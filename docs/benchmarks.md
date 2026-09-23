@@ -1,8 +1,8 @@
 # Performance targets and benchmark methodology
 
 Source of truth for Nicti's performance targets, how they're measured, and the reference dataset
-every research ticket benchmarks against. Finalized 2026-09-23 (Scrumboy ticket #11), following the
-v1 PRD sign-off (#10).
+every research ticket benchmarks against. Finalized 2026-09-23 (#14), following the
+v1 PRD sign-off (#13).
 
 ## Targets
 
@@ -73,7 +73,7 @@ against — the Z8 is the v1 MVP body and by far the largest, slowest files. The
 exist only so decoder-/catalog-import work (#37, #61/#62) has *some* non-Z8 coverage; they are
 explicitly **not** used to judge any target in the table above.
 
-**Known gaps** (tracked for backfill, not blocking #11's exit):
+**Known gaps** (tracked for backfill, not blocking #14's exit):
 - No Z6III coverage. Referenced as "sometimes Rory's Z6III," but no such files were found accessible
   locally as of 2026-09-23 — Rory's other event folders (Furpocalypse 2025, Socials 2026) contain
   only placeholder files, nothing synced yet.
@@ -94,5 +94,5 @@ person names leak into the committed manifest.
   event` — the actual original path and event/photographer this file came from. Any tooling that
   needs to re-derive provenance reads this file locally; it never leaves the machine.
 
-Any benchmark harness (see ticket #15) should verify the local `ref-10k` copy's files against the
+Any benchmark harness (see ticket #17) should verify the local `ref-10k` copy's files against the
 committed manifest's SHA-256 column before trusting a run.

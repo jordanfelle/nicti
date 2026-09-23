@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
-- **Ticket:** #12 Research: language/stack choice
+- **Ticket:** #15 Research: language/stack choice
 
 ## Context
 
@@ -13,8 +13,8 @@ compressed variants), a library scaling to 600k-2M assets, and a hero-scenario p
 switch / 60fps crop). macOS/Linux release builds are deferred to v2 (#73). Most code will be
 written by one person plus Claude Code, not a team.
 
-The E0 PRD (#1) states a preference for memory safety but does not mandate a specific language.
-This ADR is the gating decision for #14 (GPU compute API), #17 (module/plugin architecture, Claw),
+The E0 PRD (#4) states a preference for memory safety but does not mandate a specific language.
+This ADR is the gating decision for #16 (GPU compute API), #19 (module/plugin architecture, Claw),
 and #68 (GUI framework, whose candidate list — GPUI/Iced/egui/Slint — assumes Rust).
 
 ## Decision drivers
@@ -31,7 +31,7 @@ from the E0 PRD:
 6. Latency predictability against the 16.7ms slider-drag budget and <50ms cull-keypress budget
 7. Memory safety
 8. Concurrency (cooperative cancellation, priority scheduling — feeds the Pounce scheduler, #54)
-9. Plugin story (C ABI/dylib, WASM host, out-of-process — feeds Claw, #17)
+9. Plugin story (C ABI/dylib, WASM host, out-of-process — feeds Claw, #19)
 10. Windows-first tooling, with a credible macOS/Linux path for v2
 11. Open-source viability (contributor pool, toolchain licensing)
 12. Solo + agent (Claude Code) productivity — how well the compiler/type system catches
@@ -85,7 +85,7 @@ human reviewer to catch memory-safety bugs before they ship.
   discipline-and-tooling-dependent safety. This matters more here than usual: a solo project
   without a second reviewer has less safety net against the class of bug (use-after-free,
   data races) that a borrow checker eliminates at compile time.
-- **Plugin story (criterion 9, feeds #17):** `wasmtime` is a first-class native Rust embedding
+- **Plugin story (criterion 9, feeds #19):** `wasmtime` is a first-class native Rust embedding
   API from the Bytecode Alliance with active fuzzing infrastructure. C++'s WASM-host story
   (Extism's C++ SDK) is workable but thinner. Go's native `plugin` package is **explicitly
   unsupported on Windows** ([pkg.go.dev/plugin](https://pkg.go.dev/plugin), tracking issue
@@ -123,10 +123,10 @@ would have worked.
 
 ## Consequences
 
-- **Unblocks #14** (GPU compute API): `wgpu` (cross-platform, Vulkan/D3D12/Metal, in W3C
+- **Unblocks #16** (GPU compute API): `wgpu` (cross-platform, Vulkan/D3D12/Metal, in W3C
   CR-draft alignment) or `ash` (raw Vulkan) are both viable within Rust; the specific choice
-  between them is #14's own decision, not this ADR's.
-- **Unblocks #17** (Claw, module/plugin architecture): `libloading` for C-ABI dylib loading,
+  between them is #16's own decision, not this ADR's.
+- **Unblocks #19** (Claw, module/plugin architecture): `libloading` for C-ABI dylib loading,
   `wasmtime` for a WASM host — both first-class Rust crates.
 - **Unblocks #68** (GUI framework): its Rust-only candidate list (GPUI/Iced/egui/Slint) is now a
   valid constraint, not an assumption to revisit.
@@ -136,7 +136,7 @@ would have worked.
   pre-alpha pure-Rust port (correcting an earlier brief's claim that it was a C-binding wrapper) —
   treat as unverified-in-production pending #37's own evaluation.
 - **Explicitly out of scope for this ADR** (deferred to their own tickets): the specific GPU
-  compute API (#14), the embedded DB engine (#67), and the GUI toolkit (#68). This ADR only
+  compute API (#16), the embedded DB engine (#67), and the GUI toolkit (#68). This ADR only
   established that Rust has a *reachable* path to each — not which option within that path wins.
 
 ---
