@@ -27,9 +27,17 @@ rule below; they need a case-by-case sign-off, not a blanket allow.
 ### C/C++ native libraries
 LGPL is acceptable **only** via dynamic linking (shared library/DLL, replaceable without
 relinking Nicti itself) — this is the standard safe-harbor pattern for a permissively-licensed
-project consuming an LGPL library, and it's how LibRaw and lensfun's `libs/` are used. Prefer a
-permissive OR-arm when the library offers one (e.g. LibRaw's CDDL-1.0 option). GPL native
-libraries (e.g. exiv2) are denied outright, full stop — dynamic linking does not neutralize
+project consuming an LGPL library, and it's the intended arrangement for LibRaw and lensfun's
+`libs/`. **This is a requirement to enforce, not yet an accomplished fact**: #37 (RAW decode) and
+#39 (lens correction) haven't picked a specific FFI crate yet, and the common pattern for Rust
+`*-sys` bindings to a C library is to vendor and statically compile the C source by default unless
+the build script is explicitly configured to link a system-installed shared library. Neither
+`cargo deny` nor any other automated check in this repo inspects actual linker output, so whoever
+lands #37/#39 must confirm — by reading the chosen crate's `build.rs` — that it produces a genuine
+dynamically-linked `.dll`/`.so` for the LGPL code, not a statically-vendored copy; the LGPL
+safe-harbor analysis in `docs/licensing.md` depends on that being true and is invalidated if it
+isn't. Prefer a permissive OR-arm when the library offers one (e.g. LibRaw's CDDL-1.0 option). GPL
+native libraries (e.g. exiv2) are denied outright, full stop — dynamic linking does not neutralize
 GPL as it does LGPL. Rust crates that themselves link a GPL C library (e.g. rexiv2 → exiv2/gexiv2)
 inherit that denial; `docs/licensing.md` names the permissive alternative to use instead
 (kamadak-exif + little_exif for EXIF/XMP).
@@ -62,6 +70,17 @@ grant exists for Adobe/Lightroom-authored profile data. Where Nicti needs a came
 or lens-correction data without Adobe data, use LibRaw's built-in camera color matrices (already
 inside an existing dependency, no new license surface) or generate one with `dcamprof` (GPL-3.0,
 acceptable because it's invoked as an external CLI tool, never linked into Nicti's own binary).
+
+### Out of scope by design — not forgotten
+This audit does not cover the GPU compute API choice ([#16](https://github.com/jordanfelle/nicti/issues/16)),
+the embedded database engine ([#67](https://github.com/jordanfelle/nicti/issues/67), e.g.
+DuckDB/pglite-rs), or the GUI framework ([#68](https://github.com/jordanfelle/nicti/issues/68)) —
+those are separate, still-open research tickets with their own licensing dimension (notably, some
+strong Rust GUI candidates carry GPL-3.0/dual-commercial terms, which would matter a great deal for
+an open-source-release track). #66 is unblocked by *this* ticket closing, but whoever resolves
+#16/#67/#68 must add a row to `docs/licensing.md` for the option they pick before it ships — the
+"new dependency needs a row in the same PR" rule in the Process section below applies to those
+picks too, not just to the components this audit already enumerated.
 
 ### NVIDIA runtime (CUDA/cuDNN/TensorRT)
 The GPU driver itself is never bundleable — always a user-installed prerequisite Nicti's

@@ -56,8 +56,9 @@ jobs:
           command: check licenses
           # cargo-deny only resolves the root package's deps by default; --workspace pulls in
           # spikes/* and bench/whisker too (verified locally: without it, only `nicti` itself
-          # shows up in `cargo deny list`).
-          arguments: --workspace
+          # shows up in `cargo deny list`). --all-features is the action's own default -- keep it
+          # explicit since setting `arguments` overrides rather than appends to that default.
+          arguments: --workspace --all-features
 
   build-windows:
     name: cargo build (windows, v1 target)

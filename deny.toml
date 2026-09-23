@@ -15,12 +15,15 @@ allow = [
     "MIT-0",
     "Unlicense",
     "Unicode-3.0",
-    # LGPL is allowed here only as one arm of an OR-license crate (e.g. r-efi); a Rust crate whose
-    # *only* option is LGPL/GPL-family is not on this list and must fail the check. See
-    # docs/adr/0003-third-party-license-policy.md's "LGPL crates ... need a case-by-case sign-off"
-    # rule -- rawler/lensfun-rs are the known future case, not pre-cleared by adding LGPL here.
-    "LGPL-2.1-or-later",
 ]
+# Deliberately NOT listing any LGPL/GPL variant, even for r-efi's "MIT OR Apache-2.0 OR
+# LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate
+# (verified: r-efi passes today via its MIT/Apache-2.0 arms with no LGPL entry in `allow` at all),
+# so adding an LGPL SPDX string here would have no upside and a real downside: cargo-deny can't
+# express "only as an OR-arm" -- it would also pass a future crate whose *sole* license is that
+# exact LGPL string, silently bypassing the ADR-0003 rule that LGPL-as-Cargo-dependency (rawler,
+# lensfun-rs) needs a manual case-by-case sign-off, not a blanket CI pass. If a future crate's
+# only permissive arm changes, that's a real ADR-0003 review to have, not an allowlist edit.
 confidence-threshold = 0.9
 
 # publish = false workspace crates carry no SPDX license (nicti, pawprint, whisker) -- this exempts
@@ -30,12 +33,9 @@ confidence-threshold = 0.9
 [licenses.private]
 ignore = true
 
-[bans]
-multiple-versions = "allow"
-
-[advisories]
-ignore = ["*"]
-
-[sources]
-unknown-registry = "allow"
-unknown-git = "allow"
+# No [advisories]/[bans]/[sources] sections: CI only ever runs `cargo deny check licenses` (see
+# ci.yml), so config here would be dead weight -- worse, `[advisories] ignore = ["*"]` was tried
+# and confirmed NOT to do what it looks like it does (that key ignores specific RUSTSEC/yanked
+# IDs, not a wildcard "ignore everything"; "*" just matches nothing and is silently inert). If
+# advisories/bans/sources scanning is added later, write real config for it then rather than
+# leaving a misleading placeholder now.
