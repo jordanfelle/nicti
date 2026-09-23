@@ -20,8 +20,14 @@ pub fn read_frames_gray8(path: &Path, width: usize, height: usize) -> io::Result
     }
     let bytes = fs::read(path)?;
     let n = bytes.len() / frame_size;
-    let frames = (0..n).map(|i| bytes[i * frame_size..(i + 1) * frame_size].to_vec()).collect();
-    Ok(FrameStream { width, height, frames })
+    let frames = (0..n)
+        .map(|i| bytes[i * frame_size..(i + 1) * frame_size].to_vec())
+        .collect();
+    Ok(FrameStream {
+        width,
+        height,
+        frames,
+    })
 }
 
 #[cfg(test)]
@@ -33,7 +39,10 @@ mod tests {
     fn reads_whole_frames_and_drops_trailing_partial() {
         let path = unique_temp_path();
         // 2 full 2x2 (4-byte) frames plus 2 stray trailing bytes.
-        fs::File::create(&path).unwrap().write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 9]).unwrap();
+        fs::File::create(&path)
+            .unwrap()
+            .write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 9])
+            .unwrap();
         let stream = read_frames_gray8(&path, 2, 2).unwrap();
         fs::remove_file(&path).unwrap();
         assert_eq!(stream.frames.len(), 2);

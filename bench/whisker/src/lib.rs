@@ -105,8 +105,11 @@ pub fn settled_frame(
     if needed_transitions > diffs.len() {
         return None;
     }
-    (start..=diffs.len() - needed_transitions)
-        .find(|&f| diffs[f..f + needed_transitions].iter().all(|&d| d < quiet_threshold))
+    (start..=diffs.len() - needed_transitions).find(|&f| {
+        diffs[f..f + needed_transitions]
+            .iter()
+            .all(|&d| d < quiet_threshold)
+    })
 }
 
 /// Computes both the first-change and settled latency frames for one indicator-marked event,
@@ -128,13 +131,19 @@ pub fn event_latencies(
     min_quiet_frames: usize,
 ) -> (Option<usize>, Option<usize>) {
     let first_change = first_change_frame(diffs, edge, change_threshold);
-    let settled = first_change.and_then(|fc| settled_frame(diffs, fc, quiet_threshold, min_quiet_frames));
+    let settled =
+        first_change.and_then(|fc| settled_frame(diffs, fc, quiet_threshold, min_quiet_frames));
     (first_change, settled)
 }
 
 /// Frame indices in `[start, end)` where a visible change occurred — used for interaction B/C's
 /// drag frame-interval metric (how often the loupe actually repainted during a scripted drag).
-pub fn distinct_change_frames(diffs: &[f64], start: usize, end: usize, change_threshold: f64) -> Vec<usize> {
+pub fn distinct_change_frames(
+    diffs: &[f64],
+    start: usize,
+    end: usize,
+    change_threshold: f64,
+) -> Vec<usize> {
     let end = end.min(diffs.len());
     (start..end)
         .filter(|&i| diffs[i] >= change_threshold)
@@ -233,7 +242,11 @@ mod tests {
         for i in 0..10u8 {
             frames.push(solid(i * 20, 4));
         }
-        let s = FrameStream { width: 2, height: 2, frames };
+        let s = FrameStream {
+            width: 2,
+            height: 2,
+            frames,
+        };
         let diffs = s.diff_series();
         assert_eq!(settled_frame(&diffs, 0, 0.01, 3), None);
     }
@@ -246,7 +259,11 @@ mod tests {
             let v = if i % 2 == 0 { 50 } else { 200 };
             frames.push(solid(v, 4));
         }
-        let s = FrameStream { width: 2, height: 2, frames };
+        let s = FrameStream {
+            width: 2,
+            height: 2,
+            frames,
+        };
         let diffs = s.diff_series();
         let changes = distinct_change_frames(&diffs, 0, diffs.len(), 0.2);
         assert_eq!(changes, vec![1, 2, 3, 4, 5, 6, 7]);
@@ -260,7 +277,11 @@ mod tests {
         for i in 0..6u8 {
             frames.push(solid(if i % 2 == 0 { 0 } else { 255 }, 4));
         }
-        let s = FrameStream { width: 2, height: 2, frames };
+        let s = FrameStream {
+            width: 2,
+            height: 2,
+            frames,
+        };
         let diffs = s.diff_series();
         // window only covers transitions [0, 2), i.e. frames 0->1 and 1->2
         let changes = distinct_change_frames(&diffs, 0, 2, 0.5);
@@ -287,11 +308,18 @@ mod tests {
         // The ROI never changes at all after the edge -- with equal change/quiet thresholds, a
         // buggy "fall back to edge" implementation would report Some(edge) (falsely "instantly
         // settled") instead of the correct "we never even saw a change" None.
-        let s = FrameStream { width: 2, height: 2, frames: vec![solid(50, 4); 10] };
+        let s = FrameStream {
+            width: 2,
+            height: 2,
+            frames: vec![solid(50, 4); 10],
+        };
         let diffs = s.diff_series();
         let (first_change, settled) = event_latencies(&diffs, 0, 0.02, 0.02, 3);
         assert_eq!(first_change, None);
-        assert_eq!(settled, None, "must not fall back to reporting a bogus near-zero settled latency");
+        assert_eq!(
+            settled, None,
+            "must not fall back to reporting a bogus near-zero settled latency"
+        );
     }
 
     #[test]

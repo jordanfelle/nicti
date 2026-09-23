@@ -5,10 +5,15 @@ use serde::Serialize;
 use std::path::PathBuf;
 use whisker::io::read_frames_gray8;
 use whisker::stats::{summarize, Stats};
-use whisker::{distinct_change_frames, event_latencies, frame_intervals, frames_to_ms, rising_edges};
+use whisker::{
+    distinct_change_frames, event_latencies, frame_intervals, frames_to_ms, rising_edges,
+};
 
 #[derive(Parser)]
-#[command(name = "whisker", about = "Frame-diff analyzer for the #43 hero-scenario benchmark")]
+#[command(
+    name = "whisker",
+    about = "Frame-diff analyzer for the #43 hero-scenario benchmark"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -150,8 +155,13 @@ fn main() -> anyhow::Result<()> {
             let mut first_change_samples = Vec::new();
             let mut settled_samples = Vec::new();
             for &edge in &edges {
-                let (first_change, settled) =
-                    event_latencies(&roi_diffs, edge, change_threshold, quiet_threshold, min_quiet_frames);
+                let (first_change, settled) = event_latencies(
+                    &roi_diffs,
+                    edge,
+                    change_threshold,
+                    quiet_threshold,
+                    min_quiet_frames,
+                );
                 let first_change_ms = first_change.map(|f| frames_to_ms(f - edge, fps));
                 let settled_ms = settled.map(|f| frames_to_ms(f - edge, fps));
                 if let Some(ms) = first_change_ms {
@@ -160,7 +170,11 @@ fn main() -> anyhow::Result<()> {
                 if let Some(ms) = settled_ms {
                     settled_samples.push(ms);
                 }
-                events.push(SwitchEventResult { indicator_frame: edge, first_change_ms, settled_ms });
+                events.push(SwitchEventResult {
+                    indicator_frame: edge,
+                    first_change_ms,
+                    settled_ms,
+                });
             }
 
             let report = SwitchReport {
@@ -178,7 +192,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
 
-        Command::Drag { roi_raw, roi_width, roi_height, fps, start_frame, end_frame, change_threshold, out } => {
+        Command::Drag {
+            roi_raw,
+            roi_width,
+            roi_height,
+            fps,
+            start_frame,
+            end_frame,
+            change_threshold,
+            out,
+        } => {
             let roi = read_frames_gray8(&roi_raw, roi_width, roi_height)?;
             let diffs = roi.diff_series();
             let distinct = distinct_change_frames(&diffs, start_frame, end_frame, change_threshold);
@@ -195,7 +218,10 @@ fn main() -> anyhow::Result<()> {
                 effective_fps_p95,
             };
             std::fs::write(&out, serde_json::to_string_pretty(&report)?)?;
-            println!("effective fps (p95 interval) = {:?}", report.effective_fps_p95);
+            println!(
+                "effective fps (p95 interval) = {:?}",
+                report.effective_fps_p95
+            );
         }
     }
     Ok(())

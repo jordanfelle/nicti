@@ -50,15 +50,27 @@ fn synthetic_capture() -> (FrameStream, FrameStream, f64) {
         }
     }
 
-    let indicator = FrameStream { width: 2, height: 2, frames: indicator_frames };
-    let roi = FrameStream { width: 2, height: 2, frames: roi_frames };
+    let indicator = FrameStream {
+        width: 2,
+        height: 2,
+        frames: indicator_frames,
+    };
+    let roi = FrameStream {
+        width: 2,
+        height: 2,
+        frames: roi_frames,
+    };
     (indicator, roi, FPS)
 }
 
 #[test]
 fn switch_pipeline_matches_known_ground_truth_within_one_frame() {
     let (indicator, roi, fps) = synthetic_capture();
-    assert_eq!(indicator.frames.len(), roi.frames.len(), "sanity: same capture length");
+    assert_eq!(
+        indicator.frames.len(),
+        roi.frames.len(),
+        "sanity: same capture length"
+    );
 
     let brightness = indicator.mean_brightness();
     let edges = rising_edges(&brightness, 0.5);
