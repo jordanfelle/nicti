@@ -35,7 +35,13 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # --workspace: `nicti`'s root manifest is both a workspace root and a real package
+      # (not a virtual manifest), so a bare `cargo clippy` without `-p`/`--workspace` only
+      # checks the root `nicti` crate and silently skips spikes/* and bench/whisker
+      # entirely (verified locally: `cargo clippy --all-targets --all-features` alone
+      # reports "Checking nicti" only, nothing else). Same fix cargo-deny's job already
+      # needed for the same reason (see its own comment below).
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test
@@ -44,7 +50,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --all-targets --all-features
+      # --workspace: see the clippy job's comment above -- without it, pawprint's and
+      # sheath's tests silently never ran in CI.
+      - run: cargo test --workspace --all-targets --all-features
 
   cargo-deny:
     name: cargo deny (licenses)

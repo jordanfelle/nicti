@@ -1,0 +1,22 @@
+[package]
+name = "dewclaw"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway fixture for #19/sheath's dylib tests: a toy stage compiled as a cdylib and loaded through sheath::dylib's C-ABI vtable. Not a production crate, not a real Claw module."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sheath = { path = "../sheath" }
+
+[features]
+default = []
+# Bakes in a deliberately wrong ABI version, for abi_handshake.rs's mismatch case.
+bad-abi = []
+# Omits the `claw_stage_vtable` export entirely, for abi_handshake.rs's missing-symbol case.
+no-export = []
+# Exports `claw_stage_vtable`, but it returns a null pointer, for abi_handshake.rs's
+# null-vtable case (the symbol is present, but garbage/unusable).
+null-vtable = []

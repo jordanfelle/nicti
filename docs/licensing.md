@@ -15,7 +15,7 @@ GPL-3.0/AGPL-3.0 instead. Verdict: ✅ bundle OK · ⚠️ bundle with condition
 ## Rust crate dependency tree (as of 2026-09-23)
 
 Checked via `cargo metadata` against the full workspace (`nicti`, `spikes/pawprint`,
-`bench/whisker`). All resolved crates are permissive:
+`spikes/sheath`, `spikes/dewclaw`, `bench/whisker`). All resolved crates are permissive:
 
 MIT OR Apache-2.0 (the large majority — anstream, anstyle*, anyhow, arrayvec, base64, bumpalo, cc,
 cfg-if, clap*, colorchoice, cpufeatures, find-msvc-tools, futures-*, getrandom, heck,
@@ -24,9 +24,15 @@ shlex, syn, utf8parse, uuid, wasm-bindgen*, windows-*), CC0-1.0 OR Apache-2.0 OR
 LLVM-exception (`blake3`), CC0-1.0 OR MIT-0 OR Apache-2.0 (`constant_time_eq`), Unlicense OR MIT
 (`memchr`), MIT (`slab`, `strsim`, `zmij`), (MIT OR Apache-2.0) AND Unicode-3.0 (`unicode-ident` —
 the `Unicode-3.0` arm is a data-license for its Unicode table, not a code copyleft), MIT OR
-Apache-2.0 OR LGPL-2.1-or-later (`r-efi` — LGPL is only one arm of an OR, permissive arms exist).
-No GPL/AGPL crate is currently in the tree. **No action needed today** — this section exists so a
-future `cargo deny check licenses` failure has a "last known clean" baseline to diff against.
+Apache-2.0 OR LGPL-2.1-or-later (`r-efi` — LGPL is only one arm of an OR, permissive arms exist),
+**ISC** (`libloading` v0.9.0 — added for [#19](https://github.com/jordanfelle/nicti/issues/19)'s
+`sheath` spike; a short permissive license, OSI-approved and FSF Free/Libre, functionally
+MIT-equivalent — added to `deny.toml`'s allowlist in the same PR)[^s1], **Apache-2.0 WITH
+LLVM-exception** (`wasmtime` v49.0.0, and one arm of `wat` v1.259.0's own OR-list — both added for
+the same spike's WASM-vs-native timing test; already on `deny.toml`'s allowlist via `blake3`'s
+same license string)[^s2]. No GPL/AGPL crate is currently in the tree. **No action needed today
+beyond the `ISC` addition above** — this section exists so a future `cargo deny check licenses`
+failure has a "last known clean" baseline to diff against.
 
 ## Native libraries
 
@@ -140,3 +146,5 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^m8]: OpenCLIP MIT — https://github.com/mlfoundations/open_clip/blob/main/LICENSE — verified 2026-09-23
 [^m9]: InsightFace non-commercial restriction — https://github.com/deepinsight/insightface/blob/master/README.md — verified 2026-09-23
 [^m10]: Ultralytics YOLO AGPL-3.0 — https://github.com/ultralytics/ultralytics/blob/main/LICENSE — verified 2026-09-23
+[^s1]: `libloading` v0.9.0 ISC license — `cargo metadata`'s resolved `license` field against this crate's own `Cargo.toml`, cross-checked against https://docs.rs/libloading/latest/libloading/ — verified 2026-09-23
+[^s2]: `wasmtime` v49.0.0 and `wat` v1.259.0 license fields — `cargo metadata`'s resolved `license` field, cross-checked against https://github.com/bytecodealliance/wasmtime (repo-wide Apache-2.0 WITH LLVM-exception, standard for Bytecode Alliance projects) — verified 2026-09-23
