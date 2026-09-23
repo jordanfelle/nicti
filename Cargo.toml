@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "spikes/*"]
+members = [".", "spikes/*", "bench/whisker"]
 
 [package]
 name = "nicti"

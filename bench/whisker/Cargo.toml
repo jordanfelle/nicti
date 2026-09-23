@@ -1,0 +1,16 @@
+[package]
+name = "whisker"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Frame-diff analyzer for the #43 hero-scenario benchmark: turns a raw gray8 capture into input-to-settled latencies and drag frame-interval fps. Not production code."
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "whisker"
+path = "src/bin/whisker.rs"

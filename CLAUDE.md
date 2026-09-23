@@ -31,6 +31,11 @@ ADRs live in `docs/adr/`, numbered sequentially.
   area, warm/cold measurement rules, and the `ref-10k` frozen reference dataset (manifest at
   `docs/ref-10k-manifest.csv`). Finalized 2026-09-23 (#14). Every render-engine/perf-sensitive
   ticket (#43, #17, #40, etc.) measures against this.
+- **Hero-scenario benchmark (#43)**: spec at `docs/benchmarks/hero-scenario.md`. Tooling under
+  `bench/`: `bench/select_hero_set.py` (deterministic 50-file working-set selection),
+  `bench/lrc/` (AutoHotkey v2 driver + catalog setup for LRC), `bench/run-hero.ps1` (capture +
+  orchestration), `bench/whisker/` (Rust frame-diff analyzer, workspace member — not production
+  code, see its own `Cargo.toml` description).
 
 ## Naming convention: feline references
 
@@ -51,7 +56,8 @@ throwaway research spikes — e.g. `spikes/pawprint` (#21/ADR-0002's edit-docume
 history/compaction, and XMP round-trip proof) — not production code; don't build on top of a spike
 crate, and expect it to be deleted once its ADR is accepted and #20/#22 land the real crate layout.
 Update this section with a real package map (crate → path → role) as soon as the module
-architecture is decided and real crates land.
+architecture is decided and real crates land. `bench/whisker` (a workspace member) is benchmark
+tooling for #43, not a production crate either — same "don't build on top of it" caveat applies.
 
 ## Development workflow
 
