@@ -1,0 +1,91 @@
+# Pre-commit hooks for nicti (Rust)
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# ── Hook ordering ────────────────────────────────────────────────────────────
+#   1. General file hygiene      (whitespace, EOF, YAML, merge conflicts)
+#   2. Secret detection          (gitleaks) — blocks leaked tokens early
+#   3. Rust formatting & linting (rustfmt auto-fix, clippy)
+#   4. YAML linting              (yamllint)
+#   5. Local policy hooks        (renovate.json validation, tests)
+#
+# ── Stages ───────────────────────────────────────────────────────────────────
+#   pre-commit   Fast formatting, linting, and safety checks on every commit.
+#   pre-push     Slower checks (cargo test) and branch protection. Skipped on
+#                every commit to keep the local loop fast.
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  # ── 1. General file hygiene ──────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: no-commit-to-branch
+        name: Block commits to main
+        args: ['--branch', 'main']
+        stages: [pre-push]
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        exclude: ^target/
+      - id: end-of-file-fixer
+        name: Fix end of file
+        exclude: ^target/
+      - id: check-yaml
+        name: Check YAML
+        exclude: ^target/
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+        exclude: ^target/
+      - id: check-case-conflict
+        name: Check for case conflicts
+      - id: mixed-line-ending
+        name: Fix mixed line endings
+        args: ['--fix=lf']
+        exclude: ^target/
+
+  # ── 2. Secret detection ──────────────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        name: Detect secrets (gitleaks)
+        exclude: ^target/
+
+  # ── 3. Rust formatting and linting ───────────────────────────────────────
+  - repo: local
+    hooks:
+      # rustfmt auto-fix: rewrites files in place, re-stage after running.
+      - id: cargo-fmt
+        name: Format Rust code (cargo fmt)
+        entry: cargo fmt --
+        language: system
+        types: [rust]
+
+      - id: cargo-clippy
+        name: Lint Rust code (cargo clippy)
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # ── 4. YAML linting ──────────────────────────────────────────────────────
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        name: Lint YAML
+        exclude: ^target/
+
+  # ── 5. Local policy hooks ────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: cargo-test
+        name: Run Rust tests
+        entry: cargo test
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+ci:
+  autoupdate_schedule: monthly
