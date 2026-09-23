@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
-- **Ticket:** [#12](https://scrumboy.shutterpaws.pics) Research: language/stack choice
+- **Ticket:** #12 Research: language/stack choice
 
 ## Context
 

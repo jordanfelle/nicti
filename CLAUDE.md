@@ -1,8 +1,6 @@
 # Nicti
 
-Personal (non-Shutterpaws) Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Scrumboy
-board: `lightroom-classic-replacement` (display name "Nicti"). See the root `/home/jordan/git/CLAUDE.md`
-cross-repo map for how this fits alongside other repos.
+Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic.
 
 ## Architecture decisions
 
