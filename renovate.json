@@ -15,6 +15,11 @@
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["patch", "minor"],
       "groupName": "GitHub Actions (patch + minor)"
+    },
+    {
+      "description": "dtolnay/rust-toolchain's @stable/@beta/@nightly refs are branch names in that action's own repo that intentionally track the current toolchain -- SHA-pinning them (helpers:pinGitHubActionDigests' default) freezes CI on whatever commit happened to be HEAD at pin time instead of tracking new Rust releases.",
+      "matchDepNames": ["dtolnay/rust-toolchain"],
+      "pinDigests": false
     }
   ]
 }
