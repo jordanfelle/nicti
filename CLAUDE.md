@@ -22,6 +22,11 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   never-pruned named snapshots; virtual copies are multiple edit rows per asset; XMP has three
   layers (LRC-convention metadata, a lossless `nicti:` namespace for catalog recovery, and a
   best-effort `crs:` projection for AI masks). Unblocks #22, #52; feeds #44, #59.
+- **Third-party license policy**: `docs/adr/0003-third-party-license-policy.md`, backed by the
+  full per-dependency/per-model audit in `docs/licensing.md` — Rust crate allowlist, LGPL-native-lib
+  dynamic-linking rule, ML-model bundle-vs-on-demand-download criteria, and the "no Adobe
+  DCP/LCP data" rule. Update `docs/licensing.md` in the same PR as any new dependency or model.
+  Unblocks #66 (open-source release prep).
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -119,4 +124,7 @@ cargo fmt --check
 GitHub Actions, GitHub-hosted runners (`ubuntu-latest`/`windows-latest`) — this project has no
 self-hosted runner infrastructure of its own and Shutterpaws' old self-hosted GitHub Actions
 runner host was retired 2026-08-30, so don't copy the `runs-on: [self-hosted, linux]` pattern
-from Shutterpaws repos here. See `.github/workflows/ci.yml`.
+from Shutterpaws repos here. See `.github/workflows/ci.yml`. A `cargo-deny` job checks Rust crate
+licenses against `deny.toml` (the allowlist from `docs/adr/0003-third-party-license-policy.md`) —
+it only covers Cargo dependencies, not native libraries, ML models, or data files, which still
+rely on `docs/licensing.md` being updated at review time.

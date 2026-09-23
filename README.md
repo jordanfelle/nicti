@@ -32,4 +32,6 @@ cargo test
 
 ## License
 
-Not yet decided.
+Not yet decided — see [`docs/licensing.md`](docs/licensing.md) for the third-party dependency and
+ML-model license audit backing that decision, tracked in
+[#66](https://github.com/jordanfelle/nicti/issues/66).
