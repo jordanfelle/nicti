@@ -1,10 +1,12 @@
 //! Throwaway spike for #21 / `docs/adr/0002-non-destructive-edit-model.md`.
 //!
-//! Proves four claims the ADR makes: canonical per-stage hashing is stable
+//! Proves the claims the ADR makes: canonical per-stage hashing is stable
 //! and isolated to the stage that changed, history compaction collapses a
 //! slider-drag burst without losing the pre-drag undo target, bulk paste
-//! records one history entry per photo instead of one per changed stage, and
-//! a `nicti:` XMP packet round-trips a document losslessly. This is not a
+//! records one history entry per photo instead of one per changed stage, a
+//! `nicti:` XMP packet round-trips a document losslessly, and the recovery
+//! path's "newer wins, by content hash then mtime" conflict rule resolves
+//! catalog-vs-sidecar disagreements the way the ADR describes. This is not a
 //! production crate — the real crate layout is #20's decision.
 
 use std::collections::BTreeMap;
@@ -39,6 +41,20 @@ impl EditDocument {
         self.stages.get(stage_id).map(hash_stage)
     }
 
+    /// Whole-document hash: chains every stage's canonical hash, in the
+    /// `BTreeMap`'s already-sorted stage-id order, so it's stable the same
+    /// way `stage_hash` is. This is what the recovery path's conflict rule
+    /// (`xmp::resolve_conflict`) compares a sidecar's embedded document
+    /// against the catalog's to decide whether they actually disagree.
+    pub fn content_hash(&self) -> blake3::Hash {
+        let mut hasher = blake3::Hasher::new();
+        for (stage_id, stage) in &self.stages {
+            hasher.update(stage_id.as_bytes());
+            hasher.update(hash_stage(stage).as_bytes());
+        }
+        hasher.finalize()
+    }
+
     /// The Tapetum (#44) cache key for one stage: this stage's own hash
     /// chained with the caller-supplied upstream hashes, so a change to an
     /// upstream stage invalidates everything downstream of it without
@@ -65,18 +81,23 @@ impl EditDocument {
 /// overwrites the base field outright. Used for #52's relative bulk-sync
 /// mode; absolute paste is just replacing `params` wholesale, no helper
 /// needed.
+///
+/// Integer + integer stays an integer (checked, falling back to float only
+/// on overflow or if either side wasn't representable as an integer in the
+/// first place). This matters beyond cosmetics: `hash_stage` hashes the
+/// canonical JSON bytes, and a JSON int and a JSON float holding the same
+/// numeric value serialize differently (`5500` vs `5500.0`) and therefore
+/// hash differently — without this, two edits that are logically identical
+/// (reached via relative-paste arithmetic vs. any other path) would get
+/// different Tapetum cache keys, defeating the whole point of canonical
+/// hashing.
 pub fn apply_relative(base: &Value, delta: &Value) -> Value {
     match (base, delta) {
         (Value::Object(b), Value::Object(d)) => {
             let mut out = b.clone();
             for (k, dv) in d {
                 let merged = match (out.get(k), dv) {
-                    (Some(Value::Number(bn)), Value::Number(dn)) => {
-                        let sum = bn.as_f64().unwrap_or(0.0) + dn.as_f64().unwrap_or(0.0);
-                        serde_json::Number::from_f64(sum)
-                            .map(Value::Number)
-                            .unwrap_or_else(|| Value::Number(bn.clone()))
-                    }
+                    (Some(Value::Number(bn)), Value::Number(dn)) => add_numbers(bn, dn),
                     _ => dv.clone(),
                 };
                 out.insert(k.clone(), merged);
@@ -85,6 +106,16 @@ pub fn apply_relative(base: &Value, delta: &Value) -> Value {
         }
         (_, other) => other.clone(),
     }
+}
+
+fn add_numbers(a: &serde_json::Number, b: &serde_json::Number) -> Value {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if let Some(sum) = ai.checked_add(bi) {
+            return Value::Number(serde_json::Number::from(sum));
+        }
+    }
+    let sum = a.as_f64().unwrap_or(0.0) + b.as_f64().unwrap_or(0.0);
+    serde_json::Number::from_f64(sum).map(Value::Number).unwrap_or_else(|| Value::Number(a.clone()))
 }
 
 /// Normalize -0.0 to 0.0 in place. NaN/Infinity can't reach here in the

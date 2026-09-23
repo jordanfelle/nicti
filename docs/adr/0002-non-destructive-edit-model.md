@@ -101,6 +101,19 @@ downstream of it — also proven in the same test file
 (`changing_one_stage_leaves_other_stages_hashes_untouched`,
 `cache_key_changes_when_upstream_hash_changes_but_not_otherwise`).
 
+**Numeric type stability matters as much as the encoding choice.** A relative paste (e.g. "+0.3
+EV") that adds two JSON integers must produce a JSON integer, not a float — `5500` and `5500.0`
+serialize to different bytes and therefore hash differently, even though they're the same logical
+value. `apply_relative()` does checked integer addition when both operands are integers, falling
+back to float only when at least one side already was one (or on overflow). Proven in
+`hash_stability.rs`'s `relative_paste_integer_arithmetic_hashes_the_same_as_direct_construction`:
+an edit reached via relative-paste arithmetic hashes identically to the same edit reached by direct
+construction.
+
+**A whole-document hash** (`EditDocument::content_hash()`) chains every stage's canonical hash in
+the `BTreeMap`'s already-sorted order. This is what the recovery path's conflict rule (below)
+compares a sidecar's embedded document against the catalog's with.
+
 ### AI masks: the recipe, not the pixels
 
 A mask stage stores `{model_id, model_version, params, seed?}` for AI-generated masks (subject,
@@ -126,12 +139,20 @@ manual deletion as the only way to reclaim space[^l3]. Nicti's history log inste
   so it can never corrupt a redo chain the user might still walk forward into.
 - **Named snapshots** (LRC's "Snapshots" concept) are never merged away by compaction and are
   never pruned — they're the durable "I might want to come back to exactly this" marker.
-- **Batches** (bulk paste/sync, #52) share one `batch_id` across every stage they touch, so undo
-  reverts the whole batch as a single step instead of once per stage per photo.
+- **Batches** (bulk paste/sync, #52) are recorded as a single log entry covering every stage the
+  batch touched (`batch_id` tags it for provenance, but the entry itself — not cross-entry
+  grouping — is what makes it atomic), so a bulk paste across a selection is genuinely one history
+  entry per photo, not one per changed stage, and undo/redo revert or reapply the whole thing in
+  one step.
 
-All five properties (undo/redo, burst compaction preserving the pre-drag undo target, snapshot
-survival across compaction, batch atomicity, refusal to compact with a pending redo) are proven in
-`spikes/pawprint/tests/history_and_compaction.rs` and `bulk_paste.rs`.
+All these properties (undo/redo, burst compaction preserving the pre-drag undo target, snapshot
+survival across compaction, a multi-stage batch staying exactly one entry, refusal to compact with
+a pending redo) are proven in `spikes/pawprint/tests/history_and_compaction.rs` and
+`bulk_paste.rs`. An earlier draft of this design recorded one delta per stage even inside a batch
+and relied on grouping same-`batch_id` entries back together for undo/redo — that made "one entry
+per photo" true only for undo *steps*, not for the log itself, and a single-stage-only test masked
+the gap; `bulk_paste.rs`'s `batch_touching_multiple_stages_is_still_exactly_one_history_entry` now
+exercises a 3-stage batch specifically to keep that regression caught.
 
 darktable's own doc confirms the general shape (history stack stored in both its DB and the XMP
 sidecar, in edit order)[^d1] but doesn't do compaction — its history is a straight append with no
@@ -148,12 +169,16 @@ target here.
 
 A realistic single-variant document (white balance + global tone + 2 AI masks + denoise, 5 stages)
 serializes to **563 bytes**. A compacted history of 5 coarse edit steps plus one named snapshot
-(which carries a full document copy) comes to **~1.1KB**. At 2M assets, even a generous 3x
-real-world-editing multiplier over this reference session stays in the single-digit-GB range
+(which carries a full document copy — the dominant cost) comes to **~2KB**, measured by actually
+serializing the log rather than estimating a per-entry byte count. At 2M assets, even a generous
+3x real-world-editing multiplier over this reference session stays in the single-digit-GB range
 total across the whole catalog — nowhere near the LRC-scale bloat problem cited above, because
 compaction keeps per-photo step counts low regardless of how many raw slider ticks a user made.
 These are throwaway-spike numbers for order-of-magnitude planning, not a commitment to the exact
-byte layout #22 will ship.
+byte layout #22 will ship, and every named snapshot adds roughly one more full-document-worth of
+bytes — a real editing session with several named snapshots will size closer to a few KB per photo
+than to 2KB, still comfortably small at 2M assets, but a worse case than "unlimited snapshots" would
+suggest if the number is taken too literally.
 
 ### XMP layers and the LRC coexistence boundary
 
@@ -170,16 +195,22 @@ can be reconstructed by re-scanning sidecars — something neither LRC's proprie
 nor a `crs:`-only projection supports, since `crs:` (below) is lossy and one-directional.
 Conflict rule when catalog and sidecar disagree (e.g. the catalog was restored from an older
 backup than the sidecars on disk, or a sidecar was hand-edited): **newer wins, by content hash
-then mtime** — compare the sidecar's embedded document hash against the catalog's; if they match,
-no conflict; if they differ, prefer whichever side has the later modification time, and flag the
-asset for manual review if the timestamps are ambiguous (e.g. within the same filesystem
-mtime-resolution window). This deliberately avoids LRC's own approach: LRC surfaces an explicit
-conflict dialog ("Import settings from disk" vs. "overwrite settings on disk") rather than
-auto-resolving[^l4] — reported behavior, since Adobe has never published this algorithm
-officially[^l4]. Nicti's newer-wins rule is simpler and matches this project's "no manual busywork"
-maintenance target, at the cost of occasionally picking the wrong side of a genuine simultaneous
-edit in both tools; that risk is judged acceptable because phase-1 coexistence is a transitional
-state, not the end goal.
+then mtime** — compare `EditDocument::content_hash()` on both sides; if they match, no conflict;
+if they differ, prefer whichever side has the later modification time, and flag the asset for
+manual review if the timestamps are ambiguous (e.g. within the same filesystem mtime-resolution
+window). Implemented and proven in `spikes/pawprint/src/xmp.rs`'s `resolve_conflict()` and
+`spikes/pawprint/tests/xmp_conflict_resolution.rs` (identical content is never a conflict
+regardless of mtime; differing content prefers whichever side is newer; mtimes within the
+ambiguity window get flagged rather than guessed). This deliberately avoids LRC's own approach:
+LRC surfaces an explicit conflict dialog ("Import settings from disk" vs. "overwrite settings on
+disk") rather than auto-resolving[^l4] — reported behavior, since Adobe has never published this
+algorithm officially[^l4]. Nicti's newer-wins rule is simpler and matches this project's "no manual
+busywork" maintenance target, at the cost of occasionally picking the wrong side of a genuine
+simultaneous edit in both tools; that risk is judged acceptable because phase-1 coexistence is a
+transitional state, not the end goal. The spike's `resolve_conflict()` takes an already-computed
+mtime and document for each side — actually reading a file's mtime and applying the resolution
+(e.g. rewriting the catalog row, or re-writing the sidecar) is real I/O plumbing left to #59/#22,
+not part of this ADR's scope.
 
 **(c) `crs:` projection** — optional, lossy, **write-only** (Nicti never reads its own `crs:`
 output back as authoritative; the `nicti:` namespace is always the read-back source). Evaluated

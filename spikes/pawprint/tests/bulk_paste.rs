@@ -35,6 +35,33 @@ fn absolute_bulk_paste_across_500_photos_records_one_batch_entry_each() {
 }
 
 #[test]
+fn batch_touching_multiple_stages_is_still_exactly_one_history_entry() {
+    // The claim under test: "one history entry per photo, not one per
+    // stage change." A batch that only touches one stage can't distinguish
+    // "one entry per batch" from "one entry per stage" — this exercises the
+    // hero-scenario shape (WB + vibrance + masks all pasted together).
+    let mut doc = EditDocument::default();
+    doc.stages.insert("white_balance".into(), white_balance(4000, 0));
+    doc.stages.insert("global".into(), StageEntry { schema_version: 1, params: json!({"vibrance": 0}) });
+    let mut history = History::new(doc);
+
+    history.apply_batch(
+        Uuid::new_v4(),
+        vec![
+            ("white_balance".to_string(), white_balance(5500, 10)),
+            ("global".to_string(), StageEntry { schema_version: 1, params: json!({"vibrance": 20}) }),
+            ("mask.subject_0".to_string(), StageEntry { schema_version: 1, params: json!({"exposure": 0.4}) }),
+        ],
+    );
+
+    assert_eq!(history.len(), 1, "a 3-stage batch must still be one history entry, not three");
+    assert!(history.undo());
+    assert_eq!(history.document().stages["white_balance"].params, json!({"temp": 4000, "tint": 0}));
+    assert_eq!(history.document().stages["global"].params, json!({"vibrance": 0}));
+    assert!(!history.document().stages.contains_key("mask.subject_0"), "undo must remove a stage that didn't exist before the batch");
+}
+
+#[test]
 fn relative_bulk_paste_adds_to_existing_values() {
     let mut doc = EditDocument::default();
     doc.stages.insert(

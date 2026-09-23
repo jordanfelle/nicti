@@ -34,3 +34,43 @@ pub fn from_packet(packet: &str) -> Result<EditDocument, PacketParseError> {
     let json = STANDARD.decode(encoded).map_err(|_| PacketParseError)?;
     serde_json::from_slice(&json).map_err(|_| PacketParseError)
 }
+
+/// One side of a catalog-vs-sidecar comparison: a document plus the
+/// modification time it was last written at.
+pub struct Side<'a> {
+    pub document: &'a EditDocument,
+    pub mtime_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// Both sides already agree — no conflict.
+    NoConflict,
+    /// Contents differ; this side's mtime is later.
+    PreferCatalog,
+    PreferSidecar,
+    /// Contents differ and the mtimes are within the same ambiguity window
+    /// (e.g. filesystem mtime-resolution granularity) — don't guess.
+    FlagForManualReview,
+}
+
+/// The ADR's "Recovery from sidecars" conflict rule: compare the sidecar's
+/// embedded document hash against the catalog's; if they match, there's no
+/// conflict. If they differ, prefer whichever side has the later mtime,
+/// unless the mtimes are within `ambiguity_window_ms` of each other, in
+/// which case flag it for manual review rather than silently picking a
+/// side.
+pub fn resolve_conflict(catalog: Side<'_>, sidecar: Side<'_>, ambiguity_window_ms: u128) -> Resolution {
+    if catalog.document.content_hash() == sidecar.document.content_hash() {
+        return Resolution::NoConflict;
+    }
+    let diff = catalog.mtime_ms.abs_diff(sidecar.mtime_ms);
+    if diff <= ambiguity_window_ms {
+        return Resolution::FlagForManualReview;
+    }
+    if catalog.mtime_ms > sidecar.mtime_ms {
+        Resolution::PreferCatalog
+    } else {
+        Resolution::PreferSidecar
+    }
+}

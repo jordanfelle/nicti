@@ -9,5 +9,5 @@ description = "Throwaway spike for #21 (ADR-0002): edit-document hashing, histor
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"

@@ -3,7 +3,7 @@
 //! isolated stage change only changes that stage's hash and its downstream
 //! cache-key chain, not unrelated stages.
 
-use pawprint::{EditDocument, StageEntry};
+use pawprint::{apply_relative, EditDocument, StageEntry};
 use serde_json::json;
 
 fn entry(schema_version: u32, params: serde_json::Value) -> StageEntry {
@@ -23,6 +23,21 @@ fn hash_is_stable_across_serialize_roundtrip() {
     let bytes = serde_json::to_vec(&original).unwrap();
     let reloaded: StageEntry = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(pawprint::hash_stage(&original), pawprint::hash_stage(&reloaded));
+}
+
+#[test]
+fn relative_paste_integer_arithmetic_hashes_the_same_as_direct_construction() {
+    // A logically identical edit (temp=5500) reached two different ways
+    // must hash identically — the whole point of canonical hashing. Before
+    // the fix, `apply_relative` always produced a JSON float (5500.0) even
+    // for integer inputs, which hashed differently from a JSON int (5500).
+    let base = json!({"temp": 4000});
+    let delta = json!({"temp": 1500});
+    let via_relative_paste = entry(1, apply_relative(&base, &delta));
+    let via_direct_construction = entry(1, json!({"temp": 5500}));
+
+    assert_eq!(via_relative_paste.params, json!({"temp": 5500}), "integer + integer must stay an integer");
+    assert_eq!(pawprint::hash_stage(&via_relative_paste), pawprint::hash_stage(&via_direct_construction));
 }
 
 #[test]

@@ -61,10 +61,10 @@ fn per_photo_document_and_history_sizes() {
     }
     history.snapshot("v1 edit");
 
-    let history_bytes: usize = (0..history.len())
-        .map(|_| 96) // rough per-Delta overhead estimate (ids + timestamps); see note below
-        .sum::<usize>()
-        + document_bytes; // the snapshot carries a full document copy
+    // Actually serialize the log rather than guessing a per-entry constant
+    // — the snapshot entry alone carries a full document copy, which a hand
+    // -picked estimate would badly undercount.
+    let history_bytes = history.serialized_len();
 
     println!(
         "pawprint sizing: document={document_bytes}B, compacted-history(~{} entries)≈{history_bytes}B",
