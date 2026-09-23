@@ -1,3 +1,6 @@
 /bench-results/
 *.NEF
 *.dng
+/target
+*.pdb
+.DS_Store
