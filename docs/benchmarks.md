@@ -15,7 +15,7 @@ reported alongside the hardware/dataset identity — never compared across diffe
 | Loupe | next/prev < 50ms (prefetch); 100% zoom < 100ms |
 | Culling | keypress -> next image displayed < 50ms, including auto-advance |
 | Develop | slider -> preview <= 16.7ms (60fps, screen res); image switch < 100ms warm / < 200ms cold |
-| Hero scenario | switch between edited images < 100ms; crop/zoom 60fps regardless of edit stack |
+| Hero scenario | switch between edited images < 100ms; crop/zoom 60fps regardless of edit stack — spec: `benchmarks/hero-scenario.md` |
 | Library | filter/search/sort < 100ms at 600k real + 2M synthetic; cold start < 2s at 2M |
 | Export | >= 2x LRC throughput on the same batch and settings |
 | Maintenance | no "optimize catalog"; continuous crash-safe backup; bounded cache; checksum RAW backup; auto-relink |

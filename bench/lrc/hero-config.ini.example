@@ -1,0 +1,46 @@
+; hero.ahk config template. Copy to hero-config.ini and fill in the [indicator]/[crop]/[zoom]
+; screen coordinates during the calibration step in README.md -- they depend on this machine's
+; actual LRC window layout and are NOT portable across machines/resolutions.
+
+[general]
+; switch | crop | zoom
+Interaction=switch
+LrcWindowTitle=ahk_exe Lightroom.exe
+PreStartDelayMs=500
+
+[indicator]
+; Top-left corner square, positioned somewhere run-hero.ps1's ROI crop excludes.
+X=20
+Y=20
+Size=60
+FlashMs=80
+
+[switch]
+ImageCount=50
+; Must comfortably exceed the settle window whisker will look for after each keypress --
+; err on the high side for the first calibration pass, tighten once you've seen real settle times.
+InterKeyDelayMs=700
+
+[crop]
+; Corner-handle drag start/end screen coordinates in the crop overlay. hero.ahk acts on whatever
+; image is currently open in LRC -- it does NOT navigate between images. hero-scenario.md's "5
+; different images per run" spread for interactions B/C is done manually: navigate to each target
+; image in LRC yourself, then invoke run-hero.ps1 once per image (5 separate runs/output folders).
+StartX=0
+StartY=0
+EndX=0
+EndY=0
+DurationMs=2000
+Steps=60
+ExitCropAfter=1
+
+[zoom]
+PanStartX=0
+PanStartY=0
+PanEndX=0
+PanEndY=0
+DurationMs=2000
+Steps=60
+; Time to let the 1:1 zoom settle before the pan drag starts, so the pan-frame-interval
+; measurement isn't contaminated by the zoom-settle transition.
+SettleWaitMs=1000
