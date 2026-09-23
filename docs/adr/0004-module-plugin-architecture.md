@@ -81,12 +81,17 @@ exporting a single `#[repr(C)]` vtable, loaded via `libloading` (ISC license[^c1
 layout is not guaranteed stable across separate compilations — the Rust Reference is explicit that
 "type layout can be changed with each compilation... we only document what is guaranteed today,"
 and the default representation does not guarantee field order[^c4] — so the vtable's **first
-field is an explicit `abi_version: u32`, checked before any other field is trusted**. A mismatch or
-a missing export is rejected with a clean error, never UB or a crash. Proven end-to-end in
-`spikes/sheath/src/dylib.rs` (`DylibStage::load`) and `spikes/sheath/tests/abi_handshake.rs`
-(matching version loads and calls correctly; a deliberately-wrong version is rejected as
-`AbiMismatch`; a missing export is rejected as `MissingSymbol`) against the `spikes/dewclaw`
-fixture crate (a toy `cdylib` stage, feature-gated to produce both bad variants for testing).
+field is an explicit `abi_version: u32`, checked before any other field is trusted**. A mismatch, a
+missing export, or a present-but-null export (a symbol that exists but returns a garbage pointer,
+distinct from a missing symbol) is rejected with a clean error, never UB or a crash — the null
+check specifically was a gap an earlier draft of this ADR's spike had missed (`DylibStage::load`
+dereferenced the vtable pointer before validating it was non-null), caught and fixed during this
+PR's own adversarial review. Proven end-to-end in `spikes/sheath/src/dylib.rs`
+(`DylibStage::load`) and `spikes/sheath/tests/abi_handshake.rs` (matching version loads and calls
+correctly; a deliberately-wrong version is rejected as `AbiMismatch`; a missing export is rejected
+as `MissingSymbol`; a present-but-null export is rejected as `NullVtable`) against the
+`spikes/dewclaw` fixture crate (a toy `cdylib` stage, feature-gated to produce all three bad
+variants for testing).
 
 This test proves the **handshake protocol** — a host that checks a declared version number before
 trusting anything else — not a literal cross-rustc-version struct-layout break (constructing one
@@ -117,11 +122,14 @@ runs an identical linear-scale kernel (`buf[i] *= k`, representative of a cheap 
 like white balance) both as native Rust and as a `wasmtime`-hosted guest written in inline WAT
 (`spikes/sheath/tests/wasm_vs_native.rs`), over a 32MB buffer (scaled down from a real ~360MB
 45MP RGBA16F frame to keep CI time/memory bounded — see the test's own doc comment). Measured
-locally (release build, three runs): the WASM path's **total** time (host→guest copy + guest call
-+ guest→host copy) was **13–21x slower than the native loop** (native: 1.3–2.8ms; WASM total:
-26.4–34.6ms), and that gap is **almost entirely the buffer copy**, not the compute: the guest call
-itself took only 1.6–2.3ms, close to native, while `copy_in`+`copy_out` alone accounted for
-24.7–32.4ms of the total. This matches the research finding that no authoritative zero-copy path
+locally (release build, three runs, after this PR's own adversarial review caught and fixed a
+methodology bug where the output buffer's allocation was counted inside the `copy_out` timing
+window on the WASM side with no equivalent cost charged to the native side — the numbers below are
+post-fix): the WASM path's **total** time (host→guest copy + guest call + guest→host copy) was
+**11–19x slower than the native loop** (native: 1.9–5.1ms; WASM total: 26.0–56.3ms), and that gap
+is **almost entirely the buffer copy**, not the compute: the guest call itself took 2.0–6.4ms,
+close to native, while `copy_in`+`copy_out` alone accounted for 24.0–49.8ms of the total. This
+matches the research finding that no authoritative zero-copy path
 exists yet for a buffer this large crossing the WASM linear-memory boundary — the closest
 authoritative discussion (a 2026 wasmtime/WASI thread on `wasi:http` resource streaming) concludes
 the state of the art is still "essentially copying via guest memory pointers," not a solved

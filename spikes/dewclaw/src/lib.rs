@@ -25,8 +25,17 @@ static VTABLE: StageVTable = StageVTable {
     process,
 };
 
-#[cfg(not(feature = "no-export"))]
+#[cfg(all(not(feature = "no-export"), not(feature = "null-vtable")))]
 #[no_mangle]
 pub extern "C" fn claw_stage_vtable() -> *const StageVTable {
     &VTABLE
+}
+
+// A present-but-garbage export: the symbol exists (so `libloading::Library::get` succeeds),
+// but calling it returns a null pointer, exercising `DylibStage::load`'s null-vtable check
+// rather than its missing-symbol or ABI-mismatch paths.
+#[cfg(all(not(feature = "no-export"), feature = "null-vtable"))]
+#[no_mangle]
+pub extern "C" fn claw_stage_vtable() -> *const StageVTable {
+    std::ptr::null()
 }

@@ -31,6 +31,7 @@ pub const VTABLE_SYMBOL: &[u8] = b"claw_stage_vtable\0";
 pub enum DylibError {
     Load(libloading::Error),
     MissingSymbol(libloading::Error),
+    NullVtable,
     AbiMismatch { expected: u32, found: u32 },
 }
 
@@ -39,6 +40,9 @@ impl std::fmt::Display for DylibError {
         match self {
             DylibError::Load(e) => write!(f, "failed to load dylib: {e}"),
             DylibError::MissingSymbol(e) => write!(f, "missing `{VTABLE_SYMBOL:?}` symbol: {e}"),
+            DylibError::NullVtable => {
+                write!(f, "`{VTABLE_SYMBOL:?}` returned a null pointer")
+            }
             DylibError::AbiMismatch { expected, found } => write!(
                 f,
                 "ABI version mismatch: host expects {expected}, dylib reports {found}"
@@ -79,6 +83,9 @@ impl DylibStage {
         let get_vtable: libloading::Symbol<unsafe extern "C" fn() -> *const StageVTable> =
             lib.get(VTABLE_SYMBOL).map_err(DylibError::MissingSymbol)?;
         let vtable = get_vtable();
+        if vtable.is_null() {
+            return Err(DylibError::NullVtable);
+        }
         let found = (*vtable).abi_version;
         if found != CLAW_ABI_VERSION {
             return Err(DylibError::AbiMismatch {

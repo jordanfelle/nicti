@@ -42,3 +42,17 @@ fn missing_export_is_rejected_cleanly() {
         other => panic!("expected MissingSymbol, got {other:?}"),
     }
 }
+
+#[test]
+fn null_vtable_is_rejected_cleanly() {
+    // The export exists (so `libloading` itself succeeds) but returns a null pointer — a
+    // present-but-garbage export, distinct from a missing symbol. Loading this must not
+    // dereference the null pointer.
+    let path = support::build_dewclaw(&["null-vtable"]);
+    let err = unsafe { DylibStage::load(&path) }
+        .expect_err("a dylib whose `claw_stage_vtable` returns null must not load");
+    match err {
+        DylibError::NullVtable => {}
+        other => panic!("expected NullVtable, got {other:?}"),
+    }
+}

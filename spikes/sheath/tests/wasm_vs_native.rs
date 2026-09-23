@@ -89,8 +89,13 @@ fn run_wasm_kernel(
         .expect("guest kernel call");
     let call = call_start.elapsed();
 
-    let copy_out_start = Instant::now();
+    // Allocated *before* the timed window, mirroring how `native_buf` is cloned before
+    // `native_start` in the caller: an earlier version of this test started the clock before
+    // this allocation, which counted a ~30MB zero-init allocation as "copy_out" time and
+    // inflated the WASM side's numbers against a native path that pays no such cost inside
+    // its own timed region.
     let mut out = vec![0.0f32; input.len()];
+    let copy_out_start = Instant::now();
     let out_bytes: &mut [u8] =
         unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len_bytes) };
     memory
