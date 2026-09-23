@@ -115,7 +115,9 @@ fn add_numbers(a: &serde_json::Number, b: &serde_json::Number) -> Value {
         }
     }
     let sum = a.as_f64().unwrap_or(0.0) + b.as_f64().unwrap_or(0.0);
-    serde_json::Number::from_f64(sum).map(Value::Number).unwrap_or_else(|| Value::Number(a.clone()))
+    serde_json::Number::from_f64(sum)
+        .map(Value::Number)
+        .unwrap_or_else(|| Value::Number(a.clone()))
 }
 
 /// Normalize -0.0 to 0.0 in place. NaN/Infinity can't reach here in the
@@ -145,7 +147,10 @@ fn canonicalize(value: &mut Value) {
 fn canonical_bytes(stage: &StageEntry) -> Vec<u8> {
     let mut params = stage.params.clone();
     canonicalize(&mut params);
-    let canon = StageEntry { schema_version: stage.schema_version, params };
+    let canon = StageEntry {
+        schema_version: stage.schema_version,
+        params,
+    };
     serde_json::to_vec(&canon).expect("canonical stage params always serialize")
 }
 

@@ -60,7 +60,11 @@ pub enum Resolution {
 /// unless the mtimes are within `ambiguity_window_ms` of each other, in
 /// which case flag it for manual review rather than silently picking a
 /// side.
-pub fn resolve_conflict(catalog: Side<'_>, sidecar: Side<'_>, ambiguity_window_ms: u128) -> Resolution {
+pub fn resolve_conflict(
+    catalog: Side<'_>,
+    sidecar: Side<'_>,
+    ambiguity_window_ms: u128,
+) -> Resolution {
     if catalog.document.content_hash() == sidecar.document.content_hash() {
         return Resolution::NoConflict;
     }

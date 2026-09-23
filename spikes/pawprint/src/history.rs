@@ -37,7 +37,10 @@ enum LogEntry {
     /// change the document (it's captured for reference/rollback by name,
     /// not replayed), so it costs nothing in undo/redo and is never merged
     /// away by `compact`.
-    Snapshot { name: String, document: EditDocument },
+    Snapshot {
+        name: String,
+        document: EditDocument,
+    },
 }
 
 pub struct History {
@@ -49,12 +52,19 @@ pub struct History {
 }
 
 fn now_ms() -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 impl History {
     pub fn new(document: EditDocument) -> Self {
-        Self { document, log: Vec::new(), cursor: 0 }
+        Self {
+            document,
+            log: Vec::new(),
+            cursor: 0,
+        }
     }
 
     pub fn document(&self) -> &EditDocument {
@@ -87,8 +97,19 @@ impl History {
     /// Same as `apply`, but with an explicit timestamp instead of the wall
     /// clock — lets tests simulate a real gap between two edit sessions
     /// (e.g. "pre-drag baseline" vs. "the drag itself") without sleeping.
-    pub fn apply_at(&mut self, stage_id: &str, control: &str, after: StageEntry, timestamp_ms: u128) {
-        self.push_delta(Uuid::new_v4(), vec![(stage_id.to_string(), after)], Some(control), timestamp_ms);
+    pub fn apply_at(
+        &mut self,
+        stage_id: &str,
+        control: &str,
+        after: StageEntry,
+        timestamp_ms: u128,
+    ) {
+        self.push_delta(
+            Uuid::new_v4(),
+            vec![(stage_id.to_string(), after)],
+            Some(control),
+            timestamp_ms,
+        );
     }
 
     /// Apply several stage changes as a single history entry — bulk
@@ -110,7 +131,11 @@ impl History {
         for (stage_id, after) in changes {
             let before = self.document.stages.get(&stage_id).cloned();
             self.document.stages.insert(stage_id.clone(), after.clone());
-            recorded.push(StageChange { stage_id, before, after: Some(after) });
+            recorded.push(StageChange {
+                stage_id,
+                before,
+                after: Some(after),
+            });
         }
         self.log.push(LogEntry::Delta(Delta {
             batch_id,
@@ -124,7 +149,10 @@ impl History {
     /// A named, never-pruned marker over the current document state.
     pub fn snapshot(&mut self, name: &str) {
         self.log.truncate(self.cursor);
-        self.log.push(LogEntry::Snapshot { name: name.to_string(), document: self.document.clone() });
+        self.log.push(LogEntry::Snapshot {
+            name: name.to_string(),
+            document: self.document.clone(),
+        });
         self.cursor = self.log.len();
     }
 
@@ -160,7 +188,9 @@ impl History {
             for change in d.changes.iter().rev() {
                 match &change.before {
                     Some(entry) => {
-                        self.document.stages.insert(change.stage_id.clone(), entry.clone());
+                        self.document
+                            .stages
+                            .insert(change.stage_id.clone(), entry.clone());
                     }
                     None => {
                         self.document.stages.remove(&change.stage_id);
@@ -181,7 +211,9 @@ impl History {
             for change in &d.changes {
                 match &change.after {
                     Some(entry) => {
-                        self.document.stages.insert(change.stage_id.clone(), entry.clone());
+                        self.document
+                            .stages
+                            .insert(change.stage_id.clone(), entry.clone());
                     }
                     None => {
                         self.document.stages.remove(&change.stage_id);

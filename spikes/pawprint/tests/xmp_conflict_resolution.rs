@@ -8,7 +8,13 @@ use serde_json::json;
 
 fn doc(exposure: f64) -> EditDocument {
     let mut d = EditDocument::default();
-    d.stages.insert("global".to_string(), StageEntry { schema_version: 1, params: json!({"exposure": exposure}) });
+    d.stages.insert(
+        "global".to_string(),
+        StageEntry {
+            schema_version: 1,
+            params: json!({"exposure": exposure}),
+        },
+    );
     d
 }
 
@@ -17,8 +23,14 @@ fn identical_content_is_never_a_conflict_regardless_of_mtime() {
     let a = doc(0.3);
     let b = doc(0.3);
     let resolution = resolve_conflict(
-        Side { document: &a, mtime_ms: 1_000 },
-        Side { document: &b, mtime_ms: 999_999 },
+        Side {
+            document: &a,
+            mtime_ms: 1_000,
+        },
+        Side {
+            document: &b,
+            mtime_ms: 999_999,
+        },
         50,
     );
     assert_eq!(resolution, Resolution::NoConflict);
@@ -30,15 +42,27 @@ fn differing_content_prefers_the_later_mtime_on_either_side() {
     let sidecar = doc(0.5);
 
     let catalog_newer = resolve_conflict(
-        Side { document: &catalog, mtime_ms: 2_000 },
-        Side { document: &sidecar, mtime_ms: 1_000 },
+        Side {
+            document: &catalog,
+            mtime_ms: 2_000,
+        },
+        Side {
+            document: &sidecar,
+            mtime_ms: 1_000,
+        },
         50,
     );
     assert_eq!(catalog_newer, Resolution::PreferCatalog);
 
     let sidecar_newer = resolve_conflict(
-        Side { document: &catalog, mtime_ms: 1_000 },
-        Side { document: &sidecar, mtime_ms: 2_000 },
+        Side {
+            document: &catalog,
+            mtime_ms: 1_000,
+        },
+        Side {
+            document: &sidecar,
+            mtime_ms: 2_000,
+        },
         50,
     );
     assert_eq!(sidecar_newer, Resolution::PreferSidecar);
@@ -49,8 +73,14 @@ fn differing_content_with_ambiguous_mtimes_is_flagged_not_guessed() {
     let catalog = doc(0.3);
     let sidecar = doc(0.5);
     let resolution = resolve_conflict(
-        Side { document: &catalog, mtime_ms: 1_000 },
-        Side { document: &sidecar, mtime_ms: 1_010 },
+        Side {
+            document: &catalog,
+            mtime_ms: 1_000,
+        },
+        Side {
+            document: &sidecar,
+            mtime_ms: 1_010,
+        },
         50,
     );
     assert_eq!(resolution, Resolution::FlagForManualReview);

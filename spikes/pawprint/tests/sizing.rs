@@ -12,7 +12,10 @@ fn realistic_document() -> EditDocument {
     let mut doc = EditDocument::default();
     doc.stages.insert(
         "white_balance".to_string(),
-        StageEntry { schema_version: 1, params: json!({"temp": 5500, "tint": 10}) },
+        StageEntry {
+            schema_version: 1,
+            params: json!({"temp": 5500, "tint": 10}),
+        },
     );
     doc.stages.insert(
         "global".to_string(),
@@ -40,7 +43,10 @@ fn realistic_document() -> EditDocument {
     );
     doc.stages.insert(
         "denoise".to_string(),
-        StageEntry { schema_version: 1, params: json!({"model_id": "nafnet-nicti", "strength": 0.6}) },
+        StageEntry {
+            schema_version: 1,
+            params: json!({"model_id": "nafnet-nicti", "strength": 0.6}),
+        },
     );
     doc
 }
@@ -55,7 +61,13 @@ fn per_photo_document_and_history_sizes() {
     // which started life as a multi-tick slider drag that compaction
     // collapsed to one entry (proven separately in
     // history_and_compaction.rs), plus one named snapshot.
-    for stage_id in ["white_balance", "global", "mask.subject_0", "mask.inverse_subject_0", "denoise"] {
+    for stage_id in [
+        "white_balance",
+        "global",
+        "mask.subject_0",
+        "mask.inverse_subject_0",
+        "denoise",
+    ] {
         let entry = doc.stages[stage_id].clone();
         history.apply(stage_id, &format!("{stage_id}_edit"), entry);
     }
@@ -74,7 +86,10 @@ fn per_photo_document_and_history_sizes() {
     // Sanity ceilings, not tight assertions — catch a format regression
     // (e.g. someone switching to an uncompacted verbose encoding) without
     // hand-tuning an exact byte count into the test.
-    assert!(document_bytes < 2_000, "a single edit document should stay well under 2KB");
+    assert!(
+        document_bytes < 2_000,
+        "a single edit document should stay well under 2KB"
+    );
     assert!(
         history_bytes < 10_000,
         "compacted per-photo history (a handful of steps + one snapshot) should stay well under 10KB"

@@ -11,7 +11,10 @@ fn document_roundtrips_through_xmp_packet_losslessly() {
     let mut doc = EditDocument::default();
     doc.stages.insert(
         "white_balance".to_string(),
-        StageEntry { schema_version: 1, params: json!({"temp": 5500, "tint": 10}) },
+        StageEntry {
+            schema_version: 1,
+            params: json!({"temp": 5500, "tint": 10}),
+        },
     );
     doc.stages.insert(
         "mask.subject_0".to_string(),
@@ -22,18 +25,27 @@ fn document_roundtrips_through_xmp_packet_losslessly() {
     );
     doc.stages.insert(
         "vendor.unrecognized_plugin".to_string(),
-        StageEntry { schema_version: 1, params: json!({"opaque": [1, 2, 3]}) },
+        StageEntry {
+            schema_version: 1,
+            params: json!({"opaque": [1, 2, 3]}),
+        },
     );
 
     let packet = xmp::to_packet(&doc);
     assert!(packet.contains("nicti:editDocument"));
 
     let recovered = xmp::from_packet(&packet).expect("packet must parse");
-    assert_eq!(doc, recovered, "recovering from the XMP packet must reproduce the document exactly");
+    assert_eq!(
+        doc, recovered,
+        "recovering from the XMP packet must reproduce the document exactly"
+    );
 }
 
 #[test]
 fn malformed_packet_is_rejected_not_silently_defaulted() {
     let result = xmp::from_packet("<x:xmpmeta></x:xmpmeta>");
-    assert!(result.is_err(), "a packet with no nicti:editDocument attribute must fail, not return an empty document");
+    assert!(
+        result.is_err(),
+        "a packet with no nicti:editDocument attribute must fail, not return an empty document"
+    );
 }

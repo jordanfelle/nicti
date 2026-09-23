@@ -7,7 +7,10 @@ use pawprint::{apply_relative, EditDocument, StageEntry};
 use serde_json::json;
 
 fn entry(schema_version: u32, params: serde_json::Value) -> StageEntry {
-    StageEntry { schema_version, params }
+    StageEntry {
+        schema_version,
+        params,
+    }
 }
 
 #[test]
@@ -22,7 +25,10 @@ fn hash_is_stable_across_serialize_roundtrip() {
     let original = entry(1, json!({"exposure": 0.3, "contrast": 10}));
     let bytes = serde_json::to_vec(&original).unwrap();
     let reloaded: StageEntry = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(pawprint::hash_stage(&original), pawprint::hash_stage(&reloaded));
+    assert_eq!(
+        pawprint::hash_stage(&original),
+        pawprint::hash_stage(&reloaded)
+    );
 }
 
 #[test]
@@ -36,8 +42,15 @@ fn relative_paste_integer_arithmetic_hashes_the_same_as_direct_construction() {
     let via_relative_paste = entry(1, apply_relative(&base, &delta));
     let via_direct_construction = entry(1, json!({"temp": 5500}));
 
-    assert_eq!(via_relative_paste.params, json!({"temp": 5500}), "integer + integer must stay an integer");
-    assert_eq!(pawprint::hash_stage(&via_relative_paste), pawprint::hash_stage(&via_direct_construction));
+    assert_eq!(
+        via_relative_paste.params,
+        json!({"temp": 5500}),
+        "integer + integer must stay an integer"
+    );
+    assert_eq!(
+        pawprint::hash_stage(&via_relative_paste),
+        pawprint::hash_stage(&via_direct_construction)
+    );
 }
 
 #[test]
@@ -50,20 +63,28 @@ fn negative_zero_hashes_the_same_as_positive_zero() {
 #[test]
 fn changing_one_stage_leaves_other_stages_hashes_untouched() {
     let mut doc = EditDocument::default();
-    doc.stages.insert("white_balance".into(), entry(1, json!({"temp": 5500})));
-    doc.stages.insert("crop".into(), entry(1, json!({"x": 0, "y": 0})));
+    doc.stages
+        .insert("white_balance".into(), entry(1, json!({"temp": 5500})));
+    doc.stages
+        .insert("crop".into(), entry(1, json!({"x": 0, "y": 0})));
 
     let crop_hash_before = doc.stage_hash("crop").unwrap();
 
-    doc.stages.insert("white_balance".into(), entry(1, json!({"temp": 6000})));
+    doc.stages
+        .insert("white_balance".into(), entry(1, json!({"temp": 6000})));
 
-    assert_eq!(doc.stage_hash("crop").unwrap(), crop_hash_before, "unrelated stage hash must not change");
+    assert_eq!(
+        doc.stage_hash("crop").unwrap(),
+        crop_hash_before,
+        "unrelated stage hash must not change"
+    );
 }
 
 #[test]
 fn cache_key_changes_when_upstream_hash_changes_but_not_otherwise() {
     let mut doc = EditDocument::default();
-    doc.stages.insert("denoise".into(), entry(1, json!({"strength": 0.5})));
+    doc.stages
+        .insert("denoise".into(), entry(1, json!({"strength": 0.5})));
 
     let upstream_a = blake3::hash(b"upstream-a");
     let upstream_b = blake3::hash(b"upstream-b");
@@ -74,5 +95,8 @@ fn cache_key_changes_when_upstream_hash_changes_but_not_otherwise() {
     let key_b = doc.cache_key(asset, &[upstream_b], "denoise").unwrap();
 
     assert_eq!(key_a, key_a_again, "same inputs must hash identically");
-    assert_ne!(key_a, key_b, "changing an upstream stage hash must invalidate the downstream cache key");
+    assert_ne!(
+        key_a, key_b,
+        "changing an upstream stage hash must invalidate the downstream cache key"
+    );
 }

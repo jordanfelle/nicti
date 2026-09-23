@@ -9,7 +9,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 fn white_balance(temp: i64, tint: i64) -> StageEntry {
-    StageEntry { schema_version: 1, params: json!({"temp": temp, "tint": tint}) }
+    StageEntry {
+        schema_version: 1,
+        params: json!({"temp": temp, "tint": tint}),
+    }
 }
 
 #[test]
@@ -18,7 +21,8 @@ fn absolute_bulk_paste_across_500_photos_records_one_batch_entry_each() {
     let mut histories: Vec<History> = (0..500)
         .map(|_| {
             let mut doc = EditDocument::default();
-            doc.stages.insert("white_balance".into(), white_balance(4000, 0));
+            doc.stages
+                .insert("white_balance".into(), white_balance(4000, 0));
             History::new(doc)
         })
         .collect();
@@ -29,8 +33,15 @@ fn absolute_bulk_paste_across_500_photos_records_one_batch_entry_each() {
     }
 
     for history in &histories {
-        assert_eq!(history.len(), 1, "one history entry for the whole batch, not one per stage");
-        assert_eq!(history.document().stages["white_balance"].params, json!({"temp": 5500, "tint": 10}));
+        assert_eq!(
+            history.len(),
+            1,
+            "one history entry for the whole batch, not one per stage"
+        );
+        assert_eq!(
+            history.document().stages["white_balance"].params,
+            json!({"temp": 5500, "tint": 10})
+        );
     }
 }
 
@@ -41,24 +52,56 @@ fn batch_touching_multiple_stages_is_still_exactly_one_history_entry() {
     // "one entry per batch" from "one entry per stage" — this exercises the
     // hero-scenario shape (WB + vibrance + masks all pasted together).
     let mut doc = EditDocument::default();
-    doc.stages.insert("white_balance".into(), white_balance(4000, 0));
-    doc.stages.insert("global".into(), StageEntry { schema_version: 1, params: json!({"vibrance": 0}) });
+    doc.stages
+        .insert("white_balance".into(), white_balance(4000, 0));
+    doc.stages.insert(
+        "global".into(),
+        StageEntry {
+            schema_version: 1,
+            params: json!({"vibrance": 0}),
+        },
+    );
     let mut history = History::new(doc);
 
     history.apply_batch(
         Uuid::new_v4(),
         vec![
             ("white_balance".to_string(), white_balance(5500, 10)),
-            ("global".to_string(), StageEntry { schema_version: 1, params: json!({"vibrance": 20}) }),
-            ("mask.subject_0".to_string(), StageEntry { schema_version: 1, params: json!({"exposure": 0.4}) }),
+            (
+                "global".to_string(),
+                StageEntry {
+                    schema_version: 1,
+                    params: json!({"vibrance": 20}),
+                },
+            ),
+            (
+                "mask.subject_0".to_string(),
+                StageEntry {
+                    schema_version: 1,
+                    params: json!({"exposure": 0.4}),
+                },
+            ),
         ],
     );
 
-    assert_eq!(history.len(), 1, "a 3-stage batch must still be one history entry, not three");
+    assert_eq!(
+        history.len(),
+        1,
+        "a 3-stage batch must still be one history entry, not three"
+    );
     assert!(history.undo());
-    assert_eq!(history.document().stages["white_balance"].params, json!({"temp": 4000, "tint": 0}));
-    assert_eq!(history.document().stages["global"].params, json!({"vibrance": 0}));
-    assert!(!history.document().stages.contains_key("mask.subject_0"), "undo must remove a stage that didn't exist before the batch");
+    assert_eq!(
+        history.document().stages["white_balance"].params,
+        json!({"temp": 4000, "tint": 0})
+    );
+    assert_eq!(
+        history.document().stages["global"].params,
+        json!({"vibrance": 0})
+    );
+    assert!(
+        !history.document().stages.contains_key("mask.subject_0"),
+        "undo must remove a stage that didn't exist before the batch"
+    );
 }
 
 #[test]
@@ -66,7 +109,10 @@ fn relative_bulk_paste_adds_to_existing_values() {
     let mut doc = EditDocument::default();
     doc.stages.insert(
         "global".to_string(),
-        StageEntry { schema_version: 1, params: json!({"exposure": 0.2, "contrast": 10}) },
+        StageEntry {
+            schema_version: 1,
+            params: json!({"exposure": 0.2, "contrast": 10}),
+        },
     );
     let mut history = History::new(doc);
 
@@ -76,7 +122,13 @@ fn relative_bulk_paste_adds_to_existing_values() {
 
     history.apply_batch(
         Uuid::new_v4(),
-        vec![("global".to_string(), StageEntry { schema_version: 1, params: merged })],
+        vec![(
+            "global".to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: merged,
+            },
+        )],
     );
 
     assert_eq!(history.len(), 1);
