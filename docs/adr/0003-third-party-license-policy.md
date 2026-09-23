@@ -99,6 +99,13 @@ see `deny.toml`) catches a disallowed Rust crate license automatically; it does 
 catch a native-library link, an ML model weight, or a data file, so those still rely on this
 process being followed at review time.
 
+## Amendments
+
+- **2026-09-23 (#19/ADR-0004):** added `ISC` to the Rust-crate allowlist (`deny.toml` and the
+  section above), for `libloading` — a short permissive license, OSI-approved and FSF Free/Libre,
+  functionally MIT-equivalent. No other allow-list change was needed for that ADR's other new
+  dependencies (`wasmtime`/`wat`, both `Apache-2.0 WITH LLVM-exception`, already allowed).
+
 ## Consequences
 
 - Blocks #66 unblocking is now unblocked (`docs/licensing.md` + this ADR satisfy #18).

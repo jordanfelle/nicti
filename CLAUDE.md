@@ -27,6 +27,15 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   dynamic-linking rule, ML-model bundle-vs-on-demand-download criteria, and the "no Adobe
   DCP/LCP data" rule. Update `docs/licensing.md` in the same PR as any new dependency or model.
   Unblocks #66 (open-source release prep).
+- **Module/plugin architecture (Claw)**: `docs/adr/0004-module-plugin-architecture.md` — v1
+  first-party modules are in-process Rust traits with a lazy (`OnceLock`-backed) registry so heavy
+  modules load on demand; an LGPL native dependency (e.g. a future `rawler`/`lensfun-rs`) is
+  isolated behind a checked C-ABI `cdylib` boundary (`libloading` + an explicit ABI-version
+  handshake) rather than statically linked in. v2 third-party plugins are directionally WASM
+  (`wasmtime`) for non-hot-path extension points only — measured, not assumed, in
+  `spikes/sheath/tests/wasm_vs_native.rs` — never for a third-party render stage's per-pixel loop,
+  which would need GPU shaders instead. Proposes the `nicti-claw` + per-domain crate layout for
+  #20. Unblocks #20; feeds #37/#39's LGPL isolation requirement from ADR-0003.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -58,11 +67,15 @@ No production crates exist yet — this repo is still in bootstrap/scaffolding. 
 binary crate (`src/main.rs`) exists only so CI/lint tooling has something real to run against; it
 is not a commitment to final crate layout. `spikes/*` (a Cargo workspace member glob) holds
 throwaway research spikes — e.g. `spikes/pawprint` (#21/ADR-0002's edit-document hashing,
-history/compaction, and XMP round-trip proof) — not production code; don't build on top of a spike
-crate, and expect it to be deleted once its ADR is accepted and #20/#22 land the real crate layout.
-Update this section with a real package map (crate → path → role) as soon as the module
-architecture is decided and real crates land. `bench/whisker` (a workspace member) is benchmark
-tooling for #43, not a production crate either — same "don't build on top of it" caveat applies.
+history/compaction, and XMP round-trip proof) and `spikes/sheath` + fixture `spikes/dewclaw`
+(#19/ADR-0004's lazy module registry, checked C-ABI dylib boundary, and WASM-vs-native pixel-kernel
+timing) — not production code; don't build on top of a spike crate, and expect both to be deleted
+once #20 lands the real crate layout. **Proposed real package map (from ADR-0004, pending #20):**
+`nicti-claw` (module registry + dylib loader — generalizes `spikes/sheath`), then one crate per
+domain implementing its traits: `nicti-decode`, `nicti-color`, `nicti-lens`, `nicti-render`
+(Tapetum's future home, #44), `nicti-ai`, `nicti-export`, `nicti-catalog` (#22's future home).
+`bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
+same "don't build on top of it" caveat applies.
 
 ## Development workflow
 
@@ -114,10 +127,16 @@ ran, the CONFIRMED/SPECULATIVE split (or "no findings"), and how any real findin
 ## Testing
 
 ```bash
-cargo test
-cargo clippy --all-targets --all-features
+cargo test --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features
 cargo fmt --check
 ```
+
+**Always pass `--workspace`** for `test`/`clippy` in this repo: the root `Cargo.toml` is both the
+workspace root and a real package (`nicti`), not a virtual manifest, so a bare `cargo test`/`cargo
+clippy` without `-p`/`--workspace` silently checks only the root crate and skips `spikes/*` and
+`bench/whisker` entirely — confirmed as a real gap (CI's own `clippy`/`test` jobs had been doing
+exactly this since `spikes/pawprint` landed, until fixed alongside #19/ADR-0004).
 
 ## CI
 

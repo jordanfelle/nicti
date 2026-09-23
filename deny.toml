@@ -15,6 +15,9 @@ allow = [
     "MIT-0",
     "Unlicense",
     "Unicode-3.0",
+    # ISC: added for `libloading` (ADR-0004/#19) -- functionally MIT-equivalent, a short
+    # permissive license with no copyleft terms; OSI-approved and FSF Free/Libre.
+    "ISC",
 ]
 # Deliberately NOT listing any LGPL/GPL variant, even for r-efi's "MIT OR Apache-2.0 OR
 # LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate
