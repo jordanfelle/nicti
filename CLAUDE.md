@@ -15,6 +15,13 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   for now). Nikon NEF only — architecture should stay extensible (decoder/profile/lens/render
   stage/AI-model/exporter/catalog-store as extension points) without hard-coding Nikon
   assumptions, since a wider camera-brand open-source release is a long-term goal.
+- **Non-destructive edit model**: `docs/adr/0002-non-destructive-edit-model.md` — catalog DB is
+  authoritative; a fixed-order stage-parameter map (not a darktable-style reorderable op stack);
+  canonical `serde_json` + `blake3` per-stage hashing feeds Tapetum's (#44) cache key; history is
+  an append-only delta log with compaction (a slider-drag burst collapses to one undo step) plus
+  never-pruned named snapshots; virtual copies are multiple edit rows per asset; XMP has three
+  layers (LRC-convention metadata, a lossless `nicti:` namespace for catalog recovery, and a
+  best-effort `crs:` projection for AI masks). Unblocks #22, #52; feeds #44, #59.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -37,10 +44,14 @@ preemption), `Sniff` (embedded-JPEG fast preview path for culling).
 
 ## Package map
 
-No crates exist yet — this repo is still in bootstrap/scaffolding. A root placeholder binary
-crate (`src/main.rs`) exists only so CI/lint tooling has something real to run against; it is not
-a commitment to final crate layout. Update this section with a real package map (crate → path →
-role) as soon as the module architecture is decided and real crates land.
+No production crates exist yet — this repo is still in bootstrap/scaffolding. A root placeholder
+binary crate (`src/main.rs`) exists only so CI/lint tooling has something real to run against; it
+is not a commitment to final crate layout. `spikes/*` (a Cargo workspace member glob) holds
+throwaway research spikes — e.g. `spikes/pawprint` (#21/ADR-0002's edit-document hashing,
+history/compaction, and XMP round-trip proof) — not production code; don't build on top of a spike
+crate, and expect it to be deleted once its ADR is accepted and #20/#22 land the real crate layout.
+Update this section with a real package map (crate → path → role) as soon as the module
+architecture is decided and real crates land.
 
 ## Development workflow
 

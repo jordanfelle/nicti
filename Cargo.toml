@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "spikes/*"]
+
 [package]
 name = "nicti"
 version = "0.0.0"
