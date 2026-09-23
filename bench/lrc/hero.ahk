@@ -48,10 +48,19 @@ whiteGui := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x08000000", "whisker-indic
 whiteGui.BackColor := "FFFFFF"
 whiteGui.Show(indicatorRect . " Hide NoActivate")
 
+; Non-blocking: shows the indicator and returns immediately (the auto-hide is scheduled via a
+; one-shot timer instead of Sleep()-ing here) so the caller's very next statement -- the actual
+; injected input -- fires at essentially the same instant as the indicator's rising edge. A
+; blocking Flash() (show, Sleep(durationMs), hide, THEN return) would delay every injected input
+; by durationMs relative to the indicator, inflating every latency whisker reports by that amount.
 Flash(durationMs) {
     global whiteGui
     whiteGui.Show("NoActivate")
-    Sleep(durationMs)
+    SetTimer(HideIndicator, -durationMs)
+}
+
+HideIndicator() {
+    global whiteGui
     whiteGui.Hide()
 }
 
@@ -69,7 +78,9 @@ if interaction = "switch" {
     Loop imageCount - 1 {
         Flash(indicatorFlashMs)
         Send("{Right}")
-        Sleep(interKeyDelayMs - indicatorFlashMs)
+        ; Flash() now returns immediately (see its definition) and hides itself on its own timer,
+        ; so the full InterKeyDelayMs elapses here -- not InterKeyDelayMs minus the flash duration.
+        Sleep(interKeyDelayMs)
     }
 } else if interaction = "crop" {
     startX := Integer(IniRead(configPath, "crop", "StartX"))

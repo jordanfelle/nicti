@@ -23,8 +23,11 @@ hero-scenario.md -- pass 120 once run on a machine with a 120Hz+ display attache
 [indicator] section and the calibration step in bench/lrc/README.md.
 
 .PARAMETER DurationSeconds
-How long to capture. Must comfortably exceed hero.ahk's expected run time for the chosen
-interaction (see bench/lrc/hero-config.ini.example's delay/duration settings).
+Safety timeout, not the target capture length (actual capture length is however long hero.ahk
+takes to run, plus fixed buffers) -- if hero.ahk hasn't exited within this many seconds (a blocking
+MsgBox dialog, LRC not found, a hung drag), the run is aborted rather than left to hang forever.
+Must comfortably exceed hero.ahk's expected run time for the chosen interaction (see
+bench/lrc/hero-config.ini.example's delay/duration settings).
 #>
 param(
     [Parameter(Mandatory)] [ValidateSet("switch", "crop", "zoom")] [string]$Interaction,
@@ -40,6 +43,7 @@ param(
     [string]$AhkConfigPath = "$PSScriptRoot\lrc\hero-config.ini",
     [string]$AhkExe = "",
     [string]$FfmpegExe = "",
+    [string]$FfprobeExe = "",
     [string]$ResultsRoot = "$PSScriptRoot\..\bench-results\hero"
 )
 
@@ -72,8 +76,10 @@ function Resolve-Tool([string]$explicit, [string]$commandName, [string]$searchPa
 
 $AhkExe = Resolve-Tool $AhkExe "AutoHotkey64.exe" "AutoHotkey64.exe"
 $FfmpegExe = Resolve-Tool $FfmpegExe "ffmpeg" "ffmpeg.exe"
+$FfprobeExe = Resolve-Tool $FfprobeExe "ffprobe" "ffprobe.exe"
 Write-Host "Using AutoHotkey: $AhkExe"
 Write-Host "Using ffmpeg: $FfmpegExe"
+Write-Host "Using ffprobe: $FfprobeExe"
 
 # --- 1. Integrity check: hero-set files must match the committed manifest's SHA-256 column,
 #        per docs/benchmarks.md's rule that any harness verify the frozen copy before trusting it.
@@ -130,27 +136,65 @@ $meta | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $outDir "meta.json")
 # --- 3. Capture + drive, concurrently.
 $capturePath = Join-Path $outDir "capture.mkv"
 Write-Host "Starting ddagrab capture at $CaptureFps fps -> $capturePath"
+# NOT verified against real hardware yet (see hero-scenario.md/README.md): ddagrab's D3D11
+# surfaces feed h264_nvenc with no explicit hwupload/hwmap filter. Most ffmpeg+NVENC builds
+# negotiate this zero-copy path automatically, but if this errors on a format mismatch during the
+# calibration dry-run, add an explicit hw-frames bridge filter here.
 $ffmpegArgs = @(
     "-y", "-f", "lavfi", "-i", "ddagrab=framerate=$CaptureFps",
     "-c:v", "h264_nvenc", "-preset", "p7", "-qp", "0",
     $capturePath
 )
-$ffmpegProc = Start-Process -FilePath $FfmpegExe -ArgumentList $ffmpegArgs -PassThru -WindowStyle Hidden
+# Started via System.Diagnostics.Process (not Start-Process) so stdin can be redirected: ffmpeg's
+# documented graceful-stop signal is 'q' on stdin, which lets it flush/finalize the container.
+# A hard Stop-Process -Force (TerminateProcess) risks a truncated/corrupted tail on the mkv --
+# exactly the trailing frames the last event's "settled" measurement depends on.
+$ffmpegStartInfo = [System.Diagnostics.ProcessStartInfo]::new($FfmpegExe)
+foreach ($a in $ffmpegArgs) { $ffmpegStartInfo.ArgumentList.Add($a) }
+$ffmpegStartInfo.RedirectStandardInput = $true
+$ffmpegStartInfo.UseShellExecute = $false
+$ffmpegStartInfo.CreateNoWindow = $true
+$ffmpegProc = [System.Diagnostics.Process]::Start($ffmpegStartInfo)
 
 Start-Sleep -Milliseconds 500 # let the capture actually start before input begins
+if ($ffmpegProc.HasExited) {
+    throw "ffmpeg exited immediately after start (exit code $($ffmpegProc.ExitCode)) -- capture never began. Check ddagrab/NVENC availability on this display session."
+}
 
 Write-Host "Running hero.ahk ($Interaction) ..."
-$ahkProc = Start-Process -FilePath $AhkExe -ArgumentList @($AhkConfigPath) -PassThru -Wait
+$ahkProc = Start-Process -FilePath $AhkExe -ArgumentList @($AhkConfigPath) -PassThru
+if (-not $ahkProc.WaitForExit($DurationSeconds * 1000)) {
+    Stop-Process -Id $ahkProc.Id -Force -ErrorAction SilentlyContinue
+    $ffmpegProc.StandardInput.Write("q")
+    $ffmpegProc.StandardInput.Flush()
+    $ffmpegProc.WaitForExit(5000) | Out-Null
+    if (-not $ffmpegProc.HasExited) { Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue }
+    throw "hero.ahk did not exit within $DurationSeconds s (a blocking dialog? LRC window not found? a hung drag?) -- aborting. See $outDir for whatever capture exists."
+}
 
 Start-Sleep -Seconds 1 # trailing settle buffer beyond hero.ahk's own trailing sleep
 
-Write-Host "Stopping capture ..."
-Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
+Write-Host "Stopping capture (graceful 'q') ..."
+$ffmpegProc.StandardInput.Write("q")
+$ffmpegProc.StandardInput.Flush()
+if (-not $ffmpegProc.WaitForExit(5000)) {
+    Write-Warning "ffmpeg didn't exit within 5s of 'q' -- force-killing. The capture's tail frames may be truncated."
+    Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue
+}
 
 if (-not (Test-Path $capturePath)) {
     throw "Capture file was not produced: $capturePath"
 }
+
+# Sanity-check the capture actually contains video, not just an empty/near-empty container left
+# behind by a silent ddagrab/NVENC failure that Test-Path alone wouldn't catch.
+$frameCountRaw = & $FfprobeExe -v error -select_streams v:0 -count_frames -show_entries "stream=nb_read_frames" -of "csv=p=0" $capturePath
+$frameCount = 0
+[void][int]::TryParse($frameCountRaw, [ref]$frameCount)
+if ($frameCount -lt 10) {
+    throw "Capture at $capturePath has only $frameCount decodable video frame(s) -- capture likely failed silently (check ddagrab/NVENC on this display session)."
+}
+Write-Host "Capture verified: $frameCount frames."
 
 # --- 4. Crop the two ROIs whisker needs (see bench/whisker/README.md).
 $indicator = Get-Rect $IndicatorRect

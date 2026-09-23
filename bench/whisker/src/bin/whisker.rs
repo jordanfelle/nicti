@@ -5,9 +5,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use whisker::io::read_frames_gray8;
 use whisker::stats::{summarize, Stats};
-use whisker::{
-    distinct_change_frames, first_change_frame, frame_intervals, frames_to_ms, rising_edges, settled_frame,
-};
+use whisker::{distinct_change_frames, event_latencies, frame_intervals, frames_to_ms, rising_edges};
 
 #[derive(Parser)]
 #[command(name = "whisker", about = "Frame-diff analyzer for the #43 hero-scenario benchmark")]
@@ -73,10 +71,13 @@ enum Command {
         #[arg(long)]
         fps: f64,
 
-        /// First frame of the drag window (inclusive).
+        /// Start of the drag window, as an index into the frame-to-frame transition series (not
+        /// a raw frame number): transition `i` covers frames `i` -> `i+1`, so the earliest change
+        /// this can report is frame `start_frame + 1`. Pick the frame just before the drag's
+        /// first injected mouse-move.
         #[arg(long)]
         start_frame: usize,
-        /// Last frame of the drag window (exclusive).
+        /// End of the drag window (exclusive), same transition-index space as `start_frame`.
         #[arg(long)]
         end_frame: usize,
 
@@ -149,12 +150,8 @@ fn main() -> anyhow::Result<()> {
             let mut first_change_samples = Vec::new();
             let mut settled_samples = Vec::new();
             for &edge in &edges {
-                let first_change = first_change_frame(&roi_diffs, edge, change_threshold);
-                // Search for the settled point starting from the first visible change, not the
-                // raw indicator edge -- otherwise a brief pre-change plateau (the ROI hasn't
-                // started transitioning yet) can itself look like a "quiet run" and produce a
-                // bogus near-zero settled latency before the image has actually switched.
-                let settled = settled_frame(&roi_diffs, first_change.unwrap_or(edge), quiet_threshold, min_quiet_frames);
+                let (first_change, settled) =
+                    event_latencies(&roi_diffs, edge, change_threshold, quiet_threshold, min_quiet_frames);
                 let first_change_ms = first_change.map(|f| frames_to_ms(f - edge, fps));
                 let settled_ms = settled.map(|f| frames_to_ms(f - edge, fps));
                 if let Some(ms) = first_change_ms {

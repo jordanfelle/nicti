@@ -7,7 +7,7 @@
 //! latency should land within one frame of the known ground truth.
 
 use whisker::stats::summarize;
-use whisker::{first_change_frame, frames_to_ms, rising_edges, settled_frame, FrameStream};
+use whisker::{event_latencies, frames_to_ms, rising_edges, FrameStream};
 
 fn solid(value: u8, size: usize) -> Vec<u8> {
     vec![value; size]
@@ -70,10 +70,9 @@ fn switch_pipeline_matches_known_ground_truth_within_one_frame() {
     let mut first_change_samples = Vec::new();
     let mut settled_samples = Vec::new();
     for &edge in &edges {
-        let first_change = first_change_frame(&diffs, edge, 0.1).expect("first-change detected");
-        // Settled search starts from first_change, not the raw edge -- see bin/whisker.rs's
-        // Command::Switch handler for why (a pre-change plateau would otherwise look "settled").
-        let settled = settled_frame(&diffs, first_change, 0.01, 3).expect("settled detected");
+        let (first_change, settled) = event_latencies(&diffs, edge, 0.1, 0.01, 3);
+        let first_change = first_change.expect("first-change detected");
+        let settled = settled.expect("settled detected");
 
         // Ground truth: ROI starts changing 4 frames after the flash's leading edge.
         assert!(

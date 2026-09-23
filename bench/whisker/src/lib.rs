@@ -109,6 +109,29 @@ pub fn settled_frame(
         .find(|&f| diffs[f..f + needed_transitions].iter().all(|&d| d < quiet_threshold))
 }
 
+/// Computes both the first-change and settled latency frames for one indicator-marked event,
+/// given the event's indicator edge frame. Returns `(first_change, settled)`.
+///
+/// `settled` is searched starting from `first_change`, not `edge` -- searching from `edge` would
+/// let a brief pre-change plateau (the ROI hasn't started transitioning yet) look like a spurious
+/// "already settled" result. And when no change was ever detected (`first_change` is `None`),
+/// `settled` is also `None` rather than falling back to `edge`: with equal quiet/change
+/// thresholds, a plateau that never crosses `change_threshold` trivially never crosses
+/// `quiet_threshold` either, so a fallback would report a falsely "instantly settled" result for
+/// an event whose ROI never visibly changed at all (a dropped/late event, or the capture ending
+/// mid-transition) -- missing data must surface as `None`, not a misleadingly clean zero.
+pub fn event_latencies(
+    diffs: &[f64],
+    edge: usize,
+    change_threshold: f64,
+    quiet_threshold: f64,
+    min_quiet_frames: usize,
+) -> (Option<usize>, Option<usize>) {
+    let first_change = first_change_frame(diffs, edge, change_threshold);
+    let settled = first_change.and_then(|fc| settled_frame(diffs, fc, quiet_threshold, min_quiet_frames));
+    (first_change, settled)
+}
+
 /// Frame indices in `[start, end)` where a visible change occurred — used for interaction B/C's
 /// drag frame-interval metric (how often the loupe actually repainted during a scripted drag).
 pub fn distinct_change_frames(diffs: &[f64], start: usize, end: usize, change_threshold: f64) -> Vec<usize> {
@@ -248,6 +271,27 @@ mod tests {
     fn frames_to_ms_conversion() {
         assert!((frames_to_ms(6, 60.0) - 100.0).abs() < 1e-9);
         assert!((frames_to_ms(1, 120.0) - (1000.0 / 120.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn event_latencies_reports_settled_relative_to_first_change() {
+        let s = switch_frames();
+        let diffs = s.diff_series();
+        let (first_change, settled) = event_latencies(&diffs, 0, 0.05, 0.02, 3);
+        assert_eq!(first_change, Some(1));
+        assert_eq!(settled, Some(3));
+    }
+
+    #[test]
+    fn event_latencies_settled_is_none_when_no_change_ever_detected() {
+        // The ROI never changes at all after the edge -- with equal change/quiet thresholds, a
+        // buggy "fall back to edge" implementation would report Some(edge) (falsely "instantly
+        // settled") instead of the correct "we never even saw a change" None.
+        let s = FrameStream { width: 2, height: 2, frames: vec![solid(50, 4); 10] };
+        let diffs = s.diff_series();
+        let (first_change, settled) = event_latencies(&diffs, 0, 0.02, 0.02, 3);
+        assert_eq!(first_change, None);
+        assert_eq!(settled, None, "must not fall back to reporting a bogus near-zero settled latency");
     }
 
     #[test]

@@ -22,9 +22,10 @@ ImageCount=50
 InterKeyDelayMs=700
 
 [crop]
-; Corner-handle drag start/end screen coordinates in the crop overlay, and current image index
-; (1-based) this pass targets -- run-hero.ps1 calls hero.ahk once per target image with a
-; freshly-written config, per hero-scenario.md's "5 images per run" spread.
+; Corner-handle drag start/end screen coordinates in the crop overlay. hero.ahk acts on whatever
+; image is currently open in LRC -- it does NOT navigate between images. hero-scenario.md's "5
+; different images per run" spread for interactions B/C is done manually: navigate to each target
+; image in LRC yourself, then invoke run-hero.ps1 once per image (5 separate runs/output folders).
 StartX=0
 StartY=0
 EndX=0
