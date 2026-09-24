@@ -1,0 +1,20 @@
+[package]
+name = "groom"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway spike for #50 (ADR-0007): classic clone/heal (CPU + wgpu Poisson-blend compute), auto-source-pick, ort/load-dynamic AI-removal scaffolding (MobileSAM/LaMa wrappers, no bundled weights), crop/resize/feather compositing, and the HealStage/Spot edit-model representation with a pawprint-style cache_key(). Not a production crate."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+thiserror = "2"
+
+[[bin]]
+name = "groom"
+path = "src/bin/groom.rs"

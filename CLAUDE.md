@@ -63,6 +63,21 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   egui's/GPUI's built-in virtualized-list primitive, so both had to hand-roll grid-windowing math
   (`spikes/pelt/src/virtualize.rs`) for #68's grid gate. Final selection waits on
   `bench/pelt/pelt.ahk`+`run-pelt.ps1` numbers from the reference machine.
+- **Healing/removal**: `docs/adr/0007-healing-and-removal.md` — **Proposed, pending a
+  reference-machine measurement pass**. Ships both classic clone/heal (CPU Poisson-Jacobi solve +
+  a `wgpu` compute-shader twin, proven correct against each other in `spikes/groom/`) and AI
+  removal (MobileSAM+LaMa via `ort`/`load-dynamic`, per ADR-0004 §3's already-decided pattern) as
+  two `SpotKind` variants of one `HealStage`, not competing alternatives. No real ONNX weights
+  exist in this sandbox — the AI-removal wrappers prove the loading/error-handling shape only.
+  Re-verified LaMa's Places2 training-data flag (still unresolved — the primary source stays
+  unreachable, a mirror confirms Places2's own non-commercial/no-redistribution terms) and
+  researched MI-GAN as an alternative, which turned out **not** to be cleaner (same Places2
+  exposure, plus its own unresolved weights-license-legitimacy question) — see
+  `docs/research/groom-healing-removal.md`. Measured CPU-only timings (clone_stamp 0.12ms/op,
+  spot_heal 0.25ms/op, auto_source_pick 0.05ms/op) and `HealStage` serialized sizes (120/1,511/
+  7,531 bytes at 1/10/50 spots); GPU/CUDA numbers deferred to the reference machine. Proposes
+  (not commits) heal/remove's stage-order placement for #44: after lens correction, before global
+  tone, in linear space.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -124,8 +139,14 @@ TIFF/EXIF/Nikon-MakerNote IFD walker — no LibRaw/rawler dependency, deliberate
 #37's still-open decoder choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path and a
 locate/read/decode-grid/decode-screen/full-read latency benchmark; `sniff inventory` cross-checked
 byte-exact against `exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md`
-for the full write-up) — not production code; don't build on top of a spike crate, and expect each
-to be deleted once its own ticket promotes it (as #20 just did for `spikes/sheath`/`spikes/dewclaw`).
+for the full write-up), and `spikes/groom` (#50/ADR-0007's healing-and-removal research: CPU
+clone-stamp/Poisson-heal/auto-source-pick reference plus a `wgpu` compute-shader Poisson twin
+proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding with no real
+ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
+edit-model representation with a pawprint-style `cache_key()`; see
+`docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings) — not production
+code; don't build on top of a spike crate, and expect each to be deleted once its own ticket
+promotes it (as #20 just did for `spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.
 
