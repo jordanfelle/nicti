@@ -232,12 +232,16 @@ impl Workload for RedbEngine {
         {
             let mut assets_t = wtxn.open_table(ASSETS)?;
             let mut by_rating = wtxn.open_table(BY_RATING)?;
-            let raw = assets_t
-                .get(id_key(asset_id).as_slice())?
-                .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?
-                .value()
-                .to_vec();
-            let mut stored: StoredAsset = bincode::deserialize(&raw)?;
+            // Deserializing (not just slicing) produces an owned `StoredAsset` with its own
+            // `String`s, so the borrowed `AccessGuard` this reads from can drop at the end of
+            // this block, before `assets_t` needs to be borrowed mutably again below — no
+            // separate `.to_vec()` copy of the raw bytes needed first.
+            let mut stored: StoredAsset = {
+                let guard = assets_t
+                    .get(id_key(asset_id).as_slice())?
+                    .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?;
+                bincode::deserialize(guard.value())?
+            };
             let old_rating = stored.rating;
             by_rating.remove(composite_key(&[old_rating], asset_id).as_slice())?;
             stored.rating = rating;
@@ -260,12 +264,14 @@ impl Workload for RedbEngine {
             let mut assets_t = wtxn.open_table(ASSETS)?;
             let mut by_rating = wtxn.open_table(BY_RATING)?;
             for (asset_id, rating) in updates {
-                let raw = assets_t
-                    .get(id_key(*asset_id).as_slice())?
-                    .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?
-                    .value()
-                    .to_vec();
-                let mut stored: StoredAsset = bincode::deserialize(&raw)?;
+                // Same reasoning as `write_rating` above: deserialize inside a block so the
+                // borrowed `AccessGuard` drops before `assets_t.insert`'s mutable borrow.
+                let mut stored: StoredAsset = {
+                    let guard = assets_t
+                        .get(id_key(*asset_id).as_slice())?
+                        .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?;
+                    bincode::deserialize(guard.value())?
+                };
                 let old_rating = stored.rating;
                 by_rating.remove(composite_key(&[old_rating], *asset_id).as_slice())?;
                 stored.rating = *rating;
@@ -330,11 +336,11 @@ impl Workload for RedbEngine {
         let mut by_model = std::collections::HashMap::new();
         let mut by_rating = std::collections::HashMap::new();
         for id in candidate_ids {
-            let raw = match assets_t.get(id_key(id).as_slice())? {
-                Some(r) => r.value().to_vec(),
+            let guard = match assets_t.get(id_key(id).as_slice())? {
+                Some(r) => r,
                 None => continue,
             };
-            let stored: StoredAsset = bincode::deserialize(&raw)?;
+            let stored: StoredAsset = bincode::deserialize(guard.value())?;
             if let Some(m) = model {
                 if stored.model != m {
                     continue;
@@ -399,11 +405,11 @@ impl Workload for RedbEngine {
         for r in by_rating.range::<&[u8]>(lo.as_slice()..=hi.as_slice())? {
             let (_, v) = r?;
             let id = id_from_bytes(v.value());
-            let raw = match assets_t.get(id_key(id).as_slice())? {
-                Some(r) => r.value().to_vec(),
+            let guard = match assets_t.get(id_key(id).as_slice())? {
+                Some(r) => r,
                 None => continue,
             };
-            let stored: StoredAsset = bincode::deserialize(&raw)?;
+            let stored: StoredAsset = bincode::deserialize(guard.value())?;
             if stored.iso >= q.min_iso
                 && stored.iso <= q.max_iso
                 && stored.capture_date.as_str() >= q.date_from.as_str()
