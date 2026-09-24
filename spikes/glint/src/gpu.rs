@@ -305,8 +305,14 @@ impl LiveChainKernel {
     }
 
     /// Re-uploads `pixels` and `params` into the pre-built buffers (no new pipeline, no new
-    /// buffer allocation) and dispatches once. This is the actual per-dispatch cost:
-    /// `queue.write_buffer` x2 + submit + poll + readback.
+    /// large-buffer allocation or host->device upload of the workload itself) and dispatches
+    /// once: `queue.write_buffer` x2 + submit + poll + readback. Note this still goes through
+    /// the shared `dispatch_and_read` helper below, which allocates a few small, fixed-size
+    /// resources fresh every call (a staging buffer sized to the output, plus a timestamp query
+    /// set/resolve/readback trio when supported) — real but minor allocation cost that's the
+    /// same fixed tax on every backend, so it doesn't affect the *relative* backend comparison
+    /// this test is for, but means the absolute per-call numbers aren't pure zero-allocation
+    /// submission cost either.
     pub fn dispatch(
         &self,
         ctx: &GpuContext,

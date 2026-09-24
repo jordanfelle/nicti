@@ -138,7 +138,12 @@ timing pipeline compilation and full buffer (re-)allocation on every iteration, 
 submission cost, a mislabeling caught in adversarial review before merge. `LiveChainKernel`
 (`gpu.rs`) now builds the pipeline and buffers once outside the timed loop, and each timed
 iteration only re-uploads the (tiny, 256-pixel) input via `queue.write_buffer` and dispatches —
-the numbers above are from that corrected harness.)
+the numbers above are from that corrected harness. **Residual caveat, caught in a follow-up
+verification pass:** the shared dispatch helper both `LiveChainKernel` and `run_live_chain` call
+still allocates a few small, fixed-size resources fresh every call — a staging readback buffer
+and, where supported, a timestamp query set/resolve/readback trio — so these numbers aren't
+*zero*-allocation submission cost either, just far closer to it than the original bug. Since it's
+the same fixed tax on every backend, it doesn't change the Vulkan-vs-Dx12 relative comparison.)
 
 ### Host↔device interop cost — inconclusive as measured, real gap identified
 
