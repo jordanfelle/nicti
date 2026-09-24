@@ -112,6 +112,18 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   row for the full, genuinely unresolved account, plus a new `Workload::prepare_for_forget` hook
   this investigation added. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
   Revisit post-1.0, not never.
+- **`redb`, evaluated post-ADR-0009**: `docs/adr/0010-redb-evaluation.md` — **not adopted**. The
+  strongest hard-gate evidence of any pure-Rust candidate so far (real Windows CI, MIT/Apache-2.0
+  license, 1.0-plus and zero dependencies, unlike Turso's pre-1.0 status) — but two query shapes
+  miss the 2M budget (range query ~1.5x over, filename search ~5x over), root-caused to a real,
+  documented cost: redb checksums every page on read (confirmed via its own design docs and its
+  own upstream benchmark table, which independently shows the same ~1.5–2x-slower-than-LMDB
+  pattern on read-heavy workloads specifically). Crash-safety is **inconclusive**, but for a
+  cleanly understood reason this time, not a murky one like Turso's: a direct follow-up experiment
+  confirmed the reopen failure is an OS-level advisory lock scoped to the one leaked file
+  descriptor (not a process-wide guard like LMDB's) — the same *class* of fd-scoped lock ADR-0009
+  found in Turso, which this in-process `mem::forget` technique can never get past regardless of
+  engine. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -179,9 +191,11 @@ proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffoldi
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
-(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up — one
-module per candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`, behind matching
-Cargo features (`turso` is default-off, evaluated-not-adopted, kept for reference); `gen.rs`'s
+(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up and
+#106/ADR-0010's `redb` follow-up — one module per candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`, behind matching
+Cargo features (`turso` and `redb` are both default-off, evaluated-not-adopted, kept for
+reference); `gen.rs`'s
 synthetic-catalog generator is reusable for future Library-scale benchmarks, see
 `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for

@@ -26,5 +26,13 @@ pub mod lmdb;
 #[cfg(feature = "turso")]
 pub mod turso_engine;
 
+// #106's follow-up candidate, added after ADR-0009 merged — like LMDB, no query planner (hand-
+// maintained secondary indexes); unlike LMDB, a pure-Rust dependency and, per ADR-0010's own
+// crash-safety finding, no process-wide open-environment guard blocking in-process reopen after a
+// forgotten write transaction. Module named `redb_engine`, not `redb`, to avoid shadowing the
+// external `redb` crate it wraps.
+#[cfg(feature = "redb")]
+pub mod redb_engine;
+
 pub use gen::{generate_catalog, Asset, Flag};
 pub use workload::{FacetCounts, RangeQuery, Workload};

@@ -161,6 +161,15 @@ v0.1.1 (a transitive dependency of `turso_core`) carries no SPDX `license` field
 confirms Apache-2.0[^den4], already an allowed license, so no action needed beyond noting it here
 per this file's own "cargo-deny only sees what a crate declares" pattern.
 
+**Update (2026-09-24, [#106](https://github.com/jordanfelle/nicti/issues/106)'s `redb` evaluation,
+`docs/adr/0010-redb-evaluation.md`):** the `redb` crate (v4.3.0, default-off feature, kept for
+reference after evaluating-not-adopting per the ADR) is `MIT OR Apache-2.0`, confirmed from
+crates.io's version-level API response — already on `deny.toml`'s allowlist, no edit needed.
+`redb` has **zero dependencies of its own** (confirmed via `cargo tree -i redb`), so this update
+adds nothing new to the resolved dependency graph beyond the crate itself — `cargo deny
+--workspace --all-features check licenses` passes clean, same pre-existing `cfg_block`
+(Turso-only) warning as before, nothing new from `redb`.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
