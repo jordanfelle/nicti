@@ -33,9 +33,10 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   isolated behind a checked C-ABI `cdylib` boundary (`libloading` + an explicit ABI-version
   handshake) rather than statically linked in. v2 third-party plugins are directionally WASM
   (`wasmtime`) for non-hot-path extension points only — measured, not assumed, in
-  `spikes/sheath/tests/wasm_vs_native.rs` — never for a third-party render stage's per-pixel loop,
-  which would need GPU shaders instead. Proposes the `nicti-claw` + per-domain crate layout for
-  #20. Unblocks #20; feeds #37/#39's LGPL isolation requirement from ADR-0003.
+  `crates/nicti-claw/tests/wasm_vs_native.rs` — never for a third-party render stage's per-pixel
+  loop, which would need GPU shaders instead. **#20 landed the `nicti-claw` + per-domain crate
+  layout** — see the Package map section below. Feeds #37/#39's LGPL isolation requirement from
+  ADR-0003.
 - **GPU compute API**: `docs/adr/0005-gpu-compute-api.md` — `wgpu` (WGSL), Vulkan backend on
   Windows (not Dx12 — Dx12 doesn't expose `SHADER_F16` on wgpu 30/current driver, Vulkan does, and
   Tapetum's cache tiers need f16). Measured on the reference RTX 5080 in `spikes/glint/`: live-stage
@@ -93,25 +94,35 @@ preemption), `Sniff` (embedded-JPEG fast preview path for culling).
 
 ## Package map
 
-No production crates exist yet — this repo is still in bootstrap/scaffolding. A root placeholder
-binary crate (`src/main.rs`) exists only so CI/lint tooling has something real to run against; it
-is not a commitment to final crate layout. `spikes/*` (a Cargo workspace member glob) holds
-throwaway research spikes — e.g. `spikes/pawprint` (#21/ADR-0002's edit-document hashing,
-history/compaction, and XMP round-trip proof), `spikes/sheath` + fixture `spikes/dewclaw`
-(#19/ADR-0004's lazy module registry, checked C-ABI dylib boundary, and WASM-vs-native pixel-kernel
-timing), `spikes/glint` (#16/ADR-0005's wgpu-vs-CUDA measured comparison — correctness,
-feature/limit availability, throughput, dispatch overhead, host↔device interop cost), and
-`spikes/pelt` + `spikes/pelt-egui`/`spikes/pelt-iced`/`spikes/pelt-slint` (#68/ADR-0006's
-GUI-framework research — `pelt` is the toolkit-agnostic shared fixture/math crate, each `pelt-*`
-is one candidate's virtualized-grid + loupe + custom-wgpu-viewport spike; no `spikes/pelt-gpui`
-exists, see ADR-0006's Hard-gate-1 early exit) — not
-production code; don't build on top of a spike crate, and expect all of these to be deleted once
-#20 lands the real crate layout. **Proposed real package map (from ADR-0004, pending #20):**
-`nicti-claw` (module registry + dylib loader — generalizes `spikes/sheath`), then one crate per
-domain implementing its traits: `nicti-decode`, `nicti-color`, `nicti-lens`, `nicti-render`
-(Tapetum's future home, #44), `nicti-ai`, `nicti-export`, `nicti-catalog` (#22's future home).
-`bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
-same "don't build on top of it" caveat applies.
+`crates/*` (a Cargo workspace member glob, landed in #20) holds the real production crate layout
+from ADR-0004 §8:
+
+- **`crates/nicti-claw`** — the `Module` trait (identity/versioning shared by every extension
+  point), the lazy `OnceLock`-backed `Registry` (`crates/nicti-claw/src/registry.rs`), and the
+  checked C-ABI dylib handshake (`crates/nicti-claw/src/dylib.rs`) — the load-bearing crate every
+  other `nicti-*` crate builds on. Generalized from the now-deleted `spikes/sheath` spike.
+- **`crates/dewclaw`** — test fixture (cdylib) for `nicti-claw`'s dylib tests, generalized from
+  the now-deleted `spikes/dewclaw`.
+- One crate per extension point, each holding only its supertrait plus a `Registry` type alias —
+  no execution methods yet, those belong to the tickets named below: `nicti-decode` (`RawDecoder`,
+  #37/#40/#41), `nicti-color` (`ColorProfile`, #38/#42), `nicti-lens` (`LensCorrection`, #39),
+  `nicti-render` (`RenderStage`, Tapetum's future home, #44/#45), `nicti-ai` (`ModelProvider`,
+  #48-#53/#33-#36), `nicti-export` (`Exporter`, #56/#57), `nicti-catalog` (`CatalogStore`, #22's
+  future home).
+
+The root placeholder binary crate (`src/main.rs`) still exists only so CI/lint tooling has
+something real to run against; it is not the shipping v1 target's home yet. `spikes/*` still
+holds throwaway research spikes not yet promoted — `spikes/pawprint` (#21/ADR-0002's
+edit-document hashing, history/compaction, and XMP round-trip proof), `spikes/glint`
+(#16/ADR-0005's wgpu-vs-CUDA measured comparison — correctness, feature/limit availability,
+throughput, dispatch overhead, host↔device interop cost), and `spikes/pelt` +
+`spikes/pelt-egui`/`spikes/pelt-iced`/`spikes/pelt-slint` (#68/ADR-0006's GUI-framework research —
+`pelt` is the toolkit-agnostic shared fixture/math crate, each `pelt-*` is one candidate's
+virtualized-grid + loupe + custom-wgpu-viewport spike; no `spikes/pelt-gpui` exists, see
+ADR-0006's Hard-gate-1 early exit) — not production code; don't build on top of a spike crate,
+and expect each to be deleted once its own ticket promotes it (as #20 just did for
+`spikes/sheath`/`spikes/dewclaw`). `bench/whisker` (a workspace member) is benchmark tooling for
+#43, not a production crate either — same "don't build on top of it" caveat applies.
 
 ## Development workflow
 

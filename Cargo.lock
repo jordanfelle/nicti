@@ -1532,7 +1532,8 @@ dependencies = [
 name = "dewclaw"
 version = "0.0.0"
 dependencies = [
- "sheath",
+ "nicti-claw",
+ "serde_json",
 ]
 
 [[package]]
@@ -4242,6 +4243,71 @@ name = "nicti"
 version = "0.0.0"
 
 [[package]]
+name = "nicti-ai"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
+name = "nicti-catalog"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
+name = "nicti-claw"
+version = "0.0.0"
+dependencies = [
+ "libloading 0.9.0",
+ "serde_json",
+ "wasmtime",
+]
+
+[[package]]
+name = "nicti-color"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
+name = "nicti-decode"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
+name = "nicti-export"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
+name = "nicti-lens"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
+name = "nicti-render"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5863,14 +5929,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest",
-]
-
-[[package]]
-name = "sheath"
-version = "0.0.0"
-dependencies = [
- "libloading 0.9.0",
- "wasmtime",
 ]
 
 [[package]]

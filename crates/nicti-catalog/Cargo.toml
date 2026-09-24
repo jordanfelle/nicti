@@ -1,0 +1,12 @@
+[package]
+name = "nicti-catalog"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Catalog store extension point (ADR-0004 §8). Crate boundary only — this is #22's (catalog schema + import/ingest pipeline) future home; the embedded database engine (#67) and schema decisions land there."
+
+[dependencies]
+nicti-claw = { path = "../nicti-claw" }
+
+[dev-dependencies]
+serde_json = "1"

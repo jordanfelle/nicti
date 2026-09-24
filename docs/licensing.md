@@ -15,7 +15,7 @@ GPL-3.0/AGPL-3.0 instead. Verdict: ✅ bundle OK · ⚠️ bundle with condition
 ## Rust crate dependency tree (as of 2026-09-23)
 
 Checked via `cargo metadata` against the full workspace (`nicti`, `spikes/pawprint`,
-`spikes/sheath`, `spikes/dewclaw`, `bench/whisker`). All resolved crates are permissive:
+`crates/nicti-claw`, `crates/dewclaw`, `bench/whisker`). All resolved crates are permissive:
 
 MIT OR Apache-2.0 (the large majority — anstream, anstyle*, anyhow, arrayvec, base64, bumpalo, cc,
 cfg-if, clap*, colorchoice, cpufeatures, find-msvc-tools, futures-*, getrandom, heck,
@@ -26,13 +26,15 @@ LLVM-exception (`blake3`), CC0-1.0 OR MIT-0 OR Apache-2.0 (`constant_time_eq`), 
 the `Unicode-3.0` arm is a data-license for its Unicode table, not a code copyleft), MIT OR
 Apache-2.0 OR LGPL-2.1-or-later (`r-efi` — LGPL is only one arm of an OR, permissive arms exist),
 **ISC** (`libloading` v0.9.0 — added for [#19](https://github.com/jordanfelle/nicti/issues/19)'s
-`sheath` spike; a short permissive license, OSI-approved and FSF Free/Libre, functionally
-MIT-equivalent — added to `deny.toml`'s allowlist in the same PR)[^s1], **Apache-2.0 WITH
-LLVM-exception** (`wasmtime` v49.0.0, and one arm of `wat` v1.259.0's own OR-list — both added for
-the same spike's WASM-vs-native timing test; already on `deny.toml`'s allowlist via `blake3`'s
-same license string)[^s2]. No GPL/AGPL crate is currently in the tree. **No action needed today
-beyond the `ISC` addition above** — this section exists so a future `cargo deny check licenses`
-failure has a "last known clean" baseline to diff against.
+`sheath` spike, now a real dependency of the production `nicti-claw` crate landed in
+[#20](https://github.com/jordanfelle/nicti/issues/20); a short permissive license, OSI-approved
+and FSF Free/Libre, functionally MIT-equivalent — added to `deny.toml`'s allowlist in the same
+PR)[^s1], **Apache-2.0 WITH LLVM-exception** (`wasmtime` v49.0.0, and one arm of `wat`
+v1.259.0's own OR-list — both added for the same spike's WASM-vs-native timing test, still a
+dev-dependency only after #20's promotion; already on `deny.toml`'s allowlist via `blake3`'s same
+license string)[^s2]. No GPL/AGPL crate is currently in the tree. **No action needed today beyond
+the `ISC` addition above** — this section exists so a future `cargo deny check licenses` failure
+has a "last known clean" baseline to diff against.
 
 **Update (2026-09-23, [#16](https://github.com/jordanfelle/nicti/issues/16)'s `glint` spike,**
 `docs/adr/0005-gpu-compute-api.md`): `wgpu` v30.0.1 and its own dependency tree (`wgpu-core`,
@@ -54,9 +56,9 @@ this was a real gap in this PR's own local verification, not a false alarm): `sl
 never selects that backend directly — `[graph] all-features = true` in `deny.toml` resolves the
 full feature-enabled graph regardless) carries **Zlib as its sole license**, no MIT/Apache-2.0
 OR-arm the way `glow` itself has. Same for `foldhash` (pulled in via `hashbrown`, itself pulled in
-by the `wasmtime`/`cranelift` toolchain already in the tree for `spikes/sheath`'s WASM spike,
-ADR-0004 — `--workspace` is what surfaces this, since it unifies the whole workspace's dependency
-graph, not just this one spike's). Both added `Zlib` to `deny.toml`'s `allow` list, same category
+by the `wasmtime`/`cranelift` toolchain already in the tree for the `nicti-claw` crate's
+WASM-vs-native dev-dependency test, ADR-0004 — `--workspace` is what surfaces this, since it
+unifies the whole workspace's dependency graph, not just this one crate's). Both added `Zlib` to `deny.toml`'s `allow` list, same category
 as the existing `ISC` precedent: OSI-approved, FSF Free/Libre, no copyleft terms[^s3].
 
 The one native/runtime component this spike touches, NVRTC, is already covered by the existing
