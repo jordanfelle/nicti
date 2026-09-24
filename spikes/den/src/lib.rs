@@ -11,6 +11,15 @@ pub mod sqlite;
 #[cfg(feature = "duckdb")]
 pub mod duckdb_engine;
 
+// #103's two facet-count-cache candidates for SQLite's faceted-filter gap (ADR-0008). Both build
+// on `sqlite.rs` directly (its `connection()`/`naive_faceted_filter()` escape hatches), so both
+// require the `sqlite` feature; the DuckDB-backed candidate additionally requires `duckdb`.
+#[cfg(feature = "sqlite")]
+pub mod facet_cache_trigger;
+
+#[cfg(all(feature = "sqlite", feature = "duckdb"))]
+pub mod facet_cache_duckdb;
+
 // No `pglite` module: both embedded-Postgres candidates hard-gate-failed before a backend was
 // worth writing — see ADR-0008's Measured results / Options considered. pglite-rs's build.rs
 // unconditionally passes a Unix-only linker flag (no Windows path at all); pglite-oxide's own

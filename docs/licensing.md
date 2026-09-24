@@ -170,6 +170,32 @@ adds nothing new to the resolved dependency graph beyond the crate itself — `c
 --workspace --all-features check licenses` passes clean, same pre-existing `cfg_block`
 (Turso-only) warning as before, nothing new from `redb`.
 
+**Update (2026-09-24, [#66](https://github.com/jordanfelle/nicti/issues/66)/
+[ADR-0013](adr/0013-outbound-license-agpl.md)): Nicti's outbound license is decided — AGPL-3.0-
+or-later.** This is the biggest change to this file since it was created, since most of the
+copyleft-related exclusions below existed *because* the outbound license was undecided. Concretely,
+this update:
+
+- Adds `GPL-3.0-only`, `GPL-3.0-or-later`, `AGPL-3.0-only`, `AGPL-3.0-or-later`, and
+  `GPL-2.0-or-later` to `deny.toml`'s allowlist (see ADR-0003's 2026-09-24 amendment for the full
+  reasoning). **`GPL-2.0-only` deliberately stays denied** — no "or later" arm means no combining
+  into Nicti's own GPL-3.0-family license; this is a real per-crate license-text check, not a
+  blanket "any GPL now passes" change.
+- Un-excludes **Ultralytics YOLO** (AGPL-3.0) and **exiv2/rexiv2** (GPL-2.0-or-later/
+  GPL-3.0-or-later respectively — both grants verified precisely, not assumed from a short label)
+  — see their updated rows below and the Flags section.
+- **Partially** removes the special sign-off/`cdylib`-isolation requirement for
+  **LGPL-as-Cargo-dependency**: resolved for **`lensfun-rs`** (its `LGPL-3.0-or-later OR GPL-3.0`
+  dual license has a confirmed or-later arm, so it combines cleanly into Nicti's own copyleft
+  license — no isolation/sign-off needed). **Not resolved for `rawler`**: its grant is an
+  unconfirmed bare `LGPL-2.1` with no or-later arm, so it still needs the same sign-off/isolation
+  requirement as before — see the Flags section below, which was not corrected in an earlier pass
+  of this update and still needs reading precisely, not the top-line summary alone.
+- **Unaffected**: Adobe DCP/LCP (no redistribution grant exists, not a copyleft question),
+  InsightFace/RetinaFace (non-commercial-only restriction, not a copyleft question), LaMa's Places2
+  flag (training-data provenance, not a license-family question), CLIP's model-card caveat (a
+  stated position, not a license restriction).
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -179,12 +205,12 @@ adds nothing new to the resolved dependency graph beyond the crate itself — `c
 | [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ⚠️ needs explicit review | ✅ | ⚠️ static-link-vs-LGPL friction, get sign-off before shipping |
 | [lensfun](https://github.com/lensfun/lensfun) — `libs/` | Lens correction ([#39](https://github.com/jordanfelle/nicti/issues/39)) | LGPL-3.0[^lf1] | — | Dynamic (DLL) | ✅ if dynamically linked | ✅ | ✅ dynamic link only; never link `apps/` (GPL-3.0) |
 | lensfun **database** (calibration data) | Lens correction | — | CC BY-SA 3.0[^lf1] | Data file, unmodified | ✅ (data obligation, not code) | ✅ | ✅ — share-alike only bites if Nicti *modifies* and redistributes the database |
-| [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ⚠️ same LGPL/Rust caveat as rawler | ✅ | ⚠️ pick the LGPL-3.0-or-later arm; needs same review as rawler |
+| [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ⚠️ same LGPL/Rust caveat as rawler under a permissive release | ✅ | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), and this arm's confirmed "or later" grant combines cleanly, so no isolation/sign-off needed (unlike `rawler`, whose own grant isn't confirmed the same way — see the Flags section) |
 | [Little CMS 2](https://github.com/mm2/Little-CMS) | Color management ([#42](https://github.com/jordanfelle/nicti/issues/42)) | MIT[^lcms1] | — | Static or dynamic | ✅ | ✅ | ✅ bundle OK |
 | [kamadak-exif](https://crates.io/crates/kamadak-exif) | EXIF read | BSD-2-Clause[^kx1] | — | Static | ✅ | ✅ | ✅ bundle OK (read-only — see #47 below) |
 | [little_exif](https://crates.io/crates/little_exif) | EXIF/XMP write | MIT OR Apache-2.0[^le1] | — | Static | ✅ | ✅ | ✅ bundle OK |
-| [exiv2](https://github.com/Exiv2/exiv2/blob/main/COPYING) | EXIF/XMP/IPTC (candidate) | GPL-2.0[^ex1] | — | n/a | ⛔ | ✅ (same license) | ⛔ **do not use** — use kamadak-exif + little_exif instead |
-| [rexiv2](https://github.com/felixc/rexiv2) | Rust binding to exiv2/gexiv2 (candidate) | GPL-3.0-or-later — the crate's own README carries `SPDX-License-Identifier: GPL-3.0-or-later`, an explicit statement that linking against GPL exiv2/gexiv2 makes the binding itself GPL[^rx1] | — | n/a | ⛔ | ✅ (same license) | ⛔ **do not use**, same root cause as exiv2 |
+| [exiv2](https://github.com/Exiv2/exiv2/blob/main/src/exif.cpp) | EXIF/XMP/IPTC (candidate) | **GPL-2.0-or-later** (precise grant confirmed 2026-09-24 via project-specific evidence — `SPDX-License-Identifier: GPL-2.0-or-later` headers in its own source files, e.g. `src/exif.cpp`/`src/image.cpp`, and its README's License section; note the bundled `COPYING` file is just the generic FSF LGPL/GPL template distributed unedited and isn't project-specific evidence on its own, don't cite it as the source for this)[^ex1] | — | n/a | ⛔ | ✅ (the "-or-later" arm combines into Nicti's own AGPL-3.0-or-later) | ✅ **usable as of 2026-09-24** — Nicti's outbound license is now AGPL-3.0-or-later (#66/ADR-0013); kamadak-exif + little_exif remain the current choice (nothing wrong with them, no forced switch), but exiv2 is no longer license-excluded if a real reason to prefer it comes up |
+| [rexiv2](https://github.com/felixc/rexiv2) | Rust binding to exiv2/gexiv2 (candidate) | GPL-3.0-or-later — the crate's own README carries `SPDX-License-Identifier: GPL-3.0-or-later`, an explicit statement that linking against GPL exiv2/gexiv2 makes the binding itself GPL[^rx1] | — | n/a | ⛔ | ✅ (same license) | ✅ **usable as of 2026-09-24**, same reasoning as exiv2 above |
 | [Adobe XMP Toolkit SDK](https://github.com/adobe/XMP-Toolkit-SDK) | XMP (candidate) | BSD-3-Clause[^xmp1] | XMP *specification* separately covered by Adobe's XMP Specification Public Patent License (patent grant, not copyright) | Static or dynamic | ✅ | ✅ | ✅ bundle OK |
 | Adobe DNG SDK (code, not DCP/LCP data) | DNG format handling (candidate) | Adobe's own DNG SDK EULA — permits reproduction/redistribution/sublicensing but is a custom EULA, not OSI-approved[^dng1] | — | Static or dynamic | ⚠️ not SPDX-clean; must attribute as a separately-EULA'd third-party component, can't claim MIT/Apache for it | ⚠️ same | ⚠️ usable, but list under its own EULA in third-party notices, not folded into the project's own license |
 | Adobe DCP (camera profile) files | Color profiles | Proprietary Adobe/Lightroom data; no redistribution grant found[^dcp1] | — | n/a | ⛔ | ⛔ | ⛔ **never bundle** |
@@ -226,24 +252,52 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 | [CLIP (OpenAI)](https://github.com/openai/CLIP/blob/main/LICENSE) | Subject/burst grouping candidate ([#33](https://github.com/jordanfelle/nicti/issues/33)/[#35](https://github.com/jordanfelle/nicti/issues/35)) | MIT[^m7] | MIT (no separate weight license file) | OpenAI's own model card explicitly discourages *any* deployed use case, commercial or not — not a legal restriction, but a stated rights-holder position | ⚠️ flag — legally bundle-OK, but document the risk acknowledgment if shipped in a real feature |
 | [OpenCLIP](https://github.com/mlfoundations/open_clip/blob/main/LICENSE) | Subject/burst grouping candidate | MIT[^m8] | Not separately stated, presumed MIT-equivalent | Varies by checkpoint (LAION-400M/2B, DataComp-1B, etc.) — no license restriction, but LAION checkpoints carry reputational/takedown history | ✅ bundle OK — prefer a non-LAION-5B/2B checkpoint if provenance matters |
 | [InsightFace / RetinaFace](https://github.com/deepinsight/insightface/blob/master/README.md) | Face detection candidate | MIT (source code)[^m9] | **Non-commercial research only**, per the maintainers' own README, explicitly covering "models trained with this data" | Training data itself restricted; maintainers state the restriction carries to weights | ⛔ **do not bundle** — negotiate a commercial license or use a different embedding model (DINOv2/OpenCLIP) |
-| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics/blob/main/LICENSE) | Culling/detection candidate | **AGPL-3.0**[^m10] | Same AGPL-3.0 (weights bundled under the same terms; commercial license sold separately) | COCO/Ultralytics-curated — not the issue | ⛔ **do not bundle under a permissive release** — AGPL's network-use clause would force the whole combined work AGPL, or requires Ultralytics' paid commercial license, or swap to a non-Ultralytics/non-AGPL detector |
+| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics/blob/main/LICENSE) | Culling/detection candidate | **AGPL-3.0**[^m10] | Same AGPL-3.0 (weights bundled under the same terms; commercial license sold separately) | COCO/Ultralytics-curated — not the issue | ✅ **bundle OK as of 2026-09-24** — Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), so this combines cleanly; no need for Ultralytics' paid commercial license or a non-AGPL swap. See ADR-0003's 2026-09-24 amendment. |
 
 ## Flags requiring a decision before shipping a real feature
 
-1. **exiv2 / rexiv2 (GPL)** — excluded outright; kamadak-exif + little_exif already cover the same
-   ground under permissive terms. No decision needed, just don't add exiv2/rexiv2 as a dependency.
-2. **rawler / lensfun-rs (LGPL + Rust static linking)** — Rust's typical static-link compilation
-   model is a known unresolved friction point for LGPL. Get explicit sign-off (or isolate behind a
-   `cdylib`/plugin boundary, per Claw's [#19](https://github.com/jordanfelle/nicti/issues/19)
-   module architecture) before shipping either as a linked-in dependency.
+1. ~~**exiv2 / rexiv2 (GPL)** — excluded outright~~ — **resolved 2026-09-24**: no longer excluded.
+   Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013); both crates' precise
+   grants (GPL-2.0-or-later, GPL-3.0-or-later) combine cleanly into it. kamadak-exif + little_exif
+   remain the current dependency — nothing wrong with them, this isn't a forced switch — but a
+   real reason to prefer exiv2 (IPTC support, maturity) is no longer blocked on license grounds.
+2. **rawler / lensfun-rs (LGPL + Rust static linking) — partially resolved 2026-09-24, do not
+   treat both the same.** The underlying *mechanism* for resolving this is real: LGPL explicitly
+   permits a licensee to relicense under "the ordinary GPL" terms, and since Nicti's own license is
+   now already copyleft (not permissive/proprietary), the original reason for requiring dynamic-
+   linking/`cdylib` isolation (protecting a permissive/proprietary work from LGPL's copyleft) no
+   longer applies *in general*. But LGPL's relicense-to-GPL option converts to **whichever GPL
+   version the library's own grant permits** — not automatically to GPL-3.0/AGPL-3.0 just because
+   that's what the combiner wants:
+   - ~~**lensfun-rs**~~ — **resolved.** Its own dual license (`docs/licensing.md`'s pre-existing
+     row) is `LGPL-3.0-or-later OR GPL-3.0` — an explicit, already-confirmed "or later" arm.
+     Genuinely fine as a normal Cargo dependency now, no isolation needed.
+   - **rawler — still unresolved, do NOT treat as pre-cleared.** Found via a hostile re-review of
+     this very change: rawler's `Cargo.toml` declares a bare `license = "LGPL-2.1"` (not valid SPDX
+     on its own — GPL-family 2.x licenses require an explicit `-only`/`-or-later` suffix), and its
+     repo's `LICENSE` file is the unedited, generic FSF template (still contains the template's own
+     placeholder text, "James Random Hacker" — this is the standard boilerplate every LGPL-2.1
+     project ships, not a rawler-specific statement, so it's not evidence either way). If rawler's
+     actual grant is LGPL-2.1-**only** (no forward-version permission), its GPL-relicensed form
+     would be GPL-2.0-only — which this same 2026-09-24 amendment denies outright (see item 1's
+     `deny.toml` change) as incompatible with Nicti's AGPL-3.0-or-later. **Keep the sign-off/
+     `cdylib`-isolation requirement in force for rawler specifically** until someone gets an
+     authoritative answer from upstream (or finds a real per-file SPDX header settling it) on
+     whether its LGPL-2.1 grant includes an "or later" option. #37 should not skip this check just
+     because this amendment resolved the general LGPL question for lensfun-rs.
 3. **Adobe DCP/LCP data** — never bundle. Use `dcamprof` (external CLI, GPL-3.0 but not linked in)
-   or LibRaw's built-in color matrices instead.
+   or LibRaw's built-in color matrices instead. **Unaffected by the 2026-09-24 license change** —
+   this exclusion is about no redistribution grant existing at all, not about copyleft
+   compatibility; it would hold under any outbound license Nicti could pick.
 4. **InsightFace/RetinaFace** — non-commercial only, excluded. Use DINOv2 or OpenCLIP embeddings
    for face/subject grouping (#35) instead of literal face-recognition models — this also better
-   serves the "must handle fursuiters, not just human faces" requirement from #4.
-5. **Ultralytics YOLO (AGPL-3.0)** — excluded from a permissive release. If a YOLO-family detector
-   is still wanted for culling, use a non-Ultralytics implementation/weights not wrapped in the
-   AGPL license, or budget for Ultralytics' commercial license.
+   serves the "must handle fursuiters, not just human faces" requirement from #4. **Unaffected by
+   the 2026-09-24 license change** — this exclusion is about a non-commercial-only restriction, not
+   copyleft-vs-permissive compatibility.
+5. ~~**Ultralytics YOLO (AGPL-3.0)** — excluded from a permissive release~~ — **resolved
+   2026-09-24**: no longer excluded. Nicti's own outbound license is now AGPL-3.0-or-later
+   (#66/ADR-0013), so this combines cleanly — no non-Ultralytics swap or paid commercial license
+   needed if a YOLO-family detector is wanted for culling.
 6. **LaMa (Places2 provenance)** — the least clear-cut case, still unresolved after a second
    direct-fetch attempt in [#50](https://github.com/jordanfelle/nicti/issues/50)'s spike
    (`places2.csail.mit.edu` again returned a connection error; a mirror confirms Places2's own
@@ -270,7 +324,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^lcms1]: Little CMS 2 MIT license — GitHub license API resolving the repo's own `LICENSE` file at https://github.com/mm2/Little-CMS/blob/master/LICENSE — verified 2026-09-23
 [^kx1]: kamadak-exif BSD-2-Clause — https://crates.io/api/v1/crates/kamadak-exif (registry JSON) — verified 2026-09-23
 [^le1]: little_exif MIT OR Apache-2.0 — https://crates.io/api/v1/crates/little_exif (registry JSON) — verified 2026-09-23
-[^ex1]: exiv2 GPL-2.0 — https://github.com/Exiv2/exiv2/blob/main/COPYING — verified 2026-09-23
+[^ex1]: exiv2 GPL-2.0-or-later — `SPDX-License-Identifier: GPL-2.0-or-later` headers in its own source (`src/exif.cpp`, `src/image.cpp`) and its README's License section — verified 2026-09-23, precise -or-later grant confirmed 2026-09-24 (superseding an earlier citation of `COPYING`, which is generic FSF boilerplate, not project-specific evidence)
 [^rx1]: rexiv2 GPL-3.0-or-later — `SPDX-License-Identifier: GPL-3.0-or-later` header at the top of https://github.com/felixc/rexiv2/blob/main/README.md — verified 2026-09-23
 [^xmp1]: Adobe XMP Toolkit SDK BSD-3-Clause — GitHub license API for https://github.com/adobe/XMP-Toolkit-SDK — verified 2026-09-23
 [^dng1]: Adobe DNG SDK EULA — https://scancode-licensedb.aboutcode.org/adobe-dng-sdk.html (quotes the EULA text) — verified 2026-09-23

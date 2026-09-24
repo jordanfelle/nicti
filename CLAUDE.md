@@ -23,20 +23,44 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   layers (LRC-convention metadata, a lossless `nicti:` namespace for catalog recovery, and a
   best-effort `crs:` projection for AI masks). Unblocks #22, #52; feeds #44, #59.
 - **Third-party license policy**: `docs/adr/0003-third-party-license-policy.md`, backed by the
-  full per-dependency/per-model audit in `docs/licensing.md` — Rust crate allowlist, LGPL-native-lib
-  dynamic-linking rule, ML-model bundle-vs-on-demand-download criteria, and the "no Adobe
-  DCP/LCP data" rule. Update `docs/licensing.md` in the same PR as any new dependency or model.
-  Unblocks #66 (open-source release prep).
+  full per-dependency/per-model audit in `docs/licensing.md` — Rust crate allowlist, ML-model
+  bundle-vs-on-demand-download criteria, and the "no Adobe DCP/LCP data" rule. **Amended
+  2026-09-24** (see ADR-0003's own Amendments section, load-bearing not historical): the original
+  LGPL-native-lib dynamic-linking rule and the blanket GPL/AGPL denial are both superseded now that
+  Nicti's own outbound license is decided (see the ADR-0013 bullet below) — read the amendment,
+  not just the original 2026-09-23 Decision text. Update `docs/licensing.md` in the same PR as any
+  new dependency or model.
+- **Outbound license: AGPL-3.0-or-later** — `docs/adr/0013-outbound-license-agpl.md`, resolving
+  #66 (open-source release prep) early because ADR-0003's permissive-only default was already
+  actively constraining in-flight decisions. Chosen specifically over plain GPL-3.0 for the
+  network-use clause (§13) — closes the "run it as a hosted service, never share the source"
+  loophole plain GPL leaves open, which matters given #58 (web gallery/upload) and #64
+  (multi-machine catalog) are real planned v2 network-facing features, not hypothetical ones.
+  Un-excludes Ultralytics YOLO (culling/detection) and exiv2/rexiv2 (EXIF/XMP/IPTC, though
+  kamadak-exif/little_exif remain the current unforced choice) on license grounds; removes the
+  LGPL-as-Cargo-dependency sign-off/`cdylib`-isolation requirement **for `lensfun-rs` specifically**
+  (its confirmed `LGPL-3.0-or-later OR GPL-3.0` dual license combines cleanly now that Nicti's own
+  license is already copyleft) — **but not for `rawler`**, whose bare `license = "LGPL-2.1"` (no
+  `-only`/`-or-later` suffix, and no project-specific evidence either way beyond that) could still
+  mean GPL-2.0-only if relicensed, which this same amendment denies; #37 still needs to resolve
+  that before treating rawler as pre-cleared. Reopens RapidRAW (#69) as a potential adopt/fork
+  candidate, not just prior-art study, since it's also AGPL-3.0 — see the new tickets filed
+  alongside this ADR for follow-up.
 - **Module/plugin architecture (Claw)**: `docs/adr/0004-module-plugin-architecture.md` — v1
   first-party modules are in-process Rust traits with a lazy (`OnceLock`-backed) registry so heavy
-  modules load on demand; an LGPL native dependency (e.g. a future `rawler`/`lensfun-rs`) is
-  isolated behind a checked C-ABI `cdylib` boundary (`libloading` + an explicit ABI-version
-  handshake) rather than statically linked in. v2 third-party plugins are directionally WASM
-  (`wasmtime`) for non-hot-path extension points only — measured, not assumed, in
-  `crates/nicti-claw/tests/wasm_vs_native.rs` — never for a third-party render stage's per-pixel
-  loop, which would need GPU shaders instead. **#20 landed the `nicti-claw` + per-domain crate
-  layout** — see the Package map section below. Feeds #37/#39's LGPL isolation requirement from
-  ADR-0003.
+  modules load on demand. Originally described isolating an LGPL native dependency (e.g. `rawler`/
+  `lensfun-rs`) behind a checked C-ABI `cdylib` boundary (`libloading` + an explicit ABI-version
+  handshake) specifically to satisfy LGPL's dynamic-linking safe harbor — **that specific reason no
+  longer applies for `lensfun-rs`** as of ADR-0003's 2026-09-24 amendment (Nicti's own license is
+  now copyleft, and `lensfun-rs`'s confirmed or-later dual license combines in cleanly regardless
+  of link type; see the ADR-0013 bullet above) **but still applies for `rawler`**, whose LGPL grant
+  isn't confirmed to include an "or later" option — don't drop its isolation/sign-off requirement
+  without resolving that first. The `cdylib` boundary mechanism itself is still available and may
+  still be worth using for other reasons (plugin flexibility, v2's WASM-plugin direction below). v2
+  third-party plugins are directionally WASM (`wasmtime`) for non-hot-path extension points only —
+  measured, not assumed, in `crates/nicti-claw/tests/wasm_vs_native.rs` — never for a third-party
+  render stage's per-pixel loop, which would need GPU shaders instead. **#20 landed the
+  `nicti-claw` + per-domain crate layout** — see the Package map section below.
 - **GPU compute API**: `docs/adr/0005-gpu-compute-api.md` — `wgpu` (WGSL), Vulkan backend on
   Windows (not Dx12 — Dx12 doesn't expose `SHADER_F16` on wgpu 30/current driver, Vulkan does, and
   Tapetum's cache tiers need f16). Measured on the reference RTX 5080 in `spikes/glint/`: live-stage
@@ -124,6 +148,21 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   descriptor (not a process-wide guard like LMDB's) — the same *class* of fd-scoped lock ADR-0009
   found in Turso, which this in-process `mem::forget` technique can never get past regardless of
   engine. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
+- **Facet-count cache for SQLite's faceted-filter gap**: `docs/adr/0011-facet-count-cache.md` —
+  **trigger-maintained SQLite facet table**, closing ADR-0008's one measured miss (faceted-filter
+  at 2M) without adding a new dependency. Clears the <100ms budget by ~33-89x at 600k/2M (well
+  under 1ms-3ms p95); the actual per-write gate ADR-0008 sets (`write_rating` ≤5ms) clears with
+  10x+ margin at both scales, though a 100-row rating burst (a proxy for #43's rate-and-advance
+  culling pattern) is a real, non-negligible added cost (9-20ms, vs. plain SQLite's <2.1ms) — found
+  via a benchmark bug (a trigger `WHEN`-guard no-op on repeated same-value writes) that a hostile
+  review caught and this ADR documents in full. Verified correct against a from-scratch
+  recomputation both at ingest and under a write burst. A DuckDB-backed read-side cache alternative
+  was also built and measured (also clears budget, but adds a second store, a real multi-second
+  refresh cost at 2M, and a demonstrated staleness window between refreshes) and is kept as the
+  explicit fallback, not adopted. Both candidates share a real, verified scope limitation: their
+  `(model, rating, keyword)`-grain facet table only answers a *keyword-narrowed* facet query
+  correctly — an unfiltered/no-keyword facet count needs a separate table or `sqlite.rs`'s own
+  from-scratch query. Unblocks #22's facet-count implementation.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -191,11 +230,12 @@ proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffoldi
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
-(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up and
-#106/ADR-0010's `redb` follow-up — one module per candidate,
-`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`, behind matching
-Cargo features (`turso` and `redb` are both default-off, evaluated-not-adopted, kept for
-reference); `gen.rs`'s
+(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
+#106/ADR-0010's `redb` follow-up, and #103/ADR-0011's facet-count-cache follow-up — one module per
+candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/
+`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo features (`turso` and
+`redb` are both default-off, evaluated-not-adopted, kept for reference; the two facet-cache
+modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`); `gen.rs`'s
 synthetic-catalog generator is reusable for future Library-scale benchmarks, see
 `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for
