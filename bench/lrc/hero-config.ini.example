@@ -13,6 +13,12 @@ PreStartDelayMs=500
 X=20
 Y=20
 Size=60
+; For crop/zoom, ScriptedDrag flashes twice more (drag-start, drag-end) in addition to the
+; mode-entry flash below -- 3 total edges per capture. whisker's rising_edges only registers a new
+; edge once the signal has dropped back below threshold, so keep FlashMs comfortably shorter than
+; the real gap between those flashes (mode-entry -> drag-start is ~400ms at default Steps/timing;
+; too-large a FlashMs can merge two flashes into one edge and mis-scope which sample is which --
+; the calibration dry-run's "events_detected == 3" check in README.md catches this).
 FlashMs=80
 
 [switch]

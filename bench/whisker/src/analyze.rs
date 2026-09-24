@@ -152,31 +152,45 @@ pub fn pool_results(
             }
         };
 
-        let bucket = buckets
-            .entry((meta.config.clone(), meta.interaction.clone()))
-            .or_default();
+        // A `-Cold` run-hero.ps1 pass labels its meta.json interaction "$Interaction-cold" (e.g.
+        // "crop-cold") so cold results pool separately from warm ones -- but which
+        // switch/crop/zoom pipeline to run is the same regardless of warm/cold, so strip the
+        // suffix only for that decision. `run-hero-series.ps1` passes `-Cold` uniformly for every
+        // interaction (not just switch), so "crop-cold"/"zoom-cold" are real, reachable labels
+        // that must be handled the same as "crop"/"zoom", not fall through to "unknown".
+        let base_interaction = meta
+            .interaction
+            .strip_suffix("-cold")
+            .unwrap_or(meta.interaction.as_str());
 
-        let pan_window =
-            |dir: &Path, bucket: &mut MetricSamples, skipped: &mut Vec<SkippedCapture>| {
-                match drag_window_from_edges(&indicator, opts.indicator_threshold, (1, 2)) {
-                    Ok((start, end)) => {
-                        let diffs = roi.diff_series();
-                        let distinct =
-                            distinct_change_frames(&diffs, start, end, opts.change_threshold);
-                        let intervals = frame_intervals(&distinct);
-                        bucket
-                            .interval_ms
-                            .extend(intervals.iter().map(|&f| frames_to_ms(f, meta.capture_fps)));
-                    }
-                    Err(e) => skipped.push(SkippedCapture {
+        // Computed before touching `buckets` so an unrecognized interaction never creates a
+        // spurious empty bucket that would otherwise show up in the summary next to real results.
+        let pan_interval_ms = |dir: &Path, skipped: &mut Vec<SkippedCapture>| -> Option<Vec<f64>> {
+            match drag_window_from_edges(&indicator, opts.indicator_threshold, (1, 2)) {
+                Ok((start, end)) => {
+                    let diffs = roi.diff_series();
+                    let distinct =
+                        distinct_change_frames(&diffs, start, end, opts.change_threshold);
+                    let intervals = frame_intervals(&distinct);
+                    Some(
+                        intervals
+                            .iter()
+                            .map(|&f| frames_to_ms(f, meta.capture_fps))
+                            .collect(),
+                    )
+                }
+                Err(e) => {
+                    skipped.push(SkippedCapture {
                         dir: dir.to_path_buf(),
                         reason: e,
-                    }),
+                    });
+                    None
                 }
-            };
+            }
+        };
 
-        match meta.interaction.as_str() {
-            "switch" | "switch-cold" => {
+        match base_interaction {
+            "switch" => {
                 match analyze_switch(
                     &indicator,
                     &roi,
@@ -188,6 +202,9 @@ pub fn pool_results(
                     None,
                 ) {
                     Ok(report) => {
+                        let bucket = buckets
+                            .entry((meta.config.clone(), meta.interaction.clone()))
+                            .or_default();
                         bucket
                             .settled_ms
                             .extend(report.events.iter().filter_map(|e| e.settled_ms));
@@ -198,9 +215,17 @@ pub fn pool_results(
                     Err(e) => skipped.push(SkippedCapture { dir, reason: e }),
                 }
             }
-            "crop" => pan_window(&dir, bucket, &mut skipped),
+            "crop" => {
+                if let Some(samples) = pan_interval_ms(&dir, &mut skipped) {
+                    buckets
+                        .entry((meta.config.clone(), meta.interaction.clone()))
+                        .or_default()
+                        .interval_ms
+                        .extend(samples);
+                }
+            }
             "zoom" => {
-                match analyze_switch(
+                let settled = match analyze_switch(
                     &indicator,
                     &roi,
                     meta.capture_fps,
@@ -210,20 +235,39 @@ pub fn pool_results(
                     opts.change_threshold,
                     Some(&[0]),
                 ) {
-                    Ok(report) => bucket
-                        .settled_ms
-                        .extend(report.events.iter().filter_map(|e| e.settled_ms)),
-                    Err(e) => skipped.push(SkippedCapture {
-                        dir: dir.clone(),
-                        reason: e,
-                    }),
+                    Ok(report) => Some(
+                        report
+                            .events
+                            .iter()
+                            .filter_map(|e| e.settled_ms)
+                            .collect::<Vec<_>>(),
+                    ),
+                    Err(e) => {
+                        skipped.push(SkippedCapture {
+                            dir: dir.clone(),
+                            reason: e,
+                        });
+                        None
+                    }
+                };
+                let interval = pan_interval_ms(&dir, &mut skipped);
+                if settled.is_some() || interval.is_some() {
+                    let bucket = buckets
+                        .entry((meta.config.clone(), meta.interaction.clone()))
+                        .or_default();
+                    if let Some(s) = settled {
+                        bucket.settled_ms.extend(s);
+                    }
+                    if let Some(i) = interval {
+                        bucket.interval_ms.extend(i);
+                    }
                 }
-                pan_window(&dir, bucket, &mut skipped);
             }
             other => skipped.push(SkippedCapture {
                 dir,
                 reason: format!(
-                    "unknown interaction '{other}' (expected switch, switch-cold, crop, or zoom)"
+                    "unknown interaction '{other}' (base of '{}', expected switch, crop, or zoom, each optionally suffixed '-cold')",
+                    meta.interaction
                 ),
             }),
         }
@@ -428,7 +472,7 @@ mod tests {
         let samples = buckets.get(&key).expect("bucket present");
         // 1 settled sample per capture (only edge 0 counts), 2 captures.
         assert_eq!(samples.settled_ms.len(), 2);
-        // 2 distinct repaints per capture in the drag-start..drag-end window, 2 captures.
+        // 2 distinct repaints -> 1 interval between them, per capture; 2 captures.
         assert_eq!(samples.interval_ms.len(), 2);
 
         fs::remove_dir_all(&root).unwrap();
@@ -459,6 +503,82 @@ mod tests {
         assert!(samples.settled_ms.is_empty(), "crop has no settled metric");
         // 1 capture, 2 distinct repaints in its drag-start..drag-end window -> 1 interval.
         assert_eq!(samples.interval_ms.len(), 1);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A `run-hero.ps1 -Cold` pass on crop/zoom records `interaction: "crop-cold"`/`"zoom-cold"`
+    /// (run-hero-series.ps1 passes `-Cold` uniformly, not just for switch) -- these must pool
+    /// using the same crop/zoom pipeline as their warm counterparts, into their own separate
+    /// bucket, not fall through to "unknown interaction" and get silently dropped.
+    #[test]
+    fn pool_results_handles_cold_crop_and_zoom_interactions() {
+        let root = temp_dir();
+        write_zoom_capture(
+            &root.join("originals/crop-cold/run-1/img-1"),
+            "originals",
+            "run-1",
+            "crop-cold",
+        );
+        write_zoom_capture(
+            &root.join("originals/zoom-cold/run-1/img-1"),
+            "originals",
+            "run-1",
+            "zoom-cold",
+        );
+
+        let opts = AnalyzeOptions {
+            indicator_threshold: 0.5,
+            quiet_threshold: 0.02,
+            min_quiet_frames: 2,
+            change_threshold: 0.05,
+            warmup_label: "warmup".to_string(),
+        };
+        let (buckets, skipped) = pool_results(&root, &opts).unwrap();
+        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+
+        let crop_cold = buckets
+            .get(&("originals".to_string(), "crop-cold".to_string()))
+            .expect("crop-cold bucket present, distinct from warm crop");
+        assert_eq!(crop_cold.interval_ms.len(), 1);
+
+        let zoom_cold = buckets
+            .get(&("originals".to_string(), "zoom-cold".to_string()))
+            .expect("zoom-cold bucket present, distinct from warm zoom");
+        assert_eq!(zoom_cold.settled_ms.len(), 1);
+        assert_eq!(zoom_cold.interval_ms.len(), 1);
+
+        // Warm "crop"/"zoom" buckets must not exist just because a cold capture was seen.
+        assert!(!buckets.contains_key(&("originals".to_string(), "crop".to_string())));
+        assert!(!buckets.contains_key(&("originals".to_string(), "zoom".to_string())));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_unrecognized_interaction_is_skipped_without_creating_a_bucket() {
+        let root = temp_dir();
+        write_zoom_capture(
+            &root.join("originals/bogus/run-1/img-1"),
+            "originals",
+            "run-1",
+            "bogus",
+        );
+
+        let opts = AnalyzeOptions {
+            indicator_threshold: 0.5,
+            quiet_threshold: 0.02,
+            min_quiet_frames: 2,
+            change_threshold: 0.05,
+            warmup_label: "warmup".to_string(),
+        };
+        let (buckets, skipped) = pool_results(&root, &opts).unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("unknown interaction"));
+        assert!(
+            buckets.is_empty(),
+            "an unrecognized interaction must not create an empty bucket in the summary"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }

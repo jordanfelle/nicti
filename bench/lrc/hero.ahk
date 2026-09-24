@@ -100,13 +100,20 @@ if interaction = "switch" {
     Send("r")
     Sleep(300) ; let crop mode's overlay settle before the drag itself is timed
     ScriptedDrag(startX, startY, endX, endY, durationMs, steps)
-    if exitCropAfter
-        Send("{Enter}")
     ; Every repeat run on the same image must start from the same uncropped state and the same
     ; drag coordinates -- without this, run 2+ would drag against an already-cropped frame,
     ; silently invalidating both the crop geometry and every subsequent measurement on that image.
-    if revertCropAfter
-        Send("^z")
+    ; The revert method depends on whether the crop was actually committed: Ctrl+Z undoes a real
+    ; history step (only valid once Enter has committed one -- sending it with the overlay still
+    ; open would instead undo whatever the *previous* history entry was, silently corrupting
+    ; catalog state); Escape cancels a still-pending, uncommitted crop with no history step to undo.
+    if exitCropAfter {
+        Send("{Enter}")
+        if revertCropAfter
+            Send("^z")
+    } else if revertCropAfter {
+        Send("{Escape}")
+    }
 } else if interaction = "zoom" {
     panStartX := Integer(IniRead(configPath, "zoom", "PanStartX"))
     panStartY := Integer(IniRead(configPath, "zoom", "PanStartY"))
