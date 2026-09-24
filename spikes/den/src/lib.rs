@@ -29,6 +29,12 @@ pub mod facet_cache_duckdb;
 #[cfg(feature = "lmdb")]
 pub mod lmdb;
 
+// #107's schema-fit prototype: JSON-column + append-only/burst-compacted history table, per
+// ADR-0002's planned #22 shape — a different question from `workload.rs`'s OLTP filter/sort/range
+// gates. Needs both engines to compare, so it's gated on both features rather than either alone.
+#[cfg(all(feature = "sqlite", feature = "duckdb"))]
+pub mod schema_fit;
+
 // #102's follow-up candidate, added after ADR-0008 merged — the only pure-Rust engine in this
 // comparison, matching ADR-0001's own stated preference. Module named `turso_engine`, not
 // `turso`, to avoid shadowing the external `turso` crate it wraps.

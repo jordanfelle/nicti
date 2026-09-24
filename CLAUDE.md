@@ -163,6 +163,18 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   `(model, rating, keyword)`-grain facet table only answers a *keyword-narrowed* facet query
   correctly — an unfiltered/no-keyword facet count needs a separate table or `sqlite.rs`'s own
   from-scratch query. Unblocks #22's facet-count implementation.
+- **DuckDB as v1 primary catalog store, reconsidered post-ADR-0008**:
+  `docs/adr/0012-duckdb-as-primary-catalog-store.md` — **not adopted**. ADR-0008's decision is
+  unchanged, now for a demonstrated technical reason instead of a soft one: #22's planned
+  append-only history log with burst-compaction (ADR-0002) needs frequent UPDATE+DELETE-heavy
+  operations, and a real prototype (`spikes/den/src/schema_fit.rs`) measured DuckDB compacting the
+  same history runs SQLite compacts **~80x slower per operation** (4.297ms/op vs 0.054ms/op,
+  960,000 raw rows down to 19,963 compacted rows), turning a ~1-second workload into an ~86-second
+  one — a well-understood transaction-commit-overhead effect (matches ADR-0008's own single-row
+  `write_rating` cost roughly doubled), not a benchmark artifact. DuckDB's JSON support
+  (`json_extract`) is confirmed real and usable — that part of the schema-fit question favors
+  DuckDB — but doesn't offset the compaction cost. #103's separate SQLite-trigger-vs-DuckDB-sidecar
+  facet-cache work is unaffected by this outcome.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -231,13 +243,16 @@ ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStag
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
 (#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
-#106/ADR-0010's `redb` follow-up, and #103/ADR-0011's facet-count-cache follow-up — one module per
-candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/
+#106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, and #107/ADR-0012's
+schema-fit reconsideration — one module per candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/
 `facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo features (`turso` and
 `redb` are both default-off, evaluated-not-adopted, kept for reference; the two facet-cache
-modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`); `gen.rs`'s
-synthetic-catalog generator is reusable for future Library-scale benchmarks, see
-`docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
+modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`), plus
+`schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape, gated
+on both `sqlite` and `duckdb`); `gen.rs`'s synthetic-catalog generator is reusable for future
+Library-scale benchmarks, see `docs/benchmarks.md`) — not production code; don't build on top of a
+spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for
 `spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
