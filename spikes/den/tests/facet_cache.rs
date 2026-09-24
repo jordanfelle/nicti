@@ -3,9 +3,12 @@
 //! `verify_against_naive` oracle. A fast cache that isn't checked against a from-scratch
 //! recomputation is exactly the "fast but wrong" failure mode #103 requires this to rule out.
 
+#[cfg(feature = "sqlite")]
 use den::gen::{generate_catalog, GenOptions, BENCH_LEAF_KEYWORD};
+#[cfg(feature = "sqlite")]
 use den::workload::Workload;
 
+#[cfg(feature = "sqlite")]
 fn fixture() -> Vec<den::gen::Asset> {
     generate_catalog(&GenOptions {
         seed: 7,
@@ -15,6 +18,13 @@ fn fixture() -> Vec<den::gen::Asset> {
     })
 }
 
+// #113 note: both tests in this file were unconditionally compiled even though the modules they
+// import are gated behind `#[cfg(feature = "sqlite")]`/`#[cfg(all(feature = "sqlite", feature =
+// "duckdb"))]` in `lib.rs` — a pre-existing gap that only surfaced when trying to build/test `den`
+// with the new `libsql` feature and *without* `sqlite` (unavoidable: `rusqlite`'s and `libsql`'s
+// bundled SQLite C sources collide at link time if both are enabled — see `libsql_engine.rs`'s
+// module doc and `bin/den.rs`'s matching fix for the full explanation). Gated here the same way.
+#[cfg(feature = "sqlite")]
 #[test]
 fn trigger_facet_matches_naive_after_ingest_and_after_writes() {
     use den::facet_cache_trigger::TriggerFacetEngine;
@@ -89,6 +99,7 @@ fn trigger_facet_matches_naive_after_ingest_and_after_writes() {
     assert!(engine.integrity_check().unwrap());
 }
 
+#[cfg(all(feature = "sqlite", feature = "duckdb"))]
 #[test]
 fn duckdb_cache_matches_naive_after_refresh_and_is_stale_before_it() {
     use den::facet_cache_duckdb::DuckFacetCacheEngine;

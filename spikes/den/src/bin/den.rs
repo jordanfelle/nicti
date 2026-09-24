@@ -50,6 +50,7 @@ enum Cmd {
     /// #103: benchmarks the two faceted-filter cache candidates (trigger-maintained SQLite table,
     /// DuckDB-backed read cache) against the same catalog + write-burst workload, plus a
     /// from-scratch correctness check for each.
+    #[cfg(feature = "sqlite")]
     FacetBench {
         #[arg(long, value_enum)]
         variant: FacetVariant,
@@ -62,9 +63,25 @@ enum Cmd {
     },
 }
 
+// #113 note: this whole enum, `Cmd::FacetBench`, and the functions below are gated behind
+// `#[cfg(feature = "sqlite")]` (the trigger candidate needs it; the DuckDB-cache candidate needs
+// both, per `facet_cache_duckdb`'s own `#[cfg(all(feature = "sqlite", feature = "duckdb"))]`
+// module gate) — these `use den::facet_cache_trigger::...`/`facet_cache_duckdb::...` imports were
+// previously unconditional even though the modules they name are feature-gated in `lib.rs`, so
+// `den`'s bin target (and therefore `cargo build`/`cargo test -p den`) silently required `sqlite`
+// (`facet_cache_duckdb` additionally `duckdb`) to compile at all, regardless of which engine was
+// actually being exercised. Found while adding the `libsql` engine: `rusqlite`'s bundled
+// `libsqlite3-sys` and `libsql`'s bundled `libsql-ffi` both statically link a full copy of real
+// SQLite's C symbols (`sqlite3_prepare_v3`, `sqlite3_shutdown`, etc.) — linking both into the same
+// `den` binary fails with `multiple definition of ...` at the final link step, so `libsql` cannot
+// be benchmarked in the same binary as `sqlite` at all. Without this gate, there would be no way
+// to build (let alone test) `den` with `libsql` alone on any target, including the Windows CI job
+// this candidate's hard gate 1 depends on.
 #[derive(Clone, Copy, ValueEnum, Debug)]
 enum FacetVariant {
+    #[cfg(feature = "sqlite")]
     Trigger,
+    #[cfg(all(feature = "sqlite", feature = "duckdb"))]
     DuckdbCache,
 }
 
@@ -88,6 +105,8 @@ enum Engine {
     Turso,
     #[cfg(feature = "redb")]
     Redb,
+    #[cfg(feature = "libsql")]
+    Libsql,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -116,6 +135,7 @@ fn main() -> anyhow::Result<()> {
             runs,
         } => cmd_bench(engine, catalog, out_dir, runs),
         Cmd::Crash { engine, iterations } => cmd_crash(engine, iterations),
+        #[cfg(feature = "sqlite")]
         Cmd::FacetBench {
             variant,
             catalog,
@@ -219,6 +239,13 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         #[cfg(feature = "redb")]
         Engine::Redb => bench_engine::<den::redb_engine::RedbEngine>(
             &tmp.path().join("den-redb.redb"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        #[cfg(feature = "libsql")]
+        Engine::Libsql => bench_engine::<den::libsql_engine::LibsqlEngine>(
+            &tmp.path().join("den-libsql.db"),
             &assets,
             runs,
             &mut results,
@@ -346,6 +373,7 @@ fn bench_engine<E: Workload>(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 fn cmd_facet_bench(
     variant: FacetVariant,
     catalog: PathBuf,
@@ -358,12 +386,14 @@ fn cmd_facet_bench(
 
     let mut results = serde_json::Map::new();
     match variant {
+        #[cfg(feature = "sqlite")]
         FacetVariant::Trigger => bench_trigger_facet(
             &tmp.path().join("den-facet-trigger.sqlite3"),
             &assets,
             runs,
             &mut results,
         )?,
+        #[cfg(all(feature = "sqlite", feature = "duckdb"))]
         FacetVariant::DuckdbCache => bench_duckdb_facet_cache(
             &tmp.path().join("den-facet-duckdb.sqlite3"),
             &assets,
@@ -383,6 +413,7 @@ fn cmd_facet_bench(
 /// checks (right after bulk ingest, and again after the write ops below have run) — a fast
 /// answer is only worth reporting if it's also checked against the naive recomputation, per
 /// #103's own required workflow.
+#[cfg(feature = "sqlite")]
 fn bench_trigger_facet(
     path: &std::path::Path,
     assets: &[den::gen::Asset],
@@ -496,6 +527,7 @@ fn bench_trigger_facet(
 /// into any write op's latency. Also demonstrates staleness concretely: a specific asset known to
 /// belong to the benchmarked facet is rated *without* a refresh, and the cache is checked against
 /// the naive recomputation both before and after the following `refresh()` call.
+#[cfg(all(feature = "sqlite", feature = "duckdb"))]
 fn bench_duckdb_facet_cache(
     path: &std::path::Path,
     assets: &[den::gen::Asset],
@@ -677,6 +709,10 @@ fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
         }
         #[cfg(feature = "redb")]
         Engine::Redb => crash_loop::<den::redb_engine::RedbEngine>(tmp.path(), "redb", iterations)?,
+        #[cfg(feature = "libsql")]
+        Engine::Libsql => {
+            crash_loop::<den::libsql_engine::LibsqlEngine>(tmp.path(), "libsql.db", iterations)?
+        }
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");
     Ok(())

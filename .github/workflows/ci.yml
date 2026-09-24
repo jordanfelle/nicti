@@ -68,7 +68,20 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
       # --workspace: see the clippy job's comment above -- without it, pawprint's and
       # sheath's tests silently never ran in CI.
-      - run: cargo test --workspace --all-targets --all-features
+      #
+      # --exclude den, added for #113's `libsql` engine: a blanket `--all-features` here would
+      # activate `den`'s `sqlite` and `libsql` features together in the SAME feature resolution,
+      # and (unlike `cargo clippy --all-features`, which only type-checks and never reached the
+      # final link step -- confirmed by running it, not assumed) `cargo test` actually links
+      # `den`'s bin/test binaries, which fails: `rusqlite`'s bundled `libsqlite3-sys` and
+      # `libsql`'s bundled `libsql-ffi` both statically compile a full copy of real SQLite's C
+      # symbols, and linking both into one binary is a genuine `multiple definition of
+      # sqlite3_prepare_v3` (etc.) error, not a flaky one -- reproduced directly against this exact
+      # command before adding the exclusion. `den` gets its own two feature-scoped commands below
+      # instead, the same pattern the Windows job's own `-p den` line already uses.
+      - run: cargo test --workspace --all-targets --all-features --exclude den
+      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb
+      - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
 
   cargo-deny:
     name: cargo deny (licenses)
@@ -107,3 +120,11 @@ jobs:
       # CI job ever had to prove it. `-p den` only (not `--workspace`): den is a spike, same
       # reasoning as the `-p nicti` build above.
       - run: cargo test -p den --features sqlite,duckdb,lmdb,turso
+      # #113's libSQL candidate needs its own, separate step: `rusqlite`'s bundled
+      # `libsqlite3-sys` and `libsql`'s bundled `libsql-ffi` both statically link a full copy of
+      # real SQLite's C symbols into the same `den` binary, which fails at the final link step
+      # with `multiple definition of sqlite3_prepare_v3` (etc.) if both features are enabled
+      # together -- confirmed locally, not assumed. `duckdb`/`lmdb`/`turso` don't bundle a real
+      # sqlite3.c (DuckDB is its own engine; LMDB and Turso Database don't touch SQLite's C code
+      # at all), so they combine with `libsql` here without the same clash.
+      - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
