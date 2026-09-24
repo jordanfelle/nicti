@@ -105,6 +105,20 @@ allowlist covered:
 No action beyond the `deny.toml` changes above — `cargo deny --workspace --all-features check
 licenses` passes clean as of this update.
 
+**Update (2026-09-24, [#28](https://github.com/jordanfelle/nicti/issues/28)'s `sniff` spike):**
+new dependencies for embedded-JPEG inventory/decode/benchmark tooling, all already covered by
+`deny.toml`'s existing allowlist with no changes needed: `zune-jpeg`/`zune-core` (decode) and
+`fast_image_resize` (tier resize) are MIT OR Apache-2.0 OR Zlib; `csv`/`csv-core` are
+Unlicense/MIT; `clap`/`clap_builder`/`clap_derive`/`clap_lex`, `rayon`/`rayon-core`, `rand` and
+its own tree, `sha2` and its `digest`/`block-buffer`/`crypto-common`/`generic-array` chain,
+`thiserror`/`thiserror-impl`, and `windows-sys` (Windows-only, the `FILE_FLAG_NO_BUFFERING`
+cold-read path) are all MIT OR Apache-2.0; `tempfile`/`fastrand` (dev-dependency) are
+Apache-2.0 OR MIT; `zerocopy` (transitive) is BSD-2-Clause OR Apache-2.0 OR MIT. No LibRaw/rawler
+dependency: `sniff` implements its own minimal TIFF/EXIF/Nikon-MakerNote IFD walker (see
+`spikes/sniff/src/ifd.rs`) specifically to avoid pulling in #37's still-undecided RAW-decoder
+choice and rawler's LGPL-as-Cargo-dependency review this early. `cargo deny --workspace
+--all-features check licenses` passes clean as of this update, no `deny.toml` edits required.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

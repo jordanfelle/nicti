@@ -119,10 +119,15 @@ throughput, dispatch overhead, host↔device interop cost), and `spikes/pelt` +
 `spikes/pelt-egui`/`spikes/pelt-iced`/`spikes/pelt-slint` (#68/ADR-0006's GUI-framework research —
 `pelt` is the toolkit-agnostic shared fixture/math crate, each `pelt-*` is one candidate's
 virtualized-grid + loupe + custom-wgpu-viewport spike; no `spikes/pelt-gpui` exists, see
-ADR-0006's Hard-gate-1 early exit) — not production code; don't build on top of a spike crate,
-and expect each to be deleted once its own ticket promotes it (as #20 just did for
-`spikes/sheath`/`spikes/dewclaw`). `bench/whisker` (a workspace member) is benchmark tooling for
-#43, not a production crate either — same "don't build on top of it" caveat applies.
+ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG research: a from-scratch
+TIFF/EXIF/Nikon-MakerNote IFD walker — no LibRaw/rawler dependency, deliberately, to stay clear of
+#37's still-open decoder choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path and a
+locate/read/decode-grid/decode-screen/full-read latency benchmark; `sniff inventory` cross-checked
+byte-exact against `exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md`
+for the full write-up) — not production code; don't build on top of a spike crate, and expect each
+to be deleted once its own ticket promotes it (as #20 just did for `spikes/sheath`/`spikes/dewclaw`).
+`bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
+same "don't build on top of it" caveat applies.
 
 ## Development workflow
 
