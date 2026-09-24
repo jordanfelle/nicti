@@ -244,6 +244,19 @@ third-party plugins actually get built.
   `cargo-deny` job, which already needed and documented the same fix for its own purposes) and to
   `CLAUDE.md`'s local dev instructions.
 
+## Implementation
+
+Promoted from `spikes/sheath`/`spikes/dewclaw` to production crates in
+[#20](https://github.com/jordanfelle/nicti/issues/20): `crates/nicti-claw` (the `Module` trait,
+`Registry`/lazy-loading from §2, and the `DylibModule`/`VTable` C-ABI handshake from §4) and
+`crates/dewclaw` (the cdylib test fixture). §8's proposed crate layout was adopted as proposed —
+`nicti-decode`, `nicti-color`, `nicti-lens`, `nicti-render`, `nicti-ai`, `nicti-export`,
+`nicti-catalog` each hold only their extension-point supertrait (`RawDecoder`, `ColorProfile`,
+`LensCorrection`, `RenderStage`, `ModelProvider`, `Exporter`, `CatalogStore`) plus a `Registry`
+type alias; no execution methods were added, since those belong to the tickets §7/§8 name. The
+old spike paths cited throughout this ADR's Decision section no longer exist on disk — read them
+as historical references to what was proven when this ADR was written, not live paths.
+
 ---
 
 ## Verified findings

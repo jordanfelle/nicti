@@ -242,8 +242,9 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 
 Feline name: pelt, the visible outer coat — what these spikes are all about, the UI surface over
 Tapetum's fur underneath. Not production code, same "don't build on top of it" status as
-`spikes/glint`/`spikes/sheath`/`spikes/pawprint` (see `CLAUDE.md`'s package-map note); expect all
-four deleted once #20/whatever real UI crate this ADR points to lands.
+`spikes/glint`/`spikes/pawprint` (see `CLAUDE.md`'s package-map note); expect all four deleted
+once #20/whatever real UI crate this ADR points to lands. (`spikes/sheath` was promoted to
+`crates/nicti-claw`/`crates/dewclaw` in #20 and no longer exists as a spike.)
 
 - **`spikes/pelt`** (`src/config.rs`, `thumbnails.rs`, `loupe.rs`, `live_chain.rs`,
   `virtualize.rs`): toolkit-agnostic synthetic fixtures shared by all three candidate crates —

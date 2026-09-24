@@ -1,5 +1,5 @@
-//! Shared helper for tests that need the `dewclaw` fixture built as a cdylib. Not itself a
-//! test target (Cargo only auto-discovers direct `tests/*.rs` files, not files in
+//! Shared helper for tests that need this fixture crate rebuilt with a specific feature set.
+//! Not itself a test target (Cargo only auto-discovers direct `tests/*.rs` files, not files in
 //! subdirectories), following the standard "tests/support/mod.rs" pattern.
 
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
@@ -17,28 +17,20 @@ fn target_dir() -> &'static Path {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before UNIX epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "nicti-sheath-dewclaw-{}-{nanos}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("nicti-dewclaw-{}-{nanos}", std::process::id()))
     })
 }
 
-/// Builds the `dewclaw` fixture crate with the given cargo features and returns the path
-/// to the resulting cdylib. Callers within the same test binary that need distinct
-/// feature sets must call this sequentially (not from concurrently-running `#[test]` fns),
-/// since a later call's build overwrites the same private target dir's artifact.
+/// Rebuilds this fixture crate with the given cargo features and returns the path to the
+/// resulting cdylib. Callers within the same test binary that need distinct feature sets must
+/// call this sequentially (not from concurrently-running `#[test]` fns), since a later call's
+/// build overwrites the same private target dir's artifact.
 pub fn build_dewclaw(features: &[&str]) -> PathBuf {
-    let sheath_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dewclaw_manifest = sheath_manifest_dir
-        .parent()
-        .expect("spikes/sheath has a parent dir (spikes/)")
-        .join("dewclaw")
-        .join("Cargo.toml");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
 
     let mut cmd = Command::new(env!("CARGO"));
     cmd.args(["build", "--quiet", "--manifest-path"])
-        .arg(&dewclaw_manifest)
+        .arg(&manifest)
         .arg("--target-dir")
         .arg(target_dir());
     if !features.is_empty() {

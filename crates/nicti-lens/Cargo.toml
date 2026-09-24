@@ -1,0 +1,12 @@
+[package]
+name = "nicti-lens"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Lens-correction data extension point (ADR-0004 §8). Crate boundary only — correction data/application is owned by #39 (lens corrections)."
+
+[dependencies]
+nicti-claw = { path = "../nicti-claw" }
+
+[dev-dependencies]
+serde_json = "1"

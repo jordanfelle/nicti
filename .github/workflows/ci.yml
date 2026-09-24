@@ -96,3 +96,7 @@ jobs:
       # the shipping v1 target, and shouldn't ride along in the release
       # build that validates it.
       - run: cargo build --release -p nicti
+      # Dylib loading (DLL_PREFIX/DLL_SUFFIX, LoadLibrary semantics) is platform-specific, and
+      # Windows is the v1 target -- the Linux `test` job alone isn't enough coverage for
+      # nicti-claw's C-ABI dylib boundary (ADR-0004 section 4).
+      - run: cargo test -p nicti-claw -p dewclaw

@@ -228,8 +228,9 @@ and this spike doesn't isolate it.
 
 Feline name: the glint of eyeshine off the tapetum lucidum (the reflective retinal layer Tapetum,
 #44, is itself named after) — this spike is what's being measured *through*. Not production code,
-same "don't build on top of it" status as `spikes/sheath`/`spikes/pawprint` (see `CLAUDE.md`'s
-package-map note); expect it deleted once #45 lands the real render engine.
+same "don't build on top of it" status as `spikes/pawprint` (see `CLAUDE.md`'s package-map note);
+expect it deleted once #45 lands the real render engine. (`spikes/sheath` was promoted to
+`crates/nicti-claw`/`crates/dewclaw` in #20 and no longer exists as a spike.)
 
 - `src/cpu_reference.rs` — plain-`f32` ground truth for `live_chain` (WB → exposure → tone-curve
   LUT → vibrance) and `tile_blend` (feathered seam blend, the render-side half of tiled AI
