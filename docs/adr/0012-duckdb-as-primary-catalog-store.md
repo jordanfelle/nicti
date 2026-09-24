@@ -117,16 +117,24 @@ for a degrading-storage explanation to account for the measured cost, unlike an 
 this ADR, which overstated the magnitude and reached for one anyway.
 
 **JSON support is real, not just storage — this part actually favors DuckDB, it just isn't enough
-to change the Decision.** `json_extract(json_column, '$.path')` works out of the box on DuckDB
-1.10505.0's bundled build (JSON is one of the "core" extensions statically linked into the bundled
-binary, not something requiring `INSTALL json; LOAD json;` against network access) and produces
-the identical extracted value SQLite's own JSON1 extension does for the same input — proven
-directly by `json_extraction_works_on_both_engines`, not asserted from either engine's
-documentation. If ADR-0002's edit-parameter JSON blob needed genuine path-based indexing/filtering
-inside the catalog (e.g., "find every asset with `crop.aspect_ratio = 16:9`"), DuckDB's JSON
-support is at least as capable as SQLite's JSON1 for that specific need. This finding doesn't move
-the Decision because the disqualifying cost is in the history table's mutation pattern, not the
-edit-document's JSON storage.
+to change the Decision.** `json_extract(json_column, '$.path')` works on DuckDB 1.10505.0 and
+produces the identical extracted value SQLite's own JSON1 extension does for the same input —
+proven directly by `json_extraction_works_on_both_engines`, not asserted from either engine's
+documentation. **Correction (found by CI, not the original local testing):** an earlier draft of
+this ADR claimed JSON is one of the `duckdb` crate's "core" statically-linked extensions requiring
+no network access — this is false as originally configured. The `bundled` Cargo feature alone only
+statically links `core_functions`/`parquet`; JSON needs its own separate `json` feature (which
+implies `bundled`), and without it DuckDB falls back to its normal network-based extension
+autoload/autoinstall at first use. This passed locally (Linux, an already-warm extension cache)
+but failed outright on a fresh Windows CI runner with an extension-install file-move permission
+error — a real, reproducible gap, not a flake. Fixed by adding `"json"` to `spikes/den/Cargo.toml`'s
+`duckdb` feature list, which statically links it and removes the runtime network dependency
+entirely; this now matches what the original claim wrongly asserted was already true. If ADR-0002's
+edit-parameter JSON blob needed genuine path-based indexing/filtering inside the catalog (e.g.,
+"find every asset with `crop.aspect_ratio = 16:9`"), DuckDB's JSON support is at least as capable
+as SQLite's JSON1 for that specific need. This finding doesn't move the Decision because the
+disqualifying cost is in the history table's mutation pattern, not the edit-document's JSON
+storage.
 
 **QUALIFY vs. window-function-in-a-subquery: no real dialect-complexity difference.** DuckDB's
 `QUALIFY ROW_NUMBER() OVER (...) = 1` clause is marginally more concise than SQLite's equivalent
