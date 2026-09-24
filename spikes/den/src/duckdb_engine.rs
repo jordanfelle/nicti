@@ -86,6 +86,31 @@ impl Workload for DuckDbEngine {
         Ok(())
     }
 
+    fn crash_mid_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {
+        let half = assets.len() / 2;
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        let mut appender = self.conn.appender("assets")?;
+        for a in &assets[..half] {
+            appender.append_row(params![
+                a.id as i64,
+                a.folder_path,
+                a.filename,
+                a.capture_date,
+                a.model,
+                a.iso,
+                a.compression,
+                a.width,
+                a.height,
+                a.size_bytes as i64,
+                a.rating,
+                flag_str(a.flag),
+            ])?;
+        }
+        appender.flush()?;
+        // No COMMIT. Dropped uncommitted when the caller forgets `self`.
+        Ok(())
+    }
+
     fn write_rating(&mut self, asset_id: u64, rating: u8) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE assets SET rating = ?1 WHERE id = ?2",
@@ -226,12 +251,15 @@ impl Workload for DuckDbEngine {
 
     fn backup(&self, dest: &Path) -> anyhow::Result<()> {
         // DuckDB's EXPORT DATABASE is the closest online, no-optimize-step analogue to SQLite's
-        // VACUUM INTO; it writes a directory of Parquet + schema, not a single file.
+        // VACUUM INTO; it writes a directory of Parquet + schema, not a single file. `EXPORT
+        // DATABASE` takes its path as a string literal in the statement grammar, not a bindable
+        // parameter, so this can't use `params![...]` the way every other query in this file
+        // does — the single-quote doubling below is standard SQL string-literal escaping, needed
+        // since `dest` is only ever a spike-internal tempdir path today but a path containing a
+        // literal `'` (plausible on a real filesystem) would otherwise break the generated SQL.
         std::fs::create_dir_all(dest)?;
-        self.conn.execute(
-            &format!("EXPORT DATABASE '{}' (FORMAT PARQUET)", dest.to_string_lossy()),
-            [],
-        )?;
+        let escaped = dest.to_string_lossy().replace('\'', "''");
+        self.conn.execute(&format!("EXPORT DATABASE '{escaped}' (FORMAT PARQUET)"), [])?;
         Ok(())
     }
 

@@ -103,6 +103,34 @@ impl Workload for SqliteEngine {
         Ok(())
     }
 
+    fn crash_mid_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {
+        let half = assets.len() / 2;
+        self.conn.execute_batch("BEGIN")?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO assets (id, folder_path, filename, capture_date, model, iso, \
+             compression, width, height, size_bytes, rating, flag) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        )?;
+        for a in &assets[..half] {
+            stmt.execute(params![
+                a.id as i64,
+                a.folder_path,
+                a.filename,
+                a.capture_date,
+                a.model,
+                a.iso,
+                a.compression,
+                a.width,
+                a.height,
+                a.size_bytes as i64,
+                a.rating,
+                flag_str(a.flag),
+            ])?;
+        }
+        // No COMMIT. The transaction stays open; dropped uncommitted when the caller forgets `self`.
+        Ok(())
+    }
+
     fn write_rating(&mut self, asset_id: u64, rating: u8) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE assets SET rating = ?1 WHERE id = ?2",

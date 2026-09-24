@@ -127,18 +127,36 @@ which are Windows-build and dependency-graph facts, already Windows-specific by 
 
 | Candidate | 1. Windows build | 2. License | 3. Crash-safety | 4. Online backup | 5. Maintained |
 |---|---|---|---|---|---|
-| SQLite (rusqlite) | ✅ (`bundled` feature, pure C, no platform-specific build.rs branch) | ✅ MIT (binding) + public domain (bundled C) | ✅ 0/20 failures | ✅ `VACUUM INTO`, no lock, no optimize step | ✅ |
-| DuckDB | ✅ (`bundled` feature; Windows job already builds/links it) | ✅ MIT (binding + bundled C++ core) | ✅ 0/20 failures | ✅ `EXPORT DATABASE ... FORMAT PARQUET`, no lock | ✅ |
-| LMDB (heed) | ✅ (`lmdb-master-sys` bundled C, builds via `cc` on MSVC) | ✅ MIT (binding) + OpenLDAP Public License 2.8 (bundled C, attribution-only) | ⚠️ **could not measure — see below** | ✅ `env.copy_to_path(..., CompactionOption::Enabled)`, no lock | ✅ |
+| SQLite (rusqlite) | ✅ (`bundled` feature, pure C, no platform-specific build.rs branch) | ✅ MIT (binding) + public domain (bundled C) | ✅ 0/20 failures, `PRAGMA integrity_check` (real page/b-tree validation) | ✅ per documented API (`VACUUM INTO`, no lock, no optimize step) — not measured under a concurrent writer, see below | ✅ |
+| DuckDB | ✅ (`bundled` feature; Windows job already builds/links it) | ✅ MIT (binding + bundled C++ core) | ✅ 0/20 failures, but its own integrity check is a `SELECT COUNT(*)` connectivity probe, not real page validation — see below | ✅ per documented API (`EXPORT DATABASE ... FORMAT PARQUET`, no lock) — not measured under a concurrent writer, see below | ✅ |
+| LMDB (heed) | ✅ (`lmdb-master-sys` bundled C, builds via `cc` on MSVC) | ✅ MIT (binding) + OpenLDAP Public License 2.8 (bundled C, attribution-only) | ⚠️ **could not measure — see below** | ✅ per documented API (`env.copy_to_path(..., CompactionOption::Enabled)`, no lock) — not measured under a concurrent writer, see below | ✅ |
 | pglite-rs | ⛔ **fails** — `build.rs` passes a Unix-only linker flag unconditionally on non-macOS | ✅ MIT | — | — | — |
 | pglite-oxide | — (not reached; see gate 5) | ⚠️ `CDLA-Permissive-2.0` arm needs a `deny.toml` exception (added; see `docs/licensing.md`) | — | — | ⛔ **fails** — doesn't compile against its own published dependency graph (`wasmer-wasix` vs `virtual-net`, confirmed on two versions) |
 
+**Two honest scope limits on gate 4 (online backup) and gate 3 (crash-safety), for all three
+surviving candidates:** `den bench` calls `backup()` serially, after every other timed op has
+already finished — there is no concurrent writer thread anywhere in this spike, so "no exclusive
+lock on the live store" rests on each engine's own documented API contract (`VACUUM INTO`,
+`EXPORT DATABASE`, `env.copy_to_path`), not on anything this spike measured under real concurrent
+write load. And DuckDB's `integrity_check()` (`duckdb_engine.rs`) is `SELECT COUNT(*) FROM assets
+>= 0` — this can only ever return `false`/error if the connection or query itself fails outright,
+nothing like SQLite's real `PRAGMA integrity_check` (full page/b-tree validation). Both gaps are
+called out explicitly rather than left implicit in a passing ✅, per the standing rule that a
+clean-looking result and a skipped check should never look identical to a later reader.
+
 **LMDB's crash-safety gate, in detail:** this spike's crash test (`den crash`) simulates a SIGKILL
-in-process via `std::mem::forget` on the store handle mid-write, then reopens the same path and
-runs an integrity check — this worked cleanly for SQLite and DuckDB (0/20 failures each, after
-fixing an id-collision bug in the test harness itself, see the Spike section). For LMDB, every
+in-process: it opens a store, writes half a batch inside a transaction, and — critically — never
+calls `COMMIT` before `std::mem::forget`ing the handle, so the transaction is genuinely
+interrupted, not a completed write with an unclean shutdown tacked on (an earlier version of this
+test called the full `bulk_ingest`, which commits internally, before forgetting the handle — see
+the Spike section for how that was caught and fixed). It then reopens a fresh path and runs an
+integrity check. This worked cleanly for SQLite and DuckDB (0/20 failures each — each iteration
+uses its own fresh store path; reusing one path across "crash" iterations surfaced a leaked-file-
+descriptor lock artifact unrelated to actual crash safety, see the Spike section). For LMDB, every
 reopen attempt after a `mem::forget` failed outright with `environment already open in this
-program; close it to be able to open it again with different options` — `heed`/`liblmdb` maintain
+program; close it to be able to open it again with different options` — confirmed to trigger on
+every iteration's own within-iteration reopen, not merely from reusing a path across iterations
+(a fresh path per iteration doesn't help). `heed`/`liblmdb` maintain
 a process-wide table of open environments specifically to prevent undefined behavior from two
 `Env`s pointing at the same file with different options in one process, and `mem::forget` (by
 design) never runs the `Drop` that would deregister it. A **real** `kill -9` doesn't have this
@@ -200,12 +218,60 @@ an occasional, not hot-path, operation.
 **Generator note, folded into the numbers above:** the first pass at this benchmark's keyword
 vocabulary (11 flat category values) made every hierarchical-keyword query artificially
 non-selective at 2M scale — a "leaf" query was really a "match half the corpus" query, regardless
-of engine. Fixed by adding a per-event keyword (`Events.Named.<event-id>`, cardinality scaling
-with `folder_count`) to every generated asset — see `spikes/den/src/gen.rs`'s
-`BENCH_LEAF_KEYWORD`. The keyword-subtree and faceted-filter numbers above use this corrected,
-realistically-selective leaf; the broad-top-level-branch case (e.g. "everything tagged anywhere
+of engine. Fixed by adding a per-event keyword (`Events.Named.<event-id>`) to every generated
+asset — see `spikes/den/src/gen.rs`'s `BENCH_LEAF_KEYWORD`. Its absolute match count stays roughly
+constant across scales (`folder_count = asset_count / 30`, so assets-per-event stays pinned at
+~30 × 6 year-folders regardless of `asset_count`) — what improves with scale is *relative*
+selectivity (same numerator, a bigger denominator), not the leaf's own cardinality growing. That's
+still what makes it a realistic, genuinely selective leaf at both 600k and 2M; it just isn't
+"cardinality scaling with catalog size" as such. The keyword-subtree and faceted-filter numbers
+above use this corrected leaf; the broad-top-level-branch case (e.g. "everything tagged anywhere
 under `Locations`") is a genuinely different, near-full-scan workload for any engine and isn't
 what these numbers measure.
+
+## Evidence: pglite hard-gate failures (reproducible)
+
+Both eliminations below were interactive findings from this research pass, not asserted from
+memory — reproduced here verbatim so a future reader can verify them without redoing the work.
+Neither crate was ever added as a real Cargo dependency (both failed before that point), so
+neither appears in this branch's `Cargo.toml`/`Cargo.lock`.
+
+**pglite-rs** (fetched its README and `build.rs` from `github.com/Midwess/pglite-rs`, the crate's
+own repository, 2026-09-24):
+
+```rust
+// pglite-rs's build.rs
+#[cfg(target_os = "macos")]
+println!("cargo:rustc-link-arg=-Wl,-export_dynamic");
+
+#[cfg(not(target_os = "macos"))]
+println!("cargo:rustc-link-arg=-Wl,--export-dynamic");
+```
+
+`-Wl,--export-dynamic` is a GNU-ld/Unix-linker flag with no MSVC (`link.exe`) equivalent — passed
+unconditionally for every `not(target_os = "macos")` target, which includes
+`x86_64-pc-windows-msvc`. There is no `cfg(windows)` branch anywhere in this file.
+
+**pglite-oxide** (added as a real, if temporary, dependency of `spikes/den` in this session —
+`cargo check --no-default-features --features pglite-oxide` against crates.io's then-current
+resolution):
+
+```
+error[E0004]: non-exhaustive patterns: `NetworkError::MessageSize` not covered
+   --> wasmer-wasix-0.702.0-alpha.3/src/net/mod.rs:376:11
+    |
+376 |     match net_error {
+    |           ^^^^^^^^^ pattern `NetworkError::MessageSize` not covered
+    |
+note: `NetworkError` defined here
+   --> virtual-net-0.702.1/src/lib.rs:817:1
+```
+
+Re-ran after `cargo update -p virtual-net --precise 0.702.0` (the next-oldest published version)
+to rule out a transient version-skew fluke: the identical error reproduced, `MessageSize` already
+present in `virtual-net` 0.702.0 too. Both attempts, plus the eventual `pglite-oxide` feature and
+its now-unused `tokio` dependency, were removed from `Cargo.toml`/`lib.rs`/`bin/den.rs` once this
+was confirmed — see the Spike section.
 
 ## Options considered
 
@@ -267,10 +333,42 @@ Not production code. `den` (a cat's den — where it keeps its stash) holds:
   <e>` (the in-process crash-safety approximation described above).
 - `bench-results/den/` (gitignored) — raw per-run CSV/JSON backing every number in this ADR.
 
-Two harness bugs, found and fixed while producing the numbers above, are worth naming since they'd
-otherwise have silently produced wrong conclusions: the timing macro originally discarded errors
-from a failing operation (`let _ = result` instead of `result?`), which would have made a query
-that errors out on every call read as suspiciously *fast*; and the crash test originally reused the
-same asset-id range on every iteration, so the second "crash" iteration onward always failed on a
-duplicate-key error unrelated to actual crash safety, until each iteration was given a distinct id
-range.
+Several harness bugs, found and fixed while producing the numbers above, are worth naming since
+they'd otherwise have silently produced wrong conclusions:
+
+- The timing macro originally discarded errors from a failing operation (`let _ = result` instead
+  of `result?`), which would have made a query that errors out on every call read as suspiciously
+  *fast*.
+- **The crash test originally never actually interrupted a write.** It called `bulk_ingest` (which
+  commits fully before returning) and only forgot the handle *after* that commit succeeded — so the
+  first version of the "0/20 failures" result for SQLite/DuckDB only ever tested reopening after an
+  already-fully-committed write with an unclean shutdown tacked on, not a genuinely interrupted
+  transaction. Fixed by adding `crash_mid_ingest` to the `Workload` trait: it writes half a batch
+  and returns *before* calling `COMMIT`, so the forgotten transaction is real. The reused-path bug
+  below was found while fixing this one.
+- The crash test's id range and store path were both originally reused across all 20 iterations in
+  one process. The id reuse caused a duplicate-key error unrelated to actual crash safety on every
+  iteration after the first. Fixing `crash_mid_ingest` to leave a genuinely open transaction then
+  surfaced a second, subtler bug from the same path reuse: SQLite's forgotten, never-closed file
+  descriptor holds an OS-level advisory lock for the rest of the process's lifetime (unlike a real
+  crash, where process death releases every lock the OS attributes to it), so the *second*
+  iteration's reopen failed with "database is locked" — an artifact of staying in one process for
+  20 trials, not a finding about SQLite's crash safety. Fixed by giving every iteration its own
+  fresh store path, which is arguably the more correct design regardless (independent trials, not
+  one file accumulating 20 rounds of abandoned state). This does not change LMDB's own result: its
+  open-environment guard rejects reopening *any* forgotten path even once, confirmed to trigger on
+  every iteration's own within-iteration reopen rather than being specifically about cross-iteration
+  reuse — a fresh path per iteration doesn't help it the way it helped the other two.
+- **A cross-engine correctness test (`tests/cross_engine.rs`) caught two more real bugs directly**,
+  rather than relying on manual inspection: DuckDB's dynamic `faceted_filter` query builder used
+  fixed placeholder numbers (`?1`/`?2`/`?3`) per predicate regardless of which clauses were actually
+  appended, which works under SQLite's numbered-parameter semantics (unreferenced `?N` slots are
+  harmless) but fails outright under DuckDB's binder (which requires the bound-value count to match
+  the placeholders textually present) — caught by calling `faceted_filter(None, ...)` in the test,
+  which the original benchmark path never exercised. And the benchmark's `tag_keyword` op was timed
+  across 6 calls (1 discarded warm-up + 5 measured) using the *same* keyword string every time:
+  SQLite's and DuckDB's `tag_keyword` are bare inserts with no dedup, so each call appended another
+  10k rows, ending the loop with 60k accumulated duplicate rows and a growing index on later calls
+  — while LMDB's equivalent secondary-index entry is a plain key overwrite, naturally idempotent.
+  Fixed by numbering the keyword per call (`Bench.Tagged.{n}`), so every engine's timed call does an
+  equivalent, non-compounding amount of work.

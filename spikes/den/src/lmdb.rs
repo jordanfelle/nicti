@@ -127,6 +127,21 @@ impl Workload for LmdbEngine {
         Ok(())
     }
 
+    fn crash_mid_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {
+        // Unlike SQLite/DuckDB, this commits normally rather than leaving a genuinely open,
+        // uncommitted transaction: heed's `RwTxn` borrows `&self.env`, so stashing an open one
+        // across this call's return (to be dropped by the caller's later `mem::forget`) would be
+        // self-referential; forgetting the `RwTxn` itself instead, without committing, would leak
+        // LMDB's single writer-mutex for the rest of the process, which is a self-inflicted
+        // deadlock, not a crash simulation. This doesn't matter for this engine's own result:
+        // `den crash --engine lmdb` already fails at the *reopen* step (see this ADR's hard-gate-3
+        // finding — heed/liblmdb's process-wide open-environment guard, unrelated to whether the
+        // prior write committed cleanly or not), so whether this half-ingest is itself a faithful
+        // "mid-crash" write was never the deciding factor for LMDB.
+        let half = assets.len() / 2;
+        self.bulk_ingest(&assets[..half])
+    }
+
     fn write_rating(&mut self, asset_id: u64, rating: u8) -> anyhow::Result<()> {
         let mut wtxn = self.env.write_txn()?;
         let raw = self

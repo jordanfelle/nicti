@@ -33,6 +33,15 @@ pub trait Workload {
 
     fn bulk_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()>;
 
+    /// Writes half of `assets` inside an open transaction and returns **without committing** —
+    /// used only by `den crash`'s mid-write simulation. The caller `mem::forget`s the engine
+    /// immediately after this returns, so neither `COMMIT` nor `ROLLBACK` ever runs, approximating
+    /// what an OS-level `SIGKILL` mid-transaction would leave behind. This is a distinct method
+    /// from `bulk_ingest` (which commits internally) specifically because the first version of
+    /// `den crash` called `bulk_ingest` before forgetting the handle — meaning it only ever tested
+    /// reopening after an *already fully committed* write, not a real interrupted one.
+    fn crash_mid_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()>;
+
     /// A single rating write — the point-update-latency gate.
     fn write_rating(&mut self, asset_id: u64, rating: u8) -> anyhow::Result<()>;
 

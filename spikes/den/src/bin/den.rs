@@ -195,8 +195,19 @@ fn bench_engine<E: Workload>(
     let rate_burst = time_op!(runs, engine.rate_burst(&burst));
     results.insert("rate_burst_100".into(), serde_json::to_value(rate_burst)?);
 
+    // A distinct keyword per call (not the same "Bench.Tagged" 6 times): SQLite/DuckDB's
+    // `tag_keyword` is a bare INSERT with no dedup, so reusing one keyword across the 1
+    // discarded-warm-up + 5 measured calls would append another 10k rows *every* call, ending
+    // with 60k accumulated duplicate rows and a growing index each engine measures a different
+    // table size against. LMDB's equivalent index entry is a plain key overwrite (naturally
+    // idempotent), so without this fix the comparison silently pitted a workload that grows every
+    // iteration (SQLite/DuckDB) against a static one (LMDB) under the same "p50/p95" label.
     let tag_ids: Vec<u64> = assets.iter().take(10_000).map(|a| a.id).collect();
-    let tag_keyword = time_op!(runs, engine.tag_keyword(&tag_ids, "Bench.Tagged"));
+    let mut tag_call = 0u32;
+    let tag_keyword = time_op!(runs, {
+        tag_call += 1;
+        engine.tag_keyword(&tag_ids, &format!("Bench.Tagged.{tag_call}"))
+    });
     results.insert("tag_keyword_10k".into(), serde_json::to_value(tag_keyword)?);
 
     // A genuinely rare hierarchy leaf (one named event out of thousands), not a broad top-level
@@ -253,55 +264,71 @@ fn bench_engine<E: Workload>(
 
 fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
     // Real cross-process kill -9 needs a helper binary fork; documented in the ADR as a follow-up
-    // if this in-process approximation (drop the handle mid-write via mem::forget, matching what
-    // an OS-level SIGKILL leaves behind: no clean shutdown/Drop path runs) isn't convincing enough
-    // for the crash-safety gate.
+    // if this in-process approximation isn't convincing enough for the crash-safety gate.
+    // `crash_mid_ingest` (not `bulk_ingest`) leaves an open, uncommitted transaction for SQLite/
+    // DuckDB before `mem::forget` drops the handle without ever calling COMMIT or ROLLBACK,
+    // matching what an OS-level SIGKILL mid-transaction leaves behind — an earlier version of
+    // this test called `bulk_ingest` (which commits internally) here, so it only ever exercised
+    // reopening after an already-fully-committed write, not a genuinely interrupted one.
     let tmp = tempfile::tempdir()?;
     let failures = match engine {
         #[cfg(feature = "sqlite")]
-        Engine::Sqlite => crash_loop::<den::sqlite::SqliteEngine>(
-            &tmp.path().join("den-crash.sqlite3"),
-            iterations,
-        )?,
-        #[cfg(feature = "duckdb")]
-        Engine::Duckdb => crash_loop::<den::duckdb_engine::DuckDbEngine>(
-            &tmp.path().join("den-crash.duckdb"),
-            iterations,
-        )?,
-        #[cfg(feature = "lmdb")]
-        Engine::Lmdb => {
-            crash_loop::<den::lmdb::LmdbEngine>(&tmp.path().join("den-crash-lmdb"), iterations)?
+        Engine::Sqlite => {
+            crash_loop::<den::sqlite::SqliteEngine>(tmp.path(), "sqlite3", iterations)?
         }
+        #[cfg(feature = "duckdb")]
+        Engine::Duckdb => {
+            crash_loop::<den::duckdb_engine::DuckDbEngine>(tmp.path(), "duckdb", iterations)?
+        }
+        #[cfg(feature = "lmdb")]
+        Engine::Lmdb => crash_loop::<den::lmdb::LmdbEngine>(tmp.path(), "lmdb", iterations)?,
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");
     Ok(())
 }
 
-fn crash_loop<E: Workload>(path: &std::path::Path, iterations: u32) -> anyhow::Result<u32> {
+fn crash_loop<E: Workload>(
+    dir: &std::path::Path,
+    ext: &str,
+    iterations: u32,
+) -> anyhow::Result<u32> {
     let mut failures = 0u32;
     for i in 0..iterations {
+        // A fresh store path per iteration, not one file reused 20 times: with `crash_mid_ingest`
+        // now leaving a genuinely *uncommitted* transaction for SQLite/DuckDB (see cmd_crash's
+        // doc comment), the forgotten handle's file descriptor is never closed for the rest of
+        // this process's lifetime — unlike a real crash, where the OS releases every lock a dead
+        // process held. Reusing one path surfaced exactly that gap as a spurious "database is
+        // locked" error on SQLite's second iteration, which is a leaked-fd artifact of staying in
+        // one process for 20 "crashes," not a finding about crash safety. A fresh path per
+        // iteration sidesteps it and is the more correct design anyway: independent trials, not
+        // one file accumulating 20 rounds of abandoned state.
+        //
+        // This does NOT change LMDB's own already-documented result (see the ADR's hard-gate-3
+        // finding): `heed`/`liblmdb`'s open-environment guard rejects reopening *any* path once a
+        // handle to it has been forgotten, even a path that's only ever been opened once before —
+        // it isn't specifically about reusing a path across trials, so a fresh path per iteration
+        // doesn't help LMDB the way it does the other two. Confirmed here (not just asserted):
+        // every LMDB iteration fails at its own within-iteration reopen, not just iteration 2+.
+        let path = dir.join(format!("den-crash-{i}.{ext}"));
         {
-            let mut e = E::open(path)?;
-            // A distinct, non-overlapping id range per iteration: the same db file/env persists
-            // committed data across "crashes" (mem::forget only skips clean shutdown, not a
-            // successful prior commit), so reusing ids 0..500 every time would just be a
-            // duplicate-key error unrelated to crash safety.
-            let mut assets = den::gen::generate_catalog(&den::gen::GenOptions {
+            let mut e = E::open(&path)?;
+            let assets = den::gen::generate_catalog(&den::gen::GenOptions {
                 seed: i as u64,
                 asset_count: 1000,
                 folder_count: 10,
                 manifest_path: "docs/ref-10k-manifest.csv".into(),
             });
-            let id_base = i as u64 * 1000;
-            for a in &mut assets {
-                a.id += id_base;
-            }
-            e.bulk_ingest(&assets[..500])?;
+            e.crash_mid_ingest(&assets)?;
             std::mem::forget(e);
         }
-        match E::open(path).and_then(|e| e.integrity_check()) {
+        match E::open(&path).and_then(|e| e.integrity_check()) {
             Ok(true) => {}
-            Ok(false) | Err(_) => failures += 1,
+            Ok(false) => failures += 1,
+            Err(e) => {
+                eprintln!("iteration {i} reopen/integrity-check failed: {e:#}");
+                failures += 1;
+            }
         }
     }
     Ok(failures)
