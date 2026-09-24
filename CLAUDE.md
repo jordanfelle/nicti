@@ -78,6 +78,26 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   7,531 bytes at 1/10/50 spots); GPU/CUDA numbers deferred to the reference machine. Proposes
   (not commits) heal/remove's stage-order placement for #44: after lens correction, before global
   tone, in linear space.
+- **Catalog database engine**: `docs/adr/0008-catalog-database-engine.md` — **SQLite** (`rusqlite`,
+  WAL), with a `(model, rating)` composite index and `GLOB` (not `LIKE`) for every prefix-scan
+  predicate — this build's `LIKE`-to-index-range-scan transform never triggered, confirmed via
+  `EXPLAIN QUERY PLAN`. Measured in `spikes/den/` against a corrected-cardinality synthetic
+  generator (`gen.rs`'s per-event `BENCH_LEAF_KEYWORD`, after the first-pass 11-value keyword
+  vocabulary turned out to make every hierarchical query artificially non-selective): clears every
+  gate at 2M assets except faceted-filter-with-facet-counts (151ms p95 vs the 100ms budget — a
+  known, unattempted mitigation is a trigger-maintained facet table). **DuckDB passed every gate
+  with the best margins of any candidate, including the point-update gate the issue predicted it
+  would fail** — not chosen for v1 only because #22's row-store schema fits SQLite's maturity
+  better, kept explicit as the fallback if the facet-query ceiling becomes a real problem. **LMDB
+  had the best raw numbers on every indexable op, but its crash-safety gate could not be
+  measured**: `heed`/`liblmdb`'s process-wide open-environment guard makes the in-process
+  `mem::forget`-based crash simulation this spike used structurally inapplicable (confirmed, not
+  assumed) — a real fork+exec+SIGKILL harness is the only way to test it, out of scope this pass.
+  Both embedded-Postgres candidates named in the issue were eliminated at the hard-gate stage
+  before either got a spike: `pglite-rs`'s `build.rs` unconditionally emits a Unix-only linker
+  flag (no Windows path exists in the crate); `pglite-oxide` doesn't compile against its own
+  published dependency graph on any target (`wasmer-wasix` vs `virtual-net`, confirmed on two
+  versions). Unblocks #22, #23, #24, #25, #71.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -139,14 +159,18 @@ TIFF/EXIF/Nikon-MakerNote IFD walker — no LibRaw/rawler dependency, deliberate
 #37's still-open decoder choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path and a
 locate/read/decode-grid/decode-screen/full-read latency benchmark; `sniff inventory` cross-checked
 byte-exact against `exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md`
-for the full write-up), and `spikes/groom` (#50/ADR-0007's healing-and-removal research: CPU
+for the full write-up), `spikes/groom` (#50/ADR-0007's healing-and-removal research: CPU
 clone-stamp/Poisson-heal/auto-source-pick reference plus a `wgpu` compute-shader Poisson twin
 proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding with no real
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
 edit-model representation with a pawprint-style `cache_key()`; see
-`docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings) — not production
-code; don't build on top of a spike crate, and expect each to be deleted once its own ticket
-promotes it (as #20 just did for `spikes/sheath`/`spikes/dewclaw`).
+`docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
+(#67/ADR-0008's catalog-database-engine comparison — one module per surviving candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`, behind matching Cargo features; `gen.rs`'s
+synthetic-catalog generator is reusable for future Library-scale benchmarks, see
+`docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
+to be deleted once its own ticket promotes it (as #20 just did for
+`spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.
 
@@ -202,13 +226,17 @@ ran, the CONFIRMED/SPECULATIVE split (or "no findings"), and how any real findin
 ```bash
 cargo test --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features
-cargo fmt --check
+cargo fmt --all -- --check
 ```
 
-**Always pass `--workspace`** for `test`/`clippy` in this repo: the root `Cargo.toml` is both the
-workspace root and a real package (`nicti`), not a virtual manifest, so a bare `cargo test`/`cargo
-clippy` without `-p`/`--workspace` silently checks only the root crate and skips `spikes/*` and
-`bench/whisker` entirely — confirmed as a real gap (CI's own `clippy`/`test` jobs had been doing
+**Always pass `--workspace`** for `test`/`clippy`, and **`--all`** for `fmt`, in this repo: the
+root `Cargo.toml` is both the workspace root and a real package (`nicti`), not a virtual manifest,
+so a bare `cargo test`/`cargo clippy` without `-p`/`--workspace`, or a bare `cargo fmt --check`
+without `--all`, silently checks only the root crate and skips `spikes/*` and `bench/whisker`
+entirely — this exact command (`cargo fmt --check`, no `--all`) used to be what this file itself
+documented above, and following it produced a false-negative "clean" result on a real PR whose
+CI then failed `cargo fmt` on six files in `spikes/den` — confirmed as a real gap (CI's own
+`clippy`/`test` jobs had been doing
 exactly this since `spikes/pawprint` landed, until fixed alongside #19/ADR-0004).
 
 ## CI

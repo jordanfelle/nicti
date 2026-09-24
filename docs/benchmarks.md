@@ -49,7 +49,10 @@ reported alongside the hardware/dataset identity — never compared across diffe
   - Export and ingest are measured with plain wall-clock timing instead.
 - **Library scale (2M synthetic assets):** a generator builds a synthetic catalog at 2M rows,
   sampling EXIF/keyword distributions from the real reference dataset so no additional real image
-  content is needed to test at that scale.
+  content is needed to test at that scale — `spikes/den/src/gen.rs`'s `generate_catalog` (`den gen
+  --seed N --scale 2m`), built for [#67](https://github.com/jordanfelle/nicti/issues/67)'s
+  catalog-database-engine ADR ([ADR-0008](adr/0008-catalog-database-engine.md)) and reusable by
+  any future Library-area benchmark at the same scale.
 - **Result format:** each run's raw data lands as CSV/JSON under `bench-results/` (gitignored, local
   only). Only summarized numbers go into ADRs or ticket updates.
 
