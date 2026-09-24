@@ -54,28 +54,50 @@ absolute numbers are unreliable enough to caveat explicitly rather than trust at
 
 ## Decision
 
-**Trigger-maintained SQLite facet table.** It clears the 100ms budget by 58-88x at 2M (1.6-1.7ms
-p95, vs. this session's own contended-hardware 513ms plain-SQLite baseline, and vs. ADR-0008's
-151-160ms on quieter hardware), and every write-path op it touches (`write_rating`, `rate_burst`,
-`bulk_ingest`'s keyword inserts) stays enormously inside ADR-0008's ≤5ms/≤16ms gates — the slowest
-touched op, `tag_keyword_10k` (not itself a gated op), came in at 23-28ms for a 10,000-row batch,
-roughly 2x plain SQLite's 13-14ms/26-40ms and still two orders of magnitude under any per-op budget
-that matters. It adds no new dependency and no second store to keep consistent. Per #103's own
-stated default, this is a clean, unambiguous win — the DuckDB cache never got a chance to be
-"needed," because the trigger approach never came close to failing either of the two things that
-would have forced adopting it.
+**Trigger-maintained SQLite facet table.** It clears the 100ms budget by 49-168x at 2M (2.48/3.05ms
+p50/p95 — 49-52x vs. ADR-0008's own 151-160ms on quieter hardware, 168x vs. this session's own
+513ms contended-hardware plain-SQLite baseline), and the actual per-write-op gate ADR-0008 sets
+(`write_rating`, a single point update, ≤5ms) is cleared with enormous margin at both scales
+(0.06-0.21ms at 600k, 0.17-0.27ms at 2M). It adds no new dependency and no second store to keep
+consistent.
+
+**One real cost is not negligible, and is reported honestly rather than rounded away:** a
+100-row `rate_burst` (the closest proxy this benchmark has to issue #43's rate-and-advance culling
+pattern) measured at 17.96/20.36ms p50/p95 at 600k and 8.97/11.42ms at 2M — a real, first-draft
+version of this exact benchmark under-measured this by roughly 30-50x (0.46-0.68ms) because of a
+benchmark bug described in full below, found by a hostile review and fixed before this ADR's
+numbers were finalized. The corrected numbers put the burst in the same rough range as (and at
+600k slightly above) the ≤16ms-under-load reference #103's own issue text names — still small in
+absolute terms (culling one image's rating is a single-row event in practice, not a 100-row batch),
+still comfortably below any hard gate ADR-0008 itself actually sets for this op (it lists
+`rate_burst_100` as "informative, not gated" for every candidate, plain SQLite included), and still
+roughly 2x slower than the DuckDB-cache candidate's equivalent write path (which touches no
+trigger at all) — a real, if modest, trade-off worth a future implementer's attention rather than a
+number to gloss over. Per #103's own stated default (trigger wins unless it can't hit budget *or*
+its write cost is unacceptable against ADR-0008's gates), the deciding budget it must clear is
+`write_rating`'s ≤5ms, which it clears by more than an order of magnitude at both scales — the
+trigger approach still wins, just not with the "negligible cost" framing an earlier, buggy
+measurement pass would have supported.
 
 **The DuckDB-backed cache also works, measured honestly, and is kept explicit as the fallback**
 (same posture ADR-0008 gave DuckDB as primary-store fallback) if a real schema in #22 finds some
 other reason the trigger approach doesn't fit (e.g., a facet dimension too expensive to maintain
-incrementally via triggers). Its own real cost — refreshing the cache — is not hidden: 2.8s after a
-2M-row bulk ingest, 3.6s after a subsequent 100-row rating burst + 10k-row keyword tag. That's a
-real, non-gating (refresh is an explicit, on-demand/periodic action here, not a hot-path op) but
+incrementally via triggers). Its own real cost — refreshing the cache — is not hidden: 0.84-0.86s
+at 600k, and 9.6-13.1s at 2M (both scales' two numbers are "after a bulk ingest" / "after a 100-row
+rating burst + 10k-row keyword tag" respectively) — the 2M number is markedly higher than an
+earlier measurement pass of this same code found (2.8-3.6s), consistent with this session's
+shared-hardware contention (see Context) rather than a code change between passes; either number
+supports the same conclusion (a real, non-gating but non-trivial refresh cost). That's a real,
+non-gating (refresh is an explicit, on-demand/periodic action here, not a hot-path op) but
 non-trivial cost, and — the more important point — **the cache is provably stale between
 refreshes**: a deliberate demonstration (rate a real asset belonging to the exact benchmarked facet,
 without calling `refresh()`) shows the cached answer diverging from a from-scratch recomputation
 every time, exactly the "adds a dependency and a consistency surface" cost #103 asked to be
-quantified rather than asserted.
+quantified rather than asserted. Its own `faceted_filter` margin over budget also shrank under this
+session's heaviest contention (2M post-refresh: 14.27/14.80ms p50/p95, a 6.8x margin vs. the ~50x+
+margin measured at lighter contention) — still clears ADR-0008's own ≥3x reference-machine
+threshold for trusting a WSL number as final, but a real illustration of how sensitive this whole
+comparison is to concurrent load on shared hardware, not just a property of the query itself.
 
 ## Measured results
 
@@ -91,8 +113,8 @@ same `ref-10k-manifest.csv` distributions as ADR-0008/0009).
 
 | Scale | Plain SQLite (this session) | Trigger-maintained | DuckDB cache (post-refresh) |
 |---|---|---|---|
-| 600k | 39.95 / 42.09 ms | **0.482 / 0.562 ms** ✅ (71-75x) | 1.887 / 1.991 ms ✅ (21-23x) |
-| 2M | 411.8 / 513.2 ms ⛔ (budget miss, worse than ADR-0008's own 151-160ms — contended hardware, see Context) | **1.599 / 1.726 ms** ✅ (58x margin vs. this session's own 100ms-scaled gate; ~88-93x vs. ADR-0008's original 2M baseline) | 1.838 / 2.085 ms (pre-refresh-of-this-check) / 1.731 / 1.940 ms (post) ✅ (~48-58x) |
+| 600k | 39.95 / 42.09 ms | **0.447 / 0.745 ms** ✅ (56-89x) | 1.517 / 1.635 ms ✅ (26-28x) |
+| 2M | 411.8 / 513.2 ms ⛔ (budget miss, worse than ADR-0008's own 151-160ms — contended hardware, see Context) | **2.479 / 3.054 ms** ✅ (~33x margin vs. the 100ms gate; ~49-52x vs. ADR-0008's original 2M baseline; ~168x vs. this session's own contended baseline) | 14.27 / 14.80 ms ✅ (~6.8x — thinner than the 600k margin, see the note below the Decision on this session's heaviest-contention run) |
 
 Both candidates clear the 2M budget by a wide enough margin (>3x) that, per ADR-0008's own
 reference-machine rule, this doesn't need a less-contended re-run to be treated as final for the
@@ -103,42 +125,65 @@ is exactly the problem being fixed either way).
 
 | Op | Plain SQLite (this session) | Trigger-maintained | Budget (ADR-0008) |
 |---|---|---|---|
-| `write_rating` (single) | 0.018 / 0.078 ms | 0.019 / 0.038 ms | ≤ 5 ms |
-| `rate_burst_100` | 0.826 / 2.099 ms | 0.558 / 0.681 ms | ≤ 16 ms (informative in ADR-0008, used here as the "under load" reference) |
-| `tag_keyword_10k` (not budget-gated) | 40.47 / 63.78 ms | 23.09 / 26.10 ms | — |
-| `bulk_ingest`, 2M rows (informative; see contention caveat) | 214.1 s | 122.3 s | — |
+| `write_rating` (single) | 0.018 / 0.078 ms | 0.173 / 0.272 ms | ≤ 5 ms |
+| `rate_burst_100` | 0.826 / 2.099 ms | 8.973 / 11.421 ms | ≤ 16 ms (informative in ADR-0008, used here as the "under load" reference) |
+| `tag_keyword_10k` (not budget-gated) | 40.47 / 63.78 ms | 38.19 / 41.42 ms | — |
+| `bulk_ingest`, 2M rows (informative; see contention caveat) | 214.1 s | 163.5 s | — |
 
 The DuckDB-cache candidate's write path is, by construction, identical to plain SQLite (writes go
 straight to `sqlite.rs`'s schema, untouched by the cache) — its own 2M numbers (`write_rating`
-0.013/0.018ms, `rate_burst_100` 0.402/0.763ms, `tag_keyword_10k` 10.27/10.32ms) confirm this rather
+0.030/0.070ms, `rate_burst_100` 1.369/2.299ms, `tag_keyword_10k` 20.39/21.57ms) confirm this rather
 than needing a separate row here.
 
-**`bulk_ingest`'s numbers are the least trustworthy in this table, called out explicitly rather than
-read at face value:** the trigger candidate's 2M `bulk_ingest` (122.3s) measured *faster* than this
-session's own plain-SQLite baseline (214.1s) despite the trigger candidate doing strictly more work
-per keyword insert (a real trigger firing, vs. a bare `INSERT`) — the only explanation consistent
-with everything else observed is that the two runs landed in different phases of this shared
-machine's contention from concurrent unrelated builds (confirmed present via `ps aux`, not
-inferred), not that triggers make ingest faster. The 600k numbers, captured closer together in time
-with (apparently) less contention variance, show the expected direction instead: trigger `34.4s` vs.
-plain-SQLite `26.8s` (~1.29x overhead) — consistent with maintaining an extra table on every keyword
-insert. Treat the 2M `bulk_ingest` row as **directionally uninformative, not as "triggers are
-free at bulk-ingest scale"** — a re-run on quiet hardware is the honest way to get a trustworthy
-number here, out of scope for this pass since `bulk_ingest` is explicitly "informative, not gated"
-in ADR-0008's own methodology.
+**A real benchmark bug was found (by a hostile review of this exact diff) and fixed before the
+numbers above were finalized — the table above already reflects the fix, but the bug is worth
+naming in full since an earlier draft of this ADR reported the wrong (much lower) `write_rating`/
+`rate_burst_100` numbers for the trigger candidate and drew a "negligible write-path cost"
+conclusion from them that the corrected numbers only partly support (see the Decision section's own
+caveat).** `facet_cache_trigger.rs`'s rating-update trigger is guarded by `WHEN OLD.rating IS NOT
+NEW.rating` — it only does any facet-maintenance work when a write actually changes the rating. The
+first version of `bench_trigger_facet` (`bin/den.rs`) called `write_rating(id, 4)` and
+`rate_burst(&[(id, 5), ...])` with a **fixed** target value across the 1 discarded warm-up call and
+all 5 measured calls. Only the warm-up call ever changed the rating; every measured call re-wrote
+the *same* value the previous call had just set, so the trigger's `WHEN` guard evaluated false and
+the trigger body never ran during any measured call — the reported numbers were the cost of a bare
+`UPDATE` with a no-op trigger check, not real trigger-maintenance cost. This is the same class of
+bug ADR-0008/0009 already found once in this exact benchmark harness (`tag_keyword`'s reused-keyword
+bug, see ADR-0008's Spike section) — a different concrete mechanism (a trigger `WHEN` guard rather
+than accumulating duplicate rows), same root cause (a benchmark op that isn't idempotent-safe across
+repeated timed calls silently does less work on later calls than the first). Fixed by alternating
+the target rating every call (`bin/den.rs`'s `bench_trigger_facet`/`bench_duckdb_facet_cache`) so
+`OLD.rating != NEW.rating` on every measured call, not just the discarded warm-up one.
+
+**`bulk_ingest`'s numbers remain the least trustworthy in this table, called out explicitly rather
+than read at face value:** the trigger candidate's 2M `bulk_ingest` (163.5s) still measured faster
+than this session's own plain-SQLite baseline (214.1s) despite doing strictly more work per keyword
+insert (a real trigger firing, vs. a bare `INSERT`) — the only explanation consistent with
+everything else observed is that the two runs landed in different phases of this shared machine's
+contention from concurrent unrelated builds (confirmed present via `ps aux` mid-run, not inferred),
+not that triggers make ingest faster. The 600k numbers show the expected direction instead: trigger
+`37.6s` vs. plain-SQLite `26.8s` (~1.4x overhead) — consistent with maintaining an extra table on
+every keyword insert. Treat the 2M `bulk_ingest` row as **directionally uninformative, not as
+"triggers are free at bulk-ingest scale"** — a re-run on quiet hardware is the honest way to get a
+trustworthy number here, out of scope for this pass since `bulk_ingest` is explicitly "informative,
+not gated" in ADR-0008's own methodology.
 
 ### DuckDB cache: refresh cost (the real, quantified "consistency surface" cost)
 
-| Scale | Refresh after 2M-row bulk ingest | Refresh after a 100-row rating burst + 10k-row keyword tag |
+| Scale | Refresh after bulk ingest | Refresh after a 100-row rating burst + 10k-row keyword tag |
 |---|---|---|
-| 600k | 1.061 s | 1.053 s |
-| 2M | 2.781 s | 3.563 s |
+| 600k | 0.844 s | 0.863 s |
+| 2M | 13.118 s | 9.599 s |
 
 This is a full-rebuild refresh (see Options considered below for why, not incremental) — it scales
-with catalog size, not with how much actually changed since the last refresh. A UI wiring this in
-would need to decide a refresh cadence (on-demand before showing facets, a debounced background
-timer, etc.); 2.8-3.6s at 2M is not a hot-path number by any definition in `docs/benchmarks.md`; the
-important number is the next one.
+with catalog size, not with how much actually changed since the last refresh. The 2M numbers here
+are markedly higher than an earlier pass of this exact code measured (2.8-3.6s) — consistent with
+this session's shared-hardware contention (see Context), not a code change between passes. A UI
+wiring this in would need to decide a refresh cadence (on-demand before showing facets, a debounced
+background timer, etc.); even the lower-contention 2.8-3.6s figure is not a hot-path number by any
+definition in `docs/benchmarks.md`, and the higher, heavier-contention figure only reinforces that
+this is meant to be an occasional/background action, not something on any interactive critical
+path; the important number is the next one.
 
 ### DuckDB cache: correctness and staleness, verified directly (not asserted)
 
@@ -255,8 +300,11 @@ generator/workload/cross-engine-test infrastructure this reuses unchanged):
   `tests/cross_engine.rs`): both candidates checked against `naive_faceted_filter` before/after
   writes, the DuckDB candidate's pre-refresh error path and demonstrated staleness, and the shared
   `(model, rating, keyword)`-grain limitation asserted directly for both.
-- Two real bugs found and fixed while building this, beyond the shared scope-limitation finding
+- Three real bugs found and fixed while building this, beyond the shared scope-limitation finding
   above: a borrow-checker error in the DuckDB refresh query (a `rusqlite`-style `Statement` temporary
-  outliving its intended scope — trivial, caught by the compiler, not a logic bug) and the
+  outliving its intended scope — trivial, caught by the compiler, not a logic bug); the
   all-`None`-filters placeholder-count mismatch described above (a real logic bug, caught by a test,
-  not the compiler).
+  not the compiler); and the trigger-benchmark `WHEN`-guard no-op bug in `bin/den.rs`'s
+  `write_rating`/`rate_burst_100` timing (a real benchmark-honesty bug, caught by a hostile
+  adversarial review of this diff before it was pushed, not by a test or the compiler — see the
+  Measured results section above for the full account and its effect on this ADR's own numbers).

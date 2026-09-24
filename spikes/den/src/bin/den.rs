@@ -410,11 +410,36 @@ fn bench_trigger_facet(
     // The same per-write ops `bench_engine` times for every primary-store candidate, so the
     // trigger-maintenance overhead added to each is directly comparable to the plain-SQLite
     // baseline (`den bench --engine sqlite`) run in the same session.
-    let write_rating = time_op!(runs, engine.write_rating(assets[0].id, 4));
+    //
+    // **A real bug, found by a hostile review of this exact file and fixed here:** the trigger
+    // candidate's `trg_facet_rating_update` is guarded by `WHEN OLD.rating IS NOT NEW.rating` (see
+    // facet_cache_trigger.rs) — it only does any facet-maintenance work when the rating actually
+    // changes. The first version of this benchmark called `write_rating(id, 4)` and
+    // `rate_burst(&[(id, 5), ...])` with a FIXED target value across the 1 discarded warm-up call
+    // *and* all 5 measured calls. Only the warm-up call ever changed the rating (from whatever
+    // `bulk_ingest` set it to, to 4/5); every measured call re-wrote the *same* value the previous
+    // call had just set, so `OLD.rating IS NOT NEW.rating` was false and the trigger body never
+    // ran during any measured call. The reported numbers were therefore the cost of a bare
+    // `UPDATE` with a no-op trigger check, not real trigger-maintenance cost — silently
+    // undercounting the exact thing this benchmark exists to measure. Fixed by alternating the
+    // target rating every call (still "a single point-update"/"a 100-row burst", the same
+    // operation shape as every other engine's `write_rating`/`rate_burst` benchmark in this crate
+    // — just no longer reusing a value that makes the op a no-op the second time it's called).
+    let mut wr_call = 0u32;
+    let write_rating = time_op!(runs, {
+        wr_call += 1;
+        engine.write_rating(assets[0].id, if wr_call.is_multiple_of(2) { 4 } else { 2 })
+    });
     results.insert("write_rating".into(), serde_json::to_value(write_rating)?);
 
-    let burst: Vec<(u64, u8)> = assets.iter().take(100).map(|a| (a.id, 5)).collect();
-    let rate_burst = time_op!(runs, engine.rate_burst(&burst));
+    let burst_ids: Vec<u64> = assets.iter().take(100).map(|a| a.id).collect();
+    let mut burst_call = 0u32;
+    let rate_burst = time_op!(runs, {
+        burst_call += 1;
+        let rating = if burst_call.is_multiple_of(2) { 5 } else { 3 };
+        let burst: Vec<(u64, u8)> = burst_ids.iter().map(|id| (*id, rating)).collect();
+        engine.rate_burst(&burst)
+    });
     results.insert("rate_burst_100".into(), serde_json::to_value(rate_burst)?);
 
     let tag_ids: Vec<u64> = assets.iter().take(10_000).map(|a| a.id).collect();
@@ -516,12 +541,26 @@ fn bench_duckdb_facet_cache(
 
     // Same write ops (and same generic ids) as the trigger candidate/`bench_engine`, so
     // point-update cost is directly comparable — these go straight to SQLite, untouched by the
-    // DuckDB cache, so this number should look identical to plain `sqlite.rs`.
-    let write_rating = time_op!(runs, engine.write_rating(assets[0].id, 4));
+    // DuckDB cache, so this number should look identical to plain `sqlite.rs`. Values alternate
+    // per call for the same reason `bench_trigger_facet` does (see that function's comment): not
+    // a correctness requirement here (there's no trigger `WHEN` guard on this path to fool), but
+    // keeping both candidates' benchmarks doing the identical op shape avoids a second, subtler
+    // version of the same "what exactly did we just measure" question.
+    let mut wr_call = 0u32;
+    let write_rating = time_op!(runs, {
+        wr_call += 1;
+        engine.write_rating(assets[0].id, if wr_call.is_multiple_of(2) { 4 } else { 2 })
+    });
     results.insert("write_rating".into(), serde_json::to_value(write_rating)?);
 
-    let burst: Vec<(u64, u8)> = assets.iter().take(100).map(|a| (a.id, 5)).collect();
-    let rate_burst = time_op!(runs, engine.rate_burst(&burst));
+    let burst_ids: Vec<u64> = assets.iter().take(100).map(|a| a.id).collect();
+    let mut burst_call = 0u32;
+    let rate_burst = time_op!(runs, {
+        burst_call += 1;
+        let rating = if burst_call.is_multiple_of(2) { 5 } else { 3 };
+        let burst: Vec<(u64, u8)> = burst_ids.iter().map(|id| (*id, rating)).collect();
+        engine.rate_burst(&burst)
+    });
     results.insert("rate_burst_100".into(), serde_json::to_value(rate_burst)?);
 
     let tag_ids: Vec<u64> = assets.iter().take(10_000).map(|a| a.id).collect();

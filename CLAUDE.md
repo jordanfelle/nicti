@@ -114,15 +114,19 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   Revisit post-1.0, not never.
 - **Facet-count cache for SQLite's faceted-filter gap**: `docs/adr/0011-facet-count-cache.md` —
   **trigger-maintained SQLite facet table**, closing ADR-0008's one measured miss (faceted-filter
-  at 2M) without adding a new dependency. Clears the <100ms budget by 58-88x at 2M (1.6-1.7ms p95)
-  with negligible write-path cost against ADR-0008's ≤5ms/≤16ms gates, verified correct against a
-  from-scratch recomputation both at ingest and under a write burst. A DuckDB-backed read-side
-  cache alternative was also built and measured (also clears budget, but adds a second store, a
-  real 2.8-3.6s refresh cost at 2M, and a demonstrated staleness window between refreshes) and is
-  kept as the explicit fallback, not adopted. Both candidates share a real, verified scope
-  limitation: their `(model, rating, keyword)`-grain facet table only answers a *keyword-narrowed*
-  facet query correctly — an unfiltered/no-keyword facet count needs a separate table or
-  `sqlite.rs`'s own from-scratch query. Unblocks #22's facet-count implementation.
+  at 2M) without adding a new dependency. Clears the <100ms budget by ~33-89x at 600k/2M (well
+  under 1ms-3ms p95); the actual per-write gate ADR-0008 sets (`write_rating` ≤5ms) clears with
+  10x+ margin at both scales, though a 100-row rating burst (a proxy for #43's rate-and-advance
+  culling pattern) is a real, non-negligible added cost (9-20ms, vs. plain SQLite's <2.1ms) — found
+  via a benchmark bug (a trigger `WHEN`-guard no-op on repeated same-value writes) that a hostile
+  review caught and this ADR documents in full. Verified correct against a from-scratch
+  recomputation both at ingest and under a write burst. A DuckDB-backed read-side cache alternative
+  was also built and measured (also clears budget, but adds a second store, a real multi-second
+  refresh cost at 2M, and a demonstrated staleness window between refreshes) and is kept as the
+  explicit fallback, not adopted. Both candidates share a real, verified scope limitation: their
+  `(model, rating, keyword)`-grain facet table only answers a *keyword-narrowed* facet query
+  correctly — an unfiltered/no-keyword facet count needs a separate table or `sqlite.rs`'s own
+  from-scratch query. Unblocks #22's facet-count implementation.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
