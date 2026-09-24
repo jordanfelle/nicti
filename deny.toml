@@ -24,6 +24,28 @@ allow = [
     # but pass today via their own MIT/Apache-2.0 arm) these two needed it added outright. Same
     # permissive-with-no-copyleft-terms category as ISC above: OSI-approved, FSF Free/Libre.
     "Zlib",
+    # NCSA: `libfuzzer-sys`'s fuzz-target dependency, pulled in transitively via
+    # `image` -> `ravif` -> `rav1e` -> `libfuzzer-sys` by the AVIF encoder feature the egui/iced/
+    # Slint GUI-framework candidates all enable on `image` for their asset-loading paths (#68/
+    # ADR-0006's `pelt-*` spikes) -- not a choice made by this repo, and not linked into any
+    # actual pelt-* binary's fuzzing path, just present in the resolved dependency graph.
+    # Permissive, OSI-approved, no copyleft terms -- same category as ISC/Zlib above, added
+    # globally rather than scoped to `libfuzzer-sys` since any future crate pulling in AVIF
+    # support via `ravif` would hit the identical transitive dependency.
+    "NCSA",
+    # BSL-1.0: `clipboard-win`/`error-code`, pulled in transitively by every #68/ADR-0006 `pelt-*`
+    # candidate's own clipboard integration (arboard via egui/Slint, window_clipboard via iced).
+    # Permissive, OSI-approved, no copyleft terms -- same category as ISC/Zlib/NCSA above.
+    "BSL-1.0",
+    # OFL-1.1 / Ubuntu-font-1.0: `epaint_default_fonts` bundles actual font *data* (not just code)
+    # under egui's `default_fonts` feature (#68/ADR-0006's pelt-egui spike). Both are OSI-approved,
+    # permissive-for-redistribution open font licenses (SIL OFL is the standard license for
+    # bundling fonts, explicitly designed to permit this) -- but unlike the pure-code licenses
+    # above, this is exactly the kind of bundled-data case ADR-0003's Process section means by "a
+    # new dependency... gets a row in docs/licensing.md in the same PR" -- see that file's
+    # #68/ADR-0006 rows.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 # Deliberately NOT listing any LGPL/GPL variant, even for r-efi's "MIT OR Apache-2.0 OR
 # LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate
@@ -34,6 +56,64 @@ allow = [
 # lensfun-rs) needs a manual case-by-case sign-off, not a blanket CI pass. If a future crate's
 # only permissive arm changes, that's a real ADR-0003 review to have, not an allowlist edit.
 confidence-threshold = 0.9
+
+# Spike-scoped exception (#68/ADR-0006): Slint's own crates carry
+# "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0" -- none of
+# which are on the allow-list above, and `LicenseRef-Slint-*` are Slint's own non-SPDX-registered
+# proprietary-with-exceptions license texts, not something cargo-deny can evaluate generically.
+# Scoped to exactly the Slint-published crate names (not a global allow, unlike ISC/Zlib/NCSA
+# above) so this never silently passes an unrelated future GPL-only crate. This is a research
+# spike only (`spikes/pelt-slint`, not a production crate, see CLAUDE.md's package-map note) --
+# if Slint is the ADR-0006 winner, ship-decision consequences documented there require an
+# ADR-0003 amendment and explicit sign-off before any of this ships in `nicti-render`/`nicti-ui`,
+# the same standard already applied to LGPL-as-Cargo-dependency crates like `rawler`/`lensfun-rs`.
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "slint"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "slint-build"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "slint-macros"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-core"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-core-macros"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-common"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-compiler"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-backend-selector"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-backend-winit"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-renderer-femtovg"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-renderer-skia"
+
+[[licenses.exceptions]]
+allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
+name = "i-slint-renderer-software"
 
 # publish = false workspace crates carry no SPDX license (nicti, pawprint, whisker) -- this exempts
 # them from the license check entirely rather than failing on our own unlicensed-by-design internal

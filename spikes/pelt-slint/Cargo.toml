@@ -1,0 +1,19 @@
+[package]
+name = "pelt-slint"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway spike for #68 (ADR-0006): Slint GUI-framework candidate -- a Rust-driven virtualized 2M-cell grid, loupe next/prev, and a develop viewport that imports an externally-rendered wgpu::Texture (spikes/pelt's live-chain compute kernel) directly into the scene via slint::Image::try_from, using the same wgpu::Device Slint itself renders with (slint::Window::set_rendering_notifier + GraphicsAPI::WGPU30). Not a production crate."
+
+[dependencies]
+slint = { version = "1.18", features = ["unstable-wgpu-30"] }
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+pelt = { path = "../pelt" }
+
+[build-dependencies]
+slint-build = "1.18"
+
+[[bin]]
+name = "pelt-slint"
+path = "src/main.rs"

@@ -1,0 +1,127 @@
+// #68 (ADR-0006) pelt-slint spike UI: virtualized grid (Rust drives the visible tile slice via
+// the `scrolled` callback below -- Slint has no built-in `ScrollArea::show_rows` equivalent),
+// loupe next/prev, and a develop viewport bound to a GPU-resident `image` property set from Rust
+// via `slint::Image::try_from(wgpu::Texture)` (see src/main.rs).
+
+import { Slider } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "pelt-slint";
+    preferred-width: 1600px;
+    preferred-height: 900px;
+
+    in-out property <[image]> visible-tiles;
+    in-out property <int> visible-start-row;
+    in-out property <int> grid-columns: 1;
+    in-out property <int> grid-total-rows: 1;
+    in-out property <length> tile-size: 256px;
+
+    in-out property <image> loupe-image;
+    in-out property <int> loupe-index;
+    in-out property <int> loupe-count;
+
+    in-out property <image> viewport-image;
+    in-out property <float> exposure-stops: 0.0;
+
+    callback scrolled(length);
+    callback next-image();
+    callback prev-image();
+    callback exposure-changed(float);
+    callback viewport-dragged(float, float);
+
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 8px;
+
+        // -- Virtualized grid --
+        Rectangle {
+            width: 60%;
+            border-width: 1px;
+            border-color: gray;
+
+            grid-flick := Flickable {
+                width: 100%;
+                height: 100%;
+                content-height: root.grid-total-rows * root.tile-size;
+
+                changed content-y => {
+                    root.scrolled(-grid-flick.content-y);
+                }
+
+                Rectangle {
+                    y: root.visible-start-row * root.tile-size;
+                    width: 100%;
+                    height: root.visible-tiles.length / root.grid-columns * root.tile-size + root.tile-size;
+
+                    for tile[i] in root.visible-tiles: Image {
+                        x: mod(i, root.grid-columns) * root.tile-size;
+                        y: floor(i / root.grid-columns) * root.tile-size;
+                        width: root.tile-size;
+                        height: root.tile-size;
+                        source: tile;
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 8px;
+
+            // -- Loupe --
+            Rectangle {
+                height: 240px;
+                border-width: 1px;
+                border-color: gray;
+                VerticalLayout {
+                    Text {
+                        text: "Loupe " + (root.loupe-index + 1) + "/" + root.loupe-count + " (Right/Left to switch)";
+                    }
+                    Image {
+                        source: root.loupe-image;
+                        height: 200px;
+                    }
+                }
+            }
+
+            // -- Develop viewport --
+            VerticalLayout {
+                Text { text: "Develop viewport (live_chain compute)"; }
+                Slider {
+                    minimum: -2.0;
+                    maximum: 2.0;
+                    value <=> root.exposure-stops;
+                    changed value => { root.exposure-changed(self.value); }
+                }
+                viewport-drag := TouchArea {
+                    height: 540px;
+                    moved => {
+                        root.viewport-dragged(
+                            self.mouse-x / self.width,
+                            self.mouse-y / self.height,
+                        );
+                    }
+                    Image {
+                        source: root.viewport-image;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+            }
+        }
+    }
+
+    forward-focus: key-handler;
+    key-handler := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.RightArrow) {
+                root.next-image();
+                accept
+            } else if (event.text == Key.LeftArrow) {
+                root.prev-image();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+}

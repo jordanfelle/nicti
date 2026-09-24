@@ -65,6 +65,44 @@ The one native/runtime component this spike touches, NVRTC, is already covered b
 "user-installed prerequisite, detected then used" pattern that row already describes for the CUDA
 driver.
 
+**Update (2026-09-23, [#68](https://github.com/jordanfelle/nicti/issues/68)'s `pelt-egui`/
+`pelt-iced`/`pelt-slint` spikes, `docs/adr/0006-gui-framework.md`):** each GUI-framework
+candidate's own dependency tree pulled in real new licenses beyond what `deny.toml`'s existing
+allowlist covered:
+
+- **egui/eframe** (`pelt-egui`): the crate tree itself (`egui`, `eframe`, `egui-wgpu`,
+  `egui-winit`, `epaint`, `emath`, `ecolor`) is MIT OR Apache-2.0, already covered. `eframe`'s
+  `default_fonts` feature bundles `epaint_default_fonts`, whose license expression is
+  `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` — the `OFL-1.1`/`Ubuntu-font-1.0` arms
+  cover the actual bundled font **data** (not code), both open font licenses explicitly designed
+  to permit redistribution/bundling. Added to `deny.toml`'s allowlist[^s4].
+- **iced** (`pelt-iced`): `iced`/`iced_wgpu`/`iced_widget`/`iced_core`/`iced_runtime`/
+  `iced_graphics`/`iced_winit`/`iced_tiny_skia`/`iced_program`/`iced_renderer`/`iced_futures`/
+  `iced_debug` are all MIT, already covered. Pulls in `wgpu` **27.0.1** (not 30 — see ADR-0006's
+  gate-2 finding), itself MIT OR Apache-2.0 like ADR-0005's own `wgpu` 30 audit already covered.
+- **Slint** (`pelt-slint`): `slint`, `slint-build`, `slint-macros`, and every `i-slint-*` crate
+  (`i-slint-core`, `i-slint-core-macros`, `i-slint-common`, `i-slint-compiler`,
+  `i-slint-backend-selector`, `i-slint-backend-winit`, `i-slint-renderer-femtovg`,
+  `i-slint-renderer-skia`, `i-slint-renderer-software`) carry
+  `GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0` — none of
+  `deny.toml`'s existing allow-list entries, and the `LicenseRef-*` arms are Slint's own
+  non-SPDX-registered dual-commercial license texts, not something `cargo-deny` evaluates
+  generically[^s5]. Scoped `[[licenses.exceptions]]` blocks were added per Slint-published crate
+  name (not a global allow) since this is research-spike-only — **if Slint is ADR-0006's winner,
+  shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0003 amendment and explicit
+  sign-off**, the same standard already applied to LGPL-as-Cargo-dependency crates
+  (rawler/lensfun-rs) above; this update does not grant that sign-off.
+- **Shared transitive dependency (all three candidates):** each toolkit's `image`-crate-based
+  asset loading pulls in `ravif`'s AVIF encoder support, which depends on `rav1e`, which in turn
+  depends on `libfuzzer-sys` (its fuzz-target harness) — `libfuzzer-sys`'s own license expression
+  is `(MIT OR Apache-2.0) AND NCSA`, so the `NCSA` arm (a permissive, OSI-approved license) needed
+  adding. Also common to all three: `clipboard-win`/`error-code` (arboard via egui/Slint,
+  `window_clipboard` via iced) carry `BSL-1.0` (Boost Software License), also permissive and
+  OSI-approved. Both added to `deny.toml`'s allowlist globally (not GUI-toolkit-specific)[^s6].
+
+No action beyond the `deny.toml` changes above — `cargo deny --workspace --all-features check
+licenses` passes clean as of this update.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -180,3 +218,6 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^s1]: `libloading` v0.9.0 ISC license — `cargo metadata`'s resolved `license` field against this crate's own `Cargo.toml`, cross-checked against https://docs.rs/libloading/latest/libloading/ — verified 2026-09-23
 [^s2]: `wasmtime` v49.0.0 and `wat` v1.259.0 license fields — `cargo metadata`'s resolved `license` field, cross-checked against https://github.com/bytecodealliance/wasmtime (repo-wide Apache-2.0 WITH LLVM-exception, standard for Bytecode Alliance projects) — verified 2026-09-23
 [^s3]: `slotmap` v1.1.1 and `foldhash` v0.2.0 Zlib licenses — `cargo metadata`'s resolved `license` field via `cargo deny --workspace --all-features check licenses` against each crate's own `Cargo.toml`, cross-checked against https://crates.io/crates/slotmap and https://crates.io/crates/foldhash — verified 2026-09-24
+[^s4]: `epaint_default_fonts` v0.36.2 license expression — `cargo deny --workspace --all-features check licenses` against its own `Cargo.toml` — verified 2026-09-23
+[^s5]: Slint crate family license expression — `cargo deny --workspace --all-features check licenses` against `slint`/`slint-build`/`slint-macros`/every `i-slint-*` crate's own `Cargo.toml` (all identical), cross-checked against https://github.com/slint-ui/slint/blob/master/LICENSES — verified 2026-09-23
+[^s6]: `libfuzzer-sys` v0.4.13 (`(MIT OR Apache-2.0) AND NCSA`) and `clipboard-win`/`error-code` (`BSL-1.0`) — `cargo deny --workspace --all-features check licenses` against each crate's own `Cargo.toml` — verified 2026-09-23

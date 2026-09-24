@@ -48,6 +48,20 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   round-trip in the hot path (confirmed expensive, 0.8–1.5s, by the spike's own harness) — baked
   stage output must stay GPU-resident, per ADR-0002/#44. Unblocks #20, #41, #45; feeds #68 (GUI
   framework)'s wgpu-interop question.
+- **GUI framework**: `docs/adr/0006-gui-framework.md` — **Proposed, pending a reference-machine
+  measurement pass**; the hard-gate findings are final. GPUI is eliminated outright: its Windows
+  backend is a bespoke Direct3D11 renderer (`windows-rs`), with no `wgpu`/Vulkan path in its own
+  dependency graph on that platform at all (`blade-graphics` is Linux/macOS-only) — no
+  `spikes/pelt-gpui` was built. Of the other three, egui (via eframe) currently leads: the only
+  candidate whose own `wgpu` dependency (30.0.0) matches ADR-0005's choice exactly, with a clean
+  MIT/Apache-2.0 license and a mature `egui_wgpu::CallbackTrait` custom-viewport story. Iced works
+  but pins `wgpu` 27, not 30 (a real version-compatibility cost). Slint's GPU-resident
+  `Image::try_from(wgpu::Texture)` integration is the cleanest of the three mechanically, but its
+  own license (`GPL-3.0-only OR LicenseRef-Slint-*`) only passes today under a spike-scoped
+  `deny.toml` exception — shipping it needs its own ADR-0003 amendment. Neither Iced nor Slint has
+  egui's/GPUI's built-in virtualized-list primitive, so both had to hand-roll grid-windowing math
+  (`spikes/pelt/src/virtualize.rs`) for #68's grid gate. Final selection waits on
+  `bench/pelt/pelt.ahk`+`run-pelt.ps1` numbers from the reference machine.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -81,10 +95,14 @@ is not a commitment to final crate layout. `spikes/*` (a Cargo workspace member 
 throwaway research spikes — e.g. `spikes/pawprint` (#21/ADR-0002's edit-document hashing,
 history/compaction, and XMP round-trip proof), `spikes/sheath` + fixture `spikes/dewclaw`
 (#19/ADR-0004's lazy module registry, checked C-ABI dylib boundary, and WASM-vs-native pixel-kernel
-timing), and `spikes/glint` (#16/ADR-0005's wgpu-vs-CUDA measured comparison — correctness,
-feature/limit availability, throughput, dispatch overhead, host↔device interop cost) — not
-production code; don't build on top of a spike crate, and expect all three to be deleted once #20
-lands the real crate layout. **Proposed real package map (from ADR-0004, pending #20):**
+timing), `spikes/glint` (#16/ADR-0005's wgpu-vs-CUDA measured comparison — correctness,
+feature/limit availability, throughput, dispatch overhead, host↔device interop cost), and
+`spikes/pelt` + `spikes/pelt-egui`/`spikes/pelt-iced`/`spikes/pelt-slint` (#68/ADR-0006's
+GUI-framework research — `pelt` is the toolkit-agnostic shared fixture/math crate, each `pelt-*`
+is one candidate's virtualized-grid + loupe + custom-wgpu-viewport spike; no `spikes/pelt-gpui`
+exists, see ADR-0006's Hard-gate-1 early exit) — not
+production code; don't build on top of a spike crate, and expect all of these to be deleted once
+#20 lands the real crate layout. **Proposed real package map (from ADR-0004, pending #20):**
 `nicti-claw` (module registry + dylib loader — generalizes `spikes/sheath`), then one crate per
 domain implementing its traits: `nicti-decode`, `nicti-color`, `nicti-lens`, `nicti-render`
 (Tapetum's future home, #44), `nicti-ai`, `nicti-export`, `nicti-catalog` (#22's future home).
