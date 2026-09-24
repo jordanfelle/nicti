@@ -14,7 +14,10 @@ pub struct Percentiles {
 /// Computes p50/p95/max over a set of measured runs. `samples` should already exclude the
 /// discarded warm-up run, per `docs/benchmarks.md`'s methodology.
 pub fn percentiles(samples: &[Duration]) -> Percentiles {
-    assert!(!samples.is_empty(), "percentiles() needs at least one sample");
+    assert!(
+        !samples.is_empty(),
+        "percentiles() needs at least one sample"
+    );
     let mut ms: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
     ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p = |q: f64| -> f64 {

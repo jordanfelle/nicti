@@ -76,29 +76,61 @@ impl Workload for LmdbEngine {
     fn open(path: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(path)?;
         let env = unsafe {
-            EnvOpenOptions::new().map_size(MAP_SIZE).max_dbs(8).open(path)?
+            EnvOpenOptions::new()
+                .map_size(MAP_SIZE)
+                .max_dbs(8)
+                .open(path)?
         };
         let mut wtxn = env.write_txn()?;
-        let assets = env.database_options().types::<Bytes, Bytes>().name("assets").create(&mut wtxn)?;
-        let by_date =
-            env.database_options().types::<Bytes, Bytes>().name("by_date").create(&mut wtxn)?;
-        let by_folder =
-            env.database_options().types::<Bytes, Bytes>().name("by_folder").create(&mut wtxn)?;
-        let by_keyword =
-            env.database_options().types::<Bytes, Bytes>().name("by_keyword").create(&mut wtxn)?;
-        let by_model =
-            env.database_options().types::<Bytes, Bytes>().name("by_model").create(&mut wtxn)?;
-        let by_rating =
-            env.database_options().types::<Bytes, Bytes>().name("by_rating").create(&mut wtxn)?;
+        let assets = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("assets")
+            .create(&mut wtxn)?;
+        let by_date = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("by_date")
+            .create(&mut wtxn)?;
+        let by_folder = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("by_folder")
+            .create(&mut wtxn)?;
+        let by_keyword = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("by_keyword")
+            .create(&mut wtxn)?;
+        let by_model = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("by_model")
+            .create(&mut wtxn)?;
+        let by_rating = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("by_rating")
+            .create(&mut wtxn)?;
         wtxn.commit()?;
-        Ok(Self { env, assets, by_date, by_folder, by_keyword, by_model, by_rating, path: path.to_path_buf() })
+        Ok(Self {
+            env,
+            assets,
+            by_date,
+            by_folder,
+            by_keyword,
+            by_model,
+            by_rating,
+            path: path.to_path_buf(),
+        })
     }
 
     fn bulk_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {
         let mut wtxn = self.env.write_txn()?;
         for a in assets {
             let stored: StoredAsset = a.into();
-            self.assets.put(&mut wtxn, &id_key(a.id), &bincode::serialize(&stored)?)?;
+            self.assets
+                .put(&mut wtxn, &id_key(a.id), &bincode::serialize(&stored)?)?;
             self.by_date.put(
                 &mut wtxn,
                 &composite_key(a.capture_date.as_bytes(), a.id),
@@ -114,7 +146,8 @@ impl Workload for LmdbEngine {
                 &composite_key(a.model.as_bytes(), a.id),
                 &id_key(a.id),
             )?;
-            self.by_rating.put(&mut wtxn, &composite_key(&[a.rating], a.id), &id_key(a.id))?;
+            self.by_rating
+                .put(&mut wtxn, &composite_key(&[a.rating], a.id), &id_key(a.id))?;
             for kw in &a.keywords {
                 self.by_keyword.put(
                     &mut wtxn,
@@ -150,10 +183,16 @@ impl Workload for LmdbEngine {
             .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?;
         let mut stored: StoredAsset = bincode::deserialize(raw)?;
         let old_rating = stored.rating;
-        self.by_rating.delete(&mut wtxn, &composite_key(&[old_rating], asset_id))?;
+        self.by_rating
+            .delete(&mut wtxn, &composite_key(&[old_rating], asset_id))?;
         stored.rating = rating;
-        self.assets.put(&mut wtxn, &id_key(asset_id), &bincode::serialize(&stored)?)?;
-        self.by_rating.put(&mut wtxn, &composite_key(&[rating], asset_id), &id_key(asset_id))?;
+        self.assets
+            .put(&mut wtxn, &id_key(asset_id), &bincode::serialize(&stored)?)?;
+        self.by_rating.put(
+            &mut wtxn,
+            &composite_key(&[rating], asset_id),
+            &id_key(asset_id),
+        )?;
         wtxn.commit()?;
         Ok(())
     }
@@ -168,10 +207,16 @@ impl Workload for LmdbEngine {
                 .to_vec();
             let mut stored: StoredAsset = bincode::deserialize(&raw)?;
             let old_rating = stored.rating;
-            self.by_rating.delete(&mut wtxn, &composite_key(&[old_rating], *asset_id))?;
+            self.by_rating
+                .delete(&mut wtxn, &composite_key(&[old_rating], *asset_id))?;
             stored.rating = *rating;
-            self.assets.put(&mut wtxn, &id_key(*asset_id), &bincode::serialize(&stored)?)?;
-            self.by_rating.put(&mut wtxn, &composite_key(&[*rating], *asset_id), &id_key(*asset_id))?;
+            self.assets
+                .put(&mut wtxn, &id_key(*asset_id), &bincode::serialize(&stored)?)?;
+            self.by_rating.put(
+                &mut wtxn,
+                &composite_key(&[*rating], *asset_id),
+                &id_key(*asset_id),
+            )?;
         }
         wtxn.commit()?;
         Ok(())
@@ -180,7 +225,11 @@ impl Workload for LmdbEngine {
     fn tag_keyword(&mut self, asset_ids: &[u64], keyword: &str) -> anyhow::Result<()> {
         let mut wtxn = self.env.write_txn()?;
         for id in asset_ids {
-            self.by_keyword.put(&mut wtxn, &composite_key(keyword.as_bytes(), *id), &id_key(*id))?;
+            self.by_keyword.put(
+                &mut wtxn,
+                &composite_key(keyword.as_bytes(), *id),
+                &id_key(*id),
+            )?;
         }
         wtxn.commit()?;
         Ok(())
@@ -260,7 +309,10 @@ impl Workload for LmdbEngine {
 
     fn folder_subtree_count(&self, folder_prefix: &str) -> anyhow::Result<u64> {
         let rtxn = self.env.read_txn()?;
-        let count = self.by_folder.prefix_iter(&rtxn, folder_prefix.as_bytes())?.count() as u64;
+        let count = self
+            .by_folder
+            .prefix_iter(&rtxn, folder_prefix.as_bytes())?
+            .count() as u64;
         Ok(count)
     }
 
@@ -284,7 +336,10 @@ impl Workload for LmdbEngine {
         // artificial handicap.
         let lo = composite_key(&[q.min_rating], 0);
         let hi = composite_key(&[q.max_rating], u64::MAX);
-        let bounds = (std::ops::Bound::Included(lo.as_slice()), std::ops::Bound::Included(hi.as_slice()));
+        let bounds = (
+            std::ops::Bound::Included(lo.as_slice()),
+            std::ops::Bound::Included(hi.as_slice()),
+        );
         let mut out = Vec::new();
         for r in self.by_rating.range(&rtxn, &bounds)? {
             let (_, v) = r?;
@@ -320,7 +375,8 @@ impl Workload for LmdbEngine {
 
     fn backup(&self, dest: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dest)?;
-        self.env.copy_to_path(dest.join("data.mdb"), heed::CompactionOption::Enabled)?;
+        self.env
+            .copy_to_path(dest.join("data.mdb"), heed::CompactionOption::Enabled)?;
         Ok(())
     }
 

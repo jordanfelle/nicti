@@ -50,7 +50,10 @@ impl Workload for DuckDbEngine {
     fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn, path: path.to_path_buf() })
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+        })
     }
 
     fn bulk_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {
@@ -177,7 +180,11 @@ impl Workload for DuckDbEngine {
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, u8>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u8>(2)?,
+            ))
         })?;
 
         let mut counts = FacetCounts::default();
@@ -199,7 +206,9 @@ impl Workload for DuckDbEngine {
             .conn
             .prepare("SELECT id FROM assets ORDER BY capture_date DESC LIMIT ?1 OFFSET ?2")?;
         let ids = stmt
-            .query_map(params![limit as i64, offset as i64], |row| row.get::<_, i64>(0))?
+            .query_map(params![limit as i64, offset as i64], |row| {
+                row.get::<_, i64>(0)
+            })?
             .map(|r| r.map(|id: i64| id as u64))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ids)
@@ -219,7 +228,9 @@ impl Workload for DuckDbEngine {
             .conn
             .prepare("SELECT DISTINCT asset_id FROM asset_keywords WHERE keyword LIKE ?1")?;
         let ids = stmt
-            .query_map(params![format!("{keyword_prefix}%")], |row| row.get::<_, i64>(0))?
+            .query_map(params![format!("{keyword_prefix}%")], |row| {
+                row.get::<_, i64>(0)
+            })?
             .map(|r| r.map(|id: i64| id as u64))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ids)
@@ -232,7 +243,14 @@ impl Workload for DuckDbEngine {
         )?;
         let ids = stmt
             .query_map(
-                params![q.min_rating, q.max_rating, q.min_iso, q.max_iso, q.date_from, q.date_to],
+                params![
+                    q.min_rating,
+                    q.max_rating,
+                    q.min_iso,
+                    q.max_iso,
+                    q.date_from,
+                    q.date_to
+                ],
                 |row| row.get::<_, i64>(0),
             )?
             .map(|r| r.map(|id: i64| id as u64))
@@ -241,7 +259,9 @@ impl Workload for DuckDbEngine {
     }
 
     fn filename_search(&self, substr: &str) -> anyhow::Result<Vec<u64>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM assets WHERE filename LIKE ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM assets WHERE filename LIKE ?1")?;
         let ids = stmt
             .query_map(params![format!("%{substr}%")], |row| row.get::<_, i64>(0))?
             .map(|r| r.map(|id: i64| id as u64))
@@ -259,7 +279,8 @@ impl Workload for DuckDbEngine {
         // literal `'` (plausible on a real filesystem) would otherwise break the generated SQL.
         std::fs::create_dir_all(dest)?;
         let escaped = dest.to_string_lossy().replace('\'', "''");
-        self.conn.execute(&format!("EXPORT DATABASE '{escaped}' (FORMAT PARQUET)"), [])?;
+        self.conn
+            .execute(&format!("EXPORT DATABASE '{escaped}' (FORMAT PARQUET)"), [])?;
         Ok(())
     }
 
@@ -267,7 +288,9 @@ impl Workload for DuckDbEngine {
         // DuckDB has no PRAGMA integrity_check equivalent exposed via the Rust API at this
         // version; a full scan across every column is the closest self-check available without
         // shelling out to the CLI's `PRAGMA database_list`/`.recover` tooling.
-        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))?;
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))?;
         Ok(count >= 0)
     }
 }

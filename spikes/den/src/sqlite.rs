@@ -66,7 +66,10 @@ impl Workload for SqliteEngine {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn, path: path.to_path_buf() })
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+        })
     }
 
     fn bulk_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {
@@ -177,8 +180,7 @@ impl Workload for SqliteEngine {
         // trigger even with `case_sensitive_like` on in this codebase's measurements — GLOB's
         // prefix scan is unconditional, not pragma-dependent, and EXISTS never materializes the
         // fanned-out join.
-        let mut sql =
-            String::from("SELECT a.id, a.model, a.rating FROM assets a WHERE 1=1");
+        let mut sql = String::from("SELECT a.id, a.model, a.rating FROM assets a WHERE 1=1");
         if model.is_some() {
             sql.push_str(" AND a.model = ?1");
         }
@@ -219,7 +221,9 @@ impl Workload for SqliteEngine {
             .conn
             .prepare("SELECT id FROM assets ORDER BY capture_date DESC LIMIT ?1 OFFSET ?2")?;
         let ids = stmt
-            .query_map(params![limit as i64, offset as i64], |row| row.get::<_, i64>(0))?
+            .query_map(params![limit as i64, offset as i64], |row| {
+                row.get::<_, i64>(0)
+            })?
             .map(|r| r.map(|id: i64| id as u64))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ids)
@@ -239,7 +243,9 @@ impl Workload for SqliteEngine {
             .conn
             .prepare("SELECT DISTINCT asset_id FROM asset_keywords WHERE keyword GLOB ?1")?;
         let ids = stmt
-            .query_map(params![format!("{keyword_prefix}*")], |row| row.get::<_, i64>(0))?
+            .query_map(params![format!("{keyword_prefix}*")], |row| {
+                row.get::<_, i64>(0)
+            })?
             .map(|r| r.map(|id: i64| id as u64))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ids)
@@ -252,7 +258,14 @@ impl Workload for SqliteEngine {
         )?;
         let ids = stmt
             .query_map(
-                params![q.min_rating, q.max_rating, q.min_iso, q.max_iso, q.date_from, q.date_to],
+                params![
+                    q.min_rating,
+                    q.max_rating,
+                    q.min_iso,
+                    q.max_iso,
+                    q.date_from,
+                    q.date_to
+                ],
                 |row| row.get::<_, i64>(0),
             )?
             .map(|r| r.map(|id: i64| id as u64))
@@ -261,7 +274,9 @@ impl Workload for SqliteEngine {
     }
 
     fn filename_search(&self, substr: &str) -> anyhow::Result<Vec<u64>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM assets WHERE filename LIKE ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM assets WHERE filename LIKE ?1")?;
         let ids = stmt
             .query_map(params![format!("%{substr}%")], |row| row.get::<_, i64>(0))?
             .map(|r| r.map(|id: i64| id as u64))
@@ -271,13 +286,15 @@ impl Workload for SqliteEngine {
 
     fn backup(&self, dest: &Path) -> anyhow::Result<()> {
         // VACUUM INTO: online, no exclusive lock on the live WAL file, no separate "optimize" step.
-        self.conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
+        self.conn
+            .execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
         Ok(())
     }
 
     fn integrity_check(&self) -> anyhow::Result<bool> {
-        let result: String =
-            self.conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let result: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         Ok(result == "ok")
     }
 }

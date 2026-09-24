@@ -70,7 +70,13 @@ enum Engine {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Gen { seed, scale, manifest, out, verify_determinism } => cmd_gen(
+        Cmd::Gen {
+            seed,
+            scale,
+            manifest,
+            out,
+            verify_determinism,
+        } => cmd_gen(
             seed,
             match scale {
                 Scale::Full600k => 600_000,
@@ -80,7 +86,12 @@ fn main() -> anyhow::Result<()> {
             out,
             verify_determinism,
         ),
-        Cmd::Bench { engine, catalog, out_dir, runs } => cmd_bench(engine, catalog, out_dir, runs),
+        Cmd::Bench {
+            engine,
+            catalog,
+            out_dir,
+            runs,
+        } => cmd_bench(engine, catalog, out_dir, runs),
         Cmd::Crash { engine, iterations } => cmd_crash(engine, iterations),
     }
 }
@@ -92,15 +103,22 @@ fn cmd_gen(
     out: PathBuf,
     verify_determinism: bool,
 ) -> anyhow::Result<()> {
-    let opts =
-        GenOptions { seed, asset_count, folder_count: (asset_count / 30).max(1), manifest_path: manifest };
+    let opts = GenOptions {
+        seed,
+        asset_count,
+        folder_count: (asset_count / 30).max(1),
+        manifest_path: manifest,
+    };
     let assets = generate_catalog(&opts);
     let hash = catalog_hash(&assets);
 
     if verify_determinism {
         let assets2 = generate_catalog(&opts);
         let hash2 = catalog_hash(&assets2);
-        assert_eq!(hash, hash2, "generator is not deterministic for the same seed");
+        assert_eq!(
+            hash, hash2,
+            "generator is not deterministic for the same seed"
+        );
         println!("determinism OK: {hash}");
         return Ok(());
     }
@@ -164,7 +182,9 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         )?,
     }
 
-    let out_path = out_dir.join(format!("{:?}.json", engine).to_lowercase()).with_extension("json");
+    let out_path = out_dir
+        .join(format!("{:?}.json", engine).to_lowercase())
+        .with_extension("json");
     std::fs::write(&out_path, serde_json::to_string_pretty(&results)?)?;
     println!("wrote {}", out_path.display());
     Ok(())
@@ -179,7 +199,10 @@ fn bench_engine<E: Workload>(
     let cold_open_start = Instant::now();
     let mut engine = E::open(path)?;
     let cold_open = cold_open_start.elapsed();
-    results.insert("cold_open_ms".into(), (cold_open.as_secs_f64() * 1000.0).into());
+    results.insert(
+        "cold_open_ms".into(),
+        (cold_open.as_secs_f64() * 1000.0).into(),
+    );
 
     let ingest_start = Instant::now();
     engine.bulk_ingest(assets)?;
@@ -217,19 +240,34 @@ fn bench_engine<E: Workload>(
     // store-specific weakness, and isn't what this gate measures.
     let faceted_filter = time_op!(
         runs,
-        engine.faceted_filter(Some("NIKON Z 8"), Some(3), Some(den::gen::BENCH_LEAF_KEYWORD))
+        engine.faceted_filter(
+            Some("NIKON Z 8"),
+            Some(3),
+            Some(den::gen::BENCH_LEAF_KEYWORD)
+        )
     );
-    results.insert("faceted_filter".into(), serde_json::to_value(faceted_filter)?);
+    results.insert(
+        "faceted_filter".into(),
+        serde_json::to_value(faceted_filter)?,
+    );
 
     let sort_page = time_op!(runs, engine.sort_by_date_page(0, 500));
     results.insert("sort_by_date_page".into(), serde_json::to_value(sort_page)?);
 
     let folder_count = time_op!(runs, engine.folder_subtree_count("NVMe/2024"));
-    results.insert("folder_subtree_count".into(), serde_json::to_value(folder_count)?);
+    results.insert(
+        "folder_subtree_count".into(),
+        serde_json::to_value(folder_count)?,
+    );
 
-    let keyword_query =
-        time_op!(runs, engine.keyword_subtree_query(den::gen::BENCH_LEAF_KEYWORD));
-    results.insert("keyword_subtree_query".into(), serde_json::to_value(keyword_query)?);
+    let keyword_query = time_op!(
+        runs,
+        engine.keyword_subtree_query(den::gen::BENCH_LEAF_KEYWORD)
+    );
+    results.insert(
+        "keyword_subtree_query".into(),
+        serde_json::to_value(keyword_query)?,
+    );
 
     let range = RangeQuery {
         min_rating: 3,
@@ -243,7 +281,10 @@ fn bench_engine<E: Workload>(
     results.insert("range_query".into(), serde_json::to_value(range_query)?);
 
     let filename_search = time_op!(runs, engine.filename_search("00001"));
-    results.insert("filename_search".into(), serde_json::to_value(filename_search)?);
+    results.insert(
+        "filename_search".into(),
+        serde_json::to_value(filename_search)?,
+    );
 
     // A fresh destination per call: most engines' online-backup API refuses to write over an
     // existing file (SQLite's VACUUM INTO does), so reusing one path would silently no-op or

@@ -226,13 +226,17 @@ ran, the CONFIRMED/SPECULATIVE split (or "no findings"), and how any real findin
 ```bash
 cargo test --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features
-cargo fmt --check
+cargo fmt --all -- --check
 ```
 
-**Always pass `--workspace`** for `test`/`clippy` in this repo: the root `Cargo.toml` is both the
-workspace root and a real package (`nicti`), not a virtual manifest, so a bare `cargo test`/`cargo
-clippy` without `-p`/`--workspace` silently checks only the root crate and skips `spikes/*` and
-`bench/whisker` entirely — confirmed as a real gap (CI's own `clippy`/`test` jobs had been doing
+**Always pass `--workspace`** for `test`/`clippy`, and **`--all`** for `fmt`, in this repo: the
+root `Cargo.toml` is both the workspace root and a real package (`nicti`), not a virtual manifest,
+so a bare `cargo test`/`cargo clippy` without `-p`/`--workspace`, or a bare `cargo fmt --check`
+without `--all`, silently checks only the root crate and skips `spikes/*` and `bench/whisker`
+entirely — this exact command (`cargo fmt --check`, no `--all`) used to be what this file itself
+documented above, and following it produced a false-negative "clean" result on a real PR whose
+CI then failed `cargo fmt` on six files in `spikes/den` — confirmed as a real gap (CI's own
+`clippy`/`test` jobs had been doing
 exactly this since `spikes/pawprint` landed, until fixed alongside #19/ADR-0004).
 
 ## CI
