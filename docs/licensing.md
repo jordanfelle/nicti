@@ -44,13 +44,26 @@ already satisfies `deny.toml`'s allowlist). `ash` (raw Vulkan, pulled in transit
 `wgpu-hal`'s Vulkan backend, not used directly by `glint`) is also MIT OR Apache-2.0. `pollster`,
 `half`, `bytemuck` (spike-only helper crates) are the same. `cudarc` v0.19.9 (the CUDA comparison
 harness, compiled via its `fallback-dynamic-loading` feature so it never links against a CUDA
-toolkit at build time) is MIT OR Apache-2.0. **No new native-library or `deny.toml` entries
-needed** — every one of these resolved to an already-allowed license, confirmed by `cargo deny
-check` passing clean. The one native/runtime component this spike touches, NVRTC, is already
-covered by the existing "NVIDIA runtime (CUDA/cuDNN/TensorRT)" row below — `cudarc` dynamically
-loads `libnvrtc.so`/`nvrtc64_*.dll` at runtime (never bundled by the spike itself), which is the
-same "user-installed prerequisite, detected then used" pattern that row already describes for the
-CUDA driver.
+toolkit at build time) is MIT OR Apache-2.0.
+
+**One new `deny.toml` entry was needed, but not caught until CI ran** (a local `cargo deny check`
+without `--workspace --all-features` — the exact flags CI's job passes, per its own comment in
+`ci.yml` — silently only checks the root `nicti` package's own deps, missing `spikes/*` entirely;
+this was a real gap in this PR's own local verification, not a false alarm): `slotmap` v1.1.1
+(pulled in transitively via `glow`, which `wgpu-hal`'s GLES backend depends on even though `glint`
+never selects that backend directly — `[graph] all-features = true` in `deny.toml` resolves the
+full feature-enabled graph regardless) carries **Zlib as its sole license**, no MIT/Apache-2.0
+OR-arm the way `glow` itself has. Same for `foldhash` (pulled in via `hashbrown`, itself pulled in
+by the `wasmtime`/`cranelift` toolchain already in the tree for `spikes/sheath`'s WASM spike,
+ADR-0004 — `--workspace` is what surfaces this, since it unifies the whole workspace's dependency
+graph, not just this one spike's). Both added `Zlib` to `deny.toml`'s `allow` list, same category
+as the existing `ISC` precedent: OSI-approved, FSF Free/Libre, no copyleft terms[^s3].
+
+The one native/runtime component this spike touches, NVRTC, is already covered by the existing
+"NVIDIA runtime (CUDA/cuDNN/TensorRT)" row below — `cudarc` dynamically loads
+`libnvrtc.so`/`nvrtc64_*.dll` at runtime (never bundled by the spike itself), which is the same
+"user-installed prerequisite, detected then used" pattern that row already describes for the CUDA
+driver.
 
 ## Native libraries
 
@@ -166,3 +179,4 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^m10]: Ultralytics YOLO AGPL-3.0 — https://github.com/ultralytics/ultralytics/blob/main/LICENSE — verified 2026-09-23
 [^s1]: `libloading` v0.9.0 ISC license — `cargo metadata`'s resolved `license` field against this crate's own `Cargo.toml`, cross-checked against https://docs.rs/libloading/latest/libloading/ — verified 2026-09-23
 [^s2]: `wasmtime` v49.0.0 and `wat` v1.259.0 license fields — `cargo metadata`'s resolved `license` field, cross-checked against https://github.com/bytecodealliance/wasmtime (repo-wide Apache-2.0 WITH LLVM-exception, standard for Bytecode Alliance projects) — verified 2026-09-23
+[^s3]: `slotmap` v1.1.1 and `foldhash` v0.2.0 Zlib licenses — `cargo metadata`'s resolved `license` field via `cargo deny --workspace --all-features check licenses` against each crate's own `Cargo.toml`, cross-checked against https://crates.io/crates/slotmap and https://crates.io/crates/foldhash — verified 2026-09-24

@@ -18,6 +18,12 @@ allow = [
     # ISC: added for `libloading` (ADR-0004/#19) -- functionally MIT-equivalent, a short
     # permissive license with no copyleft terms; OSI-approved and FSF Free/Libre.
     "ISC",
+    # Zlib: added for `foldhash` (wasmtime/cranelift's `hashbrown`, ADR-0004/#19) and `slotmap`
+    # (`glow`, wgpu-hal's GLES backend, ADR-0005/#16) -- both carry Zlib as their *sole* license
+    # (no MIT/Apache-2.0 OR-arm), so unlike bytemuck/glow/raw-window-handle (which also list Zlib
+    # but pass today via their own MIT/Apache-2.0 arm) these two needed it added outright. Same
+    # permissive-with-no-copyleft-terms category as ISC above: OSI-approved, FSF Free/Libre.
+    "Zlib",
 ]
 # Deliberately NOT listing any LGPL/GPL variant, even for r-efi's "MIT OR Apache-2.0 OR
 # LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate
