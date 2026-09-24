@@ -1,22 +1,39 @@
-//! SQLite (WAL mode) backend. Keyword hierarchy is a materialized path with a covering index,
-//! rather than a closure table — cheaper to maintain on write. Prefix scans (keyword, folder
-//! path) use `GLOB 'prefix*'`, not `LIKE 'prefix%'`: measured here, this build's LIKE-to-index
-//! transform did not trigger even with `PRAGMA case_sensitive_like` on (confirmed via `EXPLAIN
-//! QUERY PLAN` — it stayed a full-table `SCAN` either way), while `GLOB`'s prefix scan is
-//! unconditional and always used the index. A broad top-of-hierarchy keyword prefix (matching
-//! most of the corpus) is inherently a near-full-scan regardless of engine — see #67's ADR for
-//! that finding; the benchmark exercises a realistic single-leaf filter instead. Facet counts are
-//! recomputed from the matching set at query time rather than trigger-maintained aggregate
-//! tables, since #67's own exit criteria only requires the counts be correct and fast, not
-//! incrementally maintained; a trigger-maintained version is a tiebreaker-stage follow-up if this
-//! is too slow at production scale.
+//! #103 candidate 1: a SQLite-native, trigger-maintained facet-count table. No new dependency, no
+//! second store — SQLite triggers on `assets`/`asset_keywords` keep a denormalized
+//! `facet_counts(model, rating, keyword) -> cnt` table in sync as rows are inserted, rated, or
+//! (for completeness/hygiene, even though this benchmark never calls it) keyword-deleted.
+//! `faceted_filter` then reads that small aggregate table instead of scanning the matching set of
+//! `assets` rows from scratch — see `sqlite.rs`'s own module doc, which names this exact
+//! trigger-maintained approach as the "tiebreaker-stage follow-up" ADR-0008 left unattempted.
+//!
+//! Schema is otherwise identical to `sqlite.rs` (same tables/indexes/pragmas) so this is an
+//! apples-to-apples comparison, not a differently-tuned SQLite. Every op other than
+//! `faceted_filter` behaves exactly like `sqlite.rs`'s implementation (it *is* the same SQL),
+//! except that `assets`/`asset_keywords` writes now also fire the maintenance triggers below.
+//!
+//! **Correctness, precisely:** `TriggerFacetEngine::verify_against_naive` recomputes facet counts
+//! from scratch (via `sqlite::SqliteEngine::naive_faceted_filter`, the same query `sqlite.rs`
+//! itself uses) and compares against the trigger-maintained table's answer for the same query.
+//! This is checked in `tests/facet_cache.rs`, not just asserted in this module's own doc comment.
+//!
+//! **Known, real scope limitation — found by that same test suite, not just theorized:** because
+//! `facet_counts`'s grain is `(model, rating, keyword)`, `SUM(cnt)` with `keyword_prefix: None`
+//! does **not** equal the true count of distinct matching assets — an asset with 2 keywords is
+//! counted twice, an asset with 0 keywords isn't counted at all. This only matches `sqlite.rs`'s
+//! own (per-asset) semantics when `keyword_prefix` narrows to a *specific* value, which is exactly
+//! the query shape #103 scopes this cache to ("serves *only* faceted-filter-with-counts", the
+//! keyword-narrowed benchmark case) and the only shape this candidate is claimed to support. A
+//! `keyword_prefix: None` call is intentionally left uncorrected rather than silently patched
+//! around — see `tests/facet_cache.rs`'s dedicated test asserting this mismatch, so it stays a
+//! documented, verified gap instead of a latent surprise for whoever wires this into #22.
 
 use crate::gen::{Asset, Flag};
+use crate::sqlite::SqliteEngine;
 use crate::workload::{FacetCounts, RangeQuery, Workload};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 
-pub struct SqliteEngine {
+pub struct TriggerFacetEngine {
     conn: Connection,
     path: PathBuf,
 }
@@ -50,6 +67,67 @@ CREATE INDEX IF NOT EXISTS idx_assets_model_rating ON assets(model, rating);
 CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets(filename);
 CREATE INDEX IF NOT EXISTS idx_keywords_asset ON asset_keywords(asset_id);
 CREATE INDEX IF NOT EXISTS idx_keywords_kw ON asset_keywords(keyword);
+
+-- The trigger-maintained facet-count aggregate. Grain is (model, rating, keyword): one row per
+-- distinct combination that actually occurs, not one row per asset. A faceted_filter narrowed to
+-- one specific keyword leaf (the realistic case this benchmark measures, see gen.rs's
+-- BENCH_LEAF_KEYWORD doc) only ever touches the handful of rows for that one keyword value across
+-- ratings/models, regardless of how many assets carry it — that's the whole speed win.
+CREATE TABLE IF NOT EXISTS facet_counts (
+    model TEXT NOT NULL,
+    rating INTEGER NOT NULL,
+    keyword TEXT NOT NULL,
+    cnt INTEGER NOT NULL,
+    PRIMARY KEY (model, rating, keyword)
+);
+CREATE INDEX IF NOT EXISTS idx_facet_counts_model_keyword ON facet_counts(model, keyword);
+
+-- Maintenance trigger 1: a new asset-keyword row. Fires on both `bulk_ingest` (asset row is
+-- always inserted before its keyword rows in the same transaction, so the join sees the correct
+-- model/rating already) and `tag_keyword`.
+CREATE TRIGGER IF NOT EXISTS trg_facet_kw_insert AFTER INSERT ON asset_keywords
+BEGIN
+    INSERT INTO facet_counts (model, rating, keyword, cnt)
+    SELECT a.model, a.rating, NEW.keyword, 1
+    FROM assets a WHERE a.id = NEW.asset_id
+    ON CONFLICT(model, rating, keyword) DO UPDATE SET cnt = cnt + 1;
+END;
+
+-- Maintenance trigger 2: a keyword removed from an asset. Not exercised by this benchmark (no op
+-- deletes a keyword) but included for correctness completeness — an incomplete trigger set would
+-- be a correctness bug waiting to happen the first time a real delete path is added.
+CREATE TRIGGER IF NOT EXISTS trg_facet_kw_delete AFTER DELETE ON asset_keywords
+BEGIN
+    UPDATE facet_counts SET cnt = cnt - 1
+    WHERE model = (SELECT model FROM assets WHERE id = OLD.asset_id)
+      AND rating = (SELECT rating FROM assets WHERE id = OLD.asset_id)
+      AND keyword = OLD.keyword;
+    DELETE FROM facet_counts
+    WHERE cnt <= 0
+      AND model = (SELECT model FROM assets WHERE id = OLD.asset_id)
+      AND rating = (SELECT rating FROM assets WHERE id = OLD.asset_id)
+      AND keyword = OLD.keyword;
+END;
+
+-- Maintenance trigger 3: a rating change (write_rating, rate_burst). Moves every keyword this
+-- asset already has from its old (model, old_rating) bucket to the new one. Bounded by the
+-- asset's own keyword count (0-4 in this generator), not by catalog size — this is the per-write
+-- cost that must clear the <=5ms/<=16ms point-update gates from ADR-0008.
+CREATE TRIGGER IF NOT EXISTS trg_facet_rating_update AFTER UPDATE OF rating ON assets
+WHEN OLD.rating IS NOT NEW.rating
+BEGIN
+    UPDATE facet_counts SET cnt = cnt - 1
+    WHERE model = OLD.model AND rating = OLD.rating
+      AND keyword IN (SELECT keyword FROM asset_keywords WHERE asset_id = NEW.id);
+    DELETE FROM facet_counts
+    WHERE cnt <= 0 AND model = OLD.model AND rating = OLD.rating
+      AND keyword IN (SELECT keyword FROM asset_keywords WHERE asset_id = NEW.id);
+
+    INSERT INTO facet_counts (model, rating, keyword, cnt)
+    SELECT NEW.model, NEW.rating, keyword, 1
+    FROM asset_keywords WHERE asset_id = NEW.id
+    ON CONFLICT(model, rating, keyword) DO UPDATE SET cnt = cnt + 1;
+END;
 "#;
 
 fn flag_str(f: Flag) -> &'static str {
@@ -60,7 +138,7 @@ fn flag_str(f: Flag) -> &'static str {
     }
 }
 
-impl Workload for SqliteEngine {
+impl Workload for TriggerFacetEngine {
     fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -130,7 +208,6 @@ impl Workload for SqliteEngine {
                 flag_str(a.flag),
             ])?;
         }
-        // No COMMIT. The transaction stays open; dropped uncommitted when the caller forgets `self`.
         Ok(())
     }
 
@@ -168,36 +245,43 @@ impl Workload for SqliteEngine {
         Ok(())
     }
 
+    /// Reads the trigger-maintained `facet_counts` aggregate instead of scanning `assets` — the
+    /// entire point of this candidate. Placeholders are built dynamically, one `?N` per clause
+    /// actually appended, and only that many values are bound — a fixed `?1`/`?2`/`?3` literal
+    /// with a fixed 3-value `params![...]` looked fine until a real caller (this module's own
+    /// test suite, checking the *unfiltered* facet count) passed all three filters as `None`: with
+    /// zero clauses appended, the SQL has zero declared placeholders, but a fixed 3-value
+    /// `params!` literal still supplied three — `rusqlite` rejected that outright ("Wrong number
+    /// of parameters passed to query"), rather than silently tolerating it. See
+    /// `sqlite.rs::naive_faceted_filter`'s doc comment for the full account of this bug, found and
+    /// fixed while writing #103's tests.
     fn faceted_filter(
         &self,
         model: Option<&str>,
         min_rating: Option<u8>,
         keyword_prefix: Option<&str>,
     ) -> anyhow::Result<FacetCounts> {
-        // EXISTS + GLOB rather than a JOIN + LIKE + DISTINCT: a JOIN on asset_keywords fans out
-        // one row per keyword per asset before the DISTINCT can collapse it back down, and (see
-        // sqlite.rs's module doc / ADR-0008) SQLite's LIKE-to-index-range-scan transform did not
-        // trigger even with `case_sensitive_like` on in this codebase's measurements — GLOB's
-        // prefix scan is unconditional, not pragma-dependent, and EXISTS never materializes the
-        // fanned-out join.
-        let mut sql = String::from("SELECT a.id, a.model, a.rating FROM assets a WHERE 1=1");
-        if model.is_some() {
-            sql.push_str(" AND a.model = ?1");
+        let mut sql = String::from("SELECT model, rating, SUM(cnt) FROM facet_counts WHERE 1=1");
+        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(m) = model {
+            bound.push(Box::new(m.to_string()));
+            sql.push_str(&format!(" AND model = ?{}", bound.len()));
         }
-        if min_rating.is_some() {
-            sql.push_str(" AND a.rating >= ?2");
+        if let Some(r) = min_rating {
+            bound.push(Box::new(r));
+            sql.push_str(&format!(" AND rating >= ?{}", bound.len()));
         }
-        if keyword_prefix.is_some() {
-            sql.push_str(
-                " AND EXISTS (SELECT 1 FROM asset_keywords k WHERE k.asset_id = a.id \
-                 AND k.keyword GLOB ?3)",
-            );
+        if let Some(kw) = keyword_prefix {
+            bound.push(Box::new(format!("{kw}*")));
+            sql.push_str(&format!(" AND keyword GLOB ?{}", bound.len()));
         }
+        sql.push_str(" GROUP BY model, rating");
+
         let mut stmt = self.conn.prepare(&sql)?;
-        let kw_glob = keyword_prefix.map(|p| format!("{p}*"));
+        let param_refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(
-            params![model, min_rating, kw_glob],
-            |row| -> rusqlite::Result<(i64, String, u8)> {
+            param_refs.as_slice(),
+            |row| -> rusqlite::Result<(String, u8, i64)> {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             },
         )?;
@@ -206,10 +290,11 @@ impl Workload for SqliteEngine {
         let mut by_model = std::collections::HashMap::new();
         let mut by_rating = std::collections::HashMap::new();
         for r in rows {
-            let (_, m, rating) = r?;
-            *by_model.entry(m).or_insert(0u64) += 1;
-            *by_rating.entry(rating).or_insert(0u64) += 1;
-            counts.total += 1;
+            let (m, rating, cnt) = r?;
+            let cnt = cnt as u64;
+            *by_model.entry(m).or_insert(0u64) += cnt;
+            *by_rating.entry(rating).or_insert(0u64) += cnt;
+            counts.total += cnt;
         }
         counts.by_model = by_model.into_iter().collect();
         counts.by_rating = by_rating.into_iter().collect();
@@ -285,7 +370,6 @@ impl Workload for SqliteEngine {
     }
 
     fn backup(&self, dest: &Path) -> anyhow::Result<()> {
-        // VACUUM INTO: online, no exclusive lock on the live WAL file, no separate "optimize" step.
         self.conn
             .execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
         Ok(())
@@ -299,84 +383,35 @@ impl Workload for SqliteEngine {
     }
 }
 
-impl SqliteEngine {
-    /// Reopens the database at the same path — used by `den crash` after a `kill -9`.
+impl TriggerFacetEngine {
     pub fn reopen(&self) -> anyhow::Result<Self> {
         Self::open(&self.path)
     }
 
-    /// Exposes the underlying connection read-only — used by `facet_cache_duckdb`'s refresh step
-    /// to run its own aggregation query directly against the source-of-truth store, and by
-    /// `facet_cache_trigger`'s correctness check to recompute facet counts from scratch the same
-    /// way this module's own `faceted_filter` does. Not part of the `Workload` trait: it's an
-    /// implementation escape hatch for other spike modules in this same crate, not a query op
-    /// under benchmark.
-    pub fn connection(&self) -> &Connection {
-        &self.conn
-    }
-
-    /// A from-scratch recomputation of facet counts, independent of any cache/trigger-maintained
-    /// table — used as the correctness oracle both `facet_cache_trigger` and `facet_cache_duckdb`
-    /// check their own (fast) answer against. Identical query shape to this module's own
-    /// `faceted_filter` above (kept as a free function here rather than duplicated in each cache
-    /// module, so there is exactly one "ground truth" implementation).
-    ///
-    /// **Placeholder-counting note (a real bug found and fixed while writing #103's tests):**
-    /// unlike `sqlite.rs`'s own `faceted_filter` above (which gets away with always-present fixed
-    /// `?1`/`?2`/`?3` text because at least one of the three is always exercised by every existing
-    /// caller), this free function is also called with **all three filters `None`** — #103's own
-    /// tests deliberately check the unfiltered facet count, not just the one benchmarked
-    /// combination. With every clause omitted, the base SQL has zero declared placeholders, but a
-    /// fixed `params![model, min_rating, kw_glob]` literal still supplies three bound values —
-    /// `rusqlite` rejects that outright ("Wrong number of parameters passed to query"), it doesn't
-    /// silently tolerate unreferenced slots the way the comment above implies for the *some
-    /// clauses present* case. Fixed the same way `duckdb_engine.rs`/`facet_cache_duckdb.rs` already
-    /// have to (DuckDB's binder never tolerated this at all): build the placeholder list
-    /// dynamically, one `?N` per clause actually appended, and bind exactly that many values.
-    pub fn naive_faceted_filter(
-        conn: &Connection,
+    /// Correctness oracle: recomputes the same query from scratch (bypassing `facet_counts`
+    /// entirely) and compares against this engine's own (trigger-fed) answer. Returns `Ok(true)`
+    /// only if every `(model, rating)` bucket total and the grand total agree exactly.
+    pub fn verify_against_naive(
+        &self,
         model: Option<&str>,
         min_rating: Option<u8>,
         keyword_prefix: Option<&str>,
-    ) -> anyhow::Result<FacetCounts> {
-        let mut sql = String::from("SELECT a.id, a.model, a.rating FROM assets a WHERE 1=1");
-        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(m) = model {
-            bound.push(Box::new(m.to_string()));
-            sql.push_str(&format!(" AND a.model = ?{}", bound.len()));
-        }
-        if let Some(r) = min_rating {
-            bound.push(Box::new(r));
-            sql.push_str(&format!(" AND a.rating >= ?{}", bound.len()));
-        }
-        if let Some(kw) = keyword_prefix {
-            bound.push(Box::new(format!("{kw}*")));
-            sql.push_str(&format!(
-                " AND EXISTS (SELECT 1 FROM asset_keywords k WHERE k.asset_id = a.id \
-                 AND k.keyword GLOB ?{})",
-                bound.len()
-            ));
-        }
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(
-            param_refs.as_slice(),
-            |row| -> rusqlite::Result<(i64, String, u8)> {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            },
-        )?;
+    ) -> anyhow::Result<bool> {
+        let fast = self.faceted_filter(model, min_rating, keyword_prefix)?;
+        let naive =
+            SqliteEngine::naive_faceted_filter(&self.conn, model, min_rating, keyword_prefix)?;
 
-        let mut counts = FacetCounts::default();
-        let mut by_model = std::collections::HashMap::new();
-        let mut by_rating = std::collections::HashMap::new();
-        for r in rows {
-            let (_, m, rating) = r?;
-            *by_model.entry(m).or_insert(0u64) += 1;
-            *by_rating.entry(rating).or_insert(0u64) += 1;
-            counts.total += 1;
-        }
-        counts.by_model = by_model.into_iter().collect();
-        counts.by_rating = by_rating.into_iter().collect();
-        Ok(counts)
+        let mut fast_by_rating = fast.by_rating.clone();
+        let mut naive_by_rating = naive.by_rating.clone();
+        fast_by_rating.sort_unstable();
+        naive_by_rating.sort_unstable();
+        let mut fast_by_model = fast.by_model.clone();
+        let mut naive_by_model = naive.by_model.clone();
+        fast_by_model.sort_unstable();
+        naive_by_model.sort_unstable();
+
+        Ok(fast.total == naive.total
+            && fast_by_rating == naive_by_rating
+            && fast_by_model == naive_by_model)
     }
 }

@@ -136,6 +136,21 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   row for the full, genuinely unresolved account, plus a new `Workload::prepare_for_forget` hook
   this investigation added. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
   Revisit post-1.0, not never.
+- **Facet-count cache for SQLite's faceted-filter gap**: `docs/adr/0011-facet-count-cache.md` —
+  **trigger-maintained SQLite facet table**, closing ADR-0008's one measured miss (faceted-filter
+  at 2M) without adding a new dependency. Clears the <100ms budget by ~33-89x at 600k/2M (well
+  under 1ms-3ms p95); the actual per-write gate ADR-0008 sets (`write_rating` ≤5ms) clears with
+  10x+ margin at both scales, though a 100-row rating burst (a proxy for #43's rate-and-advance
+  culling pattern) is a real, non-negligible added cost (9-20ms, vs. plain SQLite's <2.1ms) — found
+  via a benchmark bug (a trigger `WHEN`-guard no-op on repeated same-value writes) that a hostile
+  review caught and this ADR documents in full. Verified correct against a from-scratch
+  recomputation both at ingest and under a write burst. A DuckDB-backed read-side cache alternative
+  was also built and measured (also clears budget, but adds a second store, a real multi-second
+  refresh cost at 2M, and a demonstrated staleness window between refreshes) and is kept as the
+  explicit fallback, not adopted. Both candidates share a real, verified scope limitation: their
+  `(model, rating, keyword)`-grain facet table only answers a *keyword-narrowed* facet query
+  correctly — an unfiltered/no-keyword facet count needs a separate table or `sqlite.rs`'s own
+  from-scratch query. Unblocks #22's facet-count implementation.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -203,13 +218,15 @@ proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffoldi
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
-(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up — one
-module per candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`, behind matching
-Cargo features (`turso` is default-off, evaluated-not-adopted, kept for reference); `gen.rs`'s
-synthetic-catalog generator is reusable for future Library-scale benchmarks, see
-`docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
-to be deleted once its own ticket promotes it (as #20 just did for
-`spikes/sheath`/`spikes/dewclaw`).
+(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up and
+#103/ADR-0011's facet-count-cache follow-up — one module per candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`facet_cache_trigger.rs`/
+`facet_cache_duckdb.rs`, behind matching Cargo features (`turso` is default-off,
+evaluated-not-adopted, kept for reference; the two facet-cache modules require `sqlite`, and
+`facet_cache_duckdb` additionally requires `duckdb`); `gen.rs`'s synthetic-catalog generator is
+reusable for future Library-scale benchmarks, see `docs/benchmarks.md`) — not production code;
+don't build on top of a spike crate, and expect each to be deleted once its own ticket promotes it
+(as #20 just did for `spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.
 
