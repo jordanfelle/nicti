@@ -1,0 +1,19 @@
+[package]
+name = "glint"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway spike for #16 (ADR-0005): measured wgpu-vs-CUDA render/pixel-kernel comparison (correctness, feature/limit availability, throughput, dispatch overhead, host<->device interop cost) backing the GPU compute API decision. Not a production crate."
+
+[dependencies]
+wgpu = "30"
+pollster = "1"
+half = { version = "2", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "fallback-dynamic-loading", "cuda-12080"] }
+
+[[bin]]
+name = "glint"
+path = "src/bin/glint.rs"

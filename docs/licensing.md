@@ -34,6 +34,24 @@ same license string)[^s2]. No GPL/AGPL crate is currently in the tree. **No acti
 beyond the `ISC` addition above** — this section exists so a future `cargo deny check licenses`
 failure has a "last known clean" baseline to diff against.
 
+**Update (2026-09-23, [#16](https://github.com/jordanfelle/nicti/issues/16)'s `glint` spike,**
+`docs/adr/0005-gpu-compute-api.md`): `wgpu` v30.0.1 and its own dependency tree (`wgpu-core`,
+`wgpu-hal`, `wgpu-types`, `wgpu-naga-bridge`, `naga`, `naga-types`, `gpu-allocator`,
+`range-alloc`, `profiling`, `renderdoc-sys`, `static_assertions`, `khronos-egl`, `glow`,
+`raw-window-handle`, `ordered-float`) are all **MIT OR Apache-2.0** (a few carry a third `Zlib` OR
+arm — `bytemuck`, `glow`, `raw-window-handle` — which doesn't matter since the MIT/Apache-2.0 arm
+already satisfies `deny.toml`'s allowlist). `ash` (raw Vulkan, pulled in transitively by
+`wgpu-hal`'s Vulkan backend, not used directly by `glint`) is also MIT OR Apache-2.0. `pollster`,
+`half`, `bytemuck` (spike-only helper crates) are the same. `cudarc` v0.19.9 (the CUDA comparison
+harness, compiled via its `fallback-dynamic-loading` feature so it never links against a CUDA
+toolkit at build time) is MIT OR Apache-2.0. **No new native-library or `deny.toml` entries
+needed** — every one of these resolved to an already-allowed license, confirmed by `cargo deny
+check` passing clean. The one native/runtime component this spike touches, NVRTC, is already
+covered by the existing "NVIDIA runtime (CUDA/cuDNN/TensorRT)" row below — `cudarc` dynamically
+loads `libnvrtc.so`/`nvrtc64_*.dll` at runtime (never bundled by the spike itself), which is the
+same "user-installed prerequisite, detected then used" pattern that row already describes for the
+CUDA driver.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
