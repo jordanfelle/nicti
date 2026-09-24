@@ -20,5 +20,11 @@ pub mod duckdb_engine;
 #[cfg(feature = "lmdb")]
 pub mod lmdb;
 
+// #102's follow-up candidate, added after ADR-0008 merged — the only pure-Rust engine in this
+// comparison, matching ADR-0001's own stated preference. Module named `turso_engine`, not
+// `turso`, to avoid shadowing the external `turso` crate it wraps.
+#[cfg(feature = "turso")]
+pub mod turso_engine;
+
 pub use gen::{generate_catalog, Asset, Flag};
 pub use workload::{FacetCounts, RangeQuery, Workload};

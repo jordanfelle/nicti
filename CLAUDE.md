@@ -98,6 +98,15 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   flag (no Windows path exists in the crate); `pglite-oxide` doesn't compile against its own
   published dependency graph on any target (`wasmer-wasix` vs `virtual-net`, confirmed on two
   versions). Unblocks #22, #23, #24, #25, #71.
+- **Turso Database, evaluated post-ADR-0008**: `docs/adr/0009-turso-database-evaluation.md` —
+  **not adopted**. The only pure-Rust catalog candidate (matching ADR-0001's own stated
+  preference), with real Windows-CI and MIT-license evidence, but its pre-1.0 status shows up
+  exactly where it matters: crash-safety fails (a lock that never clears in-process, even after 5
+  seconds of retries — worse than LMDB's own crash-safety gap), two query shapes already sit at
+  the 600k-scale budget edge due to a confirmed-missing `LIKE`/`GLOB` prefix-scan optimization, and
+  — the deciding factor — a 2M-row bulk-ingest run was stopped after its WAL file passed 19GB and
+  was still climbing linearly (data that should be a few hundred MB in any other engine). ADR-0008
+  is unchanged: SQLite stays chosen, DuckDB stays the fallback. Revisit post-1.0, not never.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -165,8 +174,9 @@ proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffoldi
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
-(#67/ADR-0008's catalog-database-engine comparison — one module per surviving candidate,
-`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`, behind matching Cargo features; `gen.rs`'s
+(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up — one
+module per candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`, behind matching
+Cargo features (`turso` is default-off, evaluated-not-adopted, kept for reference); `gen.rs`'s
 synthetic-catalog generator is reusable for future Library-scale benchmarks, see
 `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for
