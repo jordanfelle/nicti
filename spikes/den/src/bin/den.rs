@@ -47,6 +47,25 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         iterations: u32,
     },
+    /// #103: benchmarks the two faceted-filter cache candidates (trigger-maintained SQLite table,
+    /// DuckDB-backed read cache) against the same catalog + write-burst workload, plus a
+    /// from-scratch correctness check for each.
+    FacetBench {
+        #[arg(long, value_enum)]
+        variant: FacetVariant,
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long, default_value = "bench-results/den")]
+        out_dir: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        runs: u32,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum, Debug)]
+enum FacetVariant {
+    Trigger,
+    DuckdbCache,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -67,6 +86,8 @@ enum Engine {
     Lmdb,
     #[cfg(feature = "turso")]
     Turso,
+    #[cfg(feature = "redb")]
+    Redb,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -95,6 +116,12 @@ fn main() -> anyhow::Result<()> {
             runs,
         } => cmd_bench(engine, catalog, out_dir, runs),
         Cmd::Crash { engine, iterations } => cmd_crash(engine, iterations),
+        Cmd::FacetBench {
+            variant,
+            catalog,
+            out_dir,
+            runs,
+        } => cmd_facet_bench(variant, catalog, out_dir, runs),
     }
 }
 
@@ -185,6 +212,13 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         #[cfg(feature = "turso")]
         Engine::Turso => bench_engine::<den::turso_engine::TursoEngine>(
             &tmp.path().join("den-turso.db"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        #[cfg(feature = "redb")]
+        Engine::Redb => bench_engine::<den::redb_engine::RedbEngine>(
+            &tmp.path().join("den-redb.redb"),
             &assets,
             runs,
             &mut results,
@@ -312,6 +346,311 @@ fn bench_engine<E: Workload>(
     Ok(())
 }
 
+fn cmd_facet_bench(
+    variant: FacetVariant,
+    catalog: PathBuf,
+    out_dir: PathBuf,
+    runs: u32,
+) -> anyhow::Result<()> {
+    let assets = load_catalog(&catalog)?;
+    std::fs::create_dir_all(&out_dir)?;
+    let tmp = tempfile::tempdir()?;
+
+    let mut results = serde_json::Map::new();
+    match variant {
+        FacetVariant::Trigger => bench_trigger_facet(
+            &tmp.path().join("den-facet-trigger.sqlite3"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        FacetVariant::DuckdbCache => bench_duckdb_facet_cache(
+            &tmp.path().join("den-facet-duckdb.sqlite3"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+    }
+
+    let out_path = out_dir.join(format!("facet_{variant:?}.json").to_lowercase());
+    std::fs::write(&out_path, serde_json::to_string_pretty(&results)?)?;
+    println!("wrote {}", out_path.display());
+    Ok(())
+}
+
+/// Candidate 1 (#103): trigger-maintained SQLite facet table. Reuses the exact query set
+/// `bench_engine` runs for the primary-store comparison, plus two from-scratch correctness
+/// checks (right after bulk ingest, and again after the write ops below have run) — a fast
+/// answer is only worth reporting if it's also checked against the naive recomputation, per
+/// #103's own required workflow.
+fn bench_trigger_facet(
+    path: &std::path::Path,
+    assets: &[den::gen::Asset],
+    runs: u32,
+    results: &mut serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    use den::facet_cache_trigger::TriggerFacetEngine;
+    use den::workload::Workload;
+
+    let cold_open_start = Instant::now();
+    let mut engine = TriggerFacetEngine::open(path)?;
+    results.insert(
+        "cold_open_ms".into(),
+        (cold_open_start.elapsed().as_secs_f64() * 1000.0).into(),
+    );
+
+    let ingest_start = Instant::now();
+    engine.bulk_ingest(assets)?;
+    results.insert(
+        "bulk_ingest_ms".into(),
+        (ingest_start.elapsed().as_secs_f64() * 1000.0).into(),
+    );
+
+    let correct_after_ingest = engine.verify_against_naive(
+        Some("NIKON Z 8"),
+        Some(3),
+        Some(den::gen::BENCH_LEAF_KEYWORD),
+    )?;
+    results.insert(
+        "facet_correctness_ok_after_ingest".into(),
+        correct_after_ingest.into(),
+    );
+
+    // The same per-write ops `bench_engine` times for every primary-store candidate, so the
+    // trigger-maintenance overhead added to each is directly comparable to the plain-SQLite
+    // baseline (`den bench --engine sqlite`) run in the same session.
+    //
+    // **A real bug, found by a hostile review of this exact file and fixed here:** the trigger
+    // candidate's `trg_facet_rating_update` is guarded by `WHEN OLD.rating IS NOT NEW.rating` (see
+    // facet_cache_trigger.rs) — it only does any facet-maintenance work when the rating actually
+    // changes. The first version of this benchmark called `write_rating(id, 4)` and
+    // `rate_burst(&[(id, 5), ...])` with a FIXED target value across the 1 discarded warm-up call
+    // *and* all 5 measured calls. Only the warm-up call ever changed the rating (from whatever
+    // `bulk_ingest` set it to, to 4/5); every measured call re-wrote the *same* value the previous
+    // call had just set, so `OLD.rating IS NOT NEW.rating` was false and the trigger body never
+    // ran during any measured call. The reported numbers were therefore the cost of a bare
+    // `UPDATE` with a no-op trigger check, not real trigger-maintenance cost — silently
+    // undercounting the exact thing this benchmark exists to measure. Fixed by alternating the
+    // target rating every call (still "a single point-update"/"a 100-row burst", the same
+    // operation shape as every other engine's `write_rating`/`rate_burst` benchmark in this crate
+    // — just no longer reusing a value that makes the op a no-op the second time it's called).
+    let mut wr_call = 0u32;
+    let write_rating = time_op!(runs, {
+        wr_call += 1;
+        engine.write_rating(assets[0].id, if wr_call.is_multiple_of(2) { 4 } else { 2 })
+    });
+    results.insert("write_rating".into(), serde_json::to_value(write_rating)?);
+
+    let burst_ids: Vec<u64> = assets.iter().take(100).map(|a| a.id).collect();
+    let mut burst_call = 0u32;
+    let rate_burst = time_op!(runs, {
+        burst_call += 1;
+        let rating = if burst_call.is_multiple_of(2) { 5 } else { 3 };
+        let burst: Vec<(u64, u8)> = burst_ids.iter().map(|id| (*id, rating)).collect();
+        engine.rate_burst(&burst)
+    });
+    results.insert("rate_burst_100".into(), serde_json::to_value(rate_burst)?);
+
+    let tag_ids: Vec<u64> = assets.iter().take(10_000).map(|a| a.id).collect();
+    let mut tag_call = 0u32;
+    let tag_keyword = time_op!(runs, {
+        tag_call += 1;
+        engine.tag_keyword(&tag_ids, &format!("Bench.Tagged.{tag_call}"))
+    });
+    results.insert("tag_keyword_10k".into(), serde_json::to_value(tag_keyword)?);
+
+    let faceted_filter = time_op!(
+        runs,
+        engine.faceted_filter(
+            Some("NIKON Z 8"),
+            Some(3),
+            Some(den::gen::BENCH_LEAF_KEYWORD)
+        )
+    );
+    results.insert(
+        "faceted_filter".into(),
+        serde_json::to_value(faceted_filter)?,
+    );
+
+    // Re-verify after the write burst above (100 rating changes + a 10k-row keyword tag): the
+    // trigger-maintained table must stay correct under writes, not just at initial ingest.
+    let correct_after_writes = engine.verify_against_naive(
+        Some("NIKON Z 8"),
+        Some(3),
+        Some(den::gen::BENCH_LEAF_KEYWORD),
+    )?;
+    results.insert(
+        "facet_correctness_ok_after_writes".into(),
+        correct_after_writes.into(),
+    );
+
+    let integrity_ok = engine.integrity_check()?;
+    results.insert("integrity_ok".into(), integrity_ok.into());
+
+    Ok(())
+}
+
+/// Candidate 2 (#103): DuckDB-backed read-side facet cache. Writes go only to SQLite (measured
+/// identically to plain `sqlite.rs`, since it *is* `sqlite.rs`'s schema underneath); the cache is
+/// refreshed explicitly, and its cost is reported as its own distinct metric rather than folded
+/// into any write op's latency. Also demonstrates staleness concretely: a specific asset known to
+/// belong to the benchmarked facet is rated *without* a refresh, and the cache is checked against
+/// the naive recomputation both before and after the following `refresh()` call.
+fn bench_duckdb_facet_cache(
+    path: &std::path::Path,
+    assets: &[den::gen::Asset],
+    runs: u32,
+    results: &mut serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    use den::facet_cache_duckdb::DuckFacetCacheEngine;
+    use den::workload::Workload;
+
+    let cold_open_start = Instant::now();
+    let mut engine = DuckFacetCacheEngine::open(path)?;
+    results.insert(
+        "cold_open_ms".into(),
+        (cold_open_start.elapsed().as_secs_f64() * 1000.0).into(),
+    );
+
+    let ingest_start = Instant::now();
+    engine.bulk_ingest(assets)?;
+    results.insert(
+        "bulk_ingest_ms".into(),
+        (ingest_start.elapsed().as_secs_f64() * 1000.0).into(),
+    );
+
+    let refresh_after_ingest = engine.refresh()?;
+    results.insert(
+        "cache_refresh_after_bulk_ingest_ms".into(),
+        (refresh_after_ingest.as_secs_f64() * 1000.0).into(),
+    );
+
+    let correct_after_ingest = engine.verify_against_naive(
+        Some("NIKON Z 8"),
+        Some(3),
+        Some(den::gen::BENCH_LEAF_KEYWORD),
+    )?;
+    results.insert(
+        "facet_correctness_ok_after_ingest".into(),
+        correct_after_ingest.into(),
+    );
+
+    let faceted_filter = time_op!(
+        runs,
+        engine.faceted_filter(
+            Some("NIKON Z 8"),
+            Some(3),
+            Some(den::gen::BENCH_LEAF_KEYWORD)
+        )
+    );
+    results.insert(
+        "faceted_filter".into(),
+        serde_json::to_value(faceted_filter)?,
+    );
+
+    // Same write ops (and same generic ids) as the trigger candidate/`bench_engine`, so
+    // point-update cost is directly comparable — these go straight to SQLite, untouched by the
+    // DuckDB cache, so this number should look identical to plain `sqlite.rs`. Values alternate
+    // per call for the same reason `bench_trigger_facet` does (see that function's comment): not
+    // a correctness requirement here (there's no trigger `WHEN` guard on this path to fool), but
+    // keeping both candidates' benchmarks doing the identical op shape avoids a second, subtler
+    // version of the same "what exactly did we just measure" question.
+    let mut wr_call = 0u32;
+    let write_rating = time_op!(runs, {
+        wr_call += 1;
+        engine.write_rating(assets[0].id, if wr_call.is_multiple_of(2) { 4 } else { 2 })
+    });
+    results.insert("write_rating".into(), serde_json::to_value(write_rating)?);
+
+    let burst_ids: Vec<u64> = assets.iter().take(100).map(|a| a.id).collect();
+    let mut burst_call = 0u32;
+    let rate_burst = time_op!(runs, {
+        burst_call += 1;
+        let rating = if burst_call.is_multiple_of(2) { 5 } else { 3 };
+        let burst: Vec<(u64, u8)> = burst_ids.iter().map(|id| (*id, rating)).collect();
+        engine.rate_burst(&burst)
+    });
+    results.insert("rate_burst_100".into(), serde_json::to_value(rate_burst)?);
+
+    let tag_ids: Vec<u64> = assets.iter().take(10_000).map(|a| a.id).collect();
+    let mut tag_call = 0u32;
+    let tag_keyword = time_op!(runs, {
+        tag_call += 1;
+        engine.tag_keyword(&tag_ids, &format!("Bench.Tagged.{tag_call}"))
+    });
+    results.insert("tag_keyword_10k".into(), serde_json::to_value(tag_keyword)?);
+
+    // A concrete staleness demonstration, not just a theoretical risk: find a real asset that
+    // belongs to the exact facet under benchmark (NIKON Z 8, this leaf keyword) but currently
+    // falls below the rating threshold, and push it above threshold *without* calling refresh().
+    // If the cache were being read naively, this would silently under-count by exactly one.
+    let stale_demo_id = assets.iter().find_map(|a| {
+        if a.model == "NIKON Z 8"
+            && a.rating < 3
+            && a.keywords.iter().any(|k| k == den::gen::BENCH_LEAF_KEYWORD)
+        {
+            Some(a.id)
+        } else {
+            None
+        }
+    });
+    if let Some(id) = stale_demo_id {
+        engine.write_rating(id, 5)?;
+        // Expected to be `false`: this is the demonstration that the cache is stale between
+        // refreshes, not a bug in `verify_against_naive` — the naive side sees the just-written
+        // rating immediately (it reads SQLite directly), the cached side doesn't until the next
+        // `refresh()` below.
+        let correctness_while_stale = engine.verify_against_naive(
+            Some("NIKON Z 8"),
+            Some(3),
+            Some(den::gen::BENCH_LEAF_KEYWORD),
+        )?;
+        results.insert(
+            "facet_correctness_ok_while_stale".into(),
+            correctness_while_stale.into(),
+        );
+        results.insert("stale_demo_ran".into(), true.into());
+    } else {
+        // No asset in this catalog happened to match all three conditions (possible at small
+        // scales/seeds) — reported explicitly rather than silently skipped.
+        results.insert("stale_demo_ran".into(), false.into());
+    }
+
+    let refresh_after_burst = engine.refresh()?;
+    results.insert(
+        "cache_refresh_after_burst_ms".into(),
+        (refresh_after_burst.as_secs_f64() * 1000.0).into(),
+    );
+
+    let correct_after_refresh = engine.verify_against_naive(
+        Some("NIKON Z 8"),
+        Some(3),
+        Some(den::gen::BENCH_LEAF_KEYWORD),
+    )?;
+    results.insert(
+        "facet_correctness_ok_after_refresh".into(),
+        correct_after_refresh.into(),
+    );
+
+    let faceted_filter_after_refresh = time_op!(
+        runs,
+        engine.faceted_filter(
+            Some("NIKON Z 8"),
+            Some(3),
+            Some(den::gen::BENCH_LEAF_KEYWORD)
+        )
+    );
+    results.insert(
+        "faceted_filter_after_refresh".into(),
+        serde_json::to_value(faceted_filter_after_refresh)?,
+    );
+
+    let integrity_ok = engine.integrity_check()?;
+    results.insert("integrity_ok".into(), integrity_ok.into());
+
+    Ok(())
+}
+
 fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
     // Real cross-process kill -9 needs a helper binary fork; documented in the ADR as a follow-up
     // if this in-process approximation isn't convincing enough for the crash-safety gate.
@@ -336,6 +675,8 @@ fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
         Engine::Turso => {
             crash_loop::<den::turso_engine::TursoEngine>(tmp.path(), "turso.db", iterations)?
         }
+        #[cfg(feature = "redb")]
+        Engine::Redb => crash_loop::<den::redb_engine::RedbEngine>(tmp.path(), "redb", iterations)?,
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");
     Ok(())
