@@ -125,7 +125,9 @@ impl CudaLiveChain {
             .elapsed_ms(&end_event)
             .expect("event timing failed");
         let elapsed = elapsed_ms as f64 * 1e6;
-        self.stream.synchronize().expect("stream sync failed");
+        // No separate `self.stream.synchronize()` needed here: `elapsed_ms` above already
+        // synchronizes both events (confirmed against cudarc 0.19.9's source), which already
+        // guarantees the kernel has finished before this readback starts.
 
         let out_flat = self
             .stream
