@@ -148,6 +148,19 @@ same as its Rust binding), and LMDB (OpenLDAP Public License 2.8 — note this d
 `lmdb-master-sys`'s own self-declared `Apache-2.0` Cargo.toml field, another instance of the same
 "native code license isn't what `cargo deny` sees" gap this section exists to catch)[^s8].
 
+**Update (2026-09-24, [#102](https://github.com/jordanfelle/nicti/issues/102)'s Turso Database
+evaluation, `docs/adr/0009-turso-database-evaluation.md`):** the `turso` crate (v0.8.0-pre.12,
+default-off feature, kept for reference after evaluating-not-adopting per the ADR) is MIT,
+confirmed from crates.io's version-level API response. Its own dependency tree is large (`tantivy`
+full-text search, `roaring` bitmaps, `prost`/protobuf, `aristo`, `bon`, `miette`, its own
+`turso_core`/`turso_parser`/`turso_sync_engine`/`turso_sdk_kit` family) but resolves entirely
+within `deny.toml`'s existing allowlist — `cargo deny --workspace --all-features check licenses`
+passes clean, no `deny.toml` edits required. One gap worth noting, not a blocker: `cfg_block`
+v0.1.1 (a transitive dependency of `turso_core`) carries no SPDX `license` field in its own
+`Cargo.toml`, which `cargo-deny` only warns on rather than fails — its bundled `LICENSE` file
+confirms Apache-2.0[^den4], already an allowed license, so no action needed beyond noting it here
+per this file's own "cargo-deny only sees what a crate declares" pattern.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -281,3 +294,4 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^den1]: SQLite public-domain dedication — https://www.sqlite.org/copyright.html, and the "public domain" notice embedded directly in `libsqlite3-sys`'s bundled `sqlite3.c` — verified 2026-09-24
 [^den2]: DuckDB core MIT license — https://github.com/duckdb/duckdb/blob/main/LICENSE, matching `libduckdb-sys`'s own bundled `LICENSE` file — verified 2026-09-24
 [^den3]: LMDB (`liblmdb`) OpenLDAP Public License 2.8 — the `LICENSE`/`COPYRIGHT` files bundled inside `lmdb-master-sys`'s vendored `lmdb/libraries/liblmdb/` source, cross-checked against https://www.openldap.org/software/release/license.html; note this is the *bundled C source's* license, distinct from (and not accurately reflected by) `lmdb-master-sys`'s own self-declared `Apache-2.0` Cargo.toml field — verified 2026-09-24
+[^den4]: `cfg_block` v0.1.1 Apache-2.0 — its own bundled `LICENSE` file at `~/.cargo/registry/src/.../cfg_block-0.1.1/LICENSE`, since its `Cargo.toml` carries no SPDX `license` field for `cargo-deny` to read directly — verified 2026-09-24

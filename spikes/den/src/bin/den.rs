@@ -65,6 +65,8 @@ enum Engine {
     Duckdb,
     #[cfg(feature = "lmdb")]
     Lmdb,
+    #[cfg(feature = "turso")]
+    Turso,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -176,6 +178,13 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         #[cfg(feature = "lmdb")]
         Engine::Lmdb => bench_engine::<den::lmdb::LmdbEngine>(
             &tmp.path().join("den-lmdb"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        #[cfg(feature = "turso")]
+        Engine::Turso => bench_engine::<den::turso_engine::TursoEngine>(
+            &tmp.path().join("den-turso.db"),
             &assets,
             runs,
             &mut results,
@@ -323,6 +332,10 @@ fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
         }
         #[cfg(feature = "lmdb")]
         Engine::Lmdb => crash_loop::<den::lmdb::LmdbEngine>(tmp.path(), "lmdb", iterations)?,
+        #[cfg(feature = "turso")]
+        Engine::Turso => {
+            crash_loop::<den::turso_engine::TursoEngine>(tmp.path(), "turso.db", iterations)?
+        }
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");
     Ok(())
@@ -361,6 +374,7 @@ fn crash_loop<E: Workload>(
                 manifest_path: "docs/ref-10k-manifest.csv".into(),
             });
             e.crash_mid_ingest(&assets)?;
+            e.prepare_for_forget();
             std::mem::forget(e);
         }
         match E::open(&path).and_then(|e| e.integrity_check()) {

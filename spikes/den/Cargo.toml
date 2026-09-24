@@ -3,7 +3,7 @@ name = "den"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Throwaway spike for #67: catalog-database-engine comparison (SQLite/WAL, DuckDB, LMDB) against docs/benchmarks.md's Library targets at 600k/2M synthetic scale. Embedded Postgres (pglite-rs/pglite-oxide) hard-gate-failed before a backend was worth writing — see ADR-0008. Not a production crate."
+description = "Throwaway spike for #67: catalog-database-engine comparison (SQLite/WAL, DuckDB, LMDB, Turso) against docs/benchmarks.md's Library targets at 600k/2M synthetic scale. Embedded Postgres (pglite-rs/pglite-oxide) hard-gate-failed before a backend was worth writing — see ADR-0008. Turso is #102's follow-up candidate, added after ADR-0008 merged. Not a production crate."
 
 [[bin]]
 name = "den"
@@ -14,6 +14,7 @@ default = ["sqlite", "duckdb"]
 sqlite = ["dep:rusqlite"]
 duckdb = ["dep:duckdb"]
 lmdb = ["dep:heed", "dep:bincode"]
+turso = ["dep:turso", "dep:tokio"]
 
 [dependencies]
 rand = "0.8"
@@ -32,6 +33,8 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 duckdb = { version = "1", features = ["bundled"], optional = true }
 heed = { version = "0.22", optional = true }
 bincode = { version = "1", optional = true }
+turso = { version = "0.8.0-pre.12", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

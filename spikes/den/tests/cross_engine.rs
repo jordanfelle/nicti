@@ -168,3 +168,10 @@ fn lmdb_matches_shared_workload() {
     let dir = tempfile::tempdir().unwrap();
     check::<den::lmdb::LmdbEngine>(&dir, "lmdb-test");
 }
+
+#[cfg(feature = "turso")]
+#[test]
+fn turso_matches_shared_workload() {
+    let dir = tempfile::tempdir().unwrap();
+    check::<den::turso_engine::TursoEngine>(&dir, "turso-test.db");
+}
