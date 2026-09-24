@@ -10,7 +10,7 @@
 //!
 //! This test only asserts correctness (the WASM and native paths must agree bit-for-bit —
 //! IEEE-754 single-precision multiply is deterministic). Timing is printed, not asserted on,
-//! since it's environment-dependent; run with `cargo test -p sheath --test wasm_vs_native --
+//! since it's environment-dependent; run with `cargo test -p nicti-claw --test wasm_vs_native --
 //! --nocapture` to see the numbers, which get transcribed into the ADR by hand.
 
 use std::time::Instant;

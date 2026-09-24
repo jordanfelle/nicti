@@ -32,13 +32,18 @@ impl<T: ?Sized + Module> LazyModule<T> {
     fn get(&self) -> Arc<T> {
         Arc::clone(self.instance.get_or_init(|| {
             let built = (self.factory)();
-            debug_assert_eq!(
+            // Always-on, not `debug_assert_eq!`: this guards the module system's core identity
+            // contract (a registered descriptor must describe the instance its own factory
+            // builds), and a `debug_assert_eq!` compiles to nothing in a release build — silently
+            // letting `get()`/`descriptors()` disagree about a module's id/version in exactly the
+            // build that ships.
+            assert_eq!(
                 built.id(),
                 self.descriptor.id,
                 "module factory for {:?} built an instance whose id() disagrees with its own descriptor",
                 self.descriptor,
             );
-            debug_assert_eq!(
+            assert_eq!(
                 built.schema_version(),
                 self.descriptor.schema_version,
                 "module factory for {:?} built an instance whose schema_version() disagrees with its own descriptor",

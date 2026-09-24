@@ -84,11 +84,13 @@ impl<V: VTable> std::fmt::Debug for DylibModule<V> {
 }
 
 // SAFETY: the loaded library is never unloaded before `DylibModule` is dropped (it's held in
-// `_lib`), so `vtable` stays valid for `DylibModule`'s whole lifetime. Whether `V`'s own fields
-// (function pointers, etc.) are safe to call from any thread is `V`'s own `VTable` safety
-// contract to uphold, same as any FFI vtable.
-unsafe impl<V: VTable> Send for DylibModule<V> {}
-unsafe impl<V: VTable> Sync for DylibModule<V> {}
+// `_lib`), so `vtable` stays valid for `DylibModule`'s whole lifetime. `V: Send + Sync` is
+// required here (not just `V: VTable`): `VTable`'s own safety contract only constrains the
+// struct's layout (`#[repr(C)]`, `abi_version` first), not the thread-safety of whatever else it
+// holds, so without this bound a `V` with e.g. an unsynchronized interior-mutable field would
+// still compile as `Send + Sync` and let `vtable()` hand out a racy `&V` across threads.
+unsafe impl<V: VTable + Send + Sync> Send for DylibModule<V> {}
+unsafe impl<V: VTable + Send + Sync> Sync for DylibModule<V> {}
 
 impl<V: VTable> DylibModule<V> {
     /// Loads the dylib at `path` and validates its ABI version before returning.
