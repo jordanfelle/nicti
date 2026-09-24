@@ -86,6 +86,8 @@ enum Engine {
     Lmdb,
     #[cfg(feature = "turso")]
     Turso,
+    #[cfg(feature = "redb")]
+    Redb,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -210,6 +212,13 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         #[cfg(feature = "turso")]
         Engine::Turso => bench_engine::<den::turso_engine::TursoEngine>(
             &tmp.path().join("den-turso.db"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        #[cfg(feature = "redb")]
+        Engine::Redb => bench_engine::<den::redb_engine::RedbEngine>(
+            &tmp.path().join("den-redb.redb"),
             &assets,
             runs,
             &mut results,
@@ -666,6 +675,8 @@ fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
         Engine::Turso => {
             crash_loop::<den::turso_engine::TursoEngine>(tmp.path(), "turso.db", iterations)?
         }
+        #[cfg(feature = "redb")]
+        Engine::Redb => crash_loop::<den::redb_engine::RedbEngine>(tmp.path(), "redb", iterations)?,
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");
     Ok(())

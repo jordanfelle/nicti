@@ -161,6 +161,15 @@ v0.1.1 (a transitive dependency of `turso_core`) carries no SPDX `license` field
 confirms Apache-2.0[^den4], already an allowed license, so no action needed beyond noting it here
 per this file's own "cargo-deny only sees what a crate declares" pattern.
 
+**Update (2026-09-24, [#106](https://github.com/jordanfelle/nicti/issues/106)'s `redb` evaluation,
+`docs/adr/0010-redb-evaluation.md`):** the `redb` crate (v4.3.0, default-off feature, kept for
+reference after evaluating-not-adopting per the ADR) is `MIT OR Apache-2.0`, confirmed from
+crates.io's version-level API response — already on `deny.toml`'s allowlist, no edit needed.
+`redb` has **zero dependencies of its own** (confirmed via `cargo tree -i redb`), so this update
+adds nothing new to the resolved dependency graph beyond the crate itself — `cargo deny
+--workspace --all-features check licenses` passes clean, same pre-existing `cfg_block`
+(Turso-only) warning as before, nothing new from `redb`.
+
 **Update (2026-09-24, [#66](https://github.com/jordanfelle/nicti/issues/66)/
 [ADR-0013](adr/0013-outbound-license-agpl.md)): Nicti's outbound license is decided — AGPL-3.0-
 or-later.** This is the biggest change to this file since it was created, since most of the
@@ -175,9 +184,13 @@ this update:
 - Un-excludes **Ultralytics YOLO** (AGPL-3.0) and **exiv2/rexiv2** (GPL-2.0-or-later/
   GPL-3.0-or-later respectively — both grants verified precisely, not assumed from a short label)
   — see their updated rows below and the Flags section.
-- Removes the special sign-off/`cdylib`-isolation requirement for **LGPL-as-Cargo-dependency**
-  (`rawler`, `lensfun-rs`) — that requirement protected a permissive/proprietary combined work from
-  LGPL's copyleft; Nicti's own license is now already copyleft, so it's moot.
+- **Partially** removes the special sign-off/`cdylib`-isolation requirement for
+  **LGPL-as-Cargo-dependency**: resolved for **`lensfun-rs`** (its `LGPL-3.0-or-later OR GPL-3.0`
+  dual license has a confirmed or-later arm, so it combines cleanly into Nicti's own copyleft
+  license — no isolation/sign-off needed). **Not resolved for `rawler`**: its grant is an
+  unconfirmed bare `LGPL-2.1` with no or-later arm, so it still needs the same sign-off/isolation
+  requirement as before — see the Flags section below, which was not corrected in an earlier pass
+  of this update and still needs reading precisely, not the top-line summary alone.
 - **Unaffected**: Adobe DCP/LCP (no redistribution grant exists, not a copyleft question),
   InsightFace/RetinaFace (non-commercial-only restriction, not a copyleft question), LaMa's Places2
   flag (training-data provenance, not a license-family question), CLIP's model-card caveat (a

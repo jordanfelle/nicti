@@ -175,3 +175,10 @@ fn turso_matches_shared_workload() {
     let dir = tempfile::tempdir().unwrap();
     check::<den::turso_engine::TursoEngine>(&dir, "turso-test.db");
 }
+
+#[cfg(feature = "redb")]
+#[test]
+fn redb_matches_shared_workload() {
+    let dir = tempfile::tempdir().unwrap();
+    check::<den::redb_engine::RedbEngine>(&dir, "redb-test.redb");
+}
