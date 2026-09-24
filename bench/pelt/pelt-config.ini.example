@@ -1,0 +1,47 @@
+; Config for bench/pelt/pelt.ahk. Copy to pelt-config.ini and fill in the indicator rect
+; (calibrated the same way as bench/lrc/README.md's LRC calibration step, against whichever
+; pelt-* window is on screen) before running bench/pelt/run-pelt.ps1.
+
+[general]
+; egui | iced | slint -- selects which pelt-* window title to match.
+Candidate=egui
+; grid | loupe | slider | pan -- must match run-pelt.ps1's -Interaction.
+Interaction=loupe
+PreStartDelayMs=500
+
+[indicator]
+X=0
+Y=0
+Size=40
+FlashMs=80
+
+[loupe]
+ImageCount=50
+InterKeyDelayMs=700
+
+[grid]
+; Scripted mouse-wheel scroll through the virtualized grid.
+StartX=200
+StartY=400
+DurationMs=4000
+Steps=120
+; Positive = scroll down (WheelDown), matching a top-to-bottom read of the catalog.
+WheelClicks=40
+
+[slider]
+; Scripted drag of the exposure slider.
+StartX=400
+StartY=650
+EndX=900
+EndY=650
+DurationMs=2000
+Steps=60
+
+[pan]
+; Scripted drag inside the develop viewport (vibrance/white-balance in every pelt-* candidate).
+PanStartX=1000
+PanStartY=400
+PanEndX=1400
+PanEndY=700
+DurationMs=2000
+Steps=60

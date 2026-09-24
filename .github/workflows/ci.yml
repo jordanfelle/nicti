@@ -35,6 +35,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes link against winit's Linux
+      # backends (X11/Wayland) plus Slint's Skia/FemtoVG renderers, which need these dev
+      # packages present to *link* (not just to run) -- confirmed by a local, non-CI Linux
+      # build succeeding with these libraries already installed; **not yet confirmed against
+      # a real ubuntu-latest CI run** since this PR couldn't exercise GitHub Actions directly.
+      # If CI still fails to link, check its error for the missing .so and extend this list --
+      # don't just add packages speculatively beyond what an actual failure names.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
       # --workspace: `nicti`'s root manifest is both a workspace root and a real package
       # (not a virtual manifest), so a bare `cargo clippy` without `-p`/`--workspace` only
       # checks the root `nicti` crate and silently skips spikes/* and bench/whisker
@@ -50,6 +60,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # See the clippy job's comment above -- same #68/ADR-0006 GUI-toolkit link dependency.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
       # --workspace: see the clippy job's comment above -- without it, pawprint's and
       # sheath's tests silently never ran in CI.
       - run: cargo test --workspace --all-targets --all-features

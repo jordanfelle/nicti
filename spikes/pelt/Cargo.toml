@@ -1,0 +1,9 @@
+[package]
+name = "pelt"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway spike support crate for #68 (ADR-0006): toolkit-agnostic synthetic catalog/loupe/live-chain fixtures shared by spikes/pelt-egui, spikes/pelt-iced, spikes/pelt-gpui, spikes/pelt-slint. Holds no wgpu types itself, since each toolkit crate may pin a different wgpu version. Not a production crate."
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
