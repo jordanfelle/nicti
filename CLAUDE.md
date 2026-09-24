@@ -73,9 +73,13 @@ ADRs live in `docs/adr/`, numbered sequentially.
   ticket (#43, #17, #40, etc.) measures against this.
 - **Hero-scenario benchmark (#43)**: spec at `docs/benchmarks/hero-scenario.md`. Tooling under
   `bench/`: `bench/select_hero_set.py` (deterministic 50-file working-set selection),
-  `bench/lrc/` (AutoHotkey v2 driver + catalog setup for LRC), `bench/run-hero.ps1` (capture +
-  orchestration), `bench/whisker/` (Rust frame-diff analyzer, workspace member — not production
-  code, see its own `Cargo.toml` description).
+  `bench/lrc/` (AutoHotkey v2 driver + catalog setup for LRC — `hero.ahk` drives one timed pass,
+  `navigate.ahk` positions the selection before a capture starts), `bench/run-hero.ps1` (one
+  capture + orchestration), `bench/run-hero-series.ps1` (a full warm-up + 5-measured-run series,
+  including crop/zoom's 5-image spread — this is what you actually invoke), `bench/whisker/`
+  (Rust frame-diff analyzer, workspace member — not production code, see its own `Cargo.toml`
+  description; its `analyze` subcommand pools a full results tree into per-config/interaction
+  p50/p95/max). Requires PowerShell 7+, see `bench/lrc/README.md`.
 
 ## Naming convention: feline references
 

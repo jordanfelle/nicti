@@ -5,7 +5,11 @@
 ; session that's already set up per README.md (bench catalog loaded, 50-image hero set synced
 ; with the edit stack, first pass through the set already done to warm it). Draws a
 ; keypress-indicator square that flashes on every injected input so whisker's capture analysis
-; has an unambiguous t0 per event.
+; has an unambiguous t0 per event. Never navigates between images -- see navigate.ahk for that.
+;
+; Indicator-edge count per interaction (whisker's `events_detected`/`--edges`/`--window-edges`
+; reference these positions): switch = 1 flash per keypress; crop/zoom = 3 flashes, [0] the
+; mode-entry keypress (r/Z), [1]/[2] the drag's start/end (see ScriptedDrag).
 ;
 ; Usage: AutoHotkey64.exe hero.ahk <config.ini>
 ; See hero-config.ini.example for all keys.
@@ -90,13 +94,26 @@ if interaction = "switch" {
     durationMs := Integer(IniRead(configPath, "crop", "DurationMs", "2000"))
     steps := Integer(IniRead(configPath, "crop", "Steps", "60"))
     exitCropAfter := IniRead(configPath, "crop", "ExitCropAfter", "1") = "1"
+    revertCropAfter := IniRead(configPath, "crop", "RevertCropAfter", "1") = "1"
 
     Flash(indicatorFlashMs)
     Send("r")
     Sleep(300) ; let crop mode's overlay settle before the drag itself is timed
     ScriptedDrag(startX, startY, endX, endY, durationMs, steps)
-    if exitCropAfter
+    ; Every repeat run on the same image must start from the same uncropped state and the same
+    ; drag coordinates -- without this, run 2+ would drag against an already-cropped frame,
+    ; silently invalidating both the crop geometry and every subsequent measurement on that image.
+    ; The revert method depends on whether the crop was actually committed: Ctrl+Z undoes a real
+    ; history step (only valid once Enter has committed one -- sending it with the overlay still
+    ; open would instead undo whatever the *previous* history entry was, silently corrupting
+    ; catalog state); Escape cancels a still-pending, uncommitted crop with no history step to undo.
+    if exitCropAfter {
         Send("{Enter}")
+        if revertCropAfter
+            Send("^z")
+    } else if revertCropAfter {
+        Send("{Escape}")
+    }
 } else if interaction = "zoom" {
     panStartX := Integer(IniRead(configPath, "zoom", "PanStartX"))
     panStartY := Integer(IniRead(configPath, "zoom", "PanStartY"))
@@ -119,9 +136,15 @@ if interaction = "switch" {
 Sleep(500) ; trailing buffer so the capture has settled frames after the last event
 ExitApp 0
 
+; Flashes the indicator at drag-start and drag-end (in addition to the mode-entry flash each
+; caller already sent before this runs), so whisker's `drag --indicator-raw --window-edges 1,2`
+; can derive the drag transition window from indicator edges instead of hand-picked frame numbers
+; -- see whisker::drag_window_from_edges.
 ScriptedDrag(x1, y1, x2, y2, durationMs, steps) {
+    global indicatorFlashMs
     MouseMove(x1, y1, 0)
     Sleep(100)
+    Flash(indicatorFlashMs) ; edge: drag start
     Click("down")
     Sleep(50)
     stepDelay := durationMs / steps
@@ -133,5 +156,6 @@ ScriptedDrag(x1, y1, x2, y2, durationMs, steps) {
         Sleep(stepDelay)
     }
     Sleep(50)
+    Flash(indicatorFlashMs) ; edge: drag end
     Click("up")
 }

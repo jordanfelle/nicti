@@ -4,6 +4,10 @@ Sets up a throwaway LRC catalog for the #43 hero scenario and drives the timed i
 See `docs/benchmarks/hero-scenario.md` for what's being measured and why; this doc is the
 step-by-step for actually running it.
 
+**Requires PowerShell 7+** (`winget install Microsoft.PowerShell`) — `run-hero.ps1`'s graceful
+ffmpeg-stop logic uses a .NET-Core-only API that silently fails under Windows PowerShell 5.1.
+Everything below invokes `pwsh`, not `powershell`.
+
 **Never touches your real catalog.** Every script here targets an explicit bench catalog path
 under `H:\NictiBench\lrc-bench\`; LRC is only ever launched against that path.
 
@@ -57,6 +61,38 @@ under `H:\NictiBench\lrc-bench\`; LRC is only ever launched against that path.
    ```
 3. Stop the capture once `hero.ahk` exits (`run-hero.ps1` handles this automatically).
 
+`hero.ahk` never navigates between images itself (see its own header comment) — `run-hero.ps1`'s
+`-PreNavigate` runs `navigate.ahk` to position the selection *before* the capture starts, so
+navigation never lands inside a timed capture. You won't normally invoke either script directly;
+see "Running a full series" below.
+
+Crop's drag is flashed at both ends (drag-start, drag-end) in addition to the mode-entry (`r`)
+flash, so a capture has 3 indicator edges total — `whisker drag --window-edges 1,2` derives the
+timed window from the last two instead of needing hand-picked frame numbers. After the drag,
+`hero.ahk` undoes the crop it just committed (`RevertCropAfter=1` in `hero-config.ini`, default
+on) so every repeat run on the same image starts from the same uncropped state — **verify in the
+calibration dry-run (below) that this undo actually restores the pre-crop image**, since a crop
+that silently fails to revert invalidates every subsequent run on that image.
+
+## Running a full series
+
+`../run-hero-series.ps1` drives one (config, interaction) pair's whole warm-up + 5-measured-run
+series (`docs/benchmarks.md`'s "1 warm-up discarded, 5 measured" rule), including crop/zoom's
+5-image spread — this is what you actually invoke, not `run-hero.ps1`/`hero.ahk` one at a time:
+
+```powershell
+pwsh .\run-hero-series.ps1 -Config originals -Interaction switch `
+  -IndicatorRect "20,20,60,60" -RoiRect "400,200,1200,800" `
+  -ResultsRoot H:\NictiBench\bench-results\hero
+```
+
+Repeat per config × interaction (`originals`/`smart-previews` × `switch`/`crop`/`zoom`), plus a
+cold switch pass with `-Cold` after reverting to a cold cache state (see
+`docs/benchmarks.md`'s cold-run rules and `hero-scenario.md`'s Warm vs. cold section) — pass
+`-ResultsRoot H:\NictiBench\bench-results\hero`, not the local-disk default, to keep multi-GB
+captures off the UNC session path. It stops on the first failed run rather than continuing past a
+broken series.
+
 ## Calibration
 
 Coordinates are specific to this machine's resolution/window layout and must be set once before
@@ -71,10 +107,16 @@ the first real run (and rechecked if the window moves/resizes):
 4. **Dry-run before trusting numbers**: run one `switch` pass with capture on, then step through
    the recording frame-by-frame (or use `ffprobe`/`ffplay`) to confirm the indicator flash and the
    actual loupe change are both clearly visible and land where you expect. Confirm `ffmpeg`'s
-   dropped-frame count is 0 for the capture rate in use (see `../run-hero.ps1`).
+   dropped-frame count is 0 for the capture rate in use (see `../run-hero.ps1`). Also run one
+   `crop` pass and confirm three things: `whisker switch`'s `events_detected` reads 3 (mode-entry +
+   drag-start + drag-end), the drag-start/drag-end flashes visibly bracket the scripted drag in the
+   recording, and — after the run — the image in LRC is back to its pre-crop state (the
+   `RevertCropAfter` undo). Do the same sanity pass once for `zoom` (also 3 edges: `Z` keypress +
+   pan-start + pan-end).
 
 ## Never automate on a machine you're actively using for something else
 
-`hero.ahk` and `setup.ahk` take over the mouse and keyboard and can run for tens of seconds
-unattended. Don't kick off a run while doing other work on this machine or in the same remote
-session — confirm the session is free first.
+`hero.ahk`, `setup.ahk`, and `navigate.ahk` take over the mouse and keyboard and can run for tens
+of seconds unattended. Don't kick off a run (or a `run-hero-series.ps1` series, which chains many
+of these back to back) while doing other work on this machine or in the same remote session —
+confirm the session is free first.

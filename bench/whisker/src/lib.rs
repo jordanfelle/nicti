@@ -1,12 +1,19 @@
 //! Frame-diff primitives for the #43 hero-scenario benchmark.
 //!
-//! `whisker` never talks to ffmpeg or the filesystem directly in its core logic — it consumes
-//! already-cropped, already-decoded gray8 frame streams (produced upstream by ffmpeg's `crop` +
-//! `rawvideo` filters, see `bin/whisker.rs` and `run-hero.ps1`) and turns them into the latency
-//! and frame-interval numbers `docs/benchmarks/hero-scenario.md` defines.
+//! `whisker`'s core logic never talks to ffmpeg directly — it consumes already-cropped,
+//! already-decoded gray8 frame streams (produced upstream by ffmpeg's `crop` + `rawvideo`
+//! filters, see `bin/whisker.rs` and `run-hero.ps1`) and turns them into the latency and
+//! frame-interval numbers `docs/benchmarks/hero-scenario.md` defines. `analyze` is the one module
+//! that does its own filesystem walking (a `run-hero-series.ps1` results tree), since pooling
+//! samples across many runs/captures needs to read many `meta.json`/`*.raw` files itself rather
+//! than being handed a single already-loaded pair like the rest of this crate.
 
+pub mod analyze;
 pub mod io;
 pub mod stats;
+
+use serde::Serialize;
+use stats::{summarize, Stats};
 
 /// A sequence of same-sized single-channel (gray8) frames.
 #[derive(Debug, Clone)]
@@ -160,6 +167,171 @@ pub fn frame_intervals(frames: &[usize]) -> Vec<usize> {
 /// Converts a frame count to milliseconds at the given capture rate.
 pub fn frames_to_ms(frame_count: usize, fps: f64) -> f64 {
     frame_count as f64 / fps * 1000.0
+}
+
+/// One indicator-marked event's measured latencies, relative to that event's own indicator edge.
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchEventResult {
+    pub indicator_frame: usize,
+    pub first_change_ms: Option<f64>,
+    pub settled_ms: Option<f64>,
+}
+
+/// Full report for one `switch`-shaped capture (interaction A, or interaction C's zoom-settled
+/// half): every detected indicator event plus pooled p50/p95/max stats.
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchReport {
+    pub fps: f64,
+    /// Total indicator edges detected in this capture, before any `edge_indices` filter —
+    /// the sanity-check number (e.g. "== 49") the calibration dry-run confirms against.
+    pub events_detected: usize,
+    /// Number of those edges actually analyzed (== `events_detected` unless `edge_indices` was
+    /// used to select a subset, e.g. only the first edge of a zoom capture's 3 flashes).
+    pub events_analyzed: usize,
+    pub events: Vec<SwitchEventResult>,
+    pub first_change_stats: Option<Stats>,
+    pub settled_stats: Option<Stats>,
+}
+
+/// Full report for one `drag`-shaped capture (interaction B, or interaction C's pan half).
+#[derive(Debug, Clone, Serialize)]
+pub struct DragReport {
+    pub fps: f64,
+    pub distinct_frames: Vec<usize>,
+    pub interval_frames: Vec<usize>,
+    pub interval_ms_stats: Option<Stats>,
+    pub effective_fps_p95: Option<f64>,
+}
+
+/// Runs the full switch-measurement pipeline (rising-edge detection -> first-change/settled
+/// latency -> ms conversion -> pooled stats) for one already-loaded indicator/ROI capture pair.
+///
+/// `edge_indices`, when given, restricts analysis to the listed 0-based indices into the *full*
+/// set of detected indicator edges (e.g. `&[0]` for a zoom capture, where only the first of its 3
+/// flashes — the `Z` keypress itself — is the zoom-settled event; the other two mark the pan
+/// drag's window and would otherwise be mis-scored as switch events). `events_detected` in the
+/// returned report always reports the full unfiltered count, so a filtered call still supports
+/// the "confirm events_detected == N" calibration check.
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_switch(
+    indicator: &FrameStream,
+    roi: &FrameStream,
+    fps: f64,
+    indicator_threshold: f64,
+    quiet_threshold: f64,
+    min_quiet_frames: usize,
+    change_threshold: f64,
+    edge_indices: Option<&[usize]>,
+) -> Result<SwitchReport, String> {
+    if indicator.frames.len() != roi.frames.len() {
+        return Err(format!(
+            "indicator ({} frames) and roi ({} frames) captures have different frame counts — \
+             they must come from the same capture window",
+            indicator.frames.len(),
+            roi.frames.len()
+        ));
+    }
+
+    let brightness = indicator.mean_brightness();
+    let all_edges = rising_edges(&brightness, indicator_threshold);
+    let edges: Vec<usize> = match edge_indices {
+        Some(idxs) => idxs
+            .iter()
+            .filter_map(|&i| all_edges.get(i).copied())
+            .collect(),
+        None => all_edges.clone(),
+    };
+    let roi_diffs = roi.diff_series();
+
+    let mut events = Vec::new();
+    let mut first_change_samples = Vec::new();
+    let mut settled_samples = Vec::new();
+    for &edge in &edges {
+        let (first_change, settled) = event_latencies(
+            &roi_diffs,
+            edge,
+            change_threshold,
+            quiet_threshold,
+            min_quiet_frames,
+        );
+        let first_change_ms = first_change.map(|f| frames_to_ms(f - edge, fps));
+        let settled_ms = settled.map(|f| frames_to_ms(f - edge, fps));
+        if let Some(ms) = first_change_ms {
+            first_change_samples.push(ms);
+        }
+        if let Some(ms) = settled_ms {
+            settled_samples.push(ms);
+        }
+        events.push(SwitchEventResult {
+            indicator_frame: edge,
+            first_change_ms,
+            settled_ms,
+        });
+    }
+
+    Ok(SwitchReport {
+        fps,
+        events_detected: all_edges.len(),
+        events_analyzed: edges.len(),
+        first_change_stats: summarize(&first_change_samples),
+        settled_stats: summarize(&settled_samples),
+        events,
+    })
+}
+
+/// Runs the full drag-measurement pipeline (distinct-repaint detection -> frame-interval ->
+/// effective fps) for one already-loaded ROI capture, over an explicit transition-index window.
+pub fn analyze_drag(
+    roi: &FrameStream,
+    fps: f64,
+    start_frame: usize,
+    end_frame: usize,
+    change_threshold: f64,
+) -> DragReport {
+    let diffs = roi.diff_series();
+    let distinct = distinct_change_frames(&diffs, start_frame, end_frame, change_threshold);
+    let intervals = frame_intervals(&distinct);
+    let interval_ms: Vec<f64> = intervals.iter().map(|&f| frames_to_ms(f, fps)).collect();
+    let interval_ms_stats = summarize(&interval_ms);
+    let effective_fps_p95 = interval_ms_stats.as_ref().map(|s| 1000.0 / s.p95);
+
+    DragReport {
+        fps,
+        distinct_frames: distinct,
+        interval_frames: intervals,
+        interval_ms_stats,
+        effective_fps_p95,
+    }
+}
+
+/// Derives a drag transition-index window from a pair of indicator edges, instead of requiring
+/// hand-picked frame numbers — used when `hero.ahk`'s `ScriptedDrag` flashes the indicator at the
+/// drag's start and end (see its own doc comment) so the window is machine-detectable.
+///
+/// `window_edges` is `(start_index, end_index)`, 0-based into the full set of detected indicator
+/// edges — e.g. `(1, 2)` for crop/zoom-pan, whose edge 0 is the mode-entry keypress (`r`/`z`).
+pub fn drag_window_from_edges(
+    indicator: &FrameStream,
+    indicator_threshold: f64,
+    window_edges: (usize, usize),
+) -> Result<(usize, usize), String> {
+    let brightness = indicator.mean_brightness();
+    let edges = rising_edges(&brightness, indicator_threshold);
+    let start = edges.get(window_edges.0).copied().ok_or_else(|| {
+        format!(
+            "indicator edge index {} not found (only {} edge(s) detected)",
+            window_edges.0,
+            edges.len()
+        )
+    })?;
+    let end = edges.get(window_edges.1).copied().ok_or_else(|| {
+        format!(
+            "indicator edge index {} not found (only {} edge(s) detected)",
+            window_edges.1,
+            edges.len()
+        )
+    })?;
+    Ok((start, end))
 }
 
 #[cfg(test)]
@@ -333,5 +505,91 @@ mod tests {
         };
         let diffs = s.diff_series();
         assert_eq!(distinct_change_frames(&diffs, 0, diffs.len(), 0.5), vec![2]);
+    }
+
+    /// A 3-flash capture shaped like `hero.ahk`'s zoom interaction: edge 0 is the `Z` keypress
+    /// (zoom-settled event), edges 1/2 bracket a pan drag with 3 distinct repaints in between.
+    fn zoom_shaped_capture() -> (FrameStream, FrameStream) {
+        let size = 4;
+        let mut indicator = Vec::new();
+        let mut roi = Vec::new();
+        let mut push = |ind: u8, r: u8| {
+            indicator.push(solid(ind, size));
+            roi.push(solid(r, size));
+        };
+        push(0, 10); // pre-roll
+        push(255, 10); // edge 0: Z keypress
+        push(0, 10);
+        push(0, 90); // settles here (offset 2 from edge 0)
+        push(0, 90);
+        push(0, 90);
+        push(255, 90); // edge 1: drag start
+        push(0, 90);
+        push(0, 150); // repaint 1
+        push(0, 150);
+        push(0, 210); // repaint 2
+        push(255, 210); // edge 2: drag end
+        push(0, 210);
+        (
+            FrameStream {
+                width: 2,
+                height: 2,
+                frames: indicator,
+            },
+            FrameStream {
+                width: 2,
+                height: 2,
+                frames: roi,
+            },
+        )
+    }
+
+    #[test]
+    fn analyze_switch_edge_filter_keeps_only_selected_edges() {
+        let (indicator, roi) = zoom_shaped_capture();
+        let unfiltered = analyze_switch(&indicator, &roi, 60.0, 0.5, 0.02, 2, 0.05, None).unwrap();
+        assert_eq!(unfiltered.events_detected, 3);
+        assert_eq!(unfiltered.events_analyzed, 3);
+
+        let filtered =
+            analyze_switch(&indicator, &roi, 60.0, 0.5, 0.02, 2, 0.05, Some(&[0])).unwrap();
+        // events_detected still reports the full raw count -- useful for the calibration
+        // "confirm events_detected == N" check even when only analyzing a subset.
+        assert_eq!(filtered.events_detected, 3);
+        assert_eq!(filtered.events_analyzed, 1);
+        assert_eq!(filtered.events.len(), 1);
+        assert!(filtered.events[0].settled_ms.is_some());
+    }
+
+    #[test]
+    fn analyze_switch_mismatched_frame_counts_is_an_error() {
+        let indicator = FrameStream {
+            width: 2,
+            height: 2,
+            frames: vec![solid(0, 4); 5],
+        };
+        let roi = FrameStream {
+            width: 2,
+            height: 2,
+            frames: vec![solid(0, 4); 4],
+        };
+        let result = analyze_switch(&indicator, &roi, 60.0, 0.5, 0.02, 3, 0.02, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn drag_window_from_edges_derives_start_and_end() {
+        let (indicator, roi) = zoom_shaped_capture();
+        let (start, end) = drag_window_from_edges(&indicator, 0.5, (1, 2)).unwrap();
+        let report = analyze_drag(&roi, 60.0, start, end, 0.05);
+        // Two distinct repaints (150, then 210) inside the drag-start..drag-end window.
+        assert_eq!(report.distinct_frames.len(), 2);
+    }
+
+    #[test]
+    fn drag_window_from_edges_missing_edge_is_an_error() {
+        let (indicator, _roi) = zoom_shaped_capture();
+        let result = drag_window_from_edges(&indicator, 0.5, (1, 5));
+        assert!(result.is_err());
     }
 }
