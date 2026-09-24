@@ -7,7 +7,7 @@ description = "Throwaway spike for #68 (ADR-0006): iced GUI-framework candidate 
 
 [dependencies]
 iced = { version = "0.14", features = ["wgpu", "image", "advanced"] }
-wgpu = "27"
+wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 pelt = { path = "../pelt" }
 
