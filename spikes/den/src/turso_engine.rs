@@ -121,6 +121,20 @@ impl Workload for TursoEngine {
         let (db, conn) = rt.block_on(async {
             let db = Builder::new_local(&path.to_string_lossy()).build().await?;
             let conn = db.connect()?;
+            // Match sqlite.rs's pragmas exactly for a fair comparison: journal_mode=wal is
+            // already Turso's own default (confirmed via a throwaway probe), but its default
+            // synchronous is FULL (2), not sqlite.rs's explicit NORMAL (1) -- set both explicitly
+            // so neither engine gets a stricter-by-default durability setting than the other.
+            // `execute()` (unlike `query()`) rejects a statement that returns a row, and
+            // `PRAGMA journal_mode = ...` always returns the resulting mode as one row (same as
+            // plain `PRAGMA journal_mode`) — caught by actually running this, not assumed.
+            conn.prepare("PRAGMA journal_mode = WAL")
+                .await?
+                .query(())
+                .await?
+                .next()
+                .await?;
+            conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
             for stmt in SCHEMA {
                 conn.execute(stmt, ()).await?;
             }
@@ -132,6 +146,22 @@ impl Workload for TursoEngine {
             conn,
             path: path.to_path_buf(),
         })
+    }
+
+    fn prepare_for_forget(&mut self) {
+        // Swap in a throwaway runtime so the *real* one (which actually ran whatever transaction
+        // is about to be abandoned) can be taken by value and shut down cleanly, joining every
+        // worker thread. This does NOT fully resolve this engine's own crash-safety question --
+        // see workload.rs's doc comment on this trait method, and ADR-0009's crash-safety row, for
+        // the complete (genuinely inconclusive) story. The throwaway runtime never runs anything,
+        // so dropping it normally right after (when `self` itself is forgotten) is harmless.
+        let old_rt = std::mem::replace(
+            &mut self.rt,
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("throwaway runtime"),
+        );
+        old_rt.shutdown_timeout(std::time::Duration::from_secs(5));
     }
 
     fn bulk_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()> {

@@ -33,6 +33,32 @@ pub trait Workload {
 
     fn bulk_ingest(&mut self, assets: &[Asset]) -> anyhow::Result<()>;
 
+    /// Called by `den crash` immediately before `mem::forget`ing the engine — a hook for engines
+    /// that own a background thread pool of their own (e.g. a per-engine-instance async runtime)
+    /// to shut that pool down cleanly first, so a leaked *harness* thread is never conflated with
+    /// the engine's own on-disk crash-safety. No-op by default (SQLite/DuckDB/LMDB are plain
+    /// synchronous library calls with no threads of their own to leak).
+    ///
+    /// Added while investigating a real finding in the Turso backend's crash test (every reopen
+    /// after `mem::forget` failed with "database is locked", even after 5 seconds of retries) —
+    /// the story turned out to be genuinely unresolved, not a clean fix, and is worth reading in
+    /// full before assuming this method is a general-purpose solution: a hostile re-review read
+    /// `turso_core`'s actual locking code and found the lock is a POSIX `fcntl` advisory lock tied
+    /// to the database connection's own file descriptor (released by closing it, not by anything
+    /// runtime-related), which predicts that shutting down *only* the runtime here should change
+    /// nothing. A direct follow-up experiment partially contradicted that: a minimal reproduction
+    /// (a bare table, no indexes, a few dozen rows) *did* reopen successfully after this method's
+    /// fix was applied, but the same fix applied to the real, full-schema `crash_mid_ingest`
+    /// workload still failed identically. Neither explanation — leaked runtime thread, or fd-level
+    /// lock independent of the runtime — fully accounts for both results. See
+    /// `docs/adr/0009-turso-database-evaluation.md`'s crash-safety row for the complete account;
+    /// short version: this in-process technique could not produce a trustworthy verdict on
+    /// Turso's real crash-safety either way, and a real fork+exec+SIGKILL harness is the only way
+    /// to actually resolve it. This method is kept because it's still the right hygiene for *any*
+    /// future async engine's crash test (never let a leaked harness thread pool masquerade as the
+    /// property under test), not because it's confirmed to have fixed Turso's case specifically.
+    fn prepare_for_forget(&mut self) {}
+
     /// Writes half of `assets` inside an open transaction and returns **without committing** —
     /// used only by `den crash`'s mid-write simulation. The caller `mem::forget`s the engine
     /// immediately after this returns, so neither `COMMIT` nor `ROLLBACK` ever runs, approximating

@@ -374,6 +374,7 @@ fn crash_loop<E: Workload>(
                 manifest_path: "docs/ref-10k-manifest.csv".into(),
             });
             e.crash_mid_ingest(&assets)?;
+            e.prepare_for_forget();
             std::mem::forget(e);
         }
         match E::open(&path).and_then(|e| e.integrity_check()) {
