@@ -165,41 +165,66 @@ pub mod duckdb_fit {
             Ok(start.elapsed())
         }
 
-        /// Simulates compaction as DuckDB would actually execute it: delete every row for a
-        /// `(asset_id, stage_id, control)` run except the first and last, and rewrite the first
-        /// row's `after` to the last row's `after` — a row-level UPDATE + bulk DELETE, the
-        /// operation shape columnar engines are traditionally weakest at. Returns elapsed time.
+        /// Simulates compaction as DuckDB would actually execute it: per ADR-0002, compaction only
+        /// merges *consecutive* deltas from one uninterrupted editing burst, not every row that
+        /// ever touched this `(asset_id, stage_id, control)` key — a stage can be revisited in a
+        /// later, unrelated burst, and those must NOT be folded into an earlier one. `seq` is
+        /// monotonic per asset across every stage, so a burst is exactly a maximal run of rows for
+        /// this key whose `seq` values are consecutive integers; a gap means a different burst.
+        /// Each contiguous run gets its own UPDATE + bulk DELETE (delete all but the first row,
+        /// rewrite the first row's `after` to the run's last `after`) inside one transaction.
+        /// Returns (elapsed, number of runs actually compacted — i.e. real compaction ops, not
+        /// "keys touched").
         pub fn compact_run(
             &mut self,
             asset_id: i64,
             stage_id: &str,
             control: &str,
-        ) -> anyhow::Result<std::time::Duration> {
+        ) -> anyhow::Result<(std::time::Duration, u64)> {
             let start = Instant::now();
             let tx = self.conn.transaction()?;
-            let last_after: String = tx.query_row(
-                "SELECT after FROM history WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 \
-                 ORDER BY seq DESC LIMIT 1",
-                params![asset_id, stage_id, control],
-                |row| row.get(0),
-            )?;
-            let first_id: i64 = tx.query_row(
-                "SELECT id FROM history WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 \
-                 ORDER BY seq ASC LIMIT 1",
-                params![asset_id, stage_id, control],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "UPDATE history SET after = ?1 WHERE id = ?2",
-                params![last_after, first_id],
-            )?;
-            tx.execute(
-                "DELETE FROM history WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 \
-                 AND id <> ?4",
-                params![asset_id, stage_id, control, first_id],
-            )?;
+            let rows: Vec<(i64, i64, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, seq, after FROM history \
+                     WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 ORDER BY seq ASC",
+                )?;
+                stmt.query_map(params![asset_id, stage_id, control], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+            };
+
+            let mut ops = 0u64;
+            let mut i = 0usize;
+            while i < rows.len() {
+                let mut j = i;
+                while j + 1 < rows.len() && rows[j + 1].1 == rows[j].1 + 1 {
+                    j += 1;
+                }
+                if j > i {
+                    let (first_id, _, _) = &rows[i];
+                    let (_, _, last_after) = &rows[j];
+                    tx.execute(
+                        "UPDATE history SET after = ?1 WHERE id = ?2",
+                        params![last_after, first_id],
+                    )?;
+                    let to_delete: Vec<i64> = rows[i + 1..=j].iter().map(|(id, ..)| *id).collect();
+                    let placeholders = to_delete
+                        .iter()
+                        .enumerate()
+                        .map(|(k, _)| format!("?{}", k + 1))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    tx.execute(
+                        &format!("DELETE FROM history WHERE id IN ({placeholders})"),
+                        duckdb::params_from_iter(to_delete.iter()),
+                    )?;
+                    ops += 1;
+                }
+                i = j + 1;
+            }
             tx.commit()?;
-            Ok(start.elapsed())
+            Ok((start.elapsed(), ops))
         }
 
         /// "Current effective edit stack for asset X": latest row per `(asset_id, stage_id)`,
@@ -302,37 +327,59 @@ pub mod sqlite_fit {
             Ok(start.elapsed())
         }
 
+        /// See `duckdb_fit::Fit::compact_run`'s doc comment: compaction only merges a single
+        /// contiguous run of consecutive `seq` values sharing this key, not every row that ever
+        /// touched it, since a stage can be revisited in a later, unrelated burst.
         pub fn compact_run(
             &mut self,
             asset_id: i64,
             stage_id: &str,
             control: &str,
-        ) -> anyhow::Result<std::time::Duration> {
+        ) -> anyhow::Result<(std::time::Duration, u64)> {
             let start = Instant::now();
             let tx = self.conn.transaction()?;
-            let last_after: String = tx.query_row(
-                "SELECT after FROM history WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 \
-                 ORDER BY seq DESC LIMIT 1",
-                params![asset_id, stage_id, control],
-                |row| row.get(0),
+            let mut stmt = tx.prepare(
+                "SELECT id, seq, after FROM history \
+                 WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 ORDER BY seq ASC",
             )?;
-            let first_id: i64 = tx.query_row(
-                "SELECT id FROM history WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 \
-                 ORDER BY seq ASC LIMIT 1",
-                params![asset_id, stage_id, control],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "UPDATE history SET after = ?1 WHERE id = ?2",
-                params![last_after, first_id],
-            )?;
-            tx.execute(
-                "DELETE FROM history WHERE asset_id = ?1 AND stage_id = ?2 AND control = ?3 \
-                 AND id <> ?4",
-                params![asset_id, stage_id, control, first_id],
-            )?;
+            let rows: Vec<(i64, i64, String)> = stmt
+                .query_map(params![asset_id, stage_id, control], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let mut ops = 0u64;
+            let mut i = 0usize;
+            while i < rows.len() {
+                let mut j = i;
+                while j + 1 < rows.len() && rows[j + 1].1 == rows[j].1 + 1 {
+                    j += 1;
+                }
+                if j > i {
+                    let (first_id, _, _) = &rows[i];
+                    let (_, _, last_after) = &rows[j];
+                    tx.execute(
+                        "UPDATE history SET after = ?1 WHERE id = ?2",
+                        params![last_after, first_id],
+                    )?;
+                    let to_delete: Vec<i64> = rows[i + 1..=j].iter().map(|(id, ..)| *id).collect();
+                    let placeholders = to_delete
+                        .iter()
+                        .enumerate()
+                        .map(|(k, _)| format!("?{}", k + 1))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    tx.execute(
+                        &format!("DELETE FROM history WHERE id IN ({placeholders})"),
+                        rusqlite::params_from_iter(to_delete.iter()),
+                    )?;
+                    ops += 1;
+                }
+                i = j + 1;
+            }
             tx.commit()?;
-            Ok(start.elapsed())
+            Ok((start.elapsed(), ops))
         }
 
         /// SQLite has no `QUALIFY`; the equivalent shape is a window function in a subquery
@@ -435,8 +482,8 @@ mod tests {
                     )
                     .unwrap_or(0);
                 if count > 1 {
-                    d.compact_run(asset_id, stage, "slider_drag").unwrap();
-                    compacted_runs += 1;
+                    let (_, ops) = d.compact_run(asset_id, stage, "slider_drag").unwrap();
+                    compacted_runs += ops;
                 }
             }
         }
@@ -525,8 +572,8 @@ mod tests {
                     )
                     .unwrap_or(0);
                 if count > 1 {
-                    s.compact_run(asset_id, stage, "slider_drag").unwrap();
-                    compacted_runs += 1;
+                    let (_, ops) = s.compact_run(asset_id, stage, "slider_drag").unwrap();
+                    compacted_runs += ops;
                 }
             }
         }

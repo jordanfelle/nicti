@@ -117,12 +117,13 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   unchanged, now for a demonstrated technical reason instead of a soft one: #22's planned
   append-only history log with burst-compaction (ADR-0002) needs frequent UPDATE+DELETE-heavy
   operations, and a real prototype (`spikes/den/src/schema_fit.rs`) measured DuckDB compacting the
-  same history runs SQLite compacts **~575x slower per operation** (73.7ms/op vs 0.128ms/op,
-  960,000 raw rows down to 14,733 compacted rows), turning a sub-2-second workload into an
-  18-minute one — a real technical mismatch with ADR-0002's "no optimize catalog" constraint, not a
-  benchmark artifact. DuckDB's JSON support (`json_extract`) is confirmed real and usable — that
-  part of the schema-fit question favors DuckDB — but doesn't offset the compaction cost. #103's
-  separate SQLite-trigger-vs-DuckDB-sidecar facet-cache work is unaffected by this outcome.
+  same history runs SQLite compacts **~80x slower per operation** (4.297ms/op vs 0.054ms/op,
+  960,000 raw rows down to 19,963 compacted rows), turning a ~1-second workload into an ~86-second
+  one — a well-understood transaction-commit-overhead effect (matches ADR-0008's own single-row
+  `write_rating` cost roughly doubled), not a benchmark artifact. DuckDB's JSON support
+  (`json_extract`) is confirmed real and usable — that part of the schema-fit question favors
+  DuckDB — but doesn't offset the compaction cost. #103's separate SQLite-trigger-vs-DuckDB-sidecar
+  facet-cache work is unaffected by this outcome.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 

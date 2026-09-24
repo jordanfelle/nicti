@@ -64,60 +64,57 @@ reason.
 **SQLite stays the v1 catalog store. ADR-0008 is unchanged, now for a demonstrated technical
 reason instead of a soft one.** DuckDB's JSON support is real and unremarkable to use (see below),
 but its history-log compaction cost is not a close call: DuckDB compacted the same runs SQLite
-compacted **~575x slower per operation** (73.7ms/op vs 0.128ms/op), turning a sub-2-second
-operation into an 18-minute one at the same row count. This is not the "100-write rate burst"
-number #107 already ruled out as non-gating — that number describes a bulk, batched write path;
-this one describes ADR-0002's actual, frequent, per-burst-completion compaction step, run
-14,733 times as 14,733 separate single-op transactions (one per completed slider-drag/history-run,
-matching how compaction is actually triggered in the real design), and it gets *worse*, not merely
-slow, because of how DuckDB's storage layout responds to accumulating UPDATE/DELETE churn without
-a periodic checkpoint/vacuum — a real technical mismatch with ADR-0002's "no optimize catalog"
-constraint (bounded, continuous maintenance, not a periodic compaction pass the user has to run),
-not a benchmark artifact.
+compacted **~80x slower per operation** (4.297ms/op vs 0.054ms/op), turning a ~1-second operation
+into a ~86-second one at the same row count. This is not the "100-write rate burst" number #107
+already ruled out as non-gating — that number describes a bulk, batched write path; this one
+describes ADR-0002's actual, frequent, per-burst-completion compaction step, run 19,963 times as
+19,963 separate single-op transactions, one per genuinely completed, contiguous slider-drag/
+history-run (an earlier draft of this ADR miscounted this — see the correction note in Consequences
+below). The measured per-op cost lines up cleanly with ADR-0008's own already-measured
+single-row `write_rating` transaction-commit overhead on DuckDB (1.7–2.3ms), doubled for
+compaction's UPDATE+DELETE pair — a real, well-understood technical mismatch with ADR-0002's
+"no optimize catalog" constraint (bounded, continuous maintenance, not a periodic compaction pass
+the user has to run), not a benchmark artifact, even though it is a substantially smaller effect
+than an earlier draft of this ADR reported.
 
 ## Measured results
 
 Backed by `spikes/den/src/schema_fit.rs` (new spike module, see below). Workload: 4,000 synthetic
 assets × 6 editing sessions × 40 raw slider ticks per session (one randomly chosen stage per
 burst, from `{white_balance, tone, mask_subject, mask_sky, crop}`) = 960,000 raw history rows,
-generated deterministically (`generate_bursts`, seed 7). Compaction then collapses each
-same-`(asset_id, stage_id, control)` run down to a single merged row, exactly per ADR-0002's rule
-(first tick's `before`, last tick's `after`) — 14,733 runs actually needed compaction (a run of
-exactly 1 tick has nothing to compact).
+generated deterministically (`generate_bursts`, seed 7). Compaction collapses each *contiguous run
+of consecutive-`seq` ticks* sharing `(asset_id, stage_id, control)` down to a single merged row,
+exactly per ADR-0002's rule (first tick's `before`, last tick's `after`) — critically, a stage
+revisited in a later, non-adjacent burst is its own separate run, not folded into an earlier one —
+19,963 runs actually needed compaction (a run of exactly 1 tick has nothing to compact). All
+numbers below are `cargo test --release` measurements; an earlier draft of this ADR captured debug
+(unoptimized) numbers for SQLite without saying so, which is corrected here too (see Consequences).
 
 | Measurement | SQLite | DuckDB |
 |---|---|---|
-| Raw insert, 960k rows (Appender/prepared-statement bulk path) | 3.22s (297.9 rows/ms) | 9.39s (102.3 rows/ms) |
-| Compaction, 14,733 ops (one UPDATE + one DELETE + commit per op) | 1.887s total, **0.128ms/op** | 1085.4s total, **73.7ms/op** |
-| Rows remaining after compaction | 14,733 (from 960,000) | 14,733 (from 960,000) — same logical result, confirming compaction is correct on both engines |
-| "Current effective edit stack" query, 200 calls | 9.1ms total, 0.046ms/call | 1.21s total, 6.07ms/call |
+| Raw insert, 960k rows (Appender/prepared-statement bulk path) | 0.81s (1181.8 rows/ms) | 1.05s (915.7 rows/ms) |
+| Compaction, 19,963 ops (one UPDATE + one bulk DELETE + commit per op) | 1.08s total, **0.054ms/op** | 85.79s total, **4.297ms/op** |
+| Rows remaining after compaction | 19,963 (from 960,000) | 19,963 (from 960,000) — same logical result, confirming compaction is correct on both engines |
+| "Current effective edit stack" query, 200 calls | 3.27ms total, 0.016ms/call | 200.8ms total, 1.004ms/call |
 | JSON path extraction (`json_extract(after, '$.v')`) | Works, matches DuckDB's extracted value exactly | Works (`json_extract(...)::DOUBLE`), matches SQLite's extracted value exactly |
 
-**Raw insert (3x slower on DuckDB) is not the finding — it's still fast in absolute terms and not
-gated by anything in `docs/benchmarks.md`.** The finding is compaction: **575x slower per
-operation**, and the total 1085-second wall time for 14,733 ops at this modest scale (4,000
-assets — a fraction of the 2M-asset planning horizon) means a real catalog's worth of compaction,
-run continuously as ADR-2's design calls for, is not a one-off cost DuckDB pays once — it is
-DuckDB's steady-state cost for a workload SQLite handles as a rounding error. The "current
-effective edit stack" query is also markedly slower on DuckDB (132x), though at an absolute
-6ms/call it would likely still be usable in isolation if compaction weren't the disqualifying
-factor first.
+**Raw insert (~1.3x slower on DuckDB) is not the finding — it's close and not gated by anything in
+`docs/benchmarks.md`.** The finding is compaction: **~80x slower per operation**, and the total
+86-second wall time for 19,963 ops at this modest scale (4,000 assets — a fraction of the
+2M-asset planning horizon) means a real catalog's worth of compaction, run continuously as
+ADR-0002's design calls for, is not a one-off cost DuckDB pays once — it is DuckDB's steady-state
+cost for a workload SQLite handles roughly two orders of magnitude faster. The "current effective
+edit stack" query is also markedly slower on DuckDB (~61x), though at an absolute ~1ms/call it
+would likely still be usable in isolation if compaction weren't the disqualifying factor first.
 
-**Root cause, not just observed:** each `compact_run` call does one `SELECT` for the last tick's
-value, one `SELECT` for the first row's id, one `UPDATE`, one `DELETE`, and one transaction commit
-— the same per-transaction-commit overhead ADR-0008 already measured on DuckDB's single-row
-`write_rating` (1.7–2.3ms vs SQLite's 0.012–0.04ms, already 40–100x). Compaction compounds an
-UPDATE *and* a DELETE per commit, and — unlike `write_rating`, which ADR-0008 measured against a
-static, freshly-loaded table — this workload runs 14,733 of these in sequence against the *same*
-table, so each op's cost also reflects DuckDB's row-group storage absorbing continuous UPDATE/
-DELETE churn with no interleaved `CHECKPOINT`/`VACUUM` between them (this spike never issues one,
-matching how ADR-2's compaction is described as a routine, ongoing background operation, not a
-periodic maintenance pass). The measured 73.7ms average is not explained by transaction-commit
-overhead alone (that alone would predict something closer to DuckDB's already-measured ~2ms
-single-write cost); the remainder is consistent with degrading-scan cost over an
-increasingly-fragmented row group, though this spike did not further decompose the 14,733 samples
-into a per-iteration growth curve to prove that specific mechanism — a real, named limit on how
-far this finding has been root-caused, not asserted past what was measured.
+**Root cause, not just observed:** each `compact_run` call does one `SELECT` to fetch the run's
+rows, one `UPDATE`, one bulk `DELETE`, and one transaction commit — the same per-transaction-commit
+overhead ADR-0008 already measured on DuckDB's single-row `write_rating` (1.7–2.3ms vs SQLite's
+0.012–0.04ms). The measured 4.297ms/op average lines up cleanly with that number roughly doubled
+(one UPDATE + one DELETE instead of `write_rating`'s single UPDATE) — a well-understood
+transaction-commit-overhead effect, not a mysterious or open one. This spike did not need to reach
+for a degrading-storage explanation to account for the measured cost, unlike an earlier draft of
+this ADR, which overstated the magnitude and reached for one anyway.
 
 **JSON support is real, not just storage — this part actually favors DuckDB, it just isn't enough
 to change the Decision.** `json_extract(json_column, '$.path')` works out of the box on DuckDB
@@ -142,7 +139,7 @@ concern on either side.
 | Option | Verdict |
 |---|---|
 | SQLite (status quo, ADR-0008) | **Kept.** Same tradeoffs ADR-0008 already measured, now additionally confirmed as the correct choice for ADR-0002's specific history-log/compaction shape — not merely preferred by "ecosystem maturity." |
-| DuckDB as v1 primary | **Rejected**, on new evidence this pass specifically went looking for. Its JSON support is genuinely good and its OLTP-shaped point-update numbers (ADR-0008) remain the best of any candidate in isolation, but ADR-2's compaction step — an UPDATE+DELETE-heavy, continuously-recurring operation, not a rare one — costs 575x more per operation than on SQLite, and the cost pattern is consistent with getting worse, not staying flat, as more compaction runs accumulate without a periodic optimize pass DuckDB would need and ADR-2 deliberately doesn't want to require. |
+| DuckDB as v1 primary | **Rejected**, on new evidence this pass specifically went looking for. Its JSON support is genuinely good and its OLTP-shaped point-update numbers (ADR-0008) remain the best of any candidate in isolation, but ADR-0002's compaction step — an UPDATE+DELETE-heavy, continuously-recurring operation, not a rare one — costs ~80x more per operation than on SQLite, a real per-transaction-commit-overhead effect (see Root cause above), not a benchmark artifact. |
 
 ## Prior art
 
@@ -168,6 +165,16 @@ shape those ADRs didn't test, not a new engine comparison.
 - **DuckDB's JSON support is confirmed usable** should #22 or a later ticket ever want a DuckDB-backed
   read-side sidecar that needs to query into the edit-document JSON (e.g., a facet/search index
   keyed on specific stage parameters) — this was previously unverified, now it's measured.
+- **Correction (adversarial review, before this ADR was finalized):** an earlier draft's
+  `compact_run` grouped every row ever touching a given `(asset_id, stage_id, control)` key,
+  including rows from separate, non-adjacent bursts on the same stage — collapsing multiple
+  unrelated editing sessions into one oversized op instead of one op per completed burst, and
+  under-counting the true number of compaction ops (14,733 vs the corrected 19,963). The same
+  draft's SQLite numbers were also captured without `--release`, understating SQLite's real speed
+  by ~3-4x. Both are fixed in `compact_run` (now splits on contiguous `seq` runs) and in how these
+  numbers were captured; the qualitative conclusion (SQLite wins, DuckDB unsuitable for this
+  workload) is unchanged, but the magnitude is: ~80x slower per op, not ~575x, and ~86 seconds of
+  wall time at this scale, not 18 minutes.
 
 ## Spike: `spikes/den/src/schema_fit.rs`
 
@@ -190,9 +197,15 @@ new dependency, no `docs/licensing.md` change needed):
   well under `spikes/den`'s main 2M-asset benchmark scale, since this measures one query/mutation
   shape in isolation rather than a full catalog.
 
-One implementation note worth recording since it's a real, if minor, gap: this prototype approximates
-ADR-2's compaction trigger as "run once per completed burst, checked eagerly per `(asset_id,
-stage_id)` pair after all bursts have landed" rather than the real design's likely trigger (a
-time-window-based coalescing check running inline as ticks arrive). This doesn't change the
-measured per-operation cost (the same UPDATE+DELETE+commit shape either way), but a real
-implementation's exact compaction cadence is #22's decision, not reproduced here.
+Two implementation notes worth recording:
+
+- `compact_run` splits a `(asset_id, stage_id, control)` key's rows into maximal contiguous runs
+  of consecutive `seq` values before compacting each run separately — a stage revisited in a
+  later, non-adjacent burst is correctly treated as its own run, not folded into an earlier one.
+  (An earlier draft of this function grouped by key alone with no adjacency check; see the
+  Consequences correction note above.)
+- This prototype still checks compaction eagerly per `(asset_id, stage_id)` pair after all bursts
+  have landed, rather than the real design's likely trigger (a time-window-based coalescing check
+  running inline as ticks arrive). This doesn't change the measured per-operation cost (the same
+  UPDATE+DELETE+commit shape either way), but a real implementation's exact compaction cadence is
+  #22's decision, not reproduced here.
