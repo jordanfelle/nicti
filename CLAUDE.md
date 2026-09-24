@@ -63,6 +63,26 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   egui's/GPUI's built-in virtualized-list primitive, so both had to hand-roll grid-windowing math
   (`spikes/pelt/src/virtualize.rs`) for #68's grid gate. Final selection waits on
   `bench/pelt/pelt.ahk`+`run-pelt.ps1` numbers from the reference machine.
+- **Catalog database engine**: `docs/adr/0007-catalog-database-engine.md` — **SQLite** (`rusqlite`,
+  WAL), with a `(model, rating)` composite index and `GLOB` (not `LIKE`) for every prefix-scan
+  predicate — this build's `LIKE`-to-index-range-scan transform never triggered, confirmed via
+  `EXPLAIN QUERY PLAN`. Measured in `spikes/den/` against a corrected-cardinality synthetic
+  generator (`gen.rs`'s per-event `BENCH_LEAF_KEYWORD`, after the first-pass 11-value keyword
+  vocabulary turned out to make every hierarchical query artificially non-selective): clears every
+  gate at 2M assets except faceted-filter-with-facet-counts (151ms p95 vs the 100ms budget — a
+  known, unattempted mitigation is a trigger-maintained facet table). **DuckDB passed every gate
+  with the best margins of any candidate, including the point-update gate the issue predicted it
+  would fail** — not chosen for v1 only because #22's row-store schema fits SQLite's maturity
+  better, kept explicit as the fallback if the facet-query ceiling becomes a real problem. **LMDB
+  had the best raw numbers on every indexable op, but its crash-safety gate could not be
+  measured**: `heed`/`liblmdb`'s process-wide open-environment guard makes the in-process
+  `mem::forget`-based crash simulation this spike used structurally inapplicable (confirmed, not
+  assumed) — a real fork+exec+SIGKILL harness is the only way to test it, out of scope this pass.
+  Both embedded-Postgres candidates named in the issue were eliminated at the hard-gate stage
+  before either got a spike: `pglite-rs`'s `build.rs` unconditionally emits a Unix-only linker
+  flag (no Windows path exists in the crate); `pglite-oxide` doesn't compile against its own
+  published dependency graph on any target (`wasmer-wasix` vs `virtual-net`, confirmed on two
+  versions). Unblocks #22, #23, #24, #25, #71.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -124,8 +144,12 @@ TIFF/EXIF/Nikon-MakerNote IFD walker — no LibRaw/rawler dependency, deliberate
 #37's still-open decoder choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path and a
 locate/read/decode-grid/decode-screen/full-read latency benchmark; `sniff inventory` cross-checked
 byte-exact against `exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md`
-for the full write-up) — not production code; don't build on top of a spike crate, and expect each
-to be deleted once its own ticket promotes it (as #20 just did for `spikes/sheath`/`spikes/dewclaw`).
+for the full write-up), and `spikes/den` (#67/ADR-0007's catalog-database-engine comparison — one
+module per surviving candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`, behind matching Cargo
+features; `gen.rs`'s synthetic-catalog generator is reusable for future Library-scale benchmarks,
+see `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect
+each to be deleted once its own ticket promotes it (as #20 just did for
+`spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.
 

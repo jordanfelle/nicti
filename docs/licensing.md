@@ -119,6 +119,25 @@ dependency: `sniff` implements its own minimal TIFF/EXIF/Nikon-MakerNote IFD wal
 choice and rawler's LGPL-as-Cargo-dependency review this early. `cargo deny --workspace
 --all-features check licenses` passes clean as of this update, no `deny.toml` edits required.
 
+**Update (2026-09-24, [#67](https://github.com/jordanfelle/nicti/issues/67)'s `den` spike,
+`docs/adr/0007-catalog-database-engine.md`):** new dependencies for the catalog-database-engine
+comparison. `rusqlite`, `duckdb`, `heed`/`heed-types`/`heed-traits`, and `bincode` (the Rust
+binding crates) are all MIT, already covered by the existing allowlist. One new `deny.toml` entry
+was needed: `webpki-roots` v1.0.9 carries **CDLA-Permissive-2.0**, pulled in as a *build-time-only*
+dependency of `libduckdb-sys`'s build script (`duckdb -> ureq -> webpki-roots`) — never linked
+into a shipped binary. Same bundled-permissive-data category as the existing `OFL-1.1`/
+`Ubuntu-font-1.0` entries, so added globally rather than scoped[^s7]. The two embedded-Postgres
+candidates named in #67's own issue body (`pglite-rs`, `pglite-oxide`) never got this far: both
+hard-gate-failed (see the ADR) before either was added as a real dependency, so neither appears in
+`deny.toml` or below.
+
+Each engine's **statically-linked native C/C++ core** — invisible to `cargo deny`, which only
+resolves the Rust crate graph, not vendored/bundled native source compiled by a crate's own
+`build.rs` — is added to the Native libraries table below: SQLite (public domain), DuckDB (MIT,
+same as its Rust binding), and LMDB (OpenLDAP Public License 2.8 — note this differs from
+`lmdb-master-sys`'s own self-declared `Apache-2.0` Cargo.toml field, another instance of the same
+"native code license isn't what `cargo deny` sees" gap this section exists to catch)[^s8].
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -140,6 +159,9 @@ choice and rawler's LGPL-as-Cargo-dependency review this early. `cargo deny --wo
 | Adobe LCP (lens profile) files | Lens correction | Proprietary Adobe/Lightroom data; no redistribution grant found (weakest-sourced claim in this audit — treat as prudent inference, re-verify if this becomes a real dependency)[^lcp1] | — | n/a | ⛔ | ⛔ | ⛔ **never bundle** |
 | [dcamprof](https://github.com/Beep6581/dcamprof) | Open DCP-alternative profile generator | GPL-3.0[^dc1] | — | External CLI tool (not linked) | ✅ if invoked as a separate process, not linked into Nicti's binary | ✅ | ✅ external-tool use only |
 | LibRaw's built-in camera color matrices | Open DCP-alternative (fallback, no extra dependency) | Inherits LibRaw's own LGPL-2.1/CDDL-1.0 (item above) | — | Dynamic (already inside LibRaw) | ✅ | ✅ | ✅ bundle OK — no new license surface |
+| [SQLite](https://www.sqlite.org/copyright.html) (bundled via `libsqlite3-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | Public domain[^den1] | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
+| [DuckDB](https://github.com/duckdb/duckdb/blob/main/LICENSE) core (bundled via `libduckdb-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | MIT[^den2] | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
+| [LMDB](https://www.openldap.org/software/release/license.html) (bundled via `lmdb-master-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | OpenLDAP Public License 2.8[^den3] | — | Static | ✅ (attribution-only, no copyleft) | ✅ | ✅ bundle OK — retain the license text per its own §3 condition |
 
 ## ML runtime (ONNX / CUDA / TensorRT)
 
@@ -237,3 +259,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^s4]: `epaint_default_fonts` v0.36.2 license expression — `cargo deny --workspace --all-features check licenses` against its own `Cargo.toml` — verified 2026-09-23
 [^s5]: Slint crate family license expression — `cargo deny --workspace --all-features check licenses` against `slint`/`slint-build`/`slint-macros`/every `i-slint-*` crate's own `Cargo.toml` (all identical), cross-checked against https://github.com/slint-ui/slint/blob/master/LICENSES — verified 2026-09-23
 [^s6]: `libfuzzer-sys` v0.4.13 (`(MIT OR Apache-2.0) AND NCSA`) and `clipboard-win`/`error-code` (`BSL-1.0`) — `cargo deny --workspace --all-features check licenses` against each crate's own `Cargo.toml` — verified 2026-09-23
+[^s7]: `webpki-roots` v1.0.9 `CDLA-Permissive-2.0` — `cargo deny --workspace --all-features check licenses` against its own `Cargo.toml`, cross-checked against https://crates.io/crates/webpki-roots — verified 2026-09-24
+[^den1]: SQLite public-domain dedication — https://www.sqlite.org/copyright.html, and the "public domain" notice embedded directly in `libsqlite3-sys`'s bundled `sqlite3.c` — verified 2026-09-24
+[^den2]: DuckDB core MIT license — https://github.com/duckdb/duckdb/blob/main/LICENSE, matching `libduckdb-sys`'s own bundled `LICENSE` file — verified 2026-09-24
+[^den3]: LMDB (`liblmdb`) OpenLDAP Public License 2.8 — the `LICENSE`/`COPYRIGHT` files bundled inside `lmdb-master-sys`'s vendored `lmdb/libraries/liblmdb/` source, cross-checked against https://www.openldap.org/software/release/license.html; note this is the *bundled C source's* license, distinct from (and not accurately reflected by) `lmdb-master-sys`'s own self-declared `Apache-2.0` Cargo.toml field — verified 2026-09-24

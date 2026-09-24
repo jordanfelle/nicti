@@ -46,6 +46,12 @@ allow = [
     # #68/ADR-0006 rows.
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    # CDLA-Permissive-2.0: `webpki-roots` (Mozilla's root CA bundle, republished as Rust source
+    # data), a build-time-only dependency of `libduckdb-sys`'s build script (`duckdb` -> `ureq` ->
+    # `webpki-roots`, #67/ADR-0007's `spikes/den`) -- not linked into any shipped binary. Same
+    # bundled-data category as OFL-1.1/Ubuntu-font-1.0 above: a Linux-Foundation-drafted
+    # permissive data license with no copyleft terms, standard for redistributing root-cert data.
+    "CDLA-Permissive-2.0",
 ]
 # Deliberately NOT listing any LGPL/GPL variant, even for r-efi's "MIT OR Apache-2.0 OR
 # LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate
