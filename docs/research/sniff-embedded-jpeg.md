@@ -92,21 +92,42 @@ gap above).
 
 Measured on the reference machine: AMD Ryzen 9 9950X (16-core), 93.7 GB RAM, Windows 11 Pro build
 26200, NVIDIA GeForce RTX 5080 (driver 32.0.16.1656), `H:`/`E:` both labeled "Storage"/"Storage4"
-local volumes. Windows-native via WSL→Windows cross-compile + interop, against an 800-file bounded
-sample of `H:\NictiBench\ref-10k` (NVMe), 1 discarded warm-up + 3 measured runs per config.
+local volumes. Windows-native via WSL→Windows cross-compile + interop, against a bounded sample of
+`H:\NictiBench\ref-10k` (NVMe) — 800 files for `locate`/`decode-grid`/`decode-screen`, 300 for the
+two `full-read`/`random`-order configs (the original sample-limit for those runs) — 1 discarded
+warm-up + 3 measured runs per config.
 **Gap vs. `docs/benchmarks.md`'s stated methodology:** that doc says "every result records CPU,
 GPU, driver version, RAM, Windows build, and drive models" in the result itself — `sniff bench`'s
 JSON output doesn't yet capture this (only mode/order/threads/cold/run_index/samples), so it's
 recorded by hand here instead. Worth fixing in `sniff bench` itself before relying on its raw JSON
 as a standalone artifact.
 
-| Mode | Threads | Cold | p50 | p95 | max |
-|---|---|---|---|---|---|
-| `locate` | 1 | warm | 17.0 ms | 21.5 ms | 31.6 ms (248 ms once) |
-| `locate` | 1 | cold | 14.0 ms | 20.6 ms | 32.9 ms |
-| `locate` | 8 | cold | 47.3 ms | 66.6 ms | 101.6 ms |
-| `decode-grid` | 1 | warm | 22.0 ms | 39.5 ms | 59-146 ms |
-| `decode-grid` | 8 | warm | 46.6 ms | 69.7 ms | 84-118 ms |
+| Mode | Threads | Cold | Order | p50 | p95 | max |
+|---|---|---|---|---|---|---|
+| `locate` | 1 | warm | manifest | 17.0 ms | 21.4 ms | 248.3 ms once |
+| `locate` | 1 | cold | manifest | 14.1 ms | 20.9 ms | 33.6 ms |
+| `locate` | 8 | cold | manifest | 47.0 ms | 66.8 ms | 102.5 ms |
+| `locate` | 1 | cold | random | 131.2 ms | 152.4 ms | 205.0 ms |
+| `decode-grid` | 1 | warm | manifest | 21.9 ms | 39.9 ms | 145.9 ms |
+| `decode-grid` | 8 | warm | manifest | 46.5 ms | 68.8 ms | 117.8 ms |
+| `decode-screen` | 1 | warm | manifest | 205.7 ms | 287.8 ms | 467.6 ms |
+| `full-read` | 1 | cold | manifest | 11.4 ms | 13.8 ms | 15.6 ms |
+| `full-read` | 1 | cold | random | 131.6 ms | 152.3 ms | 203.5 ms |
+
+`decode-screen` and `full-read` (both orders) are new in this rerun — filling the gap this doc
+originally left open (see "Not yet measured" below). All numbers above are re-pooled across 3
+measured runs (1 discarded warm-up), same 800-file (or 300-file for the two `full-read` /
+`random` configs, per the original sample-limit) bounded set, run against the tier-selection-bug
+fix that landed with this same PR/#28 (`locate_offset` inspecting each candidate's own SOF header
+instead of relying on the `ImageWidth`/`ImageLength` TIFF tags real NEF/DNG files don't carry) —
+`locate`/`decode-grid` reproduce their original numbers almost exactly, confirming the fix didn't
+change steady-state throughput, just correctness of which tier gets selected.
+
+**`random` order is ~9-12x slower than `manifest` order** for both `locate` and `full-read` (131ms
+vs. 14-17ms cold) — expected, since `manifest` order reads files in on-disk/creation order (mostly
+sequential for a freshly-written reference set) while `random` order forces the drive to seek
+across the full 9,142-file span for every read. This matters more than the threading finding below
+for real-world culling UX, where the user's actual browse order is arbitrary, not sequential.
 
 **Important caveat on all of the above:** every mode, including `locate`, currently reads the
 *entire* file (`fs::read`, ~4-20 MB for these bodies) before finding or decoding the target JPEG —
@@ -127,11 +148,10 @@ achieve; a targeted-read implementation should beat every number here, likely su
    in #29's design; a smaller pool, or single-threaded extraction with the OS's own read-ahead, may
    serve the `<50ms` interactive target better than throwing more threads at whole-file reads.
 
-**Not yet measured** in this pass (left as exact repro commands below, since a full run bumped
-into this session's time budget partway through `decode-screen`): `decode-screen`, the
-`full-read` baseline, the full 9,142-file set (vs. this run's 800-file sample), and the HDD
-(`E:\`) comparison. The design implication above (seek-and-read, not whole-file-read) should be
-built into `sniff bench` before that fuller pass, since it changes every number materially.
+**Still not yet measured**, now that `decode-screen`/`full-read` are filled in above: the full
+9,142-file set (vs. this run's 800-file/300-file bounded sample) and the HDD (`E:\`) comparison.
+The design implication above (seek-and-read, not whole-file-read) should be built into `sniff
+bench` before that fuller pass, since it changes every number materially.
 
 ## Reproducing / extending this run
 
@@ -146,7 +166,9 @@ sniff.exe inventory H:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-
 sniff.exe inventory E:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-hdd.csv --hdd-sample-every 20
 
 # Throughput matrix: full file set, all modes, both drives, cold+warm, both orders.
-# (This session ran an 800-file NVMe-only bounded sample -- see Throughput above.)
+# (Two bounded NVMe-only reruns so far have covered locate/decode-grid/decode-screen/full-read
+# at 800/300-file sample sizes, both manifest and random order -- see Throughput above. Still
+# outstanding: the full 9,142-file set and every E:\ (HDD) command below.)
 sniff.exe bench H:\NictiBench\ref-10k --mode locate --threads 1 --order manifest
 sniff.exe bench H:\NictiBench\ref-10k --mode decode-screen --threads 1 --order manifest
 sniff.exe bench H:\NictiBench\ref-10k --mode full-read --threads 1 --order manifest --sample-limit 500 --cold
