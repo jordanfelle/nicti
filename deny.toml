@@ -52,15 +52,37 @@ allow = [
     # bundled-data category as OFL-1.1/Ubuntu-font-1.0 above: a Linux-Foundation-drafted
     # permissive data license with no copyleft terms, standard for redistributing root-cert data.
     "CDLA-Permissive-2.0",
+    # GPL-3.0/AGPL-3.0/GPL-2.0-or-later: added 2026-09-24 per ADR-0003's amendment (#66/ADR-0010 --
+    # Nicti's own outbound license is now AGPL-3.0-or-later, so these are combinable into it, not
+    # a compatibility risk the way they were when the outbound license was still undecided).
+    # LGPL is *still* deliberately not listed here. ADR-0003's amendment resolved the
+    # LGPL-as-Cargo-dependency sign-off question for `lensfun-rs` (confirmed LGPL-3.0-or-later dual
+    # license) but explicitly NOT for `rawler` (bare "LGPL-2.1" with no confirmed or-later arm --
+    # see ADR-0003's own amendment for why this still needs resolving before rawler is pre-cleared).
+    # The reason for this allowlist omission hasn't changed either way (see below).
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "GPL-2.0-or-later",
+    # Deliberately NOT "GPL-2.0-only": without an "or later" arm, GPL-2.0-only code cannot be
+    # combined into a GPL-3.0-family work (Nicti's own AGPL-3.0-or-later license) -- this is a
+    # real incompatibility, not a leftover-caution omission like the ones below. A crate whose
+    # *sole* license is exactly "GPL-2.0-only" should still fail this check; if one is ever needed,
+    # that's a real ADR-0003 conversation (dual-licensing, a permissive fork, etc.), not an
+    # allowlist edit.
 ]
-# Deliberately NOT listing any LGPL/GPL variant, even for r-efi's "MIT OR Apache-2.0 OR
+# Deliberately NOT listing any LGPL variant, even for r-efi's "MIT OR Apache-2.0 OR
 # LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate
 # (verified: r-efi passes today via its MIT/Apache-2.0 arms with no LGPL entry in `allow` at all),
 # so adding an LGPL SPDX string here would have no upside and a real downside: cargo-deny can't
 # express "only as an OR-arm" -- it would also pass a future crate whose *sole* license is that
-# exact LGPL string, silently bypassing the ADR-0003 rule that LGPL-as-Cargo-dependency (rawler,
-# lensfun-rs) needs a manual case-by-case sign-off, not a blanket CI pass. If a future crate's
-# only permissive arm changes, that's a real ADR-0003 review to have, not an allowlist edit.
+# exact LGPL string. For `lensfun-rs` specifically, this no longer matters for the concern it was
+# originally written to guard (ADR-0003's amendment: its confirmed or-later dual license needs no
+# special sign-off now that Nicti's own license is already copyleft) -- but `rawler`'s own LGPL
+# grant isn't confirmed to include an "or later" option, so its sign-off question is still open,
+# and the general principle (don't widen an allowlist just because cargo-deny's OR-arm matching
+# makes it convenient) still holds regardless. This stays an explicit choice, not an oversight.
 confidence-threshold = 0.9
 
 # Spike-scoped exception (#68/ADR-0006): Slint's own crates carry

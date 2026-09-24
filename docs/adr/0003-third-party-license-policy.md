@@ -106,6 +106,56 @@ process being followed at review time.
   functionally MIT-equivalent. No other allow-list change was needed for that ADR's other new
   dependencies (`wasmtime`/`wat`, both `Apache-2.0 WITH LLVM-exception`, already allowed).
 
+- **2026-09-24 (#66/ADR-0013): Nicti's outbound license is now decided — AGPL-3.0-or-later** — this
+  is the single biggest change to this policy since it was written, since the whole reason the
+  original Decision section below denied GPL/AGPL was to keep the outbound-license choice open.
+  That's no longer true. The rules below are **superseded** by this amendment where they conflict;
+  read this amendment first, the original Decision section second (for anything it doesn't touch).
+
+  - **Rust crates**: `GPL-3.0-only`, `GPL-3.0-or-later`, `AGPL-3.0-only`, `AGPL-3.0-or-later`, and
+    `GPL-2.0-or-later` are now allowed (added to `deny.toml`'s allowlist). **`GPL-2.0-only`
+    remains denied** — without an "or later" arm (or a separate compatible OR-arm), GPL-2.0-only
+    code is genuinely not combinable into a GPL-3.0-family (Nicti's own) work; this is a real,
+    per-crate license-text check, not a blanket "any GPL string now passes" rule. Check the actual
+    grant text (not just a short "GPL-2.0" label some registries use loosely, and not the
+    project's bundled `COPYING`/`LICENSE` file either — that's usually the FSF's own unedited
+    template, not project-specific evidence) before clearing anything under this amendment —
+    `docs/licensing.md`'s exiv2 entry has a worked example (its own source's `SPDX-License-
+    Identifier: GPL-2.0-or-later` headers and README, not its COPYING file, are what actually
+    confirm `-or-later`).
+  - **C/C++ native libraries**: GPL native libraries are no longer denied outright, provided the
+    same or-later/compatible-arm check above passes. `exiv2` (GPL-2.0-or-later, confirmed via its
+    own SPDX headers) is now usable directly, not just its permissive alternatives.
+  - **LGPL-as-Cargo-dependency (the `rawler`/`lensfun-rs` flag)**: **partially resolved — do not
+    treat both the same.** The mechanism is real: LGPL lets a licensee relicense under "the
+    ordinary GPL," and since Nicti's own license is now already copyleft (not permissive/
+    proprietary), the isolation requirement's original purpose no longer applies *in general*. But
+    that relicense option converts to whichever GPL version the library's *own* grant permits, not
+    automatically to whatever the combiner wants — the same or-later-vs-only check two paragraphs
+    up applies here too, and was skipped in an earlier pass of this amendment.
+    - `lensfun-rs` **is resolved**: its dual license (`LGPL-3.0-or-later OR GPL-3.0`) has a
+      confirmed or-later arm. Treat it as a normal, pre-cleared Cargo dependency.
+    - `rawler` **is not resolved**: its `Cargo.toml` declares a bare `license = "LGPL-2.1"` (not
+      valid SPDX without an `-only`/`-or-later` suffix), and its repo's `LICENSE` file is the
+      unedited generic FSF template (confirmed by checking it — it still contains the template's
+      own placeholder text), which is not project-specific evidence either way. If rawler's actual
+      grant is LGPL-2.1-only, its GPL-relicensed form is GPL-2.0-only — denied under this same
+      amendment. **Keep the sign-off/`cdylib`-isolation requirement in force for `rawler`
+      specifically** until an authoritative answer is found (ask upstream, or locate a real
+      per-file SPDX header) — #37 should not skip this check just because this amendment resolved
+      the general LGPL question for `lensfun-rs`.
+  - **ML model weights**: Ultralytics YOLO (AGPL-3.0, previously denied outright for the culling/
+    detection candidate) is now allowed for bundling.
+  - **What did NOT change**: the "no bundled proprietary data" rule (Adobe DCP/LCP — those are
+    excluded because no redistribution grant exists at all, a completely separate issue from
+    copyleft-vs-permissive); any model still excluded for a *non-commercial-only* or *unclear
+    provenance* reason (InsightFace/RetinaFace, LaMa's Places2 flag) — those exclusions were never
+    about copyleft compatibility and this amendment doesn't touch them; CLIP's model-card-discourages-
+    deployment flag (a stated-position concern, not a license one).
+  - See `docs/adr/0013-outbound-license-agpl.md` for the full reasoning behind the license choice
+    itself, and `docs/licensing.md`'s dated 2026-09-24 update for the concrete per-dependency
+    verdicts this amendment changes.
+
 ## Consequences
 
 - Blocks #66 unblocking is now unblocked (`docs/licensing.md` + this ADR satisfy #18).
