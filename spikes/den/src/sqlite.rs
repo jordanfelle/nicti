@@ -173,7 +173,7 @@ impl Workload for SqliteEngine {
     ) -> anyhow::Result<FacetCounts> {
         // EXISTS + GLOB rather than a JOIN + LIKE + DISTINCT: a JOIN on asset_keywords fans out
         // one row per keyword per asset before the DISTINCT can collapse it back down, and (see
-        // sqlite.rs's module doc / ADR-0007) SQLite's LIKE-to-index-range-scan transform did not
+        // sqlite.rs's module doc / ADR-0008) SQLite's LIKE-to-index-range-scan transform did not
         // trigger even with `case_sensitive_like` on in this codebase's measurements — GLOB's
         // prefix scan is unconditional, not pragma-dependent, and EXISTS never materializes the
         // fanned-out join.

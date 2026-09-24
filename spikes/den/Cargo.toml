@@ -3,7 +3,7 @@ name = "den"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Throwaway spike for #67: catalog-database-engine comparison (SQLite/WAL, DuckDB, LMDB) against docs/benchmarks.md's Library targets at 600k/2M synthetic scale. Embedded Postgres (pglite-rs/pglite-oxide) hard-gate-failed before a backend was worth writing — see ADR-0007. Not a production crate."
+description = "Throwaway spike for #67: catalog-database-engine comparison (SQLite/WAL, DuckDB, LMDB) against docs/benchmarks.md's Library targets at 600k/2M synthetic scale. Embedded Postgres (pglite-rs/pglite-oxide) hard-gate-failed before a backend was worth writing — see ADR-0008. Not a production crate."
 
 [[bin]]
 name = "den"

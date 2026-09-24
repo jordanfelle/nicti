@@ -1,4 +1,4 @@
-# ADR-0007: Catalog database engine
+# ADR-0008: Catalog database engine
 
 - **Status:** Accepted
 - **Date:** 2026-09-24

@@ -119,8 +119,18 @@ dependency: `sniff` implements its own minimal TIFF/EXIF/Nikon-MakerNote IFD wal
 choice and rawler's LGPL-as-Cargo-dependency review this early. `cargo deny --workspace
 --all-features check licenses` passes clean as of this update, no `deny.toml` edits required.
 
+**Update (2026-09-24, [#50](https://github.com/jordanfelle/nicti/issues/50)'s `groom` spike):**
+new dependencies for the AI-removal scaffolding, all already covered by `deny.toml`'s existing
+allowlist with no changes needed: `ort`/`ort-sys` v2.0.0-rc.13 (the ONNX Runtime binding, per
+ADR-0004 §3's `load-dynamic` pattern) are MIT OR Apache-2.0; `ndarray`/`matrixmultiply`/
+`rawpointer` (pulled in transitively by `ort`'s tensor-value helpers) are MIT OR Apache-2.0 (or
+the equivalent pre-SPDX `MIT/Apache-2.0` slash-form). `wgpu` 30 and its own dependency tree (for
+the Poisson-Jacobi compute shader) are already covered by ADR-0005's 2026-09-23 update above — no
+new licenses there. `cargo deny --workspace --all-features check licenses` passes clean as of
+this update, no `deny.toml` edits required.
+
 **Update (2026-09-24, [#67](https://github.com/jordanfelle/nicti/issues/67)'s `den` spike,
-`docs/adr/0007-catalog-database-engine.md`):** new dependencies for the catalog-database-engine
+`docs/adr/0008-catalog-database-engine.md`):** new dependencies for the catalog-database-engine
 comparison. `rusqlite`, `duckdb`, `heed`/`heed-types`/`heed-traits`, and `bincode` (the Rust
 binding crates) are all MIT, already covered by the existing allowlist. One new `deny.toml` entry
 was needed: `webpki-roots` v1.0.9 carries **CDLA-Permissive-2.0**, pulled in as a *build-time-only*
@@ -185,9 +195,10 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 | Model | Used for | Code license | Weights license | Training data / provenance flag | Verdict |
 |---|---|---|---|---|---|
 | [BiRefNet](https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE) | Masking ([#48](https://github.com/jordanfelle/nicti/issues/48)) | MIT[^m1] | MIT[^m1] | DIS-TR — no stated restriction | ✅ bundle OK |
-| [MobileSAM](https://github.com/ChaoningZhang/MobileSAM/blob/master/LICENSE) | Masking ([#48](https://github.com/jordanfelle/nicti/issues/48)) | Apache-2.0[^m2] | Apache-2.0 (inherits SAM lineage) | Distilled from SAM/SA-1B | ✅ bundle OK |
+| [MobileSAM](https://github.com/ChaoningZhang/MobileSAM/blob/master/LICENSE) | Masking ([#48](https://github.com/jordanfelle/nicti/issues/48)), AI-removal source selector ([#50](https://github.com/jordanfelle/nicti/issues/50)) | Apache-2.0[^m2] | Apache-2.0 (inherits SAM lineage) | Distilled from SAM/SA-1B | ✅ bundle OK |
 | [SAM / SAM2 (Meta)](https://github.com/facebookresearch/sam2/blob/main/README.md) | Masking ([#48](https://github.com/jordanfelle/nicti/issues/48)) | Apache-2.0[^m3] | Apache-2.0 (SAM2 confirmed on GitHub README + HF card)[^m3] | SA-1B / SA-V; SA-V dataset-specific terms (`sav_dataset/README.md`) not independently re-checked | ⚠️ bundle OK on code/weights license, but re-check the SA-V dataset terms directly (same caveat class as LaMa/NAFNet below) before treating provenance as fully cleared |
-| [LaMa](https://github.com/advimman/lama/blob/main/LICENSE) | Healing/removal ([#50](https://github.com/jordanfelle/nicti/issues/50)) | Apache-2.0[^m4] | Not separately stated, presumed Apache-2.0 | `big-lama` checkpoint trained on **Places2**, whose dataset terms restrict to non-commercial research and forbid redistributing the source images — whether that shadows a model *trained on* it is a live, unsettled question, not asserted as a legal conclusion here | ⚠️ flag — re-verify Places2 terms directly, or find/train a checkpoint on non-Places2 data, before shipping |
+| [LaMa](https://github.com/advimman/lama/blob/main/LICENSE) | Healing/removal ([#50](https://github.com/jordanfelle/nicti/issues/50)/[#51](https://github.com/jordanfelle/nicti/issues/51)) | Apache-2.0[^m4] | Not separately stated, presumed Apache-2.0 | `big-lama` checkpoint trained on **Places2** — re-checked 2026-09-24 ([#50](https://github.com/jordanfelle/nicti/issues/50)'s spike): the primary `places2.csail.mit.edu` domain again returned a connection error on a direct fetch, but a search-indexed mirror of `download-private.html` states plainly "you will use the data only for non-commercial research and educational purposes and will NOT distribute the images" — whether that restriction shadows a model merely *trained on* the data is still a live, unsettled question, not asserted as a legal conclusion here; see `docs/research/groom-healing-removal.md` | ⚠️ flag — still unverified via a direct primary-source fetch; re-verify Places2 terms directly, or find/train a checkpoint on non-Places2 data, before shipping |
+| [MI-GAN](https://github.com/Picsart-AI-Research/MI-GAN) | Healing/removal candidate, researched as a LaMa alternative ([#50](https://github.com/jordanfelle/nicti/issues/50)) | MIT[^m11] | A separate `LICENSE-WEIGHTS` file, fetched directly, is itself written as MIT. A now-**closed** GitHub issue (`#25`) asked whether that grant is legitimate, since the training pipeline distills from a Co-Mod-GAN teacher licensed NVIDIA Source Code License-NC (§3.2 requires its non-commercial term to carry over to derivatives); the maintainer confirmed the MIT grant on the weights but explicitly declined the deeper legitimacy question, telling the asker to consult a lawyer[^m11] | Places2 **and** FFHQ — same Places2 exposure as LaMa above, no improvement | ⚠️ **not a clean alternative to LaMa** — same Places2 exposure, plus an explicitly maintainer-punted (not silently unanswered) provenance question over the weights license; do not adopt as a LaMa workaround without resolving that question first |
 | [NAFNet](https://github.com/megvii-research/NAFNet/blob/main/LICENSE) | Denoise ([#40](https://github.com/jordanfelle/nicti/issues/40)) | MIT + Apache-2.0 (bundled BasicSR)[^m5] | Not separately stated | Training-dataset list (SIDD/GoPro/REDS) unverified this pass — README fetch failed | ✅ bundle OK (license); re-verify training-data provenance before shipping a specific checkpoint |
 | [DINOv2](https://github.com/facebookresearch/dinov2/blob/main/LICENSE) (standard ViT-S/B/L/g) | Face/subject grouping ([#35](https://github.com/jordanfelle/nicti/issues/35)) | Apache-2.0[^m6] | Apache-2.0 | LVD-142M, self-supervised, provenance of source corpus not disclosed by Meta | ✅ bundle OK — **do not** substitute the XRay-DINO/Cell-DINO variants (FAIR Noncommercial Research License) |
 | [CLIP (OpenAI)](https://github.com/openai/CLIP/blob/main/LICENSE) | Subject/burst grouping candidate ([#33](https://github.com/jordanfelle/nicti/issues/33)/[#35](https://github.com/jordanfelle/nicti/issues/35)) | MIT[^m7] | MIT (no separate weight license file) | OpenAI's own model card explicitly discourages *any* deployed use case, commercial or not — not a legal restriction, but a stated rights-holder position | ⚠️ flag — legally bundle-OK, but document the risk acknowledgment if shipped in a real feature |
@@ -211,9 +222,15 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 5. **Ultralytics YOLO (AGPL-3.0)** — excluded from a permissive release. If a YOLO-family detector
    is still wanted for culling, use a non-Ultralytics implementation/weights not wrapped in the
    AGPL license, or budget for Ultralytics' commercial license.
-6. **LaMa (Places2 provenance)** — the least clear-cut case. Re-verify Places2's terms directly
-   (`places2.csail.mit.edu` — returned a connection error during this audit, re-check before
-   relying on the current characterization) or find/train an alternative checkpoint before
+6. **LaMa (Places2 provenance)** — the least clear-cut case, still unresolved after a second
+   direct-fetch attempt in [#50](https://github.com/jordanfelle/nicti/issues/50)'s spike
+   (`places2.csail.mit.edu` again returned a connection error; a mirror confirms Places2's own
+   non-commercial/no-redistribution terms, but whether that shadows a model trained on it remains
+   unsettled). **MI-GAN was researched as an alternative and found not to be cleaner** — same
+   Places2 exposure, plus its own unresolved weights-license-legitimacy question (see the new
+   MI-GAN row above and `docs/research/groom-healing-removal.md`). Re-verify Places2's terms
+   directly via a working primary-source fetch, widen the alternative-model search beyond MI-GAN,
+   or find/train an alternative checkpoint on non-Places2-provenance data before
    shipping healing/removal (#50/#51).
 7. **CLIP (OpenAI)** — legally clean, but OpenAI's own model card explicitly discourages any
    deployed use. Document the acknowledgment if used in a shipped feature rather than treating it
@@ -246,13 +263,14 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^m1]: BiRefNet MIT — https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE and https://huggingface.co/ZhengPeng7/BiRefNet — verified 2026-09-23
 [^m2]: MobileSAM Apache-2.0 — https://github.com/ChaoningZhang/MobileSAM/blob/master/LICENSE — verified 2026-09-23
 [^m3]: SAM/SAM2 Apache-2.0 — https://github.com/facebookresearch/segment-anything/blob/main/LICENSE and https://github.com/facebookresearch/sam2/blob/main/README.md and https://huggingface.co/facebook/sam2-hiera-large — verified 2026-09-23
-[^m4]: LaMa Apache-2.0 — https://github.com/advimman/lama/blob/main/LICENSE — verified 2026-09-23; Places2 dataset terms via secondary source (primary page unreachable this session)
+[^m4]: LaMa Apache-2.0 — https://github.com/advimman/lama/blob/main/LICENSE — verified 2026-09-23; Places2 dataset terms via secondary source (primary page unreachable this session; re-attempted and still unreachable 2026-09-24 during [#50](https://github.com/jordanfelle/nicti/issues/50)'s spike, see `docs/research/groom-healing-removal.md`)
 [^m5]: NAFNet MIT + Apache-2.0 — https://github.com/megvii-research/NAFNet/blob/main/LICENSE — verified 2026-09-23
 [^m6]: DINOv2 Apache-2.0 (standard checkpoints) — https://github.com/facebookresearch/dinov2/blob/main/LICENSE and README — verified 2026-09-23
 [^m7]: CLIP MIT + model-card deployment caveat — https://github.com/openai/CLIP/blob/main/LICENSE and https://raw.githubusercontent.com/openai/CLIP/main/model-card.md — verified 2026-09-23
 [^m8]: OpenCLIP MIT — https://github.com/mlfoundations/open_clip/blob/main/LICENSE — verified 2026-09-23
 [^m9]: InsightFace non-commercial restriction — https://github.com/deepinsight/insightface/blob/master/README.md — verified 2026-09-23
 [^m10]: Ultralytics YOLO AGPL-3.0 — https://github.com/ultralytics/ultralytics/blob/main/LICENSE — verified 2026-09-23
+[^m11]: MI-GAN code MIT and `LICENSE-WEIGHTS` (itself MIT-style) — https://github.com/Picsart-AI-Research/MI-GAN and https://raw.githubusercontent.com/Picsart-AI-Research/MI-GAN/main/LICENSE-WEIGHTS — verified 2026-09-24. https://github.com/Picsart-AI-Research/MI-GAN/issues/25 is **closed** (closed 2026-09-14, before this pass): the maintainer (`AndranikSargsyan`) confirmed the weights are released under the same MIT license, and added the `LICENSE-WEIGHTS` file in direct response to this issue — but explicitly declined the harder question of whether that grant is legitimate given the Co-Mod-GAN teacher's NVIDIA Source Code License-NC, telling the asker "I am not qualified to answer that question... I recommend consulting a lawyer." So the license-grant question is answered; only the deeper legitimacy question was left open, by an explicit punt rather than silence. Places2+FFHQ training-data statement — the repository's own README — verified 2026-09-24, **best-available-secondary** for the exact NVIDIA license clause text (relayed via the GitHub issue's own summary, not independently re-fetched verbatim from NVIDIA's license text in this pass).
 [^s1]: `libloading` v0.9.0 ISC license — `cargo metadata`'s resolved `license` field against this crate's own `Cargo.toml`, cross-checked against https://docs.rs/libloading/latest/libloading/ — verified 2026-09-23
 [^s2]: `wasmtime` v49.0.0 and `wat` v1.259.0 license fields — `cargo metadata`'s resolved `license` field, cross-checked against https://github.com/bytecodealliance/wasmtime (repo-wide Apache-2.0 WITH LLVM-exception, standard for Bytecode Alliance projects) — verified 2026-09-23
 [^s3]: `slotmap` v1.1.1 and `foldhash` v0.2.0 Zlib licenses — `cargo metadata`'s resolved `license` field via `cargo deny --workspace --all-features check licenses` against each crate's own `Cargo.toml`, cross-checked against https://crates.io/crates/slotmap and https://crates.io/crates/foldhash — verified 2026-09-24
