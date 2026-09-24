@@ -137,7 +137,7 @@ disproving nothing.
 | Candidate | Its own resolved `wgpu` version | vs. ADR-0005's `wgpu` 30 |
 |---|---|---|
 | egui / eframe (`egui-wgpu` 0.36.2) | **30.0.0**[^e2] | Matches exactly |
-| Slint (`i-slint-renderer-femtovg`'s `wgpu-30` feature) | Named `wgpu-30`; exact resolved version not independently pinned down this pass (its own `Cargo.lock` didn't resolve the optional dependency in this sandbox's default-feature check) — but the feature's own name is a strong, direct signal | Consistent with 30, not independently confirmed to the patch version |
+| Slint (`i-slint-renderer-femtovg`'s `wgpu-30` feature) | **30.0.1**, confirmed directly against this PR's own `Cargo.lock` (`i-slint-renderer-femtovg` 1.18.1's `wgpu` dependency entry) | Matches exactly |
 | Iced (`iced_wgpu` 0.14.0) | **27.0.1**[^i2] | **Does not match** |
 
 This is a real, load-bearing, evidenced constraint, not a hypothetical: Rust's type system
@@ -199,7 +199,7 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 | **GPUI** | **Fails** — Windows backend is D3D11 via `windows-rs`, no `wgpu`/Vulkan path in its own dependency graph at all, no public texture-import API | N/A | Apache-2.0[^g3] (not the blocker) | **Eliminated** — Hard gate 1, no spike built |
 | **Iced** | Passes — `Primitive`/`Pipeline` on iced's own device | **27.0.1**, not 30 | MIT | Passes gates, real wgpu-version cost |
 | **egui / eframe** | Passes — `egui_wgpu::CallbackTrait` on eframe's own device | **30.0.0**, matches ADR-0005 exactly | MIT/Apache-2.0 (+ OFL-1.1/Ubuntu-font-1.0 for bundled default fonts) | Passes every hard gate cleanly |
-| **Slint** | Passes — cleanest mechanism, GPU-resident `Image::try_from`, first-class `require_wgpu_30` API | Named `wgpu-30`; not independently pinned to a patch version this pass | GPL-3.0/dual-commercial — spike-scoped exception only | Passes gates under a scoped exception; shipping needs ADR-0003 amendment |
+| **Slint** | Passes — cleanest mechanism, GPU-resident `Image::try_from`, first-class `require_wgpu_30` API | **30.0.1**, matches ADR-0005 exactly | GPL-3.0/dual-commercial — spike-scoped exception only | Passes gates under a scoped exception; shipping needs ADR-0003 amendment |
 
 ## Prior art
 

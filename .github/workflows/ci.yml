@@ -35,13 +35,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes link against winit's Linux
-      # backends (X11/Wayland) plus Slint's Skia/FemtoVG renderers, which need these dev
-      # packages present to *link* (not just to run) -- confirmed by a local, non-CI Linux
-      # build succeeding with these libraries already installed; **not yet confirmed against
-      # a real ubuntu-latest CI run** since this PR couldn't exercise GitHub Actions directly.
-      # If CI still fails to link, check its error for the missing .so and extend this list --
-      # don't just add packages speculatively beyond what an actual failure names.
+      # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
+      # (X11/Wayland) plus Slint's Skia/FemtoVG renderers. Precautionary, NOT independently
+      # confirmed as required: a local sandbox build succeeded with none of these packages
+      # installed (winit dlopen's libX11/libwayland/libxkbcommon/libGL at runtime rather than
+      # linking them -- `readelf -d` on the resulting binaries shows no NEEDED entries for any
+      # of them), so a real ubuntu-latest CI run may not need this step at all. Left in
+      # defensively since this PR couldn't exercise actual GitHub Actions runners to confirm
+      # either way. If CI passes without it, remove this step in a follow-up; if CI fails to
+      # link, check its error for the missing .so and adjust the list to match.
       - run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev

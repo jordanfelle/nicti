@@ -73,8 +73,12 @@ impl PeltApp {
             .as_ref()
             .expect("pelt-egui requires the wgpu backend (eframe::Renderer::Wgpu)");
         let viewport_size = [pelt::config::VIEWPORT_WIDTH, pelt::config::VIEWPORT_HEIGHT];
-        let resources =
-            ViewportResources::new(&render_state.device, viewport_size[0], viewport_size[1]);
+        let resources = ViewportResources::new(
+            &render_state.device,
+            render_state.target_format,
+            viewport_size[0],
+            viewport_size[1],
+        );
         resources.upload_input(
             &render_state.queue,
             &pelt::live_chain::generate_viewport_frame(),

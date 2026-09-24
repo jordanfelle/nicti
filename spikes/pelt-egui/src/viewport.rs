@@ -3,7 +3,12 @@
 //! `Rgba32Float` texture and drawn as a fullscreen textured triangle inside egui's own render
 //! pass. This is egui's standard `egui_wgpu::CallbackTrait` pattern (mirrors the upstream
 //! `custom3d_wgpu` demo) -- the device/queue used here are eframe's own, obtained once via
-//! `wgpu_render_state()` and never a second wgpu::Instance/Device created by this crate.
+//! `wgpu_render_state()` and never a second wgpu::Instance/Device created by this crate. The
+//! render pipeline's color target format is threaded through from `wgpu_render_state.target_format`
+//! (see `main.rs`) rather than assumed -- `egui-wgpu`'s `preferred_framebuffer_format` picks
+//! whichever of `Rgba8Unorm`/`Bgra8Unorm` the surface reports first, so hardcoding either one
+//! risks a wgpu validation panic (pipeline target format must match the render-pass attachment
+//! exactly) depending on adapter/driver.
 
 use egui_wgpu::{CallbackResources, CallbackTrait};
 use pelt::live_chain::{LiveChainParams, LIVE_CHAIN_WGSL};
@@ -29,7 +34,12 @@ pub struct ViewportResources {
 const WORKGROUP_SIZE: u32 = 64;
 
 impl ViewportResources {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let pixel_count = width * height;
 
         let compute_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -118,7 +128,7 @@ impl ViewportResources {
                 module: &render_module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8Unorm,
+                    format: target_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
