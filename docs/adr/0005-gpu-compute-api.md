@@ -120,18 +120,25 @@ for capacity or performance conclusions.
 
 | Backend | Adapter | p50 (ms) | p95 (ms) |
 |---|---|---|---|
-| Vulkan | RTX 5080 | 0.926 | 1.271 |
-| Dx12 | RTX 5080 | 1.452–1.737 | 1.541–2.006 |
+| Vulkan | RTX 5080 | 0.109 | 0.140 |
+| Dx12 | RTX 5080 | 0.173–0.199 | 0.226–0.271 |
 
-Vulkan has meaningfully lower overhead here than Dx12 (~35–45% less). This is the number that
+Vulkan has meaningfully lower overhead here than Dx12 (~40–47% less). This is the number that
 would matter for an `ash`-vs-wgpu comparison (stands in for one — see `tests/dispatch_overhead.rs`
 for why a full separate `ash` harness wasn't built just to measure this): a real `ash` win would
-need to beat wgpu-Vulkan's *own* ~1ms number, not wgpu-Dx12's ~1.5-2ms one, since we're choosing
+need to beat wgpu-Vulkan's *own* ~0.1ms number, not wgpu-Dx12's ~0.2ms one, since we're choosing
 Vulkan anyway per the f16 finding above. **Caveat:** this measures a fully-synchronous
 submit→poll→map→readback cycle per dispatch (needed so the loop can time each one individually),
 not pure submission latency — a real Tapetum frame batches many dispatches into one submission
 and polls once, so this is an upper bound on per-dispatch cost, useful for backend comparison, not
 a literal "N dispatches costs N × this" estimate.
+
+(An earlier version of this section reported numbers 8–9x higher, ~0.9–2ms — those were actually
+timing pipeline compilation and full buffer (re-)allocation on every iteration, not per-dispatch
+submission cost, a mislabeling caught in adversarial review before merge. `LiveChainKernel`
+(`gpu.rs`) now builds the pipeline and buffers once outside the timed loop, and each timed
+iteration only re-uploads the (tiny, 256-pixel) input via `queue.write_buffer` and dispatches —
+the numbers above are from that corrected harness.)
 
 ### Host↔device interop cost — inconclusive as measured, real gap identified
 
@@ -141,18 +148,27 @@ a literal "N dispatches costs N × this" estimate.
 | Dx12 | RTX 5080 | 823.33 | 829.47 |
 
 **This number does not mean what it looks like it means, and must not be read as "wgpu interop is
-too slow for the 100ms warm-switch budget."** `run_live_chain`'s harness round-trips the *entire*
-45MP buffer back to a host `Vec` via `map_async` + `get_mapped_range().to_vec()`, because the
-correctness tests need a `Vec<[f32; 4]>` on the Rust side to assert against `cpu_reference`. A
-real Tapetum bake **never does this** — a baked stage's output stays GPU-resident (a texture or
-buffer the next stage reads directly, or the swapchain presents from), and the *only* real
-host→device transfer in the real pipeline is the initial RAW-decoded frame upload, once per image,
-not a round-trip. What this number actually demonstrates is that **a full 360MB
-device→host→(Rust Vec) copy is expensive (0.8–1.5s)** — which is a fact worth knowing (e.g. rules
-out ever doing this for real, confirms Tapetum's "stay GPU-resident" design isn't optional) but
-is not itself a finding about wgpu's viability. **Follow-up work, not blocking this ADR:** measure
-upload-only (host→device) cost in isolation when #45 (Tapetum core) is actually implemented — that
-is the only host↔device transfer the real design calls for, and this spike doesn't isolate it.
+too slow for the 100ms warm-switch budget."** `run_live_chain`'s harness moves the *entire* 45MP
+frame in **both directions** in one wall-clock-timed call: a fresh `create_buffer_init` upload of
+the 45,000,000-pixel `[f32; 4]` input buffer (16 bytes/pixel = **~720MB** host→device), the
+dispatch itself, and a full device→host readback of the same-sized output buffer via `map_async` +
+`get_mapped_range().to_vec()` (another **~720MB**) — roughly **1.44GB of data movement total**,
+not a single one-way 360MB download as an earlier draft of this section claimed (that 360MB figure
+is the *hero-frame size in the features/limits section above*, which assumes a hypothetical
+RGBA16F/half-float intermediate at 8 bytes/pixel — a different, hypothetical buffer from this
+test's actual f32 buffer, at 16 bytes/pixel; conflating the two was a real error caught in
+adversarial review). The readback exists only because the correctness tests need a
+`Vec<[f32; 4]>` on the Rust side to assert against `cpu_reference` — a real Tapetum bake **never
+does this**: a baked stage's output stays GPU-resident (a texture or buffer the next stage reads
+directly, or the swapchain presents from), and the *only* real host→device transfer in the real
+pipeline is the initial RAW-decoded frame upload, once per image, never a round-trip back. What
+this number actually demonstrates is that **~1.44GB of bidirectional host↔device buffer traffic
+is expensive (0.8–1.5s)** — worth knowing (it rules out ever doing this for real, and reinforces
+that Tapetum's "stay GPU-resident" design isn't optional) but not itself a finding about wgpu's
+viability, and not a clean one-way bandwidth number either. **Follow-up work, not blocking this
+ADR:** measure upload-only (host→device) cost in isolation, with no readback, when #45 (Tapetum
+core) is actually implemented — that is the only host↔device transfer the real design calls for,
+and this spike doesn't isolate it.
 
 ## Options considered
 

@@ -57,7 +57,11 @@ fn live_chain_matches_cpu_reference() {
                     gpu[c]
                 );
             }
-            assert!((gpu[3] - px[3]).abs() < TOLERANCE, "alpha not passed through on backend {:?}", ctx.backend);
+            assert!(
+                (gpu[3] - px[3]).abs() < TOLERANCE,
+                "alpha not passed through on backend {:?}",
+                ctx.backend
+            );
         }
     }
 }
@@ -70,7 +74,12 @@ fn tile_blend_matches_cpu_reference() {
         let count = width as usize * height;
         let tile_a: Vec<[f32; 4]> = (0..count).map(|_| [1.0, 0.0, 0.0, 1.0]).collect();
         let tile_b: Vec<[f32; 4]> = (0..count).map(|_| [0.0, 1.0, 0.0, 1.0]).collect();
-        let params = TileBlendParams { width, seam_start: 10, seam_width: 8, _pad: 0 };
+        let params = TileBlendParams {
+            width,
+            seam_start: 10,
+            seam_width: 8,
+            _pad: 0,
+        };
 
         let (gpu_out, _) = run_tile_blend(&ctx, &tile_a, &tile_b, params);
 

@@ -12,14 +12,24 @@ const WARMUP: usize = 1;
 const RUNS: usize = 5;
 
 fn hero_params() -> LiveChainParams {
-    LiveChainParams { wb_gain: [1.05, 1.0, 0.92], exposure_stops: 0.6, vibrance: 0.4, _pad: [0.0; 3] }
+    LiveChainParams {
+        wb_gain: [1.05, 1.0, 0.92],
+        exposure_stops: 0.6,
+        vibrance: 0.4,
+        _pad: [0.0; 3],
+    }
 }
 
 fn make_pixels(n: usize) -> Vec<[f32; 4]> {
     (0..n)
         .map(|i| {
             let t = i as f32 / n.max(1) as f32;
-            [(t * 1.3).fract(), (t * 0.7 + 0.2).fract(), (t * 2.1 + 0.5).fract(), 1.0]
+            [
+                (t * 1.3).fract(),
+                (t * 0.7 + 0.2).fract(),
+                (t * 2.1 + 0.5).fract(),
+                1.0,
+            ]
         })
         .collect()
 }
@@ -37,7 +47,10 @@ fn live_chain_throughput_wgpu_backends() {
             eprintln!("backend {:?}: no TIMESTAMP_QUERY, wall-clock numbers would be unreliable, skipping", ctx.backend);
             continue;
         }
-        for &(label, w, h) in &[("3840x2160", 3840usize, 2160usize), ("8256x5504", 8256usize, 5504usize)] {
+        for &(label, w, h) in &[
+            ("3840x2160", 3840usize, 2160usize),
+            ("8256x5504", 8256usize, 5504usize),
+        ] {
             let pixels = make_pixels(w * h);
             let params = hero_params();
             let mut samples_ms = Vec::with_capacity(WARMUP + RUNS);
@@ -45,7 +58,8 @@ fn live_chain_throughput_wgpu_backends() {
                 let (_, elapsed_ns) = run_live_chain(ctx, &pixels, params);
                 samples_ms.push(elapsed_ns.expect("timestamps enabled above") / 1e6);
             }
-            let stats = summarize_after_warmup(&samples_ms, WARMUP).expect("non-empty after warmup");
+            let stats =
+                summarize_after_warmup(&samples_ms, WARMUP).expect("non-empty after warmup");
             println!(
                 "wgpu backend={:?} adapter={} res={label} p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
                 ctx.backend, ctx.adapter_name, stats.p50, stats.p95, stats.max
@@ -61,8 +75,15 @@ fn live_chain_throughput_cuda() {
         eprintln!("throughput: no CUDA driver/NVRTC available, skipping");
         return;
     };
-    let params = CudaLiveChainParams { wb_gain: [1.05, 1.0, 0.92], exposure_stops: 0.6, vibrance: 0.4 };
-    for &(label, w, h) in &[("3840x2160", 3840usize, 2160usize), ("8256x5504", 8256usize, 5504usize)] {
+    let params = CudaLiveChainParams {
+        wb_gain: [1.05, 1.0, 0.92],
+        exposure_stops: 0.6,
+        vibrance: 0.4,
+    };
+    for &(label, w, h) in &[
+        ("3840x2160", 3840usize, 2160usize),
+        ("8256x5504", 8256usize, 5504usize),
+    ] {
         let pixels = make_pixels(w * h);
         let mut samples_ms = Vec::with_capacity(WARMUP + RUNS);
         for _ in 0..(WARMUP + RUNS) {
@@ -72,7 +93,10 @@ fn live_chain_throughput_cuda() {
         let stats = summarize_after_warmup(&samples_ms, WARMUP).expect("non-empty after warmup");
         println!(
             "cuda device={} res={label} p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-            cuda.device_name(), stats.p50, stats.p95, stats.max
+            cuda.device_name(),
+            stats.p50,
+            stats.p95,
+            stats.max
         );
     }
 }

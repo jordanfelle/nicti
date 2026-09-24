@@ -86,13 +86,22 @@ impl CudaLiveChain {
     }
 
     pub fn device_name(&self) -> String {
-        self.stream.context().name().unwrap_or_else(|_| "unknown CUDA device".to_string())
+        self.stream
+            .context()
+            .name()
+            .unwrap_or_else(|_| "unknown CUDA device".to_string())
     }
 
     pub fn run(&self, pixels: &[[f32; 4]], params: CudaLiveChainParams) -> (Vec<[f32; 4]>, f64) {
         let flat: &[f32] = bytemuck::cast_slice(pixels);
-        let input_dev = self.stream.clone_htod(flat).expect("host->device upload failed");
-        let mut output_dev = self.stream.alloc_zeros::<f32>(flat.len()).expect("device alloc failed");
+        let input_dev = self
+            .stream
+            .clone_htod(flat)
+            .expect("host->device upload failed");
+        let mut output_dev = self
+            .stream
+            .alloc_zeros::<f32>(flat.len())
+            .expect("device alloc failed");
 
         let count = pixels.len() as u32;
         let cfg = LaunchConfig::for_num_elems(count);
@@ -112,11 +121,16 @@ impl CudaLiveChain {
         let (start_event, end_event) = unsafe { builder.launch(cfg) }
             .expect("kernel launch failed")
             .expect("record_kernel_launch was set, events must be returned");
-        let elapsed_ms = start_event.elapsed_ms(&end_event).expect("event timing failed");
+        let elapsed_ms = start_event
+            .elapsed_ms(&end_event)
+            .expect("event timing failed");
         let elapsed = elapsed_ms as f64 * 1e6;
         self.stream.synchronize().expect("stream sync failed");
 
-        let out_flat = self.stream.clone_dtoh(&output_dev).expect("device->host readback failed");
+        let out_flat = self
+            .stream
+            .clone_dtoh(&output_dev)
+            .expect("device->host readback failed");
         let out: &[[f32; 4]] = bytemuck::cast_slice(&out_flat);
         (out.to_vec(), elapsed)
     }

@@ -27,9 +27,5 @@ fn main() {
 }
 
 fn hardware_identity() -> String {
-    format!(
-        "{} ({})",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+    format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)
 }

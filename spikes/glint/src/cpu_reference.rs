@@ -6,7 +6,12 @@
 /// tone-curve LUT (piecewise-linear) -> vibrance (saturation boost weighted by existing
 /// saturation, skin-tone-safe midpoint). Mirrors the stages Tapetum (#44) keeps live in the
 /// shader rather than caching, applied per-pixel over RGB (ignoring alpha).
-pub fn live_chain_pixel(rgb: [f32; 3], wb_gain: [f32; 3], exposure_stops: f32, vibrance: f32) -> [f32; 3] {
+pub fn live_chain_pixel(
+    rgb: [f32; 3],
+    wb_gain: [f32; 3],
+    exposure_stops: f32,
+    vibrance: f32,
+) -> [f32; 3] {
     let exposure_mul = 2f32.powf(exposure_stops);
     let mut c = [
         rgb[0] * wb_gain[0] * exposure_mul,
@@ -97,7 +102,11 @@ mod tests {
         let sat_in = (0.8f32 - 0.2) / 0.8;
         let max_out = out[0].max(out[1]).max(out[2]);
         let min_out = out[0].min(out[1]).min(out[2]);
-        let sat_out = if max_out > 0.0 { (max_out - min_out) / max_out } else { 0.0 };
+        let sat_out = if max_out > 0.0 {
+            (max_out - min_out) / max_out
+        } else {
+            0.0
+        };
         assert!(sat_out < sat_in);
     }
 

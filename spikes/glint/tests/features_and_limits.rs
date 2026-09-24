@@ -38,7 +38,10 @@ fn hero_intermediate_allocation_within_reported_limits() {
         let limits = ctx.device.limits();
         println!(
             "backend={:?} max_buffer_size={} max_storage_buffer_binding_size={} hero_bytes={}",
-            ctx.backend, limits.max_buffer_size, limits.max_storage_buffer_binding_size, HERO_INTERMEDIATE_BYTES
+            ctx.backend,
+            limits.max_buffer_size,
+            limits.max_storage_buffer_binding_size,
+            HERO_INTERMEDIATE_BYTES
         );
         // The default WebGPU-portable limit (256 MB) is smaller than a 45MP RGBA16F frame;
         // requesting `adapter.limits()` (this crate's device-request policy, see gpu.rs) must
@@ -77,13 +80,18 @@ fn shader_f16_probe_where_supported() {
     }
     for ctx in &contexts {
         if !ctx.supports_f16() {
-            eprintln!("backend {:?}: SHADER_F16 not supported, skipping probe", ctx.backend);
+            eprintln!(
+                "backend {:?}: SHADER_F16 not supported, skipping probe",
+                ctx.backend
+            );
             continue;
         }
-        let module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("f16_probe"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(F16_PROBE_WGSL)),
-        });
+        let module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("f16_probe"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(F16_PROBE_WGSL)),
+            });
         // Creation succeeding (module compiles/validates against this backend) is the assertion;
         // wgpu's shader-module creation panics/logs a validation error on failure, which fails
         // the test via wgpu's default panic-on-validation-error behavior in debug builds.

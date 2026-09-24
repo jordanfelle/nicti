@@ -19,8 +19,15 @@ fn full_frame_upload_readback_cost() {
         eprintln!("interop_roundtrip: no wgpu adapter available, skipping");
         return;
     }
-    let pixels: Vec<[f32; 4]> = (0..HERO_PIXEL_COUNT).map(|_| [0.5, 0.5, 0.5, 1.0]).collect();
-    let params = LiveChainParams { wb_gain: [1.0, 1.0, 1.0], exposure_stops: 0.0, vibrance: 0.0, _pad: [0.0; 3] };
+    let pixels: Vec<[f32; 4]> = (0..HERO_PIXEL_COUNT)
+        .map(|_| [0.5, 0.5, 0.5, 1.0])
+        .collect();
+    let params = LiveChainParams {
+        wb_gain: [1.0, 1.0, 1.0],
+        exposure_stops: 0.0,
+        vibrance: 0.0,
+        _pad: [0.0; 3],
+    };
 
     for ctx in &contexts {
         let mut samples_ms = Vec::with_capacity(WARMUP + RUNS);

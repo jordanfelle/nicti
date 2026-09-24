@@ -52,11 +52,13 @@ fn workgroup_grid(total_workgroups: u32) -> (u32, u32) {
     } else {
         let x = MAX_WORKGROUPS_PER_DIM;
         let y = total_workgroups.div_ceil(x);
-        assert!(y <= MAX_WORKGROUPS_PER_DIM, "workload too large for a single 2D dispatch grid");
+        assert!(
+            y <= MAX_WORKGROUPS_PER_DIM,
+            "workload too large for a single 2D dispatch grid"
+        );
         (x, y)
     }
 }
-
 
 /// Which wgpu backend a `GpuContext` was created against — used to label results and to run the
 /// same kernel across every backend the adapter enumeration finds, per the ADR-0005 decision
@@ -118,7 +120,9 @@ impl GpuContext {
     }
 
     pub fn supports_timestamps(&self) -> bool {
-        self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
+        self.device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
     }
 
     pub fn supports_f16(&self) -> bool {
@@ -126,7 +130,11 @@ impl GpuContext {
     }
 }
 
-fn make_compute_pipeline(device: &wgpu::Device, wgsl: &str, entry_point: &str) -> wgpu::ComputePipeline {
+fn make_compute_pipeline(
+    device: &wgpu::Device,
+    wgsl: &str,
+    entry_point: &str,
+) -> wgpu::ComputePipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(entry_point),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(wgsl)),
@@ -141,7 +149,12 @@ fn make_compute_pipeline(device: &wgpu::Device, wgsl: &str, entry_point: &str) -
     })
 }
 
-fn storage_buffer(device: &wgpu::Device, label: &str, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+fn storage_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     use wgpu::util::DeviceExt;
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
@@ -152,7 +165,11 @@ fn storage_buffer(device: &wgpu::Device, label: &str, contents: &[u8], usage: wg
 
 /// Runs `live_chain` once over `pixels` (RGBA, alpha ignored/passed through) and returns the
 /// output in the same layout. `timing_ns` is `Some` iff the adapter supports `TIMESTAMP_QUERY`.
-pub fn run_live_chain(ctx: &GpuContext, pixels: &[[f32; 4]], params: LiveChainParams) -> (Vec<[f32; 4]>, Option<f64>) {
+pub fn run_live_chain(
+    ctx: &GpuContext,
+    pixels: &[[f32; 4]],
+    params: LiveChainParams,
+) -> (Vec<[f32; 4]>, Option<f64>) {
     let device = &ctx.device;
     let pipeline = make_compute_pipeline(device, LIVE_CHAIN_WGSL, "live_chain");
 
@@ -181,9 +198,18 @@ pub fn run_live_chain(ctx: &GpuContext, pixels: &[[f32; 4]], params: LiveChainPa
         label: Some("live_chain bind group"),
         layout: &bind_group_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: input_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: output_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
         ],
     });
 
@@ -201,6 +227,117 @@ pub fn run_live_chain(ctx: &GpuContext, pixels: &[[f32; 4]], params: LiveChainPa
     (out.to_vec(), elapsed_ns)
 }
 
+/// A `live_chain` pipeline + buffers built once and re-dispatched many times via
+/// [`LiveChainKernel::dispatch`], for measuring genuine per-dispatch cost. `run_live_chain`
+/// rebuilds a fresh pipeline and buffers (including a fresh host->device upload) on every call,
+/// which is fine for a single one-shot measurement (correctness, or a GPU-timestamped throughput
+/// run, where only the in-GPU-timeline duration between the two timestamp writes is measured —
+/// pipeline/buffer setup happens entirely outside that window) but wrong for
+/// `tests/dispatch_overhead.rs`'s wall-clock-timed loop: without this type, that loop was
+/// re-paying pipeline compilation and a full input-buffer upload on every iteration and
+/// mislabeling the result as "per-dispatch CPU overhead" (caught in adversarial review before
+/// merge). This type is what makes that isolation actually true.
+pub struct LiveChainKernel {
+    pipeline: wgpu::ComputePipeline,
+    input_buf: wgpu::Buffer,
+    output_buf: wgpu::Buffer,
+    params_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    pixel_count: usize,
+    output_size: u64,
+}
+
+impl LiveChainKernel {
+    pub fn new(ctx: &GpuContext, pixel_count: usize) -> Self {
+        let device = &ctx.device;
+        let pipeline = make_compute_pipeline(device, LIVE_CHAIN_WGSL, "live_chain");
+
+        let input_size = (pixel_count * std::mem::size_of::<[f32; 4]>()) as u64;
+        let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("live_chain kernel input"),
+            size: input_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let output_size = input_size;
+        let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("live_chain kernel output"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("live_chain kernel params"),
+            size: std::mem::size_of::<LiveChainParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("live_chain kernel bind group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        Self {
+            pipeline,
+            input_buf,
+            output_buf,
+            params_buf,
+            bind_group,
+            pixel_count,
+            output_size,
+        }
+    }
+
+    /// Re-uploads `pixels` and `params` into the pre-built buffers (no new pipeline, no new
+    /// buffer allocation) and dispatches once. This is the actual per-dispatch cost:
+    /// `queue.write_buffer` x2 + submit + poll + readback.
+    pub fn dispatch(
+        &self,
+        ctx: &GpuContext,
+        pixels: &[[f32; 4]],
+        params: LiveChainParams,
+    ) -> (Vec<[f32; 4]>, Option<f64>) {
+        assert_eq!(
+            pixels.len(),
+            self.pixel_count,
+            "LiveChainKernel is sized for a fixed pixel count"
+        );
+        ctx.queue
+            .write_buffer(&self.input_buf, 0, bytemuck::cast_slice(pixels));
+        ctx.queue
+            .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
+
+        let (wg_x, wg_y) = workgroup_grid((self.pixel_count as u32).div_ceil(WORKGROUP_SIZE));
+        let (elapsed_ns, readback) = dispatch_and_read(
+            ctx,
+            &self.pipeline,
+            &self.bind_group,
+            (wg_x, wg_y),
+            &self.output_buf,
+            self.output_size,
+        );
+
+        let out: &[[f32; 4]] = bytemuck::cast_slice(&readback);
+        (out.to_vec(), elapsed_ns)
+    }
+}
+
 /// Runs `tile_blend` once, blending `tile_a`/`tile_b` (same length) along a seam of `seam_width`
 /// centered on `params.seam_start`.
 pub fn run_tile_blend(
@@ -209,12 +346,26 @@ pub fn run_tile_blend(
     tile_b: &[[f32; 4]],
     params: TileBlendParams,
 ) -> (Vec<[f32; 4]>, Option<f64>) {
-    assert_eq!(tile_a.len(), tile_b.len(), "tile_blend requires equal-length tiles");
+    assert_eq!(
+        tile_a.len(),
+        tile_b.len(),
+        "tile_blend requires equal-length tiles"
+    );
     let device = &ctx.device;
     let pipeline = make_compute_pipeline(device, TILE_BLEND_WGSL, "tile_blend");
 
-    let a_buf = storage_buffer(device, "tile_a", bytemuck::cast_slice(tile_a), wgpu::BufferUsages::STORAGE);
-    let b_buf = storage_buffer(device, "tile_b", bytemuck::cast_slice(tile_b), wgpu::BufferUsages::STORAGE);
+    let a_buf = storage_buffer(
+        device,
+        "tile_a",
+        bytemuck::cast_slice(tile_a),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let b_buf = storage_buffer(
+        device,
+        "tile_b",
+        bytemuck::cast_slice(tile_b),
+        wgpu::BufferUsages::STORAGE,
+    );
     let output_size = std::mem::size_of_val(tile_a) as u64;
     let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile_blend output"),
@@ -222,22 +373,46 @@ pub fn run_tile_blend(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let params_buf = storage_buffer(device, "tile_blend params", bytemuck::bytes_of(&params), wgpu::BufferUsages::UNIFORM);
+    let params_buf = storage_buffer(
+        device,
+        "tile_blend params",
+        bytemuck::bytes_of(&params),
+        wgpu::BufferUsages::UNIFORM,
+    );
 
     let bind_group_layout = pipeline.get_bind_group_layout(0);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("tile_blend bind group"),
         layout: &bind_group_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: a_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: b_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: output_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: a_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buf.as_entire_binding(),
+            },
         ],
     });
 
     let (wg_x, wg_y) = workgroup_grid((tile_a.len() as u32).div_ceil(WORKGROUP_SIZE));
-    let (elapsed_ns, readback) = dispatch_and_read(ctx, &pipeline, &bind_group, (wg_x, wg_y), &output_buf, output_size);
+    let (elapsed_ns, readback) = dispatch_and_read(
+        ctx,
+        &pipeline,
+        &bind_group,
+        (wg_x, wg_y),
+        &output_buf,
+        output_size,
+    );
     let out: &[[f32; 4]] = bytemuck::cast_slice(&readback);
     (out.to_vec(), elapsed_ns)
 }
@@ -285,12 +460,16 @@ fn dispatch_and_read(
         mapped_at_creation: false,
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("glint encoder") });
-    let timestamp_writes = query_set.as_ref().map(|qs| wgpu::ComputePassTimestampWrites {
-        query_set: qs,
-        beginning_of_pass_write_index: Some(0),
-        end_of_pass_write_index: Some(1),
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("glint encoder"),
     });
+    let timestamp_writes = query_set
+        .as_ref()
+        .map(|qs| wgpu::ComputePassTimestampWrites {
+            query_set: qs,
+            beginning_of_pass_write_index: Some(0),
+            end_of_pass_write_index: Some(1),
+        });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("glint pass"),
@@ -309,15 +488,24 @@ fn dispatch_and_read(
 
     let output_slice = staging_buf.slice(..);
     output_slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll failed");
-    let data = output_slice.get_mapped_range().expect("output buffer not mapped").to_vec();
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    let data = output_slice
+        .get_mapped_range()
+        .expect("output buffer not mapped")
+        .to_vec();
     staging_buf.unmap();
 
     let elapsed_ns = timestamp_readback.map(|ts_buf| {
         let ts_slice = ts_buf.slice(..);
         ts_slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll failed");
-        let raw = ts_slice.get_mapped_range().expect("timestamp buffer not mapped");
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+        let raw = ts_slice
+            .get_mapped_range()
+            .expect("timestamp buffer not mapped");
         let timestamps: &[u64] = bytemuck::cast_slice(&raw);
         let (start, end) = (timestamps[0], timestamps[1]);
         drop(raw);
@@ -335,7 +523,10 @@ mod tests {
     #[test]
     fn small_workload_stays_1d() {
         assert_eq!(workgroup_grid(100), (100, 1));
-        assert_eq!(workgroup_grid(MAX_WORKGROUPS_PER_DIM), (MAX_WORKGROUPS_PER_DIM, 1));
+        assert_eq!(
+            workgroup_grid(MAX_WORKGROUPS_PER_DIM),
+            (MAX_WORKGROUPS_PER_DIM, 1)
+        );
     }
 
     #[test]
