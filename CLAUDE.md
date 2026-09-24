@@ -36,6 +36,18 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   `spikes/sheath/tests/wasm_vs_native.rs` — never for a third-party render stage's per-pixel loop,
   which would need GPU shaders instead. Proposes the `nicti-claw` + per-domain crate layout for
   #20. Unblocks #20; feeds #37/#39's LGPL isolation requirement from ADR-0003.
+- **GPU compute API**: `docs/adr/0005-gpu-compute-api.md` — `wgpu` (WGSL), Vulkan backend on
+  Windows (not Dx12 — Dx12 doesn't expose `SHADER_F16` on wgpu 30/current driver, Vulkan does, and
+  Tapetum's cache tiers need f16). Measured on the reference RTX 5080 in `spikes/glint/`: live-stage
+  chain at 4K and 45MP both clear the decision rule (within 2x of an equivalent CUDA kernel, one
+  wgpu backend actually faster); `max_buffer_size`/`max_storage_buffer_binding_size` clear the 45MP
+  RGBA16F (~360MB) hero-frame size by 5–10x on real hardware. Found and fixed a real
+  dispatch-dimensioning bug along the way: a naive 1D dispatch overflows wgpu's 65535-per-dimension
+  workgroup limit at hero-scenario resolution — any future wgpu compute-stage code must dispatch as
+  a 2D grid (`gpu.rs::workgroup_grid`), not assume 1D is safe. Never do a full-frame host↔device
+  round-trip in the hot path (confirmed expensive, 0.8–1.5s, by the spike's own harness) — baked
+  stage output must stay GPU-resident, per ADR-0002/#44. Unblocks #20, #41, #45; feeds #68 (GUI
+  framework)'s wgpu-interop question.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -67,10 +79,12 @@ No production crates exist yet — this repo is still in bootstrap/scaffolding. 
 binary crate (`src/main.rs`) exists only so CI/lint tooling has something real to run against; it
 is not a commitment to final crate layout. `spikes/*` (a Cargo workspace member glob) holds
 throwaway research spikes — e.g. `spikes/pawprint` (#21/ADR-0002's edit-document hashing,
-history/compaction, and XMP round-trip proof) and `spikes/sheath` + fixture `spikes/dewclaw`
+history/compaction, and XMP round-trip proof), `spikes/sheath` + fixture `spikes/dewclaw`
 (#19/ADR-0004's lazy module registry, checked C-ABI dylib boundary, and WASM-vs-native pixel-kernel
-timing) — not production code; don't build on top of a spike crate, and expect both to be deleted
-once #20 lands the real crate layout. **Proposed real package map (from ADR-0004, pending #20):**
+timing), and `spikes/glint` (#16/ADR-0005's wgpu-vs-CUDA measured comparison — correctness,
+feature/limit availability, throughput, dispatch overhead, host↔device interop cost) — not
+production code; don't build on top of a spike crate, and expect all three to be deleted once #20
+lands the real crate layout. **Proposed real package map (from ADR-0004, pending #20):**
 `nicti-claw` (module registry + dylib loader — generalizes `spikes/sheath`), then one crate per
 domain implementing its traits: `nicti-decode`, `nicti-color`, `nicti-lens`, `nicti-render`
 (Tapetum's future home, #44), `nicti-ai`, `nicti-export`, `nicti-catalog` (#22's future home).
