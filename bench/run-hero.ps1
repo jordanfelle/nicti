@@ -1,18 +1,32 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
 Runs one measured pass of the #43 hero scenario: verifies the hero-set files against the
-manifest, records hardware identity, captures the screen while bench/lrc/hero.ahk drives LRC, then
-crops and hands the capture to whisker for analysis. See docs/benchmarks/hero-scenario.md.
+manifest, records hardware identity, optionally pre-navigates LRC's selection, captures the screen
+while bench/lrc/hero.ahk drives LRC, then crops and hands the capture to whisker for analysis. See
+docs/benchmarks/hero-scenario.md. Requires PowerShell 7+ (winget install Microsoft.PowerShell) --
+this script's graceful-ffmpeg-stop logic uses a .NET-Core-only ProcessStartInfo API that silently
+null-references under Windows PowerShell 5.1.
 
 .PARAMETER Interaction
-switch | crop | zoom -- must match bench/lrc/hero-config.ini's [general] Interaction.
+switch | crop | zoom -- must match bench/lrc/hero-config.ini's [general] Interaction (drives the
+AHK script and hero-config.ini's own interaction-specific settings; independent of -Cold below).
 
 .PARAMETER Config
 originals | smart-previews -- which LRC configuration this run is against (naming only; the
 correct catalog must already be open in LRC before this script runs).
 
+.PARAMETER Cold
+Marks this as a cold run: the `interaction` recorded in meta.json (and this run's output folder)
+is "$Interaction-cold" instead of "$Interaction", so whisker's `analyze` pools cold results
+separately from warm ones. Does not change what hero.ahk itself does -- the cold/warm distinction
+is purely about catalog/cache state you've arranged before invoking this script (see
+docs/benchmarks.md's cold-run rules and hero-scenario.md's Warm vs. cold section).
+
 .PARAMETER RunLabel
-Free-form label for this run's output folder, e.g. "warmup" or "run-1".
+Free-form label for this run's output folder, e.g. "warmup" or "run-1". whisker's `analyze`
+excludes the run labeled "warmup" (case-insensitive, overridable via its own --warmup-label) from
+pooled stats.
 
 .PARAMETER CaptureFps
 Capture rate in fps. Defaults to 60 per the documented capture-rate deviation in
@@ -22,25 +36,48 @@ hero-scenario.md -- pass 120 once run on a machine with a 120Hz+ display attache
 "x,y,w,h" screen rects for the keypress indicator and the loupe ROI, matching hero-config.ini's
 [indicator] section and the calibration step in bench/lrc/README.md.
 
+.PARAMETER PreNavigate
+Optional bench/lrc/navigate.ahk spec (e.g. "Left:49,Right:12"), run to completion *before* the
+capture starts so navigation never lands inside the timed capture or gets scored as a spurious
+switch event. See run-hero-series.ps1, which drives this for you across a full series.
+
+.PARAMETER ImageIndex
+1-based hero-set image index this run targets (crop/zoom's "5 images per run" spread). Purely a
+label: recorded in meta.json and used to nest this run's output under an "img-<N>" subfolder so
+whisker's `analyze` can walk multiple per-image captures per run. Omit (0) for switch runs, which
+always operate on the full 50-image set rather than one target image.
+
 .PARAMETER DurationSeconds
 Safety timeout, not the target capture length (actual capture length is however long hero.ahk
-takes to run, plus fixed buffers) -- if hero.ahk hasn't exited within this many seconds (a blocking
-MsgBox dialog, LRC not found, a hung drag), the run is aborted rather than left to hang forever.
-Must comfortably exceed hero.ahk's expected run time for the chosen interaction (see
-bench/lrc/hero-config.ini.example's delay/duration settings).
+takes to run, plus fixed buffers) -- if hero.ahk (or -PreNavigate's navigate.ahk) hasn't exited
+within this many seconds (a blocking dialog, LRC not found, a hung drag), the run is aborted rather
+than left to hang forever. Must comfortably exceed hero.ahk's expected run time for the chosen
+interaction (see bench/lrc/hero-config.ini.example's delay/duration settings).
+
+.PARAMETER DdagrabOutputIdx
+Optional ddagrab `output_idx` override, for a machine with multiple display adapters/outputs (this
+one has three: a Parsec virtual display, an AMD iGPU, and the NVIDIA GPU) where ddagrab's default
+output isn't the one LRC is actually on. Leave unset unless the calibration dry-run shows a capture
+of the wrong screen.
 #>
 param(
     [Parameter(Mandatory)] [ValidateSet("switch", "crop", "zoom")] [string]$Interaction,
     [Parameter(Mandatory)] [ValidateSet("originals", "smart-previews")] [string]$Config,
+    [switch]$Cold,
     [Parameter(Mandatory)] [string]$RunLabel,
     [double]$CaptureFps = 60,
     [Parameter(Mandatory)] [string]$IndicatorRect,
     [Parameter(Mandatory)] [string]$RoiRect,
+    [string]$PreNavigate = "",
+    [int]$NavigateDelayMs = 80,
+    [int]$ImageIndex = 0,
     [int]$DurationSeconds = 60,
+    [int]$DdagrabOutputIdx = -1,
     [string]$RefRoot = "H:\NictiBench\ref-10k",
     [string]$ManifestPath = "$PSScriptRoot\..\docs\ref-10k-manifest.csv",
     [string]$HeroSetFile = "$PSScriptRoot\..\docs\benchmarks\hero-set.txt",
     [string]$AhkConfigPath = "$PSScriptRoot\lrc\hero-config.ini",
+    [string]$NavigateAhkPath = "$PSScriptRoot\lrc\navigate.ahk",
     [string]$AhkExe = "",
     [string]$FfmpegExe = "",
     [string]$FfprobeExe = "",
@@ -55,10 +92,10 @@ function Get-Rect([string]$spec) {
     return @{ X = $parts[0]; Y = $parts[1]; W = $parts[2]; H = $parts[3] }
 }
 
-# winget-installed tools don't reliably land on PATH for every process that launches this script
-# (WSL interop in particular can inherit a stale PATH) -- fall back to a WinGet Packages search
-# before giving up, rather than failing on a bare "ffmpeg"/"AutoHotkey64.exe" that Start-Process
-# can't resolve.
+# winget/user-scope installs don't reliably land on PATH for every process that launches this
+# script (WSL interop in particular can inherit a stale PATH) -- fall back to a search of the
+# usual install locations before giving up, rather than failing on a bare "ffmpeg"/
+# "AutoHotkey64.exe" that Start-Process can't resolve.
 function Resolve-Tool([string]$explicit, [string]$commandName, [string]$searchPattern) {
     if ($explicit) {
         if (-not (Test-Path $explicit)) { throw "$commandName override not found: $explicit" }
@@ -66,12 +103,18 @@ function Resolve-Tool([string]$explicit, [string]$commandName, [string]$searchPa
     }
     $onPath = Get-Command $commandName -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }
-    $wingetRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
-    if (Test-Path $wingetRoot) {
-        $found = Get-ChildItem $wingetRoot -Recurse -Filter $searchPattern -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) { return $found.FullName }
+    $extraRoots = @(
+        (Join-Path $env:LOCALAPPDATA "Programs\AutoHotkey\v2"),
+        (Join-Path ${env:ProgramFiles} "AutoHotkey\v2"),
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages")
+    )
+    foreach ($rootDir in $extraRoots) {
+        if (Test-Path $rootDir) {
+            $found = Get-ChildItem $rootDir -Recurse -Filter $searchPattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { return $found.FullName }
+        }
     }
-    throw "$commandName not found on PATH or under $wingetRoot -- pass -AhkExe/-FfmpegExe explicitly."
+    throw "$commandName not found on PATH or under the usual install locations -- pass -AhkExe/-FfmpegExe explicitly."
 }
 
 $AhkExe = Resolve-Tool $AhkExe "AutoHotkey64.exe" "AutoHotkey64.exe"
@@ -80,6 +123,10 @@ $FfprobeExe = Resolve-Tool $FfprobeExe "ffprobe" "ffprobe.exe"
 Write-Host "Using AutoHotkey: $AhkExe"
 Write-Host "Using ffmpeg: $FfmpegExe"
 Write-Host "Using ffprobe: $FfprobeExe"
+
+$metaInteraction = if ($Cold) { "$Interaction-cold" } else { $Interaction }
+$indicator = Get-Rect $IndicatorRect
+$roi = Get-Rect $RoiRect
 
 # --- 1. Integrity check: hero-set files must match the committed manifest's SHA-256 column,
 #        per docs/benchmarks.md's rule that any harness verify the frozen copy before trusting it.
@@ -110,18 +157,29 @@ $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory 
 $os = (Get-CimInstance Win32_OperatingSystem).Version
 $driveInfo = Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n = "FreeGB"; e = { [math]::Round($_.Free / 1GB, 1) } }
 
-$outDir = Join-Path (Join-Path (Join-Path $ResultsRoot $Config) $Interaction) $RunLabel
+$lrcVersion = $null
+try {
+    $lrcProc = Get-Process -Name "Lightroom" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($lrcProc) { $lrcVersion = $lrcProc.MainModule.FileVersionInfo.ProductVersion }
+} catch {
+    Write-Warning "Could not read Lightroom Classic version: $_"
+}
+
+$outDir = Join-Path (Join-Path (Join-Path $ResultsRoot $Config) $metaInteraction) $RunLabel
+if ($ImageIndex -gt 0) { $outDir = Join-Path $outDir "img-$ImageIndex" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $meta = [ordered]@{
-    interaction      = $Interaction
+    interaction      = $metaInteraction
     config           = $Config
     run_label        = $RunLabel
+    image_index      = if ($ImageIndex -gt 0) { $ImageIndex } else { $null }
     capture_fps      = $CaptureFps
     capture_fps_deviation_note = if ($CaptureFps -lt 120) {
         "hero-scenario.md specifies 120fps; this run captured at $CaptureFps fps due to a <120Hz display on the machine used (see hero-scenario.md's Capture-rate deviation note)."
     } else { $null }
     timestamp_utc    = (Get-Date).ToUniversalTime().ToString("o")
+    lrc_version      = $lrcVersion
     cpu              = $cpu
     gpu              = $gpu.Name
     gpu_driver       = $gpu.DriverVersion
@@ -129,19 +187,39 @@ $meta = [ordered]@{
     windows_build    = $os
     drives           = $driveInfo
     indicator_rect   = $IndicatorRect
+    indicator_w      = $indicator.W
+    indicator_h      = $indicator.H
     roi_rect         = $RoiRect
+    roi_w            = $roi.W
+    roi_h            = $roi.H
 }
 $meta | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $outDir "meta.json")
 
-# --- 3. Capture + drive, concurrently.
+# --- 3. Pre-navigate (if requested), before the capture starts -- see -PreNavigate above.
+if ($PreNavigate) {
+    Write-Host "Pre-navigating: $PreNavigate"
+    $navProc = Start-Process -FilePath $AhkExe -ArgumentList @($NavigateAhkPath, $PreNavigate, $NavigateDelayMs) -PassThru
+    if (-not $navProc.WaitForExit($DurationSeconds * 1000)) {
+        Stop-Process -Id $navProc.Id -Force -ErrorAction SilentlyContinue
+        throw "navigate.ahk did not exit within $DurationSeconds s for spec '$PreNavigate' -- aborting."
+    }
+    if ($navProc.ExitCode -ne 0) {
+        throw "navigate.ahk exited with code $($navProc.ExitCode) for spec '$PreNavigate'."
+    }
+}
+
+# --- 4. Capture + drive, concurrently.
 $capturePath = Join-Path $outDir "capture.mkv"
 Write-Host "Starting ddagrab capture at $CaptureFps fps -> $capturePath"
 # NOT verified against real hardware yet (see hero-scenario.md/README.md): ddagrab's D3D11
 # surfaces feed h264_nvenc with no explicit hwupload/hwmap filter. Most ffmpeg+NVENC builds
 # negotiate this zero-copy path automatically, but if this errors on a format mismatch during the
 # calibration dry-run, add an explicit hw-frames bridge filter here.
+$ddagrabOpts = @("framerate=$CaptureFps")
+if ($DdagrabOutputIdx -ge 0) { $ddagrabOpts += "output_idx=$DdagrabOutputIdx" }
+$ddagrabFilter = "ddagrab=" + ($ddagrabOpts -join ":")
 $ffmpegArgs = @(
-    "-y", "-f", "lavfi", "-i", "ddagrab=framerate=$CaptureFps",
+    "-y", "-f", "lavfi", "-i", $ddagrabFilter,
     "-c:v", "h264_nvenc", "-preset", "p7", "-qp", "0",
     $capturePath
 )
@@ -196,9 +274,7 @@ if ($frameCount -lt 10) {
 }
 Write-Host "Capture verified: $frameCount frames."
 
-# --- 4. Crop the two ROIs whisker needs (see bench/whisker/README.md).
-$indicator = Get-Rect $IndicatorRect
-$roi = Get-Rect $RoiRect
+# --- 5. Crop the two ROIs whisker needs (see bench/whisker/README.md).
 $indicatorRaw = Join-Path $outDir "indicator.raw"
 $roiRaw = Join-Path $outDir "roi.raw"
 
@@ -209,4 +285,4 @@ Write-Host "Extracting ROI crop ..."
 & $FfmpegExe -y -i $capturePath -vf "crop=$($roi.W):$($roi.H):$($roi.X):$($roi.Y),format=gray" -f rawvideo $roiRaw
 
 Write-Host "Run complete. Output: $outDir"
-Write-Host "Next: run whisker (switch|drag) against indicator.raw/roi.raw -- see bench/whisker/README.md."
+Write-Host "Next: run whisker (switch|drag|analyze) against indicator.raw/roi.raw -- see bench/whisker/README.md."

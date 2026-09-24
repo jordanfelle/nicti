@@ -14,10 +14,28 @@ and turns pixel-level frame differences into the latency/fps numbers `hero-scena
   across all detected events. Used for interaction A (switch) and interaction C's zoom-settled
   half. The settled search starts from the detected first-change frame, not the raw indicator
   edge — searching from the edge would let a brief pre-change plateau (the ROI hasn't started
-  transitioning yet) look like a spurious "already settled" result.
-- **`whisker drag`** — over an explicit frame window, reports the frame-to-frame intervals between
-  visually distinct ROI repaints during a scripted drag, converted to ms and an effective fps
-  (`1000 / p95 interval`). Used for interaction B (crop) and interaction C's pan half.
+  transitioning yet) look like a spurious "already settled" result. `--edges` restricts analysis
+  to specific 0-based indicator-edge indices (e.g. `--edges 0` for a zoom capture, whose 3 flashes
+  are `[Z keypress, pan-drag-start, pan-drag-end]` and only the first is switch-shaped) — the
+  report's `events_detected` still counts every raw edge regardless, so the calibration "confirm
+  events_detected == N" check still works on a filtered call.
+- **`whisker drag`** — over a transition-index window, reports the frame-to-frame intervals
+  between visually distinct ROI repaints during a scripted drag, converted to ms and an effective
+  fps (`1000 / p95 interval`). Used for interaction B (crop) and interaction C's pan half. The
+  window can be given explicitly (`--start-frame`/`--end-frame`) or derived from a pair of
+  indicator edges (`--indicator-raw`/`--window-edges start,end`, e.g. `--window-edges 1,2` for
+  crop/zoom, whose edge 0 is the mode-entry keypress `r`/`z` and edges 1/2 bracket the drag —
+  `hero.ahk`'s `ScriptedDrag` flashes the indicator at both) — the latter means no per-capture
+  hand-picked frame numbers are needed for the ~120 crop/zoom captures the full spec produces.
+- **`whisker analyze --results-root <dir>`** — walks a `run-hero-series.ps1` results tree (every
+  directory containing a `meta.json`), analyzes each non-warm-up capture with the same pipeline as
+  the two subcommands above, and pools raw samples per (config, interaction) before computing
+  p50/p95/max — matching hero-scenario.md's "pool ... across those 5 images"/"across all the
+  measured runs" wording, rather than averaging each capture's own p95. Writes `summary.json` and
+  a `summary.md` table into `--out-dir` (default: `--results-root` itself). Any capture that fails
+  to parse or analyze (bad `meta.json`, a missing indicator edge, mismatched frame counts) is
+  listed in `skipped` rather than silently dropped from the pooled counts — always check that list
+  before trusting a summary.
 
 ## Producing the raw inputs
 
@@ -48,6 +66,16 @@ cargo run -p whisker --bin whisker -- drag \
   --roi-raw roi.raw --roi-width 1200 --roi-height 800 \
   --fps 60 --start-frame 30 --end-frame 150 \
   --out drag-report.json
+
+# Same drag, but deriving the window from indicator edges 1 and 2 instead of hand-picked frames:
+cargo run -p whisker --bin whisker -- drag \
+  --roi-raw roi.raw --roi-width 1200 --roi-height 800 \
+  --indicator-raw indicator.raw --indicator-width 40 --indicator-height 40 \
+  --window-edges 1,2 --fps 60 \
+  --out drag-report.json
+
+cargo run -p whisker --bin whisker -- analyze \
+  --results-root ../../bench-results/hero
 ```
 
 ## Tuning the thresholds

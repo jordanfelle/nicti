@@ -33,6 +33,10 @@ EndY=0
 DurationMs=2000
 Steps=60
 ExitCropAfter=1
+; Undo (Ctrl+Z) the crop after ExitCropAfter commits it, so every repeat run on this image starts
+; from the same uncropped state -- without this, run 2+ would drag against an already-cropped
+; frame and silently invalidate both the crop geometry and the measurement.
+RevertCropAfter=1
 
 [zoom]
 PanStartX=0
