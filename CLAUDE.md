@@ -112,6 +112,17 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   row for the full, genuinely unresolved account, plus a new `Workload::prepare_for_forget` hook
   this investigation added. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
   Revisit post-1.0, not never.
+- **DuckDB as v1 primary catalog store, reconsidered post-ADR-0008**:
+  `docs/adr/0012-duckdb-as-primary-catalog-store.md` — **not adopted**. ADR-0008's decision is
+  unchanged, now for a demonstrated technical reason instead of a soft one: #22's planned
+  append-only history log with burst-compaction (ADR-0002) needs frequent UPDATE+DELETE-heavy
+  operations, and a real prototype (`spikes/den/src/schema_fit.rs`) measured DuckDB compacting the
+  same history runs SQLite compacts **~575x slower per operation** (73.7ms/op vs 0.128ms/op,
+  960,000 raw rows down to 14,733 compacted rows), turning a sub-2-second workload into an
+  18-minute one — a real technical mismatch with ADR-0002's "no optimize catalog" constraint, not a
+  benchmark artifact. DuckDB's JSON support (`json_extract`) is confirmed real and usable — that
+  part of the schema-fit question favors DuckDB — but doesn't offset the compaction cost. #103's
+  separate SQLite-trigger-vs-DuckDB-sidecar facet-cache work is unaffected by this outcome.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -179,11 +190,13 @@ proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffoldi
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
-(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up — one
-module per candidate, `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`, behind matching
-Cargo features (`turso` is default-off, evaluated-not-adopted, kept for reference); `gen.rs`'s
-synthetic-catalog generator is reusable for future Library-scale benchmarks, see
-`docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
+(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up and
+#107/ADR-0012's schema-fit reconsideration — one module per candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`, behind matching Cargo features (`turso`
+is default-off, evaluated-not-adopted, kept for reference), plus `schema_fit.rs` (ADR-0002's
+JSON-column + append-only/burst-compacted history-table shape, gated on both `sqlite` and
+`duckdb`); `gen.rs`'s synthetic-catalog generator is reusable for future Library-scale benchmarks,
+see `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for
 `spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
