@@ -148,6 +148,32 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   descriptor (not a process-wide guard like LMDB's) — the same *class* of fd-scoped lock ADR-0009
   found in Turso, which this in-process `mem::forget` technique can never get past regardless of
   engine. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
+- **RocksDB, evaluated post-ADR-0010**: `docs/adr/0015-rocksdb-evaluation.md` — **not adopted**.
+  Strong Windows-build/license/maintenance evidence (including a real Windows CI gotcha found and
+  mirrored into this repo's own CI: `librocksdb-sys`'s `bindgen`-generated FFI bindings need
+  libclang, which conflicts with GitHub's `windows-latest` runner's bundled msys64 install unless
+  removed first). Two query shapes miss the 2M budget (range query ~1.8x over, filename search
+  ~4.5x over, the worst of any candidate on this shape) — root-caused (compaction was tried and
+  ruled out as the cause) to RocksDB's per-read LSM cost (bloom-filter + block-cache misses) under
+  this pass's default, untuned configuration. Crash-safety is **inconclusive**, same class of
+  finding as LMDB/Turso/redb: a leaked `LOCK` file blocks reopening the same forgotten path in this
+  in-process technique, confirmed (via a direct probe, same methodology as ADR-0009/0010) to be
+  scoped to that specific path, not a process-wide guard like LMDB's. **The concurrent-multi-writer
+  comparison this ADR exists to produce — measured for the first time in this series, since every
+  prior candidate was only ever benchmarked single-threaded — has a genuine, nuanced answer**:
+  RocksDB does not show SQLite's own textbook single-writer-serialization signature (SQLite's
+  aggregate throughput stayed flat at ~61k-76k writes/sec regardless of thread count, 1-16 threads,
+  while its own max latency grew monotonically from 5ms to 1,458ms under contention — a clean,
+  reproduced confirmation of the exact concern #115 was filed to test), and RocksDB's peak observed
+  throughput (1.05M writes/sec) was roughly 15x SQLite's ceiling — but RocksDB's own default
+  (untuned) configuration showed large, non-monotonic run-to-run variance under sustained
+  concurrent load (as low as 47.7k writes/sec in one 16-thread run, at or below SQLite's own
+  ceiling), consistent with its own documented write-stall backpressure mechanism, not a clean win
+  either way. A tuned re-run (larger block cache/write buffers, bloom-filter tuning) is the named,
+  unattempted follow-up if RocksDB is ever reconsidered. ADR-0008 is unchanged: SQLite stays
+  chosen, DuckDB stays the fallback — but this ADR's own numbers are the first real evidence in
+  this repo of what SQLite's concurrency tradeoff actually costs, worth remembering if a future
+  multi-writer feature (#64) ever forces a re-decision.
 - **Facet-count cache for SQLite's faceted-filter gap**: `docs/adr/0011-facet-count-cache.md` —
   **trigger-maintained SQLite facet table**, closing ADR-0008's one measured miss (faceted-filter
   at 2M) without adding a new dependency. Clears the <100ms budget by ~33-89x at 600k/2M (well
@@ -243,14 +269,17 @@ ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStag
 edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
 (#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
-#106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, and #107/ADR-0012's
-schema-fit reconsideration — one module per candidate,
-`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/
-`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo features (`turso` and
-`redb` are both default-off, evaluated-not-adopted, kept for reference; the two facet-cache
+#106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, #107/ADR-0012's
+schema-fit reconsideration, and #115/ADR-0015's RocksDB follow-up — one module per candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`rocksdb_engine.rs`/
+`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo features (`turso`, `redb`,
+and `rocksdb` are all default-off, evaluated-not-adopted, kept for reference; the two facet-cache
 modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`), plus
 `schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape, gated
-on both `sqlite` and `duckdb`); `gen.rs`'s synthetic-catalog generator is reusable for future
+on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's own reason for existing — a
+genuinely concurrent multi-writer-thread comparison between RocksDB and SQLite, gated on both
+`rocksdb` and `sqlite`, not part of the shared `Workload` trait since only these two engines are
+compared this way); `gen.rs`'s synthetic-catalog generator is reusable for future
 Library-scale benchmarks, see `docs/benchmarks.md`) — not production code; don't build on top of a
 spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for

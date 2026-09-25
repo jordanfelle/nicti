@@ -182,3 +182,10 @@ fn redb_matches_shared_workload() {
     let dir = tempfile::tempdir().unwrap();
     check::<den::redb_engine::RedbEngine>(&dir, "redb-test.redb");
 }
+
+#[cfg(feature = "rocksdb")]
+#[test]
+fn rocksdb_matches_shared_workload() {
+    let dir = tempfile::tempdir().unwrap();
+    check::<den::rocksdb_engine::RocksDbEngine>(&dir, "rocksdb-test");
+}
