@@ -75,10 +75,23 @@ fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let manifest = Manifest::load(&args.manifest)?;
     let root = refset::resolve_root(args.root.as_deref())?;
 
+    // `--ids ""` (e.g. a caller joining an empty id list, as bench/run-hero.ps1's `-join ","`
+    // would on a zero-entry hero set) splits to `[""]`, not `[]` -- clap's `value_delimiter`
+    // never produces zero elements from a non-empty string. `ids_given` is decided from the raw
+    // arg (before filtering), so an explicit-but-empty `--ids` still selects Scope::Ids(vec![])
+    // (trivially clean, verifies nothing) rather than silently falling through to Scope::All and
+    // verifying the entire ~9k-file manifest instead of the zero files actually requested.
+    let ids_given = !args.ids.is_empty();
+    let ids: Vec<String> = args
+        .ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+
     let scope = if let Some(n) = args.sample {
         Scope::Sample { n, seed: args.seed }
-    } else if !args.ids.is_empty() {
-        Scope::Ids(args.ids)
+    } else if ids_given {
+        Scope::Ids(ids)
     } else {
         Scope::All
     };

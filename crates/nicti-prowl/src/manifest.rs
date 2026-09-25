@@ -292,6 +292,22 @@ mod tests {
     }
 
     #[test]
+    fn verify_empty_ids_is_a_clean_no_op() {
+        // Regression test for a review-caught bug in prowl's CLI (not this module): an
+        // explicit-but-empty `--ids` must verify zero files and report clean, not silently fall
+        // through to verifying the whole manifest.
+        let dir = tempfile::tempdir().unwrap();
+        let hash = write_file_with_known_hash(dir.path(), "a.nef", b"hello");
+        let manifest_path = write_manifest(dir.path(), &[("a.nef", &hash, "z8")]);
+        let manifest = Manifest::load(&manifest_path).unwrap();
+
+        let report = manifest.verify(dir.path(), Scope::Ids(vec![]));
+        assert!(report.is_clean());
+        assert_eq!(report.ok, 0);
+        assert_eq!(report.checked(), 0);
+    }
+
+    #[test]
     fn verify_sample_is_deterministic() {
         let dir = tempfile::tempdir().unwrap();
         let mut rows = Vec::new();

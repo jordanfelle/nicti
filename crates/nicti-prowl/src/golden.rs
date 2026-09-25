@@ -8,7 +8,7 @@
 //! linear -> working-space pipeline) exists -- see the follow-up issue this PR files.
 //!
 //! The perceptual diff is a hand-rolled single-scale SSIM (Wang et al., the standard formula,
-//! computed over 8x8 luma windows) rather than pulling in `dssim-core`: that crate's own
+//! computed over 8x8 windows on each of R/G/B and averaged) rather than pulling in `dssim-core`: that crate's own
 //! published license string (`AGPL-3.0`, no `-only`/`-or-later` suffix) doesn't match any SPDX id
 //! `deny.toml` allows, and its `imgref`/`rgb`-based API would add two more dependencies for a
 //! comparison this small a formula doesn't need.
@@ -161,18 +161,31 @@ impl GoldenStore {
     }
 }
 
-/// Single-scale SSIM over 8x8 non-overlapping luma windows, standard Wang et al. constants for
-/// 8-bit dynamic range. Returns a score in roughly `[-1.0, 1.0]`; 1.0 is identical. Panics if the
-/// two images differ in size -- callers (`GoldenStore::compare`) check dimensions first.
+/// Single-scale SSIM over 8x8 non-overlapping windows, standard Wang et al. constants for 8-bit
+/// dynamic range, averaged across R/G/B channels. Returns a score in roughly `[-1.0, 1.0]`; 1.0
+/// is identical. Panics if the two images differ in size -- callers (`GoldenStore::compare`)
+/// check dimensions first.
+///
+/// Averaging over the three color channels (rather than luma alone, an earlier version of this
+/// function's mistake, caught in review) matters specifically for this project: a color-space or
+/// white-balance regression -- exactly the class of bug a RAW-pipeline golden-image harness
+/// exists to catch -- can hold luma constant while shifting hue, which a luma-only comparison
+/// would score as a perfect match. See `tests::ssim_detects_color_only_shift_luma_constant` for a
+/// worked example.
 fn ssim(a: &RgbImage, b: &RgbImage) -> f64 {
     assert_eq!(
         a.dimensions(),
         b.dimensions(),
         "ssim requires equal-sized images"
     );
+    let scores: [f64; 3] = std::array::from_fn(|channel| ssim_channel(a, b, channel));
+    scores.iter().sum::<f64>() / 3.0
+}
+
+fn ssim_channel(a: &RgbImage, b: &RgbImage, channel: usize) -> f64 {
     let (width, height) = a.dimensions();
-    let luma_a = to_luma(a);
-    let luma_b = to_luma(b);
+    let luma_a = channel_values(a, channel);
+    let luma_b = channel_values(b, channel);
 
     const WINDOW: u32 = 8;
     const L: f64 = 255.0;
@@ -233,10 +246,8 @@ fn ssim(a: &RgbImage, b: &RgbImage) -> f64 {
     }
 }
 
-fn to_luma(img: &RgbImage) -> Vec<f64> {
-    img.pixels()
-        .map(|p| 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
-        .collect()
+fn channel_values(img: &RgbImage, channel: usize) -> Vec<f64> {
+    img.pixels().map(|p| p[channel] as f64).collect()
 }
 
 #[cfg(test)]
@@ -266,6 +277,23 @@ mod tests {
         let img = checkerboard(32, 32);
         let score = ssim(&img, &img);
         assert!(score > 0.999, "expected near-1.0, got {score}");
+    }
+
+    #[test]
+    fn ssim_detects_color_only_shift_luma_constant() {
+        // Regression test for a review-caught bug: an earlier version of `ssim` compared luma
+        // only (0.299R + 0.587G + 0.114B), so two images that differ entirely in hue but happen
+        // to share the same luma value scored ~1.0 ("identical") -- exactly the class of bug
+        // (white-balance/color-profile regression) a RAW-pipeline golden-image harness exists to
+        // catch. Solid red (255,0,0), luma=76.245; solid green (0,130,0), luma=76.31 -- chosen so
+        // the two are luma-equal to within rounding, but obviously not the same color.
+        let red = RgbImage::from_pixel(16, 16, image::Rgb([255, 0, 0]));
+        let green = RgbImage::from_pixel(16, 16, image::Rgb([0, 130, 0]));
+        let score = ssim(&red, &green);
+        assert!(
+            score < 0.5,
+            "expected a low score for a color-only (luma-equal) shift, got {score}"
+        );
     }
 
     #[test]
