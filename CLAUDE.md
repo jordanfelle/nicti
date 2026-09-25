@@ -424,3 +424,18 @@ from Shutterpaws repos here. See `.github/workflows/ci.yml`. A `cargo-deny` job 
 licenses against `deny.toml` (the allowlist from `docs/adr/0003-third-party-license-policy.md`) —
 it only covers Cargo dependencies, not native libraries, ML models, or data files, which still
 rely on `docs/licensing.md` being updated at review time.
+
+**`spikes/den`'s eight bundled native catalog-engine builds are path-gated (#117)**, not part of
+the `clippy`/`test`/`build-windows` jobs every PR pays for: a `changes` job (`dorny/paths-filter`)
+only routes into `den (linux)`/`den (windows)` when `spikes/den/**`, `Cargo.{toml,lock}`, or the
+workflow file itself changed, plus a weekly Monday schedule and `workflow_dispatch` so a
+non-den-touching dependency bump can't silently break it forever between den PRs. `Swatinem/
+rust-cache` only saves (`save-if`) from a push to `main` — PRs restore main's cache and skip the
+save step, which used to be a 20-30 minute cost on the Windows job by itself and was pushing this
+repo's cache usage over GitHub's 10GB/repo limit. `CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level
+env) additionally strips debuginfo from both Rust and den's bundled C/C++ builds, which was most
+of that cache size. `spikes/**` is also excluded from Renovate (`renovate.json`) for the same
+reason — den bundles five already-rejected engine candidates (ADR-0009/0010/0014/0015/0016) that
+generate bump-PR churn nobody will act on. **`spikes/den` itself is slated for deletion once #22
+lands** — see #123 for the follow-up cleanup (CI jobs, the Renovate rule, `deny.toml` exceptions,
+this section) once that happens.

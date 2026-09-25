@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # den (#117): rejected-engine code (turso/redb/libsql/rocksdb/fjall) is path-gated out of
+    # per-PR CI below since none of it ships -- this weekly run is what catches it silently
+    # rotting (a toolchain/dependency update breaking a candidate nobody's touching) between
+    # den-touching PRs.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -14,8 +21,33 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # #117: drops Rust debuginfo, and (since cargo sets DEBUG=false for build scripts at debug=0,
+  # but not at any nonzero level including line-tables-only) also makes den's bundled C/C++ native
+  # builds (DuckDB, RocksDB, rusqlite/libsql's SQLite forks) compile without -g. This was the bulk
+  # of the multi-GB Windows/clippy rust-cache entries that were pushing this repo over GitHub's
+  # 10GB per-repo cache limit (confirmed via `gh cache list` before this change: 7.2GB Windows +
+  # 2x2GB clippy = 11.2GB, with the `test` job's own cache entry already evicted). Panic locations
+  # and backtraces still work -- they don't depend on debuginfo, only on symbol names.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
+  changes:
+    name: detect den changes
+    runs-on: ubuntu-latest
+    outputs:
+      den: ${{ steps.filter.outputs.den }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        with:
+          filters: |
+            den:
+              - 'spikes/den/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
@@ -35,6 +67,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # #117: only main's push (and scheduled/dispatch) runs save a cache; PRs restore
+          # main's most recent entry (rust-cache's own prefix-matching fallback handles the
+          # Cargo.lock-changed case) and skip the save step entirely. This was previously the
+          # single worst line item in a PR's own CI time (a 20-30min cache upload on the
+          # Windows job) and was also what caused PR runs to evict main's own cache under the
+          # 10GB per-repo limit.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
       # (X11/Wayland) plus Slint's Skia/FemtoVG renderers. Precautionary, NOT independently
       # confirmed as required: a local sandbox build succeeded with none of these packages
@@ -53,7 +93,11 @@ jobs:
       # entirely (verified locally: `cargo clippy --all-targets --all-features` alone
       # reports "Checking nicti" only, nothing else). Same fix cargo-deny's job already
       # needed for the same reason (see its own comment below).
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      #
+      # --exclude den (#117): den's own clippy check moved to the path-gated `den (linux)`/
+      # `den (windows)` jobs below, so this job (which runs on every PR regardless of what it
+      # touches) no longer pays for compiling eight bundled native catalog-engine libraries.
+      - run: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test
@@ -62,6 +106,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # See the clippy job's comment above -- same #68/ADR-0006 GUI-toolkit link dependency.
       - run: |
           sudo apt-get update
@@ -69,6 +115,34 @@ jobs:
       # --workspace: see the clippy job's comment above -- without it, pawprint's and
       # sheath's tests silently never ran in CI.
       #
+      # --exclude den (#117): den's own tests (including the sqlite/libsql feature-scoped
+      # commands this comment used to document here) moved to the path-gated `den (linux)` job
+      # below -- this job now only builds/runs the real workspace crates plus the always-on
+      # spikes, on every PR regardless of what it touches.
+      - run: cargo test --workspace --all-targets --all-features --exclude den
+
+  den-linux:
+    name: den (linux)
+    needs: changes
+    if: needs.changes.outputs.den == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
+      # den (#67/ADR-0008 and follow-ups, see CLAUDE.md's package map) is a throwaway research
+      # spike, not part of the shipping v1 target -- see the #117 issue this job was split out
+      # to address: every catalog-engine candidate it bundles (SQLite, DuckDB, LMDB, Turso, redb,
+      # libSQL, RocksDB, fjall) was compiling from source on every single PR, most of which never
+      # touch den at all. This job only runs when `spikes/den/**`/`Cargo.{toml,lock}`/this
+      # workflow file change (the `changes` job's `den` filter), on a push to main, or on the
+      # weekly schedule/manual dispatch above -- when path-gated out, GitHub Actions reports it
+      # as skipped, which still satisfies a required-status-check gate.
+      - run: cargo clippy -p den --all-targets --all-features -- -D warnings
       # --exclude den, added for #113's `libsql` engine: a blanket `--all-features` here would
       # activate `den`'s `sqlite` and `libsql` features together in the SAME feature resolution,
       # and (unlike `cargo clippy --all-features`, which only type-checks and never reached the
@@ -79,40 +153,20 @@ jobs:
       # sqlite3_prepare_v3` (etc.) error, not a flaky one -- reproduced directly against this exact
       # command before adding the exclusion. `den` gets its own two feature-scoped commands below
       # instead, the same pattern the Windows job's own `-p den` line already uses.
-      - run: cargo test --workspace --all-targets --all-features --exclude den
       - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall
       - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
 
-  cargo-deny:
-    name: cargo deny (licenses)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check licenses
-          # cargo-deny only resolves the root package's deps by default; --workspace pulls in
-          # spikes/* and bench/whisker too (verified locally: without it, only `nicti` itself
-          # shows up in `cargo deny list`). --all-features is the action's own default -- keep it
-          # explicit since setting `arguments` overrides rather than appends to that default.
-          arguments: --workspace --all-features
-
-  build-windows:
-    name: cargo build (windows, v1 target)
+  den-windows:
+    name: den (windows)
+    needs: changes
+    if: needs.changes.outputs.den == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # -p nicti, not a bare workspace build: spikes/* are throwaway
-      # research crates (see CLAUDE.md's package map section), not part of
-      # the shipping v1 target, and shouldn't ride along in the release
-      # build that validates it.
-      - run: cargo build --release -p nicti
-      # Dylib loading (DLL_PREFIX/DLL_SUFFIX, LoadLibrary semantics) is platform-specific, and
-      # Windows is the v1 target -- the Linux `test` job alone isn't enough coverage for
-      # nicti-claw's C-ABI dylib boundary (ADR-0004 section 4).
-      - run: cargo test -p nicti-claw -p dewclaw
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #115/ADR-0015's RocksDB candidate: `librocksdb-sys` generates its FFI bindings with
       # `bindgen`, which needs libclang on the build machine. GitHub's `windows-latest` runner
       # ships an msys64 install whose own `libclang.dll` conflicts with the one bindgen needs
@@ -128,11 +182,12 @@ jobs:
       # candidate must build and pass its cross-engine correctness test on the actual v1 target, not
       # just Linux -- this is exactly the gate that eliminated pglite-rs (its build.rs passes a
       # Unix-only linker flag, confirmed unrunnable here) before a Windows CI job ever had to prove
-      # it. `-p den` only (not `--workspace`): den is a spike, same reasoning as the `-p nicti` build
-      # above. `redb` was missing from this list even after ADR-0010 merged (a real gap, fixed while
-      # resolving an earlier merge, not by either side's own diff) -- it, `rocksdb`, and `fjall` all
-      # combine fine with `sqlite` (none bundles a competing SQLite C fork), so all three join the
-      # main command below; mirrors the Linux `test` job's already-validated command.
+      # it. `-p den` only (not `--workspace`): den is a spike, same reasoning as the `-p nicti`
+      # build in the main Windows job. `redb` was missing from this list even after ADR-0010
+      # merged (a real gap, fixed while resolving an earlier merge, not by either side's own diff)
+      # -- it, `rocksdb`, and `fjall` all combine fine with `sqlite` (none bundles a competing
+      # SQLite C fork), so all three join the main command below; mirrors the Linux job's
+      # already-validated command.
       - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall
       # #113's libSQL candidate needs its own, separate step: `rusqlite`'s bundled
       # `libsqlite3-sys` and `libsql`'s bundled `libsql-ffi` both statically link a full copy of
@@ -142,3 +197,43 @@ jobs:
       # sqlite3.c (DuckDB is its own engine; LMDB and Turso Database don't touch SQLite's C code
       # at all), so they combine with `libsql` here without the same clash.
       - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
+
+  cargo-deny:
+    name: cargo deny (licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check licenses
+          # cargo-deny only resolves the root package's deps by default; --workspace pulls in
+          # spikes/* and bench/whisker too (verified locally: without it, only `nicti` itself
+          # shows up in `cargo deny list`). --all-features is the action's own default -- keep it
+          # explicit since setting `arguments` overrides rather than appends to that default.
+          # Deliberately NOT path-gated like the den test/clippy jobs above: this only resolves
+          # the dependency graph (no compilation), so it stays cheap (~1min) regardless of which
+          # den features are in the graph, and license drift is worth catching on every PR.
+          arguments: --workspace --all-features
+
+  build-windows:
+    name: cargo build (windows, v1 target)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
+      # -p nicti, not a bare workspace build: spikes/* are throwaway
+      # research crates (see CLAUDE.md's package map section), not part of
+      # the shipping v1 target, and shouldn't ride along in the release
+      # build that validates it.
+      - run: cargo build --release -p nicti
+      # Dylib loading (DLL_PREFIX/DLL_SUFFIX, LoadLibrary semantics) is platform-specific, and
+      # Windows is the v1 target -- the Linux `test` job alone isn't enough coverage for
+      # nicti-claw's C-ABI dylib boundary (ADR-0004 section 4).
+      - run: cargo test -p nicti-claw -p dewclaw
+      # #117: den's own Windows coverage (including the RocksDB/bindgen msys64 workaround and
+      # both `-p den` feature-scoped test commands this comment used to document here) moved to
+      # the path-gated `den (windows)` job above -- this job now only builds/tests the real v1
+      # target's own crates on every PR, regardless of what it touches.
