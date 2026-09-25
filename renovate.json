@@ -20,6 +20,19 @@
       "description": "dtolnay/rust-toolchain's @stable/@beta/@nightly refs are branch names in that action's own repo that intentionally track the current toolchain -- SHA-pinning them (helpers:pinGitHubActionDigests' default) freezes CI on whatever commit happened to be HEAD at pin time instead of tracking new Rust releases.",
       "matchDepNames": ["dtolnay/rust-toolchain"],
       "pinDigests": false
+    },
+    {
+      "description": "spikes/pelt-iced deliberately pins wgpu = \"27\" (not ADR-0005's wgpu 30, unlike every other wgpu-using crate here) because iced_wgpu 0.14.0 itself pins wgpu 27.0.1 -- Rust requires the exact same wgpu crate version to unify wgpu::Device/RenderPass types between this crate and iced's internals, so a wgpu 30 bump here simply fails to compile (see ADR-0006's Hard gate 2). Revisit once Iced ships against wgpu 30.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["wgpu"],
+      "matchFileNames": ["spikes/pelt-iced/Cargo.toml"],
+      "enabled": false
+    },
+    {
+      "description": "bincode 3.0.0 is a placeholder/reserved release, not a real major version -- its published source is a single `compile_error!(\"https://xkcd.com/2347/\")` and it has zero dependencies (confirmed 2026-09-25 by checking out the crate directly from crates.io). Block that specific version; a legitimate future 2.x or working 3.x release is still allowed.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["bincode"],
+      "allowedVersions": "!/^3\\.0\\.0$/"
     }
   ]
 }
