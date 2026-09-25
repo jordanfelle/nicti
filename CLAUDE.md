@@ -279,7 +279,15 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   batched-transaction benchmarking bug). Hardware-accel-aware format auto-selection explicitly
   deferred to a future issue against the real (non-spike) preview pipeline, not built into this
   research spike. `ravif`/`rav1d` need `nasm` to build — added to `deny.toml` (`MPL-2.0`, `IJG`)
-  and `.github/workflows/ci.yml`'s four general clippy/test jobs in the same PR.
+  and `.github/workflows/ci.yml`'s four general clippy/test jobs in the same PR. **A hostile
+  pre-PR review caught a real measurement bug**: `source::FileSource::open` never actually
+  requested `FILE_FLAG_NO_BUFFERING` on Windows even when `cold=true` (that flag can only be set
+  at open time, not per-read), so every "cold, ranged" number was silently served from the OS page
+  cache — this produced a plausible-looking but wrong headline claim in an earlier draft ("ranged
+  reads collapse the NVMe/HDD gap even when cold"). Fixed and re-measured: HDD cold ranged reads
+  are genuinely ~11-17x slower than NVMe (not collapsed) — still a large win over whole-file HDD
+  reads (~8.7x), just not the gap-eliminating result the bug produced. See the ADR's own
+  Measured-results section for the full account.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 

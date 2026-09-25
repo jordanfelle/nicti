@@ -149,12 +149,17 @@ pub fn run(
         Tier::T2Screen => codec_kind,
     };
 
+    // A cache miss or decode error must never land in `read_decode_ms` as a fast "success" --
+    // that would silently deflate the very percentiles the JPEG-vs-AVIF comparison in the ADR
+    // relies on. Fail loudly instead (a hostile review caught this: the original `if let Some`
+    // + `let _ =` swallowed both cases while still timing them).
     let mut read_decode_ms: Vec<f64> = Vec::with_capacity(order.len());
     for id in order {
         let start = Instant::now();
-        if let Some(bytes) = cache.get(CacheKey { asset_id: id, tier })? {
-            let _ = codec::decode(decode_codec, &bytes);
-        }
+        let bytes = cache
+            .get(CacheKey { asset_id: id, tier })?
+            .ok_or_else(|| format!("cache miss for asset {id}"))?;
+        codec::decode(decode_codec, &bytes)?;
         read_decode_ms.push(start.elapsed().as_secs_f64() * 1000.0);
     }
 

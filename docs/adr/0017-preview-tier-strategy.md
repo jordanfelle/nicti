@@ -53,12 +53,22 @@ RAW decode — only the description of *why* it exists.
 
 ## Tier design
 
-| Tier | Use | Source (NEF/DNG, unedited) | Source (plain JPEG asset) | Persistence |
+| Tier | Use | Source (Z8/D7500 NEF, unedited) | Source (plain JPEG asset) | Persistence |
 |---|---|---|---|---|
 | T0 grid | grid, filmstrip | `nikon_preview_ifd`, 640x424, verbatim | resize master to 512px long edge | persistent, every asset, `previews.db` (SQLite) |
 | T1 loupe-fast | instant loupe placeholder | `sub_ifd_2`, 1620x1080, one ranged read | resize master to ~1620px | RAM ring only, not persisted |
 | T2 screen | loupe/cull at 4K | `JpgFromRaw` decoded, resized to 3840px, re-encoded JPEG | resize master to 3840px | bounded LRU disk cache (pack-file format, below) + RAM/VRAM prefetch N±k |
 | T3 1:1 | 100% focus-check zoom | `JpgFromRaw` full decode | master at full res | RAM only (current + next), never persisted |
+
+**D3400 DNG assets don't fit this table** — per #28's own findings, they carry only a single
+reduced `SubIFD` preview (max 1024px, no `nikon_preview_ifd`/`sub_ifd_2`/`JpgFromRaw` equivalent,
+since Adobe's DNG converter wraps the original MakerNote as an opaque `DNGPrivateData` blob this
+project's `sniff` walker doesn't unwrap). `docs/benchmarks.md` already scopes the D3400 bucket as
+"decoder-compatibility only, not performance-gated" — this ADR's tier design follows that same
+scope: T0/T1 for a D3400 asset both resolve to that single 1024px SubIFD preview (no separate mid
+tier exists to pick), and T2/T3 fall back to a full RAW decode (no `JpgFromRaw`-equivalent
+full-pixel-dimension JPEG exists to reuse). Not measured or performance-gated in this ADR, same as
+#28; revisit only if D3400/DNG coverage's own status changes.
 
 Cross-cutting design points:
 - **Ingest records per-tier `(offset, len)`** for every NEF/DNG asset (this ADR's `source.rs`
@@ -154,14 +164,15 @@ NVMe, cold (`FILE_FLAG_NO_BUFFERING`), 300-file sample:
 | Mode | I/O | p50 | p95 | max |
 |---|---|---|---|---|
 | `locate` | whole | 18.57 ms | 29.26 ms | 41.26 ms |
-| `locate` | ranged | 0.165 ms | 0.804 ms | 10.05 ms |
+| `locate` | ranged | 0.844 ms | 1.332 ms | 1.897 ms |
 | `read` | whole | 18.98 ms | 28.95 ms | 44.04 ms |
-| `read` | ranged | 3.56 ms | 5.50 ms | 8.62 ms |
+| `read` | ranged | 4.33 ms | 5.55 ms | 10.10 ms |
 | `decode-grid` | whole | 22.10 ms | 31.66 ms | 37.26 ms |
-| `decode-grid` | ranged | 2.49 ms | 3.07 ms | 4.51 ms |
+| `decode-grid` | ranged | 2.62 ms | 3.53 ms | 4.70 ms |
 
-Cold reads on this NVMe drive cost almost nothing extra over warm — the reference SSD's own
-hardware is fast enough that OS-cache-bypass barely shows up, unlike a mechanical drive (below).
+Cold reads on this NVMe drive cost noticeably more than warm for the ranged, I/O-bound modes
+(`locate`: 0.844ms vs. warm's 0.085ms; `read`: 4.33ms vs. warm's 3.52ms) but decode-heavy modes
+(`decode-grid`) barely move — their cost is dominated by CPU decode/resize, not the read itself.
 
 NVMe, cold, **random** order (the real arbitrary-browse-order case #28 flagged as the one that
 matters for actual culling UX), 300-file sample:
@@ -169,11 +180,12 @@ matters for actual culling UX), 300-file sample:
 | Mode | I/O | p50 | p95 | max |
 |---|---|---|---|---|
 | `locate` | whole | 19.97 ms | 28.26 ms | 43.72 ms |
-| `locate` | ranged | 0.138 ms | 0.266 ms | 0.741 ms |
+| `locate` | ranged | 0.765 ms | 1.232 ms | 2.104 ms |
 
 **No meaningful random-order penalty on NVMe** — #28's own finding of a ~9-12x random-order
 penalty was a *whole-file-read, mechanical-seek* phenomenon; it doesn't reproduce on this SSD
-(no physical seek cost) even for whole-file reads, and ranged reads show no penalty either.
+(no physical seek cost) even for whole-file reads, and ranged reads show no penalty either
+(0.765ms random vs. 0.844ms manifest — within measurement noise).
 
 HDD (`E:\`), cold, manifest order, 300-file sample — the comparison #28's own doc left as an open
 gap:
@@ -181,21 +193,31 @@ gap:
 | Mode | I/O | p50 | p95 | max |
 |---|---|---|---|---|
 | `locate` | whole | 127.10 ms | 150.05 ms | 194.97 ms |
-| `locate` | ranged | 0.134 ms | 0.390 ms | 0.568 ms |
+| `locate` | ranged | 14.60 ms | 21.24 ms | 66.42 ms |
 | `read` | whole | 126.61 ms | 150.25 ms | 173.43 ms |
-| `read` | ranged | 3.51 ms | 5.43 ms | 9.32 ms |
-| `extract-index` | ranged | 0.154 ms | 0.279 ms | 0.504 ms |
+| `read` | ranged | 46.17 ms | 60.98 ms | 151.49 ms |
+| `extract-index` | ranged | 0.70 ms | 1.52 ms | 21.31 ms |
 
-**The real headline finding**: whole-file reads on HDD are ~6.8x slower than NVMe at p50 (127.1ms
-vs. 18.6ms) — a real, expected mechanical-seek cost — but **ranged reads on HDD are barely
-distinguishable from NVMe** (0.134ms vs. 0.165ms p50 for `locate`; 3.51ms vs. 3.56ms for `read`).
-This makes sense once traced through `source.rs`'s design: the IFD walk's handful of small reads
-(TIFF header, IFD0, MakerNote) all land inside the first 256KB `FileSource::open`'s head-prefetch
-already reads in one sequential request — sequential throughput is a mechanical drive's strength,
-unlike the random seeks a naive per-tag read pattern (or a naive whole-file read across many files
-in non-sequential order) would cost. **Seek-and-read doesn't just avoid re-reading unnecessary
-bytes — it collapses the NVMe/HDD gap that #28's whole-file-read numbers showed for exactly this
-operation.**
+**A real bug was found and fixed in the middle of this measurement, and it changes a real
+conclusion** — worth documenting in full rather than quietly swapping in corrected numbers. A
+hostile pre-PR review (see below) caught that `source::FileSource::open` was calling plain
+`std::fs::File::open` unconditionally, never actually requesting `FILE_FLAG_NO_BUFFERING` even
+when `cold=true` — that flag can only be set when a Windows handle is opened, not retroactively
+per read, so every "cold, ranged" measurement above and below was silently served through the
+ordinary OS page cache, indistinguishable from warm. This produced a striking-looking but wrong
+headline finding in an earlier draft ("ranged reads collapse the NVMe/HDD gap even when cold") —
+plausible on its face (the IFD walk's reads are small and sequential-friendly), internally
+consistent with the rest of the story, and *completely an artifact of the bug*. Once
+`FileSource::open` actually honors `cold` (fixed in `source.rs`, see the PR), re-measuring shows
+the true picture: **whole-file reads on HDD are ~6.8x slower than NVMe at p50** (127.1ms vs.
+18.6ms, a real mechanical-seek cost) and **ranged reads on HDD are genuinely, substantially
+slower than NVMe too** (14.6ms vs. 0.84ms p50 for `locate` — ~17x; 46.2ms vs. 4.3ms for `read` —
+~11x) — seek-and-read is still a large, real win over whole-file on HDD (~8.7x for `locate`
+alone), just not the "collapses the gap entirely" result the buggy measurement showed. The one
+mode that *does* stay fast on HDD even when cold is `extract-index` (0.70ms p50) — that one
+genuinely only touches the file's first 256KB via one sequential read (no per-tag JPEG-header
+prefix reads the way `locate`/`read` do via `pick_candidate`), so it's the mode where the
+"sequential-locality" intuition actually holds up under a correctly-cold measurement.
 
 **Full-scale ingest gate** (`docs/benchmarks.md`: "10k NEFs grid-browsable &lt; 60s from NVMe";
 this real catalog has 105.8k Nikon-eligible assets, not 10k, so the "100k &lt; 10 min" gate is the
@@ -208,8 +230,11 @@ the per-tier offset/len index — the real ingest-time cost this ADR's design ad
 
 Single-threaded wall-clock for the full set ≈ 9,142 × ~0.07ms ≈ **0.64s** — clears the 10k/60s
 gate by roughly two orders of magnitude, and scaling linearly to the real catalog's 105.8k
-Nikon-eligible assets (≈7.4s) clears the 100k/10min gate with enormous margin. Combined with T0's
-own populate cost (SQLite, ~1.3ms/asset measured below) — ≈137s (2.3 min) for the full 105.8k-asset
+Nikon-eligible assets (≈7.4s) clears the 100k/10min gate with enormous margin. The HDD allowance
+(`docs/benchmarks.md`: "HDD allowance 3x") is also comfortably clear even using the *corrected*
+cold HDD `extract-index` number above (0.70ms p50, not the pre-fix 0.15ms) — 9,142 × 0.70ms ≈
+6.4s, nowhere near 3x the NVMe budget. Combined with T0's own populate cost (SQLite, ~1.3ms/asset
+measured below) — ≈137s (2.3 min) for the full 105.8k-asset
 set — the *combined* index-build + T0-populate ingest cost for the entire real Nikon-eligible
 library is still comfortably inside the 100k/10min budget, single-threaded, with no need to invoke
 the "don't default to wide thread-pool parallelism" caution from #28 at all for this workload.

@@ -67,7 +67,7 @@ pub struct FileSource {
 
 impl FileSource {
     pub fn open(path: &Path, cold: bool) -> io::Result<Self> {
-        let file = std::fs::File::open(path)?;
+        let file = open_file(path, cold)?;
         let len = file.metadata()?.len();
         let mut source = FileSource {
             file,
@@ -87,6 +87,28 @@ impl FileSource {
             read_warm_ranged(&self.file, offset, len)
         }
     }
+}
+
+/// `FILE_FLAG_NO_BUFFERING` must be requested when the handle is opened (a `CreateFile` flag,
+/// not something a later positioned read can retroactively apply) -- found and fixed after a
+/// hostile review caught that `FileSource::open` was unconditionally using a plain buffered
+/// `std::fs::File::open` regardless of `cold`, silently making every "cold, ranged" measurement
+/// on Windows actually read through the OS page cache like a warm one.
+#[cfg(windows)]
+fn open_file(path: &Path, cold: bool) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    if cold {
+        opts.custom_flags(FILE_FLAG_NO_BUFFERING);
+    }
+    opts.open(path)
+}
+
+#[cfg(not(windows))]
+fn open_file(path: &Path, _cold: bool) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 impl ByteSource for FileSource {
