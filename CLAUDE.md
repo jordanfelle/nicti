@@ -184,10 +184,12 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   exactly, including the same known 2M faceted-filter miss (already mitigated by ADR-0011).
   #113's own specific question — does the embedded-replica feature cost anything when unused —
   resolves cleanly at the source level (opening a local file never constructs the `Sync`/
-  `Offline`/`Remote` `DbType` variants or spawns any background task), but a real, consistent
-  1.5–4x per-operation overhead exists anyway (async-dispatch cost from the crate's
+  `Offline`/`Remote` `DbType` variants or spawns any background task), but a real 1.3–4x
+  per-operation overhead exists on most ops anyway (async-dispatch cost from the crate's
   `tokio`-wrapped API, the same architectural shape as Turso Database's own overhead, just
-  smaller), plus a ~5x larger dependency graph from the crate's default features
+  smaller — `write_rating` and folder-subtree-count tie, named explicitly rather than folded into
+  a blanket claim an earlier draft made and a hostile review caught), plus a ~5x larger dependency
+  graph from the crate's default features
   (`tonic`/`tower`/`hyper`/`h2`, unused by this engine's code path). Not enough reason to prefer
   it over plain SQLite for v1's single-machine catalog — but flagged as the leading candidate to
   revisit specifically when #64 (multi-machine catalog) becomes active, since it's the only

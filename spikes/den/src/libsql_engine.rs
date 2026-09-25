@@ -76,6 +76,19 @@ const SCHEMA: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_assets_date ON assets(capture_date)",
     "CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder_path)",
+    // These three single-column indexes are redundant for every query this workload actually
+    // runs (model/rating/iso are only ever filtered via the composite indexes below), but
+    // sqlite.rs carries them anyway, and a hostile review of an earlier draft of this file (and
+    // of ADR-0014) correctly caught that omitting them here made the "byte-identical schema"
+    // claim false — they're a real write-path index-maintenance cost `sqlite.rs` pays that this
+    // engine didn't, silently handicapping the SQLite side of the comparison rather than the
+    // libSQL side. Kept here, unlike `turso_engine.rs` (ADR-0009's own comparison scoped its claim
+    // to "equivalent composite indexes" specifically to route around this same gap rather than
+    // fix it) — added rather than just re-scoping the claim, since fixing the schema is more
+    // honest than narrowing the sentence around it.
+    "CREATE INDEX IF NOT EXISTS idx_assets_model ON assets(model)",
+    "CREATE INDEX IF NOT EXISTS idx_assets_rating ON assets(rating)",
+    "CREATE INDEX IF NOT EXISTS idx_assets_iso ON assets(iso)",
     "CREATE INDEX IF NOT EXISTS idx_assets_model_rating ON assets(model, rating)",
     "CREATE INDEX IF NOT EXISTS idx_assets_range ON assets(rating, iso, capture_date)",
     "CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets(filename)",

@@ -53,12 +53,17 @@ all left crash-safety **inconclusive**) — gate 3 (crash-safety), which libSQL 
 gets. This is expected, not a coincidence: libSQL is a genuine fork of SQLite's own C locking code,
 not a reimplementation with its own novel lock semantics. The measured gates all clear too, at the
 same margins as plain SQLite (same known faceted-filter miss at 2M, inherited directly from being
-the same SQL engine and schema, not a new libSQL-specific failure). But #113's own specific
-question is where the real, negative-for-adoption finding is: **the embedded-replica feature's own
-code path is never invoked when unconfigured (confirmed at the source level, not assumed), but a
-real, consistent per-operation overhead exists anyway** — roughly 1.5–4x libSQL over plain
-`rusqlite` on every measured op except the raw single-write gate (which ties), plus a ~19-23%
-slower bulk ingest and a ~5.5x slower (but still trivial, 4ms) cold open. This is attributable to
+the same SQL engine and equivalent schema, not a new libSQL-specific failure). But #113's own
+specific question is where the real, negative-for-adoption finding is: **the embedded-replica
+feature's own code path is never invoked when unconfigured (confirmed at the source level, not
+assumed), but a real, consistent per-operation overhead exists anyway** — roughly 1.3–4x libSQL
+over plain `rusqlite` on most measured ops, plus a ~24–32% slower bulk ingest and a ~5.5x slower
+(but still trivial, 4ms) cold open. Two ops are real exceptions, not just noise dressed up as a
+finding: `write_rating` ties within noise at both scales, and `folder_subtree_count` ties (2M) or
+is even marginally slower on SQLite (600k) — named explicitly here rather than folded into a
+blanket "every op" claim an earlier draft of this ADR made and a hostile review correctly caught
+(see the Spike section for the schema-completeness bug that draft's numbers were measured against).
+This is attributable to
 the crate's `async`-wrapped API (every call blocks on a `tokio::runtime::Runtime`, the same
 architectural shape ADR-0009 already measured overhead from in Turso Database, just smaller here),
 not to replication code actually running. Combined with a ~5x larger dependency graph pulled in by
@@ -84,42 +89,52 @@ strongest candidate on record for #64 specifically, once that ticket is real —
 
 | Query | Budget | SQLite p50/p95 | libSQL p50/p95 |
 |---|---|---|---|
-| Faceted filter + facet counts | < 100ms | 47.2 / 49.9 ms ✅ | 50.6 / 52.9 ms ✅ |
-| Sort by date, first 500 | < 100ms | 0.018 / 0.020 ms ✅ | 0.077 / 0.096 ms ✅ |
-| Folder-subtree count | < 100ms | 2.02 / 2.23 ms ✅ | 1.99 / 2.03 ms ✅ |
-| Keyword-subtree query | < 100ms | 0.039 / 0.083 ms ✅ | 0.066 / 0.118 ms ✅ |
-| Range query | < 100ms | 1.11 / 1.21 ms ✅ | 1.89 / 1.93 ms ✅ |
-| Filename substring search | < 100ms | 25.5 / 25.5 ms ✅ | 26.1 / 26.9 ms ✅ |
-| Cold open | < 2s | 0.74 ms ✅ | 4.06 ms ✅ |
-| Single rating write | ≤ 5ms | 0.0122 / 0.0176 ms ✅ | 0.0108 / 0.0165 ms ✅ (ties, within noise) |
-| 100-write rate burst (informative) | — | 0.283 / 0.334 ms | 0.353 / 0.376 ms |
-| Tag 10k assets (informative) | — | 8.09 / 11.07 ms | 18.67 / 20.08 ms |
-| Bulk ingest, 600k rows (informative) | — | 11.00 s | 13.12 s |
-| Online backup (informative) | — | 483 / 494 ms | 437 / 615 ms |
+| Faceted filter + facet counts | < 100ms | 47.2 / 49.9 ms ✅ | 49.2 / 50.8 ms ✅ |
+| Sort by date, first 500 | < 100ms | 0.018 / 0.020 ms ✅ | 0.076 / 0.081 ms ✅ |
+| Folder-subtree count | < 100ms | 2.02 / 2.23 ms ✅ | 2.33 / 2.42 ms ✅ |
+| Keyword-subtree query | < 100ms | 0.039 / 0.083 ms ✅ | 0.073 / 0.163 ms ✅ |
+| Range query | < 100ms | 1.11 / 1.21 ms ✅ | 1.85 / 1.99 ms ✅ |
+| Filename substring search | < 100ms | 25.5 / 25.5 ms ✅ | 25.3 / 26.7 ms ✅ |
+| Cold open | < 2s | 0.74 ms ✅ | 4.24 ms ✅ |
+| Single rating write | ≤ 5ms | 0.0122 / 0.0176 ms ✅ | 0.0128 / 0.0185 ms ✅ (ties, within noise) |
+| 100-write rate burst (informative) | — | 0.283 / 0.334 ms | 0.399 / 0.553 ms |
+| Tag 10k assets (informative) | — | 8.09 / 11.07 ms | 16.35 / 18.01 ms |
+| Bulk ingest, 600k rows (informative) | — | 11.00 s | 14.49 s |
+| Online backup (informative) | — | 483 / 494 ms | 482 / 492 ms |
 
 **Measured gates, 2M assets** (the planning-horizon scale the budget is stated against):
 
 | Query | Budget | SQLite p50/p95 | libSQL p50/p95 |
 |---|---|---|---|
-| Faceted filter + facet counts | < 100ms | **144.9 / 162.5 ms ⛔** (known ADR-0008 gap) | **161.2 / 165.6 ms ⛔** (same gap, inherited) |
-| Sort by date, first 500 | < 100ms | 0.019 / 0.045 ms ✅ | 0.076 / 0.106 ms ✅ |
-| Folder-subtree count | < 100ms | 7.81 / 8.30 ms ✅ | 6.61 / 7.12 ms ✅ |
-| Keyword-subtree query | < 100ms | 0.038 / 0.086 ms ✅ | 0.089 / 0.118 ms ✅ |
-| Range query | < 100ms | 4.68 / 4.81 ms ✅ | 6.81 / 7.07 ms ✅ |
-| Filename substring search | < 100ms | 77.0 / 78.2 ms ✅ (thin) | 79.3 / 79.9 ms ✅ (thin) |
-| Cold open | < 2s | 0.76 ms ✅ | 4.15 ms ✅ |
-| Single rating write | ≤ 5ms | 0.0126 / 0.0212 ms ✅ | 0.0120 / 0.0162 ms ✅ (ties) |
-| 100-write rate burst (informative) | — | 0.395 / 0.506 ms | 0.422 / 0.533 ms |
-| Tag 10k assets (informative) | — | 8.17 / 10.02 ms | 16.91 / 18.89 ms |
-| Bulk ingest, 2M rows (informative) | — | 47.97 s | 58.96 s |
-| Online backup (informative) | — | 1548 / 1686 ms | 1328 / 1382 ms |
+| Faceted filter + facet counts | < 100ms | **144.9 / 162.5 ms ⛔** (known ADR-0008 gap) | **160.4 / 162.7 ms ⛔** (same gap, inherited) |
+| Sort by date, first 500 | < 100ms | 0.019 / 0.045 ms ✅ | 0.074 / 0.098 ms ✅ |
+| Folder-subtree count | < 100ms | 7.81 / 8.30 ms ✅ | 7.33 / 8.11 ms ✅ (ties, within noise) |
+| Keyword-subtree query | < 100ms | 0.038 / 0.086 ms ✅ | 0.069 / 0.102 ms ✅ |
+| Range query | < 100ms | 4.68 / 4.81 ms ✅ | 6.77 / 6.81 ms ✅ |
+| Filename substring search | < 100ms | 77.0 / 78.2 ms ✅ (thin) | 79.2 / 82.5 ms ✅ (thin) |
+| Cold open | < 2s | 0.76 ms ✅ | 4.35 ms ✅ |
+| Single rating write | ≤ 5ms | 0.0126 / 0.0212 ms ✅ | 0.0132 / 0.0208 ms ✅ (ties) |
+| 100-write rate burst (informative) | — | 0.395 / 0.506 ms | 0.469 / 0.495 ms |
+| Tag 10k assets (informative) | — | 8.17 / 10.02 ms | 16.83 / 19.06 ms |
+| Bulk ingest, 2M rows (informative) | — | 47.97 s | 58.43 s |
+| Online backup (informative) | — | 1548 / 1686 ms | 1523 / 1570 ms |
 
 The one gate both engines miss (faceted-filter-with-counts at 2M) is not a new libSQL finding —
 it's the exact same gap ADR-0008 already identified and ADR-0011 already mitigated (a
 trigger-maintained facet table); nothing about libSQL's own schema or query plan differs from
-`sqlite.rs`'s here (`libsql_engine.rs` deliberately runs byte-identical SQL text — see the Spike
-section), so ADR-0011's mitigation would apply equally to a libSQL-backed store if one were ever
-built.
+`sqlite.rs`'s here (`libsql_engine.rs` runs byte-identical SQL text and, as of this ADR's own
+corrected version, an equivalent index set too — see the Spike section for the schema-completeness
+bug an earlier draft of this ADR had), so ADR-0011's mitigation would apply equally to a
+libSQL-backed store if one were ever built.
+
+**`folder_subtree_count` and `write_rating` are genuine ties, named explicitly rather than swept
+into a blanket overhead claim**: at 2M, libSQL's folder count (7.33/8.11ms) is nominally faster than
+SQLite's (7.81/8.30ms) — a ~6% difference at single-digit-millisecond scale, well inside normal
+run-to-run noise for this harness, not a real engine advantage; at 600k the same query runs
+nominally slower on libSQL (2.33/2.42ms vs. 2.02/2.23ms), consistent with noise rather than a
+directional effect either way. `write_rating` ties cleanly at both scales in both directions. Both
+are reported as ties, not as libSQL "winning" those ops — the honest reading of numbers this close
+at this absolute scale is "no measurable difference," not a cherry-picked advantage.
 
 ## #113's specific question: is there a baked-in embedded-replica cost even when unused?
 
@@ -137,11 +152,15 @@ deliberately not trimmed down to a minimal build, since that's what a real calle
 depend on). This is the direct evidence for the "is the feature's code path actually invoked"
 question, and the answer is no.
 
-**But there IS a real, measured overhead — just not from replication.** Every measured op above
-except the raw single-write gate (which ties within noise) runs 1.5–4x slower on libSQL than on
-plain `rusqlite`, and bulk ingest is ~19–23% slower. The write gate tying is itself informative: a
-single bare `UPDATE ... WHERE id = ?` pays almost the same cost on both engines, which is
-consistent with the overhead being **per-call async-dispatch cost** (every `Workload` method here
+**But there IS a real, measured overhead — just not from replication.** Most measured ops above run
+1.3–4x slower on libSQL than on plain `rusqlite`, and bulk ingest is ~24–32% slower. Two ops are
+real, named exceptions, not rounding error dressed up as "everything ties": `write_rating` ties
+cleanly at both scales, and `folder_subtree_count` ties at 2M (nominally faster on libSQL by ~6%,
+inside this harness's run-to-run noise at single-digit-millisecond scale) though it runs nominally
+slower on libSQL at 600k — read together, a tie, not a directional effect. `write_rating` tying is
+itself informative: a single bare `UPDATE ... WHERE id = ?` pays almost the same cost on both
+engines, which is consistent with the overhead being **per-call async-dispatch cost** (every
+`Workload` method here
 blocks a `tokio::runtime::Runtime` on an `async fn` that itself awaits a `prepare()` + `query()` /
 `execute()` call chain — the identical architectural shape `turso_engine.rs` already measured
 overhead from in ADR-0009, just smaller in magnitude here since libSQL's actual query execution is
@@ -174,7 +193,7 @@ CI — needed a real fix; see the Spike section.
 
 | Option | Verdict |
 |---|---|
-| libSQL (`tursodatabase/libsql`) | **Rejected for v1, not for good.** Passes every hard gate, including the first clean crash-safety pass of any KV-shaped-or-pure-Rust-adjacent candidate in this series. Measured gates match plain SQLite's own margins exactly (same known 2M faceted-filter gap, already mitigated by ADR-0011). #113's own question resolves cleanly: no runtime cost from the embedded-replica feature when unconfigured (confirmed at the source level), but a real, consistent 1.5–4x per-op async-dispatch overhead and a ~5x larger dependency graph exist regardless — real costs to pay for a feature (embedded-replica sync) v1 doesn't need yet. |
+| libSQL (`tursodatabase/libsql`) | **Rejected for v1, not for good.** Passes every hard gate, including the first clean crash-safety pass of any KV-shaped-or-pure-Rust-adjacent candidate in this series. Measured gates match plain SQLite's own margins exactly (same known 2M faceted-filter gap, already mitigated by ADR-0011). #113's own question resolves cleanly: no runtime cost from the embedded-replica feature when unconfigured (confirmed at the source level), but a real 1.3–4x per-op async-dispatch overhead on most ops (write_rating and folder-subtree-count tie) and a ~5x larger dependency graph exist regardless — real costs to pay for a feature (embedded-replica sync) v1 doesn't need yet. |
 | SQLite (`rusqlite`, status quo) | **Kept**, per ADR-0008/ADR-0012. Nothing in this evaluation changes that decision — libSQL doesn't out-measure plain SQLite on any gate that matters for a single-machine v1 catalog. |
 
 ## Consequences
@@ -216,6 +235,19 @@ external crate (same convention as `turso_engine`/`redb_engine`). The crate's ow
 expose the same shape of async API. Every query runs byte-identical SQL text to `sqlite.rs`
 (including its `GLOB`-not-`LIKE` prefix-scan convention), so any measured difference between the
 two engines in this ADR is attributable to the engine, not to a different query shape.
+
+**A real bug, found by hostile review and fixed here, not just re-worded around:** an earlier
+version of this file's `SCHEMA` omitted three single-column indexes (`idx_assets_model`,
+`idx_assets_rating`, `idx_assets_iso`) that `sqlite.rs` carries — copied forward from
+`turso_engine.rs`'s own schema, which has the identical gap but never claimed byte-identical
+schemas the way an earlier draft of this ADR did (ADR-0009 scoped its own claim to "equivalent
+**composite** indexes" specifically to route around this). None of this workload's queries filter
+on `model`/`rating`/`iso` alone (every query goes through a composite index instead), so the three
+missing indexes had no effect on any measured *query* time — but they are real write-path
+maintenance cost `sqlite.rs` was paying that `libsql_engine.rs` wasn't, silently handicapping the
+SQLite side of the write-op comparison. Fixed by adding the three indexes here (rather than just
+narrowing the ADR's claim to route around the gap) and re-measuring every affected number — the
+tables above already reflect the corrected, re-measured schema, not the pre-fix numbers.
 
 **Real, structural finding that required fixing code beyond `libsql_engine.rs` itself**: `libsql`'s
 bundled `libsql-ffi` and `rusqlite`'s bundled `libsqlite3-sys` both statically compile a full copy
