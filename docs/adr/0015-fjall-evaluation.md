@@ -113,7 +113,7 @@ close-margin case needing a Windows re-check.
 | Sort by date, first 500 | < 100ms | 0.036 / 0.040 ms ✅ | 0.0038 / 0.0046 ms ✅ | 0.017 / 0.017 ms ✅ | 0.137 / 0.145 ms ✅ |
 | Folder-subtree count | < 100ms | 9.99 / 13.00 ms ✅ | **6.14 / 7.44 ms ✅** | **22.58 / 23.38 ms ✅** | **201.4 / 222.1 ms ⛔** |
 | Keyword-subtree query | < 100ms | 0.042 / 0.105 ms ✅ | 0.0018 / 0.0027 ms ✅ | 0.0085 / 0.0093 ms ✅ | 0.019 / 0.020 ms ✅ |
-| Range query | < 100ms | 4.79 / 4.82 ms ✅ | **86.5 / 150.7 ms ✅ (thin)** | **121.5 / 213.3 ms ⛔** | **322.1 / 339.4 ms ⛔** |
+| Range query | < 100ms | 4.79 / 4.82 ms ✅ | **86.5 / 150.7 ms ⛔ (p95 over budget)** | **121.5 / 213.3 ms ⛔** | **322.1 / 339.4 ms ⛔** |
 | Filename substring search | < 100ms | 89.2 / 90.5 ms ✅ (thin) | 193.3 / 211.6 ms ⛔ | 319.5 / 403.6 ms ⛔ | **505.9 / 533.4 ms ⛔ (worst of all four)** |
 | Cold open | < 2s | 1.43 ms ✅ | 0.16 ms ✅ | 0.27 ms ✅ | 2.79 ms ✅ |
 | Single rating write | ≤ 5ms | 0.014 / 0.022 ms ✅ | 0.009 / 0.021 ms ✅ | 0.049 / 0.081 ms ✅ | 0.006 / 0.099 ms ✅ |
@@ -188,7 +188,7 @@ calls out), so this gap doesn't affect the number measured here either way.
 |---|---|
 | fjall | **Rejected.** Cleanest Windows-build story of any candidate (no native code, no `build.rs` at all) and a real, active maintenance signal — but fails 3 of 8 measured gates at both 600k and 2M (folder-subtree count, range query, filename search), by 2–5x, the widest and earliest measured-gate failure of any candidate in this series. Root-caused to fjall's own read-path overhead on broad prefix/range scans (partially, not fully, attributable to default LZ4 block compression; ruled out LSM-compaction-lag directly). Crash-safety inconclusive for the same fd-scoped-OS-lock reason as Turso/`redb`. |
 | SQLite (`rusqlite`, status quo) | **Kept**, per ADR-0008/0012/0014. Nothing in this evaluation changes that decision. |
-| LMDB (heed) | Still the best raw KV numbers on every indexable op of any candidate measured so far (this session's own back-to-back numbers confirm ADR-0008's original ranking) — still not chosen as primary per ADR-0008's crash-safety-methodology reasoning, unchanged here. |
+| LMDB (heed) | Still the best raw KV numbers on most indexable ops of any candidate measured so far — but this session's own 2M `range_query` p95 (150.7ms) misses the 100ms budget, a real, unremarked-until-hostile-review ~1.8x regression vs. ADR-0008's own 2M baseline for the same op (84.0ms, "thin" but passing there); not chosen as primary per ADR-0008's crash-safety-methodology reasoning either way, unchanged here. |
 | `redb` | Still not adopted per ADR-0010 (2M range-query/filename-search misses) — this session's numbers reconfirm that finding on the same hardware. |
 
 ## Consequences
