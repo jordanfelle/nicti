@@ -1,17 +1,32 @@
 //! #115's specific reason for existing: every prior catalog-engine candidate (SQLite, DuckDB,
 //! LMDB, Turso, redb) was benchmarked with a single-threaded workload only. This module runs a
 //! genuinely concurrent multi-writer-thread workload against both RocksDB and SQLite (`rusqlite`,
-//! WAL mode) on the same hardware, same operation shape, same thread counts — a real side-by-side
-//! measurement of write-serialization behavior, not an assumption that RocksDB's LSM/no-lock-file
-//! architecture is faster here just because of its reputation.
+//! WAL mode) on the same hardware, same thread counts — a real side-by-side measurement of
+//! write-serialization behavior, not an assumption that RocksDB's LSM/no-lock-file architecture is
+//! faster here just because of its reputation.
 //!
 //! **Workload shape:** `n_threads` threads, each with its own DB handle/connection to the *same*
-//! store, each updating its own disjoint slice of `writes_per_thread` existing rows (a plain
-//! rating write — the same operation `Workload::write_rating` measures single-threaded elsewhere
-//! in this crate). Disjoint key ranges per thread, not shared/contended keys: this is the
-//! realistic shape of concurrent catalog writers (several culling/tagging operations touching
-//! different photos at the same time), and it isolates the engine's own write-path serialization
-//! from application-level lock contention on a single row.
+//! store, each updating its own disjoint slice of `writes_per_thread` existing rows. Disjoint key
+//! ranges per thread, not shared/contended keys: this is the realistic shape of concurrent catalog
+//! writers (several culling/tagging operations touching different photos at the same time), and it
+//! isolates the engine's own write-path serialization from application-level lock contention on a
+//! single row.
+//!
+//! **This is deliberately a lighter operation than `Workload::write_rating`, on both sides, not an
+//! equal-weight comparison of the real catalog write** — an earlier draft of this comment claimed
+//! equivalence, corrected here after a hostile review caught it. RocksDB's write here is a single
+//! bare `db.put()` on the default column family (no read, no secondary-index maintenance, no
+//! `WriteBatch`), versus the real `write_rating`'s read-modify-write across two column families
+//! (`assets` + `by_rating`, see `rocksdb_engine.rs`). SQLite's write here is a real `UPDATE`
+//! against a table with **no secondary indexes**, versus the real `assets` table's three indexes
+//! (`idx_assets_rating`, `idx_assets_range`, `idx_assets_model_rating`, see `sqlite.rs`) that an
+//! actual rating write maintains. Both sides are simplified in the same direction (fewer indexes,
+//! no read), which keeps the *qualitative* comparison (does either engine show a
+//! single-writer-serialization signature?) meaningful, but RocksDB's simplification removes
+//! proportionally more work than SQLite's does — so any specific throughput multiplier this
+//! benchmark reports should be read as an upper bound on RocksDB's real advantage over a faithful
+//! `write_rating`-shaped concurrent write, not a precise prediction of it. See this ADR's own
+//! concurrent-writer section for the full caveat.
 //!
 //! **RocksDB**: a plain `rocksdb::DB` (not `TransactionDB`) wrapped in `Arc`, shared across
 //! threads — `rocksdb::DB` is `Send + Sync` and multi-threaded `put`/`write` is RocksDB's normal,

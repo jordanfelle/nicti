@@ -165,11 +165,14 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   aggregate throughput stayed flat at ~61k-76k writes/sec regardless of thread count, 1-16 threads,
   while its own max latency grew monotonically from 5ms to 1,458ms under contention — a clean,
   reproduced confirmation of the exact concern #115 was filed to test), and RocksDB's peak observed
-  throughput (1.05M writes/sec) was roughly 15x SQLite's ceiling — but RocksDB's own default
-  (untuned) configuration showed large, non-monotonic run-to-run variance under sustained
-  concurrent load (as low as 47.7k writes/sec in one 16-thread run, at or below SQLite's own
-  ceiling), consistent with its own documented write-stall backpressure mechanism, not a clean win
-  either way. A tuned re-run (larger block cache/write buffers, bloom-filter tuning) is the named,
+  throughput (1.05M writes/sec) was roughly 14x SQLite's ceiling on a minimal KV-shaped write (not a
+  faithful `write_rating`-equivalent op — a hostile review caught this ADR overclaiming operation-
+  shape equivalence, corrected there) — but RocksDB's own default (untuned) configuration showed
+  large, non-monotonic run-to-run variance under sustained concurrent load (as low as 47.7k
+  writes/sec in one 16-thread run, at or below SQLite's own ceiling), plausibly its own documented
+  write-stall backpressure mechanism, though this session's own heavily-loaded shared host is an
+  equally uneliminated competing explanation — not a clean win either way. A tuned re-run (larger
+  block cache/write buffers, bloom-filter tuning) is the named,
   unattempted follow-up if RocksDB is ever reconsidered. ADR-0008 is unchanged: SQLite stays
   chosen, DuckDB stays the fallback — but this ADR's own numbers are the first real evidence in
   this repo of what SQLite's concurrency tradeoff actually costs, worth remembering if a future

@@ -83,8 +83,14 @@ uncritically**: RocksDB does not show SQLite's textbook single-writer-serializat
 grows monotonically with contention — exactly what a single-writer lock predicts), but RocksDB's
 own throughput under sustained concurrent writers was **highly variable run-to-run in this pass's
 environment** — ranging from over 1,000,000 writes/sec down to below SQLite's own ceiling in one
-run — driven by write-stall backpressure under its default (untuned) configuration, not by anything
-resembling SQLite's lock-file model. Combined with the two measured-gate misses and
+run — consistent with (not conclusively proven to be caused by) write-stall backpressure under its
+default (untuned) configuration; a second, equally plausible explanation this pass cannot rule out
+is this session's own shared, heavily loaded host (see the concurrent-writer section's own
+confound disclosure) — no `Options::enable_statistics()`/stall-counter instrumentation was captured
+to distinguish the two, a real gap a hostile review of this ADR correctly flagged. Either way, this
+variance does not resemble SQLite's own lock-file model, which produces a *clean, monotonic* signal
+(flat throughput, tail latency growing smoothly with thread count), not the noisy, non-monotonic
+pattern RocksDB showed. Combined with the two measured-gate misses and
 `rocksdb_engine.rs`'s own hand-maintained-secondary-index engineering cost (the same real cost
 ADR-0008/0010 already charged against LMDB/redb), RocksDB is not a better fit for #22 than SQLite
 today.
@@ -102,7 +108,7 @@ section's own caveat about a specific, real confound in that part of the run.
 |---|---|
 | 1. Windows build | ✅ Confirmed via `rust-rocksdb/rust-rocksdb`'s own `.github/workflows/rust.yml`: a real `windows-latest` job in its 3-OS test matrix, running `cargo nextest run --all` there — not just a doc claim. **One concrete, non-trivial Windows-specific build gotcha found and worth carrying into this repo's own CI, not just noted**: `librocksdb-sys` generates its FFI bindings with `bindgen`, which needs libclang on the build machine, and upstream's own Windows job has to `Remove-Item C:\msys64` and `choco install llvm -y` first to avoid a `libclang.dll` conflict with GitHub's `windows-latest` runner's own bundled msys64 install — mirrored exactly in this PR's `.github/workflows/ci.yml` change, not invented fresh. |
 | 2. License | ✅ Apache-2.0 (binding crate) with a genuinely selectable Apache-2.0 arm on the dual-licensed native core — see the Context section above for the full chain of evidence. Already on `deny.toml`'s allowlist; `docs/licensing.md` updated in this PR with the precise per-component breakdown. |
-| 3. Crash-safety | ⚠️ **Inconclusive — same class of harness limitation as LMDB/Turso/redb, confirmed and precisely scoped, not assumed.** `den crash --engine rocksdb --iterations 20` reported **20/20 reopen failures**: `IO error: lock hold by current process ... LOCK: No locks available`. RocksDB takes an OS-level `LOCK` file on the DB directory for the handle's lifetime, released on `Drop`/close; `mem::forget` skips that `Drop`, so the caller's later reopen of the *same* path fails. **A direct follow-up probe (mirroring ADR-0009/0010's own methodology) confirms this is scoped to the specific leaked path, not a process-wide guard like LMDB's** (ADR-0008's hard-gate-3 finding): opening a **different**, never-before-touched path in the same process, right after forgetting the first one, succeeds cleanly. This is the same *category* of finding as redb's own fd-scoped advisory lock (ADR-0010) — a real OS-level `SIGKILL` releases every lock the dying process held, which this in-process technique cannot faithfully simulate, so this should be read as "harness limitation, mechanism now precisely understood," not as a failing or passing result. A real fork+exec+SIGKILL harness remains the only way to actually settle it, per ADR-0008/0009/0010's own repeated, still-unbuilt follow-up. |
+| 3. Crash-safety | ⚠️ **Inconclusive — same class of harness limitation as LMDB/Turso/redb, confirmed and precisely scoped, not assumed.** `den crash --engine rocksdb --iterations 20` reported **20/20 reopen failures**: `IO error: lock hold by current process ... LOCK: No locks available`. RocksDB takes an OS-level `LOCK` file on the DB directory for the handle's lifetime, released on `Drop`/close; `mem::forget` skips that `Drop`, so the caller's later reopen of the *same* path fails. **A direct follow-up probe (mirroring ADR-0009/0010's own methodology) confirms this is scoped to the specific leaked path, not a process-wide guard like LMDB's** (ADR-0008's hard-gate-3 finding): opening a **different**, never-before-touched path in the same process, right after forgetting the first one, succeeds cleanly. Like ADR-0010's own equivalent probe for redb, this was a throwaway `src/bin/lock_probe.rs` binary, run once and deleted before this commit rather than kept as permanent test coverage — its result is transcribed here verbatim (`PATH B (fresh, never touched): opened OK` / `PATH A (same as forgotten): FAILED: ... LOCK: No locks available`), the same "confirmed by a since-deleted throwaway probe, not left as an uncited assertion" pattern this ADR series has used since ADR-0010, called out explicitly here rather than left implicit (a hostile review of this ADR correctly flagged that the claim had no artifact in the diff to check it against, same as it would for ADR-0010's own probe). This is the same *category* of finding as redb's own fd-scoped advisory lock (ADR-0010) — a real OS-level `SIGKILL` releases every lock the dying process held, which this in-process technique cannot faithfully simulate, so this should be read as "harness limitation, mechanism now precisely understood," not as a failing or passing result. A real fork+exec+SIGKILL harness remains the only way to actually settle it, per ADR-0008/0009/0010's own repeated, still-unbuilt follow-up. |
 | 4. Maintained | ✅ `v0.25.0`, pushed 2026-08-16 (5.5 weeks before this evaluation), 2,178 GitHub stars, not archived. The native RocksDB core it vendors is itself a mature, heavily production-proven engine (CockroachDB, TiKV, and many others) — the strongest real-world production-deployment evidence of any candidate evaluated in this series, though that maturity is about the C++ core, not the Rust binding layer specifically. |
 
 ### Measured gates, 600k assets
@@ -231,21 +237,51 @@ letting a `busy_retries: 0` row look like "no contention happened."
 | 16 (run 1) | 47,691 | 0.3268 / 0.4556 / 1.07 ms |
 | 16 (run 2) | 142,719 | 0.0023 / 0.1862 / 21.8 ms |
 
+**A methodology caveat that narrows what this table actually measures, found by a hostile review of
+this ADR and worth stating plainly rather than leaving implicit**: this benchmark's per-write
+operation is **not** the same shape as `write_rating` elsewhere in this crate, despite
+`concurrent_bench.rs`'s own module doc comment originally claiming so (corrected there and here).
+RocksDB's concurrent write is a single bare `db.put()` on the default column family — no read, no
+secondary-index maintenance, no `WriteBatch` — versus the real `write_rating`'s read-modify-write
+across two column families. SQLite's concurrent write is a real `UPDATE` against a table with **no
+secondary indexes** (versus the real schema's three indexes touched by an actual rating write). Both
+sides are lighter than their own single-threaded gate numbers, but RocksDB's simplification removes
+proportionally more work (a full read plus a second CF's index maintenance) than SQLite's does (an
+indexed vs. unindexed single-column `UPDATE` is a smaller relative gap) — so the throughput numbers
+below should be read as measuring RocksDB's and SQLite's raw write-path concurrency behavior on a
+minimal KV-shaped write, not a faithful prediction of the real catalog write's absolute throughput
+under concurrency. The qualitative finding (no single-writer-lock signature vs. a clean one) is not
+undermined by this — both engines were simplified in the same direction (fewer indexes/no read) —
+but any specific multiplier below should be treated as an upper bound on RocksDB's real advantage,
+not a precise prediction.
+
 **RocksDB does not show SQLite's signature at all — but it also does not show a clean "wins outright"
 story.** There is no sign of a single-writer lock forcing aggregate throughput flat: RocksDB's
-peak observed throughput (1.05M writes/sec at 8 threads) is roughly 15x SQLite's own ceiling, and
-even its lowest observed run (47.7k writes/sec at 16 threads) is the same order of magnitude as
-SQLite's, not consistently below it. What RocksDB shows instead is **large, non-monotonic
-run-to-run variance** at every thread count — the same configuration (8 threads) produced both the
-best (1.05M/s) and one of the worst (65.0k/s) results across this section's runs — consistent with
-its own documented write-stall backpressure mechanism (a defensive throttle that kicks in when the
-memtable/L0-file count outpaces background flush/compaction) under this pass's **default, untuned**
-`Options` (default `write_buffer_size`, default `max_background_jobs`), not with anything resembling
-SQLite's lock-file model. **Read plainly: the honest answer to #115's own question is "it depends on
-tuning and load, not a guaranteed win"** — RocksDB's write path is architecturally free of SQLite's
-single-writer bottleneck and can deliver an order of magnitude more throughput under favorable
-conditions, but its default configuration in this pass did not reliably avoid its own kind of
-write-stall-driven tail-latency and throughput degradation under sustained concurrent load, and at
+peak observed throughput (1.05M writes/sec at 8 threads) is roughly 14x SQLite's own ceiling (its
+best single-thread result, 75,559 writes/sec), and even its lowest observed run (47.7k writes/sec at
+16 threads) is the same order of magnitude as SQLite's, not consistently below it. What RocksDB
+shows instead is **large, non-monotonic run-to-run variance** at every thread count — the same
+configuration (8 threads) produced both the best (1.05M/s) and one of the worst (65.0k/s) results
+across this section's runs. **Two competing explanations for that variance, neither ruled out by
+what this pass actually measured** (a hostile review of this ADR correctly flagged that the first
+explanation below was originally stated as established fact with no instrumentation to back it):
+(a) RocksDB's own documented write-stall backpressure mechanism (a defensive throttle that kicks in
+when the memtable/L0-file count outpaces background flush/compaction) under this pass's **default,
+untuned** `Options` (default `write_buffer_size`, default `max_background_jobs`); or (b) this
+session's own shared, heavily loaded host (load average 22-30+ on 32 cores from a concurrent sibling
+evaluation's builds, disclosed above) — a competing process stealing CPU/IO cycles unpredictably is
+at least as plausible an explanation for "same config, best and worst result in the same session" as
+an internal throttle. No `Options::enable_statistics()`/stall-property capture was added to this
+pass to distinguish them, and a re-run on a quiet, dedicated host is the concrete way to settle it.
+What both explanations agree on: this is not remotely SQLite's lock-file model, which produces a
+clean, monotonic signal, not this noisy, non-monotonic one.
+
+**Read plainly: the honest answer to #115's own question is "it depends on tuning and load, not a
+guaranteed win"** — RocksDB's write path is architecturally free of SQLite's single-writer
+bottleneck and can deliver an order of magnitude more throughput under favorable conditions, but
+this pass did not reliably avoid large swings in throughput and tail latency under sustained
+concurrent load (whether from its own default-configuration write-stall behavior, host contention,
+or both), and at
 least once landed at or below SQLite's own ceiling. A tuned configuration (larger write buffers,
 more background flush/compaction threads, `TransactionDB` with a real conflict-detection story for
 genuinely contended keys) was not attempted here — the same "known, unattempted mitigation" caveat
