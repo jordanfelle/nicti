@@ -3,8 +3,8 @@
 //! realistic camera/ISO/compression/dimension combinations without needing 2M real files.
 
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
+use rand::seq::IndexedRandom;
+use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Zipf};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -145,20 +145,20 @@ pub fn generate_catalog(opts: &GenOptions) -> Vec<Asset> {
         let exif = exif_pool.choose(&mut rng).unwrap();
         let folder = folders.choose(&mut rng).unwrap();
         let year: u32 = folder.split('/').nth(1).unwrap().parse().unwrap();
-        let month = rng.gen_range(1..=12u32);
-        let day = rng.gen_range(1..=28u32);
+        let month = rng.random_range(1..=12u32);
+        let day = rng.random_range(1..=28u32);
 
         // 2-10% keep rate: most assets are unrated/rejected, a minority are picks.
-        let roll: f64 = rng.gen();
+        let roll: f64 = rng.random();
         let (rating, flag) = if roll < 0.06 {
-            (rng.gen_range(3..=5u8), Flag::Pick)
+            (rng.random_range(3..=5u8), Flag::Pick)
         } else if roll < 0.30 {
             (0, Flag::Reject)
         } else {
             (0, Flag::None)
         };
 
-        let keyword_count = rng.gen_range(0..=3usize);
+        let keyword_count = rng.random_range(0..=3usize);
         let mut keywords = Vec::with_capacity(keyword_count + 1);
         for _ in 0..keyword_count {
             let idx = (keyword_zipf.sample(&mut rng) as usize - 1).min(all_keywords.len() - 1);

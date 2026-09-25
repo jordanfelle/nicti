@@ -22,7 +22,7 @@
 //! `CLAUDE.md`'s package map, same caveat as every other `spikes/den` module.
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::time::Instant;
 
 /// One raw history tick as it would be appended before compaction — mirrors ADR-0002's "records
@@ -56,12 +56,12 @@ pub fn generate_bursts(
     for asset_id in 0..asset_count as i64 {
         let mut seq = 0i64;
         for _ in 0..bursts_per_asset {
-            let stage = STAGES[rng.gen_range(0..STAGES.len())];
+            let stage = STAGES[rng.random_range(0..STAGES.len())];
             let control = "slider_drag";
-            let mut value = rng.gen_range(-100..100);
+            let mut value = rng.random_range(-100..100);
             for _ in 0..ticks_per_burst {
                 let before = format!(r#"{{"stage":"{stage}","v":{value}}}"#);
-                value += rng.gen_range(-2..3);
+                value += rng.random_range(-2..3);
                 let after = format!(r#"{{"stage":"{stage}","v":{value}}}"#);
                 out.push(RawTick {
                     asset_id,
