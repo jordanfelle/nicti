@@ -10,19 +10,19 @@ name = "sniff"
 path = "src/main.rs"
 
 [dependencies]
-zune-jpeg = "0.4"
+zune-jpeg = "0.5"
 fast_image_resize = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 csv = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 rayon = "1"
-rand = "0.8"
+rand = "0.10"
 thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
 tempfile = "3"
