@@ -49,5 +49,12 @@ pub mod turso_engine;
 #[cfg(feature = "redb")]
 pub mod redb_engine;
 
+// #113's follow-up candidate, added after ADR-0010 (`redb`) merged — the actual SQLite C-source
+// fork (not a from-scratch rewrite like Turso Database), so the query set stays byte-identical to
+// `sqlite.rs`'s own SQL text on purpose. Module named `libsql_engine`, not `libsql`, to avoid
+// shadowing the external `libsql` crate it wraps (same convention as `turso_engine`/`redb_engine`).
+#[cfg(feature = "libsql")]
+pub mod libsql_engine;
+
 pub use gen::{generate_catalog, Asset, Flag};
 pub use workload::{FacetCounts, RangeQuery, Workload};
