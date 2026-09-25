@@ -217,6 +217,21 @@ this update:
   flag (training-data provenance, not a license-family question), CLIP's model-card caveat (a
   stated position, not a license restriction).
 
+**Update (2026-09-24, [#113](https://github.com/jordanfelle/nicti/issues/113)'s `libSQL`
+evaluation, `docs/adr/0014-libsql-evaluation.md`):** the `libsql` crate (v0.9.30, default-off
+feature, kept for reference after evaluating-not-adopting-for-v1 per the ADR) is MIT, confirmed
+independently from both crates.io's version-level API response (every version checked, including
+the newest `0.10.0-pre.4`) and the `tursodatabase/libsql` GitHub repo's own `license` API field —
+already on `deny.toml`'s allowlist, no edit needed. Unlike `redb` (zero dependencies) or Turso
+(large but fully within-allowlist), `libsql`'s own **default** features (`core`, `replication`,
+`remote`, `sync`, `tls` — used as-is here, not trimmed down, since that's what a real caller would
+depend on) pull in a genuinely large dependency subtree (`tonic`, `tower`, `hyper`, `h2`, `prost`,
+`rustls` and its ecosystem, `libsql_replication`, `libsql-hrana`, among others — `cargo tree -e
+normal -p den --features libsql` resolves 433 lines vs. plain `sqlite`'s 85). Despite the size,
+`cargo deny --workspace --all-features check licenses` passes clean with no new `deny.toml` entry
+needed — the entire subtree resolves within the existing allowlist, same pre-existing `cfg_block`
+(Turso-only) warning as every prior ADR in this series, nothing new from `libsql`.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -241,6 +256,7 @@ this update:
 | [SQLite](https://www.sqlite.org/copyright.html) (bundled via `libsqlite3-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | Public domain[^den1] | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
 | [DuckDB](https://github.com/duckdb/duckdb/blob/main/LICENSE) core (bundled via `libduckdb-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | MIT[^den2] | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
 | [LMDB](https://www.openldap.org/software/release/license.html) (bundled via `lmdb-master-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | OpenLDAP Public License 2.8[^den3] | — | Static | ✅ (attribution-only, no copyleft) | ✅ | ✅ bundle OK — retain the license text per its own §3 condition |
+| [libSQL](https://github.com/tursodatabase/libsql) core, a SQLite C-source fork (bundled via `libsql-ffi`) | Catalog DB candidate ([#113](https://github.com/jordanfelle/nicti/issues/113)) | Public domain[^den6] — the bundled `bundled/src/sqlite3.c` retains SQLite's own standard "blessing" (public-domain dedication) notice throughout, confirmed by reading the actual bundled file, not assumed from the crate's own `license = "MIT"` Cargo.toml field (which describes the Rust binding, not the underlying forked C source — same "cargo-deny only sees what a crate declares" gap this file's LMDB row and `cfg_block` note already establish) | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
 | [RocksDB](https://github.com/facebook/rocksdb) core (vendored git submodule via `librocksdb-sys`) | Catalog DB candidate ([#115](https://github.com/jordanfelle/nicti/issues/115)) | Dual `Apache-2.0` **or** `GPL-2.0-only` (licensee's choice)[^den5] | — | Static | ✅ if the Apache-2.0 arm is elected (confirmed selectable — see the 2026-09-24 update above) | ✅ | ✅ bundle OK — elect the Apache-2.0 arm; the Rust binding crate itself (`rocksdb`) is Apache-2.0 only regardless |
 
 ## ML runtime (ONNX / CUDA / TensorRT)
@@ -381,3 +397,4 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^den3]: LMDB (`liblmdb`) OpenLDAP Public License 2.8 — the `LICENSE`/`COPYRIGHT` files bundled inside `lmdb-master-sys`'s vendored `lmdb/libraries/liblmdb/` source, cross-checked against https://www.openldap.org/software/release/license.html; note this is the *bundled C source's* license, distinct from (and not accurately reflected by) `lmdb-master-sys`'s own self-declared `Apache-2.0` Cargo.toml field — verified 2026-09-24
 [^den4]: `cfg_block` v0.1.1 Apache-2.0 — its own bundled `LICENSE` file at `~/.cargo/registry/src/.../cfg_block-0.1.1/LICENSE`, since its `Cargo.toml` carries no SPDX `license` field for `cargo-deny` to read directly — verified 2026-09-24
 [^den5]: RocksDB core dual license — `LICENSE.Apache` (Apache License 2.0 full text) and `COPYING` (GNU GPL v2 full text) at the root of https://github.com/facebook/rocksdb, both read directly, not inferred from a summary or README line — verified 2026-09-24. The `rocksdb` Rust binding crate's own `Cargo.toml` declares `license = "Apache-2.0"` only (no GPL arm), and its top-level `LICENSE` file at https://github.com/rust-rocksdb/rust-rocksdb is the Apache License text — verified 2026-09-24.
+[^den6]: libSQL's bundled SQLite C fork public-domain notice — the "blessing" text repeated throughout `~/.cargo/registry/src/.../libsql-ffi-0.9.30/bundled/src/sqlite3.c`, the same standard SQLite public-domain dedication `sqlite.rs`'s own footnote (`[^den1]`) cites for plain `libsqlite3-sys` — verified 2026-09-24

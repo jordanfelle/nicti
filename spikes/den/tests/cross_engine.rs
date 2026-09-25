@@ -183,6 +183,13 @@ fn redb_matches_shared_workload() {
     check::<den::redb_engine::RedbEngine>(&dir, "redb-test.redb");
 }
 
+#[cfg(feature = "libsql")]
+#[test]
+fn libsql_matches_shared_workload() {
+    let dir = tempfile::tempdir().unwrap();
+    check::<den::libsql_engine::LibsqlEngine>(&dir, "libsql-test.db");
+}
+
 #[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_matches_shared_workload() {

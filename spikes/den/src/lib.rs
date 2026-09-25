@@ -49,6 +49,13 @@ pub mod turso_engine;
 #[cfg(feature = "redb")]
 pub mod redb_engine;
 
+// #113's follow-up candidate, added after ADR-0010 (`redb`) merged — the actual SQLite C-source
+// fork (not a from-scratch rewrite like Turso Database), so the query set stays byte-identical to
+// `sqlite.rs`'s own SQL text on purpose. Module named `libsql_engine`, not `libsql`, to avoid
+// shadowing the external `libsql` crate it wraps (same convention as `turso_engine`/`redb_engine`).
+#[cfg(feature = "libsql")]
+pub mod libsql_engine;
+
 // #115's candidate, added after ADR-0010 merged — like LMDB/redb, no query planner (hand-
 // maintained secondary indexes, same shape as `lmdb.rs`). Its own crash-safety gate is
 // inconclusive via this harness for the same reason as redb's (a leaked-fd-scoped OS lock, not a

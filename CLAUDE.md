@@ -204,6 +204,30 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   (`json_extract`) is confirmed real and usable — that part of the schema-fit question favors
   DuckDB — but doesn't offset the compaction cost. #103's separate SQLite-trigger-vs-DuckDB-sidecar
   facet-cache work is unaffected by this outcome.
+- **libSQL, evaluated post-ADR-0012**: `docs/adr/0014-libsql-evaluation.md` — **not adopted for
+  v1** (not a permanent rejection — see below). Unlike Turso Database (ADR-0009, a from-scratch
+  Rust rewrite) and `redb` (ADR-0010), libSQL is an actual fork of SQLite's own C source, and it
+  shows: it's the first KV-shaped-or-pure-Rust-adjacent candidate in this series to **cleanly
+  pass** the crash-safety hard gate (0/20 reopen failures, real `PRAGMA integrity_check`), where
+  LMDB/Turso/`redb` all left it inconclusive. Measured gates match plain SQLite's own margins
+  exactly, including the same known 2M faceted-filter miss (already mitigated by ADR-0011).
+  #113's own specific question — does the embedded-replica feature cost anything when unused —
+  resolves cleanly at the source level (opening a local file never constructs the `Sync`/
+  `Offline`/`Remote` `DbType` variants or spawns any background task), but a real 1.3–4x
+  per-operation overhead exists on most ops anyway (async-dispatch cost from the crate's
+  `tokio`-wrapped API, the same architectural shape as Turso Database's own overhead, just
+  smaller — `write_rating` and folder-subtree-count tie, named explicitly rather than folded into
+  a blanket claim an earlier draft made and a hostile review caught), plus a ~5x larger dependency
+  graph from the crate's default features
+  (`tonic`/`tower`/`hyper`/`h2`, unused by this engine's code path). Not enough reason to prefer
+  it over plain SQLite for v1's single-machine catalog — but flagged as the leading candidate to
+  revisit specifically when #64 (multi-machine catalog) becomes active, since it's the only
+  evaluated engine combining real SQLite's own reliability track record with a built-in
+  offline-first sync mechanism. A real, structural finding along the way: `libsql`'s bundled
+  SQLite C fork and `rusqlite`'s bundled SQLite cannot link into the same binary (both define the
+  same C symbols) — required fixing two pre-existing cfg-gating gaps in `bin/den.rs`/
+  `tests/facet_cache.rs` and splitting `.github/workflows/ci.yml`'s `cargo test` job so `den` gets
+  its own feature-scoped commands instead of one blanket `--all-features` invocation.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -273,19 +297,21 @@ edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
 (#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
 #106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, #107/ADR-0012's
-schema-fit reconsideration, and #115/ADR-0015's RocksDB follow-up — one module per candidate,
-`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`rocksdb_engine.rs`/
-`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo features (`turso`, `redb`,
-and `rocksdb` are all default-off, evaluated-not-adopted, kept for reference; the two facet-cache
-modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`), plus
-`schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape, gated
-on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's own reason for existing — a
+schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, and #115/ADR-0015's RocksDB
+follow-up — one module per candidate,
+`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`libsql_engine.rs`/
+`rocksdb_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo
+features (`turso`, `redb`, `libsql`, and `rocksdb` are all default-off, evaluated-not-adopted,
+kept for reference — `libsql` additionally cannot be enabled in the same binary as `sqlite`, both
+bundle their own SQLite C symbols and collide at link time, see ADR-0014's Spike section; the two
+facet-cache modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`),
+plus `schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape,
+gated on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's own reason for existing — a
 genuinely concurrent multi-writer-thread comparison between RocksDB and SQLite, gated on both
 `rocksdb` and `sqlite`, not part of the shared `Workload` trait since only these two engines are
-compared this way); `gen.rs`'s synthetic-catalog generator is reusable for future
-Library-scale benchmarks, see `docs/benchmarks.md`) — not production code; don't build on top of a
-spike crate, and expect each
-to be deleted once its own ticket promotes it (as #20 just did for
+compared this way); `gen.rs`'s synthetic-catalog generator is reusable for future Library-scale
+benchmarks, see `docs/benchmarks.md`) — not production code; don't build on top of a spike crate,
+and expect each to be deleted once its own ticket promotes it (as #20 just did for
 `spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.
