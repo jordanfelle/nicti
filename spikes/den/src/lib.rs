@@ -56,6 +56,20 @@ pub mod redb_engine;
 #[cfg(feature = "libsql")]
 pub mod libsql_engine;
 
+// #115's candidate, added after ADR-0010 merged — like LMDB/redb, no query planner (hand-
+// maintained secondary indexes, same shape as `lmdb.rs`). Its own crash-safety gate is
+// inconclusive via this harness for the same reason as redb's (a leaked-fd-scoped OS lock, not a
+// process-wide guard like LMDB's) — see ADR-0015. Its own genuine multi-threaded-writer story is
+// worth measuring directly (no prior candidate's crash test exercised concurrent writers either).
+// Module named `rocksdb_engine`, not `rocksdb`, to avoid shadowing the external `rocksdb` crate.
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb_engine;
+
+// #115's own reason for existing: a real concurrent-multi-writer-thread comparison between
+// RocksDB and SQLite, not an assumption. Needs both engines to compare against each other.
+#[cfg(all(feature = "rocksdb", feature = "sqlite"))]
+pub mod concurrent_bench;
+
 // #116's follow-up candidate, added after ADR-0014 (`libsql`) merged — like LMDB/redb, no query
 // planner (hand-maintained secondary indexes); a pure-Rust dependency like redb, but LSM-tree-
 // based rather than a B-tree/copy-on-write design (RocksDB's shape, in pure Rust). Module named

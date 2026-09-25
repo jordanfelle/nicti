@@ -3,7 +3,7 @@ name = "den"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Throwaway spike for #67: catalog-database-engine comparison (SQLite/WAL, DuckDB, LMDB, Turso, redb, libSQL, fjall) against docs/benchmarks.md's Library targets at 600k/2M synthetic scale. Embedded Postgres (pglite-rs/pglite-oxide) hard-gate-failed before a backend was worth writing — see ADR-0008. Turso is #102's follow-up candidate (ADR-0009); redb is #106's follow-up candidate (ADR-0010); libSQL is #113's follow-up candidate (ADR-0014); fjall is #116's follow-up candidate (ADR-0015). Not a production crate."
+description = "Throwaway spike for #67: catalog-database-engine comparison (SQLite/WAL, DuckDB, LMDB, Turso, redb, libSQL, RocksDB, fjall) against docs/benchmarks.md's Library targets at 600k/2M synthetic scale. Embedded Postgres (pglite-rs/pglite-oxide) hard-gate-failed before a backend was worth writing — see ADR-0008. Turso is #102's follow-up candidate (ADR-0009); redb is #106's follow-up candidate (ADR-0010); libSQL is #113's follow-up candidate (ADR-0014); RocksDB is #115's follow-up candidate (ADR-0015), including a concurrent-multi-writer-thread comparison against SQLite; fjall is #116's follow-up candidate (ADR-0016). Not a production crate."
 
 [[bin]]
 name = "den"
@@ -17,6 +17,7 @@ lmdb = ["dep:heed", "dep:bincode"]
 turso = ["dep:turso", "dep:tokio"]
 redb = ["dep:redb", "dep:bincode"]
 libsql = ["dep:libsql", "dep:tokio"]
+rocksdb = ["dep:rocksdb", "dep:bincode"]
 fjall = ["dep:fjall", "dep:bincode"]
 
 [dependencies]
@@ -40,6 +41,7 @@ turso = { version = "0.8.0-pre.12", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 redb = { version = "4", optional = true }
 libsql = { version = "0.9.30", optional = true }
+rocksdb = { version = "0.25", optional = true }
 fjall = { version = "3", optional = true }
 
 [dev-dependencies]

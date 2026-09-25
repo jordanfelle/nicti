@@ -80,7 +80,7 @@ jobs:
       # command before adding the exclusion. `den` gets its own two feature-scoped commands below
       # instead, the same pattern the Windows job's own `-p den` line already uses.
       - run: cargo test --workspace --all-targets --all-features --exclude den
-      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,fjall
+      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall
       - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
 
   cargo-deny:
@@ -113,16 +113,27 @@ jobs:
       # Windows is the v1 target -- the Linux `test` job alone isn't enough coverage for
       # nicti-claw's C-ABI dylib boundary (ADR-0004 section 4).
       - run: cargo test -p nicti-claw -p dewclaw
-      # #67/ADR-0008's Windows hard gate (plus #102/ADR-0009's Turso follow-up): each
-      # catalog-database-engine candidate must build and pass its cross-engine correctness test on
-      # the actual v1 target, not just Linux -- this is exactly the gate that eliminated pglite-rs
-      # (its build.rs passes a Unix-only linker flag, confirmed unrunnable here) before a Windows
-      # CI job ever had to prove it. `-p den` only (not `--workspace`): den is a spike, same
-      # reasoning as the `-p nicti` build above.
-      # #116's fjall candidate rides along here: 100% safe Rust, no bundled C source of its own,
-      # confirmed to build and link cleanly in the same `den` binary as sqlite/duckdb/lmdb/turso
-      # (checked locally with `--all-features`, no symbol collision the way libsql has below).
-      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,fjall
+      # #115/ADR-0015's RocksDB candidate: `librocksdb-sys` generates its FFI bindings with
+      # `bindgen`, which needs libclang on the build machine. GitHub's `windows-latest` runner
+      # ships an msys64 install whose own `libclang.dll` conflicts with the one bindgen needs
+      # (confirmed against `rust-rocksdb/rust-rocksdb`'s own upstream CI, which carries this exact
+      # workaround for this exact reason -- not a guess). Removing it and installing LLVM via
+      # choco mirrors that upstream recipe precisely rather than inventing a different fix.
+      - name: Remove msys64 (bindgen/libclang conflict, RocksDB build)
+        run: Remove-Item -LiteralPath "C:\msys64\" -Force -Recurse -ErrorAction SilentlyContinue
+      - name: Install LLVM (bindgen/libclang, RocksDB build)
+        run: choco install llvm -y
+      # #67/ADR-0008's Windows hard gate (plus #102/ADR-0009's Turso, #106/ADR-0010's redb,
+      # #115/ADR-0015's RocksDB, and #116/ADR-0016's fjall follow-ups): each catalog-database-engine
+      # candidate must build and pass its cross-engine correctness test on the actual v1 target, not
+      # just Linux -- this is exactly the gate that eliminated pglite-rs (its build.rs passes a
+      # Unix-only linker flag, confirmed unrunnable here) before a Windows CI job ever had to prove
+      # it. `-p den` only (not `--workspace`): den is a spike, same reasoning as the `-p nicti` build
+      # above. `redb` was missing from this list even after ADR-0010 merged (a real gap, fixed while
+      # resolving an earlier merge, not by either side's own diff) -- it, `rocksdb`, and `fjall` all
+      # combine fine with `sqlite` (none bundles a competing SQLite C fork), so all three join the
+      # main command below; mirrors the Linux `test` job's already-validated command.
+      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall
       # #113's libSQL candidate needs its own, separate step: `rusqlite`'s bundled
       # `libsqlite3-sys` and `libsql`'s bundled `libsql-ffi` both statically link a full copy of
       # real SQLite's C symbols into the same `den` binary, which fails at the final link step
