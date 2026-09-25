@@ -36,10 +36,10 @@ struct VerifyArgs {
     #[arg(long)]
     root: Option<PathBuf>,
     /// Verify every entry in the manifest (default if no other scope flag is given).
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["ids", "sample"])]
     all: bool,
     /// Verify exactly these ids (repeatable, or comma-separated).
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', conflicts_with = "sample")]
     ids: Vec<String>,
     /// Verify a random sample of this many entries instead of the whole set.
     #[arg(long)]
