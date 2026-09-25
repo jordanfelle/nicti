@@ -2,6 +2,7 @@
 name = "dewclaw"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Test fixture for nicti-claw's dylib tests: a toy stage compiled as a cdylib and loaded through nicti_claw::dylib's C-ABI vtable. Not a production module, not part of the shipping v1 target."
 

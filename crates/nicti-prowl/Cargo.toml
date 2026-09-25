@@ -1,0 +1,25 @@
+[package]
+name = "nicti-prowl"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license.workspace = true
+description = "Benchmark + golden-image harness (#17): ref-10k manifest verification against docs/ref-10k-manifest.csv, bucket-based reference-set selection, the docs/benchmarks.md perf protocol, and a golden-image compare/store API against a pluggable Render trait. Not the hero-scenario tooling itself (that stays bench/*, see CLAUDE.md) -- prowl is the reusable library every research ticket's exit criteria can build on."
+
+[dependencies]
+anyhow = "1"
+csv = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rand = "0.9"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "prowl"
+path = "src/bin/prowl.rs"

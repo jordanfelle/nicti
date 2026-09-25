@@ -2,6 +2,7 @@
 name = "nicti-export"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Exporter extension point (ADR-0004 §8). Crate boundary only — resize/encode/metadata-write/watermark execution is owned by #56 (export stack research) and #57 (export pipeline)."
 

@@ -2,6 +2,7 @@
 name = "whisker"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Frame-diff analyzer for the #43 hero-scenario benchmark: turns a raw gray8 capture into input-to-settled latencies and drag frame-interval fps. Not production code."
 

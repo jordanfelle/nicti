@@ -2,6 +2,7 @@
 name = "nicti-color"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Camera color profile extension point (ADR-0004 §8). Crate boundary only — profile parsing/execution is owned by #38 (color pipeline, DCP HueSatMap) and #42 (color management)."
 

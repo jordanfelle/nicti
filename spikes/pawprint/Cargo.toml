@@ -2,6 +2,7 @@
 name = "pawprint"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Throwaway spike for #21 (ADR-0002): edit-document hashing, history/compaction, and XMP recovery round-trip. Not a production crate."
 

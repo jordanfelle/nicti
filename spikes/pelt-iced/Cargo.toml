@@ -2,6 +2,7 @@
 name = "pelt-iced"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Throwaway spike for #68 (ADR-0006): iced GUI-framework candidate -- a hand-rolled virtualized 2M-cell grid (iced 0.14 has no built-in equivalent to egui's ScrollArea::show_rows), loupe next/prev, and a custom wgpu viewport (iced::widget::shader::Primitive) driving spikes/pelt's live-chain compute kernel, measured for input latency via bench/whisker per hero-scenario.md's method. Not a production crate."
 
