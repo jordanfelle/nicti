@@ -137,7 +137,7 @@ pub fn generate_catalog(opts: &GenOptions) -> Vec<Asset> {
     }
 
     // Zipf-distributed keyword vocabulary: a handful of hot keywords, a long tail.
-    let keyword_zipf = Zipf::new((LOCATIONS.len() + SUBJECTS.len()) as u64, 1.2).unwrap();
+    let keyword_zipf = Zipf::new((LOCATIONS.len() + SUBJECTS.len()) as f64, 1.2).unwrap();
     let all_keywords: Vec<&str> = LOCATIONS.iter().chain(SUBJECTS.iter()).copied().collect();
 
     let mut assets = Vec::with_capacity(opts.asset_count as usize);
