@@ -36,6 +36,16 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       den: ${{ steps.filter.outputs.den }}
+    # dorny/paths-filter fetches the PR's changed-file list via the GitHub REST API on
+    # `pull_request` events by default, which needs `pull-requests: read` -- the workflow-level
+    # `permissions: contents: read` block above sets every OTHER unlisted scope to `none` for the
+    # whole run, so without this the API call 403s and this job fails on every real PR (the exact
+    # trigger it exists for), while `den-linux`/`den-windows`'s own `if:` (a custom condition,
+    # which replaces the implicit `needs: success()` gate entirely) still falls through to
+    # `needs.changes.outputs.den` == '' and silently skips instead of blocking on the failure.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
