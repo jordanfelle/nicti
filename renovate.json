@@ -33,6 +33,12 @@
       "matchManagers": ["cargo"],
       "matchPackageNames": ["bincode"],
       "allowedVersions": "!/^3\\.0\\.0$/"
+    },
+    {
+      "description": "spikes/* are throwaway research crates deleted on promotion (see CLAUDE.md's package map section) -- spikes/den in particular pulls in eight catalog-engine candidates, five of them already evaluated-and-rejected (turso/redb/libsql/rocksdb/fjall, see the ADR-0009/0010/0014/0015/0016 bullets), so a bump PR against one of those is pure churn nobody will act on before the whole crate is deleted (#123, blocked on #22). A dependency shared with a real crates/* or root manifest still gets bumped normally via that manifest's own PR.",
+      "matchManagers": ["cargo"],
+      "matchFileNames": ["spikes/**"],
+      "enabled": false
     }
   ]
 }
