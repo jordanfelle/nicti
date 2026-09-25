@@ -370,8 +370,15 @@ tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust), `cache.rs`'s 
 cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
 per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
 benchmark with a `--io {whole,ranged}` axis; `sniff inventory` cross-checked byte-exact against
-`exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md` for #28's write-up
-and `docs/adr/0017-preview-tier-strategy.md` for #29's), `spikes/groom` (#50/ADR-0007's
+`exiftool` on real Z8/D7500 files. **#28 closed**: full 9,142-file NVMe set plus the HDD (`E:\`)
+comparison the issue's own scope called for are both measured — HDD is ~16x slower than NVMe for
+cold, randomly-ordered reads, same order/cold-ness on both drives (the realistic culling-browse
+case). Also found and fixed a real `FILE_FLAG_NO_BUFFERING` sector-alignment bug shared by
+`read_cold`/`read_cold_range` (a resumed short read could pass a misaligned buffer address/file
+offset to the next call, surfacing as `os error 87` on HDD ~10-19% of the time, never on NVMe) —
+fixed by retrying the identical `seek_read` call on the same handle rather than resuming from a
+running offset. See `docs/research/sniff-embedded-jpeg.md` for #28's write-up and
+`docs/adr/0017-preview-tier-strategy.md` for #29's), `spikes/groom` (#50/ADR-0007's
 healing-and-removal research: CPU
 clone-stamp/Poisson-heal/auto-source-pick reference plus a `wgpu` compute-shader Poisson twin
 proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding with no real
