@@ -203,18 +203,23 @@ negatives from an unrelated tooling gap (see below), not evidence the bug was go
 **Root cause**, confirmed via the actual OS error text (`os error 87`, `ERROR_INVALID_PARAMETER`):
 `read_cold`'s original chunked-read loop resumed a short read from `buf.as_mut_slice()[total..]`,
 passing a buffer address of `base_ptr + total` to the next `ReadFile` call. `FILE_FLAG_NO_BUFFERING`
-requires every read's buffer address, offset, and length to be sector-aligned — guaranteed for the
-*first* call by `AlignedBuf`'s own 4096-byte-aligned allocation, but only guaranteed for a
-*resumed* call if `total` (the running sum of actual bytes transferred so far) happens to still be
-a multiple of the sector size. NVMe reads of these ~15-22MB files essentially always complete in one
-call, so this path was never exercised; a slower HDD returns a short read often enough to hit it
-in normal operation, ~10-19% of the time in this pass. **Fixed** by not tracking a running offset at
-all: `read_cold` now issues one read of the whole aligned buffer, and on a short read reopens the
-file and retries once from the same code path — every `ReadFile` call's offset (0) and buffer
-address (the allocation's own base) stay aligned by construction, since there is no partial
-continuation to misalign. Verified: the exact same previously-~15%-failing HDD scenario (500 files,
-random order, cold) now shows 0 failures across every mode, and all four full-set/HDD passes above
-are the fixed binary's numbers.
+requires every read's buffer address, file offset, and length to be sector-aligned — guaranteed for
+the *first* call by `AlignedBuf`'s own 4096-byte-aligned allocation and the file's initial position,
+but only guaranteed for a *resumed* call if `total` (the running sum of actual bytes transferred so
+far) happens to still be a multiple of the sector size, since both the buffer address *and* the
+auto-advanced file position depend on it — this pass didn't isolate which of the two invariants
+Windows actually rejected (or whether both did), only that removing the running-offset resume
+entirely eliminates both possible violations at once. NVMe reads of these ~15-22MB files essentially
+always complete in one call, so this path was never exercised; a slower HDD returns a short read
+often enough to hit it in normal operation, ~10-19% of the time in this pass. **Fixed** by not
+tracking a running offset at all: `read_cold_range` (the shared helper both `read_cold` and #29's
+ranged `FileSource` now call through) issues one `seek_read` for the whole aligned window, and on a
+short read retries once with the identical call on the same handle — no reopen needed, since
+`seek_read` is positional rather than cursor-based, so every attempt's buffer address (the
+allocation's own base) and file offset (the fixed, aligned `aligned_offset`) stay aligned by
+construction, with no partial continuation to misalign. Verified: the exact same
+previously-~15%-failing HDD scenario (500 files, random order, cold) now shows 0 failures across
+every mode, and all four full-set/HDD passes above are the fixed binary's numbers.
 
 **A second, unrelated tooling gap surfaced while chasing this**: diagnosing the failure needed the
 actual error text, but `SampleResult` only ever stored `ok: bool`, discarding the real
