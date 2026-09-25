@@ -61,6 +61,29 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         runs: u32,
     },
+    /// #115: runs a genuinely concurrent multi-writer-thread workload against RocksDB or SQLite
+    /// (WAL mode) on the same shared store, and reports aggregate throughput + latency
+    /// percentiles — the side-by-side number this issue exists to produce.
+    ConcurrentBench {
+        #[arg(long, value_enum)]
+        engine: ConcurrentEngine,
+        #[arg(long, default_value_t = 100_000)]
+        n_rows: u64,
+        #[arg(long, default_value_t = 8)]
+        threads: u32,
+        #[arg(long, default_value_t = 5_000)]
+        writes_per_thread: u32,
+        #[arg(long, default_value = "bench-results/den")]
+        out_dir: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum, Debug)]
+enum ConcurrentEngine {
+    #[cfg(feature = "rocksdb")]
+    Rocksdb,
+    #[cfg(feature = "sqlite")]
+    Sqlite,
 }
 
 // #113 note: this whole enum, `Cmd::FacetBench`, and the functions below are gated behind
@@ -107,6 +130,8 @@ enum Engine {
     Redb,
     #[cfg(feature = "libsql")]
     Libsql,
+    #[cfg(feature = "rocksdb")]
+    Rocksdb,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -142,6 +167,13 @@ fn main() -> anyhow::Result<()> {
             out_dir,
             runs,
         } => cmd_facet_bench(variant, catalog, out_dir, runs),
+        Cmd::ConcurrentBench {
+            engine,
+            n_rows,
+            threads,
+            writes_per_thread,
+            out_dir,
+        } => cmd_concurrent_bench(engine, n_rows, threads, writes_per_thread, out_dir),
     }
 }
 
@@ -246,6 +278,13 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         #[cfg(feature = "libsql")]
         Engine::Libsql => bench_engine::<den::libsql_engine::LibsqlEngine>(
             &tmp.path().join("den-libsql.db"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        #[cfg(feature = "rocksdb")]
+        Engine::Rocksdb => bench_engine::<den::rocksdb_engine::RocksDbEngine>(
+            &tmp.path().join("den-rocksdb"),
             &assets,
             runs,
             &mut results,
@@ -713,6 +752,10 @@ fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
         Engine::Libsql => {
             crash_loop::<den::libsql_engine::LibsqlEngine>(tmp.path(), "libsql.db", iterations)?
         }
+        #[cfg(feature = "rocksdb")]
+        Engine::Rocksdb => {
+            crash_loop::<den::rocksdb_engine::RocksDbEngine>(tmp.path(), "rocksdb", iterations)?
+        }
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");
     Ok(())
@@ -764,4 +807,50 @@ fn crash_loop<E: Workload>(
         }
     }
     Ok(failures)
+}
+
+#[cfg(all(feature = "rocksdb", feature = "sqlite"))]
+fn cmd_concurrent_bench(
+    engine: ConcurrentEngine,
+    n_rows: u64,
+    threads: u32,
+    writes_per_thread: u32,
+    out_dir: PathBuf,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&out_dir)?;
+    let tmp = tempfile::tempdir()?;
+
+    let result = match engine {
+        #[cfg(feature = "rocksdb")]
+        ConcurrentEngine::Rocksdb => den::concurrent_bench::run_concurrent_writers_rocksdb(
+            &tmp.path().join("den-concurrent-rocksdb"),
+            n_rows,
+            threads,
+            writes_per_thread,
+        )?,
+        #[cfg(feature = "sqlite")]
+        ConcurrentEngine::Sqlite => den::concurrent_bench::run_concurrent_writers_sqlite(
+            &tmp.path().join("den-concurrent.sqlite3"),
+            n_rows,
+            threads,
+            writes_per_thread,
+        )?,
+    };
+
+    println!("{result:#?}");
+    let out_path = out_dir.join(format!("concurrent_{:?}.json", engine).to_lowercase());
+    std::fs::write(&out_path, serde_json::to_string_pretty(&result)?)?;
+    println!("wrote {}", out_path.display());
+    Ok(())
+}
+
+#[cfg(not(all(feature = "rocksdb", feature = "sqlite")))]
+fn cmd_concurrent_bench(
+    _engine: ConcurrentEngine,
+    _n_rows: u64,
+    _threads: u32,
+    _writes_per_thread: u32,
+    _out_dir: PathBuf,
+) -> anyhow::Result<()> {
+    anyhow::bail!("concurrent-bench requires both the `rocksdb` and `sqlite` features")
 }
