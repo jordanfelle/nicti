@@ -58,6 +58,21 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        persist-credentials: false
+
+    # #127: scope the rust workspace analyzed here to the shipping v1 target (root package +
+    # crates/*) before CodeQL's extractor loads the workspace manifest. Without this, the
+    # extractor's own LoadManifest phase (which builds every member to resolve its crate graph,
+    # including running den's bundled DuckDB/RocksDB/libSQL C/C++ build scripts from scratch)
+    # measured 18m34s of a 35m51s total run -- almost entirely spent on spikes/* and
+    # bench/whisker, none of which ship. This edit is local to the CI checkout only, never
+    # committed back, so it doesn't touch the real workspace members list.
+    - name: Scope rust workspace to shipping crates (skip CodeQL commit)
+      if: matrix.language == 'rust'
+      run: |
+        sed -i 's/members = \[".", "crates\/\*", "spikes\/\*", "bench\/whisker"\]/members = [".", "crates\/*"]/' Cargo.toml
+        grep -q '^members = \[".", "crates/\*"\]$' Cargo.toml
 
     # Add any setup steps before running the `github/codeql-action/init` action.
     # This includes steps like installing compilers or runtimes (`actions/setup-node`
@@ -71,6 +86,15 @@ jobs:
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
+        # #127: excludes spikes/*/bench/whisker from result reporting/file extraction, matching
+        # the Cargo.toml workspace-members edit above (that edit stops the rust extractor from
+        # ever building these; this stops the `actions` language's own file-based scan, plus any
+        # source-extraction CodeQL still does for a non-rust language, from covering them).
+        config: |
+          paths-ignore:
+            - spikes/**
+            - bench/**
+            - docs/**
         # If you wish to specify custom queries, you can do so here or in a config file.
         # By default, queries listed here will override any specified in a config file.
         # Prefix the list here with "+" to use these queries and those in the config file.

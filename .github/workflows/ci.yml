@@ -8,7 +8,9 @@ on:
     # den (#117): rejected-engine code (turso/redb/libsql/rocksdb/fjall) is path-gated out of
     # per-PR CI below since none of it ships -- this weekly run is what catches it silently
     # rotting (a toolchain/dependency update breaking a candidate nobody's touching) between
-    # den-touching PRs.
+    # den-touching PRs. pelt (#127): the pelt-egui/pelt-iced/pelt-slint GUI-framework spikes are
+    # path-gated the same way and for the same reason -- this run also catches those rotting
+    # between pelt-touching PRs.
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
@@ -36,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       den: ${{ steps.filter.outputs.den }}
+      pelt: ${{ steps.filter.outputs.pelt }}
     # dorny/paths-filter fetches the PR's changed-file list via the GitHub REST API on
     # `pull_request` events by default, which needs `pull-requests: read` -- the workflow-level
     # `permissions: contents: read` block above sets every OTHER unlisted scope to `none` for the
@@ -60,6 +63,13 @@ jobs:
           filters: |
             den:
               - 'spikes/den/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            pelt:
+              - 'spikes/pelt-egui/**'
+              - 'spikes/pelt-iced/**'
+              - 'spikes/pelt-slint/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -95,18 +105,6 @@ jobs:
           # Windows job) and was also what caused PR runs to evict main's own cache under the
           # 10GB per-repo limit.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
-      # (X11/Wayland) plus Slint's Skia/FemtoVG renderers. Precautionary, NOT independently
-      # confirmed as required: a local sandbox build succeeded with none of these packages
-      # installed (winit dlopen's libX11/libwayland/libxkbcommon/libGL at runtime rather than
-      # linking them -- `readelf -d` on the resulting binaries shows no NEEDED entries for any
-      # of them), so a real ubuntu-latest CI run may not need this step at all. Left in
-      # defensively since this PR couldn't exercise actual GitHub Actions runners to confirm
-      # either way. If CI passes without it, remove this step in a follow-up; if CI fails to
-      # link, check its error for the missing .so and adjust the list to match.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
       # --workspace: `nicti`'s root manifest is both a workspace root and a real package
       # (not a virtual manifest), so a bare `cargo clippy` without `-p`/`--workspace` only
       # checks the root `nicti` crate and silently skips spikes/* and bench/whisker
@@ -117,7 +115,19 @@ jobs:
       # --exclude den (#117): den's own clippy check moved to the path-gated `den (linux)`/
       # `den (windows)` jobs below, so this job (which runs on every PR regardless of what it
       # touches) no longer pays for compiling eight bundled native catalog-engine libraries.
-      - run: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
+      #
+      # --exclude pelt-egui/-iced/-slint (#127): these #68/ADR-0006 GUI-framework spikes alone
+      # account for 311 of the 543 unique crates in a full Windows build (measured via
+      # `cargo tree`) -- egui/iced/Slint each pull in their own windowing/renderer stack
+      # (winit, wgpu-adjacent crates, Skia/FemtoVG for Slint). ADR-0006 is still Proposed,
+      # pending #90's reference-machine run, so this isn't shipping code yet. Moved to the
+      # path-gated `pelt (linux)`/`pelt (windows)` jobs below, same pattern as den. This also
+      # drops the apt-get GUI-headers step from this job -- it only existed for these three
+      # crates' Linux windowing backends (X11/Wayland/GL), confirmed unneeded for the rest of
+      # the workspace by the pelt-linux job passing without it once it's the only Linux job
+      # left compiling them; if that job's build ever fails to link, that's the first place to
+      # look.
+      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --all-targets --all-features -- -D warnings
 
   clippy-windows:
     name: cargo clippy (windows)
@@ -134,9 +144,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17: Windows is v1's actual target platform (see README's Scope section and
       # docs/adr/0001), so it -- not Linux -- is the platform whose clippy/test results should
-      # gate merges. --workspace --exclude den mirrors the Linux job exactly (see its own
-      # comment above for why both flags are required).
-      - run: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
+      # gate merges. --workspace --exclude den --exclude pelt-* mirrors the Linux job exactly
+      # (see its own comment above for why each flag is required).
+      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test (linux)
@@ -149,10 +159,6 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
-      # See the clippy job's comment above -- same #68/ADR-0006 GUI-toolkit link dependency.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
       # --workspace: see the clippy job's comment above -- without it, pawprint's and
       # sheath's tests silently never ran in CI.
       #
@@ -160,7 +166,10 @@ jobs:
       # commands this comment used to document here) moved to the path-gated `den (linux)` job
       # below -- this job now only builds/runs the real workspace crates plus the always-on
       # spikes, on every PR regardless of what it touches.
-      - run: cargo test --workspace --all-targets --all-features --exclude den
+      #
+      # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
+      # the path-gated `pelt (linux)` job below, same reasoning as den.
+      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint
 
   test-windows:
     name: cargo test (windows)
@@ -177,7 +186,12 @@ jobs:
       # covers nicti-claw's/dewclaw's dylib-loading tests (previously the only Windows test
       # coverage, via build-windows's own narrow `-p nicti-claw -p dewclaw` step, now redundant
       # and removed there).
-      - run: cargo test --workspace --all-targets --all-features --exclude den
+      #
+      # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
+      # the path-gated `pelt (windows)` job below, same reasoning as den. This is the single
+      # biggest driver of this job's own compile time: cold, these three crates alone pull in
+      # 311 of the 543 unique crates otherwise compiled here.
+      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint
 
   den-linux:
     name: den (linux)
@@ -201,7 +215,13 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
+          # #127: unlike every other cache in this workflow, this one never saves, even from
+          # main. den (linux) isn't a required check, only runs when path-gated in, and den
+          # itself is slated for deletion once #22 lands (#123) -- its Linux cache entry
+          # (1.46GiB, measured via `gh cache list`) was 14% of this repo's total cache usage
+          # against GitHub's 10GB/repo limit for a job nothing else depends on being warm.
+          # den (windows) is required, so its own cache still saves normally.
+          save-if: false
       # den (#67/ADR-0008 and follow-ups, see CLAUDE.md's package map) is a throwaway research
       # spike, not part of the shipping v1 target -- see the #117 issue this job was split out
       # to address: every catalog-engine candidate it bundles (SQLite, DuckDB, LMDB, Turso, redb,
@@ -267,6 +287,59 @@ jobs:
       # sqlite3.c (DuckDB is its own engine; LMDB and Turso Database don't touch SQLite's C code
       # at all), so they combine with `libsql` here without the same clash.
       - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
+
+  pelt-linux:
+    name: pelt (linux)
+    needs: changes
+    # See den-linux's comment above for why the changes-failure case runs rather than skips.
+    if: needs.changes.result == 'failure' || needs.changes.outputs.pelt == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # #127: same reasoning as den-linux's own save-if: false above -- not a required
+          # check, rarely touched, and its own cache entry would otherwise ride along on every
+          # main push regardless of whether these spikes changed.
+          save-if: false
+      # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
+      # (X11/Wayland) plus Slint's Skia/FemtoVG renderers. Precautionary, NOT independently
+      # confirmed as required -- see #126's original version of this comment (moved here
+      # verbatim from the main clippy/test jobs when #127 split these crates out): a local
+      # sandbox build succeeded with none of these packages installed. If this job passes
+      # without it in a follow-up, remove it; if it fails to link, check the error for the
+      # missing .so and adjust the list to match.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
+      - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
+      - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
+
+  pelt-windows:
+    name: pelt (windows)
+    needs: changes
+    if: needs.changes.result == 'failure' || needs.changes.outputs.pelt == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see den-linux's comment above
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # required check, see clippy job's comment above
+      # #17/#127: this is a required (blocking) check, matching how den (windows) is required
+      # for the same reason -- Windows is v1's actual target, so a GUI-framework candidate must
+      # prove out on it, not just Linux.
+      - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
+      - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
 
   cargo-deny:
     name: cargo deny (licenses)
