@@ -235,6 +235,31 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   same C symbols) — required fixing two pre-existing cfg-gating gaps in `bin/den.rs`/
   `tests/facet_cache.rs` and splitting `.github/workflows/ci.yml`'s `cargo test` job so `den` gets
   its own feature-scoped commands instead of one blanket `--all-features` invocation.
+- **fjall, evaluated post-ADR-0014**: `docs/adr/0016-fjall-evaluation.md` — **not adopted**. The
+  cleanest Windows-build story of any catalog candidate so far (fjall and its own `lsm-tree`
+  dependency have no `build.rs` at all — 100% safe Rust, no native C/C++ core to audit) and a real,
+  active maintenance signal (v3.1.10, 25 days old at spike time) — but **fails 3 of 8 measured
+  query gates (folder-subtree count, range query, filename search) at both 600k and 2M**, by 2–5x,
+  the widest and earliest measured-gate failure of any candidate in this series (SQLite's and
+  `redb`'s own misses only showed up at the 2M planning horizon, not already at 600k). Investigated
+  directly rather than assumed: ruled out post-ingest LSM-compaction lag as the cause (calling
+  `major_compact()` barely moved the number), confirmed fjall's default LZ4 block compression is a
+  real but only partial contributor (~2–3x, not enough to close the gap to LMDB/`redb`'s zero-copy
+  mmap reads), and attributes the remainder to fjall's own `Guard`/iterator overhead per matched
+  item — a real, still-open question a future profiling pass could resolve, not fully closed here.
+  Crash-safety is **inconclusive**, the same structural finding as Turso/`redb`: fjall holds an
+  OS-level advisory file lock (`std::fs::File::try_lock()`) released only on a clean `Drop`, which
+  this spike's `mem::forget`-based crash simulation always skips — 20/20 reopen failures, all the
+  identical `FjallError: Locked`, not a torn-write finding. A real, structural discovery along the
+  way: fjall's atomic `Database::batch()` stages entirely in process memory until `.commit()`
+  (unlike LMDB's/`redb`'s open write transactions, which touch on-disk structures pre-commit), so
+  it has no read-your-own-writes within one open batch, and its `crash_mid_ingest` test — leaving a
+  genuinely open, uncommitted batch, then `mem::forget`ing it — structurally cannot leave any
+  on-disk trace for fjall at all, unlike every prior candidate. Unlike libSQL, fjall has **no
+  bundled native C source**, so it links cleanly into the same `den` binary as every other
+  candidate (no CI job split needed, unlike ADR-0014's mandatory `--exclude den` fix). One real
+  `deny.toml` edit was needed: `varint-rs` (transitive via `lsm-tree`) carries `0BSD`, not
+  previously allowlisted.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -304,21 +329,23 @@ edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
 (#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
 #106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, #107/ADR-0012's
-schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, and #115/ADR-0015's RocksDB
-follow-up — one module per candidate,
+schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, #115/ADR-0015's RocksDB follow-up,
+and #116/ADR-0016's `fjall` follow-up — one module per candidate,
 `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`libsql_engine.rs`/
-`rocksdb_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo
-features (`turso`, `redb`, `libsql`, and `rocksdb` are all default-off, evaluated-not-adopted,
-kept for reference — `libsql` additionally cannot be enabled in the same binary as `sqlite`, both
-bundle their own SQLite C symbols and collide at link time, see ADR-0014's Spike section; the two
-facet-cache modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`),
-plus `schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape,
-gated on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's own reason for existing — a
-genuinely concurrent multi-writer-thread comparison between RocksDB and SQLite, gated on both
-`rocksdb` and `sqlite`, not part of the shared `Workload` trait since only these two engines are
-compared this way); `gen.rs`'s synthetic-catalog generator is reusable for future Library-scale
-benchmarks, see `docs/benchmarks.md`) — not production code; don't build on top of a spike crate,
-and expect each to be deleted once its own ticket promotes it (as #20 just did for
+`rocksdb_engine.rs`/`fjall_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind
+matching Cargo features (`turso`, `redb`, `libsql`, `rocksdb`, and `fjall` are all default-off,
+evaluated-not-adopted, kept for reference — `libsql` additionally cannot be enabled in the same
+binary as `sqlite`, both bundle their own SQLite C symbols and collide at link time, see
+ADR-0014's Spike section; `rocksdb` and `fjall` have no such collision, they link cleanly
+alongside every other engine, see ADR-0015's/ADR-0016's Consequences; the two facet-cache modules
+require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`), plus `schema_fit.rs`
+(ADR-0002's JSON-column + append-only/burst-compacted history-table shape, gated on both `sqlite`
+and `duckdb`) and `concurrent_bench.rs` (#115's own reason for existing — a genuinely concurrent
+multi-writer-thread comparison between RocksDB and SQLite, gated on both `rocksdb` and `sqlite`,
+not part of the shared `Workload` trait since only these two engines are compared this way);
+`gen.rs`'s synthetic-catalog generator is reusable for future Library-scale benchmarks, see
+`docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
+to be deleted once its own ticket promotes it (as #20 just did for
 `spikes/sheath`/`spikes/dewclaw`).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.

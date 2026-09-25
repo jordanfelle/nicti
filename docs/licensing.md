@@ -232,6 +232,21 @@ normal -p den --features libsql` resolves 433 lines vs. plain `sqlite`'s 85). De
 needed — the entire subtree resolves within the existing allowlist, same pre-existing `cfg_block`
 (Turso-only) warning as every prior ADR in this series, nothing new from `libsql`.
 
+**Update (2026-09-24, [#116](https://github.com/jordanfelle/nicti/issues/116)'s `fjall` evaluation,
+`docs/adr/0016-fjall-evaluation.md`):** the `fjall` crate (v3.1.10, default-off feature, kept for
+reference after evaluating-not-adopting per the ADR) is `MIT OR Apache-2.0`, confirmed directly
+from crates.io's version-level API response and cross-checked against the bundled `LICENSE-MIT`/
+`LICENSE-APACHE` files in the downloaded crate source. Its own dependency (`lsm-tree`, the
+underlying LSM-tree implementation fjall wraps) is also `MIT OR Apache-2.0` (checked directly in
+its own `Cargo.toml`, not assumed from fjall's). Unlike SQLite/DuckDB/LMDB, fjall has **no bundled
+native C/C++ core at all** — 100% safe Rust (the crate itself carries `#![deny(unsafe_code)]`) —
+so this update adds no new row to the Native libraries table below. One `deny.toml` edit **was**
+needed, unlike redb/Turso's zero-edit updates: `varint-rs` (a transitive dependency of `lsm-tree`)
+carries `0BSD`, not previously on the allowlist — added as its own entry (OSI-approved, even more
+permissive than MIT/Apache-2.0, no attribution requirement) rather than assumed compatible.
+`cargo deny --workspace --all-features check licenses` now passes clean, same pre-existing
+`cfg_block` (Turso-only) warning as before, nothing else new from `fjall`.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

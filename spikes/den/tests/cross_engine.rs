@@ -196,3 +196,10 @@ fn rocksdb_matches_shared_workload() {
     let dir = tempfile::tempdir().unwrap();
     check::<den::rocksdb_engine::RocksDbEngine>(&dir, "rocksdb-test");
 }
+
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_matches_shared_workload() {
+    let dir = tempfile::tempdir().unwrap();
+    check::<den::fjall_engine::FjallEngine>(&dir, "fjall-test");
+}

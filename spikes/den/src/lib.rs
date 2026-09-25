@@ -70,5 +70,13 @@ pub mod rocksdb_engine;
 #[cfg(all(feature = "rocksdb", feature = "sqlite"))]
 pub mod concurrent_bench;
 
+// #116's follow-up candidate, added after ADR-0014 (`libsql`) merged — like LMDB/redb, no query
+// planner (hand-maintained secondary indexes); a pure-Rust dependency like redb, but LSM-tree-
+// based rather than a B-tree/copy-on-write design (RocksDB's shape, in pure Rust). Module named
+// `fjall_engine`, not `fjall`, to avoid shadowing the external `fjall` crate it wraps (same
+// convention as `turso_engine`/`redb_engine`/`libsql_engine`).
+#[cfg(feature = "fjall")]
+pub mod fjall_engine;
+
 pub use gen::{generate_catalog, Asset, Flag};
 pub use workload::{FacetCounts, RangeQuery, Workload};
