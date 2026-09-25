@@ -99,6 +99,13 @@ pub fn run_concurrent_writers_rocksdb(
 ) -> anyhow::Result<ConcurrentBenchResult> {
     use rocksdb::{Options, WriteBatch, DB};
 
+    anyhow::ensure!(n_threads > 0, "n_threads must be > 0");
+    anyhow::ensure!(writes_per_thread > 0, "writes_per_thread must be > 0");
+    anyhow::ensure!(
+        n_rows >= n_threads as u64,
+        "n_rows ({n_rows}) must be >= n_threads ({n_threads}) so each thread gets a disjoint slice"
+    );
+
     let mut opts = Options::default();
     opts.create_if_missing(true);
     let db = Arc::new(DB::open(&opts, path)?);
@@ -156,6 +163,13 @@ pub fn run_concurrent_writers_sqlite(
     n_threads: u32,
     writes_per_thread: u32,
 ) -> anyhow::Result<ConcurrentBenchResult> {
+    anyhow::ensure!(n_threads > 0, "n_threads must be > 0");
+    anyhow::ensure!(writes_per_thread > 0, "writes_per_thread must be > 0");
+    anyhow::ensure!(
+        n_rows >= n_threads as u64,
+        "n_rows ({n_rows}) must be >= n_threads ({n_threads}) so each thread gets a disjoint slice"
+    );
+
     // Setup phase (single-threaded, not timed).
     {
         let conn = Connection::open(path)?;
@@ -182,6 +196,13 @@ pub fn run_concurrent_writers_sqlite(
             std::thread::spawn(move || -> anyhow::Result<Vec<Duration>> {
                 let conn = Connection::open(&path)?;
                 conn.pragma_update(None, "journal_mode", "WAL")?;
+                // `synchronous` is connection-specific, not persisted in the database file --
+                // each new connection defaults to FULL regardless of what the setup connection
+                // was set to, even in WAL mode. Without this, these timed writes would silently
+                // run under FULL's stricter per-commit fsync cost instead of the NORMAL setting
+                // this benchmark intends to measure, understating SQLite's real throughput. Found
+                // by adversarial review.
+                conn.pragma_update(None, "synchronous", "NORMAL")?;
                 // 5s busy timeout: a writer blocked behind WAL mode's single-writer rule waits and
                 // retries via SQLite's own busy-handler rather than erroring immediately — the
                 // wait is what shows up as elevated latency below, which is the point.

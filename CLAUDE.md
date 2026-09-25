@@ -153,25 +153,32 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   mirrored into this repo's own CI: `librocksdb-sys`'s `bindgen`-generated FFI bindings need
   libclang, which conflicts with GitHub's `windows-latest` runner's bundled msys64 install unless
   removed first). Two query shapes miss the 2M budget (range query ~1.8x over, filename search
-  ~4.5x over, the worst of any candidate on this shape) — root-caused (compaction was tried and
-  ruled out as the cause) to RocksDB's per-read LSM cost (bloom-filter + block-cache misses) under
-  this pass's default, untuned configuration. Crash-safety is **inconclusive**, same class of
+  ~4.5x over, the worst of any candidate on this shape). The unflushed-memtable hypothesis was
+  tested and ruled out (compaction was tried and did not help); the remaining explanation
+  (ordinary LSM per-read block-cache cost under this pass's default, untuned configuration) is
+  consistent with RocksDB's architecture but not independently isolated — no bloom-filter policy
+  is even configured, so that specific mechanism an earlier draft named isn't actually in play.
+  Crash-safety is **inconclusive**, same class of
   finding as LMDB/Turso/redb: a leaked `LOCK` file blocks reopening the same forgotten path in this
   in-process technique, confirmed (via a direct probe, same methodology as ADR-0009/0010) to be
   scoped to that specific path, not a process-wide guard like LMDB's. **The concurrent-multi-writer
   comparison this ADR exists to produce — measured for the first time in this series, since every
   prior candidate was only ever benchmarked single-threaded — has a genuine, nuanced answer**:
   RocksDB does not show SQLite's own textbook single-writer-serialization signature (SQLite's
-  aggregate throughput stayed flat at ~61k-76k writes/sec regardless of thread count, 1-16 threads,
-  while its own max latency grew monotonically from 5ms to 1,458ms under contention — a clean,
-  reproduced confirmation of the exact concern #115 was filed to test), and RocksDB's peak observed
-  throughput (1.05M writes/sec) was roughly 14x SQLite's ceiling on a minimal KV-shaped write (not a
+  corrected aggregate throughput settles into a ~93k-98k writes/sec range at 8-16 threads, not
+  scaling with thread count, while its own max latency grew monotonically from under 1ms to
+  1,963ms under contention — a clean, reproduced confirmation of the exact concern #115 was filed
+  to test, after fixing a real benchmark bug a hostile review caught: `synchronous=NORMAL` was only
+  ever set on the setup connection, not each worker's own connection, silently running the timed
+  writes under SQLite's stricter default `FULL` instead), and RocksDB's peak observed throughput
+  (1.05M writes/sec) was roughly 8-12x SQLite's corrected range on a minimal KV-shaped write (not a
   faithful `write_rating`-equivalent op — a hostile review caught this ADR overclaiming operation-
   shape equivalence, corrected there) — but RocksDB's own default (untuned) configuration showed
   large, non-monotonic run-to-run variance under sustained concurrent load (as low as 47.7k
-  writes/sec in one 16-thread run, at or below SQLite's own ceiling), plausibly its own documented
-  write-stall backpressure mechanism, though this session's own heavily-loaded shared host is an
-  equally uneliminated competing explanation — not a clean win either way. A tuned re-run (larger
+  writes/sec in one 16-thread run, now clearly below SQLite's entire corrected range); the cause
+  remains unresolved
+  (RocksDB's own documented write-stall backpressure mechanism and this session's own heavily-loaded
+  shared host are both plausible, uneliminated explanations) — not a clean win either way. A tuned re-run (larger
   block cache/write buffers, bloom-filter tuning) is the named,
   unattempted follow-up if RocksDB is ever reconsidered. ADR-0008 is unchanged: SQLite stays
   chosen, DuckDB stays the fallback — but this ADR's own numbers are the first real evidence in

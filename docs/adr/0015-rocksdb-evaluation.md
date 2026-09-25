@@ -155,33 +155,43 @@ was the only KV-shaped, no-query-planner candidate in this whole series with a r
 not a gap. This isn't the deciding factor (the measured-gate misses are), but it's a genuine
 strength worth recording plainly rather than only reporting misses.
 
-**Root cause for the two misses — tested, not guessed, per this spike's own standing rule.** A
-direct experiment ruled out the first, most obvious hypothesis (unflushed/uncompacted L0 data from
-the single bulk `WriteBatch` commit): forcing an explicit `compact_range_cf` across every column
-family **did not improve** `range_query` (54ms before forced compaction vs 108ms after, on a
-separate 600k probe run) — if anything slightly worse, most likely because compaction cold-starts a
-fresh set of SST blocks that then have to be paged in again, not because compaction itself made
-reads slower in general. This rules out "the benchmark accidentally measured an unflushed memtable"
-as the explanation. What remains, consistent with RocksDB's own documented architecture and this
-pass's own default (untuned) `Options`, is the ordinary LSM point/range-read cost: each `get_cf`/
-range-iterator step pays a bloom-filter check plus a block-cache lookup per SST level touched, with
-this pass's default 8MB block cache doing essentially nothing useful at 2M-row scale — a real,
-structural cost distinct from LMDB's direct mmap'd B-tree lookups (LMDB clears both of these same
-two query shapes easily, per ADR-0008) and from redb's own different but analogous per-page-
-checksum cost (ADR-0010). **A known, unattempted mitigation**: a larger, explicitly-sized block
-cache and/or bloom-filter-bits-per-key tuning via `BlockBasedTableOptions` — this pass measured
-RocksDB's out-of-the-box default configuration deliberately (the realistic starting point for a
-hand-rolled catalog store, matching how LMDB/redb were also evaluated untuned), and did not attempt
-a tuned re-run; worth a targeted follow-up if RocksDB is ever reconsidered.
+**What was actually tested for the two misses, and what remains a hypothesis, not a measured
+root cause.** A direct experiment ruled out the first, most obvious explanation (unflushed/
+uncompacted L0 data from the single bulk `WriteBatch` commit): forcing an explicit
+`compact_range_cf` across every column family **did not improve** `range_query` (54ms before
+forced compaction vs 108ms after, on a separate 600k probe run) — if anything slightly worse, most
+likely because compaction cold-starts a fresh set of SST blocks that then have to be paged in
+again, not because compaction itself made reads slower in general. This rules out "the benchmark
+accidentally measured an unflushed memtable" as the explanation — that part is measured, not
+guessed. **What remains is a hypothesis, not independently isolated by this probe**: the ordinary
+LSM point/range-read cost (a block-cache lookup per SST level touched, plausibly compounded by
+this pass's default, unconfigured 8MB block cache at 2M-row scale) is *consistent with*
+RocksDB's own documented architecture and this pass's default (untuned) `Options`, but this probe
+did not isolate cache-miss cost from other possible factors, and **no bloom-filter policy is
+configured anywhere in `rocksdb_engine.rs`** — without one, standard block-based tables don't use
+bloom filters at all, so a bloom-filter-check cost specifically is not something this pass's
+default configuration would even incur; an earlier draft of this ADR wrongly asserted it did. This
+structural-cost family is still a real, distinct-from-LMDB explanation in kind (LMDB's direct
+mmap'd B-tree lookups clear both of these same two query shapes easily, per ADR-0008, and redb's
+own different but analogous per-page-checksum cost, ADR-0010, is the same class of finding), but
+the *specific* mechanism within it is not established here. **A known, unattempted mitigation**: a
+larger, explicitly-sized block cache and/or configuring a bloom-filter policy via
+`BlockBasedTableOptions` — this pass measured RocksDB's out-of-the-box default configuration
+deliberately (the realistic starting point for a hand-rolled catalog store, matching how LMDB/redb
+were also evaluated untuned), and did not attempt a tuned re-run; worth a targeted follow-up if
+RocksDB is ever reconsidered.
 
 ### The concurrent-writer comparison (`den concurrent-bench`) — #115's own reason for existing
 
 **Methodology**: `n_threads` threads, each with its own DB handle/connection to the *same* store on
-disk, each updating its own **disjoint** slice of 100,000 pre-seeded rows with a plain single-row
-rating write (the same operation shape `write_rating` measures single-threaded elsewhere in this
-crate) — disjoint key ranges, not contended shared keys, matching the realistic shape of concurrent
-catalog writers (several culling/tagging operations touching different photos at once) and isolating
-the engine's own write-path serialization from application-level row-lock contention.
+disk, each updating its own **disjoint** slice of 100,000 pre-seeded rows — disjoint key ranges, not
+contended shared keys, matching the realistic shape of concurrent catalog writers (several
+culling/tagging operations touching different photos at once) and isolating the engine's own
+write-path serialization from application-level row-lock contention. **The actual per-write
+operation is lighter than `write_rating`'s** — RocksDB's side is a bare `db.put()` on the default
+column family (no read, no secondary-index maintenance), and SQLite's side is an unindexed
+single-column `UPDATE` — see the methodology caveat below for exactly how this narrows what the
+throughput numbers mean.
 **RocksDB**: a plain `rocksdb::DB` (not `TransactionDB`) wrapped in `Arc`, shared across threads —
 `rocksdb::DB` is `Send + Sync` and multi-threaded `put` is RocksDB's normal, documented usage
 pattern (a write-group-leader thread batches concurrent writers' individual writes into one WAL
@@ -206,24 +216,30 @@ reasonable follow-up before treating any single RocksDB throughput figure below 
 
 | Threads | Aggregate writes/sec | Latency p50/p95/max |
 |---|---|---|
-| 1 | 75,559 | 0.0085 / 0.0124 / 5.4 ms |
-| 4 | 70,015 | 0.0087 / 0.0143 / 456.8 ms |
-| 8 | 70,481 | 0.0083 / 0.0135 / 1,058.7 ms |
-| 16 | 61,143 | 0.0086 / 0.0151 / 1,457.8 ms |
+| 1 | 89,197 | 0.0094 / 0.0157 / 0.7 ms |
+| 4 | 123,792 | 0.0069 / 0.0098 / 229.7 ms |
+| 8 | 97,401 | 0.0069 / 0.0129 / 959.4 ms |
+| 16 | 93,771 | 0.0081 / 0.0142 / 1,963.2 ms |
 
-**This is the textbook single-writer-serialization signature, cleanly and consistently reproduced**:
-aggregate throughput stays essentially flat (61k–76k writes/sec) regardless of thread count — more
-writer threads do not increase total work done per second, exactly what a single-writer-at-a-time
-model predicts — while p50/p95 latency stay low and stable (each write, once it acquires the lock,
-is still fast) but **max latency grows monotonically and dramatically with contention**: 5.4ms at 1
-thread → 1,457.8ms at 16 threads, as more writers queue up waiting for the WAL writer lock. **A
-methodology note worth being precise about**: `busy_retries` (this benchmark's own counter for
-`SQLITE_BUSY` errors caught and retried in application code) reported **0 across every run** — this
-does *not* mean there was no contention; it means `rusqlite`'s `busy_timeout` handles the wait
-internally (SQLite's own busy-handler sleeps and retries before ever returning control to the
-calling code), so the queueing time shows up entirely as elevated `max` latency on the writer that
-had to wait, not as an application-visible retry count. Calling this out explicitly rather than
-letting a `busy_retries: 0` row look like "no contention happened."
+**Corrected numbers, re-measured after an adversarial review found a real bug**: an earlier pass of
+this benchmark set `synchronous=NORMAL` only on the setup connection, not on each worker thread's
+own connection — `synchronous` is connection-specific, not persisted in the database file, so every
+worker connection was silently running under SQLite's stricter default (`FULL`, which fsyncs on
+every commit) instead of the `NORMAL` setting this benchmark was meant to measure. Fixed in
+`concurrent_bench.rs`, and every number in this table is from the corrected re-run, not the original
+one. The qualitative signature survives the correction: aggregate throughput does not scale with
+thread count (in fact it settles into a narrower ~93k-98k range at 8-16 threads, with 4 threads as a
+mild, unstable peak, not a real trend), and **max latency still grows dramatically with
+contention**: 0.7ms at 1 thread → 1,963.2ms at 16 threads, as more writers queue up waiting for the
+WAL writer lock — the underlying single-writer-serialization mechanism is unchanged by this fix,
+only the absolute cost of each write was previously overstated. **A methodology note worth being
+precise about**: `busy_retries` (this benchmark's own counter for `SQLITE_BUSY` errors caught and
+retried in application code) reported **0 across every run** — this does *not* mean there was no
+contention; it means `rusqlite`'s `busy_timeout` handles the wait internally (SQLite's own
+busy-handler sleeps and retries before ever returning control to the calling code), so the queueing
+time shows up entirely as elevated `max` latency on the writer that had to wait, not as an
+application-visible retry count. Calling this out explicitly rather than letting a `busy_retries: 0`
+row look like "no contention happened."
 
 **RocksDB (plain `DB`, default `Options`), 100k rows, 20,000 writes/thread:**
 
@@ -257,12 +273,13 @@ not a precise prediction.
 
 **RocksDB does not show SQLite's signature at all — but it also does not show a clean "wins outright"
 story.** There is no sign of a single-writer lock forcing aggregate throughput flat: RocksDB's
-peak observed throughput (1.05M writes/sec at 8 threads) is roughly 14x SQLite's own ceiling (its
-best single-thread result, 75,559 writes/sec), and even its lowest observed run (47.7k writes/sec at
-16 threads) is the same order of magnitude as SQLite's, not consistently below it. What RocksDB
-shows instead is **large, non-monotonic run-to-run variance** at every thread count — the same
-configuration (8 threads) produced both the best (1.05M/s) and one of the worst (65.0k/s) results
-across this section's runs. **Two competing explanations for that variance, neither ruled out by
+peak observed throughput (1.05M writes/sec at 8 threads) is roughly 8-12x SQLite's own corrected
+range (89k-124k writes/sec across thread counts, best single-thread result 89,197 writes/sec) — but
+its lowest observed run (47.7k writes/sec at 16 threads) is now clearly **below** SQLite's entire
+corrected range, not merely "the same order of magnitude" as an earlier draft of this ADR said
+against the pre-fix SQLite numbers. What RocksDB shows instead is **large, non-monotonic run-to-run
+variance** at every thread count — the same configuration (8 threads) produced both the best
+(1.05M/s) and one of the worst (65.0k/s) results across this section's runs. **Two competing explanations for that variance, neither ruled out by
 what this pass actually measured** (a hostile review of this ADR correctly flagged that the first
 explanation below was originally stated as established fact with no instrumentation to back it):
 (a) RocksDB's own documented write-stall backpressure mechanism (a defensive throttle that kicks in
@@ -292,7 +309,7 @@ conclusion either way.
 
 | Option | Verdict |
 |---|---|
-| RocksDB (`rocksdb` crate) | **Rejected.** Strong Windows-build/license/maintenance evidence (including a real, concrete Windows CI gotcha — a bindgen/libclang conflict — found and mirrored into this repo's own CI). Two measured query shapes miss the 2M budget, one badly (filename search ~4.5x over, the worst of any candidate on this shape), root-caused to a real per-read LSM cost under default tuning, tested and not just asserted (compaction was tried and ruled out as the cause). The concurrent-writer comparison this ADR exists to produce has a genuine, nuanced answer: RocksDB avoids SQLite's textbook single-writer serialization signature and can deliver up to ~15x SQLite's throughput, but its own default-configuration write-stall behavior produced highly variable results, including at least one run at or below SQLite's own ceiling — not the clean, reputation-driven "RocksDB wins" story #115 was filed specifically to test against actual measurement. |
+| RocksDB (`rocksdb` crate) | **Rejected.** Strong Windows-build/license/maintenance evidence (including a real, concrete Windows CI gotcha — a bindgen/libclang conflict — found and mirrored into this repo's own CI). Two measured query shapes miss the 2M budget, one badly (filename search ~4.5x over, the worst of any candidate on this shape). The unflushed-memtable hypothesis for this was tested and ruled out (compaction was tried and did not help); the remaining LSM-read-cost explanation is consistent with RocksDB's architecture but not independently isolated by this pass — see the ADR's own Root-cause section. The concurrent-writer comparison this ADR exists to produce has a genuine, nuanced answer: RocksDB avoids SQLite's textbook single-writer serialization signature and can deliver up to ~8-12x SQLite's corrected throughput range, but its results under default settings were highly variable, including at least one run below SQLite's entire corrected range; the cause remains unresolved — not the clean, reputation-driven "RocksDB wins" story #115 was filed specifically to test against actual measurement. |
 | SQLite (`rusqlite`, WAL) | Unchanged from ADR-0008: still chosen. Its concurrent-writer signature (flat aggregate throughput, monotonically growing tail latency under contention) is now directly, cleanly measured for the first time in this series — confirming the real cost this candidate's own filing worried about, even though it isn't the deciding factor here (RocksDB's own measured-gate misses and tuning-dependent concurrent story are). |
 | LMDB (`heed`) | Unchanged from ADR-0008: still the best raw single-threaded numbers on every indexable op, still rejected on the same unmeasurable crash-safety hard gate. |
 | `redb` | Unchanged from ADR-0010: still not adopted, same per-page-cost story as this ADR's own findings for RocksDB (a different mechanism, checksums vs. bloom-filter/block-cache misses, same *shape* of finding: real per-read cost, not a fixable indexing gap). |

@@ -244,13 +244,27 @@ impl Workload for RocksDbEngine {
         let assets_cf = self.cf("assets");
         let by_rating_cf = self.cf("by_rating");
         let mut batch = WriteBatch::default();
+        // Tracks each asset's rating as staged so far *within this batch*, not just on disk --
+        // if `updates` repeats an asset_id (e.g. (5, 2) then (5, 3) in the same burst), the
+        // second iteration must delete the by_rating[2] entry the first iteration just staged,
+        // not re-read the stale on-disk rating (which hasn't been committed yet) and delete the
+        // wrong key, which would leave a stale index entry pointing at an intermediate rating a
+        // range_query could then incorrectly return. Found by adversarial review.
+        let mut staged_rating: std::collections::HashMap<u64, u8> =
+            std::collections::HashMap::new();
         for (asset_id, rating) in updates {
             let raw = self
                 .db
                 .get_cf(assets_cf, id_key(*asset_id))?
                 .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?;
             let mut stored: StoredAsset = bincode::deserialize(&raw)?;
-            let old_rating = stored.rating;
+            // The rating to delete from the index is whatever this asset's rating was staged to
+            // by an earlier entry in *this same batch*, if any -- not the on-disk value, which
+            // still reflects the pre-batch state until `self.db.write(batch)` below commits.
+            let old_rating = staged_rating
+                .get(asset_id)
+                .copied()
+                .unwrap_or(stored.rating);
             batch.delete_cf(by_rating_cf, composite_key(&[old_rating], *asset_id));
             stored.rating = *rating;
             batch.put_cf(assets_cf, id_key(*asset_id), bincode::serialize(&stored)?);
@@ -259,6 +273,7 @@ impl Workload for RocksDbEngine {
                 composite_key(&[*rating], *asset_id),
                 id_key(*asset_id),
             );
+            staged_rating.insert(*asset_id, *rating);
         }
         self.db.write(batch)?;
         Ok(())
