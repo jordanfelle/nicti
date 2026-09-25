@@ -189,3 +189,10 @@ fn libsql_matches_shared_workload() {
     let dir = tempfile::tempdir().unwrap();
     check::<den::libsql_engine::LibsqlEngine>(&dir, "libsql-test.db");
 }
+
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_matches_shared_workload() {
+    let dir = tempfile::tempdir().unwrap();
+    check::<den::fjall_engine::FjallEngine>(&dir, "fjall-test");
+}

@@ -24,6 +24,7 @@ fn fixture() -> Vec<den::gen::Asset> {
 // with the new `libsql` feature and *without* `sqlite` (unavoidable: `rusqlite`'s and `libsql`'s
 // bundled SQLite C sources collide at link time if both are enabled — see `libsql_engine.rs`'s
 // module doc and `bin/den.rs`'s matching fix for the full explanation). Gated here the same way.
+// The same gap independently would have blocked a `fjall`-only build (#116) too.
 #[cfg(feature = "sqlite")]
 #[test]
 fn trigger_facet_matches_naive_after_ingest_and_after_writes() {

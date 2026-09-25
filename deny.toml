@@ -37,6 +37,11 @@ allow = [
     # candidate's own clipboard integration (arboard via egui/Slint, window_clipboard via iced).
     # Permissive, OSI-approved, no copyleft terms -- same category as ISC/Zlib/NCSA above.
     "BSL-1.0",
+    # 0BSD: `varint-rs`, a transitive dependency of `lsm-tree` (the LSM-tree engine `fjall` wraps,
+    # #116/ADR-0014's evaluation). The BSD Zero Clause License is OSI-approved and even more
+    # permissive than MIT/Apache-2.0 -- no attribution requirement at all -- same
+    # no-copyleft-terms category as ISC/Zlib/NCSA/BSL-1.0 above.
+    "0BSD",
     # OFL-1.1 / Ubuntu-font-1.0: `epaint_default_fonts` bundles actual font *data* (not just code)
     # under egui's `default_fonts` feature (#68/ADR-0006's pelt-egui spike). Both are OSI-approved,
     # permissive-for-redistribution open font licenses (SIL OFL is the standard license for

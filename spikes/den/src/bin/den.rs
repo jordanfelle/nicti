@@ -63,20 +63,22 @@ enum Cmd {
     },
 }
 
-// #113 note: this whole enum, `Cmd::FacetBench`, and the functions below are gated behind
+// This whole enum, `Cmd::FacetBench`, and the functions below are gated behind
 // `#[cfg(feature = "sqlite")]` (the trigger candidate needs it; the DuckDB-cache candidate needs
 // both, per `facet_cache_duckdb`'s own `#[cfg(all(feature = "sqlite", feature = "duckdb"))]`
 // module gate) — these `use den::facet_cache_trigger::...`/`facet_cache_duckdb::...` imports were
 // previously unconditional even though the modules they name are feature-gated in `lib.rs`, so
 // `den`'s bin target (and therefore `cargo build`/`cargo test -p den`) silently required `sqlite`
 // (`facet_cache_duckdb` additionally `duckdb`) to compile at all, regardless of which engine was
-// actually being exercised. Found while adding the `libsql` engine: `rusqlite`'s bundled
+// actually being exercised. Found while adding the `libsql` engine (#113): `rusqlite`'s bundled
 // `libsqlite3-sys` and `libsql`'s bundled `libsql-ffi` both statically link a full copy of real
 // SQLite's C symbols (`sqlite3_prepare_v3`, `sqlite3_shutdown`, etc.) — linking both into the same
 // `den` binary fails with `multiple definition of ...` at the final link step, so `libsql` cannot
 // be benchmarked in the same binary as `sqlite` at all. Without this gate, there would be no way
 // to build (let alone test) `den` with `libsql` alone on any target, including the Windows CI job
-// this candidate's hard gate 1 depends on.
+// this candidate's hard gate 1 depends on. The same gap independently would have blocked a
+// `fjall`-only build (#116) too, confirmed while adding that candidate — this single fix already
+// covers both.
 #[derive(Clone, Copy, ValueEnum, Debug)]
 enum FacetVariant {
     #[cfg(feature = "sqlite")]
@@ -107,6 +109,8 @@ enum Engine {
     Redb,
     #[cfg(feature = "libsql")]
     Libsql,
+    #[cfg(feature = "fjall")]
+    Fjall,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -246,6 +250,13 @@ fn cmd_bench(engine: Engine, catalog: PathBuf, out_dir: PathBuf, runs: u32) -> a
         #[cfg(feature = "libsql")]
         Engine::Libsql => bench_engine::<den::libsql_engine::LibsqlEngine>(
             &tmp.path().join("den-libsql.db"),
+            &assets,
+            runs,
+            &mut results,
+        )?,
+        #[cfg(feature = "fjall")]
+        Engine::Fjall => bench_engine::<den::fjall_engine::FjallEngine>(
+            &tmp.path().join("den-fjall"),
             &assets,
             runs,
             &mut results,
@@ -712,6 +723,10 @@ fn cmd_crash(engine: Engine, iterations: u32) -> anyhow::Result<()> {
         #[cfg(feature = "libsql")]
         Engine::Libsql => {
             crash_loop::<den::libsql_engine::LibsqlEngine>(tmp.path(), "libsql.db", iterations)?
+        }
+        #[cfg(feature = "fjall")]
+        Engine::Fjall => {
+            crash_loop::<den::fjall_engine::FjallEngine>(tmp.path(), "fjall", iterations)?
         }
     };
     println!("{engine:?}: {failures}/{iterations} crash-reopen failures");

@@ -80,7 +80,7 @@ jobs:
       # command before adding the exclusion. `den` gets its own two feature-scoped commands below
       # instead, the same pattern the Windows job's own `-p den` line already uses.
       - run: cargo test --workspace --all-targets --all-features --exclude den
-      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb
+      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,fjall
       - run: cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso
 
   cargo-deny:
@@ -119,7 +119,10 @@ jobs:
       # (its build.rs passes a Unix-only linker flag, confirmed unrunnable here) before a Windows
       # CI job ever had to prove it. `-p den` only (not `--workspace`): den is a spike, same
       # reasoning as the `-p nicti` build above.
-      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso
+      # #116's fjall candidate rides along here: 100% safe Rust, no bundled C source of its own,
+      # confirmed to build and link cleanly in the same `den` binary as sqlite/duckdb/lmdb/turso
+      # (checked locally with `--all-features`, no symbol collision the way libsql has below).
+      - run: cargo test -p den --features sqlite,duckdb,lmdb,turso,fjall
       # #113's libSQL candidate needs its own, separate step: `rusqlite`'s bundled
       # `libsqlite3-sys` and `libsql`'s bundled `libsql-ffi` both statically link a full copy of
       # real SQLite's C symbols into the same `den` binary, which fails at the final link step
