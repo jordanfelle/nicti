@@ -169,7 +169,13 @@ pub fn write_report(
             .open(&candidate)
         {
             Ok(mut file) => {
-                file.write_all(json.as_bytes())?;
+                if let Err(write_err) = file.write_all(json.as_bytes()) {
+                    // Drop the handle before removing the file -- required on Windows, where
+                    // deleting a still-open file fails.
+                    drop(file);
+                    let _ = fs::remove_file(&candidate);
+                    return Err(write_err.into());
+                }
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
