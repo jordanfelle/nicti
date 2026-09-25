@@ -2,6 +2,7 @@
 name = "nicti-render"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Render stage extension point (ADR-0004 §8). Crate boundary only — this is Tapetum's (#44/#45) future home; the render-stage execution signature (GPU buffer bindings, cache-key interaction) is explicitly left open by ADR-0004 §7 for #44/#16 to settle."
 

@@ -76,6 +76,7 @@ param(
     [string]$RefRoot = "H:\NictiBench\ref-10k",
     [string]$ManifestPath = "$PSScriptRoot\..\docs\ref-10k-manifest.csv",
     [string]$HeroSetFile = "$PSScriptRoot\..\docs\benchmarks\hero-set.txt",
+    [string]$ProwlExe = "$PSScriptRoot\..\target\release\prowl.exe",
     [string]$AhkConfigPath = "$PSScriptRoot\lrc\hero-config.ini",
     [string]$NavigateAhkPath = "$PSScriptRoot\lrc\navigate.ahk",
     [string]$AhkExe = "",
@@ -130,23 +131,27 @@ $roi = Get-Rect $RoiRect
 
 # --- 1. Integrity check: hero-set files must match the committed manifest's SHA-256 column,
 #        per docs/benchmarks.md's rule that any harness verify the frozen copy before trusting it.
-Write-Host "Verifying hero-set file integrity against $ManifestPath ..."
-$manifest = Import-Csv $ManifestPath
-$manifestById = @{}
-foreach ($row in $manifest) { $manifestById[$row.id] = $row.sha256 }
-
-$heroIds = Get-Content $HeroSetFile | Where-Object { $_.Trim() -ne "" }
-$badIds = @()
-foreach ($id in $heroIds) {
-    $path = Join-Path $RefRoot $id
-    if (-not (Test-Path $path)) { $badIds += "$id (missing at $path)"; continue }
-    $expected = $manifestById[$id]
-    if (-not $expected) { $badIds += "$id (not in manifest)"; continue }
-    $actual = (Get-FileHash -Algorithm SHA256 -Path $path).Hash.ToLower()
-    if ($actual -ne $expected.ToLower()) { $badIds += "$id (sha256 mismatch)" }
+#        #17 moved this from an inline Get-FileHash loop to `prowl verify`, so this script and
+#        every other harness (the `prowl` binary itself, any future research ticket's own
+#        tooling) share one verifier instead of each reimplementing it.
+if (-not (Test-Path $ProwlExe)) {
+    throw "prowl.exe not found at $ProwlExe -- build it first: cargo build --release -p nicti-prowl"
 }
-if ($badIds.Count -gt 0) {
-    throw "Hero-set integrity check failed for $($badIds.Count) file(s):`n$($badIds -join "`n")"
+Write-Host "Verifying hero-set file integrity via prowl ..."
+# @(...): without this, PowerShell unwraps a single-match Where-Object result to a scalar
+# instead of a one-element array, which would make $heroIds.Count below misreport.
+$heroIds = @(Get-Content $HeroSetFile | Where-Object { $_.Trim() -ne "" })
+if ($heroIds.Count -eq 0) {
+    # prowl verify --ids "" would otherwise report a clean, zero-file no-op (correct in
+    # isolation -- see nicti-prowl's own tests) and let this script fall through to actually
+    # driving and capturing a benchmark against zero verified reference files. An empty
+    # hero-set.txt is always a configuration mistake, never an intentional zero-file run.
+    throw "Hero-set file $HeroSetFile contains no non-blank ids -- nothing to verify or benchmark."
+}
+$idsArg = $heroIds -join ","
+& $ProwlExe verify --manifest $ManifestPath --root $RefRoot --ids $idsArg
+if ($LASTEXITCODE -ne 0) {
+    throw "Hero-set integrity check failed (prowl verify exited $LASTEXITCODE) -- see output above."
 }
 Write-Host "Integrity check passed: $($heroIds.Count) files verified."
 

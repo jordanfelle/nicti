@@ -99,3 +99,11 @@ person names leak into the committed manifest.
 
 Any benchmark harness (see ticket #17) should verify the local `ref-10k` copy's files against the
 committed manifest's SHA-256 column before trusting a run.
+
+**Harness (#17):** `crates/nicti-prowl` is the enforced version of this rule — its `manifest`
+module hashes and checks files against this CSV, and its `perf::Protocol::run_verified` refuses
+to execute a benchmark closure unless that check has already passed. `bench/run-hero.ps1` calls
+the `prowl` binary (`prowl verify --manifest docs/ref-10k-manifest.csv --root <ref-10k root>
+--ids <comma-separated ids>`) instead of hashing files itself. Two env vars: `NICTI_REF10K` (the
+ref-10k root, so callers don't have to pass `--root`/`-Root` everywhere) and `NICTI_BLESS=1`
+(rewrites golden-image files instead of comparing against them, for `nicti_prowl::golden`).

@@ -6163,6 +6163,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nicti-prowl"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "csv",
+ "image",
+ "rand 0.9.5",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "nicti-render"
 version = "0.0.0"
 dependencies = [

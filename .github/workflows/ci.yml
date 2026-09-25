@@ -47,7 +47,13 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # persist-credentials: false on every checkout in this workflow (CodeRabbit, #126):
+      # actions/checkout persists the read-only contents token into the local git config by
+      # default, which a build script (any of them, not just this repo's own) could read. None of
+      # these jobs push, so there's no reason to keep it around.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
@@ -63,16 +69,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: cargo clippy
+    name: cargo clippy (linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -109,11 +119,32 @@ jobs:
       # touches) no longer pays for compiling eight bundled native catalog-engine libraries.
       - run: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
 
+  clippy-windows:
+    name: cargo clippy (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
+      # #17: Windows is v1's actual target platform (see README's Scope section and
+      # docs/adr/0001), so it -- not Linux -- is the platform whose clippy/test results should
+      # gate merges. --workspace --exclude den mirrors the Linux job exactly (see its own
+      # comment above for why both flags are required).
+      - run: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
+
   test:
-    name: cargo test
+    name: cargo test (linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -131,6 +162,23 @@ jobs:
       # spikes, on every PR regardless of what it touches.
       - run: cargo test --workspace --all-targets --all-features --exclude den
 
+  test-windows:
+    name: cargo test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
+      # #17: runs the full workspace test suite on Windows, the actual v1 target -- this also
+      # covers nicti-claw's/dewclaw's dylib-loading tests (previously the only Windows test
+      # coverage, via build-windows's own narrow `-p nicti-claw -p dewclaw` step, now redundant
+      # and removed there).
+      - run: cargo test --workspace --all-targets --all-features --exclude den
+
   den-linux:
     name: den (linux)
     needs: changes
@@ -146,6 +194,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -181,6 +231,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -221,6 +273,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check licenses
@@ -238,6 +292,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -247,10 +303,10 @@ jobs:
       # the shipping v1 target, and shouldn't ride along in the release
       # build that validates it.
       - run: cargo build --release -p nicti
-      # Dylib loading (DLL_PREFIX/DLL_SUFFIX, LoadLibrary semantics) is platform-specific, and
-      # Windows is the v1 target -- the Linux `test` job alone isn't enough coverage for
-      # nicti-claw's C-ABI dylib boundary (ADR-0004 section 4).
-      - run: cargo test -p nicti-claw -p dewclaw
+      # #17: nicti-claw's/dewclaw's dylib-loading tests (DLL_PREFIX/DLL_SUFFIX, LoadLibrary
+      # semantics) now run as part of test-windows's full `--workspace` run above, so this job's
+      # own narrow `-p nicti-claw -p dewclaw` step was removed as redundant.
+      #
       # #117: den's own Windows coverage (including the RocksDB/bindgen msys64 workaround and
       # both `-p den` feature-scoped test commands this comment used to document here) moved to
       # the path-gated `den (windows)` job above -- this job now only builds/tests the real v1

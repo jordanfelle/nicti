@@ -278,6 +278,21 @@ ADRs live in `docs/adr/`, numbered sequentially.
   (Rust frame-diff analyzer, workspace member — not production code, see its own `Cargo.toml`
   description; its `analyze` subcommand pools a full results tree into per-config/interaction
   p50/p95/max). Requires PowerShell 7+, see `bench/lrc/README.md`.
+- **Reusable harness (#17): `crates/nicti-prowl`** — a real production crate (not `bench/`-style
+  tooling), since its manifest-verify/perf-protocol pieces are meant to be depended on by future
+  research tickets' own exit criteria, not just the hero scenario. `manifest.rs`
+  (`Manifest::load`/`verify`, checks a ref-10k copy's SHA-256 against `docs/ref-10k-manifest.csv`
+  — `bench/run-hero.ps1` calls this via the `prowl` binary instead of its own inline
+  `Get-FileHash` loop), `refset.rs` (`select` — general-purpose bucket-based picking, deliberately
+  *not* a Rust port of `bench/select_hero_set.py`'s stratified sampler; `hero_set` reads the
+  already-frozen `docs/benchmarks/hero-set.txt` instead), `perf.rs` (`Protocol` — the 1-warmup +
+  5-measured-run/p50-p95-max protocol from `docs/benchmarks.md`, `run_verified` refuses to run
+  against an unverified ref-10k copy), `golden.rs` (`GoldenStore`/`Render` trait — golden-image
+  compare/store, hand-rolled single-scale SSIM rather than `dssim-core`, whose own published
+  license string doesn't cleanly match an allowed SPDX id in `deny.toml`; tested only against
+  synthetic images since no real NEF→render path exists yet, see the follow-up issue filed
+  alongside #17 for wiring in real goldens once #41 lands). `prowl` (the bin target) exposes
+  `verify`/`select` for PowerShell/CI callers.
 
 ## Naming convention: feline references
 
@@ -300,6 +315,8 @@ from ADR-0004 §8:
   other `nicti-*` crate builds on. Generalized from the now-deleted `spikes/sheath` spike.
 - **`crates/dewclaw`** — test fixture (cdylib) for `nicti-claw`'s dylib tests, generalized from
   the now-deleted `spikes/dewclaw`.
+- **`crates/nicti-prowl`** — the benchmark + golden-image harness (#17); see the Performance
+  targets and benchmarking section above for its module breakdown.
 - One crate per extension point, each holding only its supertrait plus a `Registry` type alias —
   no execution methods yet, those belong to the tickets named below: `nicti-decode` (`RawDecoder`,
   #37/#40/#41), `nicti-color` (`ColorProfile`, #38/#42), `nicti-lens` (`LensCorrection`, #39),
@@ -424,6 +441,12 @@ from Shutterpaws repos here. See `.github/workflows/ci.yml`. A `cargo-deny` job 
 licenses against `deny.toml` (the allowlist from `docs/adr/0003-third-party-license-policy.md`) —
 it only covers Cargo dependencies, not native libraries, ML models, or data files, which still
 rely on `docs/licensing.md` being updated at review time.
+
+**Windows is the required (blocking) platform (#17)**, not Linux: `cargo fmt`, `cargo clippy
+(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, and `den (windows)` are
+the branch-protection-required checks, matching the actual v1 target (README's Scope section).
+`cargo clippy (linux)`/`cargo test (linux)`/`den (linux)` still run on every PR (Linux stays
+CI-only, catches platform-specific bugs early) but aren't required to merge.
 
 **`spikes/den`'s eight bundled native catalog-engine builds are path-gated (#117)**, not part of
 the `clippy`/`test`/`build-windows` jobs every PR pays for: a `changes` job (`dorny/paths-filter`)

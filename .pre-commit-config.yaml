@@ -56,15 +56,22 @@ repos:
   - repo: local
     hooks:
       # rustfmt auto-fix: rewrites files in place, re-stage after running.
+      # --all: the root Cargo.toml is both the workspace root and a real package (`nicti`), not
+      # a virtual manifest, so a bare `cargo fmt --` without `--all` silently only formats the
+      # root crate and skips spikes/* and bench/whisker -- see CLAUDE.md's Testing section for
+      # the real CI incident this exact gap caused.
       - id: cargo-fmt
         name: Format Rust code (cargo fmt)
-        entry: cargo fmt --
+        entry: cargo fmt --all --
         language: system
         types: [rust]
 
+      # --workspace --exclude den: same root-package gap as cargo fmt above, plus den (eight
+      # bundled native catalog-engine builds, see CI's own --exclude den comment) is excluded so
+      # this hook stays fast enough to run on every commit.
       - id: cargo-clippy
         name: Lint Rust code (cargo clippy)
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
@@ -82,7 +89,7 @@ repos:
     hooks:
       - id: cargo-test
         name: Run Rust tests
-        entry: cargo test
+        entry: cargo test --workspace --all-targets --all-features --exclude den
         language: system
         pass_filenames: false
         stages: [pre-push]

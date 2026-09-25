@@ -2,6 +2,7 @@
 name = "groom"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Throwaway spike for #50 (ADR-0007): classic clone/heal (CPU + wgpu Poisson-blend compute), auto-source-pick, ort/load-dynamic AI-removal scaffolding (MobileSAM/LaMa wrappers, no bundled weights), crop/resize/feather compositing, and the HealStage/Spot edit-model representation with a pawprint-style cache_key(). Not a production crate."
 

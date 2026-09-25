@@ -2,6 +2,7 @@
 name = "sniff"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Throwaway spike for #28: embedded-JPEG (NEF/DNG PreviewIFD) inventory and read/decode benchmark across Nikon bodies, feeding #29's preview-tier design. Not a production crate."
 

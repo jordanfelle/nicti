@@ -2,6 +2,7 @@
 name = "glint"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Throwaway spike for #16 (ADR-0005): measured wgpu-vs-CUDA render/pixel-kernel comparison (correctness, feature/limit availability, throughput, dispatch overhead, host<->device interop cost) backing the GPU compute API decision. Not a production crate."
 

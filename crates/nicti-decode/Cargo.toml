@@ -2,6 +2,7 @@
 name = "nicti-decode"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "RAW decoder extension point (ADR-0004 §8). Crate boundary only — decoder implementation is owned by #37 (RAW decoder), #40 (demosaic + noise reduction), #41 (RAW -> linear -> working-space pipeline)."
 

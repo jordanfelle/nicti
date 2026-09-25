@@ -2,6 +2,7 @@
 name = "nicti-catalog"
 version = "0.0.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Catalog store extension point (ADR-0004 §8). Crate boundary only — this is #22's (catalog schema + import/ingest pipeline) future home; the embedded database engine (#67) and schema decisions land there."
 
