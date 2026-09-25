@@ -134,7 +134,15 @@ jobs:
   den-linux:
     name: den (linux)
     needs: changes
-    if: needs.changes.outputs.den == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    # needs.changes.result == 'failure' runs den rather than skipping it: a custom `if:` on a job
+    # with `needs:` replaces the implicit `needs: success()` gate entirely, so without this a
+    # `changes`-job failure (a transient API error, a future permissions regression, anything)
+    # would make den silently skip instead of blocking -- CodeRabbit caught this as a real
+    # structural gap even after the pull-requests:read fix (which only fixed one specific cause
+    # of `changes` failing, not the underlying "failure defaults to skip" shape). Running den on
+    # a `changes` failure is the safe default: worst case is an unnecessary den run, not a
+    # silently-unverified one.
+    if: needs.changes.result == 'failure' || needs.changes.outputs.den == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -169,7 +177,7 @@ jobs:
   den-windows:
     name: den (windows)
     needs: changes
-    if: needs.changes.outputs.den == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: needs.changes.result == 'failure' || needs.changes.outputs.den == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see den-linux's comment above
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
