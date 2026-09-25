@@ -170,25 +170,33 @@ The full 9,142-file NVMe set and the HDD (`E:\`) comparison the issue's own scop
 | `locate` | NVMe | manifest | warm | 45,710 | 18.4 ms | 44.9 ms | 645.9 ms |
 | `decode-screen` | NVMe | manifest | warm | 9,142 | 204.4 ms | 254.6 ms | 689.7 ms |
 | `full-read` | NVMe | manifest | cold | 2,500 | 12.3 ms | 14.5 ms | 56.1 ms |
+| `locate` | NVMe | random | cold | 2,500 | 15.6 ms | 34.0 ms | 91.0 ms |
+| `full-read` | NVMe | random | cold | 2,500 | 15.7 ms | 32.4 ms | 101.6 ms |
 | `locate` | HDD | random | cold | 2,500 | 252.2 ms | 447.8 ms | 3,794.2 ms |
 | `full-read` | HDD | random | cold | 2,500 | 251.2 ms | 454.1 ms | 4,507.3 ms |
 
-`locate`/`decode-screen` used the full 9,142-file set; `full-read` and both HDD configs used the
-500-file sample the doc's own reproduction commands specify (`full-read` isn't tier-dependent, and
-a 500-file random-order cold sample already forces the drive to seek across the full span, so a
-full-set run adds cost without adding information here). `decode-screen`'s full-set pass used 1
-warm-up + 1 measured run rather than the usual 1+5 — a deliberate scope reduction, not a
+`locate`/`decode-screen` used the full 9,142-file set; every `full-read` row and both HDD configs
+used the 500-file sample the doc's own reproduction commands specify (`full-read` isn't
+tier-dependent, and a 500-file random-order cold sample already forces the drive to seek across the
+full span, so a full-set run adds cost without adding information here). `decode-screen`'s full-set
+pass used 1 warm-up + 1 measured run rather than the usual 1+5 — a deliberate scope reduction, not a
 methodology violation: the per-file variance this mode's numbers carry was already characterized
 at 800-file/3-run scale in the Throughput section above, so what this full-set pass needed to add
 was *coverage* (does the number hold at 9,142 files, not just 800), not more repeated-measurement
 samples. 9,142 pooled samples from one run is still far more data than the earlier 800-file/3-run
 pass's 2,400.
 
-**HDD is ~14-20x slower than NVMe for cold, randomly-ordered reads** (locate: 252ms vs 18ms p50;
-full-read: 251ms vs 12ms p50) — the realistic case for culling, where a user's browse order is
-arbitrary, not sequential. This is a far larger gap than the ~9-12x NVMe manifest-vs-random gap
-already measured above, confirming random-order seek cost compounds with the underlying drive's own
-seek latency rather than being NVMe-specific overhead.
+**HDD is ~16x slower than NVMe, isolating the drive alone** — the NVMe-random-cold and
+HDD-random-cold rows above hold order and cold-ness fixed and vary only the drive: `locate` 252.2ms
+vs 15.6ms p50 (16.2x), `full-read` 251.2ms vs 15.7ms p50 (16.0x). This is a different, cleaner
+comparison than "HDD-random vs NVMe-manifest" (an earlier draft of this doc quoted 251ms vs 12ms —
+correct numbers, but conflating two separate effects: the drive's own speed *and* the ~9-12x
+NVMe manifest-vs-random seek-order cost already measured in the Throughput section above). Both
+effects are real; they don't stack multiplicatively into a single number, since NVMe's manifest
+number is fast enough that random order costs relatively more of it proportionally than the same
+seek pattern costs HDD's already-slow baseline — comparing across two varied dimensions at once
+overstated the apparent NVMe-vs-HDD gap. The drive-alone comparison above (~16x) is the number that
+actually answers the issue's own question.
 
 ### Real bug found and fixed: `read_cold`'s NO_BUFFERING alignment violation on short reads
 

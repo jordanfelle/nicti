@@ -379,7 +379,6 @@ offset to the next call, surfacing as `os error 87` on HDD ~10-19% of the time, 
 fixed by retrying the identical `seek_read` call on the same handle rather than resuming from a
 running offset. See `docs/research/sniff-embedded-jpeg.md` for #28's write-up and
 `docs/adr/0017-preview-tier-strategy.md` for #29's), `spikes/groom` (#50/ADR-0007's
->>>>>>> 9fc9bb6 (Fix line wrap in CLAUDE.md pointer)
 healing-and-removal research: CPU
 clone-stamp/Poisson-heal/auto-source-pick reference plus a `wgpu` compute-shader Poisson twin
 proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding with no real
