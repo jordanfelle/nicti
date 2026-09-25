@@ -199,7 +199,7 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   same C symbols) — required fixing two pre-existing cfg-gating gaps in `bin/den.rs`/
   `tests/facet_cache.rs` and splitting `.github/workflows/ci.yml`'s `cargo test` job so `den` gets
   its own feature-scoped commands instead of one blanket `--all-features` invocation.
-- **fjall, evaluated post-ADR-0014**: `docs/adr/0015-fjall-evaluation.md` — **not adopted**. The
+- **fjall, evaluated post-ADR-0014**: `docs/adr/0016-fjall-evaluation.md` — **not adopted**. The
   cleanest Windows-build story of any catalog candidate so far (fjall and its own `lsm-tree`
   dependency have no `build.rs` at all — 100% safe Rust, no native C/C++ core to audit) and a real,
   active maintenance signal (v3.1.10, 25 days old at spike time) — but **fails 3 of 8 measured
@@ -293,14 +293,14 @@ edit-model representation with a pawprint-style `cache_key()`; see
 `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
 (#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
 #106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, #107/ADR-0012's
-schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, and #116/ADR-0015's `fjall`
+schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, and #116/ADR-0016's `fjall`
 follow-up — one module per candidate,
 `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`libsql_engine.rs`/
 `fjall_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind matching Cargo features
 (`turso`, `redb`, `libsql`, and `fjall` are all default-off, evaluated-not-adopted, kept for
 reference — `libsql` additionally cannot be enabled in the same binary as `sqlite`, both bundle
 their own SQLite C symbols and collide at link time, see ADR-0014's Spike section; `fjall` has no
-such collision, it links cleanly alongside every other engine, see ADR-0015's Consequences; the two
+such collision, it links cleanly alongside every other engine, see ADR-0016's Consequences; the two
 facet-cache modules require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`),
 plus `schema_fit.rs` (ADR-0002's
 JSON-column + append-only/burst-compacted history-table shape, gated on both `sqlite` and

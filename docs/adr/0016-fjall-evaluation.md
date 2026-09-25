@@ -1,4 +1,4 @@
-# ADR-0015: fjall, evaluated for the catalog store — not adopted
+# ADR-0016: fjall, evaluated for the catalog store — not adopted
 
 - **Status:** Rejected
 - **Date:** 2026-09-24

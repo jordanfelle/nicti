@@ -212,7 +212,7 @@ needed — the entire subtree resolves within the existing allowlist, same pre-e
 (Turso-only) warning as every prior ADR in this series, nothing new from `libsql`.
 
 **Update (2026-09-24, [#116](https://github.com/jordanfelle/nicti/issues/116)'s `fjall` evaluation,
-`docs/adr/0015-fjall-evaluation.md`):** the `fjall` crate (v3.1.10, default-off feature, kept for
+`docs/adr/0016-fjall-evaluation.md`):** the `fjall` crate (v3.1.10, default-off feature, kept for
 reference after evaluating-not-adopting per the ADR) is `MIT OR Apache-2.0`, confirmed directly
 from crates.io's version-level API response and cross-checked against the bundled `LICENSE-MIT`/
 `LICENSE-APACHE` files in the downloaded crate source. Its own dependency (`lsm-tree`, the
