@@ -10,11 +10,11 @@ description = "Benchmark + golden-image harness (#17): ref-10k manifest verifica
 anyhow = "1"
 csv = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
-rand = "0.9"
+rand = "0.10"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
