@@ -54,18 +54,22 @@ inventing a new one, keeping the comparison apples-to-apples.
 
 ## Decision
 
-**Not adopted.** fjall clears every hard gate — including a genuinely clean pure-Rust,
-no-native-code Windows-build story, the strongest of any candidate evaluated so far — but it
-**fails three of the eight measured query gates, at both 600k and 2M scale**, by a wide margin
-(2–5x over budget even at the smaller scale, not just at the 2M planning horizon the way SQLite's
-one known miss or `redb`'s two misses only showed up at 2M). No other candidate in this series has
-missed this many gates this early. Crash-safety is **inconclusive**, for the same structural reason
+**Not adopted.** fjall's license and maintenance gates pass cleanly, and it has a genuinely clean
+pure-Rust, no-native-code build story (no `build.rs`, nothing to cross-compile) — the strongest
+Windows-build story of any candidate evaluated so far, though this pass's own confirmation is
+local/Linux-side reasoning about the absence of native code, not yet a real `windows-latest` CI
+run; that's on this PR's own CI to confirm, not asserted here as already-verified. Crash-safety is
+**inconclusive**, not a clean pass — for the same structural reason
 ADR-0009/ADR-0010 already documented for Turso Database/`redb`: this spike's in-process
 `mem::forget` crash simulation cannot distinguish a real `kill -9` (which releases every OS-level
 lock the dead process held) from a leaked file descriptor inside the *same, still-alive* test
 process — and fjall holds exactly that kind of OS-level advisory file lock (a `std::fs::File::
 try_lock()` on a per-directory lock file, released only by its own `Drop` impl, which `mem::forget`
-skips). Combined with the real engineering cost visible in `fjall_engine.rs` (six hand-maintained
+skips). **What actually decides this evaluation**: fjall **fails three of the eight measured query
+gates, at both 600k and 2M scale**, by a wide margin (2–5x over budget even at the smaller scale,
+not just at the 2M planning horizon the way SQLite's one known miss or `redb`'s two misses only
+showed up at 2M) — no other candidate in this series has missed this many gates this early.
+Combined with the real engineering cost visible in `fjall_engine.rs` (six hand-maintained
 secondary indexes, no query planner, same category of hand-rolled cost LMDB/`redb` already showed),
 fjall is not a better fit for #22 than SQLite (still the incumbent per ADR-0008/0012) or than
 `redb`/LMDB among the KV-shaped alternatives already evaluated.
@@ -85,7 +89,7 @@ close-margin case needing a Windows re-check.
 
 | Gate | Result |
 |---|---|
-| 1. Windows build | ✅ Strong source-level evidence: neither `fjall` nor its own `lsm-tree` dependency has a `build.rs` at all — no native C/C++ compilation step, no linker-flag surface (the exact bug class that hard-gate-failed `pglite-rs` in ADR-0008). The only `cfg(target_os = ...)` branches in the crate (`src/file.rs`, `src/db_config.rs`) are genuine, dedicated `windows`/`macos` branches, not a "does everything except macOS" pattern with no real Windows path. This PR extends `.github/workflows/ci.yml`'s `build-windows` job (`cargo test -p den --features sqlite,duckdb,lmdb,turso,fjall`) — the authoritative confirmation is that CI run, not this local evidence alone. |
+| 1. Windows build | ✅ Strong source-level evidence: neither `fjall` nor its own `lsm-tree` dependency has a `build.rs` at all — no native C/C++ compilation step, no linker-flag surface (the exact bug class that hard-gate-failed `pglite-rs` in ADR-0008). The only `cfg(target_os = ...)` branches in the crate (`src/file.rs`, `src/db_config.rs`) are genuine, dedicated `windows`/`macos` branches, not a "does everything except macOS" pattern with no real Windows path. This PR extends `.github/workflows/ci.yml`'s `build-windows` job (`cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall`) — the authoritative confirmation is that CI run, not this local evidence alone. |
 | 2. License | ✅ `MIT OR Apache-2.0`, confirmed independently from crates.io and the bundled `LICENSE-MIT`/`LICENSE-APACHE` files — already on `deny.toml`'s allowlist. One real, mechanical allowlist edit was needed (unlike `redb`/Turso's zero-edit updates): `varint-rs` (a transitive dependency of `lsm-tree`) carries `0BSD`, not previously allowed — added as its own entry (OSI-approved, even more permissive than MIT/Apache-2.0, no attribution requirement). `cargo deny --workspace --all-features check licenses` passes clean after that one addition. |
 | 3. Crash-safety | ⚠️ **Inconclusive, not failed** — **20/20 reopen failures**, but every failure is the identical `FjallError: Locked`, from a fresh path on the very first attempt to reopen it (not a cross-iteration path-reuse artifact — `den crash`'s harness already uses a fresh path per iteration, per ADR-0009's own established practice). Root-caused at the source level, not assumed: `fjall`'s `LockedFileGuard` (`src/locked_file.rs`) takes a `std::fs::File::try_lock()` (an OS-level advisory lock) on a per-directory lock file when the store opens, released only by `LockedFileGuardInner`'s own `Drop` impl. `mem::forget`ing the engine (this spike's crash-simulation technique) skips `Drop` entirely, so the lock is never released for the rest of this *same, still-alive* test process — the identical structural limitation ADR-0009 found for Turso Database's `fcntl` lock and ADR-0010 found for `redb`'s OS-level byte-range lock, both scoped to the one leaked file descriptor rather than LMDB's process-wide open-environment table. A real `kill -9` doesn't have this problem (the OS reclaims every lock the dead process held), but this in-process technique cannot distinguish that from a bug — a real fork+exec+SIGKILL harness is the only way to actually resolve it, out of scope for this pass, same conclusion as every prior fd-scoped-lock finding in this series. |
 | 4. Maintained | ✅ `fjall` 3.1.10 published 2026-08-30 (25 days before this evaluation); steady 2026 release cadence (3.1.4 → 3.1.10, roughly monthly); GitHub repo (`fjall-rs/fjall`) not archived. Real, working API, not a stub — confirmed by reading the actual crate source (`Database`/`Keyspace`/`OwnedWriteBatch`/`Snapshot`), exercised end-to-end by `fjall_engine.rs` and its passing `cross_engine.rs` correctness test. |

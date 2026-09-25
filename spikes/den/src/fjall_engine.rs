@@ -69,7 +69,9 @@
 
 use crate::gen::{Asset, Flag};
 use crate::workload::{FacetCounts, RangeQuery, Workload};
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, Readable, Snapshot};
+use fjall::{
+    Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable, Snapshot,
+};
 use std::path::{Path, PathBuf};
 
 pub struct FjallEngine {
@@ -285,11 +287,14 @@ impl Workload for FjallEngine {
     }
 
     fn rate_burst(&mut self, updates: &[(u64, u8)]) -> anyhow::Result<()> {
-        // See this module's doc comment: each read below sees only the last *committed* state,
-        // not any earlier update already staged into `batch` this same call — harmless as long as
-        // no id repeats within one burst (true for this benchmark's inputs), but a real divergence
-        // from `lmdb.rs`/`redb_engine.rs`'s open-write-txn version if it ever did.
+        // Each read below sees only the last *committed* state, not any earlier update already
+        // staged into `batch` this same call. If `updates` repeats an asset_id, that would leave a
+        // stale `by_rating` entry for an intermediate rating (found by CodeRabbit's CLI review,
+        // same class of bug already fixed in rocksdb_engine.rs's rate_burst). Tracks each asset's
+        // rating as staged so far *within this batch* to avoid it, matching that fix.
         let mut batch = self.db.batch();
+        let mut staged_rating: std::collections::HashMap<u64, u8> =
+            std::collections::HashMap::new();
         for (asset_id, rating) in updates {
             let idk = id_key(*asset_id);
             let raw = self
@@ -297,7 +302,10 @@ impl Workload for FjallEngine {
                 .get(idk.as_slice())?
                 .ok_or_else(|| anyhow::anyhow!("asset {asset_id} not found"))?;
             let mut stored: StoredAsset = bincode::deserialize(raw.as_ref())?;
-            let old_rating = stored.rating;
+            let old_rating = staged_rating
+                .get(asset_id)
+                .copied()
+                .unwrap_or(stored.rating);
             stored.rating = *rating;
             let bytes = bincode::serialize(&stored)?;
 
@@ -311,6 +319,7 @@ impl Workload for FjallEngine {
                 composite_key(&[*rating], *asset_id).as_slice(),
                 idk.as_slice(),
             );
+            staged_rating.insert(*asset_id, *rating);
         }
         batch.commit()?;
         Ok(())
@@ -454,12 +463,37 @@ impl Workload for FjallEngine {
     }
 
     fn backup(&self, dest: &Path) -> anyhow::Result<()> {
+        // Reject a dest that is the source directory itself or nested inside it -- copying a
+        // directory into itself would recurse indefinitely / corrupt the source. Not reachable by
+        // this crate's own benchmark call site (always a sibling path), but a real hazard for any
+        // other caller of this spike code, found by CodeRabbit's CLI review.
+        let src_canon = self.path.canonicalize()?;
+        if dest.exists() {
+            let dest_canon = dest.canonicalize()?;
+            anyhow::ensure!(
+                dest_canon != src_canon && !dest_canon.starts_with(&src_canon),
+                "backup destination {dest_canon:?} must not be the source directory or nested inside it"
+            );
+        } else if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let parent_canon = parent.canonicalize()?;
+            anyhow::ensure!(
+                parent_canon != src_canon && !parent_canon.starts_with(&src_canon),
+                "backup destination {dest:?} must not be nested inside the source directory"
+            );
+        }
+
         std::fs::create_dir_all(dest)?;
         // Pins the current state so segment/journal files this snapshot depends on aren't
         // reclaimed mid-copy — see this module's doc comment for why this is a real, documented
         // fjall guarantee, stronger than `redb_engine.rs`'s equivalent caveat, but still not a
         // purpose-built, commit-boundary-coordinated backup call.
         let _snapshot = self.db.snapshot();
+        // Flush the in-memory-buffered journal to disk *before* the raw file copy below -- without
+        // this, recently committed writes that haven't reached disk yet would be silently missing
+        // from the backup, since `copy_dir_recursive` only sees what's already on the filesystem.
+        // Found by CodeRabbit's CLI review; `snapshot()` alone pins existing on-disk state, it
+        // doesn't force pending journal data to disk.
+        self.db.persist(PersistMode::SyncAll)?;
         copy_dir_recursive(&self.path, dest)?;
         Ok(())
     }
