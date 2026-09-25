@@ -82,9 +82,17 @@ hash.
 Every Z8 and D7500 file (all 8,842 of them) carries the same consistent 3-4-tier structure: a tiny
 classic thumbnail (Z8 only), a small `nikon_preview_ifd` (~640x424, ~140 KB), a genuinely useful
 mid-size `sub_ifd_2` (1620x1080, ~1 MB, quality 97-98), and the full-resolution `sub_ifd_0`
-(`JpgFromRaw`) — which for High Efficiency/HE*-compressed Z8 files *is the actual compressed RAW
-pixel data*, not just a preview (quality ~71, matching the codec's own working quality, not a
-separately-chosen preview quality). Every D3400 DNG file has at least one usable preview via a
+(`JpgFromRaw`, quality ~71). **Correction (added for #29): `JpgFromRaw` is not the actual
+compressed RAW pixel data**, contrary to what this doc originally claimed. Verified directly via
+`exiftool` against `ref-00001.nef` (Z8, High Efficiency): the real raw sensor strip lives in a
+separate SubIFD (`Compression: Nikon NEF Compressed`, `ImageWidth/Height: 8280x5520`, its own
+`StripOffsets`/`StripByteCounts`, ~17.1 MB) — a completely different offset and roughly 8x the
+byte size of `JpgFromRawStart`/`Length`'s ~2.1 MB. `JpgFromRaw` is a genuine, separately-encoded
+JPEG preview at the camera's full pixel dimensions, not a view into the compressed raw strip; its
+quality-~71 estimate reflects the camera's own preview-encoding choice, not the HE codec's working
+quality. This doesn't change `JpgFromRaw`'s usefulness as #29's T3 (1:1 zoom) source — it's still
+a real, full-resolution, camera-rendered JPEG, cheaper than a full RAW decode — only the
+description of *why* it exists. Every D3400 DNG file has at least one usable preview via a
 `SubIFD`, just smaller (max 1024px) and no MakerNote-based mid/large tier (see the DNGPrivateData
 gap above).
 

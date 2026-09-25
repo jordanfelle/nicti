@@ -1,5 +1,7 @@
 //! Decode + resize helpers for the two preview tiers Sniff benchmarks: a "grid" thumbnail
-//! (~512px long edge) and a "screen" preview (~2560px long edge, matching a typical loupe view).
+//! (~512px long edge) and a "screen" preview (~3840px long edge, matching #29's confirmed
+//! reference-machine display: 2x LG ~32" panels at 3840x2160 -- the 1620px `sub_ifd_2` mid
+//! preview is *not* enough for this loupe viewport, see `docs/adr/0017-preview-tier-strategy.md`).
 
 use fast_image_resize as fr;
 use std::num::NonZeroU32;
@@ -7,7 +9,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::JpegDecoder;
 
 pub const GRID_TIER_LONG_EDGE: u32 = 512;
-pub const SCREEN_TIER_LONG_EDGE: u32 = 2560;
+pub const SCREEN_TIER_LONG_EDGE: u32 = 3840;
 
 pub struct DecodedRgb {
     pub width: u32,

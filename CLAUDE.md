@@ -260,6 +260,25 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   candidate (no CI job split needed, unlike ADR-0014's mandatory `--exclude den` fix). One real
   `deny.toml` edit was needed: `varint-rs` (transitive via `lsm-tree`) carries `0BSD`, not
   previously allowlisted.
+- **Preview tier strategy (#29)**: `docs/adr/0017-preview-tier-strategy.md` — T0 (grid,
+  `nikon_preview_ifd` verbatim) → T1 (loupe-fast, `sub_ifd_2`, RAM-only) → T2 (screen, `JpgFromRaw`
+  decoded+resized to the confirmed reference display's 3840px long edge, re-encoded JPEG) → T3
+  (1:1, `JpgFromRaw` full decode). Real-catalog sizing (380,300 assets, only 28% Nikon-body — most
+  is already-decoded JPEG needing a separate resize-the-master path, not embedded-tier
+  extraction) and a correction to #28's finding (`JpgFromRaw` is a real distinct preview JPEG, not
+  the actual raw sensor strip — that lives in its own SubIFD, confirmed via `exiftool`) both feed
+  this ADR. Seek-and-read (`spikes/sniff/src/source.rs`'s `ByteSource`/`FileSource`, `ifd::Walker`
+  now generic over it) measured **~110x faster** than #28's original whole-file-read locate path.
+  **AVIF measured against JPEG for the T2 tier at the user's explicit request** (pure-Rust
+  `ravif`/`avif-decode`, no C toolchain): ~4.2x smaller but ~9.5x slower to encode and misses the
+  &lt;50ms interactive decode budget at p95 — **JPEG stays the v1 choice**, AVIF's compression win
+  doesn't clear its own throughput/latency costs. **Cache backend split by tier size**: SQLite for
+  T0 (small, ~138KB, fastest+most-consistent reads) vs. a pack-file format for T2 (large, ~1.2MB,
+  SQLite's write path is the bottleneck at this size, confirmed after fixing a real
+  batched-transaction benchmarking bug). Hardware-accel-aware format auto-selection explicitly
+  deferred to a future issue against the real (non-spike) preview pipeline, not built into this
+  research spike. `ravif`/`rav1d` need `nasm` to build — added to `deny.toml` (`MPL-2.0`, `IJG`)
+  and `.github/workflows/ci.yml`'s four general clippy/test jobs in the same PR.
 
 ADRs live in `docs/adr/`, numbered sequentially.
 
@@ -333,12 +352,18 @@ throughput, dispatch overhead, host↔device interop cost), and `spikes/pelt` +
 `spikes/pelt-egui`/`spikes/pelt-iced`/`spikes/pelt-slint` (#68/ADR-0006's GUI-framework research —
 `pelt` is the toolkit-agnostic shared fixture/math crate, each `pelt-*` is one candidate's
 virtualized-grid + loupe + custom-wgpu-viewport spike; no `spikes/pelt-gpui` exists, see
-ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG research: a from-scratch
-TIFF/EXIF/Nikon-MakerNote IFD walker — no LibRaw/rawler dependency, deliberately, to stay clear of
-#37's still-open decoder choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path and a
-locate/read/decode-grid/decode-screen/full-read latency benchmark; `sniff inventory` cross-checked
-byte-exact against `exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md`
-for the full write-up), `spikes/groom` (#50/ADR-0007's healing-and-removal research: CPU
+ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG research, extended for
+#29's preview-tier-strategy comparison: a from-scratch TIFF/EXIF/Nikon-MakerNote IFD walker (now
+generic over `source::ByteSource` — `SliceSource`/`FileSource` — for #29's ranged, seek-and-read
+extraction) — no LibRaw/rawler dependency, deliberately, to stay clear of #37's still-open decoder
+choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF
+tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust), `cache.rs`'s three
+cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
+per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
+benchmark with a `--io {whole,ranged}` axis; `sniff inventory` cross-checked byte-exact against
+`exiftool` on real Z8/D7500 files, see `docs/research/sniff-embedded-jpeg.md` for #28's write-up
+and `docs/adr/0017-preview-tier-strategy.md` for #29's), `spikes/groom` (#50/ADR-0007's
+healing-and-removal research: CPU
 clone-stamp/Poisson-heal/auto-source-pick reference plus a `wgpu` compute-shader Poisson twin
 proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding with no real
 ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`

@@ -6,6 +6,7 @@
 
 use crate::ifd::{PreviewSource, Walker};
 use crate::jpeg_meta;
+use crate::source::SliceSource;
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -116,7 +117,7 @@ fn process_file(
         }
     };
 
-    let mut walker = match Walker::new(&data) {
+    let mut walker = match Walker::new(SliceSource::new(&data)) {
         Ok(w) => w,
         Err(e) => {
             return vec![InventoryRow {
