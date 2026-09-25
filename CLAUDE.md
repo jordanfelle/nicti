@@ -443,22 +443,43 @@ it only covers Cargo dependencies, not native libraries, ML models, or data file
 rely on `docs/licensing.md` being updated at review time.
 
 **Windows is the required (blocking) platform (#17)**, not Linux: `cargo fmt`, `cargo clippy
-(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, and `den (windows)` are
-the branch-protection-required checks, matching the actual v1 target (README's Scope section).
-`cargo clippy (linux)`/`cargo test (linux)`/`den (linux)` still run on every PR (Linux stays
-CI-only, catches platform-specific bugs early) but aren't required to merge.
+(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, `den (windows)`, and
+`pelt (windows)` are the branch-protection-required checks, matching the actual v1 target
+(README's Scope section). `cargo clippy (linux)`/`cargo test (linux)`/`den (linux)`/
+`pelt (linux)` still run on every PR (Linux stays CI-only, catches platform-specific bugs early)
+but aren't required to merge.
 
-**`spikes/den`'s eight bundled native catalog-engine builds are path-gated (#117)**, not part of
+**`spikes/den`'s eight bundled native catalog-engine builds, and `spikes/pelt-egui`/`pelt-iced`/
+`pelt-slint`'s GUI-framework spikes, are both path-gated the same way (#117, #127)**, not part of
 the `clippy`/`test`/`build-windows` jobs every PR pays for: a `changes` job (`dorny/paths-filter`)
-only routes into `den (linux)`/`den (windows)` when `spikes/den/**`, `Cargo.{toml,lock}`, or the
+only routes into `den (linux)`/`den (windows)` when `spikes/den/**` changed (or `pelt (linux)`/
+`pelt (windows)` when `spikes/pelt-egui|iced|slint/**` changed), or `Cargo.{toml,lock}`/the
 workflow file itself changed, plus a weekly Monday schedule and `workflow_dispatch` so a
-non-den-touching dependency bump can't silently break it forever between den PRs. `Swatinem/
-rust-cache` only saves (`save-if`) from a push to `main` — PRs restore main's cache and skip the
-save step, which used to be a 20-30 minute cost on the Windows job by itself and was pushing this
-repo's cache usage over GitHub's 10GB/repo limit. `CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level
-env) additionally strips debuginfo from both Rust and den's bundled C/C++ builds, which was most
-of that cache size. `spikes/**` is also excluded from Renovate (`renovate.json`) for the same
-reason — den bundles five already-rejected engine candidates (ADR-0009/0010/0014/0015/0016) that
-generate bump-PR churn nobody will act on. **`spikes/den` itself is slated for deletion once #22
-lands** — see #123 for the follow-up cleanup (CI jobs, the Renovate rule, `deny.toml` exceptions,
-this section) once that happens.
+non-touching dependency bump can't silently break either forever between den/pelt PRs. The pelt
+split matters because `pelt-egui`/`pelt-iced`/`pelt-slint` alone account for 311 of the 543 unique
+crates in a full Windows build (measured via `cargo tree --workspace --exclude den`) — the largest
+single driver of #126's cold-build Windows clippy/test times (5m47s/8m35s of actual compile,
+confirmed via CI logs to be cold builds, not slow warm ones: `rust-cache` had "No cache found" on
+both, since these were brand-new jobs). `Swatinem/rust-cache` only saves (`save-if`) from a push to
+`main`, for every job except `den (linux)`/`pelt (linux)` which never save at all (`save-if:
+false`, #127) — neither is a required check, and den is already slated for deletion. PRs restore
+main's cache and skip the save step, which used to be a 20-30 minute cost on the Windows job by
+itself and was pushing this repo's cache usage over GitHub's 10GB/repo limit.
+`CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level env) additionally strips debuginfo from both Rust and
+den's bundled C/C++ builds, which was most of that cache size. `spikes/**` is also excluded from
+Renovate (`renovate.json`) for the same reason — den bundles five already-rejected engine
+candidates (ADR-0009/0010/0014/0015/0016) that generate bump-PR churn nobody will act on.
+**`spikes/den` itself is slated for deletion once #22 lands, and `spikes/pelt-*` once ADR-0006
+resolves** — see #123 for the den follow-up cleanup (CI jobs, the Renovate rule, `deny.toml`
+exceptions, this section); the pelt-* cleanup isn't filed as its own issue yet since ADR-0006 is
+still Proposed pending #90's reference-machine run.
+
+**CodeQL's `rust` analysis (`.github/workflows/codeql.yml`) is scoped to the shipping crates
+only (#127)**: before `codeql-action/init` runs, a CI-only step rewrites the checked-out
+`Cargo.toml`'s workspace `members` to `[".", "crates/*"]` (never committed — the real file on disk
+is untouched) and the `init` step's inline `config.paths-ignore` excludes `spikes/**`/`bench/**`/
+`docs/**`. Without this, the extractor's own manifest-loading phase built every workspace member
+to resolve its crate graph — including running `den`'s bundled DuckDB/RocksDB/libSQL C/C++ build
+scripts from scratch — which measured 18m34s of a 35m51s total run on #126's PR, almost entirely
+spent on code that never ships. CodeQL isn't a required check, so this was pure runner-time waste,
+not a merge blocker.
