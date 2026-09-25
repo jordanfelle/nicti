@@ -527,7 +527,7 @@ mod tests {
         let large = fake_jpeg(640, 424, 100);
         let data = build_two_jpeg_file(&small, &large);
 
-        // Screen tier (2560px): neither candidate clears it, so the largest (640x424) wins.
+        // Screen tier (3840px): neither candidate clears it, so the largest (640x424) wins.
         let (_offset, len) = locate_offset(&data, Some(decode::SCREEN_TIER_LONG_EDGE))
             .expect("falls back to the largest candidate");
         assert_eq!(len, large.len() as u64);

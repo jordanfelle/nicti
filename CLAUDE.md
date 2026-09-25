@@ -268,7 +268,8 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   extraction) and a correction to #28's finding (`JpgFromRaw` is a real distinct preview JPEG, not
   the actual raw sensor strip — that lives in its own SubIFD, confirmed via `exiftool`) both feed
   this ADR. Seek-and-read (`spikes/sniff/src/source.rs`'s `ByteSource`/`FileSource`, `ifd::Walker`
-  now generic over it) measured **~110x faster** than #28's original whole-file-read locate path.
+  now generic over it) measured **~250x faster at p50** than #28's original whole-file-read locate
+  path.
   **AVIF measured against JPEG for the T2 tier at the user's explicit request** (pure-Rust
   `ravif`/`avif-decode`, no C toolchain): ~4.2x smaller but ~9.5x slower to encode and misses the
   &lt;50ms interactive decode budget at p95 — **JPEG stays the v1 choice**, AVIF's compression win

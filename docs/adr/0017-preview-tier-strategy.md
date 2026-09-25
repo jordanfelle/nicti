@@ -311,8 +311,8 @@ tooling next.
   3840px / resized-master, JPEG-encoded, pack-file cache) → T3 (`JpgFromRaw` full decode /
   full-res master, RAM-only). Plain-JPEG assets (72% of the real catalog) use a resize-the-master
   path at every tier, not embedded-JPEG extraction.
-- **Extraction**: ranged reads via `Walker<FileSource>`, never whole-file — ~110x faster at p50
-  for locate/index-build.
+- **Extraction**: ranged reads via `Walker<FileSource>`, never whole-file — ~250x faster at p50
+  (~207x at p95) for `locate`.
 - **Tier-payload format**: JPEG, not AVIF, for v1's interactive tiers — AVIF's real ~4.2x size win
   doesn't clear its own encode-throughput and decode-latency costs against this project's ingest
   and interactivity budgets.
