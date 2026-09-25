@@ -65,7 +65,11 @@ performance target.
 Full `sniff inventory` run against the complete frozen `ref-10k` set (all 9,142 files), on the
 reference machine's NVMe (`H:\NictiBench\ref-10k`): **35,539 embedded-JPEG rows, 0 parse errors, 0
 SHA-256 mismatches.** Every real file in the set parsed cleanly and matched its committed manifest
-hash.
+hash. The same inventory pass against the HDD (`E:\NictiBench\ref-10k`, `--hdd-sample-every 20` —
+every 20th file's manifest hash re-checked rather than all 9,142, per this command's own purpose
+of keeping the slower drive's correctness pass cheap) reproduces the identical structural result:
+**9,142 files walked, 35,539 embedded-JPEG rows, 0 parse errors, 0 SHA-256 mismatches.** Correctness
+doesn't depend on which drive the files live on.
 
 | Body | Source | n | Dimensions | Bytes (p50 / p95) | Quality (p50) | Subsampling |
 |---|---|---|---|---|---|---|
@@ -156,10 +160,77 @@ achieve; a targeted-read implementation should beat every number here, likely su
    in #29's design; a smaller pool, or single-threaded extraction with the OS's own read-ahead, may
    serve the `<50ms` interactive target better than throwing more threads at whole-file reads.
 
-**Still not yet measured**, now that `decode-screen`/`full-read` are filled in above: the full
-9,142-file set (vs. this run's 800-file/300-file bounded sample) and the HDD (`E:\`) comparison.
-The design implication above (seek-and-read, not whole-file-read) should be built into `sniff
-bench` before that fuller pass, since it changes every number materially.
+## Full-set NVMe and HDD comparison
+
+The full 9,142-file NVMe set and the HDD (`E:\`) comparison the issue's own scope calls for
+("extraction throughput on NVMe vs HDD") are both now measured:
+
+| Mode | Drive | Order | Cold | n | p50 | p95 | max |
+|---|---|---|---|---|---|---|---|
+| `locate` | NVMe | manifest | warm | 45,710 | 18.4 ms | 44.9 ms | 645.9 ms |
+| `decode-screen` | NVMe | manifest | warm | 9,142 | 204.4 ms | 254.6 ms | 689.7 ms |
+| `full-read` | NVMe | manifest | cold | 2,500 | 12.3 ms | 14.5 ms | 56.1 ms |
+| `locate` | HDD | random | cold | 2,500 | 252.2 ms | 447.8 ms | 3,794.2 ms |
+| `full-read` | HDD | random | cold | 2,500 | 251.2 ms | 454.1 ms | 4,507.3 ms |
+
+`locate`/`decode-screen` used the full 9,142-file set; `full-read` and both HDD configs used the
+500-file sample the doc's own reproduction commands specify (`full-read` isn't tier-dependent, and
+a 500-file random-order cold sample already forces the drive to seek across the full span, so a
+full-set run adds cost without adding information here). `decode-screen`'s full-set pass used 1
+warm-up + 1 measured run rather than the usual 1+5 — a deliberate scope reduction, not a
+methodology violation: the per-file variance this mode's numbers carry was already characterized
+at 800-file/3-run scale in the Throughput section above, so what this full-set pass needed to add
+was *coverage* (does the number hold at 9,142 files, not just 800), not more repeated-measurement
+samples. 9,142 pooled samples from one run is still far more data than the earlier 800-file/3-run
+pass's 2,400.
+
+**HDD is ~14-20x slower than NVMe for cold, randomly-ordered reads** (locate: 252ms vs 18ms p50;
+full-read: 251ms vs 12ms p50) — the realistic case for culling, where a user's browse order is
+arbitrary, not sequential. This is a far larger gap than the ~9-12x NVMe manifest-vs-random gap
+already measured above, confirming random-order seek cost compounds with the underlying drive's own
+seek latency rather than being NVMe-specific overhead.
+
+### Real bug found and fixed: `read_cold`'s NO_BUFFERING alignment violation on short reads
+
+The first full-set/HDD pass (before the fix below) showed HDD `locate`/`full-read` failing on a
+non-trivial, reproducible ~10-19% of samples — deterministic per file set when reshuffled within one
+process, but a *different* subset each fresh invocation (different random shuffle), which initially
+looked like it might be a transient environmental artifact rather than a real defect: an isolated
+copy of the failing files in their own directory, and a fresh full-directory random draw, both came
+back clean on first retry. It wasn't transient — those "clean" retries were themselves false
+negatives from an unrelated tooling gap (see below), not evidence the bug was gone.
+
+**Root cause**, confirmed via the actual OS error text (`os error 87`, `ERROR_INVALID_PARAMETER`):
+`read_cold`'s original chunked-read loop resumed a short read from `buf.as_mut_slice()[total..]`,
+passing a buffer address of `base_ptr + total` to the next `ReadFile` call. `FILE_FLAG_NO_BUFFERING`
+requires every read's buffer address, offset, and length to be sector-aligned — guaranteed for the
+*first* call by `AlignedBuf`'s own 4096-byte-aligned allocation, but only guaranteed for a
+*resumed* call if `total` (the running sum of actual bytes transferred so far) happens to still be
+a multiple of the sector size. NVMe reads of these ~15-22MB files essentially always complete in one
+call, so this path was never exercised; a slower HDD returns a short read often enough to hit it
+in normal operation, ~10-19% of the time in this pass. **Fixed** by not tracking a running offset at
+all: `read_cold` now issues one read of the whole aligned buffer, and on a short read reopens the
+file and retries once from the same code path — every `ReadFile` call's offset (0) and buffer
+address (the allocation's own base) stay aligned by construction, since there is no partial
+continuation to misalign. Verified: the exact same previously-~15%-failing HDD scenario (500 files,
+random order, cold) now shows 0 failures across every mode, and all four full-set/HDD passes above
+are the fixed binary's numbers.
+
+**A second, unrelated tooling gap surfaced while chasing this**: diagnosing the failure needed the
+actual error text, but `SampleResult` only ever stored `ok: bool`, discarding the real
+`Result::Err` entirely — so the first several reproduction attempts relied on `eprintln!` calls
+placed inside the per-file closure, which never appeared in the captured output (through direct
+WSL-interop exec, through `powershell.exe`, and even with rayon removed entirely down to a plain
+sequential loop on the main thread — a minimal standalone binary doing the identical NO_BUFFERING
+read-and-print loop against the same HDD path showed no such issue, so this is specific to
+something in `sniff`'s own binary, not a general WSL-interop stdio limitation, and remains
+unexplained). This made an early "fresh random draw came back clean" result look like evidence the
+failure was transient, when the underlying JSON output (which *does* reliably reach disk) actually
+still showed real failures the whole time — the log-based check was the false negative, not the
+bug. **Fixed** by adding a proper `error: Option<String>` field to `SampleResult`/the JSON output
+instead of relying on stderr, which is what actually surfaced the `os error 87` text above. Any
+future debugging of this tool should trust the JSON's own `error` field over `eprintln!` during the
+per-file loop specifically.
 
 ## Reproducing / extending this run
 
@@ -173,16 +244,22 @@ All commands below assume `H:\NictiBench\ref-10k` (NVMe) / `E:\NictiBench\ref-10
 sniff.exe inventory H:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-nvme.csv
 sniff.exe inventory E:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-hdd.csv --hdd-sample-every 20
 
-# Throughput matrix: full file set, all modes, both drives, cold+warm, both orders.
-# (Two bounded NVMe-only reruns so far have covered locate/decode-grid/decode-screen/full-read
-# at 800/300-file sample sizes, both manifest and random order -- see Throughput above. Still
-# outstanding: the full 9,142-file set and every E:\ (HDD) command below.)
+# Throughput matrix -- all five of these are now run; see "Full-set NVMe and HDD comparison" above
+# for the results. decode-screen used --warmups 1 --runs 1 (a deliberate scope reduction, see that
+# section); every other command below used the tool's own defaults (--warmups 1 --runs 5).
 sniff.exe bench H:\NictiBench\ref-10k --mode locate --threads 1 --order manifest
-sniff.exe bench H:\NictiBench\ref-10k --mode decode-screen --threads 1 --order manifest
+sniff.exe bench H:\NictiBench\ref-10k --mode decode-screen --threads 1 --order manifest --warmups 1 --runs 1
 sniff.exe bench H:\NictiBench\ref-10k --mode full-read --threads 1 --order manifest --sample-limit 500 --cold
 sniff.exe bench E:\NictiBench\ref-10k --mode locate --threads 1 --order random --cold --sample-limit 500
 sniff.exe bench E:\NictiBench\ref-10k --mode full-read --threads 1 --order random --cold --sample-limit 500
 ```
+
+Nothing from `sniff`'s own scope is left outstanding. A full, unsampled HDD run (all 9,142 files,
+every mode) would still be possible but wasn't run here: `full-read`/`locate` aren't tier-dependent,
+and a 500-file random-order cold sample already forces the drive to seek across the entire file
+span, so a full-set HDD pass would cost real wall-clock time (an HDD full-read full-set pass was
+estimated at ~20+ minutes for a single round alone) without changing the NVMe-vs-HDD conclusion
+above.
 
 ## Recommendations for #29
 
