@@ -235,7 +235,7 @@ pub fn run(
     files.sort();
 
     if let Order::Random = order {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         files.shuffle(&mut rng);
     }
     if let Some(limit) = sample_limit {

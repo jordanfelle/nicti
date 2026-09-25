@@ -3,6 +3,7 @@
 
 use fast_image_resize as fr;
 use std::num::NonZeroU32;
+use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::JpegDecoder;
 
 pub const GRID_TIER_LONG_EDGE: u32 = 512;
@@ -15,7 +16,7 @@ pub struct DecodedRgb {
 }
 
 pub fn decode_jpeg(bytes: &[u8]) -> Result<DecodedRgb, String> {
-    let mut decoder = JpegDecoder::new(bytes);
+    let mut decoder = JpegDecoder::new(ZCursor::new(bytes));
     let pixels = decoder.decode().map_err(|e| e.to_string())?;
     let info = decoder.info().ok_or("decoder produced no image info")?;
     Ok(DecodedRgb {
