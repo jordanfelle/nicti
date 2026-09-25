@@ -290,7 +290,13 @@ approach — libSQL forks the real sqlite3.c, so there was no reason to expect (
 measured numbers confirm) `VACUUM INTO` behaves identically to `sqlite.rs`'s own online, no-lock
 backup, not Turso Database's still-experimental reimplementation of it.
 
-No new `docs/licensing.md` entry was needed beyond noting libSQL's license here (MIT, already
-allowed) — `cargo deny --workspace --all-features check licenses` passes clean with libSQL's full
-dependency tree resolved, the same pre-existing `cfg_block` (Turso-only) warning as every prior
-ADR in this series, nothing new from `libsql`.
+No new `deny.toml` allowlist entry was needed (MIT is already allowed) — `cargo deny --workspace
+--all-features check licenses` passes clean with libSQL's full dependency tree resolved, the same
+pre-existing `cfg_block` (Turso-only) warning as every prior ADR in this series, nothing new from
+`libsql`. `docs/licensing.md` does get two additions in this same PR, per this repo's own
+ADR-0003-established process: an update-log paragraph for the `libsql` crate itself (MIT,
+confirmed independently from both crates.io and the GitHub repo), and a new Native-libraries table
+row for the bundled `libsql-ffi` C fork specifically — its own license (public domain, verified by
+reading the actual bundled `sqlite3.c`'s blessing text) is distinct from the crate's own declared
+`MIT` Cargo.toml field, the same "cargo-deny only sees what a crate declares" gap this doc's LMDB
+row and `cfg_block` footnote already establish, applied here rather than skipped.
