@@ -67,6 +67,13 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             pelt:
+              # spikes/pelt (not just the three pelt-* candidate crates) is included: it's a
+              # shared fixture/math crate all three depend on via a path dependency (see
+              # CLAUDE.md's package-map note) -- unlike den, which is fully self-contained under
+              # spikes/den/**, a change scoped only to spikes/pelt/** would otherwise never
+              # trigger pelt-linux/pelt-windows and could merge a real breakage undetected until
+              # the weekly schedule.
+              - 'spikes/pelt/**'
               - 'spikes/pelt-egui/**'
               - 'spikes/pelt-iced/**'
               - 'spikes/pelt-slint/**'
