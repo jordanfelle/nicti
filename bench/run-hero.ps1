@@ -138,7 +138,16 @@ if (-not (Test-Path $ProwlExe)) {
     throw "prowl.exe not found at $ProwlExe -- build it first: cargo build --release -p nicti-prowl"
 }
 Write-Host "Verifying hero-set file integrity via prowl ..."
-$heroIds = Get-Content $HeroSetFile | Where-Object { $_.Trim() -ne "" }
+# @(...): without this, PowerShell unwraps a single-match Where-Object result to a scalar
+# instead of a one-element array, which would make $heroIds.Count below misreport.
+$heroIds = @(Get-Content $HeroSetFile | Where-Object { $_.Trim() -ne "" })
+if ($heroIds.Count -eq 0) {
+    # prowl verify --ids "" would otherwise report a clean, zero-file no-op (correct in
+    # isolation -- see nicti-prowl's own tests) and let this script fall through to actually
+    # driving and capturing a benchmark against zero verified reference files. An empty
+    # hero-set.txt is always a configuration mistake, never an intentional zero-file run.
+    throw "Hero-set file $HeroSetFile contains no non-blank ids -- nothing to verify or benchmark."
+}
 $idsArg = $heroIds -join ","
 & $ProwlExe verify --manifest $ManifestPath --root $RefRoot --ids $idsArg
 if ($LASTEXITCODE -ne 0) {

@@ -140,17 +140,42 @@ impl Protocol {
 }
 
 /// Writes `report` as JSON under `bench-results/<name>-<unix_time>.json` (gitignored, per
-/// docs/benchmarks.md's Result format).
+/// docs/benchmarks.md's Result format). Uses exclusive creation with a numeric suffix on
+/// collision (two runs of the same name within the same second) rather than `fs::write`, which
+/// would silently truncate and lose the earlier report -- caught in review.
 pub fn write_report(
     bench_results_dir: impl AsRef<Path>,
     report: &RunReport,
 ) -> anyhow::Result<PathBuf> {
+    use std::io::Write;
+
     let dir = bench_results_dir.as_ref();
     fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{}-{}.json", report.name, report.unix_time));
     let json = serde_json::to_string_pretty(report)?;
-    fs::write(&path, json)?;
-    Ok(path)
+
+    let mut suffix = 0u64;
+    loop {
+        let candidate = if suffix == 0 {
+            dir.join(format!("{}-{}.json", report.name, report.unix_time))
+        } else {
+            dir.join(format!(
+                "{}-{}-{}.json",
+                report.name, report.unix_time, suffix
+            ))
+        };
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                file.write_all(json.as_bytes())?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 pub fn now_unix() -> u64 {
@@ -235,5 +260,43 @@ mod tests {
         assert!(path.exists());
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("test-run"));
+    }
+
+    #[test]
+    fn write_report_does_not_clobber_a_same_second_collision() {
+        // Regression test for a review-caught bug: two reports with the same name and unix_time
+        // (two runs within the same second) used to silently truncate the earlier file via
+        // fs::write, losing its data.
+        let dir = tempfile::tempdir().unwrap();
+        let first = RunReport {
+            name: "same-name".into(),
+            hardware: HardwareIdentity::capture(),
+            protocol: Protocol::default(),
+            stats: Stats::from_samples(vec![Duration::from_millis(1)]),
+            unix_time: 1000,
+        };
+        let second = RunReport {
+            name: "same-name".into(),
+            hardware: HardwareIdentity::capture(),
+            protocol: Protocol::default(),
+            stats: Stats::from_samples(vec![Duration::from_millis(2)]),
+            unix_time: 1000,
+        };
+
+        let path_a = write_report(dir.path(), &first).unwrap();
+        let path_b = write_report(dir.path(), &second).unwrap();
+
+        assert_ne!(
+            path_a, path_b,
+            "colliding reports must land at different paths"
+        );
+        assert!(path_a.exists());
+        assert!(path_b.exists());
+        assert!(fs::read_to_string(&path_a)
+            .unwrap()
+            .contains("\"max_ms\": 1.0"));
+        assert!(fs::read_to_string(&path_b)
+            .unwrap()
+            .contains("\"max_ms\": 2.0"));
     }
 }
