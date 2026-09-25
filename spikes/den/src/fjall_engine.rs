@@ -486,7 +486,12 @@ impl Workload for FjallEngine {
         // Pins the current state so segment/journal files this snapshot depends on aren't
         // reclaimed mid-copy — see this module's doc comment for why this is a real, documented
         // fjall guarantee, stronger than `redb_engine.rs`'s equivalent caveat, but still not a
-        // purpose-built, commit-boundary-coordinated backup call.
+        // purpose-built, commit-boundary-coordinated backup call: `copy_dir_recursive` below still
+        // isn't a true filesystem checkpoint, and a real concurrent writer/background maintenance
+        // job during the copy could leave the destination with files from different commit states.
+        // Same accepted limitation `redb_engine.rs::backup`'s own doc comment already documents for
+        // its engine (real, but never exercised in this spike regardless — the benchmark's only
+        // caller is single-threaded, no concurrent writer runs during a `backup()` call).
         let _snapshot = self.db.snapshot();
         // Flush the in-memory-buffered journal to disk *before* the raw file copy below -- without
         // this, recently committed writes that haven't reached disk yet would be silently missing
