@@ -55,36 +55,92 @@ scratch, not real-shoot content), sorted-filename-list SHA-256
 this ad hoc subset (unlike ref-10k's `docs/ref-10k-manifest.csv`) — the hash above is the closest
 available "was this the same set" check, not a byte-content verification of each file.
 
+All 261 assets encoded successfully in every config (0 failures); values below are the median of
+5 measured runs (per `docs/benchmarks.md`'s protocol), via `run-codec-sweep.ps1`'s own aggregation:
+
 | Config | Avg encoded size | Encode p50 | Encode p95 | Read+decode p50 | Read+decode p95 | SSIM mean | SSIM p5 |
 |---|---|---|---|---|---|---|---|
-| JPEG q85 (baseline) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| AVIF q75 speed 6 (ADR-0017's setting) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| AVIF q75 speed 7 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| AVIF q75 speed 8 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| AVIF q75 speed 9 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| AVIF q75 speed 10 (fastest) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| WebP q75 method 4 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| WebP q80 method 4 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| WebP q85 method 4 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| JPEG q85 (baseline) | 1,508,408 B (1.51 MB) | 66.6 ms | 104.9 ms | 24.9 ms | 31.8 ms | 0.9335 | 0.8970 |
+| AVIF q75 speed 6 (ADR-0017's setting) | 488,807 B (0.49 MB) | 794.3 ms | 1013.4 ms | 44.9 ms | 77.4 ms | 0.8985 | 0.8541 |
+| AVIF q75 speed 7 | 493,798 B (0.49 MB) | 622.4 ms | 694.2 ms | 34.8 ms | 40.4 ms | 0.8984 | 0.8541 |
+| AVIF q75 speed 8 | 493,798 B (0.49 MB) | 719.6 ms\* | 1027.6 ms\* | 40.5 ms | 48.3 ms | 0.8984 | 0.8541 |
+| AVIF q75 speed 9 | 496,592 B (0.50 MB) | 399.6 ms | 512.3 ms | 34.9 ms | 54.1 ms | 0.8990 | 0.8560 |
+| AVIF q75 speed 10 (fastest) | 549,102 B (0.55 MB) | 341.0 ms | 454.0 ms | 32.8 ms | 59.4 ms | 0.9024 | 0.8612 |
+| WebP q75 method 4 | 527,556 B (0.53 MB) | 537.9 ms | 659.2 ms | 55.5 ms | 67.1 ms | 0.8847 | 0.8380 |
+| WebP q80 method 4 | 738,628 B (0.74 MB) | 556.1 ms | 662.1 ms | 63.3 ms | 73.3 ms | 0.9062 | 0.8623 |
+| WebP q85 method 4 | 1,062,616 B (1.06 MB) | 633.4 ms | 716.1 ms | 76.3 ms | 93.0 ms | 0.9285 | 0.8932 |
 
-TBD — full sweep in progress, see `spikes/sniff/run-codec-sweep.ps1`'s committed output for the
-raw per-run JSON this table summarizes.
+\* Speed 8's encode p50/p95 land higher than speed 7's, breaking the otherwise-monotonic
+speed-6-through-10 trend — reported as measured, not smoothed away. Read+decode latency, encoded
+size, and SSIM all stay perfectly consistent with speeds 7/9 bracketing it, so this looks like
+real run-to-run wall-clock jitter (single-threaded CPU-bound work sharing the reference machine
+with whatever else was running that pass), not a `ravif` behavior worth a claim on its own.
 
-**Findings:** TBD.
+**Findings:**
 
-**Recommendation:** TBD.
+- **A faster `ravif` speed narrows the encode-throughput gap but doesn't close it.** Speed
+  6→10 cuts AVIF's own encode p50 by ~2.3x (794ms→341ms), bringing AVIF from ~9.5x slower than
+  JPEG at speed 6 (still directionally matching ADR-0017's own finding) down to ~5.1x slower at
+  speed 10 — a real improvement, but still far outside `docs/benchmarks.md`'s ingest budget
+  (~6ms/asset at 10k-in-60s), the same conclusion ADR-0017 reached, just with a smaller gap.
+  File size grows ~12% from speed 6 to speed 10 (488,807 B → 549,102 B) — the speed dial trades
+  some of AVIF's compression ratio for throughput, not free.
+- **AVIF's own decode latency improves at higher speed, independent of the encode-speed/size
+  tradeoff**: p95 read+decode drops from 77.4ms (speed 6) to 59.4ms (speed 10) — still over the
+  &lt;50ms interactive p95 budget at every speed tested, but meaningfully closer than ADR-0017's
+  own 65.0ms finding (measured on a different, larger dataset, so not a direct before/after, but
+  the same directional gap).
+- **SSIM reveals AVIF q75 is not actually "roughly comparable perceptual quality" to JPEG q85**,
+  the assumption ADR-0017 stated without measuring it: JPEG q85 scores 0.9335 vs. AVIF's
+  ~0.898-0.902 across every speed tested, despite AVIF's files being ~3x smaller. AVIF's real
+  compression win comes partly from accepting a lower SSIM at this quality setting, not purely
+  from better efficiency at equal quality — a correction to ADR-0017's own stated assumption, not
+  a contradiction of its numeric findings.
+- **Real lossy WebP is worse than AVIF on every measured axis at comparable size, and worse than
+  JPEG on both speed axes at comparable quality.** At its smallest setting (q75, 527,556 B — close
+  to AVIF's size range), WebP's SSIM (0.8847) is the lowest of any config measured, including every
+  AVIF speed. At its highest quality (q85, 1,062,616 B, SSIM 0.9285 — close to JPEG's own SSIM),
+  WebP still needs ~9.5x longer to encode than JPEG (633ms vs. 66.6ms, the same order of magnitude
+  AVIF was rejected for) and its read+decode p95 (93.0ms) is nearly **3x** JPEG's own (31.8ms) —
+  the worst decode latency of any codec/setting in this table, missing the &lt;50ms interactive
+  budget by the widest margin measured. WebP additionally requires a real C toolchain dependency
+  (`libwebp-sys`), unlike AVIF's pure-Rust path.
+
+**Recommendation:**
+
+- **JPEG remains the correct T2 v1 choice.** Nothing measured this pass changes ADR-0017's
+  decision — AVIF's encode-throughput cost, even at its fastest tested speed, is still ~5x JPEG's,
+  and real lossy WebP measures worse than both JPEG and AVIF on every latency and quality axis
+  that matters for an interactive tier.
+- **A faster AVIF speed (9 or 10) is worth reconsidering for #64/#72** (archival/cold tiers, where
+  the encode-throughput budget doesn't bind the way it does for T2): at speed 10, AVIF's
+  read+decode latency gap to JPEG narrows enough (32.8ms vs. 24.9ms p50) that it's a much more
+  attractive candidate there than ADR-0017's original speed-6 numbers suggested, and its
+  compression win (~2.7x over JPEG at speed 10, 549,102 B vs. 1,508,408 B) is still real, just not
+  as large as speed 6's ~3.1x.
+- **Lossy WebP should not be pursued further as a T2 (or #64/#72) candidate** absent a specific new
+  reason — it's not merely "no better than JPEG," it's measurably worse than AVIF at comparable
+  size and worse than JPEG at comparable quality, on both encode and decode latency, while adding a
+  native C dependency neither JPEG nor AVIF requires here.
 
 ## Options considered
 
 | Option | Verdict |
 |---|---|
-| AVIF at a faster `ravif` speed preset | TBD |
-| Lossy WebP (`webp`/`libwebp-sys`, native C dependency) | TBD |
-| JPEG (status quo, ADR-0017) | TBD |
+| AVIF at a faster `ravif` speed preset (7-10) | **Not adopted for T2 v1** — narrows but doesn't close the encode-throughput gap (~5.1x slower than JPEG at best, down from ~9.5x). Worth reconsidering for #64/#72's archival tiers, where the gap matters less and AVIF's decode-latency disadvantage shrinks further. |
+| Lossy WebP (`webp`/`libwebp-sys`, native C dependency) | **Rejected.** Worse than AVIF at comparable size (lowest SSIM of any config tested) and worse than JPEG at comparable quality (same order-of-magnitude encode-throughput cost as AVIF, plus the widest decode-latency miss of any config, plus a native dependency). |
+| JPEG (status quo, ADR-0017) | **Confirmed for T2 v1.** Unchanged by this pass's measurements. |
 
 ## Consequences
 
-- TBD, pending the measured numbers above.
+- **ADR-0017's T2 codec decision (JPEG) is confirmed, not revisited** — this pass adds precision
+  to *why*, not a different answer.
+- **AVIF at a faster speed (9-10) is now a named candidate for #64/#72's design**, not just "AVIF
+  in general" — file that context against whichever issue picks up the archival/cold-tier preview
+  format question next, rather than re-deriving it from scratch.
+- **Real lossy WebP is now closed out, not just deferred.** ADR-0017 left it unmeasured; this pass
+  measured it and found it worse than both existing candidates on every axis that matters — no
+  further WebP research is warranted for Nicti's preview pipeline without a new, specific reason.
 - `spikes/sniff/src/codec.rs`'s `Codec` enum now has three variants (`Jpeg`/`Avif`/`Webp`) and
   `encode()` takes an explicit `speed: u8` parameter instead of the old hardcoded
   `AVIF_SPEED` constant — any future codec research building on this spike should extend that

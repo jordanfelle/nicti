@@ -170,6 +170,17 @@ git checkout main && git pull origin main
 git worktree add ../nicti-wt-myfeature -b feat/myfeature
 ```
 
+**Assign yourself to the GitHub issue immediately when starting work on it** — same turn as
+creating the worktree, before the first edit, not deferred until the PR is open:
+```bash
+gh issue edit <N> --repo jordanfelle/nicti --add-assignee jordanfelle
+```
+Unlike `shutterpaws-tech`'s Scrumboy board (`doing`/`testing`/`done` columns), a plain GitHub
+issue has no separate "in progress" status — the assignee field on an open issue *is* that
+signal here. Skipping it (as happened on #143, caught only when asked "why is it not assigned")
+leaves the issue looking unclaimed to anything reading the tracker, including `/nicti-backlog`'s
+own "assigned to you" vs. "unassigned" split.
+
 Compile-feedback loop: `cargo check`, not `cargo build` — skips codegen/linking. Full
 `cargo build`/`cargo test` only when the binary or test execution is actually needed. (This
 section's efficiency rules are agent-specific; a human contributor doesn't need them — see

@@ -38,4 +38,13 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   ADR-0017's own table didn't have (`nicti_prowl::golden::ssim`, reused rather than duplicated).
   Measured against #37/#136's 261-file stratified subset, not ref-10k (which no longer exists —
   see #136) — not directly comparable to ADR-0017's own absolute numbers, only internally
-  comparable across this follow-up's own configs. See the ADR for the table and recommendation.
+  comparable across this follow-up's own configs.
+  **Result: JPEG stays the T2 v1 choice, confirmed rather than revisited.** A faster `ravif` speed
+  narrows AVIF's encode-throughput gap from ~9.5x to ~5.1x slower than JPEG (speed 10 vs. speed 6)
+  and improves its decode latency, but doesn't close either gap — worth reconsidering for #64/#72's
+  archival tiers, where the throughput budget doesn't bind the same way. SSIM revealed AVIF q75 is
+  *not* actually comparable perceptual quality to JPEG q85 as ADR-0017 assumed (0.898-0.902 vs.
+  0.9335), despite being ~3x smaller — a correction to that assumption, not to ADR-0017's own
+  numeric findings. Real lossy WebP was measured and rejected outright: worse SSIM than AVIF at
+  comparable size, worse encode/decode latency than JPEG at comparable quality, plus a native C
+  dependency (`libwebp-sys`) neither JPEG nor AVIF requires. See the ADR for the full table.
