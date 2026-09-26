@@ -175,10 +175,11 @@ The full 9,142-file NVMe set and the HDD (`E:\`) comparison the issue's own scop
 | `locate` | HDD | random | cold | 2,500 | 252.2 ms | 447.8 ms | 3,794.2 ms |
 | `full-read` | HDD | random | cold | 2,500 | 251.2 ms | 454.1 ms | 4,507.3 ms |
 
-`locate`/`decode-screen` used the full 9,142-file set; every `full-read` row and both HDD configs
-used the 500-file sample the doc's own reproduction commands specify (`full-read` isn't
-tier-dependent, and a 500-file random-order cold sample already forces the drive to seek across the
-full span, so a full-set run adds cost without adding information here). `decode-screen`'s full-set
+The two *manifest*-order `locate`/`decode-screen` rows used the full 9,142-file set; every other
+row (every `full-read` row, plus both NVMe- and HDD-random-cold `locate` rows) used the 500-file
+sample the doc's own reproduction commands specify (`full-read` isn't tier-dependent, and a
+500-file random-order cold sample already forces the drive to seek across the full span, so a
+full-set run adds cost without adding information here). `decode-screen`'s full-set
 pass used 1 warm-up + 1 measured run rather than the usual 1+5 — a deliberate scope reduction, not a
 methodology violation: the per-file variance this mode's numbers carry was already characterized
 at 800-file/3-run scale in the Throughput section above, so what this full-set pass needed to add
