@@ -44,7 +44,7 @@ Constraints already fixed by earlier ADRs/docs:
   `mount_events::windows_impl`) is therefore **written but unverified** — it type-checks against
   `windows-sys`' documented API shapes but has never been compiled or run. Every schema/fingerprint
   finding below (the parts of the spike that don't need Windows — `schema.rs`, `fingerprint.rs`,
-  `relink.rs`, `path.rs`) is real, measured against this sandbox's Rust toolchain: 20 unit tests
+  `relink.rs`, `path.rs`) is real, measured against this sandbox's Rust toolchain: 23 unit tests
   pass, `cargo clippy -p homing --all-targets --all-features -- -D warnings` is clean, and the
   crate participates in the workspace's normal (non-path-gated) `clippy`/`test` jobs like `sniff`
   does. The volume-identity survival table and the Windows throughput/latency numbers are
@@ -196,7 +196,7 @@ real LRC-edited DNG, as hypothesized): TBD.
 
 ### Sandbox-measured (real, not TBD)
 
-- `cargo test -p homing --all-targets --all-features`: 20/20 unit tests pass (schema, fingerprint,
+- `cargo test -p homing --all-targets --all-features`: 23/23 unit tests pass (schema, fingerprint,
   path normalization, identity-key selection logic — everything not requiring a live Windows
   volume).
 - `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean.

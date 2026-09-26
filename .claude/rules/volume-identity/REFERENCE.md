@@ -29,5 +29,5 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   stubbed, not implemented — flagged follow-up, not a silent gap.
 - **ADR-0020 is Proposed, not Accepted** — this sandbox has no Windows/mountable NTFS volume, so
   `volume::windows_impl`/`mount_events::windows_impl` are unverified. Everything cross-platform
-  (schema/fingerprint/path) is real: 20 tests pass, workspace clippy/test/fmt/cargo-deny clean.
+  (schema/fingerprint/path) is real: 23 tests pass, workspace clippy/test/fmt/cargo-deny clean.
   Reference-machine run required before Accepted — see ADR-0020's Measured results (all TBD).

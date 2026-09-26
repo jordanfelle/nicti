@@ -152,7 +152,7 @@ bin-only spike would; `lib.rs` re-exports `fingerprint`/`mount_events`/`path`/`r
 `volume`) is Windows-only research written in a Linux/WSL sandbox with no mountable NTFS volume:
 its `windows_impl` modules are unverified against real hardware (see ADR-0020's own sandbox-note
 and Measured-results section, all marked TBD pending a reference-machine pass), while its
-cross-platform schema/fingerprint/path logic is real, tested (20 unit tests), and — unlike
+cross-platform schema/fingerprint/path logic is real, tested (23 unit tests), and — unlike
 `den`/`pelt-*`/`retina` — not path-gated out of CI's normal `clippy`/`test` jobs, since it needs no
 heavy native build (same as `sniff`).
 

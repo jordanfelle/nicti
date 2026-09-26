@@ -26,6 +26,12 @@ pub enum Tier {
 pub struct BuildStats {
     pub files_indexed: usize,
     pub errors: usize,
+    /// Files indexed successfully but whose fingerprint hash could not be computed (a real I/O
+    /// error -- locked/corrupt file -- not a deliberate `Tier::None` skip). Tracked separately
+    /// from `errors` (which are metadata/insert failures that drop the file entirely) so a
+    /// caller can tell "no fingerprint by choice" apart from "no fingerprint because reading the
+    /// file failed" -- these assets can never be relinked by fingerprint later.
+    pub fingerprint_failures: usize,
 }
 
 pub fn build(
@@ -38,6 +44,7 @@ pub fn build(
     let root_id = schema::insert_root(conn, volume_id, root_rel_path)?;
     let mut files_indexed = 0;
     let mut errors = 0;
+    let mut fingerprint_failures = 0;
 
     for entry in WalkDir::new(root_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
@@ -67,8 +74,20 @@ pub fn build(
             .unwrap_or(0);
 
         let fingerprint = match tier {
-            Some(Tier::Partial) => fingerprint::partial_hash(abs_path).ok(),
-            Some(Tier::Full) => fingerprint::full_hash(abs_path).ok(),
+            Some(Tier::Partial) => match fingerprint::partial_hash(abs_path) {
+                Ok(h) => Some(h),
+                Err(_) => {
+                    fingerprint_failures += 1;
+                    None
+                }
+            },
+            Some(Tier::Full) => match fingerprint::full_hash(abs_path) {
+                Ok(h) => Some(h),
+                Err(_) => {
+                    fingerprint_failures += 1;
+                    None
+                }
+            },
             None => None,
         };
         let natural_key = fingerprint::natural_key(abs_path)
@@ -96,6 +115,7 @@ pub fn build(
     Ok(BuildStats {
         files_indexed,
         errors,
+        fingerprint_failures,
     })
 }
 
@@ -118,6 +138,10 @@ pub enum ResolveOutcome {
     Offline,
     /// Resolved by matching a fingerprint against an unrecognized volume's freshly-scanned files.
     RelinkedByFingerprint(String),
+    /// Resolved via tier (a) (size + filename) only -- the asset had no fingerprint to check
+    /// (never computed, or hashing failed at import time), so this is the weakest available
+    /// signal, not a fingerprint-confirmed match.
+    RelinkedBySizeName(String),
     /// No match at any tier.
     Lost,
 }
@@ -125,6 +149,20 @@ pub enum ResolveOutcome {
 /// The "tree moved onto an unrecognized volume" scenario: given a currently-mounted, previously
 /// unknown volume's file listing (path -> (size, partial_hash)), tries to relink every `asset`
 /// row whose owning volume is offline, cheapest tier first.
+///
+/// Each candidate path can be claimed by at most one asset: without this, two offline assets
+/// that happen to share the same size+fingerprint (a genuine duplicate photo, or a partial-hash
+/// collision) would both silently resolve to the *same* candidate file -- a false-positive relink
+/// for one of them, reported as a clean success. `claimed` tracks paths already matched to an
+/// earlier (lower `asset.id`, per the `ORDER BY`) asset in this same call, so a later asset with
+/// an identical fingerprint either finds a different real candidate or, if there truly isn't one,
+/// is honestly reported `Lost` instead of double-claiming.
+///
+/// Candidates are pre-bucketed by size (`by_size`) so the fingerprint fallback only scans
+/// same-size candidates, not the full set -- this also gives tier (a)'s `size_name_key` (see
+/// `fingerprint.rs`) real use: an asset with no fingerprint at all (no hash was computed at
+/// import time, or hashing failed -- see `BuildStats::fingerprint_failures`) still gets a weaker,
+/// last-resort shot at a match via size+filename alone, rather than being unconditionally `Lost`.
 pub fn relink_against_unknown_volume(
     conn: &Connection,
     candidate_files: &HashMap<String, (u64, String)>,
@@ -134,7 +172,8 @@ pub fn relink_against_unknown_volume(
          FROM asset a
          JOIN root r ON r.id = a.root_id
          JOIN volume v ON v.id = r.volume_id
-         WHERE v.online = 0",
+         WHERE v.online = 0
+         ORDER BY a.id",
     )?;
     let offline_assets: Vec<(i64, String, u64, Option<String>)> = stmt
         .query_map([], |row| {
@@ -148,31 +187,79 @@ pub fn relink_against_unknown_volume(
         .filter_map(|r| r.ok())
         .collect();
 
+    let mut by_size: HashMap<u64, Vec<String>> = HashMap::new();
+    let mut by_size_name: HashMap<fingerprint::SizeNameKey, String> = HashMap::new();
+    for (path, (size, _fp)) in candidate_files {
+        by_size.entry(*size).or_default().push(path.clone());
+        let file_name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        by_size_name
+            .entry(fingerprint::SizeNameKey {
+                size_bytes: *size,
+                file_name,
+            })
+            .or_insert_with(|| path.clone());
+    }
+
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut results = Vec::new();
     for (asset_id, rel_path, size_bytes, fingerprint) in offline_assets {
-        let by_path = candidate_files.get(&rel_path);
+        let by_path = candidate_files
+            .get(&rel_path)
+            .filter(|_| !claimed.contains(&rel_path));
         let matched = match (fingerprint.as_deref(), by_path) {
             (Some(fp), Some((candidate_size, candidate_fp)))
                 if fp == candidate_fp && size_bytes == *candidate_size =>
             {
                 Some(rel_path.clone())
             }
-            _ => candidate_files
-                .iter()
-                .find(|(_, (candidate_size, candidate_fp))| {
-                    fingerprint.as_deref() == Some(candidate_fp.as_str())
-                        && *candidate_size == size_bytes
+            (Some(fp), _) => by_size
+                .get(&size_bytes)
+                .into_iter()
+                .flatten()
+                .find(|path| {
+                    !claimed.contains(*path)
+                        && candidate_files
+                            .get(*path)
+                            .is_some_and(|(_, candidate_fp)| candidate_fp == fp)
                 })
-                .map(|(path, _)| path.clone()),
+                .cloned(),
+            (None, _) => None,
         };
 
-        results.push((
-            asset_id,
-            match matched {
-                Some(path) => ResolveOutcome::RelinkedByFingerprint(path),
-                None => ResolveOutcome::Lost,
-            },
-        ));
+        // No fingerprint at all -- last-resort tier (a): size + filename. Weaker evidence than a
+        // fingerprint match, only tried when there's no fingerprint to check at all.
+        let size_name_matched = if fingerprint.is_none() && matched.is_none() {
+            let file_name = Path::new(&rel_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            by_size_name
+                .get(&fingerprint::SizeNameKey {
+                    size_bytes,
+                    file_name,
+                })
+                .filter(|path| !claimed.contains(*path))
+                .cloned()
+        } else {
+            None
+        };
+
+        let outcome = match (matched, size_name_matched) {
+            (Some(path), _) => {
+                claimed.insert(path.clone());
+                ResolveOutcome::RelinkedByFingerprint(path)
+            }
+            (None, Some(path)) => {
+                claimed.insert(path.clone());
+                ResolveOutcome::RelinkedBySizeName(path)
+            }
+            (None, None) => ResolveOutcome::Lost,
+        };
+
+        results.push((asset_id, outcome));
     }
     Ok(results)
 }
@@ -313,6 +400,80 @@ mod tests {
         assert_eq!(results.len(), 2);
         for (_, outcome) in &results {
             assert_eq!(*outcome, ResolveOutcome::Lost);
+        }
+    }
+
+    #[test]
+    fn relink_never_double_claims_a_candidate_for_two_assets_with_the_same_fingerprint() {
+        let conn = open_in_memory().unwrap();
+        let vid = schema::upsert_volume(&conn, "ntfs64:aaa", None, None, false, "H:\\", now_unix())
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        // Two genuinely identical files (same bytes -> same fingerprint AND size) at different
+        // paths -- the exact case a naive "first fingerprint match wins" scan would double-claim
+        // a single candidate for both.
+        fs::write(dir.path().join("IMG_A.NEF"), b"identical-bytes-both-files").unwrap();
+        fs::write(dir.path().join("IMG_B.NEF"), b"identical-bytes-both-files").unwrap();
+        build(&conn, vid, "", dir.path(), Some(Tier::Partial)).unwrap();
+        schema::mark_offline_except(&conn, &[]).unwrap();
+
+        // Only ONE candidate file exists on the unrecognized volume with that fingerprint+size --
+        // simulating that only one of the two duplicates actually survived the move.
+        let mut candidates = HashMap::new();
+        let fp = fingerprint::partial_hash(&dir.path().join("IMG_A.NEF")).unwrap();
+        let size = fs::metadata(dir.path().join("IMG_A.NEF")).unwrap().len();
+        candidates.insert("Recovered/only_copy.NEF".to_string(), (size, fp));
+
+        let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
+        assert_eq!(results.len(), 2);
+        let relinked_count = results
+            .iter()
+            .filter(|(_, o)| matches!(o, ResolveOutcome::RelinkedByFingerprint(_)))
+            .count();
+        let lost_count = results
+            .iter()
+            .filter(|(_, o)| *o == ResolveOutcome::Lost)
+            .count();
+        assert_eq!(
+            relinked_count, 1,
+            "exactly one asset may claim the single available candidate"
+        );
+        assert_eq!(
+            lost_count, 1,
+            "the other asset must be honestly reported Lost, not double-matched to the same file"
+        );
+    }
+
+    #[test]
+    fn relink_falls_back_to_size_and_name_when_no_fingerprint_was_computed() {
+        let conn = open_in_memory().unwrap();
+        let vid = schema::upsert_volume(&conn, "ntfs64:aaa", None, None, false, "H:\\", now_unix())
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        write_sample_files(&dir);
+        // Tier::None -- no fingerprint computed at import time, exercising tier (a)'s last-resort
+        // size+name path rather than the fingerprint tiers the other tests already cover.
+        build(&conn, vid, "", dir.path(), None).unwrap();
+        schema::mark_offline_except(&conn, &[]).unwrap();
+
+        let mut candidates = HashMap::new();
+        let size1 = fs::metadata(dir.path().join("IMG_0001.NEF")).unwrap().len();
+        let size2 = fs::metadata(dir.path().join("IMG_0002.NEF")).unwrap().len();
+        // Different relative path (moved into a dated subfolder), same file name + size --
+        // the exact shape the size+name fallback exists for.
+        candidates.insert(
+            "2026/09/IMG_0001.NEF".to_string(),
+            (size1, "unused-fingerprint".to_string()),
+        );
+        candidates.insert(
+            "2026/09/IMG_0002.NEF".to_string(),
+            (size2, "unused-fingerprint".to_string()),
+        );
+
+        let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
+        assert_eq!(results.len(), 2);
+        for (_, outcome) in &results {
+            assert!(matches!(outcome, ResolveOutcome::RelinkedBySizeName(_)));
         }
     }
 }

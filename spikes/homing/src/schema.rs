@@ -97,9 +97,15 @@ pub fn upsert_volume(
     Ok(id)
 }
 
-/// Marks every volume not present in `seen_identity_keys` as offline. Their `root`/`asset` rows
-/// are untouched -- catalog data (ratings, keywords, edits) is never deleted just because a drive
-/// is unplugged, per ADR-0020's offline-UX decision.
+/// Marks every volume not present in `seen_identity_keys` as offline **and** every volume that
+/// *is* present as online -- this is the reconnect path, not just the disconnect path. An
+/// earlier version of this function only ever cleared `online`, never set it back: a volume that
+/// went offline once stayed stuck at `online = 0` forever after, even after a real reconnect,
+/// since `upsert_volume` (called only from `cmd_build`) was the sole path that set it back to 1.
+/// `cmd_resolve` calls this on every run without rebuilding, so it must be able to bring a volume
+/// back online on its own. Their `root`/`asset` rows are untouched either way -- catalog data
+/// (ratings, keywords, edits) is never deleted just because a drive is unplugged, per ADR-0020's
+/// offline-UX decision.
 pub fn mark_offline_except(conn: &Connection, seen_identity_keys: &[String]) -> Result<usize> {
     if seen_identity_keys.is_empty() {
         return Ok(conn.execute("UPDATE volume SET online = 0", [])?);
@@ -109,12 +115,19 @@ pub fn mark_offline_except(conn: &Connection, seen_identity_keys: &[String]) -> 
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!("UPDATE volume SET online = 0 WHERE identity_key NOT IN ({placeholders})");
     let params: Vec<&dyn rusqlite::ToSql> = seen_identity_keys
         .iter()
         .map(|s| s as &dyn rusqlite::ToSql)
         .collect();
-    Ok(conn.execute(&sql, params.as_slice())?)
+
+    let offline_sql =
+        format!("UPDATE volume SET online = 0 WHERE identity_key NOT IN ({placeholders})");
+    let mut changed = conn.execute(&offline_sql, params.as_slice())?;
+
+    let online_sql = format!("UPDATE volume SET online = 1 WHERE identity_key IN ({placeholders})");
+    changed += conn.execute(&online_sql, params.as_slice())?;
+
+    Ok(changed)
 }
 
 pub fn is_volume_online(conn: &Connection, identity_key: &str) -> Result<bool> {
@@ -174,24 +187,31 @@ pub fn resolve(
     asset_id: i64,
     mounted: &std::collections::HashMap<String, String>,
 ) -> Result<Option<String>> {
-    let row: Option<(String, bool, String, String)> = conn
-        .query_row(
-            "SELECT v.identity_key, v.online, r.rel_path, a.rel_path
-             FROM asset a
-             JOIN root r ON r.id = a.root_id
-             JOIN volume v ON v.id = r.volume_id
-             WHERE a.id = ?1",
-            [asset_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get::<_, i64>(1)? != 0,
-                    row.get(2)?,
-                    row.get(3)?,
-                ))
-            },
-        )
-        .ok();
+    // `.ok()` here would conflate "this asset id doesn't exist" (a real, expected `NoRows` case)
+    // with a genuine DB error (corruption, I/O failure) -- both would collapse to `Ok(None)`,
+    // and a caller (e.g. `cmd_resolve`) would count a real DB failure as an ordinary "offline"
+    // asset instead of surfacing it. Match on the specific "no rows" variant instead, and
+    // propagate everything else.
+    let row: Option<(String, bool, String, String)> = match conn.query_row(
+        "SELECT v.identity_key, v.online, r.rel_path, a.rel_path
+         FROM asset a
+         JOIN root r ON r.id = a.root_id
+         JOIN volume v ON v.id = r.volume_id
+         WHERE a.id = ?1",
+        [asset_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, i64>(1)? != 0,
+                row.get(2)?,
+                row.get(3)?,
+            ))
+        },
+    ) {
+        Ok(row) => Some(row),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
     let Some((identity_key, online, root_rel, asset_rel)) = row else {
         return Ok(None);
     };
@@ -280,6 +300,25 @@ mod tests {
         assert_eq!(
             count, 1,
             "offline volumes keep their catalog rows, per ADR-0020's offline-UX decision"
+        );
+    }
+
+    #[test]
+    fn mark_offline_except_brings_a_reconnected_volume_back_online() {
+        let conn = open_in_memory().unwrap();
+        upsert_volume(&conn, "ntfs64:aaa", None, None, false, "H:\\", 100).unwrap();
+
+        // Drive unplugged: not in this round's seen set.
+        mark_offline_except(&conn, &[]).unwrap();
+        assert!(!is_volume_online(&conn, "ntfs64:aaa").unwrap());
+
+        // Drive reconnected: it's now in the seen set, and must come back online without
+        // needing `homing build` to be rerun -- `cmd_resolve` only ever calls
+        // `mark_offline_except`, never `upsert_volume`.
+        mark_offline_except(&conn, &["ntfs64:aaa".to_string()]).unwrap();
+        assert!(
+            is_volume_online(&conn, "ntfs64:aaa").unwrap(),
+            "a volume present in the seen set must be marked back online, not left stuck offline"
         );
     }
 

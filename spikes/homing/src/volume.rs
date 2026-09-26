@@ -142,14 +142,10 @@ pub mod windows_impl {
     fn volume_info_for(guid_path: &str) -> VolumeInfo {
         let mount_points = mount_points_for(guid_path);
         let (serial_32, label, total_bytes) = volume_information(guid_path);
-        let (ntfs_serial_64, marker_uuid) = mount_points
+        let ntfs_serial_64 = ntfs_volume_data(guid_path);
+        let marker_uuid = mount_points
             .first()
-            .map(|mp| {
-                let ntfs = ntfs_volume_data(mp);
-                let marker = read_or_none(&format!("{mp}.nicti-volume"));
-                (ntfs, marker)
-            })
-            .unwrap_or((None, None));
+            .and_then(|mp| read_or_none(&format!("{mp}.nicti-volume")));
         let (partition_guid, mbr_signature, mbr_partition_offset) =
             partition_info(guid_path).unwrap_or((None, None, None));
         let removable = mount_points
@@ -205,11 +201,17 @@ pub mod windows_impl {
         (Some(serial), label, None)
     }
 
-    fn ntfs_volume_data(mount_point: &str) -> Option<u64> {
-        // Open the volume's root as a handle suitable for DeviceIoControl -- trailing backslash
-        // required for a volume root path (`\\.\H:` form is also valid; the mount-point form
-        // works here because we open the directory itself, not the raw device).
-        let file = fs::File::open(mount_point).ok()?;
+    fn ntfs_volume_data(guid_path: &str) -> Option<u64> {
+        // `FSCTL_GET_NTFS_VOLUME_DATA` needs a genuine volume-device handle, not a directory
+        // handle -- an earlier draft opened the mount point directly (`fs::File::open(mount_point)`,
+        // e.g. `"H:\\"`), which is wrong on two counts: `CreateFileW` on a directory path needs
+        // `FILE_FLAG_BACKUP_SEMANTICS` at minimum (plain `std::fs::File::open` doesn't set it), and
+        // per Microsoft's own FSCTL documentation the control code itself requires a volume handle
+        // (`\\.\H:` or `\\?\Volume{GUID}`), not a directory handle, regardless of that flag. Opening
+        // the trimmed GUID path instead (same pattern `partition_info` below already uses
+        // successfully) sidesteps both problems in one fix.
+        let path = guid_path.trim_end_matches('\\');
+        let file = fs::File::open(path).ok()?;
         let handle: HANDLE = file.as_raw_handle() as HANDLE;
         let mut out = NTFS_VOLUME_DATA_BUFFER::default();
         let mut returned: u32 = 0;

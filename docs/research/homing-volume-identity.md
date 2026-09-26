@@ -17,7 +17,7 @@ baseline measurement deferred" precedent — flagged explicitly here rather than
 What *is* real, from this sandbox:
 
 - `spikes/homing`'s cross-platform modules (`path.rs`, `schema.rs`, `fingerprint.rs`, `relink.rs`,
-  and `volume::identity_key`'s pure selection logic) compile and pass **20/20 unit tests**.
+  and `volume::identity_key`'s pure selection logic) compile and pass **23/23 unit tests**.
 - `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean.
 - The full workspace sweep with `homing` added — `cargo fmt --all -- --check`, `cargo clippy
   --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude
@@ -95,6 +95,43 @@ exact tables to fill in:
 
 Once those are filled in, move ADR-0020 from Proposed to Accepted (or revise the Decision if a
 measurement contradicts it — same discipline as every reference-machine-pending ADR in this repo).
+
+## Adversarial review
+
+A fresh review pass (before opening the PR, per this repo's standing rule) attacked the code that
+*was* compiled and tested here, not just the flagged-unverified Windows FFI, and found six real
+issues, all fixed before merge:
+
+- **Reconnect bug**: `schema::mark_offline_except` only ever cleared `volume.online`, never set it
+  back — a volume that went offline once stayed stuck offline after a real reconnect, since
+  `cmd_resolve`'s poll-and-resolve loop never calls `upsert_volume` (the only other path that set
+  `online = 1`). Fixed to flip both directions in one call; covered by a new test
+  (`mark_offline_except_brings_a_reconnected_volume_back_online`).
+- **False-positive relink**: `relink_against_unknown_volume` had no candidate de-duplication — two
+  offline assets sharing a fingerprint+size (a genuine duplicate photo) could both silently resolve
+  to the same candidate file. Fixed with a `claimed`-paths set, processed in a deterministic
+  `ORDER BY a.id`; covered by a new test.
+- **`schema::resolve`'s error handling** conflated "asset not found" with a real DB error (both
+  collapsed to `Ok(None)` via `.ok()`) — fixed to match specifically on
+  `rusqlite::Error::QueryReturnedNoRows` and propagate everything else.
+- **`ntfs_volume_data`'s FFI was structurally wrong**, independent of being unverified: it opened a
+  directory (the mount point) rather than a volume-device handle, which `FSCTL_GET_NTFS_VOLUME_DATA`
+  requires per its own documentation. Fixed to open the trimmed volume-GUID path instead, matching
+  `partition_info`'s already-correct pattern.
+- **Silent fingerprint-hash failures** (a locked/corrupt file during import) were indistinguishable
+  from "no fingerprint requested" — added `BuildStats::fingerprint_failures` to track them
+  separately.
+- **`fingerprint::SizeNameKey` (tier a) was dead code**, never actually wired into the relink path
+  despite the design intent described in `fingerprint.rs`'s own doc comment. Wired in as the
+  last-resort match for assets with no fingerprint at all (never computed, or a hashing failure),
+  and as a size-bucketing index that also narrows the fingerprint-tier fallback scan instead of a
+  full linear scan over every candidate file. A new `ResolveOutcome::RelinkedBySizeName` variant
+  keeps this weaker signal distinguishable from a fingerprint-confirmed match; covered by a new
+  test.
+
+Not fixed, correctly left as an open follow-up (see below): the volume-level identity-ambiguity
+guard (two *mounted volumes* sharing an identity key) is a different gap from the relink-level
+candidate-dedup bug above, and remains unimplemented.
 
 ## Follow-ups filed, not solved inline
 

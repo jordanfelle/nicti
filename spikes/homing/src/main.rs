@@ -174,8 +174,8 @@ fn cmd_build(
     )?;
     let stats = relink::build(&conn, vid, root_rel_path, root_dir, tier)?;
     println!(
-        "indexed {} file(s), {} error(s), volume identity {identity_key}",
-        stats.files_indexed, stats.errors
+        "indexed {} file(s), {} error(s), {} fingerprint failure(s), volume identity {identity_key}",
+        stats.files_indexed, stats.errors, stats.fingerprint_failures
     );
     Ok(())
 }
@@ -237,11 +237,17 @@ fn cmd_relink(scan_dir: &std::path::Path, db_path: &std::path::Path) -> Result<(
         match outcome {
             relink::ResolveOutcome::RelinkedByFingerprint(p) => {
                 relinked += 1;
-                println!("asset {id} -> relinked to {p}");
+                println!("asset {id} -> relinked to {p} (fingerprint match)");
+            }
+            relink::ResolveOutcome::RelinkedBySizeName(p) => {
+                relinked += 1;
+                println!(
+                    "asset {id} -> relinked to {p} (size+name only, no fingerprint available)"
+                );
             }
             relink::ResolveOutcome::Lost => {
                 lost += 1;
-                println!("asset {id} -> lost, no fingerprint match");
+                println!("asset {id} -> lost, no match");
             }
             _ => {}
         }
