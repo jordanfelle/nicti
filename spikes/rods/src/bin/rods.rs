@@ -48,6 +48,12 @@ enum Command {
         /// WSL/CPU one). Omit for the full image.
         #[arg(long)]
         crop: Option<u32>,
+        /// Times the denoise stage under `nicti_prowl::perf::Protocol` (1 warmup + 5 measured
+        /// runs, p50/p95/max) instead of running it once. CPU-only dev-loop numbers, not the
+        /// real ADR measurement -- that's a Windows-native/GPU job (P5). No-op without
+        /// --denoise-model.
+        #[arg(long)]
+        time: bool,
     },
 }
 
@@ -65,6 +71,7 @@ fn main() -> anyhow::Result<()> {
             tile,
             overlap,
             crop,
+            time,
         } => compare(
             &ref_tiff,
             &ref_json,
@@ -75,6 +82,7 @@ fn main() -> anyhow::Result<()> {
             ort_dylib.as_deref(),
             ai::TileConfig { tile, overlap },
             crop,
+            time,
         ),
     }
 }
@@ -90,6 +98,7 @@ fn compare(
     ort_dylib: Option<&std::path::Path>,
     tile_config: ai::TileConfig,
     crop: Option<u32>,
+    time: bool,
 ) -> anyhow::Result<()> {
     let reference = linear_input::load(ref_tiff, ref_json)?;
     let candidate = linear_input::load(candidate_tiff, candidate_json)?;
@@ -192,6 +201,22 @@ fn compare(
             tile_config.overlap
         );
         let mut denoiser = ai::TiledDenoiser::load(model_path, ort_dylib)?;
+
+        if time {
+            // 1 warmup + 5 measured throwaway calls (docs/benchmarks.md's protocol), then one
+            // more real call below whose output is what actually gets scored -- CPU/WSL numbers,
+            // a dev-loop signal only; the real ADR measurement is Windows-native/GPU (P5).
+            let mut timed_result: Option<Result<Vec<f32>, ai::AiDenoiseError>> = None;
+            let stats = nicti_prowl::perf::Protocol::default().run(|| {
+                timed_result = Some(denoiser.denoise(&cand_srgb, width, height, tile_config))
+            });
+            let _ = timed_result; // only the timing matters here; scored again for real below
+            println!(
+                "denoise timing (CPU/WSL dev-loop, not the real ADR number): p50={:.1}ms p95={:.1}ms max={:.1}ms",
+                stats.p50_ms, stats.p95_ms, stats.max_ms
+            );
+        }
+
         cand_srgb = denoiser.denoise(&cand_srgb, width, height, tile_config)?;
     }
 
