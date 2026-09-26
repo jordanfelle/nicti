@@ -12,13 +12,16 @@ permissions:
   contents: read
 
 concurrency:
-  # `gh issue list --search` has some index-propagation lag, so two watched runs completing
-  # close together (CI and CodeQL Advanced finishing near-simultaneously, or two rapid main
-  # pushes) could otherwise both miss seeing each other's just-created issue and double-file.
-  # Serializing (not cancelling) closes that window -- a queued run still sees the first run's
-  # issue by the time it's its turn.
+  # Two watched runs completing close together (CI and CodeQL Advanced finishing
+  # near-simultaneously, or two rapid main pushes) could otherwise run concurrently and both
+  # miss creating a duplicate issue for the same job. Serializing (not cancelling) means a
+  # queued run only starts once the run ahead of it has already created (or not) that issue.
   group: ci-duration-watch
   cancel-in-progress: false
+  # Default `queue: single` only keeps one pending run and replaces it if another arrives first
+  # -- the replaced run's own CI/CodeQL completion would then never get checked. `queue: max`
+  # keeps every eligible run queued (up to GitHub's 100-item cap) instead.
+  queue: max
 
 jobs:
   watch:
@@ -34,6 +37,10 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event != 'pull_request'
     permissions:
+      # A job-level `permissions` block resets every unlisted scope to `none`, it does not
+      # inherit the workflow-level block above -- contents: read must be repeated here for
+      # actions/checkout's default-token fetch to be reliably granted.
+      contents: read
       actions: read
       issues: write
     steps:

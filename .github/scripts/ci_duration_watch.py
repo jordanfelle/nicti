@@ -92,13 +92,15 @@ def slowest_steps(job: dict, n: int = 3) -> list[tuple[str, float]]:
 
 
 def find_open_issue(repo: str, title_substr: str) -> dict | None:
+    # Listed directly (no --search): GitHub's search index has propagation lag, so a run that
+    # searched for an issue another run just created could miss it and file a duplicate. Listing
+    # every open ci-slow issue and matching titles locally in Python has no such lag.
     data = json.loads(
         subprocess.run(
             [
                 "gh", "issue", "list", "-R", repo,
                 "--label", LABEL, "--state", "open",
-                "--search", title_substr,
-                "--json", "number,title",
+                "--json", "number,title", "--limit", "100",
             ],
             capture_output=True, text=True, check=True,
         ).stdout
