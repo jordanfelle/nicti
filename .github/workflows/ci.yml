@@ -39,6 +39,7 @@ jobs:
     outputs:
       den: ${{ steps.filter.outputs.den }}
       pelt: ${{ steps.filter.outputs.pelt }}
+      retina: ${{ steps.filter.outputs.retina }}
     # dorny/paths-filter fetches the PR's changed-file list via the GitHub REST API on
     # `pull_request` events by default, which needs `pull-requests: read` -- the workflow-level
     # `permissions: contents: read` block above sets every OTHER unlisted scope to `none` for the
@@ -77,6 +78,14 @@ jobs:
               - 'spikes/pelt-egui/**'
               - 'spikes/pelt-iced/**'
               - 'spikes/pelt-slint/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            retina:
+              # #37: retina bundles LibRaw's full C++ source (via a git submodule) and compiles it
+              # from scratch on every touching PR -- same rationale as den/pelt above, moved out
+              # of the always-on jobs so an unrelated PR doesn't pay for a C++ recompile.
+              - 'spikes/retina/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -137,7 +146,7 @@ jobs:
       # the workspace by the pelt-linux job passing without it once it's the only Linux job
       # left compiling them; if that job's build ever fails to link, that's the first place to
       # look.
-      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
 
   clippy-windows:
     name: cargo clippy (windows)
@@ -159,7 +168,7 @@ jobs:
       # docs/adr/0001), so it -- not Linux -- is the platform whose clippy/test results should
       # gate merges. --workspace --exclude den --exclude pelt-* mirrors the Linux job exactly
       # (see its own comment above for why each flag is required).
-      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test (linux)
@@ -184,7 +193,7 @@ jobs:
       #
       # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
       # the path-gated `pelt (linux)` job below, same reasoning as den.
-      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint
+      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
 
   test-windows:
     name: cargo test (windows)
@@ -208,7 +217,7 @@ jobs:
       # the path-gated `pelt (windows)` job below, same reasoning as den. This is the single
       # biggest driver of this job's own compile time: cold, these three crates alone pull in
       # 311 of the 543 unique crates otherwise compiled here.
-      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint
+      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
 
   den-linux:
     name: den (linux)
@@ -357,6 +366,62 @@ jobs:
       # prove out on it, not just Linux.
       - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
       - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
+
+  retina-linux:
+    name: retina (linux)
+    needs: changes
+    # See den-linux's comment above for why the changes-failure case runs rather than skips.
+    if: needs.changes.result == 'failure' || needs.changes.outputs.retina == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # #37: spikes/retina/vendor/LibRaw is a git submodule (yogthos/LibRaw's HE/HE* decoder
+          # fork, pinned to the exact commit this research verified) -- without this, build.rs's
+          # own check for libraw/libraw.h fails with a clear panic rather than a confusing
+          # compile error, but it still fails.
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Same reasoning as den-linux's own save-if: false above: not a required check, and a
+          # full from-scratch LibRaw C++ compile (~95 source files) would otherwise ride along on
+          # every main push regardless of whether spikes/retina changed.
+          save-if: false
+      # #37/ADR-0018: retina bundles LibRaw's real C++ source (compiled via the `cc` crate, see
+      # build.rs) to research the RAW decoder question -- a throwaway spike, not part of the
+      # shipping v1 target, same reasoning as den/pelt above for why this is path-gated out of
+      # the always-on jobs.
+      - run: cargo clippy -p retina --all-targets --all-features -- -D warnings
+      - run: cargo test -p retina --all-targets --all-features
+
+  retina-windows:
+    name: retina (windows)
+    needs: changes
+    if: needs.changes.result == 'failure' || needs.changes.outputs.retina == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see den-linux's comment above
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }} # required check, see clippy job's comment above
+      # #17/#37: required (blocking) check, matching den (windows)/pelt (windows)'s own
+      # reasoning -- Windows is v1's actual target, and this is where ADR-0018's real numbers
+      # came from (native Windows .exe via WSL interop, not this Linux build). Uses MSVC (the
+      # runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
+      # covers this path; the MinGW-specific static-linking branch is exercised locally, not
+      # by this job.
+      - run: cargo clippy -p retina --all-targets --all-features -- -D warnings
+      - run: cargo test -p retina --all-targets --all-features
 
   cargo-deny:
     name: cargo deny (licenses)

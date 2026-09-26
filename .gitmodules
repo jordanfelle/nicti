@@ -1,0 +1,4 @@
+[submodule "spikes/retina/vendor/LibRaw"]
+	path = spikes/retina/vendor/LibRaw
+	url = https://github.com/yogthos/LibRaw.git
+	branch = nikon-he-decoder

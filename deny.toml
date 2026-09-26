@@ -60,11 +60,16 @@ allow = [
     # GPL-3.0/AGPL-3.0/GPL-2.0-or-later: added 2026-09-24 per ADR-0003's amendment (#66/ADR-0010 --
     # Nicti's own outbound license is now AGPL-3.0-or-later, so these are combinable into it, not
     # a compatibility risk the way they were when the outbound license was still undecided).
-    # LGPL is *still* deliberately not listed here. ADR-0003's amendment resolved the
-    # LGPL-as-Cargo-dependency sign-off question for `lensfun-rs` (confirmed LGPL-3.0-or-later dual
-    # license) but explicitly NOT for `rawler` (bare "LGPL-2.1" with no confirmed or-later arm --
-    # see ADR-0003's own amendment for why this still needs resolving before rawler is pre-cleared).
-    # The reason for this allowlist omission hasn't changed either way (see below).
+    # LGPL is *still* deliberately not listed here, though the reason changed 2026-09-25 (#37):
+    # LGPL-2.1 combining into an AGPL-3.0-or-later work turned out to need no "or-later" grant at
+    # all (LGPL-2.1 §§5-6 permit it directly, see docs/licensing.md's Flags §2 for the full
+    # citation trail) -- the compatibility question itself is resolved for `rawler`/`lensfun-rs`
+    # alike. What's still per-crate, not blanket-allowlistable, is §6's own notice + license-text
+    # obligation (the source-availability condition itself is satisfied structurally by Nicti
+    # being AGPL-3.0-or-later open source, see docs/licensing.md's Flags §2) -- cargo-deny can
+    # check license *compatibility*, not whether a shipped build actually gives that notice, so
+    # each LGPL dependency still gets its own scoped exception (see below) rather than a global
+    # allow entry, same principle as the OR-arm-matching caveat this section already documents.
     "GPL-3.0-only",
     "GPL-3.0-or-later",
     "AGPL-3.0-only",
@@ -92,12 +97,13 @@ allow = [
 # (verified: r-efi passes today via its MIT/Apache-2.0 arms with no LGPL entry in `allow` at all),
 # so adding an LGPL SPDX string here would have no upside and a real downside: cargo-deny can't
 # express "only as an OR-arm" -- it would also pass a future crate whose *sole* license is that
-# exact LGPL string. For `lensfun-rs` specifically, this no longer matters for the concern it was
-# originally written to guard (ADR-0003's amendment: its confirmed or-later dual license needs no
-# special sign-off now that Nicti's own license is already copyleft) -- but `rawler`'s own LGPL
-# grant isn't confirmed to include an "or later" option, so its sign-off question is still open,
-# and the general principle (don't widen an allowlist just because cargo-deny's OR-arm matching
-# makes it convenient) still holds regardless. This stays an explicit choice, not an oversight.
+# exact LGPL string. For `lensfun-rs` specifically, its confirmed or-later dual license needed no
+# special sign-off once Nicti's own license was already copyleft (ADR-0003's amendment). `rawler`
+# (and LibRaw, vendored outside Cargo's graph entirely) turned out to need no "or-later" grant
+# either, once #37 checked LGPL-2.1's actual §§5-6 text (docs/licensing.md's Flags §2) -- but the
+# general principle (don't widen an allowlist just because cargo-deny's OR-arm matching makes it
+# convenient, since it can't verify per-crate packaging compliance) still holds regardless. This
+# stays an explicit choice, not an oversight.
 confidence-threshold = 0.9
 
 # Spike-scoped exception (#68/ADR-0006): Slint's own crates carry
@@ -157,6 +163,23 @@ name = "i-slint-renderer-skia"
 [[licenses.exceptions]]
 allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
 name = "i-slint-renderer-software"
+
+# Exception (#37): `rawler`'s bare "LGPL-2.1" is compatible with Nicti's AGPL-3.0-or-later per
+# LGPL-2.1 §§5-6 (see the LGPL note above and docs/licensing.md's Flags §2 for the full citation
+# trail) -- not blocked on an "or-later" grant the way an earlier draft of this file assumed. Kept
+# as a per-crate exception rather than a global allowlist entry because cargo-deny can verify
+# license *compatibility*, not whether a shipped build actually satisfies §6's own notice +
+# source-availability packaging obligation -- that's a per-crate, per-shipping-decision check, not
+# something a blanket "LGPL-2.1" allow entry could express. **Not actually path-scoped to
+# `spikes/retina`** -- cargo-deny's `licenses.exceptions` matches by crate name across the whole
+# resolved dependency graph, with no per-workspace-member mechanism (confirmed: a hostile review
+# caught an earlier draft of this comment overclaiming path-scoping). If any other crate in this
+# workspace ever adds `rawler` as a dependency, this exception silently covers that too -- that's
+# fine on the compatibility question now, but re-check the §6 packaging obligation is actually
+# satisfied wherever that dependency ships.
+[[licenses.exceptions]]
+allow = ["LGPL-2.1"]
+name = "rawler"
 
 # publish = false workspace crates carry no SPDX license (nicti, pawprint, whisker) -- this exempts
 # them from the license check entirely rather than failing on our own unlicensed-by-design internal
