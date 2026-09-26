@@ -26,11 +26,23 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   (wgpu 30.0.0 match, MIT/Apache-2.0). Iced pins wgpu 27 (compat cost). Slint's GPU integration is
   cleanest but its license (`GPL-3.0-only OR LicenseRef-Slint-*`) needs its own ADR-0003 amendment
   to ship. Final pick waits on `bench/pelt/pelt.ahk`+`run-pelt.ps1` reference-machine numbers.
-- **Healing/removal** — `docs/adr/0007`: **Proposed, pending reference-machine pass**. Ships both
-  classic clone/heal (CPU Poisson-Jacobi + `wgpu` compute-shader twin) and AI removal
-  (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`. **No
-  real ONNX weights exist in this sandbox** — the AI-removal wrappers prove only the
-  loading/error-handling shape, not real inference. LaMa's Places2 training-data license status is
-  still unresolved (unreachable primary source); MI-GAN investigated as an alternative, not
-  cleaner (same exposure). Proposed stage order for #44: after lens correction, before global
+- **Healing/removal** — `docs/adr/0007`: **Accepted** (2026-09-26, #97's reference-machine pass).
+  Ships both classic clone/heal (CPU Poisson-Jacobi + `wgpu` compute-shader twin) and AI removal
+  (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`.
+  **GPU Poisson-solve validated on real RTX 5080 hardware: 0.386ms p50 (Vulkan) vs. the <16ms/
+  update target** — ~40x headroom; see #97's WSL-has-no-NVIDIA-Vulkan-ICD gotcha below. **AI
+  removal latency/quality still TBD** — real ONNX weights are #51's scope, not obtained here; the
+  wrappers prove only the loading/error-handling shape. LaMa's Places2 training-data license
+  status is still unresolved (unreachable primary source); MI-GAN investigated as an alternative,
+  not cleaner (same exposure). Proposed stage order for #44: after lens correction, before global
   tone, in linear space.
+  - **Gotcha (#97)**: this WSL sandbox has no NVIDIA Vulkan ICD registered at all — `wgpu` here
+    only reaches the software `llvmpipe` adapter (88ms p50, not real hardware), even though
+    `libcuda.so`/D3D12 interop libs under `/usr/lib/wsl/lib/` give real CUDA/D3D12 access.
+    `mesa-vulkan-drivers` on this distro also has no `dzn` (D3D12-translation) ICD. Fix: cross-
+    compile for `x86_64-pc-windows-gnu` (`rustup target add`, needs `x86_64-w64-mingw32-gcc` for
+    the linker — **and must use the rustup-managed `cargo`/`rustc`, not a Homebrew-installed one
+    that shadows it on `PATH` first and has no Windows target installed**) and run the real `.exe`
+    directly on the reference machine's Windows side via WSL interop
+    (`powershell.exe -Command "& '<unc-path-from-wslpath--w>' --ignored --nocapture"`) — same
+    pattern `spikes/retina`/`spikes/sniff` already used for their own real-hardware passes.
