@@ -83,8 +83,10 @@ pub fn inspect(conn: &Connection) -> Result<Inventory> {
         conn.query_row("SELECT COUNT(*) FROM AgLibraryKeyword", [], |r| r.get(0))?;
     // genealogy is a `/`-separated chain of ancestor ids, e.g. `/540430/826707370`; the number of
     // separators is the nesting depth (root-level keywords have exactly one leading `/`, depth 0).
+    // `MAX()` over zero rows is NULL, not 0 -- COALESCE keeps a catalog with no keywords at all
+    // reporting depth 0 instead of failing the whole `inventory` command on an `i64` NULL read.
     let keyword_max_depth: i64 = conn.query_row(
-        "SELECT MAX(LENGTH(genealogy) - LENGTH(REPLACE(genealogy, '/', ''))) - 1 \
+        "SELECT COALESCE(MAX(LENGTH(genealogy) - LENGTH(REPLACE(genealogy, '/', ''))) - 1, 0) \
          FROM AgLibraryKeyword",
         [],
         |r| r.get(0),
@@ -151,6 +153,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn fixture_catalog(dir: &Path) -> rusqlite::Connection {
+        fixture_catalog_with_keywords(dir, true)
+    }
+
+    fn fixture_catalog_with_keywords(dir: &Path, with_keywords: bool) -> rusqlite::Connection {
         let path = dir.join("fixture.lrcat");
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
@@ -176,8 +182,6 @@ mod tests {
             INSERT INTO AgLibraryFile DEFAULT VALUES;
 
             CREATE TABLE AgLibraryKeyword (id_local INTEGER PRIMARY KEY, genealogy TEXT);
-            INSERT INTO AgLibraryKeyword (genealogy) VALUES ('/1'), ('/1/2'), ('/1/2/3');
-
             CREATE TABLE AgLibraryKeywordSynonym (id_local INTEGER PRIMARY KEY);
             CREATE TABLE AgLibraryKeywordImage (id_local INTEGER PRIMARY KEY);
             INSERT INTO AgLibraryKeywordImage DEFAULT VALUES;
@@ -192,6 +196,12 @@ mod tests {
             "#,
         )
         .unwrap();
+        if with_keywords {
+            conn.execute_batch(
+                "INSERT INTO AgLibraryKeyword (genealogy) VALUES ('/1'), ('/1/2'), ('/1/2/3');",
+            )
+            .unwrap();
+        }
         drop(conn);
         open::open_backup(&path).unwrap()
     }
@@ -213,5 +223,18 @@ mod tests {
             inv.collection_kind_counts,
             vec![("com.adobe.ag.library.collection".to_string(), 2)]
         );
+    }
+
+    /// Regression test: `MAX()` over zero rows is SQL `NULL`, not `0` -- reading that into an
+    /// `i64` without `COALESCE` failed the entire `inventory` command on a catalog with no
+    /// keywords at all, instead of correctly reporting `keyword_max_depth: 0`.
+    #[test]
+    fn reports_zero_depth_for_a_catalog_with_no_keywords() {
+        let dir = TempDir::new().unwrap();
+        let conn = fixture_catalog_with_keywords(dir.path(), false);
+
+        let inv = inspect(&conn).unwrap();
+        assert_eq!(inv.keyword_count, 0);
+        assert_eq!(inv.keyword_max_depth, 0);
     }
 }

@@ -24,6 +24,10 @@ enum Command {
     /// Fail if any of `files` contains a keyword/collection/path string pulled from `catalog`.
     PrivacyCheck {
         catalog: PathBuf,
+        /// `required = true`: a bare `Vec<PathBuf>` positional accepts zero args, which would
+        /// silently report "clean (0 file(s) checked)" and exit 0 on a caller mistake (e.g. an
+        /// empty glob expansion) instead of failing loudly on an incomplete check.
+        #[arg(required = true)]
         files: Vec<PathBuf>,
     },
 }
@@ -110,6 +114,20 @@ fn cmd_privacy_check(catalog: &std::path::Path, files: &[PathBuf]) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// Regression test: a bare `Vec<PathBuf>` positional accepts zero arguments under clap's
+    /// derive defaults, which would let `shed privacy-check catalog.lrcat` (files omitted, e.g.
+    /// via an empty glob expansion in a calling script) silently report "clean" having checked
+    /// nothing at all, rather than failing to parse.
+    #[test]
+    fn privacy_check_requires_at_least_one_file() {
+        let result = Cli::try_parse_from(["shed", "privacy-check", "catalog.lrcat"]);
+        assert!(result.is_err());
+
+        let result = Cli::try_parse_from(["shed", "privacy-check", "catalog.lrcat", "a.md"]);
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn quote_identifier_wraps_a_plain_name() {

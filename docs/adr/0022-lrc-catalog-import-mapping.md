@@ -127,8 +127,13 @@ pass found referencing them; the exact blob-to-asset linkage (whether it's `hist
 ### Q6: #53 (AI auto-tone training dataset) feasibility
 
 380,300 assets, only 2 with no develop settings row at all (`Adobe_imageDevelopSettings` has
-380,307 rows against 380,300 images — the extra 7 are history-step snapshots sharing an `image` id,
-not orphans). A "before" state is reconstructable from the first
+380,307 rows against 380,300 images). Those two counts don't fully reconcile as reported: if
+exactly 2 images have zero rows, the remaining 380,298 images must together account for at least
+9 more rows than images, not 7 — this pass measured the row/image counts but never actually
+queried which images have more than one settings row (multiple snapshots? a duplicate?) or
+confirmed the "2 missing" count against a `LEFT JOIN`. Both the exact reconciliation and its
+mechanism are unconfirmed and flagged as a follow-up, not resolved here. A "before" state is
+reconstructable from the first
 `Adobe_libraryImageDevelopHistoryStep` row per image (1,771,117 total history-step rows across
 380,300 images, avg ~4.7 steps/image) or from LRC's known per-process-version defaults. This
 catalog is large enough to be a real, usable training set — dataset construction specifics (which

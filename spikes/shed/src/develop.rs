@@ -308,15 +308,19 @@ pub fn analyze(conn: &Connection) -> Result<DevelopReport> {
         |r| r.get(0),
     )?;
 
+    // Parsed row-by-row rather than collected into a `Vec<Option<String>>` first -- the real
+    // catalog has ~380,300 rows, each a several-KB Lua-literal payload, so buffering every one
+    // before parsing any of them costs a peak allocation of hundreds of MB for no benefit.
     let mut stmt = conn.prepare("SELECT text FROM Adobe_imageDevelopSettings")?;
-    let texts: Vec<Option<String>> = stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut rows = stmt.query([])?;
 
     let mut rows_seen = 0i64;
     let mut parse_failures = 0i64;
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
-    for text in texts.into_iter().flatten() {
+    while let Some(row) = rows.next()? {
+        let Some(text): Option<String> = row.get(0)? else {
+            continue;
+        };
         rows_seen += 1;
         match agprefs::Agpref::parse(&text) {
             Ok(pref) => {

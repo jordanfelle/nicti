@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
-/// Opens `path` read-only via SQLite's `mode=ro` URI parameter, refusing beforehand when either
+/// Opens `path` read-only, refusing beforehand when either
 /// sibling looks like a real, live process still has this catalog open:
 ///
 /// - a non-empty `.lock` file (Lightroom's own advisory lock -- confirmed against the user's real,
@@ -30,10 +30,21 @@ use std::path::Path;
 /// steps with a real gap between them (a live process could acquire the lock and start writing in
 /// that window), and `immutable=1` is exactly the flag that turns that gap from "SQLite would
 /// notice and error" into "SQLite has no mechanism to notice at all," risking a silent read of
-/// torn/inconsistent pages instead of a clean failure. Plain `mode=ro` keeps SQLite's normal
+/// torn/inconsistent pages instead of a clean failure. Plain read-only mode keeps SQLite's normal
 /// shared-lock/WAL-aware read path active, so a real concurrent writer is still safely serialized
 /// against (or surfaced as a busy/lock error) rather than silently ignored -- the pre-check above
 /// is a fast, informative up-front rejection for the common case, not the only safety net.
+///
+/// **Deliberately not a `file:` URI at all**: an earlier draft passed `path` through
+/// `format!("file:{}?mode=ro", ...)`, which needed `SQLITE_OPEN_URI` to parse. That's a second,
+/// independent bug on top of the `immutable=1` one above -- SQLite's URI filename syntax treats an
+/// unescaped `?`/`#` in the path as the start of its own query string/fragment, so a `path`
+/// containing one (e.g. `catalog.lrcat?immutable=1`, however such a name arose) would silently
+/// reinterpret part of the *filename* as a URI parameter, potentially re-adding `immutable=1`
+/// behind this guard's back -- while `sibling_with_suffix`'s own sibling checks above still operate
+/// on the literal, unparsed `path`, so the two would disagree about which file is actually being
+/// opened. Passing `path` directly with no `SQLITE_OPEN_URI` flag needs no escaping and has no URI
+/// parser in the loop to disagree with the sibling checks in the first place.
 pub fn open_backup(path: &Path) -> Result<Connection> {
     let lock = sibling_with_suffix(path, ".lock");
     if non_empty(&lock)? {
@@ -55,12 +66,8 @@ pub fn open_backup(path: &Path) -> Result<Connection> {
         );
     }
 
-    let uri = format!("file:{}?mode=ro", path.display());
-    let conn = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
-    .with_context(|| format!("opening {} read-only", path.display()))?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} read-only", path.display()))?;
     Ok(conn)
 }
 
@@ -99,6 +106,22 @@ mod tests {
     fn opens_a_plain_backup_copy() {
         let dir = TempDir::new().unwrap();
         let path = make_catalog(dir.path());
+        assert!(open_backup(&path).is_ok());
+    }
+
+    /// Regression test: an earlier draft opened `path` via a hand-built `file:{path}?mode=ro` URI,
+    /// which needed `SQLITE_OPEN_URI` to parse -- meaning a filename containing a literal `?` or
+    /// `#` would have part of its own name reinterpreted as a URI query string/fragment by SQLite,
+    /// while the sibling-file checks above kept operating on the real, literal filename, letting
+    /// the two disagree about which file is being opened. Passing `path` directly with no URI
+    /// parsing in the loop must not care what characters the filename contains.
+    #[test]
+    fn opens_a_backup_whose_filename_contains_uri_special_characters() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("catalog.lrcat?immutable=1#x");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        drop(conn);
         assert!(open_backup(&path).is_ok());
     }
 

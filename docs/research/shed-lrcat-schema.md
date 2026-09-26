@@ -121,8 +121,11 @@ unconfirmed — flagged as a follow-up for whoever picks up the filed issue.
 ## #53 (AI auto-tone) feasibility
 
 380,300 assets, 1,771,117 develop-history-step rows (~4.7 steps/image average) — a real, sizeable
-before/after training set. `Adobe_imageDevelopSettings` has 380,307 rows against 380,300 images;
-the extra 7 are additional history-step-linked settings rows sharing an image id, not orphans.
+before/after training set. `Adobe_imageDevelopSettings` has 380,307 rows against 380,300 images,
+and only 2 images have zero settings rows — those two counts don't fully reconcile (the remaining
+380,298 images must then account for at least 9 more rows than images, not 7), since this pass
+never queried which images have more than one row or confirmed the "2 missing" count via a
+`LEFT JOIN`. Flagged as an open reconciliation, not resolved here.
 
 ## `lrcat-extractor` evaluation
 

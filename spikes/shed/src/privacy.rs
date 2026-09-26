@@ -32,7 +32,11 @@ use std::path::Path;
 pub fn sensitive_strings(conn: &Connection) -> Result<HashSet<String>> {
     let mut set = HashSet::new();
 
-    let mut stmt = conn.prepare("SELECT name FROM AgLibraryKeyword WHERE name IS NOT NULL")?;
+    // `name != ''` matters here, not just `IS NOT NULL`: an empty string is a substring of every
+    // string, so a bare empty keyword name would make `check_files` flag every file it's given,
+    // regardless of content -- the same reasoning the collection-name query below already applies.
+    let mut stmt =
+        conn.prepare("SELECT name FROM AgLibraryKeyword WHERE name IS NOT NULL AND name != ''")?;
     for name in stmt.query_map([], |r| r.get::<_, String>(0))? {
         set.insert(name?);
     }
@@ -101,6 +105,35 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "Only aggregate counts here: 380300 assets.").unwrap();
 
+        let hits = check_files(&sensitive, &[file.path()]).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    /// Regression test: an empty string is a substring of every string, so a bare empty keyword
+    /// name being carried into the sensitive set would make `check_files` flag every file
+    /// regardless of content -- `sensitive_strings` must exclude it, the same way it already
+    /// excludes an empty collection name.
+    #[test]
+    fn excludes_an_empty_keyword_name() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE AgLibraryKeyword (name TEXT);
+            INSERT INTO AgLibraryKeyword (name) VALUES (''), ('RealKeyword');
+            CREATE TABLE AgLibraryCollection (name TEXT);
+            CREATE TABLE AgLibraryRootFolder (absolutePath TEXT);
+            CREATE TABLE AgLibraryFolder (pathFromRoot TEXT);
+            CREATE TABLE AgLibraryFile (baseName TEXT);
+            "#,
+        )
+        .unwrap();
+
+        let sensitive = sensitive_strings(&conn).unwrap();
+        assert!(!sensitive.contains(""));
+        assert!(sensitive.contains("RealKeyword"));
+
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "Nothing sensitive in this file at all.").unwrap();
         let hits = check_files(&sensitive, &[file.path()]).unwrap();
         assert!(hits.is_empty());
     }
