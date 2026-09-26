@@ -115,6 +115,12 @@ mod tests {
     /// while the sibling-file checks above kept operating on the real, literal filename, letting
     /// the two disagree about which file is being opened. Passing `path` directly with no URI
     /// parsing in the loop must not care what characters the filename contains.
+    ///
+    /// **Unix-only**: Windows' filesystem rejects `?`/`#` in a filename outright (`CannotOpen`,
+    /// confirmed by this exact test failing CI on `windows-latest` before this `cfg` was added) --
+    /// the scenario this test exercises can only occur on a filesystem that permits those
+    /// characters at all, so there is nothing to regress-test on Windows.
+    #[cfg(unix)]
     #[test]
     fn opens_a_backup_whose_filename_contains_uri_special_characters() {
         let dir = TempDir::new().unwrap();
