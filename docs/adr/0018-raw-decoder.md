@@ -74,9 +74,10 @@ data needs to be accessible to more than one person/machine going forward** — 
 problem from decoder selection, tracked as a follow-up (see Deferred, below), not solved by this
 ADR. This research instead pulled a **stratified subset directly from the live source library**
 (`H:\Photos\Furries\Cons\...` / `E:\Archive\Furries\Cons\...`), copied to a small NVMe scratch
-directory: 106 HE + 26 HE\* + 26 non-D7500-Lossless-candidate Z8 files (from Anthrocon
-2025/2024, Midwest FurFest 2024) plus **all 129** native D7500 NEFs from Rory/Fursonacon (the same
-files `docs/ref-10k-manifest.csv`'s D7500 bucket was built from) — 261 real files, ~6.5GB total.
+directory: **132 Z8 files** (from Anthrocon 2025/2024, Midwest FurFest 2024 -- 106 turned out HE
+and 26 turned out HE\* on real decode, not assumed from folder/date) plus **all 129** native D7500
+NEFs from Rory/Fursonacon (the same files `docs/ref-10k-manifest.csv`'s D7500 bucket was built
+from) — 261 real files total, ~6.5GB.
 `retina scan` (a new subcommand, no manifest CSV required — walks a directory and decodes every
 `.NEF`/`.nef`/`.dng` found) was built for exactly this: running directly against the live library
 or any ad hoc subset, since the frozen-manifest workflow this repo's other benchmarking tooling
@@ -110,7 +111,7 @@ before the reference set vanished) show **0% exact hash match** between decoders
 per-pixel `retina diff` on that Z8 file and one D7500 file shows exactly the same, narrow, fully
 characterized shape both times:
 
-```
+```text
 samples: 45,705,600 (Z8) / 20,876,800 (D7500)
 max abs diff: 1
 mean abs diff: ~0.73-0.75

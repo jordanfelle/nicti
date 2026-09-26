@@ -488,12 +488,33 @@ fn bench(
             continue;
         }
 
+        // Caught by CodeRabbit: discarding decode_one's Result meant a bucket where every file
+        // fails (e.g. rawler against an all-HE bucket, which rejects fast via a metadata check
+        // rather than doing real decode work) would still print a latency number -- a fast,
+        // meaningless one, since nothing was actually decoded. Track failures and skip reporting
+        // for a bucket where none of the sampled files decoded.
         let mut idx = 0usize;
+        let mut failures = 0usize;
         let stats = protocol.run(|| {
             let data = &files[idx % files.len()];
             idx += 1;
-            let _ = decode_one(decoder, data);
+            if decode_one(decoder, data).is_err() {
+                failures += 1;
+            }
         });
+
+        let total_runs = protocol.warmup + protocol.measured;
+        if failures >= total_runs {
+            eprintln!(
+                "bucket {label} [{decoder:?}]: every sampled decode failed, skipping latency report (not a real measurement)"
+            );
+            continue;
+        }
+        if failures > 0 {
+            eprintln!(
+                "bucket {label} [{decoder:?}]: {failures}/{total_runs} sampled decodes failed -- latency below includes only the failed-fast calls too, treat with caution"
+            );
+        }
 
         println!(
             "{label} [{decoder:?}] n={} p50={:.2}ms p95={:.2}ms max={:.2}ms",

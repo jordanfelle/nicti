@@ -63,7 +63,7 @@ Zero crashes on either side, across 261 real files.
 **Cross-decoder agreement (Lossless only)**: `compare` initially reported 0/129 exact CFA-hash
 matches, which looked like a real bug until `diff`'s per-pixel histogram explained it:
 
-```
+```text
 $ retina diff <lossless-z8-file>
 samples: 45705600
 exact match: 12429427 (27.19%)
@@ -93,7 +93,8 @@ reference machine, Ryzen 9 9950X):
 | Lossless (Z8) | LibRaw+#826 | 1 | 1.29 |
 | Lossless (Z8), same file | rawler | 1 | 2.37 |
 
-5-12x over `docs/benchmarks.md`'s 200ms/100ms targets — expected for unoptimized reference code
+5-12x over `docs/benchmarks.md`'s 200ms cold-switch target, 10-24x over its stricter 100ms 1:1-zoom
+target — expected for unoptimized reference code
 doing Bayer-plane-only decode (no demosaic/color/render yet). A 32-way concurrent `scan` across
 the whole subset showed 2.5-4x higher p50s than these isolated numbers purely from thread/memory
 contention among 32 simultaneous single-threaded decodes — not representative of real usage
