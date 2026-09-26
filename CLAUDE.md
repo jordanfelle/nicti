@@ -173,6 +173,25 @@ Compile-feedback loop: `cargo check`, not `cargo build` — skips codegen/linkin
 section's efficiency rules are agent-specific; a human contributor doesn't need them — see
 CONTRIBUTING.md instead.)
 
+## Issue lifecycle — assign + label the moment work starts
+
+The instant a worktree/branch is created for a GitHub issue — before the first edit, not after —
+run, for that issue number `N`:
+
+```bash
+gh issue edit N --repo jordanfelle/nicti --add-assignee jordanfelle --add-label in-progress
+```
+
+(`in-progress` is a real label in this repo, not a placeholder — create it with `gh label create`
+if it's ever missing.) When the PR merges, `gh issue close N` and drop the `in-progress` label in
+the same turn as the merge — don't leave it dangling on a closed issue.
+
+This is this repo's equivalent of the Shutterpaws/Scrumboy board-sync rule (see the launch-root
+`~/git/CLAUDE.md`'s ticket-lifecycle rule) — same reasoning, adapted to plain GitHub Issues
+instead of a Scrumboy board: an issue sitting unassigned and unlabeled while a branch is actively
+open on it is invisible to anyone (including a future session) checking what's already spoken
+for. Missed once on #38 (2026-09-26) — the worktree and PR were created without this step.
+
 ## PR conventions
 
 - Plain GitHub Issues/PRs — a bare `#N` in a commit/PR/ADR/issue body means a GitHub issue/PR in
