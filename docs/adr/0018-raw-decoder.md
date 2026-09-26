@@ -94,13 +94,15 @@ assumes is no longer how this dataset is meant to be maintained.
 | Lossless (D7500) | 129 | 129/129 ✅ | 129/129 ✅ |
 
 LibRaw+#826 decoded **100% (261/261)** of every real file tried, across three compression modes
-and two camera bodies, with zero crashes and zero silent failures (every failure path returns a
-typed error, never a hang or a wrong-looking-but-corrupt result). **This table measures decode
-success, not pixel correctness** — for HE/HE\*, this research didn't independently re-verify pixel
-output against an oracle (Context's "336.7M samples bit-exact against Adobe DNG Converter" claim
-is the PR thread's own reported result, not reproduced here); the Lossless bucket *is*
-independently pixel-verified, via the cross-decoder diff below. rawler correctly and safely
-rejects every HE/HE\* file — it never crashes or returns garbage, it just can't decode them,
+and two camera bodies, with zero crashes and zero hangs (every failure path returns a typed
+error). **This table measures decode success only, not pixel correctness** — for HE/HE\*, this
+research didn't independently re-verify pixel output against an oracle, and a successful decode
+here is not itself proof the output is uncorrupted (Context's "336.7M samples bit-exact against
+Adobe DNG Converter" claim is the PR thread's own reported result, not reproduced here; treat
+HE/HE\* as production-ready only after that independent oracle check is actually done, see
+Deferred item 8). The Lossless bucket *is* independently pixel-verified, via the cross-decoder
+diff below. rawler correctly and safely rejects every HE/HE\* file — it never crashes or returns
+garbage, it just can't decode them,
 confirming ADR-0001's finding under real files, not just the PR's own synthetic test set.
 
 **Correctness — cross-decoder agreement (Lossless only, the only mode both decoders speak)**: an
