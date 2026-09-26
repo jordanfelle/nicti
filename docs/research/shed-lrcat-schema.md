@@ -1,6 +1,6 @@
 # #61: .lrcat schema mapping (`spikes/shed`)
 
-See `docs/adr/0022-lrc-catalog-import-mapping.md` for the decision and its rationale. This document
+See `docs/adr/0023-lrc-catalog-import-mapping.md` for the decision and its rationale. This document
 is the write-up: the full table-by-table map, the develop-key→owner table, and the inventory
 aggregates `shed` measured against the user's own real 380,300-asset catalog backup (never the
 live working copy, never a keyword/collection/path value — see the ADR's privacy note).
@@ -129,7 +129,7 @@ never queried which images have more than one row or confirmed the "2 missing" c
 
 ## `lrcat-extractor` evaluation
 
-Not adopted as a compiled workspace dependency — see ADR-0022 Q8 for the full Cargo `links`
+Not adopted as a compiled workspace dependency — see ADR-0023 Q8 for the full Cargo `links`
 uniqueness conflict this pass found with `den`'s `rusqlite = "^0.40"` pin. Evaluated standalone
 (outside this workspace, in a scratch Cargo project, per this session): it opened and read the
 real v13 catalog without error via its own `rusqlite = "0.38"`. A full feature-parity comparison

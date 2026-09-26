@@ -1,7 +1,7 @@
 ## Lightroom Classic catalog import mapping
 
 Covers #61's `.lrcat` schema mapping — full reasoning and every measured number in
-`docs/adr/0022-lrc-catalog-import-mapping.md` and `docs/research/shed-lrcat-schema.md`. This file
+`docs/adr/0023-lrc-catalog-import-mapping.md` and `docs/research/shed-lrcat-schema.md`. This file
 is the per-topic summary; those two are the full research trail.
 
 - **Real data, real numbers**: this ADR is grounded against the user's own 380,300-asset catalog

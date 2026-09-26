@@ -28,7 +28,7 @@ use std::path::Path;
 /// and dropping pure-digit segments (a year is not identity-revealing the way a real keyword is)
 /// cuts that noise substantially -- but this is a floor on a genuine false-positive rate, not a
 /// promise of zero false positives: every flagged match still needs a human to confirm it isn't a
-/// real leak before committing, exactly as `docs/adr/0022`'s privacy note describes.
+/// real leak before committing, exactly as `docs/adr/0023`'s privacy note describes.
 pub fn sensitive_strings(conn: &Connection) -> Result<HashSet<String>> {
     let mut set = HashSet::new();
 

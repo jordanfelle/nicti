@@ -1,4 +1,4 @@
-# ADR-0022: Lightroom Classic catalog import mapping
+# ADR-0023: Lightroom Classic catalog import mapping
 
 - **Status:** Accepted
 - **Date:** 2026-09-26

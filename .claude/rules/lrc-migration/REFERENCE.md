@@ -2,7 +2,7 @@
 paths:
   - "spikes/shed/**"
   - "crates/nicti-catalog/**"
-  - "docs/adr/0022*"
+  - "docs/adr/0023*"
 ---
 
 # LRC Migration — Quick Reference

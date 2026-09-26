@@ -30,6 +30,19 @@ ravif = "0.13"
 avif-decode = { version = "3", default-features = false }
 rgb = "0.8"
 imgref = "1"
+# Lossy-WebP candidate for #143 (ADR-0017's deferred follow-up): unlike ravif/avif-decode above,
+# this is a real C dependency (`libwebp-sys` vendors and compiles libwebp with `cc`) -- accepted
+# here because `rusqlite`'s `bundled` feature already compiles C in this same crate, so it's not a
+# new category of build requirement. `default-features = false` drops the optional `image` dep
+# (only needed for `Encoder::from_image`/`DynamicImage` conversions this spike doesn't use).
+webp = { version = "0.3", default-features = false }
+# `nicti-prowl::golden::ssim` takes/returns `image::RgbImage` in its public signature, so this
+# spike needs its own matching `image` dependency to name that type -- not re-exported by prowl.
+image = { version = "0.25", default-features = false }
+# Reuses `nicti-prowl`'s hand-rolled SSIM (`golden::ssim`) for #143's quality-vs-speed comparison
+# instead of a second copy. Spike-depends-on-crate is an unusual direction, but the alternative is
+# duplicating the same formula.
+nicti-prowl = { path = "../../crates/nicti-prowl" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }

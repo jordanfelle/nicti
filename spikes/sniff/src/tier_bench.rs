@@ -36,6 +36,9 @@ pub struct TierBenchResult {
     pub tier: String,
     pub codec: String,
     pub quality: u8,
+    /// Only meaningful for `codec: "avif"`; recorded regardless so a JPEG/WebP run's result JSON
+    /// still shows what was passed (usually the CLI default), rather than omitting the field.
+    pub avif_speed: u8,
     pub cache_format: String,
     pub n_assets: usize,
     pub n_encode_failures: usize,
@@ -48,7 +51,19 @@ pub struct TierBenchResult {
     pub read_decode_p50_ms: f64,
     pub read_decode_p95_ms: f64,
     pub read_decode_max_ms: f64,
+    /// `None` unless `--ssim` was passed. Encoded-vs-pre-encode-source SSIM, in `[-1.0, 1.0]`
+    /// (1.0 = identical) -- see `nicti_prowl::golden::ssim`. Absent for T0 (verbatim, no
+    /// re-encode, so there's nothing to score against).
+    pub ssim_mean: Option<f64>,
+    pub ssim_p5: Option<f64>,
+    pub ssim_min: Option<f64>,
 }
+
+/// `(encoded bytes, encode-only elapsed, the resized pre-encode source, if extraction ran a
+/// re-encode step)`. Shared by `extract_grid_verbatim` and `extract_and_encode` so `run`'s loop
+/// can treat both tiers uniformly.
+type ExtractResult =
+    Result<(Vec<u8>, std::time::Duration, Option<decode::DecodedRgb>), Box<dyn std::error::Error>>;
 
 fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
     if sorted_ms.is_empty() {
@@ -58,44 +73,82 @@ fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
     sorted_ms[idx.min(sorted_ms.len() - 1)]
 }
 
+/// Walks each root non-recursively (not recursively merged into one deep walk -- #143's
+/// stratified subset is intentionally several sibling folders, not a nested tree) and merges the
+/// matches, still sorted overall so results stay deterministic regardless of `--root` order.
+fn collect_raw_files(roots: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for root in roots {
+        files.extend(
+            std::fs::read_dir(root)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension()
+                        .map(|e| {
+                            let e = e.to_string_lossy().to_lowercase();
+                            e == "nef" || e == "dng"
+                        })
+                        .unwrap_or(false)
+                }),
+        );
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn to_rgb_image(img: &decode::DecodedRgb) -> Result<image::RgbImage, Box<dyn std::error::Error>> {
+    image::RgbImage::from_raw(img.width, img.height, img.rgb.clone())
+        .ok_or_else(|| "buffer size doesn't match width*height*3".into())
+}
+
+fn percentile_opt(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        None
+    } else {
+        Some(percentile(sorted, p))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    root: &Path,
+    roots: &[PathBuf],
     tier_kind: Tier,
     codec_kind: Codec,
     quality: u8,
+    avif_speed: u8,
     cache_kind: CacheKind,
     sample_limit: Option<usize>,
+    compute_ssim: bool,
     out_dir: &Path,
 ) -> Result<TierBenchResult, Box<dyn std::error::Error>> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(root)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .map(|e| {
-                    let e = e.to_string_lossy().to_lowercase();
-                    e == "nef" || e == "dng"
-                })
-                .unwrap_or(false)
-        })
-        .collect();
-    files.sort();
+    let mut files = collect_raw_files(roots)?;
     if let Some(limit) = sample_limit {
         files.truncate(limit);
     }
 
     let mut payloads: Vec<(u32, Vec<u8>)> = Vec::with_capacity(files.len());
     let mut encode_ms: Vec<f64> = Vec::with_capacity(files.len());
+    let mut ssim_scores: Vec<f64> = Vec::new();
     let mut n_encode_failures = 0usize;
 
     for (idx, path) in files.iter().enumerate() {
         let result = match tier_kind {
-            Tier::T0Grid => extract_grid_verbatim(path),
-            Tier::T2Screen => extract_and_encode(path, codec_kind, quality),
+            Tier::T0Grid => {
+                extract_grid_verbatim(path).map(|(bytes, elapsed)| (bytes, elapsed, None))
+            }
+            Tier::T2Screen => extract_and_encode(path, codec_kind, quality, avif_speed),
         };
         match result {
-            Ok((bytes, elapsed)) => {
+            Ok((bytes, elapsed, resized_source)) => {
+                if compute_ssim {
+                    if let Some(source) = &resized_source {
+                        match score_ssim(codec_kind, &bytes, source) {
+                            Ok(score) => ssim_scores.push(score),
+                            Err(e) => eprintln!("ssim skipped for {}: {e}", path.display()),
+                        }
+                    }
+                }
                 payloads.push((idx as u32, bytes));
                 encode_ms.push(elapsed.as_secs_f64() * 1000.0);
             }
@@ -165,12 +218,18 @@ pub fn run(
 
     encode_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     read_decode_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ssim_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let total_encoded_bytes: u64 = payloads.iter().map(|(_, b)| b.len() as u64).sum();
     let avg_encoded_bytes = if payloads.is_empty() {
         0.0
     } else {
         total_encoded_bytes as f64 / payloads.len() as f64
+    };
+    let ssim_mean = if ssim_scores.is_empty() {
+        None
+    } else {
+        Some(ssim_scores.iter().sum::<f64>() / ssim_scores.len() as f64)
     };
 
     Ok(TierBenchResult {
@@ -181,6 +240,7 @@ pub fn run(
         } else {
             quality
         },
+        avif_speed,
         cache_format: format!("{cache_kind:?}").to_lowercase(),
         n_assets: payloads.len(),
         n_encode_failures,
@@ -193,7 +253,32 @@ pub fn run(
         read_decode_p50_ms: percentile(&read_decode_ms, 0.5),
         read_decode_p95_ms: percentile(&read_decode_ms, 0.95),
         read_decode_max_ms: read_decode_ms.last().copied().unwrap_or(0.0),
+        ssim_mean,
+        ssim_p5: percentile_opt(&ssim_scores, 0.05),
+        ssim_min: ssim_scores.first().copied(),
     })
+}
+
+/// Decodes `encoded` back and scores it against `source` (the pre-encode resized image) with
+/// `nicti_prowl::golden::ssim`. Runs after the timed encode call, never inside it -- SSIM is a
+/// research-quality signal, not part of the latency numbers ADR-0017's comparison depends on.
+fn score_ssim(
+    codec_kind: Codec,
+    encoded: &[u8],
+    source: &decode::DecodedRgb,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    let decoded = codec::decode(codec_kind, encoded)?;
+    let source_img = to_rgb_image(source)?;
+    let decoded_img = to_rgb_image(&decoded)?;
+    if source_img.dimensions() != decoded_img.dimensions() {
+        return Err(format!(
+            "dimension mismatch: source {:?} vs decoded {:?}",
+            source_img.dimensions(),
+            decoded_img.dimensions()
+        )
+        .into());
+    }
+    Ok(nicti_prowl::golden::ssim(&source_img, &decoded_img))
 }
 
 /// T0: `nikon_preview_ifd`, read verbatim -- no decode/resize/re-encode. "Elapsed" here is just
@@ -214,11 +299,15 @@ fn extract_grid_verbatim(
     Ok((bytes, start.elapsed()))
 }
 
+/// Returns `(encoded bytes, encode-only elapsed, the resized pre-encode source)` -- the third
+/// element is `Some` so `run`'s optional `--ssim` pass can score the encode against it without
+/// re-decoding+re-resizing the original embedded JPEG a second time.
 fn extract_and_encode(
     path: &Path,
     codec_kind: Codec,
     quality: u8,
-) -> Result<(Vec<u8>, std::time::Duration), Box<dyn std::error::Error>> {
+    avif_speed: u8,
+) -> ExtractResult {
     let source = FileSource::open(path, false)?;
     let mut walker = Walker::new(source)?;
     let jpegs = walker.find_embedded_jpegs()?;
@@ -229,6 +318,6 @@ fn extract_and_encode(
     let resized = decode::resize_to_long_edge(&decoded, target)?;
 
     let start = Instant::now();
-    let bytes = codec::encode(codec_kind, &resized, quality)?;
-    Ok((bytes, start.elapsed()))
+    let bytes = codec::encode(codec_kind, &resized, quality, avif_speed)?;
+    Ok((bytes, start.elapsed(), Some(resized)))
 }

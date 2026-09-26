@@ -20,8 +20,8 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`lrc-migration` (0022). A new ADR adds a bullet to
+`preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
+`lrc-migration` (0023). A new ADR adds a bullet to
 both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -98,8 +98,10 @@ ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG rese
 #29's preview-tier-strategy comparison: a from-scratch TIFF/EXIF/Nikon-MakerNote IFD walker (now
 generic over `source::ByteSource` — `SliceSource`/`FileSource` — for #29's ranged, seek-and-read
 extraction) — no LibRaw/rawler dependency, deliberately, to stay clear of #37's still-open decoder
-choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF
-tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust), `cache.rs`'s three
+choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF-vs-WebP
+tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust, plus lossy WebP via the
+C-linked `webp`/`libwebp-sys`, added for #143's ADR-0022 follow-up alongside a swept `avif-speed`
+axis and `nicti-prowl`-reused SSIM scoring — see the committed `run-codec-sweep.ps1`), `cache.rs`'s three
 cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
 per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
 benchmark with a `--io {whole,ranged}` axis; `sniff inventory` cross-checked byte-exact against
@@ -168,7 +170,7 @@ are storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a
 test passing against lavapipe; pure Rust, no FFI, not path-gated. See
 `docs/research/calico-color-pipeline.md`) is real, tested (26 unit tests + 3 integration tests),
 pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
-`spikes/shed` (#61/ADR-0022's `.lrcat` schema-mapping research — schema/inventory/develop-settings
+`spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
 reading plus a pre-commit privacy check against the real catalog's own keyword/path strings; see
 `docs/research/shed-lrcat-schema.md`) is real, tested (10 unit tests), not path-gated.
 
@@ -277,7 +279,11 @@ false`, #127) — neither is a required check, and den is already slated for del
 main's cache and skip the save step, which used to be a 20-30 minute cost on the Windows job by
 itself and was pushing this repo's cache usage over GitHub's 10GB/repo limit.
 `CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level env) additionally strips debuginfo from both Rust and
-den's bundled C/C++ builds, which was most of that cache size. `spikes/**` is also excluded from
+den's bundled C/C++ builds, which was most of that cache size. **den (linux)'s own `save-if:
+false` was reverted in #154** (2026-09-26): it caused a measured 2-3min -> 25-33min regression
+(every run recompiling all eight bundled native engines from scratch) that outweighed the ~1.5GiB
+cache-budget saving -- it now saves on push to main like every other job here. `pelt-linux`/
+`retina-linux` still use `save-if: false` (cold cost is only 4min/2.5min). `spikes/**` is also excluded from
 Renovate (`renovate.json`) for the same reason — den bundles five already-rejected engine
 candidates (ADR-0009/0010/0014/0015/0016) that generate bump-PR churn nobody will act on.
 **`spikes/den` itself is slated for deletion once #22 lands, and `spikes/pelt-*` once ADR-0006
