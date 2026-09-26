@@ -172,7 +172,8 @@ test passing against lavapipe; pure Rust, no FFI, not path-gated. See
 pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
 `spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
 reading plus a pre-commit privacy check against the real catalog's own keyword/path strings; see
-`docs/research/shed-lrcat-schema.md`) is real, tested (10 unit tests), not path-gated.
+`docs/research/shed-lrcat-schema.md`) is real, tested (17 unit tests on Unix, 16 on Windows), not
+path-gated.
 
 ## Development workflow
 

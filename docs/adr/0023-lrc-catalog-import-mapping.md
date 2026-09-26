@@ -200,9 +200,10 @@ All numbers above are `shed`'s real output against the user's own 380,300-asset 
 (`shed inventory`/`shed develop`, see `docs/research/shed-lrcat-schema.md` for the full tables).
 Sandbox-measured, real (not TBD):
 
-- `cargo test -p shed`: 10/10 unit tests pass (open-guard live-catalog detection — including a
-  real false-positive this pass found and fixed, see `open.rs`'s own doc comment — inventory
-  aggregation, develop-key classification, privacy-check).
+- `cargo test -p shed`: 17/17 unit tests pass on Unix (16/16 on Windows; the URI-special-character
+  test is Unix-only, see `open.rs`'s own doc comment) — open-guard live-catalog detection
+  (including a real false-positive this pass found and fixed), inventory aggregation, develop-key
+  classification (pinned against the real 197-key catalog dump), and privacy-check.
 - `cargo clippy -p shed --all-targets -- -D warnings`: clean.
 - `cargo fmt --all -- --check` and the full workspace `cargo clippy --workspace --exclude den
   --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets
