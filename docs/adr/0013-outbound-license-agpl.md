@@ -47,21 +47,19 @@ source of truth for what's allowed. Summary of what changes, in brief:
   exiv2 entry is a worked example of checking this precisely (its own source's `SPDX-License-
   Identifier: GPL-2.0-or-later` headers and README confirm the `-or-later` grant).
 - The LGPL-as-Cargo-dependency dynamic-linking safe-harbor requirement (ADR-0003's `rawler`/
-  `lensfun-rs` flag) is **only partly resolved — the two crates are not in the same state.** That
-  safe harbor exists to protect users of a *permissively-licensed or proprietary* combined work
-  from having the whole program's source forced open by a statically-linked LGPL component.
-  Nicti's own license is now already copyleft (AGPL-3.0-or-later) — LGPL explicitly permits
-  relicensing to "the ordinary GPL," but only to whichever GPL version the library's own grant
-  actually permits, not automatically to whatever version the combiner wants. `lensfun-rs`'s dual
-  license (`LGPL-3.0-or-later OR GPL-3.0`) has a confirmed or-later arm, so it's genuinely
-  unconditionally fine as an ordinary Cargo dependency now. **`rawler` is not resolved**: its
-  `Cargo.toml` declares a bare `license = "LGPL-2.1"` (not valid SPDX without an `-only`/
-  `-or-later` suffix), and its repo's `LICENSE` file is the unedited generic FSF template
-  (confirmed — it still contains the template's own placeholder text), not project-specific
-  evidence. If rawler's actual grant is LGPL-2.1-only, its GPL-relicensed form is GPL-2.0-only —
-  denied under this same ADR. #37 must resolve that (an authoritative upstream answer, or a real
-  per-file SPDX header) before dropping rawler's `cdylib`/out-of-process isolation requirement;
-  #39 (`lensfun-rs`) no longer needs it.
+  `lensfun-rs` flag) is **fully resolved — both crates.** That safe harbor exists to protect users
+  of a *permissively-licensed or proprietary* combined work from having the whole program's source
+  forced open by a statically-linked LGPL component. Nicti's own license is now already copyleft
+  (AGPL-3.0-or-later), so the isolation requirement's original purpose no longer applies.
+  `lensfun-rs`'s dual license (`LGPL-3.0-or-later OR GPL-3.0`) has a confirmed or-later arm, so
+  it's unconditionally fine as an ordinary Cargo dependency. **`rawler`/LibRaw are resolved too
+  (2026-09-25/26, #37/#138)**: their bare `LGPL-2.1` grant looked unresolved under LGPL-2.1 §3's
+  relicense-to-GPL mechanism (no confirmed "or-later" arm on the grant itself), but §3 turns out
+  not to be the applicable mechanism at all — **LGPL-2.1 §§5–6 permit combining the library into
+  Nicti's AGPL work directly, no relicensing and no "or-later" grant needed.** No upstream contact
+  required. See `docs/adr/0019-raw-decoder.md`'s Licensing section for the full citation trail; the
+  real remaining item is a per-release distribution-mechanics checklist (§6(d)), not a
+  compatibility question.
 - Ultralytics YOLO (AGPL-3.0, previously denied for ML model bundling) becomes allowed.
 
 ## New work this unblocks — see the tickets filed alongside this ADR

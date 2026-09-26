@@ -46,11 +46,13 @@ catalog-scale DAM with a 380k-asset real library and a stage-cached render-graph
 
 Running Nicti's own `deny.toml` against RapidRAW's full resolved dependency graph (`cargo deny
 check licenses`, 583 unique crates) produced exactly **one rejection**: `rawler v0.7.1` (bare
-`LGPL-2.1`, no `-or-later` suffix, confirmed in source headers not just `Cargo.toml`). This is the
-same open question ADR-0013 already flagged for upstream `rawler` — RapidRAW's own fork
+`LGPL-2.1`, no `-or-later` suffix, confirmed in source headers not just `Cargo.toml`). This was the
+same open question ADR-0013 originally flagged for upstream `rawler` — RapidRAW's own fork
 (`RapidRAW-DngLab`) doesn't resolve it; it only patches a highlights-clamping behavior, license
-headers untouched. **This is real, useful evidence for #37**, independent of the adopt/fork
-question: if #37 clears `rawler`'s licensing, RapidRAW's own real-world use of it (in production,
+headers untouched. **Resolved since (2026-09-25/26, #37/#138, see ADR-0019's Licensing section):**
+LGPL-2.1 §§5–6 permit combining a bare-`LGPL-2.1` library into Nicti's AGPL-3.0-or-later work
+directly, no "or-later" grant or upstream answer needed. **This is real, useful evidence for #37**,
+independent of the adopt/fork question: RapidRAW's own real-world use of `rawler` (in production,
 10.2k stars, active) is corroborating evidence it's a viable v1 decoder choice. Every other crate
 in RapidRAW's graph — all 582 remaining, including `ort`/`load-dynamic`, `image`, `imageproc`,
 `jxl-oxide`, `image_hasher` — clears Nicti's existing allowlist with zero additions needed.
@@ -71,8 +73,11 @@ given the monolithic-module conflict above.
 ## What to actually do with this research
 
 - **#37 (RAW decoder)**: cite RapidRAW's and vkdt's independent convergence on `rawler`/dnglab as
-  evidence it's the community's leading pure-Rust option, but the LGPL-2.1 ambiguity is unchanged
-  and still #37's own open question.
+  evidence it's the community's leading pure-Rust option. The LGPL-2.1 compatibility question is
+  now resolved (see above) — not an open item for #37 anymore. The per-release §6 distribution
+  checklist still applies before `nicti-decode` ships either dependency: §6(d) (binary and
+  complete source available from the same place), plus the separate notice and shipped
+  license-text requirements — see ADR-0019's deferred item 2.
 - **#44/#45 (Tapetum)**: use vkdt's Vulkan DAG (`docs/research/stalk-prior-art.md`'s vkdt section)
   as the real prior-art reference for the stage-cache design, not RapidRAW's.
 - **#48/#51 (masking/healing)**: read RapidRAW's SAM/LaMa/Depth-Anything integration code as a

@@ -278,8 +278,23 @@ clippy/test jobs (Linux and Windows) now install it too** (`apt-get install -y n
 path-gated job of its own like `den`/`pelt-*`). `cargo deny --workspace --all-features check
 licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) above.
 
+**Update (2026-09-26, [#71](https://github.com/jordanfelle/nicti/issues/71)'s `homing` spike,
+`docs/adr/0020-volume-identity-and-remapping.md`):** new dependencies for volume-identity
+enumeration, the candidate SQLite volume/root/asset schema, and file-fingerprint relinking.
+`rusqlite` v0.40.2 (`bundled`) and `blake3` v1.8.7 are already-reviewed crates (`spikes/den`'s
+2026-09-24 update, `crates/nicti-claw`'s pawprint-style hashing respectively), reused here with no
+new review needed. `kamadak-exif` v0.6.1 (BSD-2-Clause, already audited in this file's Rust crate
+dependency tree section above for #47) is now also a real dependency (EXIF natural-key relink
+tier). Three genuinely new-to-workspace crates: `walkdir` v2.5.0 (`Unlicense/MIT`, same
+Unlicense-OR-MIT category `memchr` already covers), `unicode-normalization` v0.1.25 (`MIT OR
+Apache-2.0`), and `sysinfo` v0.37.2 (`MIT`, Windows-target-only dependency, mount-event polling
+comparison baseline) — all permissive, no new `deny.toml` entry needed, `cargo deny --workspace
+--all-features check licenses` passes clean. `windows-sys` v0.61 (Windows-target-only, volume
+enumeration/`DeviceIoControl` FFI) is the same crate/license `spikes/sniff`'s
+`FILE_FLAG_NO_BUFFERING` work already covers (see CLAUDE.md's package-map note on `sniff`).
+
 **Update (2026-09-26, [#143](https://github.com/jordanfelle/nicti/issues/143)'s preview-codec
-follow-up, `docs/adr/0020-preview-codec-followup.md`):** one new dependency for `spikes/sniff`'s
+follow-up, `docs/adr/0021-preview-codec-followup.md`):** one new dependency for `spikes/sniff`'s
 real lossy-WebP measurement, deliberately deferred from the 2026-09-25 update above (ADR-0017's
 own spike-stage comparison avoided a native C dependency). `webp` v0.3.1 is `MIT OR Apache-2.0`;
 its own dependency `libwebp-sys` v0.9.6 is `MIT` — both already covered by the existing
@@ -319,7 +334,7 @@ committing to this dependency.
 | [LMDB](https://www.openldap.org/software/release/license.html) (bundled via `lmdb-master-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | OpenLDAP Public License 2.8[^den3] | — | Static | ✅ (attribution-only, no copyleft) | ✅ | ✅ bundle OK — retain the license text per its own §3 condition |
 | [libSQL](https://github.com/tursodatabase/libsql) core, a SQLite C-source fork (bundled via `libsql-ffi`) | Catalog DB candidate ([#113](https://github.com/jordanfelle/nicti/issues/113)) | Public domain[^den6] — the bundled `bundled/src/sqlite3.c` retains SQLite's own standard "blessing" (public-domain dedication) notice throughout, confirmed by reading the actual bundled file, not assumed from the crate's own `license = "MIT"` Cargo.toml field (which describes the Rust binding, not the underlying forked C source — same "cargo-deny only sees what a crate declares" gap this file's LMDB row and `cfg_block` note already establish) | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
 | [RocksDB](https://github.com/facebook/rocksdb) core (vendored git submodule via `librocksdb-sys`) | Catalog DB candidate ([#115](https://github.com/jordanfelle/nicti/issues/115)) | Dual `Apache-2.0` **or** `GPL-2.0-only` (licensee's choice)[^den5] | — | Static | ✅ if the Apache-2.0 arm is elected (confirmed selectable — see the 2026-09-24 update above) | ✅ | ✅ bundle OK — elect the Apache-2.0 arm; the Rust binding crate itself (`rocksdb`) is Apache-2.0 only regardless |
-| [libwebp](https://github.com/webmproject/libwebp) core (bundled via `libwebp-sys`, the `webp` crate's own dependency) | Lossy-WebP tier-payload-format candidate ([#143](https://github.com/jordanfelle/nicti/issues/143)/ADR-0020), `spikes/sniff` only | BSD-3-Clause[^wp1], plus a separate perpetual royalty-free WebM patent grant (no copyleft obligation, standard for Google's WebM-family releases) | — | Static (`libwebp-sys` compiles the vendored C source via `cc`, same build model as `rusqlite`'s `bundled` feature) | ✅ | ✅ | ✅ bundle OK — attribution-only; the `webp`/`libwebp-sys` Rust crates are `MIT OR Apache-2.0`/`MIT` respectively, already covered by `deny.toml`'s existing allowlist, no new entry needed |
+| [libwebp](https://github.com/webmproject/libwebp) core (bundled via `libwebp-sys`, the `webp` crate's own dependency) | Lossy-WebP tier-payload-format candidate ([#143](https://github.com/jordanfelle/nicti/issues/143)/ADR-0021), `spikes/sniff` only | BSD-3-Clause[^wp1], plus a separate perpetual royalty-free WebM patent grant (no copyleft obligation, standard for Google's WebM-family releases) | — | Static (`libwebp-sys` compiles the vendored C source via `cc`, same build model as `rusqlite`'s `bundled` feature) | ✅ | ✅ | ✅ bundle OK — attribution-only; the `webp`/`libwebp-sys` Rust crates are `MIT OR Apache-2.0`/`MIT` respectively, already covered by `deny.toml`'s existing allowlist, no new entry needed |
 
 ## ML runtime (ONNX / CUDA / TensorRT)
 

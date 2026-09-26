@@ -18,7 +18,7 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
 - **Gotcha**: `FILE_FLAG_NO_BUFFERING` can only be set at file-open time, not per-read — a bug that
   silently served "cold" reads from the OS page cache and produced a wrong headline number, caught
   by hostile pre-PR review. Real HDD-cold-ranged numbers: ~11-17x slower than NVMe.
-- **Follow-up (#143)** — `docs/adr/0020`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
+- **Follow-up (#143)** — `docs/adr/0021`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
   ADR-0017's fixed 6), plus real lossy WebP (`webp`/`libwebp-sys`, native C dep) — against the
-  #37/#136 stratified subset (ref-10k no longer exists, see #136). See ADR-0020 for the numbers
+  #37/#136 stratified subset (ref-10k no longer exists, see #136). See ADR-0021 for the numbers
   and recommendation.

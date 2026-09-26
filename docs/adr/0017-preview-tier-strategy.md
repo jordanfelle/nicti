@@ -359,4 +359,4 @@ tooling next.
   touches every PR's CI setup time going forward.
 
 **Follow-up (2026-09):** the faster-`ravif`-speed and real-lossy-WebP items above are measured in
-[ADR-0020](0020-preview-codec-followup.md) (#143).
+[ADR-0021](0021-preview-codec-followup.md) (#143).

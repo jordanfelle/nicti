@@ -126,24 +126,21 @@ process being followed at review time.
   - **C/C++ native libraries**: GPL native libraries are no longer denied outright, provided the
     same or-later/compatible-arm check above passes. `exiv2` (GPL-2.0-or-later, confirmed via its
     own SPDX headers) is now usable directly, not just its permissive alternatives.
-  - **LGPL-as-Cargo-dependency (the `rawler`/`lensfun-rs` flag)**: **partially resolved — do not
-    treat both the same.** The mechanism is real: LGPL lets a licensee relicense under "the
+  - **LGPL-as-Cargo-dependency (the `rawler`/`lensfun-rs` flag)**: **both resolved — no upstream
+    sign-off needed for either.** The mechanism is real: LGPL lets a licensee relicense under "the
     ordinary GPL," and since Nicti's own license is now already copyleft (not permissive/
-    proprietary), the isolation requirement's original purpose no longer applies *in general*. But
-    that relicense option converts to whichever GPL version the library's *own* grant permits, not
-    automatically to whatever the combiner wants — the same or-later-vs-only check two paragraphs
-    up applies here too, and was skipped in an earlier pass of this amendment.
+    proprietary), the isolation requirement's original purpose no longer applies *in general*.
     - `lensfun-rs` **is resolved**: its dual license (`LGPL-3.0-or-later OR GPL-3.0`) has a
       confirmed or-later arm. Treat it as a normal, pre-cleared Cargo dependency.
-    - `rawler` **is not resolved**: its `Cargo.toml` declares a bare `license = "LGPL-2.1"` (not
-      valid SPDX without an `-only`/`-or-later` suffix), and its repo's `LICENSE` file is the
-      unedited generic FSF template (confirmed by checking it — it still contains the template's
-      own placeholder text), which is not project-specific evidence either way. If rawler's actual
-      grant is LGPL-2.1-only, its GPL-relicensed form is GPL-2.0-only — denied under this same
-      amendment. **Keep the sign-off/`cdylib`-isolation requirement in force for `rawler`
-      specifically** until an authoritative answer is found (ask upstream, or locate a real
-      per-file SPDX header) — #37 should not skip this check just because this amendment resolved
-      the general LGPL question for `lensfun-rs`.
+    - `rawler`/LibRaw **are resolved (2026-09-25/26, #37/#138)**: an earlier pass of this
+      amendment treated the bare `LGPL-2.1` grant (no confirmed `-or-later`) as blocking, on the
+      theory that the only relicensing route (LGPL-2.1 §3) would force a GPL-2.0-only result absent
+      an "or-later" grant. §3 turns out not to be the applicable mechanism at all — **LGPL-2.1
+      §§5–6 directly permit combining an LGPL-2.1 library into a differently-licensed larger
+      work** (exactly LGPL's purpose), no relicensing and no "or-later" grant needed. No upstream
+      contact required; see `docs/adr/0019-raw-decoder.md`'s Licensing section and
+      `docs/licensing.md`'s Flags §2 for the full citation trail and the real remaining
+      obligation (§6(d) distribution mechanics, not a compatibility question).
   - **ML model weights**: Ultralytics YOLO (AGPL-3.0, previously denied outright for the culling/
     detection candidate) is now allowed for bundling.
   - **What did NOT change**: the "no bundled proprietary data" rule (Adobe DCP/LCP — those are
@@ -159,8 +156,9 @@ process being followed at review time.
 ## Consequences
 
 - Blocks #66 unblocking is now unblocked (`docs/licensing.md` + this ADR satisfy #18).
-- `rawler`/`lensfun-rs` and any future LGPL-as-Cargo-dependency case carries an open sign-off step
-  that #37/#39 must resolve explicitly, not silently inherit from "it's on crates.io."
+- `rawler`/`lensfun-rs` are both resolved (see the amendment above); a future
+  LGPL-as-Cargo-dependency case still needs its own explicit or-later/§§5–6 check, not a silent
+  inherit from "it's on crates.io."
 - Face/subject grouping (#35) should target DINOv2 or OpenCLIP embeddings rather than a literal
   face-recognition model — this also happens to better serve the "must handle fursuiters, not
   just human faces" requirement from #4, since InsightFace-style face recognition is excluded
