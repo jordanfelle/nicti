@@ -135,11 +135,16 @@ instead of relying on the `ImageWidth`/`ImageLength` TIFF tags real NEF/DNG file
 `locate`/`decode-grid` reproduce their original numbers almost exactly, confirming the fix didn't
 change steady-state throughput, just correctness of which tier gets selected.
 
-**`random` order is ~9-12x slower than `manifest` order** for both `locate` and `full-read` (131ms
-vs. 14-17ms cold) — expected, since `manifest` order reads files in on-disk/creation order (mostly
-sequential for a freshly-written reference set) while `random` order forces the drive to seek
-across the full 9,142-file span for every read. This matters more than the threading finding below
-for real-world culling UX, where the user's actual browse order is arbitrary, not sequential.
+**`random` order appeared ~9-12x slower than `manifest` order** for both `locate` and `full-read` in
+this bounded pass (131ms vs. 14-17ms cold) — **this specific ratio is now unresolved, not
+established**: the "Full-set NVMe and HDD comparison" section below found a fresh, independently
+re-verified NVMe-random-cold number (15.6/15.7ms p50) an order of magnitude faster than the 131ms
+figure this ratio is built on, and couldn't reconcile the two (see that section's own discrepancy
+note). Until a matched re-run resolves which number is representative, treat the *qualitative*
+direction (random order costs more than manifest order, since it forces the drive to seek across
+the full 9,142-file span instead of reading in mostly-sequential on-disk order) as still likely
+correct, but don't cite "~9-12x" as a settled figure. This matters more than the threading finding
+below for real-world culling UX, where the user's actual browse order is arbitrary, not sequential.
 
 **Important caveat on all of the above:** every mode, including `locate`, currently reads the
 *entire* file (`fs::read`, ~4-20 MB for these bodies) before finding or decoding the target JPEG —
@@ -191,12 +196,13 @@ pass's 2,400.
 HDD-random-cold rows above hold order and cold-ness fixed and vary only the drive: `locate` 252.2ms
 vs 15.6ms p50 (16.2x), `full-read` 251.2ms vs 15.7ms p50 (16.0x). This is a different, cleaner
 comparison than "HDD-random vs NVMe-manifest" (an earlier draft of this doc quoted 251ms vs 12ms —
-correct numbers, but conflating two separate effects: the drive's own speed *and* the ~9-12x
-NVMe manifest-vs-random seek-order cost already measured in the Throughput section above). Both
-effects are real; they don't stack multiplicatively into a single number, since NVMe's manifest
-number is fast enough that random order costs relatively more of it proportionally than the same
-seek pattern costs HDD's already-slow baseline — comparing across two varied dimensions at once
-overstated the apparent NVMe-vs-HDD gap. The drive-alone comparison above (~16x) is the number that
+correct numbers, but conflating two separate effects: the drive's own speed, and whatever the real
+NVMe manifest-vs-random seek-order cost turns out to be — flagged above as unresolved, not the
+~9-12x this section's own earlier draft had assumed was settled). Both effects are real regardless
+of that unresolved ratio's exact size; they don't stack multiplicatively into a single number,
+since conflating drive speed with seek-order cost risks double-counting or under/overstating either
+one — comparing across two varied dimensions at once overstated the apparent NVMe-vs-HDD gap in
+that earlier draft. The drive-alone comparison above (~16x) is the number that
 actually answers the issue's own question.
 
 **This NVMe-random-cold number (15.6/15.7ms p50) does not match the older 800-file bounded pass's
