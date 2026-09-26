@@ -257,11 +257,27 @@ it only covers Cargo dependencies, not native libraries, ML models, or data file
 rely on `docs/licensing.md` being updated at review time.
 
 **Windows is the required (blocking) platform (#17)**, not Linux: `cargo fmt`, `cargo clippy
-(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, `den (windows)`, and
-`pelt (windows)` are the branch-protection-required checks, matching the actual v1 target
+(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, and `den/pelt windows
+(required check gate)` are the branch-protection-required checks, matching the actual v1 target
 (README's Scope section). `cargo clippy (linux)`/`cargo test (linux)`/`den (linux)`/
 `pelt (linux)` still run on every PR (Linux stays CI-only, catches platform-specific bugs early)
 but aren't required to merge.
+
+**`den (windows)`/`pelt (windows)` are themselves NOT in the required-checks list (#166)** --
+despite being the jobs that actually do the Windows den/pelt work, listing them directly caused
+classic branch protection to block merge on every PR that path-gates them out to `skipped`
+(GitHub treats a required check reporting `skipped` as not satisfying the requirement, contrary
+to what this file used to claim -- confirmed on #162, which needed `gh pr merge --admin` twice).
+`den/pelt windows (required check gate)` is the actual required check instead: it has no
+path-gated `if:` of its own (so it's never itself skipped), and only fails when
+`den-windows`/`pelt-windows` genuinely failed or were cancelled -- a skipped upstream result
+still passes the gate. If a new path-gated Windows-required job is ever added, route it through
+this same gate rather than listing it directly in branch protection. Trade-off: the gate trusts
+`skipped` unconditionally, so it can't tell "correctly path-gated" apart from "`dorny/paths-filter`
+patterns drifted and should have matched but didn't" -- before #166 that case was accidentally
+fail-closed (blocked merge, forcing a human to look), after it's fail-open (merges silently). Same
+failure class the `changes` job's own comment above already worries about; worth remembering if
+den/pelt's path-filter patterns are ever restructured.
 
 **`spikes/den`'s eight bundled native catalog-engine builds, and `spikes/pelt-egui`/`pelt-iced`/
 `pelt-slint`'s GUI-framework spikes, are both path-gated the same way (#117, #127)**, not part of
