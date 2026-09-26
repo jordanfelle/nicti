@@ -36,15 +36,15 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0019](0019-raw-decoder.md) | RAW decoder | Accepted |
 | [0020](0020-volume-identity-and-remapping.md) | Volume identity and drive remapping | Proposed |
 | [0021](0021-color-pipeline.md) | Color pipeline | Proposed |
-| [0023](0023-demosaic-and-denoise.md) | Demosaic and noise reduction | Proposed |
+| [0022](0022-preview-codec-followup.md) | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
+| [0023](0023-lrc-catalog-import-mapping.md) | Lightroom Classic catalog import mapping | Accepted |
+| [0024](0024-demosaic-and-denoise.md) | Demosaic and noise reduction | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.
 
 **Numbering note:** 0018 and 0019 both touch the RAW decoder question (adopt/fork research vs.
-the decoder itself); this is intentional, not a numbering error — cross-reference both. **0022 is
-reserved** by the still-open `research/143-codec-sweep` branch (preview-codec follow-up) — 0023
-was picked deliberately to avoid colliding with it.
+the decoder itself); this is intentional, not a numbering error — cross-reference both.
 
 ## Template
 

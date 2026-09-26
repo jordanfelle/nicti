@@ -1,4 +1,4 @@
-//! `retina dump-cfa`: for #40/ADR-0023's Path A (Bayer-domain model) input. Writes the
+//! `retina dump-cfa`: for #40/ADR-0024's Path A (Bayer-domain model) input. Writes the
 //! still-mosaiced, black-subtracted, white-normalized Bayer plane as a 16-bit grayscale TIFF (the
 //! shim's normalized-0..1 float rescaled to 0..65535 -- `image` 0.25's `tiff` feature has no
 //! plain single-channel float `ColorType`, so this avoids a runtime encode failure rather than

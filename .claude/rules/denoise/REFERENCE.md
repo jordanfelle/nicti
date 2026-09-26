@@ -10,7 +10,7 @@ paths:
 
 Full reasoning/history: `docs/decisions/denoise.md`.
 
-- **Demosaic + NR (#40)** — `docs/adr/0023`: **Proposed** — pending real LRC comparison and a real
+- **Demosaic + NR (#40)** — `docs/adr/0024`: **Proposed** — pending real LRC comparison and a real
   Z8 tripod verification pass (weeks/months out); every quality number measured so far is
   candidate-vs-ground-truth on **RawNIND's real Nikon Z6** frames, not candidate-vs-LRC on Z8.
 - **Path A (Bayer-domain joint demosaic+denoise) moved to v2, not built** — real candidates found

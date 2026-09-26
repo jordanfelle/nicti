@@ -20,9 +20,9 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`denoise` (0023). A new ADR adds a bullet to both files of its topic (or a new topic) and to this
-list — not inline here.
+`preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
+`lrc-migration` (0023), `denoise` (0024). A new ADR adds a bullet to
+both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
 
@@ -144,11 +144,11 @@ via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`d
 also `dump-linear` (#38/ADR-0021: demosaics one NEF with white balance/color-matrix/gamma all
 disabled via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
 `spikes/calico` to consume, without calico depending on retina's FFI/submodule), and
-`dump-classic`/`dump-cfa` (#40/ADR-0023's classic-pipeline and Bayer-plane dumps for
+`dump-classic`/`dump-cfa` (#40/ADR-0024's classic-pipeline and Bayer-plane dumps for
 `spikes/rods` — see the `denoise` topic's REFERENCE.md); see `docs/research/retina-raw-decoder.md`.
 Its own `vendor/LibRaw` submodule needs `git submodule update --init spikes/retina/vendor/LibRaw`
 before it builds.
-`spikes/rods` (#40/ADR-0023's demosaic+denoise comparison harness — alignment, a fixed color
+`spikes/rods` (#40/ADR-0024's demosaic+denoise comparison harness — alignment, a fixed color
 treatment, and a tiled CUDA/TensorRT-capable `ort` AI-denoise wrapper; see the `denoise` topic's
 REFERENCE.md and `docs/research/rods-demosaic-denoise.md` for the module breakdown and results).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
