@@ -1,0 +1,57 @@
+name: CI duration watch
+
+# #160: files (or updates) a `ci-slow`-labelled issue when a CI job runs over its budget in
+# .github/ci-budgets.json on two consecutive main-branch runs -- see #154, where den (linux)
+# regressed from 2-3min to 25-33min and went unnoticed for a while with nothing watching for it.
+on:
+  workflow_run:
+    workflows: [CI, CodeQL Advanced]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two watched runs completing close together (CI and CodeQL Advanced finishing
+  # near-simultaneously, or two rapid main pushes) could otherwise run concurrently and both
+  # miss creating a duplicate issue for the same job. Serializing (not cancelling) means a
+  # queued run only starts once the run ahead of it has already created (or not) that issue.
+  group: ci-duration-watch
+  cancel-in-progress: false
+  # Default `queue: single` only keeps one pending run and replaces it if another arrives first
+  # -- the replaced run's own CI/CodeQL completion would then never get checked. `queue: max`
+  # keeps every eligible run queued (up to GitHub's 100-item cap) instead.
+  queue: max
+
+jobs:
+  watch:
+    name: check job durations against budget
+    runs-on: ubuntu-latest
+    # main-branch, non-PR runs only: PR runs never save a cache (see ci.yml's own save-if
+    # comments), so their timings are noisier and would produce false alarms. `workflow_run`
+    # always executes from the repo's default branch regardless of what triggered the run it's
+    # watching, so this `if:` is filtering which *watched* run to react to, not what code this
+    # job itself checks out.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event != 'pull_request'
+    permissions:
+      # A job-level `permissions` block resets every unlisted scope to `none`, it does not
+      # inherit the workflow-level block above -- contents: read must be repeated here for
+      # actions/checkout's default-token fetch to be reliably granted.
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      # persist-credentials: false, matching ci.yml -- see its own comment on this. This job only
+      # reads the default branch (workflow_run never checks out the triggering run's own code),
+      # so there's no untrusted-code exposure either way, but the convention stays consistent.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check job durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 .github/scripts/ci_duration_watch.py --run-id ${{ github.event.workflow_run.id }}

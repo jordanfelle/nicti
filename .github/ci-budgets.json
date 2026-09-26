@@ -1,0 +1,23 @@
+{
+  "_comment": "Per-job duration budgets in minutes, checked by .github/scripts/ci_duration_watch.py after every main-branch run of the listed workflows. Values are ~1.5x the observed warm main-branch duration (including the cache-save post step) as of #160/#154. A PR that legitimately makes a job slower must raise its budget here in the same PR -- see CLAUDE.md's CI section.",
+  "CI": {
+    "cargo fmt": 2,
+    "detect den changes": 1,
+    "cargo deny (licenses)": 2,
+    "cargo clippy (linux)": 3,
+    "cargo test (linux)": 3,
+    "cargo clippy (windows)": 6,
+    "cargo test (windows)": 7,
+    "cargo build (windows, v1 target)": 4,
+    "den (linux)": 6,
+    "den (windows)": 10,
+    "pelt (linux)": 6,
+    "pelt (windows)": 6,
+    "retina (linux)": 4,
+    "retina (windows)": 8
+  },
+  "CodeQL Advanced": {
+    "Analyze (rust)": 10,
+    "Analyze (actions)": 3
+  }
+}

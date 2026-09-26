@@ -296,3 +296,11 @@ to resolve its crate graph — including running `den`'s bundled DuckDB/RocksDB/
 scripts from scratch — which measured 18m34s of a 35m51s total run on #126's PR, almost entirely
 spent on code that never ships. CodeQL isn't a required check, so this was pure runner-time waste,
 not a merge blocker.
+
+**A duration watcher (#160) files a `ci-slow` GitHub issue when a `CI`/`CodeQL Advanced` job
+runs over its budget in `.github/ci-budgets.json` on two consecutive main-branch runs** (one slow
+run alone is treated as noise, e.g. a cold cache right after a `Cargo.lock` bump) — see
+`.github/scripts/ci_duration_watch.py` and `.github/workflows/ci-duration-watch.yml`. A PR that
+legitimately makes a job slower raises that job's budget in `ci-budgets.json` in the same PR,
+rather than leaving the watcher to keep re-filing against a budget everyone's already accepted
+missing.
