@@ -158,6 +158,20 @@ name = "i-slint-renderer-skia"
 allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]
 name = "i-slint-renderer-software"
 
+# Exception (#37): `rawler`'s bare "LGPL-2.1" is still unresolved on the or-later question (see
+# the LGPL note above) -- same reason it isn't in the global allowlist. Named for `spikes/retina`
+# (the only current user, not a production crate -- see CLAUDE.md's package-map note), same intent
+# as the Slint exceptions above: research/comparison use is fine pending sign-off, shipping in
+# `nicti-decode` is not. **Not actually path-scoped** -- cargo-deny's `licenses.exceptions` matches
+# by crate name across the whole resolved dependency graph, with no per-workspace-member
+# mechanism (confirmed: a hostile review caught an earlier draft of this comment overclaiming
+# path-scoping). If any other crate in this workspace ever adds `rawler` as a dependency, this
+# exception silently covers that too -- re-review this exception (not just add a new one) if that
+# ever happens.
+[[licenses.exceptions]]
+allow = ["LGPL-2.1"]
+name = "rawler"
+
 # publish = false workspace crates carry no SPDX license (nicti, pawprint, whisker) -- this exempts
 # them from the license check entirely rather than failing on our own unlicensed-by-design internal
 # crates (verified: `cargo deny check licenses` passes with them Unlicensed and this set to true;

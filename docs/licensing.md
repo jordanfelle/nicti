@@ -283,9 +283,9 @@ licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) a
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
 |---|---|---|---|---|---|---|---|
-| [LibRaw](https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL) | RAW decode ([#37](https://github.com/jordanfelle/nicti/issues/37)) | Dual LGPL-2.1 **or** CDDL-1.0 (licensee's choice)[^lr1] | — | Dynamic (DLL) | ✅ if dynamically linked | ✅ | ✅ dynamic link only |
-| [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826) (Nikon HE/HE* PR) | RAW decode research | No license grant of its own; maintainers state it won't be merged, will be replaced by their own decoder[^lr2] | — | n/a | n/a | n/a | ⛔ do not vendor this PR's code directly — no license grant |
-| [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ⚠️ needs explicit review | ✅ | ⚠️ static-link-vs-LGPL friction, get sign-off before shipping |
+| [LibRaw](https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL) | RAW decode ([#37](https://github.com/jordanfelle/nicti/issues/37)) | Dual LGPL-2.1 **or** CDDL-1.0 (licensee's choice)[^lr1] | — | Static (spike; `cc`-compiled into `spikes/retina`, see #37) | ⚠️ CDDL arm is GPL/AGPL-incompatible (can't combine into Nicti's AGPL-3.0-or-later) -- must take the LGPL arm; that arm's own per-file header is a bare "version 2.1" with no "or later" phrase (same ambiguity as rawler below, see Flags §2) | ✅ | ⚠️ static-link-vs-LGPL friction (same class of question as rawler), get sign-off before shipping in `nicti-decode` |
+| [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826) (Nikon HE/HE* PR, vendored as `yogthos/LibRaw@nikon-he-decoder` in `spikes/retina/vendor/LibRaw`) | RAW decode research + spike | **Corrected 2026-09-25** (superseding the "no license grant" line below -- checked the actual submodule source this time, not just the PR thread): every new `nikon_he/*`/`nikon_he_decoder.cpp` file carries LibRaw's own standard dual LGPL-2.1/CDDL-1.0 header, copyright Dmitri Sotnikov[^lr2] -- it inherits LibRaw's own license, not an unlicensed contribution. ~~No license grant of its own; maintainers state it won't be merged, will be replaced by their own decoder~~ (the "won't be merged" part is still true and is why this is pinned to a fork, not upstream) | — | Static (spike) | ⚠️ same LGPL/CDDL choice as the LibRaw row above | ✅ | ⚠️ spike-only pending LibRaw's own official HE snapshot (ADR-0001); same sign-off question as the LibRaw row |
+| [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ⚠️ needs explicit review | ✅ | ⚠️ static-link-vs-LGPL friction, get sign-off before shipping; **spike-scoped `deny.toml` exception added for `spikes/retina` (#37)**, same pattern as Slint's ADR-0006 exception -- research/comparison use only, not pre-clearance to ship |
 | [lensfun](https://github.com/lensfun/lensfun) — `libs/` | Lens correction ([#39](https://github.com/jordanfelle/nicti/issues/39)) | LGPL-3.0[^lf1] | — | Dynamic (DLL) | ✅ if dynamically linked | ✅ | ✅ dynamic link only; never link `apps/` (GPL-3.0) |
 | lensfun **database** (calibration data) | Lens correction | — | CC BY-SA 3.0[^lf1] | Data file, unmodified | ✅ (data obligation, not code) | ✅ | ✅ — share-alike only bites if Nicti *modifies* and redistributes the database |
 | [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ⚠️ same LGPL/Rust caveat as rawler under a permissive release | ✅ | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), and this arm's confirmed "or later" grant combines cleanly, so no isolation/sign-off needed (unlike `rawler`, whose own grant isn't confirmed the same way — see the Flags section) |
@@ -370,6 +370,22 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      authoritative answer from upstream (or finds a real per-file SPDX header settling it) on
      whether its LGPL-2.1 grant includes an "or later" option. #37 should not skip this check just
      because this amendment resolved the general LGPL question for lensfun-rs.
+   - **LibRaw itself has the identical ambiguity, discovered during #37 (2026-09-25) -- an earlier
+     draft of ADR-0001/this file assumed LibRaw's LGPL arm was clean and only recommended
+     preferring its CDDL arm instead, which turns out backwards for this project.** LibRaw's own
+     per-file header (checked directly: `src/libraw_datastream.cpp` and every vendored
+     `nikon_he/*.cpp` file in `spikes/retina/vendor/LibRaw`) reads only "GNU LESSER GENERAL PUBLIC
+     LICENSE version 2.1 (See file LICENSE.LGPL...)" -- no "or any later version" phrase, the same
+     kind of bare grant that makes rawler's status unresolved above. The `LICENSE.LGPL` file's own
+     body *does* contain the standard FSF "any later version" boilerplate (verified: line ~420),
+     but that's the same generic-template evidence the rawler analysis above says isn't
+     project-specific proof either way. Meanwhile LibRaw's CDDL-1.0 arm, while unambiguous, is
+     GPL-incompatible and so cannot combine into Nicti's AGPL-3.0-or-later at all -- it isn't a
+     safer fallback here, it's a dead end for this project. Net: **use LibRaw's LGPL arm** (CDDL
+     is not an option), but its own or-later status is exactly as unconfirmed as rawler's, so the
+     same "get an authoritative answer or a real per-file SPDX header before shipping" bar applies
+     to both, not just rawler. Not blocking for `spikes/retina`'s research use; blocking before
+     `nicti-decode` ships either dependency.
 3. **Adobe DCP/LCP data** — never bundle. Use `dcamprof` (external CLI, GPL-3.0 but not linked in)
    or LibRaw's built-in color matrices instead. **Unaffected by the 2026-09-24 license change** —
    this exclusion is about no redistribution grant existing at all, not about copyleft

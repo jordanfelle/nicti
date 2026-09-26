@@ -43,9 +43,13 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   license is already copyleft) — **but not for `rawler`**, whose bare `license = "LGPL-2.1"` (no
   `-only`/`-or-later` suffix, and no project-specific evidence either way beyond that) could still
   mean GPL-2.0-only if relicensed, which this same amendment denies; #37 still needs to resolve
-  that before treating rawler as pre-cleared. Reopens RapidRAW (#69) as a potential adopt/fork
-  candidate, not just prior-art study, since it's also AGPL-3.0 — see the new tickets filed
-  alongside this ADR for follow-up.
+  that before treating rawler as pre-cleared. **#37 found LibRaw itself has the identical
+  ambiguity** (its own per-file header is a bare "version 2.1" too) — its CDDL-1.0 arm is
+  unambiguous but GPL-incompatible, so it can't substitute; see the RAW decoder bullet below.
+  Reopens RapidRAW (#69) as a potential adopt/fork candidate, not just prior-art study, since it's
+  also AGPL-3.0 — see the new tickets filed alongside this ADR for follow-up. **#37 found RapidRAW
+  doesn't actually decode HE/HE\* either** (its own rawler fork still rejects it, silently falling
+  back to the embedded JPEG on Windows), so it isn't a shortcut past #37's own decoder work.
 - **Module/plugin architecture (Claw)**: `docs/adr/0004-module-plugin-architecture.md` — v1
   first-party modules are in-process Rust traits with a lazy (`OnceLock`-backed) registry so heavy
   modules load on demand. Originally described isolating an LGPL native dependency (e.g. `rawler`/
@@ -260,6 +264,26 @@ Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public 
   candidate (no CI job split needed, unlike ADR-0014's mandatory `--exclude den` fix). One real
   `deny.toml` edit was needed: `varint-rs` (transitive via `lsm-tree`) carries `0BSD`, not
   previously allowlisted.
+- **RAW decoder (#37)**: `docs/adr/0018-raw-decoder.md` — **Proposed**, pending the LGPL or-later
+  question and a decode-latency product call (see the ADR's own Decision section). **LibRaw,
+  patched with the still-open [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826)
+  (Nikon HE/HE* decoder)**, vendored as a git submodule pinned to `yogthos/LibRaw@nikon-he-decoder`
+  — the only candidate that decodes the real library at all (no released LibRaw/rawler/rawspeed
+  version handles HE/HE*, which is 88% of the real Z8 files). Measured 100% decode success
+  (261/261) across a real 261-file subset pulled from the live source library (HE/HE*/Lossless,
+  two camera bodies), zero crashes either decoder side. **rawler stays only as the Lossless-path
+  correctness cross-check** (it structurally can't read HE/HE* — confirmed via a clean, typed
+  rejection, never a crash), via a **±1 LSB tolerance diff, not hash equality** — the two
+  decoders' Lossless output never hash-matches, a real, characterized, one-directional rounding
+  difference in curve-inversion, not a bug. **RapidRAW (#69) was checked and doesn't solve HE
+  either** — its own rawler fork still rejects HE/HE*; on Windows it silently falls back to the
+  NEF's embedded JPEG instead of a real RAW decode. Single-file decode cost is real and high
+  (~1-2.4s, isolated, native Windows exe) — expected for PR #826's unoptimized reference code, but
+  a real input to #44's render-graph cache design. **The frozen `ref-10k` reference set (both the
+  393GB NVMe and HDD copies `docs/benchmarks.md` describes) vanished from disk mid-research** —
+  unmaintainable per-machine at that size; the dataset needs multi-person/multi-machine access
+  going forward, tracked as a separate follow-up, not solved by #37. `retina scan` (no manifest
+  required) is the tool for running against the live library or any ad hoc subset now.
 - **Preview tier strategy (#29)**: `docs/adr/0017-preview-tier-strategy.md` — T0 (grid,
   `nikon_preview_ifd` verbatim) → T1 (loupe-fast, `sub_ifd_2`, RAM-only) → T2 (screen, `JpgFromRaw`
   decoded+resized to the confirmed reference display's 3840px long edge, re-encoded JPEG) → T3
@@ -404,7 +428,12 @@ not part of the shared `Workload` trait since only these two engines are compare
 `gen.rs`'s synthetic-catalog generator is reusable for future Library-scale benchmarks, see
 `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for
-`spikes/sheath`/`spikes/dewclaw`).
+`spikes/sheath`/`spikes/dewclaw`), and `spikes/retina` (#37/ADR-0018's RAW decoder comparison —
+vendors LibRaw's HE/HE\*-capable fork as a git submodule at `spikes/retina/vendor/LibRaw`, compiled
+via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`diff` against rawler
+0.8.0, plus `scan` for a manifest-free directory walk and `watch` for #24's `notify` research; see
+`docs/research/retina-raw-decoder.md`). Its own `vendor/LibRaw` submodule needs
+`git submodule update --init spikes/retina/vendor/LibRaw` before it builds.
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies.
 

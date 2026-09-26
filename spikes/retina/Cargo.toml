@@ -1,0 +1,31 @@
+[package]
+name = "retina"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #37: RAW decoder research. Compares LibRaw (vendored yogthos/LibRaw#nikon-he-decoder, the still-open PR #826 branch with a real Nikon HE/HE* decoder) against rawler 0.8.0 across the full ref-10k set, plus a notify-based filesystem-watch spike for ingest (#24). Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+build = "build.rs"
+
+[[bin]]
+name = "retina"
+path = "src/main.rs"
+
+[dependencies]
+nicti-prowl = { path = "../../crates/nicti-prowl" }
+rawler = "0.8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+rayon = "1"
+anyhow = "1"
+thiserror = "2"
+notify = "8"
+csv = "1"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"
