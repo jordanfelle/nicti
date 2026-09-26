@@ -394,9 +394,9 @@ mod tests {
         // 4x3 source) -- confirms x/y offsets are applied, not just the (0,0) case above.
         let img = test_image();
         let tile = build_padded_tile(&img, window(1, 1, 2, 2, 2));
-        assert_eq!(tile[0], (1 * 10 + 1) as f32); // (col=1,row=1) in source coords
+        assert_eq!(tile[0], 11.0); // (col=1,row=1) in source coords: col*10 + row = 1*10+1
         assert_eq!(tile[3], (2 * 10 + 1) as f32); // (col=2,row=1)
-        assert_eq!(tile[6], (1 * 10 + 2) as f32); // (col=1,row=2)
+        assert_eq!(tile[6], 12.0); // (col=1,row=2): col*10 + row = 1*10+2
         assert_eq!(tile[9], (2 * 10 + 2) as f32); // (col=2,row=2)
     }
 
