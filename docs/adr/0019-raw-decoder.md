@@ -130,7 +130,9 @@ histogram check, not a hash comparison, for this format.
 
 **Performance — isolated single-file decode, real Windows `.exe` via WSL interop** (this WSL box
 *is* the reference machine — Ryzen 9 9950X, per `docs/research/sniff-embedded-jpeg.md`), one file
-at a time, no concurrent load:
+at a time, no concurrent load. **These are `retina.exe peek`'s full end-to-end process timings**
+(process launch + file read + decode + metadata print), timed externally via shell `time`, not an
+internal decoder-only timer — a real distinction a hostile review asked to be stated explicitly:
 
 | Bucket | Decoder | Sample | Time |
 |---|---|---|---|
@@ -191,15 +193,23 @@ findings correct/extend prior work — the middle one supersedes an earlier draf
    and would force a GPL-2.0-only result absent an "or-later" grant — but §3 itself lets whoever
    exercises it pick *any* GPL version that exists at the time, and more importantly, §3 isn't
    even the applicable mechanism here: **LGPL-2.1 §§5–6 directly permit combining an LGPL-2.1
-   library into a differently-licensed larger work** (exactly LGPL's purpose), conditioned only on
-   notice + source-availability obligations for the LGPL'd portion — obligations Nicti already
-   satisfies by vendoring full source. No relicensing, no GPL-version question, no "or-later" grant
+   library into a differently-licensed larger work** (exactly LGPL's purpose), provided that
+   license permits modification + reverse engineering for debugging (AGPL grants both by its own
+   copyleft nature) plus notice + one of five source-availability options. **A hostile review
+   correctly caught that an earlier draft of this correction understated that source
+   obligation** — for a statically-linked executable, §6(a) specifically requires the complete
+   *"work that uses the Library"* (the whole combined executable, not just the vendored library)
+   as object and/or source so a user can relink. That's satisfied structurally, not by vendoring
+   alone: **Nicti is itself AGPL-3.0-or-later open source in this same public repo**, so the
+   complete corresponding source of the entire executable is already required to be available to
+   anyone who receives it (and, via AGPL §13, to any network user) — a strictly stronger
+   requirement than §6(a) asks for. No relicensing, no GPL-version question, no "or-later" grant
    needed. LibRaw's CDDL-1.0 arm is a moot alternative either way now (GPL-incompatible, and
    unneeded once the LGPL arm is confirmed usable directly).
-3. **What's left is packaging mechanics, not a licensing blocker**: satisfy §6's own notice +
-   source-availability condition in the shipped product before `nicti-decode` ships either
-   dependency (already trivially satisfiable — Nicti vendors full source of both). Not blocking
-   for `spikes/retina`'s research use either way.
+3. **What's left is a real but small administrative checklist item, not a licensing blocker**:
+   give §6's prominent notice + include the LGPL license text for LibRaw/rawler in the shipped
+   product before `nicti-decode` ships either dependency. Not blocking for `spikes/retina`'s
+   research use either way.
 
 `deny.toml` gained a `rawler`-specific exception (not a global `LGPL-2.1` allow entry, since
 cargo-deny can verify license compatibility but not whether a shipped build actually satisfies
@@ -229,10 +239,11 @@ unilaterally.
 1. **Swap PR #826 for LibRaw's own official HE snapshot once it ships** ("this fall," no firm
    date per ADR-0001) — re-run `retina scan`/`diff` against it when it lands; likely faster, and
    also makes the vendored fork's own out-of-bounds-read patch (see the Spike section above) moot.
-2. **Pick and implement LGPL-2.1 §6's packaging compliance option before `nicti-decode` ships**
-   (prominent notice + bundled source is the simplest, already-satisfied path — see
-   `docs/licensing.md`'s Flags §2) — a packaging task now that the licensing question itself is
-   resolved, not blocked on any further legal research.
+2. **Give §6's prominent notice + include the LGPL license text for LibRaw/rawler in the shipped
+   product before `nicti-decode` ships** — a small administrative checklist item, not a legal
+   question: the harder §6(a) source-availability condition is already satisfied structurally by
+   Nicti being AGPL-3.0-or-later open source itself (see `docs/licensing.md`'s Flags §2), not
+   something separate to build.
 3. **`ref-10k`'s storage/access model is broken and needs its own ticket** — a 393GB
    frozen-per-machine copy is what just silently vanished; the user's explicit direction is that
    this needs to be accessible to more than one person, not re-created as another single-machine

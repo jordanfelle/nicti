@@ -283,9 +283,9 @@ licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) a
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
 |---|---|---|---|---|---|---|---|
-| [LibRaw](https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL) | RAW decode ([#37](https://github.com/jordanfelle/nicti/issues/37)) | Dual LGPL-2.1 **or** CDDL-1.0 (licensee's choice)[^lr1] | — | Static (spike; `cc`-compiled into `spikes/retina`, see #37) | ✅ **resolved 2026-09-25** — LGPL-2.1 §§5–6 permit combining an LGPL-2.1 library into a differently-licensed larger work (here, AGPL-3.0-or-later) without any relicensing, conditioned only on notice + source-availability obligations for the LGPL'd portion itself (already satisfied: full source vendored); no "or later"/GPL-version question is actually in play for this path, see Flags §2 | ✅ | ✅ satisfy §6's notice + bundled-source obligation before shipping in `nicti-decode` (packaging mechanics, not a licensing blocker) |
+| [LibRaw](https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL) | RAW decode ([#37](https://github.com/jordanfelle/nicti/issues/37)) | Dual LGPL-2.1 **or** CDDL-1.0 (licensee's choice)[^lr1] | — | Static (spike; `cc`-compiled into `spikes/retina`, see #37) | ✅ **resolved 2026-09-25** — LGPL-2.1 §§5–6 permit combining an LGPL-2.1 library into a differently-licensed larger work (here, AGPL-3.0-or-later) without any relicensing; §6(a)'s full requirement (source for the *whole combined executable*, not just the library, so a user can relink) is satisfied structurally by Nicti already being AGPL-3.0-or-later open source, not by vendoring alone — see Flags §2 | ✅ | ✅ give §6's prominent notice + include the LGPL license text for LibRaw in the shipped product (a real checklist item, not a legal question) before shipping in `nicti-decode` |
 | [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826) (Nikon HE/HE* PR, vendored as `yogthos/LibRaw@nikon-he-decoder` in `spikes/retina/vendor/LibRaw`) | RAW decode research + spike | **Corrected 2026-09-25** (superseding the "no license grant" line below -- checked the actual submodule source this time, not just the PR thread): every new `nikon_he/*`/`nikon_he_decoder.cpp` file carries LibRaw's own standard dual LGPL-2.1/CDDL-1.0 header, copyright Dmitri Sotnikov[^lr2] -- it inherits LibRaw's own license, not an unlicensed contribution. ~~No license grant of its own; maintainers state it won't be merged, will be replaced by their own decoder~~ (the "won't be merged" part is still true and is why this is pinned to a fork, not upstream) | — | Static (spike) | ✅ same resolution as the LibRaw row above | ✅ | ⚠️ spike-only pending LibRaw's own official HE snapshot (ADR-0001) — separately: a hostile PR review found and this project patched at build time a real out-of-bounds read in this pinned commit's tone-curve table builder (`nikon_he_iqx_iqp_lut_data.h`), see `spikes/retina/build.rs`'s own `PATCHES` constant |
-| [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ✅ **resolved 2026-09-25**, same LGPL-2.1 §§5–6 reasoning as the LibRaw row above | ✅ | ✅ satisfy §6's notice + source-availability obligation before shipping in `nicti-decode`; the `deny.toml` exception (named for `rawler`, not path-scoped — see its own comment) stays a per-crate exception rather than a global `LGPL-2.1` allow entry, since cargo-deny can verify license compatibility but not §6 packaging compliance |
+| [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ✅ **resolved 2026-09-25**, same LGPL-2.1 §§5–6 reasoning as the LibRaw row above | ✅ | ✅ same §6 notice/license-text checklist item as the LibRaw row before shipping in `nicti-decode`; the `deny.toml` exception (named for `rawler`, not path-scoped — see its own comment) stays a per-crate exception rather than a global `LGPL-2.1` allow entry, since cargo-deny can verify license compatibility but not §6's administrative notice requirement |
 | [lensfun](https://github.com/lensfun/lensfun) — `libs/` | Lens correction ([#39](https://github.com/jordanfelle/nicti/issues/39)) | LGPL-3.0[^lf1] | — | Dynamic (DLL) | ✅ if dynamically linked | ✅ | ✅ dynamic link only; never link `apps/` (GPL-3.0) |
 | lensfun **database** (calibration data) | Lens correction | — | CC BY-SA 3.0[^lf1] | Data file, unmodified | ✅ (data obligation, not code) | ✅ | ✅ — share-alike only bites if Nicti *modifies* and redistributes the database |
 | [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ⚠️ same LGPL/Rust caveat as rawler under a permissive release | ✅ | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), and this arm's confirmed "or later" grant combines cleanly, so no isolation/sign-off needed (unlike `rawler`, whose own grant isn't confirmed the same way — see the Flags section) |
@@ -366,13 +366,27 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      terms — not something linking/combining triggers automatically. The right provision for
      "can Nicti combine an LGPL-2.1 library into a differently-licensed larger AGPL-3.0-or-later
      program" is **LGPL-2.1 §§5–6**, which is exactly what LGPL is *for*: §5 confirms a "work that
-     uses the Library" isn't a derivative of the Library until linked, and even then §6 explicitly
-     permits distributing that combination "under terms of your choice" for the surrounding work,
-     conditioned only on obligations attached to the LGPL'd portion itself (prominent notice + the
-     LGPL license text, plus one of: full relinkable source, a shared-library mechanism, a 3-year
-     written-offer, equivalent access, or proof of prior receipt). Nicti already vendors the full
-     source of both libraries, satisfying the simplest of those options trivially. No relicensing,
-     no "-or-later" grant, and no GPL-version question ever enters into this path.
+     uses the Library" isn't a derivative of the Library until linked; §6 permits distributing that
+     combination under terms of your choice (here, AGPL-3.0-or-later), **provided those terms
+     permit modification of the work for the user's own use and reverse engineering for
+     debugging** (AGPL grants both by its own nature — it's a copyleft license, and it doesn't
+     restrict reverse engineering), plus prominent notice + the LGPL license text, plus one of five
+     options for the *source* obligation. **A hostile review correctly caught that an earlier draft
+     of this section understated that source obligation** — for a statically-linked executable,
+     §6(a) specifically requires accompanying the work not just with the LGPL'd library's own
+     source, but with **the complete "work that uses the Library" — i.e. the whole combined
+     executable — as object and/or source code, so the user can modify the library and relink**.
+     "We vendor the library's source" alone doesn't reach that. What actually satisfies it: **Nicti
+     is itself AGPL-3.0-or-later, open source, in this same public repository** — meaning the
+     complete corresponding source of the *entire* combined executable (not just the vendored
+     libraries) is already required to be available to anyone who receives it (and, via AGPL §13,
+     to any network user) as a direct consequence of Nicti's own outbound license, independent of
+     anything LGPL asks for. §6(a)'s source condition is satisfied as a structural consequence of
+     shipping Nicti as AGPL open source, not a separate packaging task — though the administrative
+     step (crediting LibRaw/rawler + including the LGPL license text in the shipped product, per
+     §6's own notice requirement) is still a real, distinct checklist item, separate from the
+     legal-compliance question. No relicensing, no "-or-later" grant, and no GPL-version question
+     ever enters into this path.
    - The FSF's own license-compatibility page (`gnu.org/licenses/license-list.en.html`) confirms
      LGPL-2.1 is compatible with both GPLv2 and GPLv3, and separately confirms GPLv3-family works
      can combine separate modules/source files with AGPLv3-family works even though the two aren't
@@ -381,10 +395,11 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      `lensfun-rs` on LGPL-vs-AGPL compatibility grounds** — the earlier `cdylib`-isolation
      requirement (ADR-0004 §3) was written to satisfy a stricter reading than LGPL-2.1 actually
      demands. LibRaw's CDDL-1.0 arm is a moot alternative either way (GPL-incompatible, and
-     unneeded now that the LGPL arm is confirmed usable directly). The one remaining item is
-     purely a packaging/compliance-mechanics choice, not a licensing blocker: pick which §6 option
-     to satisfy in the shipped product (bundled source is simplest, matching what's already
-     vendored) and follow through on the prominent-notice requirement.
+     unneeded now that the LGPL arm is confirmed usable directly). §6(a)'s source-availability
+     option is satisfied as a structural consequence of Nicti already being AGPL-3.0-or-later open
+     source (see above) — not a packaging choice to make. What's left is a real but small
+     administrative checklist item, not a legal question: give prominent notice + include the LGPL
+     license text for LibRaw/rawler in the shipped product before `nicti-decode` ships either.
    - `lensfun-rs`'s own dual license (`LGPL-3.0-or-later OR GPL-3.0`) was already confirmed
      unambiguous before this correction and needs no change to that conclusion.
 3. **Adobe DCP/LCP data** — never bundle. Use `dcamprof` (external CLI, GPL-3.0 but not linked in)
@@ -462,4 +477,4 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^den4]: `cfg_block` v0.1.1 Apache-2.0 — its own bundled `LICENSE` file at `~/.cargo/registry/src/.../cfg_block-0.1.1/LICENSE`, since its `Cargo.toml` carries no SPDX `license` field for `cargo-deny` to read directly — verified 2026-09-24
 [^den5]: RocksDB core dual license — `LICENSE.Apache` (Apache License 2.0 full text) and `COPYING` (GNU GPL v2 full text) at the root of https://github.com/facebook/rocksdb, both read directly, not inferred from a summary or README line — verified 2026-09-24. The `rocksdb` Rust binding crate's own `Cargo.toml` declares `license = "Apache-2.0"` only (no GPL arm), and its top-level `LICENSE` file at https://github.com/rust-rocksdb/rust-rocksdb is the Apache License text — verified 2026-09-24.
 [^den6]: libSQL's bundled SQLite C fork public-domain notice — the "blessing" text repeated throughout `~/.cargo/registry/src/.../libsql-ffi-0.9.30/bundled/src/sqlite3.c`, the same standard SQLite public-domain dedication `sqlite.rs`'s own footnote (`[^den1]`) cites for plain `libsqlite3-sys` — verified 2026-09-24
-[^lgpl1]: LGPL-2.1 §3 (relicense-to-GPL option, version choice is the redistributor's, not forced to GPL-2.0) and §§5–6 (permits combining/linking with a differently-licensed work without relicensing, conditioned on notice + source-availability obligations for the LGPL'd portion) — https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html and https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt (full section text), cross-checked against https://opensource.org/license/lgpl-2-1/ — verified 2026-09-25. FSF's license-compatibility page confirms LGPLv2.1 is "compatible with GPLv2 and GPLv3," and separately that GPLv3-family and AGPLv3-family works can combine separate modules/source files even though neither is a whole-program relicense of the other — https://www.gnu.org/licenses/license-list.en.html — verified 2026-09-25.
+[^lgpl1]: LGPL-2.1 §3 (relicense-to-GPL option, version choice is the redistributor's, not forced to GPL-2.0) and §§5–6 (permits combining/linking with a differently-licensed work without relicensing, provided that license permits modification + reverse engineering for debugging, plus notice + one of five source-availability options — for a statically-linked executable, §6(a) specifically requires the complete "work that uses the Library," i.e. the whole combined executable, as object and/or source so the user can relink, not just the LGPL'd library's own source) — https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html and https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt (full section text, §6 read in full), cross-checked against https://opensource.org/license/lgpl-2-1/ — verified 2026-09-25. FSF's license-compatibility page confirms LGPLv2.1 is "compatible with GPLv2 and GPLv3," and separately that GPLv3-family and AGPLv3-family works can combine separate modules/source files even though neither is a whole-program relicense of the other — https://www.gnu.org/licenses/license-list.en.html — verified 2026-09-25.

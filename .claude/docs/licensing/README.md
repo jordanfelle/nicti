@@ -31,14 +31,23 @@ Covers the third-party license policy (and its 2026-09-24 amendment) and the out
   wording. More importantly, **§3 isn't even the applicable mechanism** — it's an opt-in act for
   redistributing a *modified copy of the library itself* under GPL terms, not something linking
   triggers. The actual provision, **LGPL-2.1 §§5–6, directly permits combining an LGPL-2.1 library
-  into a differently-licensed larger work** (this is exactly what LGPL is designed for), 
-  conditioned only on a notice + source-availability obligation for the LGPL'd portion — already
-  satisfied, since Nicti vendors full source of both. FSF's own license-compatibility page
-  corroborates: LGPLv2.1 is "compatible with GPLv2 and GPLv3." No relicensing, no GPL-version
-  question, no "-or-later" grant needed. See `docs/licensing.md`'s Flags §2 for the full
-  gnu.org-sourced citation trail; `raw-decoder` topic's own doc has the RAW-decoder-specific
-  account. What remains is packaging mechanics (satisfying §6's condition before shipping), not a
-  licensing blocker. Reopens RapidRAW (#69) as a potential adopt/fork candidate, not just prior-art
+  into a differently-licensed larger work** (this is exactly what LGPL is designed for), provided
+  that license permits modification + reverse engineering for debugging (AGPL grants both by its
+  own copyleft nature), plus notice + one of five source-availability options. **For a
+  statically-linked executable, §6(a) specifically requires the complete "work that uses the
+  Library" — the whole combined executable, not just the vendored library's own source — as
+  object and/or source so a user can relink** (an earlier draft of this correction understated
+  this, caught by a hostile review). That's satisfied structurally, not by vendoring alone:
+  **Nicti is itself AGPL-3.0-or-later open source in this same public repo**, so the complete
+  corresponding source of the entire executable is already required to be available to anyone who
+  receives it (and, via AGPL §13, to any network user) — a strictly stronger requirement than
+  §6(a) asks for. FSF's own license-compatibility page corroborates: LGPLv2.1 is "compatible with
+  GPLv2 and GPLv3." No relicensing, no GPL-version question, no "-or-later" grant needed. See
+  `docs/licensing.md`'s Flags §2 for the full gnu.org-sourced citation trail; `raw-decoder`
+  topic's own doc has the RAW-decoder-specific account. What remains is a real but small
+  administrative checklist item (give §6's prominent notice + include the LGPL license text in
+  the shipped product), not a licensing blocker. Reopens RapidRAW (#69) as a potential adopt/fork
+  candidate, not just prior-art
   study, since it's also AGPL-3.0 — **resolved not adopted, study-only, see the next bullet.**
   **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler fork still rejects
   it, silently falling back to the embedded JPEG on Windows), so it isn't a shortcut past #37's

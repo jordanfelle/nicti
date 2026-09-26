@@ -64,9 +64,10 @@ allow = [
     # LGPL-2.1 combining into an AGPL-3.0-or-later work turned out to need no "or-later" grant at
     # all (LGPL-2.1 §§5-6 permit it directly, see docs/licensing.md's Flags §2 for the full
     # citation trail) -- the compatibility question itself is resolved for `rawler`/`lensfun-rs`
-    # alike. What's still per-crate, not blanket-allowlistable, is §6's own packaging condition
-    # (notice + source-availability obligation for the LGPL'd portion) -- cargo-deny can check
-    # license *compatibility*, not whether a shipped build actually satisfies that obligation, so
+    # alike. What's still per-crate, not blanket-allowlistable, is §6's own notice + license-text
+    # obligation (the source-availability condition itself is satisfied structurally by Nicti
+    # being AGPL-3.0-or-later open source, see docs/licensing.md's Flags §2) -- cargo-deny can
+    # check license *compatibility*, not whether a shipped build actually gives that notice, so
     # each LGPL dependency still gets its own scoped exception (see below) rather than a global
     # allow entry, same principle as the OR-arm-matching caveat this section already documents.
     "GPL-3.0-only",

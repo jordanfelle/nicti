@@ -24,7 +24,9 @@ reference set.
   characterized, one-directional rounding difference in curve-inversion, not a bug. **RapidRAW
   (#69) was checked and doesn't solve HE either** — its own rawler fork still rejects HE/HE*; on
   Windows it silently falls back to the NEF's embedded JPEG instead of a real RAW decode.
-  Single-file decode cost is real and high (~1-2.4s, isolated, Windows .exe via WSL interop) — 5-12x over
+  Single-file decode cost is real and high (~1-2.4s, `retina.exe peek`'s full end-to-end process
+  time -- launch + read + decode + output, isolated, via WSL interop, not a pure decoder-only
+  timer) — 5-12x over
   the 200ms cold-image-switch target and 10-24x over the stricter 100ms 1:1-zoom target, expected
   for PR #826's unoptimized reference code, but a real input to #44's render-graph cache design.
   **The frozen `ref-10k` reference set (both the 393GB NVMe and HDD copies `docs/benchmarks.md`

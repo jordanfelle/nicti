@@ -84,7 +84,9 @@ decoder. **Takeaway: cross-checking Lossless NEF decoders needs a tolerance-base
 ## Performance
 
 Isolated single-file timings, real Windows `.exe` via WSL interop (this WSL box is itself the
-reference machine, Ryzen 9 9950X):
+reference machine, Ryzen 9 9950X). **These are `retina.exe peek`'s full end-to-end process
+timings** (launch + file read + decode + output), timed externally via shell `time`, not an
+internal decoder-only timer:
 
 | Bucket | Decoder | n | Time(s) |
 |---|---|---|---|
