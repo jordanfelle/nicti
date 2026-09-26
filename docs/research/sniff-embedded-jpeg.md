@@ -198,6 +198,21 @@ seek pattern costs HDD's already-slow baseline — comparing across two varied d
 overstated the apparent NVMe-vs-HDD gap. The drive-alone comparison above (~16x) is the number that
 actually answers the issue's own question.
 
+**This NVMe-random-cold number (15.6/15.7ms p50) does not match the older 800-file bounded pass's
+own NVMe-random-cold figures (131.2/131.6ms p50) in the Throughput section above — an ~8x gap on
+what should be the same drive, mode, and order.** Re-checked directly: a fresh, independent
+500-file random-order cold run against `H:\NictiBench\ref-10k` reproduces the same order of
+magnitude as the number used here (23.1ms p50 on that single-round check), not anything close to
+131ms — so the new number is the one that holds up under re-verification, not a fluke. The most
+likely explanation, though not independently reverified since the buggy code no longer exists to
+re-test against: the pre-fix `read_cold` bug documented below likely didn't only produce hard
+`os error 87` failures on a short read — a misaligned continuation that Windows *accepted* rather
+than rejected could plausibly have fallen back to a slower internal path, inflating latency on
+NVMe (where a short read is rare but not impossible) without ever surfacing as a failed sample.
+This is a plausible reconciling explanation, not a confirmed one; the two figures are left in this
+doc side by side rather than silently reconciled, per the standing rule that a real discrepancy
+should be visible to a future reader, not smoothed over.
+
 ### Real bug found and fixed: `read_cold`'s NO_BUFFERING alignment violation on short reads
 
 The first full-set/HDD pass (before the fix below) showed HDD `locate`/`full-read` failing on a
@@ -257,12 +272,14 @@ All commands below assume `H:\NictiBench\ref-10k` (NVMe) / `E:\NictiBench\ref-10
 sniff.exe inventory H:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-nvme.csv
 sniff.exe inventory E:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-hdd.csv --hdd-sample-every 20
 
-# Throughput matrix -- all five of these are now run; see "Full-set NVMe and HDD comparison" above
+# Throughput matrix -- all seven of these are now run; see "Full-set NVMe and HDD comparison" above
 # for the results. decode-screen used --warmups 1 --runs 1 (a deliberate scope reduction, see that
 # section); every other command below used the tool's own defaults (--warmups 1 --runs 5).
 sniff.exe bench H:\NictiBench\ref-10k --mode locate --threads 1 --order manifest
 sniff.exe bench H:\NictiBench\ref-10k --mode decode-screen --threads 1 --order manifest --warmups 1 --runs 1
 sniff.exe bench H:\NictiBench\ref-10k --mode full-read --threads 1 --order manifest --sample-limit 500 --cold
+sniff.exe bench H:\NictiBench\ref-10k --mode locate --threads 1 --order random --cold --sample-limit 500
+sniff.exe bench H:\NictiBench\ref-10k --mode full-read --threads 1 --order random --cold --sample-limit 500
 sniff.exe bench E:\NictiBench\ref-10k --mode locate --threads 1 --order random --cold --sample-limit 500
 sniff.exe bench E:\NictiBench\ref-10k --mode full-read --threads 1 --order random --cold --sample-limit 500
 ```
