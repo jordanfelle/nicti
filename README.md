@@ -42,9 +42,13 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for prerequisites (Rust, `nasm`, platfo
 toolchain requirements, and the LibRaw submodule) and the full command set. Quick start:
 
 ```bash
-cargo build --workspace
-cargo test --workspace --all-targets --all-features
+cargo build --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
+cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
 ```
+
+(The excludes skip `den`'s eight bundled native catalog-engine builds, the GUI-framework spikes,
+and `retina`'s vendored LibRaw compile — none of which a first build needs. See CONTRIBUTING.md if
+you're working on one of those.)
 
 ## Contributing
 
