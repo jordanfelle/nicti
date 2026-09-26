@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use rods::{align, display, linear_input};
+use rods::{ai, align, display, linear_input};
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +30,18 @@ enum Command {
         /// Reject (report, don't fail) an alignment shift past this many pixels.
         #[arg(long, default_value_t = 0.25)]
         shift_tolerance: f64,
+        /// Path B AI candidate: run this ONNX model over the candidate's fixed-display-sRGB
+        /// image before scoring (an NCHW-float, dynamic-shape denoiser -- NAFNet-SIDD/SCUNet's
+        /// `deepghs/image_restoration` ONNX exports, or any model sharing that contract).
+        /// Requires --ort-dylib. Omit both to score the classic-demosaic-only baseline.
+        #[arg(long, requires = "ort_dylib")]
+        denoise_model: Option<PathBuf>,
+        #[arg(long)]
+        ort_dylib: Option<PathBuf>,
+        #[arg(long, default_value_t = 512)]
+        tile: u32,
+        #[arg(long, default_value_t = 32)]
+        overlap: u32,
     },
 }
 
@@ -42,22 +54,33 @@ fn main() -> anyhow::Result<()> {
             candidate_tiff,
             candidate_json,
             shift_tolerance,
+            denoise_model,
+            ort_dylib,
+            tile,
+            overlap,
         } => compare(
             &ref_tiff,
             &ref_json,
             &candidate_tiff,
             &candidate_json,
             shift_tolerance,
+            denoise_model.as_deref(),
+            ort_dylib.as_deref(),
+            ai::TileConfig { tile, overlap },
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare(
     ref_tiff: &std::path::Path,
     ref_json: &std::path::Path,
     candidate_tiff: &std::path::Path,
     candidate_json: &std::path::Path,
     shift_tolerance: f64,
+    denoise_model: Option<&std::path::Path>,
+    ort_dylib: Option<&std::path::Path>,
+    tile_config: ai::TileConfig,
 ) -> anyhow::Result<()> {
     let reference = linear_input::load(ref_tiff, ref_json)?;
     let candidate = linear_input::load(candidate_tiff, candidate_json)?;
@@ -92,7 +115,19 @@ fn compare(
         };
 
     let ref_srgb = to_srgb_planes(&reference.image, &reference.meta.cam_xyz);
-    let cand_srgb = to_srgb_planes(&candidate.image, &candidate.meta.cam_xyz);
+    let mut cand_srgb = to_srgb_planes(&candidate.image, &candidate.meta.cam_xyz);
+
+    if let Some(model_path) = denoise_model {
+        let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
+        println!(
+            "running Path B AI denoise: {} (tile={}, overlap={})",
+            model_path.display(),
+            tile_config.tile,
+            tile_config.overlap
+        );
+        let mut denoiser = ai::TiledDenoiser::load(model_path, ort_dylib)?;
+        cand_srgb = denoiser.denoise(&cand_srgb, width, height, tile_config)?;
+    }
 
     // Luma plane (simple average, not a weighted luma -- good enough for the alignment estimate,
     // which only needs gradient structure, not colorimetric accuracy) for shift estimation.

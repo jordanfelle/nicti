@@ -8599,6 +8599,7 @@ dependencies = [
  "clap",
  "image",
  "nicti-prowl",
+ "ort",
  "serde",
  "serde_json",
  "tempfile",
