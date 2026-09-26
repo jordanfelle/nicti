@@ -30,3 +30,12 @@ Full reasoning/history: `.claude/docs/licensing/README.md`.
   candidate — but **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler
   fork still rejects it, falling back to the embedded JPEG), so it isn't a shortcut past #37's own
   decoder work.
+- **RapidRAW adopt/fork, resolved** — `docs/adr/0018`: **not adopted, study-only**. Checked its
+  real ~583-crate dependency graph against `deny.toml`: 582 crates pass cleanly, one rejection
+  (`rawler`'s bare `LGPL-2.1`, already resolved compatible per the bullet above) — real
+  corroborating evidence, not a blocker either way. Architecturally incompatible regardless of
+  licensing: no DAG/per-stage
+  cache (opposite of Tapetum/#44's design), monolithic module structure (no Claw-style
+  extension points), untyped JSON sidecar edit storage (no catalog DB). See
+  `docs/research/stalk-prior-art.md` for the full RapidRAW/vkdt/Ansel findings and file:line
+  citations.
