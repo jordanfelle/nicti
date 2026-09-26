@@ -241,9 +241,17 @@ ranged `FileSource` now call through) issues one `seek_read` for the whole align
 short read retries once with the identical call on the same handle — no reopen needed, since
 `seek_read` is positional rather than cursor-based, so every attempt's buffer address (the
 allocation's own base) and file offset (the fixed, aligned `aligned_offset`) stay aligned by
-construction, with no partial continuation to misalign. Verified: the exact same
-previously-~15%-failing HDD scenario (500 files, random order, cold) now shows 0 failures across
-every mode, and all four full-set/HDD passes above are the fixed binary's numbers.
+construction, with no partial continuation to misalign. Verified two ways, since the merge with
+#29's ranged `FileSource` work (`--io ranged`, a later-merged PR) made `read_cold_range`'s non-zero-
+`offset` arithmetic — the actual new ground this shared function has to get right, not just the
+offset-0 whole-file case the original bug report covered — worth checking on its own: (1) the exact
+same previously-~15%-failing HDD scenario (500 files, random order, cold, `--io whole`) now shows 0
+failures across every mode, and all four full-set/HDD passes above are the fixed binary's numbers;
+(2) the same 500-file/random/cold scenario re-run with `--io ranged` (exercising `read_cold_range`
+via `FileSource` with real non-zero offsets — each embedded JPEG's own byte range, not offset 0)
+also shows 0 failures across 2,500 pooled samples (5 measured runs), p50 15.6ms/p95 20.5ms/max
+62.1ms — both far faster than whole-file HDD cold (252ms p50) and consistent with #29's own finding
+that ranged reads substantially close the NVMe/HDD gap without eliminating it.
 
 **A second, unrelated tooling gap surfaced while chasing this**: diagnosing the failure needed the
 actual error text, but `SampleResult` only ever stored `ok: bool`, discarding the real
