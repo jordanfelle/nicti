@@ -325,6 +325,21 @@ MIT/Apache-2.0 crate, already covered. Confirmed the whole crate (including `lib
 build) cross-compiles cleanly to `x86_64-pc-windows-gnu`, the CI-required target, before
 committing to this dependency.
 
+**Update (2026-09-26, [#61](https://github.com/jordanfelle/nicti/issues/61)'s `shed` spike,
+`docs/adr/0023-lrc-catalog-import-mapping.md`):** new dependency `agprefs` v0.3.3 (MIT — already on
+`deny.toml`'s allowlist, no new entry needed) parses Lightroom Classic's `.lrcat` develop-settings
+Lua-literal text (`s = { Key = Value, ... }`); its own transitive tree (`nom`, `nom-supreme`,
+`cookie-factory`, `brownstone`, `indent_write`, `joinery`, `arrayvec`) is entirely
+MIT/Apache-2.0/BSD-permissive, no new `deny.toml` entry needed. **`lrcat-extractor` v0.7.0
+(MPL-2.0 — already allowlisted) was evaluated but is *not* a workspace dependency**: its own
+`rusqlite = "0.38"` pin cannot coexist with `spikes/den`'s unconditional `rusqlite = "^0.40"` in
+this workspace's single `Cargo.lock` — Cargo's `links = "sqlite3"` uniqueness is enforced across
+the whole workspace, not per binary, and this held even behind an optional, default-off Cargo
+feature (see ADR-0023 Q8 for the full reproduction). Evaluated standalone, outside this workspace,
+against the real catalog instead — no license action needed since it was never added as a
+dependency here. `cargo deny --workspace --all-features check licenses` passes clean (`agprefs`
+included).
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

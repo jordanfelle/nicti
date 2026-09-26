@@ -37,6 +37,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0020](0020-volume-identity-and-remapping.md) | Volume identity and drive remapping | Proposed |
 | [0021](0021-color-pipeline.md) | Color pipeline | Proposed |
 | [0022](0022-preview-codec-followup.md) | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
+| [0023](0023-lrc-catalog-import-mapping.md) | Lightroom Classic catalog import mapping | Accepted |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.
