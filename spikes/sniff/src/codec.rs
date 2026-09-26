@@ -161,11 +161,17 @@ mod tests {
         let decoded = decode(Codec::Avif, &encoded).expect("decode");
         assert_eq!(decoded.width, width);
         assert_eq!(decoded.height, height);
-        let min = decoded.rgb.iter().copied().min().expect("pixels");
-        let max = decoded.rgb.iter().copied().max().expect("pixels");
+        // Compare whole pixels (not per-channel min/max, which a fixed uniform color could still
+        // pass if its own R/G/B happened to differ from each other) across positions, so a
+        // decoder that silently returned one repeated pixel for the whole image would fail here.
+        // `chunks_exact(3)`, not clippy's suggested `as_chunks::<3>()` -- that's still a nightly-
+        // only API (`slice_as_chunks`), not available on this project's stable toolchain.
+        #[allow(clippy::chunks_exact_to_as_chunks)]
+        let pixels: Vec<&[u8]> = decoded.rgb.chunks_exact(3).collect();
+        let first_pixel = pixels[0];
         assert!(
-            max > min,
-            "decoded AVIF lost all image content (uniform output)"
+            pixels.iter().any(|p| *p != first_pixel),
+            "decoded AVIF lost all image content (every pixel identical)"
         );
     }
 
