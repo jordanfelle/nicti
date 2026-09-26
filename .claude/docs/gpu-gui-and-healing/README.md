@@ -15,7 +15,11 @@ Covers the GPU compute API choice, the (proposed) GUI framework decision, and th
   stage output must stay GPU-resident, per ADR-0002/#44. Unblocks #20, #41, #45; feeds #68 (GUI
   framework)'s wgpu-interop question.
 - **GUI framework**: `docs/adr/0006-gui-framework.md` — **Proposed, pending a reference-machine
-  measurement pass**; the hard-gate findings are final. GPUI is eliminated outright: its Windows
+  measurement pass**; the hard-gate findings are final. **Correction, 2026-09-26** (#69's prior-art
+  research): the Prior-art section had wrongly claimed RapidRAW uses egui/eframe — it's actually
+  Tauri + React (see the ADR's own Amendments section). Doesn't change this ADR's Decision, which
+  rests on egui's own wgpu-30 match, license, and `CallbackTrait` maturity, independent of that
+  citation. GPUI is eliminated outright: its Windows
   backend is a bespoke Direct3D11 renderer (`windows-rs`), with no `wgpu`/Vulkan path in its own
   dependency graph on that platform at all (`blade-graphics` is Linux/macOS-only) — no
   `spikes/pelt-gpui` was built. Of the other three, egui (via eframe) currently leads: the only

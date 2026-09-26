@@ -186,7 +186,12 @@ and this spike doesn't isolate it.
 ## Prior art
 
 - **RapidRAW** uses `wgpu` for its render pipeline[^pa1] — same choice, same reasoning trade-off
-  (portability without giving up native-backend performance).
+  (portability without giving up native-backend performance). **Update, 2026-09-26** (#69's
+  prior-art research, `docs/research/stalk-prior-art.md`): RapidRAW pins `wgpu = "29.0"`, one major
+  version behind Nicti's own wgpu-30 choice, with an explicit manifest comment — `# Downgraded to
+  prevent P3 color shifts on Apple devices` (`src-tauri/Cargo.toml:26`). Not acted on here (Nicti
+  has no macOS build yet, v2 per #73), but worth remembering if the same color-shift symptom shows
+  up once macOS support lands.
 - **vkdt** (darktable's from-scratch Vulkan rewrite) uses raw Vulkan directly, with a
   Vulkan-native node-graph (DAG) pipeline (already referenced in ADR-0004 §context/footnote
   p4)[^pa2] — the closest prior art to the rejected `ash` option, but vkdt's own stated motivation

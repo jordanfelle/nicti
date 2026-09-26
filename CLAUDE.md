@@ -16,7 +16,7 @@ to keep this file under the line-count gate. Each topic has:
 - `.claude/docs/<topic>/README.md` — the full original prose, verbatim, with every issue ref and
   piece of reasoning. Human-only reference, not auto-loaded.
 
-Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013),
+Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
 `preview-tiers` (0017). A new ADR adds a bullet to both files of its topic (or a new topic) and
 to this list — not inline here.
