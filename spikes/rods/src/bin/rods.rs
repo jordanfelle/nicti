@@ -42,6 +42,12 @@ enum Command {
         tile: u32,
         #[arg(long, default_value_t = 32)]
         overlap: u32,
+        /// Score only a centered crop of this size (both dimensions), instead of the full image
+        /// -- a fast CPU dev-loop knob, especially with --denoise-model on hardware with no GPU
+        /// execution provider (full-resolution real numbers are a Windows-native/GPU job, not a
+        /// WSL/CPU one). Omit for the full image.
+        #[arg(long)]
+        crop: Option<u32>,
     },
 }
 
@@ -58,6 +64,7 @@ fn main() -> anyhow::Result<()> {
             ort_dylib,
             tile,
             overlap,
+            crop,
         } => compare(
             &ref_tiff,
             &ref_json,
@@ -67,6 +74,7 @@ fn main() -> anyhow::Result<()> {
             denoise_model.as_deref(),
             ort_dylib.as_deref(),
             ai::TileConfig { tile, overlap },
+            crop,
         ),
     }
 }
@@ -81,6 +89,7 @@ fn compare(
     denoise_model: Option<&std::path::Path>,
     ort_dylib: Option<&std::path::Path>,
     tile_config: ai::TileConfig,
+    crop: Option<u32>,
 ) -> anyhow::Result<()> {
     let reference = linear_input::load(ref_tiff, ref_json)?;
     let candidate = linear_input::load(candidate_tiff, candidate_json)?;
@@ -91,43 +100,46 @@ fn compare(
         reference.image.dimensions(),
         candidate.image.dimensions(),
     );
-    let (width, height) = reference.image.dimensions();
+    let (full_width, full_height) = reference.image.dimensions();
+
+    let (width, height) = match crop {
+        Some(size) => (size.min(full_width), size.min(full_height)),
+        None => (full_width, full_height),
+    };
+    let (x0, y0) = ((full_width - width) / 2, (full_height - height) / 2);
+    if crop.is_some() {
+        println!("cropping to {width}x{height} centered at ({x0},{y0})");
+    }
+    let crop_view = |img: &image::ImageBuffer<image::Rgb<u16>, Vec<u16>>| -> Vec<image::Rgb<u16>> {
+        (y0..y0 + height)
+            .flat_map(|y| (x0..x0 + width).map(move |x| *img.get_pixel(x, y)))
+            .collect()
+    };
+    let reference_pixels = crop_view(&reference.image);
+    let candidate_pixels = crop_view(&candidate.image);
     let pixels = width as usize * height as usize;
 
     // Fixed display treatment: camera RGB (already WB-applied by `dump-classic`, black/white
     // scaled by `linearize_sample`) -> XYZ(D50) -> linear sRGB -> sRGB OETF, per pixel, for both
     // images, using each image's own decoder-reported `cam_xyz`.
-    let to_srgb_planes =
-        |img: &image::ImageBuffer<image::Rgb<u16>, Vec<u16>>, cam_xyz: &[f32; 12]| -> Vec<f32> {
-            let mut out = vec![0.0f32; pixels * 3];
-            for (i, px) in img.pixels().enumerate() {
-                let cam_rgb = [
-                    linear_input::linearize_sample(px[0]),
-                    linear_input::linearize_sample(px[1]),
-                    linear_input::linearize_sample(px[2]),
-                ];
-                let srgb = display::to_display_srgb(cam_rgb, cam_xyz);
-                out[i * 3] = srgb[0];
-                out[i * 3 + 1] = srgb[1];
-                out[i * 3 + 2] = srgb[2];
-            }
-            out
-        };
+    let to_srgb_planes = |px: &[image::Rgb<u16>], cam_xyz: &[f32; 12]| -> Vec<f32> {
+        let mut out = vec![0.0f32; pixels * 3];
+        for (i, p) in px.iter().enumerate() {
+            let cam_rgb = [
+                linear_input::linearize_sample(p[0]),
+                linear_input::linearize_sample(p[1]),
+                linear_input::linearize_sample(p[2]),
+            ];
+            let srgb = display::to_display_srgb(cam_rgb, cam_xyz);
+            out[i * 3] = srgb[0];
+            out[i * 3 + 1] = srgb[1];
+            out[i * 3 + 2] = srgb[2];
+        }
+        out
+    };
 
-    let ref_srgb = to_srgb_planes(&reference.image, &reference.meta.cam_xyz);
-    let mut cand_srgb = to_srgb_planes(&candidate.image, &candidate.meta.cam_xyz);
-
-    if let Some(model_path) = denoise_model {
-        let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
-        println!(
-            "running Path B AI denoise: {} (tile={}, overlap={})",
-            model_path.display(),
-            tile_config.tile,
-            tile_config.overlap
-        );
-        let mut denoiser = ai::TiledDenoiser::load(model_path, ort_dylib)?;
-        cand_srgb = denoiser.denoise(&cand_srgb, width, height, tile_config)?;
-    }
+    let ref_srgb = to_srgb_planes(&reference_pixels, &reference.meta.cam_xyz);
+    let cand_srgb_raw = to_srgb_planes(&candidate_pixels, &candidate.meta.cam_xyz);
 
     // Luma plane (simple average, not a weighted luma -- good enough for the alignment estimate,
     // which only needs gradient structure, not colorimetric accuracy) for shift estimation.
@@ -144,17 +156,37 @@ fn compare(
             samples,
         }
     };
-    let ref_luma = luma(&ref_srgb);
-    let cand_luma = luma(&cand_srgb);
 
+    // Estimated from the *raw* (pre-denoise) candidate, always -- this is a real-camera geometry
+    // question (how far apart were these two exposures), independent of which Path A/B candidate
+    // gets scored against the same reference. Re-estimating per-candidate on a denoised image was
+    // a real bug: a smoother candidate's gradient structure shifts where Lucas-Kanade converges,
+    // producing a spurious "misregistration" warning that isn't a real geometric shift -- caught
+    // when SCUNet's own smoother output tripped the 0.25px gate while the identical raw-candidate
+    // shift did not.
+    let ref_luma = luma(&ref_srgb);
+    let raw_cand_luma = luma(&cand_srgb_raw);
     let margin = 16.min(width / 4).min(height / 4);
-    let shift = align::estimate_shift(&ref_luma, &cand_luma, margin, 30);
+    let shift = align::estimate_shift(&ref_luma, &raw_cand_luma, margin, 30);
     println!(
-        "shift: dx={:.4} dy={:.4} (tolerance {shift_tolerance})",
+        "shift (measured pre-denoise): dx={:.4} dy={:.4} (tolerance {shift_tolerance})",
         shift.dx, shift.dy
     );
     if !shift.within_tolerance(shift_tolerance) {
         println!("WARNING: shift exceeds tolerance -- scores below may reflect misregistration");
+    }
+
+    let mut cand_srgb = cand_srgb_raw;
+    if let Some(model_path) = denoise_model {
+        let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
+        println!(
+            "running Path B AI denoise: {} (tile={}, overlap={})",
+            model_path.display(),
+            tile_config.tile,
+            tile_config.overlap
+        );
+        let mut denoiser = ai::TiledDenoiser::load(model_path, ort_dylib)?;
+        cand_srgb = denoiser.denoise(&cand_srgb, width, height, tile_config)?;
     }
 
     // No sub-pixel resampling of the full RGB planes at the estimated shift is implemented yet
