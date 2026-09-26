@@ -83,8 +83,8 @@ explicitly **not** used to judge any target in the table above.
 - D3400 coverage is DNG-only (Lightroom-converted), not native NEF — see table above.
 
 **Freeze locations** (both are exact byte-identical copies, verified by SHA-256 at copy time):
-- `H:\NictiBench\ref-10k\` — NVMe, for the "from NVMe" ingest/loupe targets.
-- `E:\NictiBench\ref-10k\` — HDD, for the "HDD allowance" targets.
+- `<REF10K_ROOT>` — NVMe, for the "from NVMe" ingest/loupe targets.
+- `<REF10K_ROOT_HDD>` — HDD, for the "HDD allowance" targets.
 
 Files are renamed sequentially (`ref-00001.NEF`, `ref-00002.dng`, ...) on copy, so no event or
 person names leak into the committed manifest.
@@ -93,7 +93,7 @@ person names leak into the committed manifest.
 - `docs/ref-10k-manifest.csv` (committed, public): `id, sha256, bucket, model, iso, compression,
   width, height, size_bytes`. No source paths, no event/person names beyond the generic bucket
   label above.
-- `H:\NictiBench\ref-10k\PRIVATE-source-map.csv` (local only, never committed): `id, source_path,
+- `<REF10K_ROOT>\PRIVATE-source-map.csv` (local only, never committed): `id, source_path,
   event` — the actual original path and event/photographer this file came from. Any tooling that
   needs to re-derive provenance reads this file locally; it never leaves the machine.
 

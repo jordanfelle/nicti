@@ -18,9 +18,8 @@ use rand::SeedableRng;
 
 use crate::manifest::{Entry, Manifest};
 
-/// Env var pointing at the local ref-10k root (e.g. `H:\NictiBench\ref-10k` per
-/// docs/benchmarks.md). No default path: the reference machine's drive layout isn't something
-/// this crate should guess at.
+/// Env var pointing at the local ref-10k root (e.g. `<REF10K_ROOT>` per docs/benchmarks.md). No
+/// default path: a benchmark machine's drive layout isn't something this crate should guess at.
 pub const REF10K_ENV: &str = "NICTI_REF10K";
 
 pub fn resolve_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
@@ -30,7 +29,8 @@ pub fn resolve_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
     match env::var_os(REF10K_ENV) {
         Some(p) if !p.is_empty() => Ok(PathBuf::from(p)),
         _ => anyhow::bail!(
-            "ref-10k root not given and {REF10K_ENV} is not set (see docs/benchmarks.md for where it lives on the reference machine)"
+            "ref-10k root not given and {REF10K_ENV} is not set -- ref-10k is a private reference \
+             dataset (see docs/benchmarks.md and issue #136); set {REF10K_ENV} to your own copy's root"
         ),
     }
 }

@@ -1,0 +1,43 @@
+name: Bug report
+description: Something built is broken or behaving unexpectedly.
+labels: []
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what actually happened?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Windows 11 26200 / Ubuntu 24.04 / ..."
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Commit / version
+      placeholder: "commit hash, or `cargo --version` output if build-related"
+    validations:
+      required: false
+  - type: input
+    id: part_of
+    attributes:
+      label: Related issue (optional)
+      description: "If this is part of a larger epic, link it: `#N`"
+      placeholder: "#N"
+    validations:
+      required: false

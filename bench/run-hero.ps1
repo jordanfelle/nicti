@@ -73,7 +73,7 @@ param(
     [int]$ImageIndex = 0,
     [int]$DurationSeconds = 60,
     [int]$DdagrabOutputIdx = -1,
-    [string]$RefRoot = "H:\NictiBench\ref-10k",
+    [string]$RefRoot = $env:NICTI_REF10K,
     [string]$ManifestPath = "$PSScriptRoot\..\docs\ref-10k-manifest.csv",
     [string]$HeroSetFile = "$PSScriptRoot\..\docs\benchmarks\hero-set.txt",
     [string]$ProwlExe = "$PSScriptRoot\..\target\release\prowl.exe",
@@ -86,6 +86,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrEmpty($RefRoot)) {
+    throw "No -RefRoot given and NICTI_REF10K is not set. ref-10k is a private reference dataset (see docs/benchmarks.md and issue #136) -- point this at your own copy's root."
+}
 
 function Get-Rect([string]$spec) {
     $parts = $spec -split "," | ForEach-Object { [int]$_.Trim() }

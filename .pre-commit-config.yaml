@@ -66,12 +66,15 @@ repos:
         language: system
         types: [rust]
 
-      # --workspace --exclude den: same root-package gap as cargo fmt above, plus den (eight
-      # bundled native catalog-engine builds, see CI's own --exclude den comment) is excluded so
-      # this hook stays fast enough to run on every commit.
+      # --workspace --exclude den/pelt-*/retina: same root-package gap as cargo fmt above, plus
+      # these crates (eight bundled native catalog-engine builds, three GUI-framework stacks, a
+      # full LibRaw C++ compile via a git submodule — see CI's own matching --exclude comment in
+      # .github/workflows/ci.yml) are excluded so this hook stays fast enough to run on every
+      # commit, and so it doesn't fail for a contributor who hasn't installed GUI headers or
+      # initialized the retina submodule.
       - id: cargo-clippy
         name: Lint Rust code (cargo clippy)
-        entry: cargo clippy --workspace --exclude den --all-targets --all-features -- -D warnings
+        entry: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
@@ -89,7 +92,7 @@ repos:
     hooks:
       - id: cargo-test
         name: Run Rust tests
-        entry: cargo test --workspace --all-targets --all-features --exclude den
+        entry: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
         language: system
         pass_filenames: false
         stages: [pre-push]

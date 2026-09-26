@@ -63,9 +63,9 @@ performance target.
 ## Per-body findings
 
 Full `sniff inventory` run against the complete frozen `ref-10k` set (all 9,142 files), on the
-reference machine's NVMe (`H:\NictiBench\ref-10k`): **35,539 embedded-JPEG rows, 0 parse errors, 0
+reference machine's NVMe (`<REF10K_ROOT>`): **35,539 embedded-JPEG rows, 0 parse errors, 0
 SHA-256 mismatches.** Every real file in the set parsed cleanly and matched its committed manifest
-hash. The same inventory pass against the HDD (`E:\NictiBench\ref-10k`, `--hdd-sample-every 20` —
+hash. The same inventory pass against the HDD (`<REF10K_ROOT_HDD>`, `--hdd-sample-every 20` —
 every 20th file's manifest hash re-checked rather than all 9,142, per this command's own purpose
 of keeping the slower drive's correctness pass cheap) reproduces the identical structural result:
 **9,142 files walked, 35,539 embedded-JPEG rows, 0 parse errors, 0 SHA-256 mismatches.** Correctness
@@ -105,7 +105,7 @@ gap above).
 Measured on the reference machine: AMD Ryzen 9 9950X (16-core), 93.7 GB RAM, Windows 11 Pro build
 26200, NVIDIA GeForce RTX 5080 (driver 32.0.16.1656), `H:`/`E:` both labeled "Storage"/"Storage4"
 local volumes. Windows-native via WSL→Windows cross-compile + interop, against a bounded sample of
-`H:\NictiBench\ref-10k` (NVMe) — 800 files for `locate`/`decode-grid`/`decode-screen`, 300 for the
+`<REF10K_ROOT>` (NVMe) — 800 files for `locate`/`decode-grid`/`decode-screen`, 300 for the
 two `full-read`/`random`-order configs (the original sample-limit for those runs) — 1 discarded
 warm-up + 3 measured runs per config.
 **Gap vs. `docs/benchmarks.md`'s stated methodology:** that doc says "every result records CPU,
@@ -167,7 +167,7 @@ achieve; a targeted-read implementation should beat every number here, likely su
 
 ## Full-set NVMe and HDD comparison
 
-The full 9,142-file NVMe set and the HDD (`E:\`) comparison the issue's own scope calls for
+The full 9,142-file NVMe set and the HDD comparison the issue's own scope calls for
 ("extraction throughput on NVMe vs HDD") are both now measured:
 
 | Mode | Drive | Order | Cold | n | p50 | p95 | max |
@@ -208,7 +208,7 @@ actually answers the issue's own question.
 **This NVMe-random-cold number (15.6/15.7ms p50) does not match the older 800-file bounded pass's
 own NVMe-random-cold figures (131.2/131.6ms p50) in the Throughput section above — an ~8x gap on
 what should be the same drive, mode, and order.** Re-checked directly: a fresh, independent
-500-file random-order cold run against `H:\NictiBench\ref-10k` reproduces the same order of
+500-file random-order cold run against `<REF10K_ROOT>` reproduces the same order of
 magnitude as the number used here (23.1ms p50 on that single-round check), not anything close to
 131ms — so the new number is the one that holds up under re-verification, not a fluke. The most
 likely explanation, though not independently reverified since the buggy code no longer exists to
@@ -277,26 +277,26 @@ per-file loop specifically.
 
 ## Reproducing / extending this run
 
-All commands below assume `H:\NictiBench\ref-10k` (NVMe) / `E:\NictiBench\ref-10k` (HDD) per
+All commands below assume `<REF10K_ROOT>` (NVMe) / `<REF10K_ROOT_HDD>` (HDD) per
 `docs/benchmarks.md`, and a release build of `sniff` (cross-compiled from WSL to
 `x86_64-pc-windows-gnu`, then run Windows-native via interop — the same approach
 [#85](https://github.com/jordanfelle/nicti/issues/85)'s `glint` spike used):
 
 ```powershell
 # Inventory (correctness + per-body size/quality/subsampling stats) -- already run, see above.
-sniff.exe inventory H:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-nvme.csv
-sniff.exe inventory E:\NictiBench\ref-10k docs\ref-10k-manifest.csv --out sniff-hdd.csv --hdd-sample-every 20
+sniff.exe inventory <REF10K_ROOT> docs\ref-10k-manifest.csv --out sniff-nvme.csv
+sniff.exe inventory <REF10K_ROOT_HDD> docs\ref-10k-manifest.csv --out sniff-hdd.csv --hdd-sample-every 20
 
 # Throughput matrix -- all seven of these are now run; see "Full-set NVMe and HDD comparison" above
 # for the results. decode-screen used --warmups 1 --runs 1 (a deliberate scope reduction, see that
 # section); every other command below used the tool's own defaults (--warmups 1 --runs 5).
-sniff.exe bench H:\NictiBench\ref-10k --mode locate --threads 1 --order manifest
-sniff.exe bench H:\NictiBench\ref-10k --mode decode-screen --threads 1 --order manifest --warmups 1 --runs 1
-sniff.exe bench H:\NictiBench\ref-10k --mode full-read --threads 1 --order manifest --sample-limit 500 --cold
-sniff.exe bench H:\NictiBench\ref-10k --mode locate --threads 1 --order random --cold --sample-limit 500
-sniff.exe bench H:\NictiBench\ref-10k --mode full-read --threads 1 --order random --cold --sample-limit 500
-sniff.exe bench E:\NictiBench\ref-10k --mode locate --threads 1 --order random --cold --sample-limit 500
-sniff.exe bench E:\NictiBench\ref-10k --mode full-read --threads 1 --order random --cold --sample-limit 500
+sniff.exe bench <REF10K_ROOT> --mode locate --threads 1 --order manifest
+sniff.exe bench <REF10K_ROOT> --mode decode-screen --threads 1 --order manifest --warmups 1 --runs 1
+sniff.exe bench <REF10K_ROOT> --mode full-read --threads 1 --order manifest --sample-limit 500 --cold
+sniff.exe bench <REF10K_ROOT> --mode locate --threads 1 --order random --cold --sample-limit 500
+sniff.exe bench <REF10K_ROOT> --mode full-read --threads 1 --order random --cold --sample-limit 500
+sniff.exe bench <REF10K_ROOT_HDD> --mode locate --threads 1 --order random --cold --sample-limit 500
+sniff.exe bench <REF10K_ROOT_HDD> --mode full-read --threads 1 --order random --cold --sample-limit 500
 ```
 
 Nothing from `sniff`'s own scope is left outstanding. A full, unsampled HDD run (all 9,142 files,

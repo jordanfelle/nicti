@@ -1,6 +1,6 @@
 # ADR-0001: Implementation language and native stack
 
-- **Status:** Accepted
+- **Status:** Accepted (see Context update, 2026-09)
 - **Date:** 2026-09-23
 - **Ticket:** #15 Research: language/stack choice
 
@@ -120,6 +120,26 @@ with no first-party GPU-compute or ONNX Runtime path on Windows+NVIDIA.
 None of Rust's competitors are hard-blocked; each loses on a different combination of ecosystem
 maturity, GC-latency risk, or Windows-tooling youth. Rust is preferred, not the only option that
 would have worked.
+
+## Context update (2026-09)
+
+Nicti is now public under AGPL-3.0-or-later and accepts outside contributors (#133) — the
+"most code will be written by one person plus Claude Code, not a team" framing in Context above,
+and criterion 12's "solo + agent productivity" framing, described the situation at the time this
+ADR was written, not a permanent constraint.
+
+Re-checking criterion 12 against that change: the underlying language decision still holds. Rust's
+compiler-enforced memory safety and exhaustive `Result`/`match` handling remain valuable
+independent of who's writing the code — they catch mistakes regardless of whether the author is a
+solo maintainer, an AI agent, or an outside contributor's first PR. What has changed is the
+"no second human reviewer" framing under criterion 7 (Decision, above): outside contributions now
+mean real human review is possible on at least some changes, which was the specific gap that
+argument was compensating for. This doesn't change the Rust decision — it was never solely
+justified by the absence of reviewers — but it does mean that gap is now partially closed by
+something other than the compiler.
+
+The original scoring and matrix below are left as written; they're a record of the decision as
+made, not something to re-litigate here.
 
 ## Consequences
 

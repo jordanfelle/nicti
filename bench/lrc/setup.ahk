@@ -9,27 +9,35 @@
 ; for that half; do it once per LRC config (originals / smart-previews) and verify by eye before
 ; running hero.ahk.
 ;
-; Usage: AutoHotkey64.exe setup.ahk <config-name> <source-dir>
+; Usage: AutoHotkey64.exe setup.ahk <config-name> <source-dir> [bench-root]
 ;   config-name: originals | smart-previews (only affects the catalog file name)
 ;   source-dir:  folder containing the 50 hero-set files (see docs/benchmarks/hero-scenario.md)
+;   bench-root:  optional -- where to create the lrc-bench catalog dir. Defaults to the
+;                NICTI_BENCH_ROOT env var; if neither is given, errors instead of guessing a drive.
 
 #SingleInstance Force
 SendMode "Event"
 SetTitleMatchMode 2
 
 if A_Args.Length < 2 {
-    MsgBox "Usage: setup.ahk <config-name: originals|smart-previews> <source-dir>"
+    MsgBox "Usage: setup.ahk <config-name: originals|smart-previews> <source-dir> [bench-root]"
     ExitApp 1
 }
 configName := A_Args[1]
 sourceDir := A_Args[2]
+benchRoot := A_Args.Length >= 3 ? A_Args[3] : EnvGet("NICTI_BENCH_ROOT")
 
 if !DirExist(sourceDir) {
     MsgBox "Source dir not found: " sourceDir
     ExitApp 1
 }
 
-catalogDir := "H:\NictiBench\lrc-bench"
+if benchRoot = "" {
+    MsgBox "No bench root given and NICTI_BENCH_ROOT is not set -- pass it as a 3rd argument or set the env var (e.g. a scratch drive of your own choosing)."
+    ExitApp 1
+}
+
+catalogDir := benchRoot "\lrc-bench"
 DirCreate(catalogDir)
 catalogPath := catalogDir "\hero-" configName ".lrcat"
 

@@ -5,7 +5,7 @@ paths:
 
 # Preview Tiers — Quick Reference
 
-Full reasoning/history: `.claude/docs/preview-tiers/README.md`.
+Full reasoning/history: `docs/decisions/preview-tiers.md`.
 
 - **Preview tier strategy (#29)** — `docs/adr/0017`: T0 (grid, `nikon_preview_ifd` verbatim) → T1
   (loupe-fast, `sub_ifd_2`, RAM-only) → T2 (screen, `JpgFromRaw` decoded+resized to 3840px long

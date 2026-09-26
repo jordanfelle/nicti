@@ -69,7 +69,7 @@ pub struct HardwareIdentity {
 impl HardwareIdentity {
     /// Best-effort identity from what `std` can see without a native-query dependency. GPU/driver
     /// version aren't captured here -- docs/benchmarks.md expects those recorded by hand
-    /// alongside the reference machine's run, same as today's manual bench/ scripts.
+    /// alongside the benchmark machine's run, same as today's manual bench/ scripts.
     pub fn capture() -> Self {
         let hostname = env::var("COMPUTERNAME")
             .or_else(|_| env::var("HOSTNAME"))
