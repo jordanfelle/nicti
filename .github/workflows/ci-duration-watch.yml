@@ -1,0 +1,50 @@
+name: CI duration watch
+
+# #160: files (or updates) a `ci-slow`-labelled issue when a CI job runs over its budget in
+# .github/ci-budgets.json on two consecutive main-branch runs -- see #154, where den (linux)
+# regressed from 2-3min to 25-33min and went unnoticed for a while with nothing watching for it.
+on:
+  workflow_run:
+    workflows: [CI, CodeQL Advanced]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  # `gh issue list --search` has some index-propagation lag, so two watched runs completing
+  # close together (CI and CodeQL Advanced finishing near-simultaneously, or two rapid main
+  # pushes) could otherwise both miss seeing each other's just-created issue and double-file.
+  # Serializing (not cancelling) closes that window -- a queued run still sees the first run's
+  # issue by the time it's its turn.
+  group: ci-duration-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: check job durations against budget
+    runs-on: ubuntu-latest
+    # main-branch, non-PR runs only: PR runs never save a cache (see ci.yml's own save-if
+    # comments), so their timings are noisier and would produce false alarms. `workflow_run`
+    # always executes from the repo's default branch regardless of what triggered the run it's
+    # watching, so this `if:` is filtering which *watched* run to react to, not what code this
+    # job itself checks out.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event != 'pull_request'
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      # persist-credentials: false, matching ci.yml -- see its own comment on this. This job only
+      # reads the default branch (workflow_run never checks out the triggering run's own code),
+      # so there's no untrusted-code exposure either way, but the convention stays consistent.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check job durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 .github/scripts/ci_duration_watch.py --run-id ${{ github.event.workflow_run.id }}
