@@ -26,7 +26,9 @@ Full reasoning/history: `.claude/docs/gpu-gui-and-healing/README.md`.
   to ship. Final pick waits on `bench/pelt/pelt.ahk`+`run-pelt.ps1` reference-machine numbers.
 - **Healing/removal** — `docs/adr/0007`: **Proposed, pending reference-machine pass**. Ships both
   classic clone/heal (CPU Poisson-Jacobi + `wgpu` compute-shader twin) and AI removal
-  (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`. LaMa's
-  Places2 training-data license status is still unresolved (unreachable primary source); MI-GAN
-  investigated as an alternative, not cleaner (same exposure). Proposed stage order for #44: after
-  lens correction, before global tone, in linear space.
+  (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`. **No
+  real ONNX weights exist in this sandbox** — the AI-removal wrappers prove only the
+  loading/error-handling shape, not real inference. LaMa's Places2 training-data license status is
+  still unresolved (unreachable primary source); MI-GAN investigated as an alternative, not
+  cleaner (same exposure). Proposed stage order for #44: after lens correction, before global
+  tone, in linear space.
