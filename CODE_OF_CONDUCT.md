@@ -51,15 +51,16 @@ representing the community in public spaces.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported directly to
-the project maintainer ([@jordanfelle](https://github.com/jordanfelle)) via a GitHub direct
-message, or by using GitHub's ["Report content"](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam)
-flow on the specific comment/issue/PR involved. All complaints will be reviewed and investigated
-promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior can be reported confidentially
+to the project maintainer ([@jordanfelle](https://github.com/jordanfelle)) through a
+[private security advisory](https://github.com/jordanfelle/nicti/security/advisories/new) on this
+repo — GitHub only offers one confidential-report tool for a repo this size, and this is it,
+regardless of the "security" label on the button. For behavior in a specific public comment,
+issue, or PR, GitHub's own ["Report content"](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam)
+flow is a second option. All complaints will be reviewed and investigated promptly and fairly.
 
-(Security *vulnerabilities* — not conduct issues — go through
-[`SECURITY.md`](SECURITY.md)'s private advisory process instead; the two are handled through
-different channels since GitHub's security advisories aren't intended for behavior reports.)
+(For actual security *vulnerabilities* rather than conduct issues, use the same private-advisory
+link via [`SECURITY.md`](SECURITY.md) instead — same tool, different subject.)
 
 ## Attribution
 
