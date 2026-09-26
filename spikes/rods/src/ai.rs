@@ -164,6 +164,16 @@ impl TiledDenoiser {
     /// Runs the model over the whole image, tiled per `config`, with a linear-ramp feathered
     /// blend across each overlap region so tile seams don't show up as a visible or
     /// metrics-detectable artifact. `rgb_hwc` is interleaved RGB, `0.0..=1.0`.
+    ///
+    /// Every tile fed to the model is exactly `config.tile x config.tile`, even at the image's
+    /// right/bottom edge -- found necessary, not just tidy, when a real full-resolution run
+    /// surfaced SCUNet's window-attention self-attention rejecting a smaller, non-divisible edge
+    /// tile with an ONNX Runtime reshape error (its internal downsampled feature map didn't
+    /// divide evenly by its window size). An edge tile's out-of-bounds region is clamp-to-edge
+    /// padded (replicating the source image's last real row/column, not zero-filled, so the
+    /// model sees continuation rather than a hard black edge) before inference, then only the
+    /// tile's real (unpadded) region is used for blending -- the padded region's output is
+    /// discarded, never blended in.
     pub fn denoise(
         &mut self,
         rgb_hwc: &[f32],
@@ -185,23 +195,27 @@ impl TiledDenoiser {
             loop {
                 let tile_w = config.tile.min(width - x);
 
-                let mut tile_data = vec![0.0f32; tile_w as usize * tile_h as usize * 3];
-                for row in 0..tile_h {
-                    let src_start = (((y + row) * width + x) * 3) as usize;
-                    let src_end = src_start + tile_w as usize * 3;
-                    let dst_start = (row * tile_w * 3) as usize;
-                    tile_data[dst_start..dst_start + tile_w as usize * 3]
-                        .copy_from_slice(&rgb_hwc[src_start..src_end]);
-                }
+                let tile_data = build_padded_tile(
+                    rgb_hwc,
+                    TileWindow {
+                        source_width: width,
+                        source_height: height,
+                        x,
+                        y,
+                        tile_w,
+                        tile_h,
+                        tile_size: config.tile,
+                    },
+                );
 
-                let denoised = self.denoise_tile(&tile_data, tile_w, tile_h)?;
+                let denoised = self.denoise_tile(&tile_data, config.tile, config.tile)?;
 
                 for row in 0..tile_h {
                     for col in 0..tile_w {
                         let w = feather_weight(col, tile_w, config.overlap)
                             * feather_weight(row, tile_h, config.overlap);
                         let global_idx = ((y + row) * width + (x + col)) as usize;
-                        let local_idx = (row * tile_w + col) as usize;
+                        let local_idx = (row * config.tile + col) as usize;
                         weight[global_idx] += w;
                         for c in 0..3 {
                             accum[global_idx * 3 + c] += denoised[local_idx * 3 + c] as f64 * w;
@@ -231,6 +245,45 @@ impl TiledDenoiser {
     }
 }
 
+/// Builds one `tile_size x tile_size` interleaved-RGB buffer starting at `(x, y)` in `rgb_hwc`
+/// (an interleaved RGB image, `width*height*3` samples). The real region is `tile_w x tile_h`
+/// (`<= tile_size`, smaller at the image's right/bottom edge); anything beyond that is
+/// clamp-to-edge padded from the source image's own last real row/column -- see
+/// [`TiledDenoiser::denoise`]'s doc comment for why (a real full-resolution run surfaced a model
+/// that rejects a non-divisible tile size, including a smaller edge/remainder tile).
+///
+/// Pure function, no model/session involved, so this is unit-testable without a real ONNX file --
+/// [`TiledDenoiser::denoise`]'s own real-model tests can't run in this sandbox (see this module's
+/// own model-less test), but the padding math that feeds it can and should be checked directly.
+#[derive(Debug, Clone, Copy)]
+struct TileWindow {
+    source_width: u32,
+    source_height: u32,
+    /// Top-left corner of this tile in the source image.
+    x: u32,
+    y: u32,
+    /// The tile's real (unpadded) size -- `<= tile_size`, smaller at the image's right/bottom
+    /// edge.
+    tile_w: u32,
+    tile_h: u32,
+    tile_size: u32,
+}
+
+fn build_padded_tile(rgb_hwc: &[f32], w: TileWindow) -> Vec<f32> {
+    let mut tile_data = vec![0.0f32; w.tile_size as usize * w.tile_size as usize * 3];
+    for row in 0..w.tile_size {
+        let src_row = (w.y + row.min(w.tile_h - 1)).min(w.source_height - 1);
+        for col in 0..w.tile_size {
+            let src_col = (w.x + col.min(w.tile_w - 1)).min(w.source_width - 1);
+            let src_idx = (src_row * w.source_width + src_col) as usize;
+            let dst_idx = (row * w.tile_size + col) as usize;
+            tile_data[dst_idx * 3..dst_idx * 3 + 3]
+                .copy_from_slice(&rgb_hwc[src_idx * 3..src_idx * 3 + 3]);
+        }
+    }
+    tile_data
+}
+
 fn anyhow_ensure_len(actual: usize, expected: usize) -> Result<(), AiDenoiseError> {
     if actual != expected {
         return Err(AiDenoiseError::UnexpectedOutputLength { actual, expected });
@@ -255,6 +308,97 @@ fn feather_weight(pos: u32, extent: u32, overlap: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 4x3 RGB image, pixel value at (col,row) = (col*10 + row) repeated across R/G/B, so a
+    /// padded/clamped sample's origin is identifiable from its value alone.
+    fn test_image() -> Vec<f32> {
+        let width = 4u32;
+        let height = 3u32;
+        let mut out = vec![0.0f32; (width * height * 3) as usize];
+        for row in 0..height {
+            for col in 0..width {
+                let v = (col * 10 + row) as f32;
+                let idx = (row * width + col) as usize;
+                out[idx * 3..idx * 3 + 3].copy_from_slice(&[v, v, v]);
+            }
+        }
+        out
+    }
+
+    fn window(x: u32, y: u32, tile_w: u32, tile_h: u32, tile_size: u32) -> TileWindow {
+        TileWindow {
+            source_width: 4,
+            source_height: 3,
+            x,
+            y,
+            tile_w,
+            tile_h,
+            tile_size,
+        }
+    }
+
+    #[test]
+    fn build_padded_tile_real_region_is_unpadded() {
+        // The tile's real (tile_w x tile_h) region must be an exact copy of the source, whatever
+        // padding happens beyond it.
+        let img = test_image();
+        let tile = build_padded_tile(&img, window(0, 0, 4, 3, 4));
+        for row in 0..3u32 {
+            for col in 0..4u32 {
+                let expected = (col * 10 + row) as f32;
+                let idx = (row * 4 + col) as usize;
+                assert_eq!(tile[idx * 3], expected, "at ({col},{row})");
+            }
+        }
+    }
+
+    #[test]
+    fn build_padded_tile_pads_bottom_edge_by_replicating_last_row() {
+        // Image is 4x3; a 4x4 tile at (0,0) has tile_h=3 (real) but tile_size=4, so row 3 must
+        // replicate row 2 (the image's real last row), not read out of bounds or zero-fill.
+        let img = test_image();
+        let tile = build_padded_tile(&img, window(0, 0, 4, 3, 4));
+        for col in 0..4u32 {
+            let expected_last_real_row = (col * 10 + 2) as f32; // row index 2 is the last real row
+            let padded_idx = (3 * 4 + col) as usize; // row 3 (padded)
+            assert_eq!(
+                tile[padded_idx * 3],
+                expected_last_real_row,
+                "padded row should replicate the last real row at col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_padded_tile_pads_right_edge_by_replicating_last_column() {
+        // A 4-wide image with a 6-wide tile: tile_w=4 (real), tile_size=6, so columns 4/5 must
+        // replicate column 3 (the image's real last column).
+        let img = test_image();
+        let tile = build_padded_tile(&img, window(0, 0, 4, 3, 6));
+        for row in 0..3u32 {
+            let expected_last_real_col = (3 * 10 + row) as f32; // col index 3 is the last real col
+            for padded_col in [4u32, 5u32] {
+                let padded_idx = (row * 6 + padded_col) as usize;
+                assert_eq!(
+                    tile[padded_idx * 3],
+                    expected_last_real_col,
+                    "padded col {padded_col} should replicate the last real col at row {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_padded_tile_offset_tile_reads_the_right_source_window() {
+        // A tile starting at (x=1, y=1), fully interior (2 real cols, 2 real rows within a
+        // 4x3 source) -- confirms x/y offsets are applied, not just the (0,0) case above.
+        let img = test_image();
+        let tile = build_padded_tile(&img, window(1, 1, 2, 2, 2));
+        assert_eq!(tile[0], (1 * 10 + 1) as f32); // (col=1,row=1) in source coords
+        assert_eq!(tile[3], (2 * 10 + 1) as f32); // (col=2,row=1)
+        assert_eq!(tile[6], (1 * 10 + 2) as f32); // (col=1,row=2)
+        assert_eq!(tile[9], (2 * 10 + 2) as f32); // (col=2,row=2)
+    }
 
     #[test]
     fn feather_weight_is_one_in_the_interior() {
