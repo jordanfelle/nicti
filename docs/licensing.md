@@ -205,13 +205,12 @@ this update:
 - Un-excludes **Ultralytics YOLO** (AGPL-3.0) and **exiv2/rexiv2** (GPL-2.0-or-later/
   GPL-3.0-or-later respectively — both grants verified precisely, not assumed from a short label)
   — see their updated rows below and the Flags section.
-- **Partially** removes the special sign-off/`cdylib`-isolation requirement for
-  **LGPL-as-Cargo-dependency**: resolved for **`lensfun-rs`** (its `LGPL-3.0-or-later OR GPL-3.0`
-  dual license has a confirmed or-later arm, so it combines cleanly into Nicti's own copyleft
-  license — no isolation/sign-off needed). **Not resolved for `rawler`**: its grant is an
-  unconfirmed bare `LGPL-2.1` with no or-later arm, so it still needs the same sign-off/isolation
-  requirement as before — see the Flags section below, which was not corrected in an earlier pass
-  of this update and still needs reading precisely, not the top-line summary alone.
+- **Removes** the special sign-off/`cdylib`-isolation requirement for **LGPL-as-Cargo-dependency**
+  — resolved for **`lensfun-rs`** (its `LGPL-3.0-or-later OR GPL-3.0` dual license has a confirmed
+  or-later arm) and, **corrected 2026-09-25 by #37**, for **`rawler`/LibRaw too**: LGPL-2.1 §§5-6
+  permit the combination directly regardless of the "-or-later" question, no isolation/sign-off
+  needed for either — see the Flags section below for the full reasoning and the real remaining
+  distribution-mechanics checklist (not a compatibility question) before shipping.
 - **Unaffected**: Adobe DCP/LCP (no redistribution grant exists, not a copyleft question),
   InsightFace/RetinaFace (non-commercial-only restriction, not a copyleft question), LaMa's Places2
   flag (training-data provenance, not a license-family question), CLIP's model-card caveat (a
@@ -288,7 +287,7 @@ licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) a
 | [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ✅ **resolved 2026-09-25**, same LGPL-2.1 §§5–6 reasoning as the LibRaw row above | ✅ | ✅ same §6 notice/license-text checklist item as the LibRaw row before shipping in `nicti-decode`; the `deny.toml` exception (named for `rawler`, not path-scoped — see its own comment) stays a per-crate exception rather than a global `LGPL-2.1` allow entry, since cargo-deny can verify license compatibility but not §6's administrative notice requirement |
 | [lensfun](https://github.com/lensfun/lensfun) — `libs/` | Lens correction ([#39](https://github.com/jordanfelle/nicti/issues/39)) | LGPL-3.0[^lf1] | — | Dynamic (DLL) | ✅ if dynamically linked | ✅ | ✅ dynamic link only; never link `apps/` (GPL-3.0) |
 | lensfun **database** (calibration data) | Lens correction | — | CC BY-SA 3.0[^lf1] | Data file, unmodified | ✅ (data obligation, not code) | ✅ | ✅ — share-alike only bites if Nicti *modifies* and redistributes the database |
-| [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ⚠️ same LGPL/Rust caveat as rawler under a permissive release | ✅ | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), and this arm's confirmed "or later" grant combines cleanly, so no isolation/sign-off needed (unlike `rawler`, whose own grant isn't confirmed the same way — see the Flags section) |
+| [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), and this arm's confirmed "or later" grant combines cleanly | ✅ | ✅ no isolation/sign-off needed — same conclusion `rawler`/LibRaw reached too, **corrected 2026-09-25 by #37** (see Flags §2): LGPL-2.1 §§5-6 permit this regardless of an "-or-later" grant |
 | [Little CMS 2](https://github.com/mm2/Little-CMS) | Color management ([#42](https://github.com/jordanfelle/nicti/issues/42)) | MIT[^lcms1] | — | Static or dynamic | ✅ | ✅ | ✅ bundle OK |
 | [kamadak-exif](https://crates.io/crates/kamadak-exif) | EXIF read | BSD-2-Clause[^kx1] | — | Static | ✅ | ✅ | ✅ bundle OK (read-only — see #47 below) |
 | [little_exif](https://crates.io/crates/little_exif) | EXIF/XMP write | MIT OR Apache-2.0[^le1] | — | Static | ✅ | ✅ | ✅ bundle OK |
@@ -376,33 +375,43 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      §6(a) specifically requires accompanying the work not just with the LGPL'd library's own
      source, but with **the complete "work that uses the Library" — i.e. the whole combined
      executable — as object and/or source code, so the user can modify the library and relink**.
-     "We vendor the library's source" alone doesn't reach that. What actually satisfies it: **Nicti
-     is itself AGPL-3.0-or-later, open source, in this same public repository** — meaning the
-     complete corresponding source of the *entire* combined executable (not just the vendored
-     libraries) is already published here, as a direct consequence of Nicti's own outbound license
-     — AGPL-3.0-or-later's §13 additionally extends this same source-offer obligation to remote
-     network users specifically for a *modified* version run as a network service (closing the
-     "hosted-service loophole" plain GPL leaves open, per ADR-0013), not a broader claim that §13
-     covers every possible deployment — independent of anything LGPL asks for. §6(a)'s source
-     condition is satisfied as a structural consequence of
-     shipping Nicti as AGPL open source, not a separate packaging task — though the administrative
-     step (crediting LibRaw/rawler + including the LGPL license text in the shipped product, per
-     §6's own notice requirement) is still a real, distinct checklist item, separate from the
-     legal-compliance question. No relicensing, no "-or-later" grant, and no GPL-version question
-     ever enters into this path.
+     "We vendor the library's source" alone doesn't reach that. **A second hostile review correctly
+     pushed back further**: §6(a)'s own text says "*accompany* the work" — read strictly, that
+     means the source travels *with* the distributed binary, not merely "exists somewhere public";
+     public repo existence alone doesn't, by itself, satisfy option (a) specifically. The clean fit
+     is a **different one of §6's five options: §6(d)**, "if distribution of the work is made by
+     offering access to copy from a designated place, offer equivalent access to copy the [§6a]
+     materials from the same place." A GitHub Release tied to a tagged commit is exactly this
+     shape: the place a user gets the binary from (that Release, on this repo) is the *same place*
+     that already serves the complete corresponding source of the entire executable — required
+     regardless, since Nicti's own outbound license (AGPL-3.0-or-later) makes this repo the
+     authoritative, complete source for anyone who receives a copy (§13 further extends the same
+     source-offer obligation to remote network users specifically for a *modified* version run as
+     a network service — closing the "hosted-service loophole" plain GPL leaves open, per
+     ADR-0013 — not a claim that §13 covers every deployment). **This is not "already
+     unconditionally satisfied, zero action needed"** — it depends on the actual release mechanism
+     genuinely keeping the binary and complete source at the same place (which GitHub Releases
+     does naturally, but a different distribution channel later — a standalone installer, a
+     third-party download mirror — would need to independently satisfy §6(d) or another option, a
+     real "verify at ship time" item, not a permanently pre-solved abstract fact). Combined with
+     the notice + LGPL-license-text requirement §6 always demands regardless of which sub-option is
+     used, this is the actual, complete compliance shape before `nicti-decode` ships either
+     dependency — genuinely satisfiable with Nicti's existing GitHub-native distribution model, but
+     a real checklist to verify per release, not something to treat as closed forever. No
+     relicensing, no "-or-later" grant, and no GPL-version question ever enters into this path.
    - The FSF's own license-compatibility page (`gnu.org/licenses/license-list.en.html`) confirms
      LGPL-2.1 is compatible with both GPLv2 and GPLv3, and separately confirms GPLv3-family works
      can combine separate modules/source files with AGPLv3-family works even though the two aren't
      interchangeable as a whole-program relicense — the same cross-linking shape as LGPL's own §6.
    - **Net: no isolation/sign-off requirement is actually needed for `rawler`, `LibRaw`, or
-     `lensfun-rs` on LGPL-vs-AGPL compatibility grounds** — the earlier `cdylib`-isolation
+     `lensfun-rs` on LGPL-vs-AGPL *compatibility* grounds** — the earlier `cdylib`-isolation
      requirement (ADR-0004 §3) was written to satisfy a stricter reading than LGPL-2.1 actually
      demands. LibRaw's CDDL-1.0 arm is a moot alternative either way (GPL-incompatible, and
-     unneeded now that the LGPL arm is confirmed usable directly). §6(a)'s source-availability
-     option is satisfied as a structural consequence of Nicti already being AGPL-3.0-or-later open
-     source (see above) — not a packaging choice to make. What's left is a real but small
-     administrative checklist item, not a legal question: give prominent notice + include the LGPL
-     license text for LibRaw/rawler in the shipped product before `nicti-decode` ships either.
+     unneeded now that the LGPL arm is confirmed usable directly). What's left before shipping
+     isn't a compatibility question, but it *is* a real distribution-mechanics checklist (see
+     above): §6(d)'s "same place" condition via GitHub Releases, plus §6's prominent notice + LGPL
+     license text for LibRaw/rawler — verify both hold for however `nicti-decode` actually ships,
+     not a permanently pre-solved fact.
    - `lensfun-rs`'s own dual license (`LGPL-3.0-or-later OR GPL-3.0`) was already confirmed
      unambiguous before this correction and needs no change to that conclusion.
 3. **Adobe DCP/LCP data** — never bundle. Use `dcamprof` (external CLI, GPL-3.0 but not linked in)

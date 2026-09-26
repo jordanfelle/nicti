@@ -199,18 +199,25 @@ findings correct/extend prior work — the middle one supersedes an earlier draf
    correctly caught that an earlier draft of this correction understated that source
    obligation** — for a statically-linked executable, §6(a) specifically requires the complete
    *"work that uses the Library"* (the whole combined executable, not just the vendored library)
-   as object and/or source so a user can relink. That's satisfied structurally, not by vendoring
-   alone: **Nicti is itself AGPL-3.0-or-later open source in this same public repo**, so the
-   complete corresponding source of the entire executable is already published here (§13 further
-   extends the same source-offer obligation to remote network users of a *modified* version run
-   as a network service — not a claim that it covers every deployment) — a strictly stronger
-   requirement than §6(a) asks for. No relicensing, no GPL-version question, no "or-later" grant
-   needed. LibRaw's CDDL-1.0 arm is a moot alternative either way now (GPL-incompatible, and
-   unneeded once the LGPL arm is confirmed usable directly).
-3. **What's left is a real but small administrative checklist item, not a licensing blocker**:
-   give §6's prominent notice + include the LGPL license text for LibRaw/rawler in the shipped
-   product before `nicti-decode` ships either dependency. Not blocking for `spikes/retina`'s
-   research use either way.
+   as object and/or source so a user can relink. **A second hostile review correctly pushed back
+   further**: §6(a) says "*accompany* the work" — public repo existence alone doesn't obviously
+   satisfy that specific option. The clean fit is **§6(d)** instead: "offer equivalent access to
+   copy the [§6a] materials from the same place" you distribute the binary from. A GitHub Release
+   tied to a tagged commit is exactly this — the place a user gets the binary is the same place
+   that already serves the complete corresponding source (required regardless, since Nicti is
+   itself AGPL-3.0-or-later open source; §13 further extends the same obligation to remote network
+   users of a *modified* version run as a network service, not every deployment). **Not
+   "unconditionally already satisfied"** — this depends on the actual release mechanism keeping
+   binary and source at the same place, which GitHub Releases does naturally but a future,
+   different distribution channel would need to independently satisfy. No relicensing, no
+   GPL-version question, no "or-later" grant needed. LibRaw's CDDL-1.0 arm is a moot alternative
+   either way now (GPL-incompatible, and unneeded once the LGPL arm is confirmed usable directly).
+3. **What's left is a real distribution-mechanics checklist to verify per release, not a
+   compatibility blocker**: confirm the actual release mechanism satisfies §6(d) (binary and
+   complete source available from the same place — natural for GitHub Releases, not automatic for
+   every future channel) and give §6's prominent notice + include the LGPL license text for
+   LibRaw/rawler in the shipped product, before `nicti-decode` ships either dependency. Not
+   blocking for `spikes/retina`'s research use either way.
 
 `deny.toml` gained a `rawler`-specific exception (not a global `LGPL-2.1` allow entry, since
 cargo-deny can verify license compatibility but not whether a shipped build actually satisfies
@@ -240,11 +247,12 @@ unilaterally.
 1. **Swap PR #826 for LibRaw's own official HE snapshot once it ships** ("this fall," no firm
    date per ADR-0001) — re-run `retina scan`/`diff` against it when it lands; likely faster, and
    also makes the vendored fork's own out-of-bounds-read patch (see the Spike section above) moot.
-2. **Give §6's prominent notice + include the LGPL license text for LibRaw/rawler in the shipped
-   product before `nicti-decode` ships** — a small administrative checklist item, not a legal
-   question: the harder §6(a) source-availability condition is already satisfied structurally by
-   Nicti being AGPL-3.0-or-later open source itself (see `docs/licensing.md`'s Flags §2), not
-   something separate to build.
+2. **Verify §6(d) and give §6's prominent notice + LGPL license text before `nicti-decode`
+   ships** — confirm the actual release mechanism keeps the binary and complete corresponding
+   source available from the same place (natural for GitHub Releases, not automatic for any
+   future distribution channel) and include the LGPL license text for LibRaw/rawler in the shipped
+   product (see `docs/licensing.md`'s Flags §2) — a real per-release checklist, not a compatibility
+   question to research further.
 3. **`ref-10k`'s storage/access model is broken and needs its own ticket** — a 393GB
    frozen-per-machine copy is what just silently vanished; the user's explicit direction is that
    this needs to be accessible to more than one person, not re-created as another single-machine

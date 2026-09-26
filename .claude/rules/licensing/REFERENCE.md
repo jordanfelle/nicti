@@ -25,11 +25,13 @@ Full reasoning/history: `.claude/docs/licensing/README.md`.
   an LGPL-2.1 library into a differently-licensed larger work with no relicensing at all** —
   exactly LGPL's purpose, given that AGPL permits modification/reverse-engineering (it does, by its
   copyleft nature). §6(a)'s source condition (for static linking: the *whole combined executable*,
-  not just the library, in relinkable form) is satisfied structurally by Nicti already being
-  AGPL-3.0-or-later open source, not by vendoring alone. See `docs/licensing.md`'s Flags §2 for the
-  full citation trail (gnu.org primary sources). What's left is a small administrative checklist
-  item (§6's prominent notice + LGPL license text in the shipped product), not a licensing
-  blocker. Reopens RapidRAW (#69) as an adopt/fork
+  not just the library, in relinkable form) is satisfied via **§6(d)** instead (equivalent access
+  from the *same place* the binary ships from — a GitHub Release does this naturally, since Nicti
+  is itself AGPL-3.0-or-later open source), not automatically by vendoring or public-repo existence
+  alone. See `docs/licensing.md`'s Flags §2 for the full citation trail (gnu.org primary sources).
+  What's left is a real distribution-mechanics + notice checklist to verify per release (§6(d)'s
+  same-place condition + prominent notice + LGPL license text in the shipped product), not a
+  licensing blocker. Reopens RapidRAW (#69) as an adopt/fork
   candidate — but **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler
   fork still rejects it, falling back to the embedded JPEG), so it isn't a shortcut past #37's own
   decoder work.

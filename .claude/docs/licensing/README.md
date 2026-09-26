@@ -37,17 +37,21 @@ Covers the third-party license policy (and its 2026-09-24 amendment) and the out
   statically-linked executable, §6(a) specifically requires the complete "work that uses the
   Library" — the whole combined executable, not just the vendored library's own source — as
   object and/or source so a user can relink** (an earlier draft of this correction understated
-  this, caught by a hostile review). That's satisfied structurally, not by vendoring alone:
-  **Nicti is itself AGPL-3.0-or-later open source in this same public repo**, so the complete
-  corresponding source of the entire executable is already published here (§13 further extends the
-  same source-offer obligation to remote network users of a *modified* version run as a network
-  service, not every deployment) — a strictly stronger requirement than §6(a) asks for. FSF's own
-  license-compatibility page corroborates: LGPLv2.1 is "compatible with
-  GPLv2 and GPLv3." No relicensing, no GPL-version question, no "-or-later" grant needed. See
+  this, caught by a hostile review). §6(a)'s "*accompany* the work" wording arguably isn't
+  satisfied by mere public-repo existence either (a second hostile review's pushback) — the clean
+  fit is **§6(d)**: offer equivalent access to the source from the *same place* the binary is
+  distributed from. A GitHub Release tied to a tagged commit is exactly this shape, since that
+  same repo already serves the complete corresponding source (required regardless — Nicti is
+  itself AGPL-3.0-or-later open source; §13 further extends the same obligation to remote network
+  users of a *modified* version run as a network service, not every deployment). **Not
+  unconditionally pre-solved** — depends on the actual release mechanism keeping binary and source
+  at the same place, natural for GitHub Releases but not automatic for a future different channel.
+  FSF's own license-compatibility page corroborates: LGPLv2.1 is "compatible with GPLv2 and
+  GPLv3." No relicensing, no GPL-version question, no "-or-later" grant needed. See
   `docs/licensing.md`'s Flags §2 for the full gnu.org-sourced citation trail; `raw-decoder`
-  topic's own doc has the RAW-decoder-specific account. What remains is a real but small
-  administrative checklist item (give §6's prominent notice + include the LGPL license text in
-  the shipped product), not a licensing blocker. Reopens RapidRAW (#69) as a potential adopt/fork
+  topic's own doc has the RAW-decoder-specific account. What remains is a real distribution-
+  mechanics + notice checklist to verify per release, not a licensing blocker. Reopens RapidRAW
+  (#69) as a potential adopt/fork
   candidate, not just prior-art
   study, since it's also AGPL-3.0 — **resolved not adopted, study-only, see the next bullet.**
   **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler fork still rejects

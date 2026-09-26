@@ -26,7 +26,8 @@ Full reasoning/history: `.claude/docs/raw-decoder/README.md`.
   characterized, one-directional rounding difference in curve-inversion, not a bug).
 - **RapidRAW (#69) doesn't solve HE either** — its own rawler fork still rejects HE/HE\*; on
   Windows it silently falls back to the embedded JPEG instead of a real RAW decode.
-- **Decode cost is real and high**: ~1-2.4s/file isolated (Windows .exe via WSL interop) —
+- **Decode cost is real and high**: ~1-2.4s/file, `retina.exe peek`'s full end-to-end process
+  time (launch + read + decode + output, isolated, via WSL interop, not a pure decoder timer) —
   5-12x over the 200ms cold-switch target, 10-24x over the 100ms 1:1-zoom target. Expected for
   PR #826's unoptimized reference code; a real input to #44's render-graph cache design.
 - **The frozen `ref-10k` reference set (393GB NVMe + HDD copies) vanished mid-research** —
