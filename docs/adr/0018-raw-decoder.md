@@ -93,10 +93,14 @@ assumes is no longer how this dataset is meant to be maintained.
 | Lossless (D7500) | 129 | 129/129 ✅ | 129/129 ✅ |
 
 LibRaw+#826 decoded **100% (261/261)** of every real file tried, across three compression modes
-and two camera bodies, with zero crashes and zero silently-wrong results (every failure path
-returns a typed error). rawler correctly and safely rejects every HE/HE\* file — it never crashes
-or returns garbage, it just can't decode them, confirming ADR-0001's finding under real files, not
-just the PR's own synthetic test set.
+and two camera bodies, with zero crashes and zero silent failures (every failure path returns a
+typed error, never a hang or a wrong-looking-but-corrupt result). **This table measures decode
+success, not pixel correctness** — for HE/HE\*, this research didn't independently re-verify pixel
+output against an oracle (Context's "336.7M samples bit-exact against Adobe DNG Converter" claim
+is the PR thread's own reported result, not reproduced here); the Lossless bucket *is*
+independently pixel-verified, via the cross-decoder diff below. rawler correctly and safely
+rejects every HE/HE\* file — it never crashes or returns garbage, it just can't decode them,
+confirming ADR-0001's finding under real files, not just the PR's own synthetic test set.
 
 **Correctness — cross-decoder agreement (Lossless only, the only mode both decoders speak)**: an
 earlier draft of this research assumed bit-exact CFA-hash agreement between LibRaw and rawler was
@@ -132,8 +136,10 @@ at a time, no concurrent load:
 | Lossless (Z8) | LibRaw+#826 | 1 file | 1.29s |
 | Lossless (Z8) | rawler | 1 file (same) | 2.37s |
 
-Every number here is **5-12x over** `docs/benchmarks.md`'s 200ms cold-image-switch target and the
-100ms 1:1-zoom target. This is expected, not alarming on its own: PR #826 is unoptimized reference
+Every number here is **5-12x over** `docs/benchmarks.md`'s 200ms cold-image-switch target
+(1.00s/0.2s to 2.37s/0.2s) and **10-24x over** its stricter 100ms 1:1-zoom target -- reported
+separately since a single combined ratio understates the 100ms target's own gap. This is expected,
+not alarming on its own: PR #826 is unoptimized reference
 code (a correctness proof, explicitly not the maintainer's own eventual decoder), and this is
 Bayer-plane decode only (no demosaic/color/render yet, those are #40/#41/#44's own cost).
 Interpretation and what (if anything) needs optimizing is deferred — see below. Note also: these
@@ -152,11 +158,15 @@ Windows `.exe`, `ReadDirectoryChangesW` backend) produced 3,781 events — **~82
 almost all `Modify`, only 11 explicit `Create` events for 46 new files (the discrepancy is real
 and, as of this research, unexplained — plausibly event coalescing specific to how `cp` writes,
 not investigated further here). Zero `Flag::Rescan` (16KB-buffer-overflow) events fired at this
-burst size. **Conclusion: any real ingest watcher needs debouncing** (this spike didn't use
-`notify-debouncer-full` — its latest stable, 0.7.0, only pairs with `notify` 7.x, not 8.x, a real
-version mismatch worth resolving before #24 builds on this) **and must treat "file stopped
-changing for N ms" as the actual ingest trigger, not "a Create event arrived."** The rescan/
-overflow case still needs a larger burst (500-2000 files) to actually trigger and measure —
+burst size. **Conclusion: any real ingest watcher needs debouncing** (this spike hand-rolled a
+quiet-period loop instead of pulling in `notify-debouncer-full` — not because of a version
+mismatch, an earlier draft of this ADR incorrectly claimed one; corrected after a hostile review
+caught it: `notify-debouncer-full` 0.7.0 actually requires `notify ^8.2.0`, matching the version
+used here exactly, confirmed via `cargo metadata`. Reaching for the real crate rather than a
+hand-rolled loop is a fair follow-up, just not one blocked on any version conflict) **and must
+treat "file stopped changing for N ms" as the actual ingest trigger, not "a Create event
+arrived."** The rescan/overflow case still needs a larger burst (500-2000 files) to actually
+trigger and measure —
 deferred, see below.
 
 ## Licensing
@@ -215,8 +225,8 @@ Accepted call:
    copy. Out of scope for #37 to solve; filed separately.
 4. **A larger (500-2,000 file) burst for the `notify` rescan/overflow case** — this pass's 46-file
    burst never triggered it; #24 needs to know the real threshold before designing ingest around
-   it. Also: pin a `notify`/`notify-debouncer-full` version pair that actually match (0.7.0 only
-   pairs with notify 7.x).
+   it. Also: swap this spike's hand-rolled quiet-period loop for the real `notify-debouncer-full`
+   crate (0.7.0 pairs cleanly with the `notify` 8.2 used here, see Measured results above).
 5. **The unexplained Create-vs-Modify event-count mismatch** in the watch results above — real,
    not chased down here.
 6. **Profile whether PR #826's HE/HE\* decode cost is fixable** (vectorization, threading within
@@ -225,3 +235,6 @@ Accepted call:
 7. **Promote `spikes/retina` into a real crate** implementing `nicti-decode`'s `RawDecoder` trait
    (currently an empty placeholder, see `crates/nicti-decode/src/lib.rs`) — this ADR's spike
    proves the approach works, #41 is the ticket that turns it into production code.
+8. **Independently re-verify HE/HE\* pixel correctness against an oracle** (Adobe DNG Converter,
+   as the PR's own report already did) — this research's own decode-success table doesn't
+   substitute for that; caught by a hostile review that an earlier draft implied it did.

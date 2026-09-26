@@ -24,8 +24,12 @@ pub struct RawFrame {
     pub cam_mul: [f32; 4],
     /// blake3 of the still-mosaiced Bayer plane (post black-level-as-decoded, i.e. exactly what
     /// the decoder handed back -- *not* black-subtracted/normalized). This is what `compare`
-    /// diffs; two decoders agreeing on this hash is the correctness signal for the Lossless/D7500
-    /// cross-check (#37's Correctness section).
+    /// diffs, but it's an *exact-match* indicator only -- **a mismatch here is not itself a
+    /// correctness failure for the Lossless/D7500 cross-check.** LibRaw and rawler decode
+    /// Lossless NEF with a real, characterized, one-directional ±1 LSB rounding difference (see
+    /// `docs/adr/0018-raw-decoder.md`'s Correctness section), so their hashes never match on real
+    /// files -- use `diff`'s per-pixel histogram (max abs diff ≤ 1) as the actual correctness
+    /// check, not hash equality.
     pub cfa_hash: String,
     pub cfa_len: usize,
 }

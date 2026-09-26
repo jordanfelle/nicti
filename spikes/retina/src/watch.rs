@@ -2,9 +2,11 @@
 //! `seconds`, printing every event with a timestamp plus a running count, and flags a
 //! `notify::EventKind::Other` "rescan" event distinctly -- that's `ReadDirectoryChangesW`'s 16KB
 //! buffer overflowing on Windows (see notify's `windows.rs`), the thing a burst NEF-import test
-//! needs to watch for. No debouncer crate here (notify-debouncer-full's latest stable, 0.7.0,
-//! only pairs with notify 7.x, not notify 8 -- see Cargo.toml); this hand-rolled quiet-period
-//! loop is enough for a spike measuring "does an event arrive, and how fast."
+//! needs to watch for. No debouncer crate here -- not because of a version conflict
+//! (notify-debouncer-full 0.7.0 actually requires notify ^8.2.0, matching Cargo.toml's version
+//! exactly; an earlier draft of this comment wrongly claimed a 7.x-only pairing), just because
+//! this hand-rolled quiet-period loop is enough for a spike measuring "does an event arrive, and
+//! how fast." A real ingest watcher should reach for notify-debouncer-full instead.
 
 use std::path::Path;
 use std::sync::mpsc::channel;
