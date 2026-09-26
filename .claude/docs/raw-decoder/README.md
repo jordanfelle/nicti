@@ -4,8 +4,10 @@ Covers #37's RAW decoder research (ADR-0018): the LibRaw+PR#826 decision, the ra
 cross-check methodology, RapidRAW's HE gap, measured performance, and the vanished `ref-10k`
 reference set.
 
-- **RAW decoder (#37)**: `docs/adr/0018-raw-decoder.md` — **Proposed**, pending the LGPL or-later
-  question and a decode-latency product call (see the ADR's own Decision section). **LibRaw,
+- **RAW decoder (#37)**: `docs/adr/0018-raw-decoder.md` — **Proposed**, pending a decode-latency
+  product call (see the ADR's own Decision section; the LGPL question is resolved — LGPL-2.1 §§5-6
+  permit combining `rawler`/LibRaw into Nicti's AGPL-3.0-or-later work directly, no "or-later"
+  grant needed, see the `licensing` topic). **LibRaw,
   patched with the still-open [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826)
   (Nikon HE/HE* decoder)**, vendored as a git submodule pinned to `yogthos/LibRaw@nikon-he-decoder`
   — the only candidate that decodes the real library at all (no released LibRaw/rawler/rawspeed
@@ -22,7 +24,7 @@ reference set.
   characterized, one-directional rounding difference in curve-inversion, not a bug. **RapidRAW
   (#69) was checked and doesn't solve HE either** — its own rawler fork still rejects HE/HE*; on
   Windows it silently falls back to the NEF's embedded JPEG instead of a real RAW decode.
-  Single-file decode cost is real and high (~1-2.4s, isolated, native Windows exe) — 5-12x over
+  Single-file decode cost is real and high (~1-2.4s, isolated, Windows .exe via WSL interop) — 5-12x over
   the 200ms cold-image-switch target and 10-24x over the stricter 100ms 1:1-zoom target, expected
   for PR #826's unoptimized reference code, but a real input to #44's render-graph cache design.
   **The frozen `ref-10k` reference set (both the 393GB NVMe and HDD copies `docs/benchmarks.md`

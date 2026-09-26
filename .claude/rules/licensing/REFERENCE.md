@@ -17,11 +17,16 @@ Full reasoning/history: `.claude/docs/licensing/README.md`.
 - **Outbound license: AGPL-3.0-or-later** — `docs/adr/0013`. Chosen over plain GPL-3.0 for the
   network-use clause (§13) — closes the hosted-service loophole, relevant to #58/#64. Un-excludes
   Ultralytics YOLO and exiv2/rexiv2 on license grounds. Removes the LGPL-cdylib-isolation
-  requirement for `lensfun-rs` specifically (its `LGPL-3.0-or-later OR GPL-3.0` dual license
-  combines cleanly) — **not** for `rawler` (bare `LGPL-2.1`, no `-or-later` confirmed; #37 must
-  resolve before treating it as pre-cleared). **#37 found LibRaw itself has the identical
-  ambiguity** (its own per-file header is a bare "version 2.1" too) — its CDDL-1.0 arm is
-  unambiguous but GPL-incompatible, so it can't substitute; see `raw-decoder` topic. Reopens
-  RapidRAW (#69) as an adopt/fork candidate — but **#37 found RapidRAW doesn't actually decode
-  HE/HE\* either** (its own rawler fork still rejects it, falling back to the embedded JPEG), so
-  it isn't a shortcut past #37's own decoder work.
+  requirement for `lensfun-rs` (its `LGPL-3.0-or-later OR GPL-3.0` dual license combines cleanly),
+  and — **corrected 2026-09-25 by #37** — for `rawler`/LibRaw too: an earlier draft treated their
+  bare `LGPL-2.1` grants (no confirmed `-or-later`) as blocking, on the theory that LGPL-2.1 §3's
+  relicense option would force GPL-2.0-only. That's wrong on the primary-source text: §3 lets
+  whoever exercises it pick any GPL version, and more importantly **§§5-6 already permit combining
+  an LGPL-2.1 library into a differently-licensed larger work with no relicensing at all** —
+  exactly LGPL's purpose, conditioned only on a notice + source-availability obligation for the
+  LGPL'd portion (already satisfied — full source vendored). See `docs/licensing.md`'s Flags §2 for
+  the full citation trail (gnu.org primary sources). What's left is packaging mechanics (satisfy
+  §6's condition before shipping), not a licensing blocker. Reopens RapidRAW (#69) as an adopt/fork
+  candidate — but **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler
+  fork still rejects it, falling back to the embedded JPEG), so it isn't a shortcut past #37's own
+  decoder work.

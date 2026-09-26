@@ -105,11 +105,12 @@ contention among 32 simultaneous single-threaded decodes — not representative 
 A 46-file burst copy into an NVMe-watched folder (real `.exe`, `ReadDirectoryChangesW`) produced
 3,781 events (~82/file, almost all `Modify`), only 11 explicit `Create` events for 46 new files
 (discrepancy unexplained, not chased down), and zero `Rescan`/buffer-overflow flags at this burst
-size. This spike hand-rolled a quiet-period loop rather than pulling in `notify-debouncer-full` —
-not because of a version conflict (an earlier draft of this doc wrongly claimed one; corrected:
-`notify-debouncer-full` 0.7.0 requires `notify ^8.2.0`, matching the version used here exactly).
-**Any real ingest watcher needs its own debounce/quiet-period logic**, not "first event = file
-ready" — reaching for the real debouncer crate instead of a hand-rolled loop is a fair follow-up.
+size. **This spike's `watch` implements no debouncing at all** — it just receives and counts every
+raw event until the deadline (an earlier draft of this doc wrongly said it had a hand-rolled
+quiet-period loop). Not blocked on a version conflict either (another earlier-draft error,
+corrected: `notify-debouncer-full` 0.7.0 requires `notify ^8.2.0`, matching the version used here
+exactly). **Any real ingest watcher needs its own debounce/quiet-period logic**, not "first event
+= file ready" — reaching for `notify-debouncer-full` is a real follow-up.
 
 ## Reproducing / extending this run
 

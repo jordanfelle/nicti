@@ -8,9 +8,30 @@
 //! external-lib `#include` in the tree is behind a `USE_JPEG`/etc guard this build never
 //! defines), so there's nothing to vendor beyond LibRaw's own C++ and this shim.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const LIBRAW_DIR: &str = "vendor/LibRaw";
+
+/// Real out-of-bounds read found by a hostile PR review in the vendored fork's HE tone-curve
+/// table builder (`nikon_he_iqx_iqp_lut_data.h`): `while (k < 255 && ...) ++k;` still lets `k`
+/// reach 255, and the loop body unconditionally reads `kIqxIqpBreakpoints[k + 1]` -- at `k == 255`
+/// that's index 256 into a 256-entry array. This isn't attacker-input-dependent: `i` always
+/// reaches `kIqxIqpLutSize - 1` (81791) while building the lazily-materialized table on *every*
+/// HE/HE* decode, so every real HE/HE* file hits this OOB read, not just a crafted one. Since this
+/// is a git submodule pinned to an exact upstream commit that CI re-clones fresh, a local edit to
+/// the checked-out submodule files does nothing for CI or any other clone -- the fix has to be
+/// applied programmatically at build time instead. Verified behavior-preserving: at i=81791 the
+/// last two real breakpoints are (65535, 65534) and (81791, 65534) -- identical y-values, so
+/// clamping the loop to stop at k=254 (never advancing to 255) produces the exact same
+/// interpolated result (65534) as the buggy k=255 path would have, just without reading past the
+/// array. Filed upstream is a fair follow-up; not done here (not this project's repo to file a PR
+/// against on this fork specifically, and #137 already tracks swapping to LibRaw's own official
+/// snapshot once it ships, which would make this whole vendored fork moot anyway).
+const PATCHES: &[(&str, &str, &str)] = &[(
+    "src/decoders/nikon_he/nikon_he_iqx_iqp_lut_data.h",
+    "while (k < 255 && kIqxIqpBreakpoints[k + 1][0] <= i) ++k;",
+    "while (k < 254 && kIqxIqpBreakpoints[k + 1][0] <= i) ++k;",
+)];
 
 // Copied from vendor/LibRaw/Makefile.am's `lib_libraw_a_SOURCES` (the non-reentrant variant's
 // source list -- retina builds the reentrant semantics instead, see the `-pthread`/no-NOTHREADS
@@ -114,15 +135,73 @@ const SOURCES: &[&str] = &[
     "src/x3f/x3f_utils_patched.cpp",
 ];
 
+/// Copies `vendor/LibRaw` into `$OUT_DIR/libraw-patched` and applies `PATCHES` to the copy, so
+/// the actual compile never touches the pristine submodule checkout (keeping `git status` clean
+/// and the pinned commit meaningful) while still shipping the fix in every build, everywhere.
+fn patched_libraw_dir(vendor: &Path, out_dir: &Path) -> PathBuf {
+    let dest = out_dir.join("libraw-patched");
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest).expect("clear stale libraw-patched dir");
+    }
+    copy_dir_recursive(vendor, &dest);
+
+    for (rel_path, find, replace) in PATCHES {
+        let path = dest.join(rel_path);
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {} to patch: {e}", path.display()));
+        let patched_count = contents.matches(find).count();
+        assert_eq!(
+            patched_count,
+            1,
+            "expected exactly one occurrence of the OOB-read pattern in {} (found {}) -- \
+             upstream may have changed this file; re-verify the patch still applies before \
+             assuming this fix still matters",
+            path.display(),
+            patched_count
+        );
+        std::fs::write(&path, contents.replace(find, replace))
+            .unwrap_or_else(|e| panic!("writing patched {}: {e}", path.display()));
+    }
+
+    dest
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap_or_else(|e| panic!("creating {}: {e}", dst.display()));
+    for entry in std::fs::read_dir(src).unwrap_or_else(|e| panic!("reading {}: {e}", src.display()))
+    {
+        let entry = entry.expect("reading dir entry");
+        let file_type = entry.file_type().expect("reading file type");
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path);
+        } else if file_type.is_file() {
+            std::fs::copy(&src_path, &dst_path).unwrap_or_else(|e| {
+                panic!(
+                    "copying {} -> {}: {e}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            });
+        }
+        // Symlinks (none expected in this vendored tree) are deliberately skipped, not followed.
+    }
+}
+
 fn main() {
-    let libraw = Path::new(LIBRAW_DIR);
-    if !libraw.join("libraw/libraw.h").exists() {
+    let vendor = Path::new(LIBRAW_DIR);
+    if !vendor.join("libraw/libraw.h").exists() {
         panic!(
             "vendor/LibRaw submodule not checked out -- run `git submodule update --init \
              spikes/retina/vendor/LibRaw` (retina is a spike crate, not part of the default \
              build; see CLAUDE.md's CI path-gating note for retina)"
         );
     }
+
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
+    let libraw = patched_libraw_dir(vendor, &out_dir);
+    let libraw = libraw.as_path();
 
     let mut build = cc::Build::new();
     build
@@ -219,5 +298,5 @@ fn main() {
     // of the 95 files individually) is enough -- Cargo watches a named directory recursively.
     println!("cargo:rerun-if-changed=shim.cpp");
     println!("cargo:rerun-if-changed=shim.h");
-    println!("cargo:rerun-if-changed={}", libraw.display());
+    println!("cargo:rerun-if-changed={}", vendor.display());
 }

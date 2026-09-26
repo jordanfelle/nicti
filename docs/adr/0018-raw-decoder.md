@@ -161,12 +161,13 @@ Windows `.exe`, `ReadDirectoryChangesW` backend) produced 3,781 events — **~82
 almost all `Modify`, only 11 explicit `Create` events for 46 new files (the discrepancy is real
 and, as of this research, unexplained — plausibly event coalescing specific to how `cp` writes,
 not investigated further here). Zero `Flag::Rescan` (16KB-buffer-overflow) events fired at this
-burst size. **Conclusion: any real ingest watcher needs debouncing** (this spike hand-rolled a
-quiet-period loop instead of pulling in `notify-debouncer-full` — not because of a version
-mismatch, an earlier draft of this ADR incorrectly claimed one; corrected after a hostile review
-caught it: `notify-debouncer-full` 0.7.0 actually requires `notify ^8.2.0`, matching the version
-used here exactly, confirmed via `cargo metadata`. Reaching for the real crate rather than a
-hand-rolled loop is a fair follow-up, just not one blocked on any version conflict) **and must
+burst size. **Conclusion: any real ingest watcher needs debouncing** — this spike's `watch`
+subcommand implements **none**: it only receives and counts every raw event until the deadline (a
+hostile review caught an earlier draft claiming it had a "hand-rolled quiet-period loop," which
+isn't true of the actual code). Reaching for `notify-debouncer-full` is a real follow-up, not
+blocked on any version conflict (an earlier draft of this ADR wrongly claimed one; corrected:
+`notify-debouncer-full` 0.7.0 actually requires `notify ^8.2.0`, matching the version used here
+exactly, confirmed via `cargo metadata`) **and must
 treat "file stopped changing for N ms" as the actual ingest trigger, not "a Create event
 arrived."** The rescan/overflow case still needs a larger burst (500-2000 files) to actually
 trigger and measure —
@@ -174,27 +175,35 @@ deferred, see below.
 
 ## Licensing
 
-Full detail (with quoted file headers) in `docs/licensing.md`'s Flags §2. Two real findings
-correct/extend prior work:
+Full detail (with quoted primary-source text) in `docs/licensing.md`'s Flags §2. Three real
+findings correct/extend prior work — the middle one supersedes an earlier draft of this same ADR:
 
 1. **PR #826 is not an unlicensed contribution** — an earlier docs/licensing.md row said so,
    sourced only from the PR thread's own text, not the actual changed files. Checked directly in
    the vendored submodule: every new `nikon_he/*.cpp`/`.h` and `nikon_he_decoder.cpp` file carries
    LibRaw's own standard "Copyright (C) 2026 Dmitri Sotnikov ... LGPL-2.1 or CDDL-1.0" header. It
    inherits LibRaw's license, same as every other file in the tree.
-2. **LibRaw's own LGPL arm has the identical "-only ambiguity" this repo already flagged for
-   rawler** — discovered while checking (1). LibRaw's per-file header text is a bare "version 2.1,"
-   no "or any later version" phrase; only the *bundled generic FSF template file* (`LICENSE.LGPL`)
-   contains that phrase, which docs/licensing.md's own rawler analysis already treats as
-   boilerplate, not project-specific evidence. LibRaw's CDDL-1.0 arm is unambiguous but
-   **GPL-incompatible**, so it cannot combine into Nicti's AGPL-3.0-or-later at all — it isn't a
-   safer fallback for this project, it's a dead end. **Use LibRaw's LGPL arm** (the only option
-   that can combine at all), but treat its or-later status as exactly as unresolved as rawler's:
-   get an authoritative answer from LibRaw LLC (or a real per-file SPDX header) before shipping
-   either dependency in `nicti-decode` proper. Not blocking for `spikes/retina`'s research use.
+2. **LGPL-2.1 already permits combining `rawler`/LibRaw into Nicti's AGPL-3.0-or-later work,
+   without needing an "or-later" grant at all — corrected 2026-09-25.** An earlier draft of this
+   ADR found that LibRaw's per-file header is a bare "version 2.1," the same kind of grant that
+   makes rawler's status look unresolved, and treated both as blocking pending legal sign-off.
+   That reasoning assumed LGPL-2.1's own relicense-to-GPL option (§3) was the relevant mechanism
+   and would force a GPL-2.0-only result absent an "or-later" grant — but §3 itself lets whoever
+   exercises it pick *any* GPL version that exists at the time, and more importantly, §3 isn't
+   even the applicable mechanism here: **LGPL-2.1 §§5–6 directly permit combining an LGPL-2.1
+   library into a differently-licensed larger work** (exactly LGPL's purpose), conditioned only on
+   notice + source-availability obligations for the LGPL'd portion — obligations Nicti already
+   satisfies by vendoring full source. No relicensing, no GPL-version question, no "or-later" grant
+   needed. LibRaw's CDDL-1.0 arm is a moot alternative either way now (GPL-incompatible, and
+   unneeded once the LGPL arm is confirmed usable directly).
+3. **What's left is packaging mechanics, not a licensing blocker**: satisfy §6's own notice +
+   source-availability condition in the shipped product before `nicti-decode` ships either
+   dependency (already trivially satisfiable — Nicti vendors full source of both). Not blocking
+   for `spikes/retina`'s research use either way.
 
-`deny.toml` gained a spike-scoped exception for rawler's `LGPL-2.1` (same pattern as Slint's
-ADR-0006 exception) — research/comparison only, not pre-clearance to ship.
+`deny.toml` gained a `rawler`-specific exception (not a global `LGPL-2.1` allow entry, since
+cargo-deny can verify license compatibility but not whether a shipped build actually satisfies
+§6's packaging condition) — same pattern as Slint's ADR-0006 exception.
 
 ## Decision
 
@@ -205,31 +214,34 @@ it. rawler stays in the toolbox as the Lossless-path correctness cross-check (`r
 ±1-LSB histogram, not hash-equality), not as the primary or a fallback decoder — it structurally
 cannot read most of this library's Z8 files.
 
-**Why "Proposed," not "Accepted":** two real, unresolved items keep this from being a clean
-Accepted call:
-- The LGPL or-later status (Licensing, above) needs a real answer before this can ship past a
-  spike, not just be research-cleared.
-- The ~1-2.4s single-file decode cost is unoptimized reference code's cost, not necessarily what
-  ships — whether that's acceptable to build #41 on top of (with optimization as a later pass) or
-  disqualifying enough to need vectorization/profiling work *before* #41 starts is a real product
-  call, not something this ADR should decide unilaterally.
+**Why "Proposed," not "Accepted":** the licensing question (Licensing, above) turned out to be
+resolved on further research — LGPL-2.1 §§5-6 permit combining `rawler`/`LibRaw` into Nicti's
+AGPL-3.0-or-later work directly, no "or-later" grant or relicensing needed (an earlier draft of
+this ADR got this wrong; corrected 2026-09-25, see `docs/licensing.md`'s Flags §2 for the full
+citation trail). One real item remains: **the ~1-2.4s single-file decode cost is unoptimized
+reference code's cost, not necessarily what ships** — whether that's acceptable to build #41 on
+top of (with optimization as a later pass) or disqualifying enough to need vectorization/profiling
+work *before* #41 starts is a real product call, not something this ADR should decide
+unilaterally.
 
 ## Deferred / follow-ups (not built in this pass)
 
 1. **Swap PR #826 for LibRaw's own official HE snapshot once it ships** ("this fall," no firm
-   date per ADR-0001) — re-run `retina scan`/`diff` against it when it lands; likely faster and
-   removes the licensing-ambiguity question if LibRaw LLC's own snapshot has clearer terms.
-2. **Get an authoritative LGPL or-later answer from LibRaw LLC** (and separately from rawler's
-   maintainer) — blocks shipping either as a real `nicti-decode` dependency, not blocking further
-   spike work.
+   date per ADR-0001) — re-run `retina scan`/`diff` against it when it lands; likely faster, and
+   also makes the vendored fork's own out-of-bounds-read patch (see the Spike section above) moot.
+2. **Pick and implement LGPL-2.1 §6's packaging compliance option before `nicti-decode` ships**
+   (prominent notice + bundled source is the simplest, already-satisfied path — see
+   `docs/licensing.md`'s Flags §2) — a packaging task now that the licensing question itself is
+   resolved, not blocked on any further legal research.
 3. **`ref-10k`'s storage/access model is broken and needs its own ticket** — a 393GB
    frozen-per-machine copy is what just silently vanished; the user's explicit direction is that
    this needs to be accessible to more than one person, not re-created as another single-machine
    copy. Out of scope for #37 to solve; filed separately.
 4. **A larger (500-2,000 file) burst for the `notify` rescan/overflow case** — this pass's 46-file
    burst never triggered it; #24 needs to know the real threshold before designing ingest around
-   it. Also: swap this spike's hand-rolled quiet-period loop for the real `notify-debouncer-full`
-   crate (0.7.0 pairs cleanly with the `notify` 8.2 used here, see Measured results above).
+   it. Also: add real debouncing via `notify-debouncer-full` (this spike's `watch` implements
+   none at all, just raw event counting; 0.7.0 pairs cleanly with the `notify` 8.2 used here, see
+   Measured results above).
 5. **The unexplained Create-vs-Modify event-count mismatch** in the watch results above — real,
    not chased down here.
 6. **Profile whether PR #826's HE/HE\* decode cost is fixable** (vectorization, threading within

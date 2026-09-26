@@ -488,40 +488,49 @@ fn bench(
             continue;
         }
 
-        // Caught by CodeRabbit: discarding decode_one's Result meant a bucket where every file
-        // fails (e.g. rawler against an all-HE bucket, which rejects fast via a metadata check
-        // rather than doing real decode work) would still print a latency number -- a fast,
-        // meaningless one, since nothing was actually decoded. Track failures and skip reporting
-        // for a bucket where none of the sampled files decoded.
+        // Two real bugs here, both caught by CodeRabbit:
+        // (1) discarding decode_one's Result meant a bucket where every file fails (e.g. rawler
+        //     against an all-HE bucket, which rejects fast via a metadata check rather than doing
+        //     real decode work) still printed a latency number -- fast but meaningless, since
+        //     nothing was actually decoded.
+        // (2) `protocol.run` only calls its closure `warmup + measured` times (6, by default),
+        //     cycling through `files[idx % files.len()]` -- with the default `sample_per_bucket`
+        //     of 20, only the first 6 files (1 discarded warm-up + 5 measured) ever get touched,
+        //     not all 20, yet this used to print `n=files.len()` (20), overstating the real
+        //     sample size. Failures during the discarded warm-up call were also counted the same
+        //     as measured-run failures, which could flag a bucket as failing based on a run that
+        //     never contributes to `stats` at all.
+        // Fixed: report `n` as what's actually exercised during the *measured* phase, and track
+        // warm-up vs. measured failures separately using `idx` (calls `0..warmup` are warm-up,
+        // `warmup..warmup+measured` are measured -- `protocol.run`'s own documented order).
         let mut idx = 0usize;
-        let mut failures = 0usize;
+        let mut measured_failures = 0usize;
         let stats = protocol.run(|| {
             let data = &files[idx % files.len()];
+            let is_warmup = idx < protocol.warmup;
             idx += 1;
-            if decode_one(decoder, data).is_err() {
-                failures += 1;
+            if decode_one(decoder, data).is_err() && !is_warmup {
+                measured_failures += 1;
             }
         });
 
-        let total_runs = protocol.warmup + protocol.measured;
-        if failures >= total_runs {
+        if measured_failures >= protocol.measured {
             eprintln!(
-                "bucket {label} [{decoder:?}]: every sampled decode failed, skipping latency report (not a real measurement)"
+                "bucket {label} [{decoder:?}]: every measured decode failed, skipping latency report (not a real measurement)"
             );
             continue;
         }
-        if failures > 0 {
+        if measured_failures > 0 {
             eprintln!(
-                "bucket {label} [{decoder:?}]: {failures}/{total_runs} sampled decodes failed -- latency below includes only the failed-fast calls too, treat with caution"
+                "bucket {label} [{decoder:?}]: {measured_failures}/{} measured decodes failed -- latency below includes those failed-fast calls too, treat with caution",
+                protocol.measured
             );
         }
 
+        let measured_sample_size = files.len().min(protocol.measured);
         println!(
-            "{label} [{decoder:?}] n={} p50={:.2}ms p95={:.2}ms max={:.2}ms",
-            files.len(),
-            stats.p50_ms,
-            stats.p95_ms,
-            stats.max_ms
+            "{label} [{decoder:?}] n={measured_sample_size} p50={:.2}ms p95={:.2}ms max={:.2}ms",
+            stats.p50_ms, stats.p95_ms, stats.max_ms
         );
     }
     Ok(())
