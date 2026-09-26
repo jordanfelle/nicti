@@ -183,12 +183,12 @@ known to visibly affect. See `dcp.rs`'s `hue_sat_map` closure for the full note.
 
 **Deferred, each as its own follow-up issue:**
 
-- **Reference-machine ΔE measurement run** (this ADR's own Measured results, above) — filed as a
-  GitHub issue, same pattern as #90/#97's reference-machine follow-ups, Part of #7.
+- **Reference-machine ΔE measurement run** (this ADR's own Measured results, above) — filed as
+  [#149](https://github.com/jordanfelle/nicti/issues/149), same pattern as #90/#97's
+  reference-machine follow-ups, Part of #7.
 - **Adobe Raw `.xmp` "Look" profile decode** (`xmp_profile.rs`'s `UnrecognizedTableFormat` path) —
-  filed as its own research issue if the reference-machine pass confirms the installed Adobe Vivid
-  `.xmp` doesn't parse as a DCP-style IFD; needs a real sample file and a way to validate against
-  it, neither available in this sandbox.
+  filed as [#150](https://github.com/jordanfelle/nicti/issues/150); needs a real sample file and a
+  way to validate against it, neither available in this sandbox.
 - **Per-pixel black-level shading** (`retina`'s `cblack` pattern map beyond the four per-channel
   scalars) — out of scope for this pass, noted in `shim.h`.
 - **Real GPU hardware timing** for the 3D-texture HueSatMap kernel — this ADR only establishes
