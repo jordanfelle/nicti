@@ -35,7 +35,9 @@ each a base-ISO-50 ground truth plus a full climbing ISO ladder to 51200 — the
 tripod shoot would have had. All 60 files' SHA1s verified against the filename-embedded hash.
 
 Every quality number below is therefore **provisional against a Z6, not a Z8** — the exact caveat
-ADR-0023 states up front. A real Z8 verification pass is filed as its own follow-up issue.
+ADR-0023 states up front. A real Z8 verification pass is filed as
+[#164](https://github.com/jordanfelle/nicti/issues/164); the LRC comparison itself is
+[#163](https://github.com/jordanfelle/nicti/issues/163).
 
 ### Classic pipeline
 
@@ -206,9 +208,11 @@ cross-compiles cleanly, no C/C++ dependency to fight (unlike `retina`'s vendored
 - **Feeds ADR-0023's decision** (see that ADR for the actual shipping call) — this doc supplies
   the evidence, not the ruling.
 - **Still needed before the decision rule is actually satisfied**: real LRC AI Denoise comparison
-  (user's own export batch, not yet run), LPIPS (not wired), and a real Z8 tripod verification pass
-  (weeks/months out per the user's own timeline) — every number here is candidate-vs-ground-truth
-  on a Z6, a real and useful signal, but not yet the LRC-relative, Z8-specific claim the decision
+  ([#163](https://github.com/jordanfelle/nicti/issues/163), user's own export batch, not yet run),
+  LPIPS (not wired), and a real Z8 tripod verification pass
+  ([#164](https://github.com/jordanfelle/nicti/issues/164), weeks/months out per the user's own
+  timeline) — every number here is candidate-vs-ground-truth on a Z6, a real and useful signal, but
+  not yet the LRC-relative, Z8-specific claim the decision
   rule asks for.
 - **`docs/licensing.md` updated in this PR**: NAFNet's row updated to note the actual ONNX source
   used and its evaluate-only status; new SCUNet row (Apache-2.0, cleanest provenance of the three

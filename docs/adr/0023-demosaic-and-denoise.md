@@ -1,6 +1,8 @@
 # ADR-0023: Demosaic and noise reduction
 
-- **Status:** Proposed — pending real Z8 tripod verification and LRC-relative comparison
+- **Status:** Proposed — pending [#164](https://github.com/jordanfelle/nicti/issues/164) (real Z8
+  tripod verification) and [#163](https://github.com/jordanfelle/nicti/issues/163) (LRC-relative
+  comparison)
 - **Date:** 2026-09-26
 - **Ticket:** [#40](https://github.com/jordanfelle/nicti/issues/40) Research: demosaic + noise
   reduction
@@ -136,10 +138,12 @@ Real LRC comparison numbers: **not yet measured** — pending the user's own LRC
 - **Feeds #44 (Tapetum)**: proposes classic AHD demosaic (FBDD 0) → SCUNet AI denoise as the
   render-stage order's demosaic+NR segment — #44's own call to adopt or revise.
 - **Two follow-up issues required before Accepted:**
-  1. Real LRC AI Denoise export batch + comparison (the decision rule's actual quality/speed
-     gate) — blocked on the user's own export step, not further engineering.
-  2. Real Z8 tripod verification pass, once real tripod hardware time exists (weeks/months out per
-     the user) — confirms this ruling holds on the real sensor, not just RawNIND's Z6 stand-in.
+  1. [#163](https://github.com/jordanfelle/nicti/issues/163) — real LRC AI Denoise export batch +
+     comparison (the decision rule's actual quality/speed gate), blocked on the user's own export
+     step, not further engineering.
+  2. [#164](https://github.com/jordanfelle/nicti/issues/164) — real Z8 tripod verification pass,
+     once real tripod hardware time exists (weeks/months out per the user) — confirms this ruling
+     holds on the real sensor, not just RawNIND's Z6 stand-in.
 - **Wavelet denoise stays broken in the vendored LibRaw fork**, not fixed. A follow-up if FBDD
   alone turns out insufficient once real LRC numbers exist.
 - **`docs/licensing.md` updated in this PR**: NAFNet's row refreshed (actual ONNX source, evaluate-
