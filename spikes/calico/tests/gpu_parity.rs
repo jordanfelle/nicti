@@ -7,12 +7,19 @@ use calico::huesatmap::{hsv_to_rgb, rgb_to_hsv, HueSatMap};
 // Confirmed via a separate throwaway diagnostic (texel-by-texel `textureLoad` nearest-fetch
 // readback, not committed): the texture upload and the texel-center coordinate remap in
 // `shaders/color.wgsl` are both exactly correct in exact arithmetic -- worked by hand for this
-// test's own data against the specific pixel that first failed with a tighter bound. The
-// remaining ~0.05-0.06 max deviation in final RGB tracks lavapipe (the software Vulkan renderer
-// this sandbox falls back to, see gpu.rs's doc comment) using lower-precision fixed-point
-// trilinear filtering weights than a real GPU's texture unit -- expect this gap to shrink on the
-// user's real hardware pass; ADR-0021 notes it as a sandbox-only caveat, not a correctness bug.
-const TOLERANCE: f32 = 1e-1;
+// test's own data against the specific pixel that first failed with a tighter bound.
+//
+// An earlier version of this test passed with a much looser 1e-1 tolerance and a ~0.05-0.06 max
+// deviation, attributed (wrongly) to lavapipe's own lower-precision fixed-point trilinear
+// filtering. The real cause was a CPU-only bug in `huesatmap.rs`'s `sample`/`sample_gpu_style`:
+// the saturation-axis and value-axis interpolation fractions were swapped, which this test's
+// smoothly-varying synthetic data mostly masked (the two fractions were often close enough that
+// swapping them barely changed the result) -- caught for real by `pipeline.rs`'s
+// `encoding_choice_does_affect_value_scaling` test, which used a sat_divisions=1 table where the
+// swap's effect couldn't hide. With that fixed, the real CPU/GPU deviation (the hardware sampler
+// doing shortest-path-unaware linear filtering, plus genuine floating-point precision) is two
+// orders of magnitude smaller.
+const TOLERANCE: f32 = 5e-3;
 
 fn require_contexts() -> Vec<GpuContext> {
     let contexts = GpuContext::enumerate();

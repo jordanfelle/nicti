@@ -15,16 +15,28 @@ just type-checking — a wgpu compute-shader 3D-texture kernel, tested for CPU/G
 this sandbox's lavapipe (software Vulkan) fallback. All of that is backed by 26 unit tests and 3
 integration tests (`cargo test -p calico`), not just written-and-hoped-correct.
 
-**A real bug was found and fixed via that GPU test**, not just written and assumed right: an
-initial version of `shaders/color.wgsl`'s hue/sat/val texture-coordinate math didn't account for
-hardware trilinear filtering treating texel `i`'s center as sitting at normalized coordinate
-`(i+0.5)/N`, not `i/N` — the CPU sampler in `huesatmap.rs` uses the latter convention. The fix (and
-a from-scratch derivation of why it's correct, cross-checked by hand against the exact failing
-test case) is in `gpu.rs`'s and `shaders/color.wgsl`'s comments. A follow-up dedicated diagnostic
-(a `textureLoad`-based nearest-fetch readback, not committed — see the ADR) additionally confirmed
-the texture *upload* itself (data layout, `bytes_per_row`/`rows_per_image`) was always correct;
-the remaining ~0.05-0.06 max ΔRGB in the parity test is lavapipe's own lower-precision fixed-point
-trilinear filtering weights, not a bug — expect this gap to shrink on the user's real GPU.
+**Two real bugs were found and fixed via that GPU test and its own review process**, not just
+written and assumed right:
+
+1. An initial version of `shaders/color.wgsl`'s hue/sat/val texture-coordinate math didn't account
+   for hardware trilinear filtering treating texel `i`'s center as sitting at normalized coordinate
+   `(i+0.5)/N`, not `i/N` — the CPU sampler in `huesatmap.rs` uses the latter convention. The fix
+   (and a from-scratch derivation of why it's correct, cross-checked by hand against the exact
+   failing test case) is in `gpu.rs`'s and `shaders/color.wgsl`'s comments.
+2. `huesatmap.rs`'s `sample`/`sample_gpu_style` had the saturation-axis and value-axis
+   interpolation fractions swapped in the final two `lerp` calls — a CPU-only bug the GPU's own
+   hardware trilinear filtering never shared, since it interpolates all three axes correctly by
+   construction. The parity test's smoothly-varying synthetic data mostly masked this (the two
+   fractions were often numerically close, so swapping them barely changed the result), which is
+   why an earlier pass here attributed the ~0.05-0.06 max ΔRGB deviation to lavapipe's own
+   lower-precision filtering — a plausible-sounding but wrong explanation, corrected once a
+   different test (`pipeline.rs`'s `encoding_choice_does_affect_value_scaling`, using a
+   sat_divisions=1 table where the swap's effect couldn't hide) exposed the real bug. Fixed, the
+   parity test's tolerance is now `5e-3`, and the actual measured deviation is `~1.5e-4`.
+
+A follow-up dedicated diagnostic (a `textureLoad`-based nearest-fetch readback, not committed — see
+the ADR) additionally confirmed the texture *upload* itself (data layout,
+`bytes_per_row`/`rows_per_image`) was always correct.
 
 ## What's real vs. what's pending
 

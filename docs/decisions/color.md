@@ -9,18 +9,29 @@ pipeline from linear camera RGB to a display-referred image.
   is installed. A from-scratch DNG-spec Camera Profile tag reader (`spikes/calico/src/dcp.rs`)
   over a minimal hand-rolled TIFF/IFD parser reads `ColorMatrix1/2`, `ForwardMatrix1/2`,
   `CalibrationIlluminant1/2`, `ProfileHueSatMapDims/Data1/Data2`, `ProfileLookTableDims/Data`,
-  `ProfileToneCurve`, and `BaselineExposureOffset` — tested only against synthetic DCPs built
-  byte-for-byte in test code, never a real Adobe file.
-- **Pipeline stage order**: linearize (black/white-level scale) → white balance (as-shot
-  `cam_mul`) → camera→XYZ(D50) via `cct.rs`'s CCT-interpolated matrix (DNG spec 6.3.7's
-  dual-illuminant blend, using McCamy's published 1992 xy→CCT approximation as a documented
-  stand-in for Adobe's own undisclosed solver) → the chosen working space → HueSatMap (applied in
-  a gamma-encoded, "1/1.8 power curve", linear-ProPhoto RGB representation — the DNG spec is clear
-  HueSatMap/LookTable operate in *some* ProPhoto-referenced perceptual space, just not exactly
-  which encoding, so this is a documented approximation) → baseline exposure offset → LookTable
-  (same representation) → tone curve (a Fritsch-Carlson monotonic cubic Hermite spline through the
-  profile's `ProfileToneCurve` control points, or a commonly-reproduced "medium contrast" default
-  curve when the profile has none) → sRGB for display/comparison output.
+  `ProfileToneCurve`, `BaselineExposureOffset`, `ProfileHueSatMapEncoding`, and
+  `ProfileLookTableEncoding` — tested only against synthetic DCPs built byte-for-byte in test code,
+  never a real Adobe file.
+- **Pipeline stage order**: linearize (LibRaw's own black-subtracted, 16-bit-scaled `dcraw_process`
+  output — re-subtracting black/dividing by the raw sensor max on top of that double-applies the
+  correction, a bug caught and fixed) → white balance (as-shot `cam_mul` — only for the
+  ForwardMatrix branch below; the ColorMatrix fallback expects raw un-white-balanced input, since
+  its own Bradford adaptation already corrects the illuminant, and applying both double-corrects
+  it) → camera→XYZ(D50) via `cct.rs`'s CCT-interpolated matrix (DNG spec 6.3.7's dual-illuminant
+  blend, using McCamy's published 1992 xy→CCT approximation as a documented stand-in for Adobe's
+  own undisclosed solver; the white-point *search* itself always uses the ColorMatrix inverse,
+  never ForwardMatrix, regardless of whether a ForwardMatrix exists — ForwardMatrix expects
+  already-white-balanced input, which isn't known until the search converges) → ProPhoto
+  intermediate → HueSatMap (hue and saturation come from **unencoded, linear** RGB, per Adobe's
+  own reference implementation (`dng_reference.cpp`'s `RefBaselineHueSatMap`) — only the *value*
+  coordinate runs through `ProfileHueSatMapEncoding`'s curve, linear by default, sRGB when tagged
+  1; there is no "gamma 1.8" encoding, and no per-channel R/G/B encoding, anywhere in the spec — an
+  earlier draft of this pipeline got both of those wrong, caught by review) → baseline exposure
+  offset → LookTable (same hue/sat-unencoded, value-only-encoded treatment, per its own
+  `ProfileLookTableEncoding`) → the chosen working space → tone curve (a Fritsch-Carlson monotonic
+  cubic Hermite spline through the profile's `ProfileToneCurve` control points, or a
+  commonly-reproduced "medium contrast" default curve when the profile has none) → sRGB for
+  display/comparison output.
 - **Working-space candidates, not yet decided**: linear ProPhoto/ROMM (ACR's own internal space),
   linear Rec.2020, and ACEScg (AP1 primaries) are all implemented and measured the same way; the
   decision rule (ADR-0021) picks whichever scores the lowest mean CIEDE2000 against LRC-exported
@@ -39,18 +50,28 @@ pipeline from linear camera RGB to a display-referred image.
   storage-buffer-only by design (texture-specific concerns were explicitly left to whichever
   ticket needed them first — see `glint/src/gpu.rs`'s own scoping note). `spikes/calico/src/gpu.rs`
   is that ticket: a wgpu compute kernel applying a single `HueSatMap` via a real `Rgba16Float` 3D
-  texture, `Repeat` addressing on the wrapping hue axis, `ClampToEdge` on saturation/value,
-  hardware trilinear filtering. Getting a real CPU/GPU parity test to pass against lavapipe (this
-  sandbox's software Vulkan fallback) required finding and fixing a real bug: hardware trilinear
-  filtering treats texel `i`'s center as sitting at normalized coordinate `(i+0.5)/N`, not `i/N` —
-  the CPU-side `HueSatMap::sample`/`sample_gpu_style` functions use the latter convention, so the
-  GPU shader's texture-coordinate calculation needs an explicit remap (`gpu.rs` and
-  `shaders/color.wgsl`'s comments carry the full derivation). A separate diagnostic (a
-  `textureLoad`-based nearest-fetch readback, not committed to the repo) additionally confirmed the
-  texture *upload* itself — data layout, `bytes_per_row`/`rows_per_image` — was correct throughout;
-  the parity test's remaining ~0.05-0.06 max per-channel deviation is attributed to lavapipe's own
-  lower-precision fixed-point trilinear filtering weights, a software-rasterizer characteristic
-  rather than an algorithm bug, and is expected to shrink on real GPU hardware.
+  texture — width=saturation, height=hue, depth=value (matching the table's real DNG-SDK storage
+  order, value outermost/hue middle/saturation innermost, with no transpose on upload), `Repeat`
+  addressing on the wrapping hue axis, `ClampToEdge` on saturation/value, hardware trilinear
+  filtering. Getting a real CPU/GPU parity test to pass against lavapipe (this sandbox's software
+  Vulkan fallback) required finding and fixing two real bugs, not just a texture-coordinate detail:
+  1. Hardware trilinear filtering treats texel `i`'s center as sitting at normalized coordinate
+     `(i+0.5)/N`, not `i/N` — the CPU-side `HueSatMap::sample`/`sample_gpu_style` functions use the
+     latter convention, so the GPU shader's texture-coordinate calculation needs an explicit remap
+     (`gpu.rs` and `shaders/color.wgsl`'s comments carry the full derivation).
+  2. `HueSatMap::sample`/`sample_gpu_style` had the saturation-axis and value-axis interpolation
+     fractions swapped in their final blend step — a CPU-only bug (the GPU's hardware trilinear
+     filtering interpolates all three axes correctly by construction, so it never shared this).
+     The parity test's smoothly-varying synthetic data mostly masked it, which is why an earlier
+     pass here attributed the resulting ~0.05-0.06 max per-channel deviation to lavapipe's own
+     lower-precision filtering — plausible-sounding, but wrong; a different, deliberately
+     adversarial test (a sat_divisions=1 table, where the swap's effect couldn't hide) exposed the
+     real bug. A separate diagnostic (a `textureLoad`-based nearest-fetch readback, not committed
+     to the repo) confirmed the texture *upload* itself — data layout,
+     `bytes_per_row`/`rows_per_image` — was correct throughout, both before and after this fix.
+
+  Fixed, the parity test's tolerance is `5e-3` and the actual measured deviation is `~1.5e-4` —
+  two orders of magnitude tighter than the number this pipeline was originally measured against.
 - **`retina dump-linear`, the decoder hand-off**: rather than making `spikes/calico` depend on
   `retina`'s LibRaw FFI/git-submodule (which would drag calico into the same CI path-gating retina
   needs), `retina` gained a `dump-linear` subcommand that demosaics with white balance, the color

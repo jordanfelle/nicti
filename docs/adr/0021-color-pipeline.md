@@ -113,10 +113,12 @@ normal `clippy`/`test` jobs.
   regardless of ForwardMatrix availability, per the DNG spec; the *final* matrix uses ForwardMatrix
   when both illuminants have one, which then expects white-balanced input, or the ColorMatrix
   fallback, which expects raw un-white-balanced input since its Bradford adaptation already
-  corrects the illuminant) → working space → HueSatMap (in the representation
-  `ProfileHueSatMapEncoding` specifies — linear when absent/0, sRGB-encoded when 1; there is no
-  "gamma 1.8" encoding in the DNG spec) → baseline exposure offset → LookTable (per its own
-  `ProfileLookTableEncoding`) → tone curve → sRGB.
+  corrects the illuminant) → ProPhoto intermediate → HueSatMap (hue/sat from unencoded linear
+  ProPhoto RGB, per Adobe's own reference implementation -- only the *value* coordinate is run
+  through `ProfileHueSatMapEncoding`'s curve, linear when absent/0, sRGB-encoded when 1; there is
+  no "gamma 1.8" encoding, and no per-channel R/G/B encoding, in the DNG spec) → baseline exposure
+  offset → LookTable (same hue/sat-unencoded, value-only-encoded treatment, per its own
+  `ProfileLookTableEncoding`) → selected working space → tone curve → sRGB.
 - **`deltae.rs`** — CIEDE2000 (Sharma, Wu & Dalal 2005) plus sRGB→Lab conversion, tested against
   that paper's own published near-identical-color test pairs (the classic ΔE00≈1.0000 hue-wrap
   edge case several independent implementations get wrong).
@@ -127,11 +129,15 @@ normal `clippy`/`test` jobs.
   interpolation stay CPU-only, since a hardware sampler's linear filtering doesn't do
   shortest-path interpolation across the hue seam. **A real, working CPU/GPU parity test
   (`tests/gpu_parity.rs`) runs against this sandbox's lavapipe software Vulkan adapter and passes**
-  — getting it to pass required finding and fixing a real texel-center coordinate-mapping bug
-  (hardware trilinear filtering centers texel `i` at normalized coordinate `(i+0.5)/N`, not `i/N`;
-  the fix and its derivation are in `gpu.rs`'s and `shaders/color.wgsl`'s comments) and confirming,
-  via a separate texel-exact `textureLoad` readback check, that the remaining ~0.05-0.06 max
-  deviation is lavapipe's own lower-precision fixed-point filtering weights, not a real bug.
+  — getting it to pass required finding and fixing two real bugs: a texel-center
+  coordinate-mapping bug (hardware trilinear filtering centers texel `i` at normalized coordinate
+  `(i+0.5)/N`, not `i/N`; the fix and its derivation are in `gpu.rs`'s and `shaders/color.wgsl`'s
+  comments), and a CPU-only bug in `huesatmap.rs`'s trilinear interpolation (the saturation- and
+  value-axis fractions were swapped) that this test's own smoothly-varying synthetic data mostly
+  masked — a separate texel-exact `textureLoad` readback check confirmed the texture *upload*
+  itself was always correct, but an earlier pass here wrongly attributed the resulting ~0.05-0.06
+  max deviation to lavapipe's filtering precision rather than to that swap. Fixed, the tolerance
+  is `5e-3` and the real measured deviation is `~1.5e-4`.
 
 **Not adopted / considered and rejected:**
 

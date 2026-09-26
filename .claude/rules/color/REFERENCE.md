@@ -15,10 +15,12 @@ Full reasoning/history: `docs/decisions/color.md`.
   black-subtracted, 16-bit-scaled output) → WB (`cam_mul`, ForwardMatrix branch only) →
   camera→XYZ(D50) (CCT-interpolated `ColorMatrix`/`ForwardMatrix`, DNG spec 6.3.7 — white-point
   *search* always uses ColorMatrix, ForwardMatrix only for the final matrix, expects
-  white-balanced input; ColorMatrix fallback expects raw input) → working space → HueSatMap (per
-  `ProfileHueSatMapEncoding`: linear when absent/0, sRGB when 1 — no "gamma 1.8" in the spec) →
-  baseline exposure → LookTable (per `ProfileLookTableEncoding`) → tone curve (Fritsch-Carlson
-  monotonic spline) → sRGB.
+  white-balanced input; ColorMatrix fallback expects raw input) → ProPhoto intermediate →
+  HueSatMap (hue/sat from unencoded linear RGB, per Adobe's reference implementation — only the
+  *value* coordinate goes through `ProfileHueSatMapEncoding`: linear when absent/0, sRGB when 1 —
+  no "gamma 1.8", no per-channel R/G/B encoding, in the spec) → baseline exposure → LookTable
+  (same treatment, `ProfileLookTableEncoding`) → selected working space → tone curve
+  (Fritsch-Carlson monotonic spline) → sRGB.
 - **Profile source: parse the user's own installed Adobe `.dcp`/`.xmp` at runtime**, never bundle
   one (ADR-0003) — falls back to LibRaw's built-in camera matrix when none is installed. Adobe
   Raw "Look" `.xmp` profiles (e.g. Adobe Vivid) have an undocumented embedded look-table encoding
@@ -34,9 +36,10 @@ Full reasoning/history: `docs/decisions/color.md`.
   the storage order above with no transpose on upload); sampler Repeat on height (hue wraps),
   ClampToEdge on width/depth. Hardware trilinear filtering centers texel `i` at `(i+0.5)/N`, not
   `i/N` — `huesatmap.rs`'s CPU sampler uses the latter; `gpu.rs`/`shaders/color.wgsl` remap
-  coordinates accordingly. CPU/GPU parity confirmed on lavapipe (~0.05-0.06 max ΔRGB, attributed
-  to lavapipe's own lower-precision filtering, not a bug — verified via a separate `textureLoad`
-  nearest-fetch readback check).
+  coordinates accordingly. `huesatmap.rs`'s `sample`/`sample_gpu_style` also had the sat/value
+  interpolation fractions swapped (fixed) — this, not lavapipe precision, was the real source of
+  an earlier ~0.05-0.06 max ΔRGB; CPU/GPU parity now holds to `5e-3` (~1.5e-4 measured), verified
+  via a separate `textureLoad` nearest-fetch readback check on the texture upload itself.
 - **`retina dump-linear`**: new subcommand, demosaic-only (WB/color-matrix/gamma disabled via
   LibRaw's own `user_mul={1,1,1,1}`/`output_color=0`/`gamm={1,1}` params) — hands linear camera RGB
   + metadata (black/max/cam_mul/pre_mul/cam_xyz/cblack) to calico without calico depending on

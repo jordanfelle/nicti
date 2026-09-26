@@ -55,6 +55,16 @@ fn sample_blended(
     ]
 }
 
+/// Per Adobe's own reference implementation (`dng_reference.cpp`'s `RefBaselineHueSatMap`, the
+/// DNG SDK's `DNG_RGBtoHSV`/encode/lookup/decode/`DNG_HSVtoRGB` sequence): hue and saturation are
+/// computed from **unencoded, linear** RGB and used as-is for the table's hue/sat axes.
+/// `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` only ever apply to the **value**
+/// coordinate -- both for the table's value axis at lookup time, and for the scale the lookup
+/// returns (`vEncoded = vEncoded * valScale`, decoded back afterward). An earlier version of this
+/// function encoded all three R/G/B channels before computing HSV, which also distorts hue/sat
+/// (a per-channel nonlinear curve changes the R:G:B ratios those are derived from) -- caught by a
+/// CodeRabbit review citing the real DNG SDK source, verified against that source directly before
+/// applying this fix.
 fn apply_hue_sat(
     rgb_linear_prophoto: Vec3,
     map1: &HueSatMap,
@@ -62,24 +72,16 @@ fn apply_hue_sat(
     weight: f64,
     encoding: TableEncoding,
 ) -> Vec3 {
-    let encoded = [
-        table_encode(encoding, rgb_linear_prophoto[0]),
-        table_encode(encoding, rgb_linear_prophoto[1]),
-        table_encode(encoding, rgb_linear_prophoto[2]),
-    ];
-    let hsv = rgb_to_hsv(encoded);
-    let adj = sample_blended(map1, map2, hsv[0], hsv[1], hsv[2], weight);
+    let hsv = rgb_to_hsv(rgb_linear_prophoto);
+    let val_encoded = table_encode(encoding, hsv[2]);
+    let adj = sample_blended(map1, map2, hsv[0], hsv[1], val_encoded, weight);
+    let new_val_encoded = val_encoded * adj[2];
     let new_hsv = [
         hsv[0] + adj[0],
         (hsv[1] * adj[1]).clamp(0.0, 1.0),
-        hsv[2] * adj[2],
+        table_decode(encoding, new_val_encoded),
     ];
-    let out_encoded = hsv_to_rgb(new_hsv);
-    [
-        table_decode(encoding, out_encoded[0]),
-        table_decode(encoding, out_encoded[1]),
-        table_decode(encoding, out_encoded[2]),
-    ]
+    hsv_to_rgb(new_hsv)
 }
 
 pub struct RenderOptions<'a> {
@@ -206,4 +208,75 @@ pub fn render(input: &LinearInput, opts: &RenderOptions) -> RgbImage {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A HueSatMap whose entries vary only by hue/sat bin, not by value (every value-axis entry
+    /// is identical) -- so, per the DNG reference implementation, its output must be identical
+    /// regardless of `TableEncoding`, since encoding only ever touches the value coordinate. The
+    /// bug this guards against: an earlier version of `apply_hue_sat` encoded all of R/G/B before
+    /// computing HSV, which changes the *hue and saturation* HSV coordinates too (not just V) --
+    /// that version would have picked a different hue/sat table bin under `Srgb` than under
+    /// `Linear` for the same input, and this test would fail on it.
+    fn hue_only_map() -> HueSatMap {
+        // 4 hue divisions (0/90/180/270 deg), 1 sat division, 1 val division (so val can't be
+        // the source of any difference either) -- bin 1 (90 deg) gets a distinctive +15 deg
+        // shift, every other bin is a no-op.
+        let mut data = vec![[0.0f32, 1.0, 1.0]; 4];
+        data[1] = [15.0, 1.0, 1.0];
+        HueSatMap {
+            hue_divisions: 4,
+            sat_divisions: 1,
+            val_divisions: 1,
+            data,
+        }
+    }
+
+    #[test]
+    fn encoding_choice_does_not_affect_hue_or_saturation() {
+        let map = hue_only_map();
+        // An RGB with real, non-trivial ratios (not a neutral gray, where hue is undefined and
+        // this test couldn't distinguish anything) landing near the map's shifted 90 deg bin.
+        let rgb: Vec3 = [0.3, 0.6, 0.1];
+
+        let out_linear = apply_hue_sat(rgb, &map, None, 1.0, TableEncoding::Linear);
+        let out_srgb = apply_hue_sat(rgb, &map, None, 1.0, TableEncoding::Srgb);
+
+        for (a, b) in out_linear.iter().zip(out_srgb.iter()) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "encoding leaked into hue/sat: linear={out_linear:?} srgb={out_srgb:?}"
+            );
+        }
+        // And confirm the map's hue shift actually did something (i.e. this isn't vacuously
+        // passing because both paths happened to no-op).
+        assert!(
+            (out_linear[0] - rgb[0]).abs() > 1e-6 || (out_linear[1] - rgb[1]).abs() > 1e-6,
+            "expected the hue shift to visibly change the output, got {out_linear:?}"
+        );
+    }
+
+    #[test]
+    fn encoding_choice_does_affect_value_scaling() {
+        // A map whose only nontrivial entries differ by *value* bin -- this is the one axis
+        // `TableEncoding` should actually influence, per the DNG reference implementation.
+        let map = HueSatMap {
+            hue_divisions: 1,
+            sat_divisions: 1,
+            val_divisions: 2,
+            data: vec![[0.0, 1.0, 1.0], [0.0, 1.0, 2.0]],
+        };
+        let rgb: Vec3 = [0.5, 0.5, 0.5];
+
+        let out_linear = apply_hue_sat(rgb, &map, None, 1.0, TableEncoding::Linear);
+        let out_srgb = apply_hue_sat(rgb, &map, None, 1.0, TableEncoding::Srgb);
+
+        assert!(
+            (out_linear[0] - out_srgb[0]).abs() > 1e-6,
+            "expected TableEncoding to change the value-axis lookup: linear={out_linear:?} srgb={out_srgb:?}"
+        );
+    }
 }

@@ -68,9 +68,17 @@ impl HueSatMap {
                     lerp(c011, c111, h_frac),
                 )
             };
-            let c0 = lerp(c00, c01, s_frac);
-            let c1 = lerp(c10, c11, s_frac);
-            *out_val = lerp(c0, c1, v_frac);
+            // c00/c01 (both at s0) and c10/c11 (both at s1) differ from each other in v, not s --
+            // so this blend needs v_frac. The result of that pair (differing in s) then needs
+            // s_frac. An earlier version of this function had these two fractions swapped: with
+            // sat_divisions <= 1 (s_frac always 0, forcing the *s*-blend below to discard the s1
+            // side unconditionally) that swap made val's real weight (v_frac) apply to a pair of
+            // already-identical values, silently dropping the val axis entirely -- exactly the
+            // DNG spec's common "2.5D" table shape (val_divisions < 2), caught by
+            // `pipeline::tests::encoding_choice_does_affect_value_scaling`.
+            let c0 = lerp(c00, c01, v_frac);
+            let c1 = lerp(c10, c11, v_frac);
+            *out_val = lerp(c0, c1, s_frac);
         }
         out
     }
@@ -108,9 +116,10 @@ impl HueSatMap {
             let c10 = lerp(c010, c110, h_frac);
             let c01 = lerp(c001, c101, h_frac);
             let c11 = lerp(c011, c111, h_frac);
-            let c0 = lerp(c00, c01, s_frac);
-            let c1 = lerp(c10, c11, s_frac);
-            *out_val = lerp(c0, c1, v_frac);
+            // Same v_frac/s_frac fix as `sample` above.
+            let c0 = lerp(c00, c01, v_frac);
+            let c1 = lerp(c10, c11, v_frac);
+            *out_val = lerp(c0, c1, s_frac);
         }
         out
     }
