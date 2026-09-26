@@ -1,6 +1,6 @@
 # ADR-0019: RAW decoder
 
-- **Status:** Proposed (see Decision for exactly what's still open)
+- **Status:** Accepted
 - **Date:** 2026-09-25
 - **Ticket:** [#37](https://github.com/jordanfelle/nicti/issues/37) Research: RAW decoder
 
@@ -235,15 +235,16 @@ correctness cross-check (`retina diff`'s
 ±1-LSB histogram, not hash-equality), not as the primary or a fallback decoder — it structurally
 cannot read most of this library's Z8 files.
 
-**Why "Proposed," not "Accepted":** the licensing question (Licensing, above) turned out to be
-resolved on further research — LGPL-2.1 §§5-6 permit combining `rawler`/`LibRaw` into Nicti's
-AGPL-3.0-or-later work directly, no "or-later" grant or relicensing needed (an earlier draft of
-this ADR got this wrong; corrected 2026-09-25, see `docs/licensing.md`'s Flags §2 for the full
-citation trail). One real item remains: **the ~1-2.4s single-file decode cost is unoptimized
-reference code's cost, not necessarily what ships** — whether that's acceptable to build #41 on
-top of (with optimization as a later pass) or disqualifying enough to need vectorization/profiling
-work *before* #41 starts is a real product call, not something this ADR should decide
-unilaterally.
+The licensing question (Licensing, above) turned out to be resolved on further research —
+LGPL-2.1 §§5-6 permit combining `rawler`/`LibRaw` into Nicti's AGPL-3.0-or-later work directly, no
+"or-later" grant or relicensing needed (an earlier draft of this ADR got this wrong; corrected
+2026-09-25, see `docs/licensing.md`'s Flags §2 for the full citation trail).
+
+**Product call on the remaining open item (2026-09-26):** the ~1-2.4s single-file decode cost is
+unoptimized reference code's cost, not necessarily what ships. Decision: **build #41 on top of it
+as-is; optimize after**, rather than blocking #41 on vectorization/profiling work first. Deferred
+item 6 (profiling PR #826's HE/HE\* decode cost) stays open as v1 follow-up work, not a
+prerequisite for starting #41.
 
 ## Deferred / follow-ups (not built in this pass)
 
