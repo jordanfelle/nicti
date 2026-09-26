@@ -58,7 +58,7 @@ fn poisson_jacobi_gpu_matches_cpu_reference() {
     let cpu_out = poisson_jacobi_cpu(&guidance, &initial, &mask_bool, width, height, iterations);
 
     for ctx in require_contexts() {
-        let gpu_out = run_poisson_jacobi(
+        let (gpu_out, _elapsed_ns) = run_poisson_jacobi(
             &ctx,
             &guidance,
             &initial,
@@ -94,7 +94,7 @@ fn poisson_jacobi_gpu_matches_cpu_reference_at_zero_iterations() {
     assert_eq!(cpu_out, initial);
 
     for ctx in require_contexts() {
-        let gpu_out = run_poisson_jacobi(
+        let (gpu_out, _elapsed_ns) = run_poisson_jacobi(
             &ctx,
             &guidance,
             &initial,

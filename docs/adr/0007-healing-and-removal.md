@@ -1,7 +1,7 @@
 # ADR-0007: Healing and removal
 
-- **Status:** Proposed — pending reference-machine measurement pass
-- **Date:** 2026-09-24
+- **Status:** Accepted
+- **Date:** 2026-09-24 (reference-machine pass: 2026-09-26, [#97](https://github.com/jordanfelle/nicti/issues/97))
 - **Ticket:** [#50](https://github.com/jordanfelle/nicti/issues/50) Research: healing/removal
 
 ## Context
@@ -32,12 +32,15 @@ Constraints already fixed by earlier ADRs/docs:
   and already flagged LaMa's `big-lama` checkpoint over its Places2 training-data provenance —
   this ADR's own research (below, and `docs/research/groom-healing-removal.md`) is the follow-up
   that flag asked for.
-- **Sandbox note**, matching ADR-0005/0006's own precedent: this research pass ran in a Linux/WSL
-  sandbox with no GPU-backed Vulkan/Dx12 adapter and no real ONNX model weights (obtaining actual
-  LaMa/MobileSAM checkpoints is out of scope for this spike — a large download, and in LaMa's case
-  gated on the licensing question this ADR is itself researching). Every CPU number below is real,
-  measured data from this sandbox; every GPU/CUDA number is marked **TBD — reference machine**,
-  the same convention ADR-0005/0006 use for their own pending hardware runs.
+- **Sandbox note**, matching ADR-0005/0006's own precedent: this research pass initially ran in a
+  Linux/WSL sandbox with no GPU-backed Vulkan/Dx12 adapter and no real ONNX model weights
+  (obtaining actual LaMa/MobileSAM checkpoints is out of scope for this spike — a large download,
+  and in LaMa's case gated on the licensing question this ADR is itself researching). The classic
+  clone/heal CPU numbers were real, measured data from that sandbox from the start. **The GPU
+  Poisson-solve number was filled in by #97's reference-machine pass** (2026-09-26, real RTX
+  5080/Windows box, both Vulkan and Dx12 backends — see Measured results below); AI removal
+  latency and quality stay **TBD — real weights**, since obtaining real LaMa/MobileSAM checkpoints
+  is #51's scope, not this ADR's or #97's.
 
 ## Decision rule (stated before measuring)
 
@@ -47,12 +50,13 @@ Constraints already fixed by earlier ADRs/docs:
   real photos with known-good ground truth nor real inpainting weights, so no quality number is
   claimed here — this rule is stated for #51 to apply, not satisfied by this ADR.
 - **Speed — interactive spot-heal**: **< 16ms/update on GPU** (a hypothesis carried over from
-  ADR-0005's 60fps budget, *to be validated* on the reference machine — this sandbox has no GPU
-  numbers for the Poisson solver at all, only CPU ones below).
+  ADR-0005's 60fps budget). **Validated by #97**: 0.386ms p50 on the reference RTX 5080 (Vulkan
+  backend) — well within budget, ~40x headroom.
 - **Speed — AI removal**: a **bake-time** operation (per ADR-0002's stage model, baked once and
   cached, not recomputed per frame), with a stated latency budget of **< 2s/removal on a CUDA
-  execution provider** — also *to be validated* on the reference machine; this sandbox can't run
-  either MobileSAM or LaMa at all (no GPU, no real weights).
+  execution provider** — still *to be validated*, gated on #51 obtaining real MobileSAM/LaMa
+  weights, not on reference-machine access (#97 confirmed the reference machine itself is
+  available and GPU-capable).
 - **License**: a hard gate on **bundling** a model's weights inside Nicti's own installer, not on
   whether a model can be evaluated/researched. An unbundleable-today model (LaMa, pending Places2
   clarification) can still ship as an **on-demand download** the user fetches separately, which is
@@ -126,19 +130,57 @@ they're solved in). This is #44's call to finalize, not this ADR's.
 
 ## Measured results
 
-**CPU-only** (this sandbox has no GPU-backed Vulkan/Dx12 adapter — WSL without a real Vulkan ICD).
-Measured via `cargo test -p groom --test throughput --release -- --ignored --nocapture`, one
-discarded warm-up run + 20 measured runs per operation, 512×512 synthetic checkerboard image,
-`radius = 20`, `feather = 4`, 50 Jacobi iterations for the heal case:
+**CPU** (this WSL box is itself the reference machine, Ryzen 9 9950X). Measured via
+`cargo test -p groom --test throughput --release -- --ignored --nocapture`, one discarded warm-up
+run + 20 measured runs per operation, 512×512 synthetic checkerboard image, `radius = 20`,
+`feather = 4`, 50 Jacobi iterations for the heal case:
 
 | Operation | Mean time |
 |---|---|
 | `clone_stamp` | **0.1209 ms/op** |
 | `spot_heal` (50 Jacobi iterations) | **0.2458 ms/op** |
 | `auto_source_pick` (24 candidates) | **0.0542 ms/op** |
-| `poisson_jacobi` GPU compute | **TBD — reference machine** |
-| AI removal (MobileSAM + LaMa, CUDA EP) end-to-end latency | **TBD — reference machine** (no GPU, no real weights in this sandbox) |
-| Quality (PSNR/LPIPS on synthetic holes) | **TBD — reference machine + real weights** |
+
+**GPU** (#97, 2026-09-26): the WGSL `poisson_jacobi` kernel, same 512×512/`radius=20`/50-iteration
+config, 1 discarded warm-up + 5 measured runs (`docs/benchmarks.md`'s protocol), timed via
+`TIMESTAMP_QUERY` (in-GPU-timeline duration spanning all 50 Jacobi dispatches). Built as a real
+Windows `.exe` (`cargo test -p groom --test throughput --release --target x86_64-pc-windows-gnu`)
+and run directly on the reference RTX 5080/Windows box — not this WSL sandbox, which has no NVIDIA
+Vulkan ICD registered (`wgpu::Backends::PRIMARY` here only reaches the software `llvmpipe`
+adapter; see this section's footnote for what that number looked like before the Windows run):
+
+| Backend | Adapter | p50 | p95 | max |
+|---|---|---|---|---|
+| **Vulkan** (ADR-0005's chosen backend) | **NVIDIA GeForce RTX 5080** | **0.386 ms** | **0.400 ms** | **0.400 ms** |
+| Dx12 | NVIDIA GeForce RTX 5080 | 0.305 ms | 0.311 ms | 0.311 ms |
+| Vulkan | AMD Radeon(TM) Graphics (iGPU) | 9.185 ms | 9.194 ms | 9.194 ms |
+| Dx12 | AMD Radeon(TM) Graphics (iGPU) | 9.083 ms | 9.251 ms | 9.251 ms |
+| Dx12 | Microsoft Basic Render Driver (software) | 26.396 ms | 28.108 ms | 28.108 ms |
+
+**Against the <16ms/update interactive-heal target: the Vulkan/RTX 5080 combination Nicti actually
+ships on clears it with ~40x headroom** (0.386ms vs. 16ms). Even the AMD iGPU stays under budget;
+only the software fallback misses it, and Nicti's v1 target assumes a real GPU is present.
+`wgpu::Backends::PRIMARY` enumerated both Vulkan and Dx12 adapters on Windows (unlike this WSL
+sandbox, which only ever sees Vulkan); Dx12 is marginally faster here but ADR-0005 already ruled
+it out for lacking `SHADER_F16`, which Tapetum's (#44) cache tiers need — a constraint this kernel
+doesn't itself exercise, so the two backends being close doesn't reopen that decision.
+
+| Operation | Result |
+|---|---|
+| AI removal (MobileSAM + LaMa, CUDA EP) end-to-end latency | **TBD — real weights** (reference machine confirmed GPU-capable by #97; blocked on #51 obtaining actual checkpoints, not on hardware access) |
+| Quality (PSNR/LPIPS on synthetic holes) | **TBD — real weights** (same gate as above) |
+
+<sup>Before the Windows run, the identical test compiled and run natively inside this WSL sandbox
+reported `backend=Vulkan adapter=llvmpipe (LLVM 21.1.8, 256 bits): p50_ms=88.4640` — a software
+rasterizer, not real hardware, caught before being recorded here as a "reference machine" number.
+This WSL install has no NVIDIA Vulkan ICD registered (`/usr/share/vulkan/icd.d/` has `lvp`/
+`nouveau`/etc. but no `nvidia_icd.json`, and this distro's `mesa-vulkan-drivers` build has no `dzn`
+D3D12-translation ICD either) — `libcuda.so`/`libnvidia-*` under `/usr/lib/wsl/lib/` give this
+sandbox real CUDA and D3D12 access to the RTX 5080, but not Vulkan. The fix, matching
+`spikes/retina`/`spikes/sniff`'s existing precedent for this exact gap: cross-compile for
+`x86_64-pc-windows-gnu` and run the real `.exe` via WSL interop
+(`powershell.exe -Command "& '<unc-path>' --ignored --nocapture"`), which reaches Windows' own
+Vulkan/Dx12 drivers directly.</sup>
 
 `HealStage` serialized size (canonical `serde_json`, measured via
 `cargo test -p groom spot::tests::spot_list_sizes_at_1_10_and_50 -- --nocapture`), a mix of
@@ -224,9 +266,10 @@ keeping.
   persisted" design.
 - **`src/gpu.rs`** + **`shaders/poisson_jacobi.wgsl`**: the `wgpu` compute-shader twin of the CPU
   Jacobi solver, following `spikes/glint`'s adapter-enumeration/dispatch pattern (including its 2D
-  dispatch-grid workaround for wgpu's 65535-per-dimension workgroup limit), simplified relative to
-  glint by dropping the GPU-timestamp harness entirely — this ticket's perf work is CPU-only in
-  this sandbox, so no GPU timing code was written only to sit unused.
+  dispatch-grid workaround for wgpu's 65535-per-dimension workgroup limit). Originally shipped
+  without glint's GPU-timestamp harness (no adapter to time against in the research sandbox); #97
+  added it back once real hardware was available, mirroring `spikes/glint::gpu::run_live_chain`'s
+  `Option<f64>` elapsed-time shape.
 - **`src/ai.rs`**: `MobileSamSelector`/`LamaInpainter`, the `ort`/`load-dynamic` scaffolding
   described above.
 - **`src/compositing.rs`**: `BBox`, `mask_bounding_box`, `expand_bbox_with_margin`, `crop_image`,

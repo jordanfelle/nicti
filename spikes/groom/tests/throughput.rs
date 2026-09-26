@@ -1,17 +1,19 @@
-//! CPU-only throughput comparison of clone-stamp / spot-heal / auto-source-pick, `#[ignore]`d
-//! since it's a timing measurement, not a correctness check (matches
-//! `spikes/glint/tests/throughput.rs`'s own `#[ignore]` convention for perf tests).
+//! Throughput comparison of clone-stamp / spot-heal / auto-source-pick (CPU) and the
+//! `poisson_jacobi` WGSL kernel (GPU), `#[ignore]`d since these are timing measurements, not
+//! correctness checks (matches `spikes/glint/tests/throughput.rs`'s own `#[ignore]` convention
+//! for perf tests).
 //!
-//! **GPU numbers are deferred to the reference-machine follow-up** (ADR-0007's Measured results
-//! section) -- this sandbox has no GPU-backed Vulkan/Dx12 adapter, so `poisson_jacobi`'s GPU
-//! throughput can only be measured on real hardware, the same gap ADR-0005/0006 already flag for
-//! their own GPU numbers. What's measured here is legitimate CPU-only data, not a placeholder.
+//! CPU numbers are legitimate anywhere. **GPU numbers require a real GPU-backed Vulkan/Dx12
+//! adapter** (#97's reference-machine pass) -- `poisson_jacobi_gpu_throughput` skips cleanly,
+//! printing a message, when `GpuContext::enumerate()` finds nothing or no adapter reports
+//! `TIMESTAMP_QUERY` support (matching `tests/correctness.rs`'s skip pattern).
 //!
-//! Run explicitly: `cargo test -p groom --test throughput -- --ignored --nocapture`.
+//! Run explicitly: `cargo test -p groom --test throughput --release -- --ignored --nocapture`.
 
 use std::time::Instant;
 
 use groom::cpu_reference::{auto_source_pick, clone_stamp, spot_heal, Image};
+use groom::gpu::{run_poisson_jacobi, GpuContext};
 
 fn checkerboard(width: usize, height: usize) -> Image {
     let mut img = Image::new(width, height, [0.0, 0.0, 0.0, 1.0]);
@@ -80,4 +82,100 @@ fn cpu_clone_heal_and_auto_pick_throughput() {
     assert!(clone_ms > 0.0);
     assert!(heal_ms > 0.0);
     assert!(pick_ms > 0.0);
+}
+
+/// Nearest-rank p50/p95/max over `values_ms`, after discarding `warmup` samples from the front --
+/// `docs/benchmarks.md`'s "1 warm-up run discarded, then N measured runs" protocol. Duplicated
+/// (not imported) from `spikes/glint/src/stats.rs` since spikes don't depend on each other.
+fn summarize_after_warmup(values_ms: &[f64], warmup: usize) -> Option<(f64, f64, f64)> {
+    let samples = values_ms.get(warmup..)?;
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("NaN in latency samples"));
+    let percentile = |q: f64| -> f64 {
+        let idx = (q * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
+    Some((
+        percentile(0.50),
+        percentile(0.95),
+        *sorted.last().expect("checked non-empty above"),
+    ))
+}
+
+/// The same synthetic patch shape as `tests/correctness.rs::make_patch`, sized to match the CPU
+/// throughput case above (512x512, matching the destination-circle radius the CPU heal case
+/// uses) so the two numbers are comparable.
+fn make_patch(width: usize, height: usize) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<u32>) {
+    let mut guidance = Vec::with_capacity(width * height);
+    let mut initial = Vec::with_capacity(width * height);
+    let mut mask = Vec::with_capacity(width * height);
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 / 2.0;
+    let radius = 20.0f32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let fx = x as f32 / width as f32;
+            let fy = y as f32 / height as f32;
+            guidance.push([fx, fy, (fx + fy) * 0.5, 1.0]);
+            let v = if (x / 8 + y / 8) % 2 == 0 { 0.85 } else { 0.15 };
+            initial.push([v, v, v, 1.0]);
+            let dist = (((x as f32 - cx).powi(2)) + ((y as f32 - cy).powi(2))).sqrt();
+            mask.push((dist < radius) as u32);
+        }
+    }
+    (guidance, initial, mask)
+}
+
+const WARMUP: usize = 1;
+const RUNS: usize = 5;
+
+#[test]
+#[ignore = "timing measurement, requires a real GPU-backed adapter -- run explicitly with --ignored"]
+fn poisson_jacobi_gpu_throughput() {
+    let contexts = GpuContext::enumerate();
+    if contexts.is_empty() {
+        eprintln!("throughput: no wgpu adapter available, skipping");
+        return;
+    }
+
+    let width = 512;
+    let height = 512;
+    let iterations = 50u32; // same radius/iteration count as the CPU spot_heal case above
+    let (guidance, initial, mask) = make_patch(width, height);
+
+    for ctx in &contexts {
+        if !ctx.supports_timestamps() {
+            eprintln!(
+                "backend {:?}: no TIMESTAMP_QUERY, wall-clock numbers would be unreliable, skipping",
+                ctx.backend
+            );
+            continue;
+        }
+        let mut samples_ms = Vec::with_capacity(WARMUP + RUNS);
+        for _ in 0..(WARMUP + RUNS) {
+            let (_, elapsed_ns) = run_poisson_jacobi(
+                ctx,
+                &guidance,
+                &initial,
+                &mask,
+                width as u32,
+                height as u32,
+                iterations,
+            );
+            samples_ms.push(elapsed_ns.expect("timestamps enabled above") / 1e6);
+        }
+        let (p50, p95, max) =
+            summarize_after_warmup(&samples_ms, WARMUP).expect("non-empty after warmup");
+        eprintln!(
+            "groom GPU throughput (512x512, radius=20, {iterations} Jacobi iterations) \
+             backend={:?} adapter={}: p50_ms={p50:.4} p95_ms={p95:.4} max_ms={max:.4} \
+             (target: <16ms/update interactive-heal budget, ADR-0007)",
+            ctx.backend, ctx.adapter_name
+        );
+        assert!(p50 > 0.0);
+    }
 }
