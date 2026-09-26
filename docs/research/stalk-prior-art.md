@@ -23,7 +23,18 @@ Pinned commits (all fetched 2026-09-25/26): RapidRAW `772c76b7`, RapidRAW-DngLab
 
 ## RapidRAW
 
-**License**: AGPL-3.0 (repo-level, `gh api repos/CyberTimon/RapidRAW --jq .license.spdx_id`).
+**License**: AGPL-3.0 — but **the exact grant is ambiguous, same category of gap as `rawler`'s bare
+`LGPL-2.1` below, not resolved here**. GitHub's API (`gh api repos/CyberTimon/RapidRAW --jq
+.license.spdx_id`) reports a bare `"AGPL-3.0"`, which is GitHub's own license-detection matching
+the committed `LICENSE` file's boilerplate text, not a per-project grant statement. Checked
+directly for an explicit election, the way the doc already does for Ansel below: no
+`SPDX-License-Identifier` header exists in any source file, and the README's own license section
+(`README.md:1013`) just says "GNU Affero General Public License v3.0 (AGPL-3.0)" with no
+`-only`/`-or-later` language. **Practical effect on ADR-0018's reasoning: none** — GPL-family
+licenses of the same base version are compatible with each other regardless of the `-only`/
+`-or-later` distinction (an `-or-later` grant is only an added permission on top of the same v3
+text, so a combined work can always be distributed under plain version 3, satisfying both sides)
+— but the doc should say this was checked and found ambiguous, not imply it was confirmed.
 **Activity**: ~10.2k stars, pushed same day as this research (2026-09-25) — active.
 **Stack**: Rust backend (`src-tauri/`, ~37.4k lines across 27 files) + TypeScript/React frontend
 via Tauri 2.11 (`src-tauri/Cargo.toml:17`), **not egui/eframe** — see Correction below.
@@ -185,9 +196,10 @@ the implementation language doesn't transfer.
 **License**: GPL-3.0 — repo-level metadata says just "GPL-3.0", but source file headers carry the
 full grant: `src/win/strptime.c:11` (and every other checked header) reads "(at your option) any
 later version" — confirmed **GPL-3.0-or-later**, not `-only`. GPL-3.0-or-later combines cleanly
-with Nicti's own AGPL-3.0-or-later (AGPL §13 is explicitly designed to be compatible with plain
-GPL-3.0-or-later code; the FSF's own compatibility matrix confirms this pairing) — so, in principle,
-Ansel code could be reused without a license conflict, same as RapidRAW.
+with Nicti's own AGPL-3.0-or-later: AGPLv3 §13 exists specifically to make it license-compatible
+with GPLv3 (and, by the `-or-later` grant on both sides, with future versions of either) — see the
+FSF's own "GPL-Compatible Free Software Licenses" list, which names GNU AGPLv3 explicitly[^ansel1]
+— so, in principle, Ansel code could be reused without a license conflict, same as RapidRAW.
 **Language**: C/GTK, a hard fork of darktable — **not Rust**, and its own architecture is
 darktable's well-known reorderable IOP module stack: `doc/history-split.md` (measuring an in-flight
 internal refactor, not upstream-facing docs, but load-bearing evidence of the real shape) confirms
@@ -232,3 +244,7 @@ need a reference for interaction design, not for backend structure.
 are answered above with file:line citations, each spot-checked against the actual source after the
 `ask-gemini` deep-dive returned. See `docs/adr/0018-rapidraw-adopt-or-fork.md` for the resulting
 go/no-go recommendation.
+
+[^ansel1]: FSF, "Various Licenses and Comments about Them" (GPL-Compatible Free Software Licenses
+    section), listing the GNU Affero General Public License version 3 as GPLv3-compatible —
+    https://www.gnu.org/licenses/license-list.html#AGPLv3.0 — verified 2026-09-26
