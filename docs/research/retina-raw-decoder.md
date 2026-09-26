@@ -32,7 +32,7 @@ Subcommands:
 
 ## The vanished reference set
 
-`docs/benchmarks.md`'s frozen `ref-10k` (9,142 files, two 393GB copies on `H:\`/`E:\`) disappeared
+`docs/benchmarks.md`'s frozen `ref-10k` (9,142 files, two 393GB NVMe/HDD copies) disappeared
 from disk mid-research, unrelated to this work (see ADR-0019's Context section). Per explicit user
 direction, that frozen-full-copy model is retired — the dataset needs to be accessible beyond one
 machine, which is a separate, deferred problem (see ADR-0019's Deferred list). This research
@@ -40,10 +40,10 @@ pulled a **261-file stratified subset directly from the live source library** in
 
 | Source | Files | Bucket |
 |---|---|---|
-| `Photos/Furries/Cons/Anthrocon/2025/2025-07-03` (every 10th file) | 60 | Z8, mostly HE |
-| `Archive/Furries/Cons/Midwest FurFest/2024/2024-12-06` (every 10th) | 46 | Z8, mostly HE |
-| `Archive/Furries/Cons/Anthrocon/2024/2024-07-04` (every 3rd) | 26 | Z8, mixed HE\*/Lossless |
-| `Photos/Furries/Others/Rory/Fursonacon` (all of it) | 129 | D7500, Lossless — same set `docs/ref-10k-manifest.csv`'s D7500 bucket came from |
+| Event A, 2025 (every 10th file) | 60 | Z8, mostly HE |
+| Event B, 2024 (every 10th file) | 46 | Z8, mostly HE |
+| Event A, 2024 (every 3rd file) | 26 | Z8, mixed HE\*/Lossless |
+| Second photographer's contributed set (all of it) | 129 | D7500, Lossless — same set `docs/ref-10k-manifest.csv`'s D7500 bucket came from |
 
 Real decode determined the actual compression breakdown (106 HE / 26 HE\* / 129 Lossless), not
 folder/date guessing.
@@ -118,18 +118,18 @@ exactly). **Any real ingest watcher needs its own debounce/quiet-period logic**,
 
 ```powershell
 # Full-subset decode (both backends):
-retina.exe scan H:\NictiBench-subset --decoder libraw --out libraw.jsonl
-retina.exe scan H:\NictiBench-subset --decoder rawler --out rawler.jsonl
+retina.exe scan <SCRATCH_DIR> --decoder libraw --out libraw.jsonl
+retina.exe scan <SCRATCH_DIR> --decoder rawler --out rawler.jsonl
 retina.exe compare libraw.jsonl rawler.jsonl
 
 # Per-pixel diff on one file:
-retina.exe diff H:\NictiBench-subset\exe-test\lossless-z8.nef
+retina.exe diff <SCRATCH_DIR>\exe-test\lossless-z8.nef
 
 # Isolated single-file timing (wrap in PowerShell Measure-Command, or `time` under WSL interop):
-retina.exe peek H:\path\to\file.nef --decoder libraw --n 1
+retina.exe peek path\to\file.nef --decoder libraw --n 1
 
 # Watch burst test:
-retina.exe watch H:\watch-dir --seconds 30
+retina.exe watch <WATCH_DIR> --seconds 30
 # (copy files into watch-dir from another terminal while this runs)
 ```
 

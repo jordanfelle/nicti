@@ -1,0 +1,40 @@
+name: Feature request / research proposal
+description: Propose new work — a feature, a research question, or a requirements gap.
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This board is research-first: an epic breaks into `requirements`/`research`/`build`
+        children. If you're proposing a new research/build item under an existing epic, link it
+        with `**Part of:** #N` below. If an item depends on a decision that hasn't landed yet, use
+        `**Blocked by:** #N`.
+  - type: textarea
+    id: description
+    attributes:
+      label: What's being proposed
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why
+      description: What problem does this solve, or what question does it answer?
+    validations:
+      required: false
+  - type: input
+    id: part_of
+    attributes:
+      label: Part of (optional)
+      description: "Parent epic, if any: `#N`"
+      placeholder: "#N"
+    validations:
+      required: false
+  - type: input
+    id: blocked_by
+    attributes:
+      label: Blocked by (optional)
+      description: "Issue(s) this depends on, if any: `#N, #M`"
+      placeholder: "#N"
+    validations:
+      required: false

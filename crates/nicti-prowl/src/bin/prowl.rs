@@ -1,7 +1,7 @@
 //! `prowl` -- the CLI front-end for `nicti-prowl`'s manifest verification and reference-set
-//! selection, so PowerShell scripts on the reference machine (and anyone else) can call one
-//! binary instead of re-implementing SHA-256 checking themselves (see `bench/run-hero.ps1`,
-//! which this PR points at `prowl verify --ids` in place of its own inline `Get-FileHash` loop).
+//! selection, so PowerShell scripts on any benchmark machine can call one binary instead of
+//! re-implementing SHA-256 checking themselves (see `bench/run-hero.ps1`, which points at
+//! `prowl verify --ids` in place of its own inline `Get-FileHash` loop).
 
 use std::path::PathBuf;
 

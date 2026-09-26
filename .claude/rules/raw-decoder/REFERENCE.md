@@ -6,7 +6,7 @@ paths:
 
 # RAW Decoder — Quick Reference
 
-Full reasoning/history: `.claude/docs/raw-decoder/README.md`.
+Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
 - **RAW decoder (#37)** — `docs/adr/0019`: **Proposed**, pending a decode-latency product call
   (the LGPL question is resolved — LGPL-2.1 §§5-6 permit combining `rawler`/LibRaw into Nicti's

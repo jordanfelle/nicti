@@ -8,7 +8,7 @@ paths:
 
 # Licensing — Quick Reference
 
-Full reasoning/history: `.claude/docs/licensing/README.md`.
+Full reasoning/history: `docs/decisions/licensing.md`.
 
 - **Third-party license policy** — `docs/adr/0003` + full audit in `docs/licensing.md` (Rust crate
   allowlist, ML-model bundle-vs-download criteria, no Adobe DCP/LCP data). **Amended 2026-09-24**

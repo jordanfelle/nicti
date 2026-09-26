@@ -1,20 +1,22 @@
 # Nicti
 
-Personal Rust RAW photo editor + DAM, replacing Adobe Lightroom Classic. Public repo:
-`github.com/jordanfelle/nicti`. Not a Shutterpaws project.
+Rust RAW photo editor + DAM, aiming to replace Adobe Lightroom Classic. Public repo:
+`github.com/jordanfelle/nicti`. This file is Claude Code-specific guidance; **`CONTRIBUTING.md`
+is the canonical human contributor guide** — read that first if you're new here.
 
 ## Architecture decisions
 
-ADRs live in `docs/adr/`, numbered sequentially. Per-ADR decisions, measured results, and gotchas
-live in `.claude/rules/<topic>/REFERENCE.md` + `.claude/docs/<topic>/README.md`, not inline here,
-to keep this file under the line-count gate. Each topic has:
+ADRs live in `docs/adr/` (see `docs/adr/README.md` for the index and template), numbered
+sequentially. Per-ADR decisions, measured results, and gotchas live in
+`.claude/rules/<topic>/REFERENCE.md` + `docs/decisions/<topic>.md`, not inline here, to keep this
+file under the line-count gate. Each topic has:
 
 - `.claude/rules/<topic>/REFERENCE.md` — terse key:value/bullet compression, the actionable fact +
   a pointer, scoped with `paths:` frontmatter so Claude Code only auto-loads it when touching a
   matching file (unscoped `.claude/rules/**` files load unconditionally every session, which is why
   this repo scopes them).
-- `.claude/docs/<topic>/README.md` — the full original prose, verbatim, with every issue ref and
-  piece of reasoning. Human-only reference, not auto-loaded.
+- `docs/decisions/<topic>.md` — the full original prose, verbatim, with every issue ref and piece
+  of reasoning. Not auto-loaded by Claude Code, but a normal repo doc any contributor can read.
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
@@ -156,18 +158,15 @@ git worktree add ../nicti-wt-myfeature -b feat/myfeature
 ```
 
 Compile-feedback loop: `cargo check`, not `cargo build` — skips codegen/linking. Full
-`cargo build`/`cargo test` only when the binary or test execution is actually needed. See
-`~/.claude/rules/rust-workflow/REFERENCE.md` for the fuller set of Rust-specific efficiency rules
-(lower Gemini-routing threshold, targeted `cargo clippy`, the `LSP` tool over grep+full-file reads,
-`cargo watch -x check` for long edit loops).
+`cargo build`/`cargo test` only when the binary or test execution is actually needed. (This
+section's efficiency rules are agent-specific; a human contributor doesn't need them — see
+CONTRIBUTING.md instead.)
 
 ## PR conventions
 
-- **No issue tracker integration yet.** This project isn't tracked on any external tracker —
-  plain GitHub Issues/PRs only, with the intent to formalize on GitHub Issues once the project is
-  past its first phase. Don't add ticket-reference conventions, ticket-ID trailers, or
-  cross-tool links until that happens; a bare `#N` in a commit/PR/ADR here means a GitHub
-  issue/PR in this repo.
+- Plain GitHub Issues/PRs — a bare `#N` in a commit/PR/ADR/issue body means a GitHub issue/PR in
+  this repo. See CONTRIBUTING.md's Issue conventions section for the `**Part of:**`/
+  `**Blocked by:**` link format.
 - **PR titles**: a plain summary sentence.
 - **This is a public repo — never include a `Claude-Session:` trailer or a "Generated with Claude
   Code" footer** in commit messages or PR descriptions here. `Co-Authored-By:` is fine to keep;
@@ -180,40 +179,30 @@ Anything substantial goes through an adversarial review loop before it's called 
 verify each finding → fix → re-review if the fixes were non-trivial. Small, low-risk changes may
 skip it (a copy tweak, a comment, a version bump, a one-line config edit).
 
-**Run this BEFORE opening the PR, not after.** Spawn a fresh agent (no explicit `model` override
-— see the account-wide Fable rule in `~/.claude/CLAUDE.md`) pointed at the branch's diff, prompted
-hostilely: assume the author was overconfident, name concrete areas to attack, require a
-CONFIRMED/SPECULATIVE split with a failing scenario per finding. Verify every finding yourself
-before acting on it, and when a finding names one instance of a pattern, grep for its siblings
-instead of fixing only the one named.
+**Run this BEFORE opening the PR, not after.** Spawn a fresh agent (no explicit `model` override)
+pointed at the branch's diff, prompted hostilely: assume the author was overconfident, name
+concrete areas to attack, require a CONFIRMED/SPECULATIVE split with a failing scenario per
+finding. Verify every finding yourself before acting on it, and when a finding names one instance
+of a pattern, grep for its siblings instead of fixing only the one named.
 
 **Post the outcome as a PR comment before merge**, not just the local pass/fix cycle: state what
 ran, the CONFIRMED/SPECULATIVE split (or "no findings"), and how any real finding was resolved.
 
 ## Testing
 
-```bash
-cargo test --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features
-cargo fmt --all -- --check
-```
-
-**Always pass `--workspace`** for `test`/`clippy`, and **`--all`** for `fmt`, in this repo: the
+See CONTRIBUTING.md's "Building, testing, linting" section for the exact commands (they mirror
+CI's exclude flags for `den`/`pelt-*`/`retina`) and why `--workspace`/`--all` are required — the
 root `Cargo.toml` is both the workspace root and a real package (`nicti`), not a virtual manifest,
-so a bare `cargo test`/`cargo clippy` without `-p`/`--workspace`, or a bare `cargo fmt --check`
-without `--all`, silently checks only the root crate and skips `spikes/*` and `bench/whisker`
-entirely — this exact command (`cargo fmt --check`, no `--all`) used to be what this file itself
-documented above, and following it produced a false-negative "clean" result on a real PR whose
-CI then failed `cargo fmt` on six files in `spikes/den` — confirmed as a real gap (CI's own
-`clippy`/`test` jobs had been doing
-exactly this since `spikes/pawprint` landed, until fixed alongside #19/ADR-0004).
+so a bare `cargo test`/`cargo clippy` (no `-p`/`--workspace`) or a bare `cargo fmt --check` (no
+`--all`) silently only checks the root crate and skips `spikes/*`/`bench/whisker` entirely — this
+exact gap produced a false-negative "clean" local result once on a real PR whose CI then failed
+`cargo fmt` on six files in `spikes/den` (fixed alongside #19/ADR-0004).
 
 ## CI
 
 GitHub Actions, GitHub-hosted runners (`ubuntu-latest`/`windows-latest`) — this project has no
-self-hosted runner infrastructure of its own and Shutterpaws' old self-hosted GitHub Actions
-runner host was retired 2026-08-30, so don't copy the `runs-on: [self-hosted, linux]` pattern
-from Shutterpaws repos here. See `.github/workflows/ci.yml`. A `cargo-deny` job checks Rust crate
+self-hosted runner infrastructure of its own; don't add a `runs-on: [self-hosted, ...]` job here.
+See `.github/workflows/ci.yml`. A `cargo-deny` job checks Rust crate
 licenses against `deny.toml` (the allowlist from `docs/adr/0003-third-party-license-policy.md`) —
 it only covers Cargo dependencies, not native libraries, ML models, or data files, which still
 rely on `docs/licensing.md` being updated at review time.

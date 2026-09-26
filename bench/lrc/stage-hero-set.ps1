@@ -8,7 +8,7 @@ Hardlinks (not copies) so this doesn't duplicate multi-GB Z8 NEFs on disk -- bot
 the same data, and both must stay on the same NTFS volume as the frozen ref-10k source.
 
 .PARAMETER RefRoot
-Path to the frozen ref-10k copy to stage from, e.g. H:\NictiBench\ref-10k or E:\NictiBench\ref-10k.
+Path to the frozen ref-10k copy to stage from (see NICTI_REF10K / docs/benchmarks.md).
 
 .PARAMETER HeroSetFile
 Path to docs/benchmarks/hero-set.txt (one file id per line).

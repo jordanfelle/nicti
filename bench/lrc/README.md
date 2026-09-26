@@ -9,22 +9,24 @@ ffmpeg-stop logic uses a .NET-Core-only API that silently fails under Windows Po
 Everything below invokes `pwsh`, not `powershell`.
 
 **Never touches your real catalog.** Every script here targets an explicit bench catalog path
-under `H:\NictiBench\lrc-bench\`; LRC is only ever launched against that path.
+under `<BENCH_ROOT>\lrc-bench\` (`<BENCH_ROOT>` is your own scratch location, passed as
+`setup.ahk`'s 3rd argument or the `NICTI_BENCH_ROOT` env var); LRC is only ever launched against
+that path.
 
 ## One-time setup, per LRC config (`originals`, `smart-previews`)
 
 1. **Stage the working set** (hardlinks, no duplicate storage):
    ```powershell
-   .\stage-hero-set.ps1 -RefRoot H:\NictiBench\ref-10k `
+   .\stage-hero-set.ps1 -RefRoot <REF10K_ROOT> `
      -HeroSetFile ..\..\docs\benchmarks\hero-set.txt `
-     -DestDir H:\NictiBench\lrc-bench\hero-set
+     -DestDir <BENCH_ROOT>\lrc-bench\hero-set
    ```
 2. **Create the catalog + import** — launch any LRC catalog first, then:
    ```
-   AutoHotkey64.exe setup.ahk originals H:\NictiBench\lrc-bench\hero-set
+   AutoHotkey64.exe setup.ahk originals <BENCH_ROOT>\lrc-bench\hero-set <BENCH_ROOT>
    ```
    (or `smart-previews` for the second config). This creates
-   `H:\NictiBench\lrc-bench\hero-<config>.lrcat`, walks through File > New Catalog, then pauses
+   `<BENCH_ROOT>\lrc-bench\hero-<config>.lrcat`, walks through File > New Catalog, then pauses
    for you to complete the import in the dialog it opens (select all 50, **Add** not Copy/Move).
 3. **Build previews:**
    - `originals` config: Library > Previews > Build 1:1 Previews, for all 50.
@@ -83,13 +85,13 @@ series (`docs/benchmarks.md`'s "1 warm-up discarded, 5 measured" rule), includin
 ```powershell
 pwsh .\run-hero-series.ps1 -Config originals -Interaction switch `
   -IndicatorRect "20,20,60,60" -RoiRect "400,200,1200,800" `
-  -ResultsRoot H:\NictiBench\bench-results\hero
+  -ResultsRoot <BENCH_ROOT>\bench-results\hero
 ```
 
 Repeat per config × interaction (`originals`/`smart-previews` × `switch`/`crop`/`zoom`), plus a
 cold switch pass with `-Cold` after reverting to a cold cache state (see
 `docs/benchmarks.md`'s cold-run rules and `hero-scenario.md`'s Warm vs. cold section) — pass
-`-ResultsRoot H:\NictiBench\bench-results\hero`, not the local-disk default, to keep multi-GB
+`-ResultsRoot <BENCH_ROOT>\bench-results\hero`, not the local-disk default, to keep multi-GB
 captures off the UNC session path. It stops on the first failed run rather than continuing past a
 broken series.
 

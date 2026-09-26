@@ -242,8 +242,8 @@ mod tests {
     }
 
     /// Requires an actual MobileSAM ONNX file at `NICTI_TEST_MOBILE_SAM_ONNX` and a real ONNX
-    /// Runtime shared library at `NICTI_TEST_ORT_DYLIB` -- neither exists in this sandbox or in
-    /// CI, so this is `#[ignore]`d. Run manually on a reference machine with real weights via
+    /// Runtime shared library at `NICTI_TEST_ORT_DYLIB` -- neither exists in CI, so this is
+    /// `#[ignore]`d. Run manually with real weights via
     /// `cargo test -p groom -- --ignored runs_a_real_model_if_present`.
     #[test]
     #[ignore = "needs a real MobileSAM .onnx file and a real ONNX Runtime shared library on disk"]

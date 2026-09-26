@@ -65,19 +65,20 @@ object's symbol needs.
 
 ### The `ref-10k` reference set vanished mid-research
 
-`H:\NictiBench\ref-10k\` and `E:\NictiBench\ref-10k\` (the two frozen 393GB copies docs/benchmarks.md
+`<REF10K_ROOT>` and `<REF10K_ROOT_HDD>` (the two frozen 393GB copies docs/benchmarks.md
 describes) both disappeared from disk partway through this research's full-set sweep — not caused
-by this work (a `sync.ffs_db` FreeFileSync database appeared at `H:\`'s root around the same time,
-suggesting an external sync/cleanup tool, but this wasn't confirmed). Per direct user decision, the
+by this work (a sync-tool database file appeared at the NVMe root around the same time, suggesting
+an external sync/cleanup tool, but this wasn't confirmed). Per direct user decision, the
 frozen full-copy model is retired outright: **it's too large to maintain per-machine, and this
 data needs to be accessible to more than one person/machine going forward** — a real, separate
 problem from decoder selection, tracked as a follow-up (see Deferred, below), not solved by this
-ADR. This research instead pulled a **stratified subset directly from the live source library**
-(`H:\Photos\Furries\Cons\...` / `E:\Archive\Furries\Cons\...`), copied to a small NVMe scratch
-directory: **132 Z8 files** (from Anthrocon 2025/2024, Midwest FurFest 2024 -- 106 turned out HE
-and 26 turned out HE\* on real decode, not assumed from folder/date) plus **all 129** native D7500
-NEFs from Rory/Fursonacon (the same files `docs/ref-10k-manifest.csv`'s D7500 bucket was built
-from) — 261 real files total, ~6.5GB.
+ADR. This research instead pulled a **stratified subset directly from the live source photo
+library** (two event-photo source trees, on NVMe and HDD respectively), copied to a small NVMe
+scratch directory: **132 Z8 files** (from two 2024/2025 events, one on each camera-support
+compression path -- 106 turned out HE and 26 turned out HE\* on real decode, not assumed from
+folder/date) plus **all 129** native D7500 NEFs from a second photographer's contributed set (the
+same files `docs/ref-10k-manifest.csv`'s D7500 bucket was built from) — 261 real files total,
+~6.5GB.
 `retina scan` (a new subcommand, no manifest CSV required — walks a directory and decodes every
 `.NEF`/`.nef`/`.dng` found) was built for exactly this: running directly against the live library
 or any ad hoc subset, since the frozen-manifest workflow this repo's other benchmarking tooling

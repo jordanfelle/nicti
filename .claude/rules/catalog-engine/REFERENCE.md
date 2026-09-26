@@ -6,7 +6,7 @@ paths:
 
 # Catalog Engine — Quick Reference
 
-Full reasoning/history: `.claude/docs/catalog-engine/README.md`.
+Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 - **Chosen: SQLite** (`rusqlite`, WAL) — `docs/adr/0008`. `(model, rating)` composite index,
   `GLOB` not `LIKE` for prefix scans. Clears every gate at 2M assets except

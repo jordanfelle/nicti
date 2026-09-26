@@ -9,10 +9,10 @@ paths:
 
 # Language and Architecture — Quick Reference
 
-Full reasoning/history: `.claude/docs/language-and-architecture/README.md`.
+Full reasoning/history: `docs/decisions/language-and-architecture.md`.
 
 - **Language: Rust**, C FFI to LibRaw (+lensfun) — `docs/adr/0001`. Chosen over C++/C#/Go/Zig/Swift
-  on memory safety + solo/agent productivity.
+  on memory safety + agent-assisted-development productivity.
 - **v1 target**: Windows only (macOS/Linux is v2, Linux stays CI-only). Nikon NEF only, but keep
   decoder/profile/lens/render/AI-model/exporter/catalog-store as extension points — wider
   camera-brand support is a long-term goal, don't hard-code Nikon assumptions.

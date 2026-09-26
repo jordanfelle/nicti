@@ -78,4 +78,4 @@ Covers the third-party license policy (and its 2026-09-24 amendment) and the out
   bundled), just not code to fork or a dependency to add. Also corrected two prior-art citations
   found wrong during this research: ADR-0006 had claimed RapidRAW uses egui/eframe (it's actually
   Tauri+React) and ADR-0005's wgpu note now reflects RapidRAW's real wgpu-29 pin — see those ADRs'
-  own Amendments/Prior-art sections in `.claude/docs/gpu-gui-and-healing/README.md`'s topic.
+  own Amendments/Prior-art sections in `docs/decisions/gpu-gui-and-healing.md`'s topic.

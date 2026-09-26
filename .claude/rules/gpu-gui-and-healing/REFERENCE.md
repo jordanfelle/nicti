@@ -12,7 +12,7 @@ paths:
 
 # GPU, GUI, and Healing — Quick Reference
 
-Full reasoning/history: `.claude/docs/gpu-gui-and-healing/README.md`.
+Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - **GPU compute API** — `docs/adr/0005`: `wgpu` (WGSL), Vulkan backend on Windows (not Dx12 — no
   `SHADER_F16` there, Tapetum's cache tiers need f16). Measured on RTX 5080: within 2x of CUDA at
