@@ -213,27 +213,31 @@ fn compare(
 
         if time {
             // 1 warmup + 5 measured throwaway calls (docs/benchmarks.md's protocol), then one
-            // more real call below whose output is what actually gets scored -- CPU/WSL numbers,
-            // a dev-loop signal only; the real ADR measurement is Windows-native/GPU (P5).
+            // more real call below whose output is what actually gets scored.
+            let identity = nicti_prowl::perf::HardwareIdentity::capture();
+            println!(
+                "hardware: os={} arch={} cpus={} host={}",
+                identity.os, identity.arch, identity.cpu_count, identity.hostname
+            );
             let mut timed_result: Option<Result<Vec<f32>, ai::AiDenoiseError>> = None;
             let stats = nicti_prowl::perf::Protocol::default().run(|| {
                 timed_result = Some(denoiser.denoise(&cand_srgb, width, height, tile_config))
             });
             let _ = timed_result; // only the timing matters here; scored again for real below
             println!(
-                "denoise timing (CPU/WSL dev-loop, not the real ADR number): p50={:.1}ms p95={:.1}ms max={:.1}ms",
-                stats.p50_ms, stats.p95_ms, stats.max_ms
+                "denoise timing (ep={ep:?} -- docs/benchmarks.md's real ADR measurement is \
+                 Windows-native; GPU/driver aren't in HardwareIdentity, record them by hand \
+                 alongside this like the existing bench/ scripts do): \
+                 p50={:.1}ms p95={:.1}ms max={:.1}ms",
+                stats.p50_ms, stats.p95_ms, stats.max_ms,
             );
         }
 
         cand_srgb = denoiser.denoise(&cand_srgb, width, height, tile_config)?;
     }
 
-    // No sub-pixel resampling of the full RGB planes at the estimated shift is implemented yet
-    // (only the luma plane resampling machinery exists, via `Plane::sample_bilinear`) -- P2's
-    // remaining work item. For now, score directly (real RawNIND tripod frames are expected to be
-    // near-zero shift already) and rely on the printed shift/warning above to flag anything that
-    // needs the resample step before its numbers are trusted.
+    // The candidate was already resampled onto the reference's pixel grid above (before this
+    // point), so the mask/gain-fit/metrics below operate on registered, not just cropped, data.
     let mask: Vec<bool> = align::clip_mask(&ref_srgb, &cand_srgb, 1.0 / 255.0, 1.0 - 1.0 / 255.0);
     let masked_frac = mask.iter().filter(|&&m| m).count() as f64 / mask.len() as f64;
     println!("unmasked (unclipped) fraction: {masked_frac:.4}");
