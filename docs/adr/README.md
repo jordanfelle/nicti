@@ -34,6 +34,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0017](0017-preview-tier-strategy.md) | Preview tier strategy | Accepted |
 | [0018](0018-rapidraw-adopt-or-fork.md) | RapidRAW as an adopt/fork candidate | Proposed (not adopted, study-only) |
 | [0019](0019-raw-decoder.md) | RAW decoder | Proposed |
+| [0020](0020-volume-identity-and-remapping.md) | Volume identity and drive remapping | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.
