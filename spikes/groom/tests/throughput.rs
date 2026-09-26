@@ -105,9 +105,15 @@ fn summarize_after_warmup(values_ms: &[f64], warmup: usize) -> Option<(f64, f64,
     ))
 }
 
-/// The same synthetic patch shape as `tests/correctness.rs::make_patch`, sized to match the CPU
-/// throughput case above (512x512, matching the destination-circle radius the CPU heal case
-/// uses) so the two numbers are comparable.
+/// The same synthetic patch shape as `tests/correctness.rs::make_patch`, at 512x512. **Not an
+/// equal-work comparison against the CPU case above**: `cpu_reference::spot_heal` crops to a
+/// ~41x41 bounding box around the destination circle before running its Jacobi solve, while this
+/// WGSL kernel dispatches one thread per pixel across the *entire* width*height grid every
+/// iteration regardless of `mask` (the mask only picks interior-vs-boundary handling per pixel,
+/// it doesn't shrink the dispatch) -- so this measures ~156x more raw work per iteration than the
+/// CPU number it's printed alongside. That makes it a strictly more conservative (pessimistic)
+/// proxy for the interactive-heal budget, not a matched-workload comparison; see #97's adversarial
+/// review for why this distinction matters for ADR-0007's Measured-results claims.
 fn make_patch(width: usize, height: usize) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<u32>) {
     let mut guidance = Vec::with_capacity(width * height);
     let mut initial = Vec::with_capacity(width * height);
@@ -144,7 +150,9 @@ fn poisson_jacobi_gpu_throughput() {
 
     let width = 512;
     let height = 512;
-    let iterations = 50u32; // same radius/iteration count as the CPU spot_heal case above
+    let iterations = 50u32; // same iteration count as the CPU spot_heal case above (see
+                            // make_patch's doc comment for why the per-iteration workload isn't
+                            // actually equal)
     let (guidance, initial, mask) = make_patch(width, height);
 
     for ctx in &contexts {

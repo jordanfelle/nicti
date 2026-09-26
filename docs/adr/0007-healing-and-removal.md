@@ -141,13 +141,18 @@ run + 20 measured runs per operation, 512×512 synthetic checkerboard image, `ra
 | `spot_heal` (50 Jacobi iterations) | **0.2458 ms/op** |
 | `auto_source_pick` (24 candidates) | **0.0542 ms/op** |
 
-**GPU** (#97, 2026-09-26): the WGSL `poisson_jacobi` kernel, same 512×512/`radius=20`/50-iteration
-config, 1 discarded warm-up + 5 measured runs (`docs/benchmarks.md`'s protocol), timed via
-`TIMESTAMP_QUERY` (in-GPU-timeline duration spanning all 50 Jacobi dispatches). Built as a real
-Windows `.exe` (`cargo test -p groom --test throughput --release --target x86_64-pc-windows-gnu`)
-and run directly on the reference RTX 5080/Windows box — not this WSL sandbox, which has no NVIDIA
-Vulkan ICD registered (`wgpu::Backends::PRIMARY` here only reaches the software `llvmpipe`
-adapter; see this section's footnote for what that number looked like before the Windows run):
+**GPU** (#97, 2026-09-26): the WGSL `poisson_jacobi` kernel dispatched over a 512×512 grid, 50
+Jacobi iterations, 1 discarded warm-up + 5 measured runs (`docs/benchmarks.md`'s protocol), timed
+via `TIMESTAMP_QUERY` (in-GPU-timeline duration spanning all 50 Jacobi dispatches). **Not an
+equal-work comparison against the CPU `spot_heal` row above**: the CPU path crops to a ~41×41
+bounding box around the destination circle before solving, while every GPU dispatch covers the
+*entire* 512×512 grid regardless of the mask (~156x more raw per-iteration work) — a strictly more
+conservative proxy for the interactive-heal budget, not a matched-workload timing (see
+`tests/throughput.rs::make_patch`'s doc comment). Built as a real Windows `.exe`
+(`cargo test -p groom --test throughput --release --target x86_64-pc-windows-gnu`) and run
+directly on the reference RTX 5080/Windows box — not this WSL sandbox, which has no NVIDIA Vulkan
+ICD registered (`wgpu::Backends::PRIMARY` here only reaches the software `llvmpipe` adapter; see
+this section's footnote for what that number looked like before the Windows run):
 
 | Backend | Adapter | p50 | p95 | max |
 |---|---|---|---|---|
