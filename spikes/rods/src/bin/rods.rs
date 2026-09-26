@@ -54,6 +54,12 @@ enum Command {
         /// --denoise-model.
         #[arg(long)]
         time: bool,
+        /// Execution provider for the denoise stage. CUDA/TensorRT need a matching Windows-
+        /// native onnxruntime.dll + CUDA/cuDNN/TensorRT install (see the plan's P0) -- on WSL,
+        /// where none of that exists, `ort` falls back to CPU silently (see `ai.rs`'s own doc
+        /// comment on why that fallback can't be introspected after the fact).
+        #[arg(long, value_enum, default_value_t = ai::ExecutionProviderKind::Cpu)]
+        ep: ai::ExecutionProviderKind,
     },
 }
 
@@ -72,6 +78,7 @@ fn main() -> anyhow::Result<()> {
             overlap,
             crop,
             time,
+            ep,
         } => compare(
             &ref_tiff,
             &ref_json,
@@ -83,6 +90,7 @@ fn main() -> anyhow::Result<()> {
             ai::TileConfig { tile, overlap },
             crop,
             time,
+            ep,
         ),
     }
 }
@@ -99,6 +107,7 @@ fn compare(
     tile_config: ai::TileConfig,
     crop: Option<u32>,
     time: bool,
+    ep: ai::ExecutionProviderKind,
 ) -> anyhow::Result<()> {
     let reference = linear_input::load(ref_tiff, ref_json)?;
     let candidate = linear_input::load(candidate_tiff, candidate_json)?;
@@ -195,12 +204,12 @@ fn compare(
     if let Some(model_path) = denoise_model {
         let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
         println!(
-            "running Path B AI denoise: {} (tile={}, overlap={})",
+            "running Path B AI denoise: {} (tile={}, overlap={}, ep={ep:?})",
             model_path.display(),
             tile_config.tile,
             tile_config.overlap
         );
-        let mut denoiser = ai::TiledDenoiser::load(model_path, ort_dylib)?;
+        let mut denoiser = ai::TiledDenoiser::load(model_path, ort_dylib, ep)?;
 
         if time {
             // 1 warmup + 5 measured throwaway calls (docs/benchmarks.md's protocol), then one

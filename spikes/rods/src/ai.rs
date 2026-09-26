@@ -9,9 +9,12 @@
 //! baseline `rods compare` already measures, not a second color pipeline.
 //!
 //! Same `ort`/`load-dynamic` scaffolding pattern as `spikes/groom/src/ai.rs` (one model, one
-//! named input, one named output) -- CPU execution provider only for now (this WSL sandbox has
-//! no CUDA/TensorRT installed, see the plan's P0; CUDA/TensorRT EP registration is P5's
-//! Windows-native job, gated behind this crate's own `cuda`/`tensorrt` features once wired).
+//! named input, one named output). Execution provider is selectable ([`ExecutionProviderKind`])
+//! -- CPU by default, CUDA/TensorRT on request (Windows-native only in practice, since WSL has no
+//! CUDA/TensorRT installed at all, see the plan's P0). `ort` falls back to CPU by itself if a
+//! requested EP fails to initialize (a missing/incompatible driver), so requesting CUDA/TensorRT
+//! is always safe to try -- callers just shouldn't trust the timing number if the fallback fired
+//! silently underneath them without checking `Session::execution_providers` or similar.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -77,16 +80,43 @@ impl Default for TileConfig {
     }
 }
 
+/// Which execution provider to request. `ort`/onnxruntime always keeps CPU available as an
+/// implicit fallback for any op an accelerated EP can't claim (or if the EP fails to initialize
+/// at all, e.g. a missing driver) -- confirmed against this same onnxruntime version in the
+/// plan's own P0 hello-world check, so requesting Cuda/TensorRt is always safe to try. There is
+/// no cheap way to introspect which EP actually served a given `run()` call after the fact
+/// (checked; `ort` 2.0.0-rc.13's `Session` doesn't expose this), so a caller trusting a CUDA/
+/// TensorRT timing number should sanity-check it's dramatically faster than the CPU numbers
+/// already measured -- a silent fallback would show up as suspiciously CPU-speed timing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ExecutionProviderKind {
+    #[default]
+    Cpu,
+    Cuda,
+    TensorRt,
+}
+
 impl TiledDenoiser {
-    pub fn load(model_path: &Path, ort_dylib_path: &Path) -> Result<Self, AiDenoiseError> {
+    pub fn load(
+        model_path: &Path,
+        ort_dylib_path: &Path,
+        ep: ExecutionProviderKind,
+    ) -> Result<Self, AiDenoiseError> {
         if !model_path.is_file() {
             return Err(AiDenoiseError::ModelNotFound(model_path.to_path_buf()));
         }
         ensure_ort_environment(ort_dylib_path)?;
-        let session = Session::builder()
-            .map_err(ort_err)?
-            .commit_from_file(model_path)
-            .map_err(ort_err)?;
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = match ep {
+            ExecutionProviderKind::Cpu => builder,
+            ExecutionProviderKind::Cuda => builder
+                .with_execution_providers([ort::ep::CUDA::default().build()])
+                .map_err(ort_err)?,
+            ExecutionProviderKind::TensorRt => builder
+                .with_execution_providers([ort::ep::TensorRT::default().build()])
+                .map_err(ort_err)?,
+        };
+        let session = builder.commit_from_file(model_path).map_err(ort_err)?;
         Ok(TiledDenoiser { session })
     }
 
@@ -249,6 +279,7 @@ mod tests {
         let result = TiledDenoiser::load(
             Path::new("/nonexistent/model.onnx"),
             Path::new("/nonexistent/onnxruntime.so"),
+            ExecutionProviderKind::Cpu,
         );
         assert!(matches!(result, Err(AiDenoiseError::ModelNotFound(_))));
     }
