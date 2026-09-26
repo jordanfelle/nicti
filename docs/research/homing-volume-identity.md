@@ -41,7 +41,7 @@ describe — flagged explicitly here rather than glossed over.
 What *is* real, from this sandbox:
 
 - `spikes/homing`'s cross-platform modules (`path.rs`, `schema.rs`, `fingerprint.rs`, `relink.rs`,
-  and `volume::identity_key`'s pure selection logic) compile and pass **28/28 unit tests**.
+  and `volume::identity_key`'s pure selection logic) compile and pass **29/29 unit tests**.
 - `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean on both the native
   Linux target and the `x86_64-pc-windows-gnu` cross-compile.
 - The full workspace sweep with `homing` added — `cargo fmt --all -- --check`, `cargo clippy

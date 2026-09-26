@@ -188,11 +188,25 @@ fn root_rel_path_for(dir: &std::path::Path, mount_point: &str) -> Result<String>
     let abs_str = abs.to_string_lossy().replace('\\', "/");
     let abs_str = abs_str.strip_prefix("//?/").unwrap_or(&abs_str);
     let mp_norm = mount_point.trim_end_matches(['\\', '/']).replace('\\', "/");
-    Ok(abs_str
-        .strip_prefix(&mp_norm)
-        .unwrap_or("")
-        .trim_start_matches('/')
-        .to_string())
+    // Same component-boundary requirement `current_volume_for` enforces: a bare `strip_prefix`
+    // would treat mount point `H:/Mount` as a prefix of `H:/MountOther/Photos` too, silently
+    // producing a wrong-but-non-crashing `root_rel` ("ther/Photos") instead of failing loudly.
+    // `dir == mount_point` (root_rel is empty) is the one case where there's no `/` to require.
+    let root_rel = if abs_str == mp_norm {
+        ""
+    } else {
+        abs_str
+            .strip_prefix(&mp_norm)
+            .filter(|rest| rest.starts_with('/'))
+            .with_context(|| {
+                format!(
+                    "{} is not actually under mount point {mount_point}",
+                    dir.display()
+                )
+            })?
+            .trim_start_matches('/')
+    };
+    Ok(root_rel.to_string())
 }
 
 fn cmd_build(
@@ -413,5 +427,26 @@ mod tests {
             root_rel_path_for(&sub, &mount_point).unwrap(),
             "Photos/2026"
         );
+    }
+
+    #[test]
+    fn root_rel_path_for_rejects_a_sibling_prefix_that_is_not_a_real_component_match() {
+        // "Mount" is a *string* prefix of "MountOther" but not its path-component ancestor --
+        // exactly the false-positive class current_volume_for is fixed against elsewhere in this
+        // file. This function must reject it the same way, not silently return a
+        // wrong-but-non-crashing "ther/Photos". Both directories are real (canonicalize must
+        // succeed) so the rejection under test is the strip_prefix component check itself, not
+        // an I/O error from a nonexistent path.
+        let base = TempDir::new().unwrap();
+        let mount = base.path().join("Mount");
+        let sibling = base.path().join("MountOther").join("Photos");
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let mount_point = mount
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(root_rel_path_for(&sibling, &mount_point).is_err());
     }
 }
