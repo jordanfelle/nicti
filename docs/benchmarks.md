@@ -68,7 +68,7 @@ copy so results are repeatable and unaffected by files moving around in the live
 | Anthrocon 2025 | 4,763 | Nikon Z8 | High Efficiency | Primary event — general cull/develop mix, performance-critical |
 | Midwest FurFest 2024 | 2,663 | Nikon Z8 | High Efficiency | Second event — volume + most of the high-ISO/denoise coverage |
 | Anthrocon 2024 | 1,287 | Nikon Z8 | Lossless + High Efficiency* | Compression-format diversity |
-| Rory (Fursonacon 2025) | 129 | Nikon D7500 | Lossless | Decoder-compatibility only, not performance-gated |
+| Second photographer's contributed set, 2025 | 129 | Nikon D7500 | Lossless | Decoder-compatibility only, not performance-gated |
 | Images 2017-2018 (sampled) | 300 of 1,338 | Nikon D3400 | n/a (DNG-converted) | Decoder-compatibility only — **known gap: no native NEF survives for D3400, these are Lightroom-converted DNGs**, so they can't exercise the actual NEF decoder path |
 
 The Z8 buckets (8,713 files, ~232 GB) are what every performance target above actually measures
@@ -77,9 +77,9 @@ exist only so decoder-/catalog-import work (#37, #61/#62) has *some* non-Z8 cove
 explicitly **not** used to judge any target in the table above.
 
 **Known gaps** (tracked for backfill, not blocking #14's exit):
-- No Z6III coverage. Referenced as "sometimes Rory's Z6III," but no such files were found accessible
-  locally as of 2026-09-23 — Rory's other event folders (Furpocalypse 2025, Socials 2026) contain
-  only placeholder files, nothing synced yet.
+- No Z6III coverage. Referenced as "sometimes shot on a Z6III" by the second photographer above,
+  but no such files were found accessible locally as of 2026-09-23 — their other event folders
+  contain only placeholder files, nothing synced yet.
 - D3400 coverage is DNG-only (Lightroom-converted), not native NEF — see table above.
 
 **Freeze locations** (both are exact byte-identical copies, verified by SHA-256 at copy time):
