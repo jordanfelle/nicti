@@ -1,0 +1,39 @@
+[package]
+name = "homing"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #71: volume identity + drive-remapping research. Compares Windows volume-identity candidates (NTFS serial, GPT partition GUID, sysinfo) for surviving a drive-letter change/detach-reattach/reformat, a candidate SQLite volume/root/asset schema, and file-fingerprint relinking to an unrecognized volume. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "homing"
+path = "src/lib.rs"
+
+[[bin]]
+name = "homing"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+blake3 = "1"
+kamadak-exif = "0.6"
+anyhow = "1"
+thiserror = "2"
+walkdir = "2"
+unicode-normalization = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_System_Ioctl",
+  "Win32_Foundation",
+  "Win32_System_IO",
+] }
+sysinfo = "0.37"
+
+[dev-dependencies]
+tempfile = "3"

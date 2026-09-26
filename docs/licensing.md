@@ -278,6 +278,21 @@ clippy/test jobs (Linux and Windows) now install it too** (`apt-get install -y n
 path-gated job of its own like `den`/`pelt-*`). `cargo deny --workspace --all-features check
 licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) above.
 
+**Update (2026-09-26, [#71](https://github.com/jordanfelle/nicti/issues/71)'s `homing` spike,
+`docs/adr/0020-volume-identity-and-remapping.md`):** new dependencies for volume-identity
+enumeration, the candidate SQLite volume/root/asset schema, and file-fingerprint relinking.
+`rusqlite` v0.40.2 (`bundled`) and `blake3` v1.8.7 are already-reviewed crates (`spikes/den`'s
+2026-09-24 update, `crates/nicti-claw`'s pawprint-style hashing respectively), reused here with no
+new review needed. `kamadak-exif` v0.6.1 (BSD-2-Clause, already audited in this file's Rust crate
+dependency tree section above for #47) is now also a real dependency (EXIF natural-key relink
+tier). Three genuinely new-to-workspace crates: `walkdir` v2.5.0 (`Unlicense/MIT`, same
+Unlicense-OR-MIT category `memchr` already covers), `unicode-normalization` v0.1.25 (`MIT OR
+Apache-2.0`), and `sysinfo` v0.37.2 (`MIT`, Windows-target-only dependency, mount-event polling
+comparison baseline) — all permissive, no new `deny.toml` entry needed, `cargo deny --workspace
+--all-features check licenses` passes clean. `windows-sys` v0.61 (Windows-target-only, volume
+enumeration/`DeviceIoControl` FFI) is the same crate/license `spikes/sniff`'s
+`FILE_FLAG_NO_BUFFERING` work already covers (see CLAUDE.md's package-map note on `sniff`).
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

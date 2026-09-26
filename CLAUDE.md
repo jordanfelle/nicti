@@ -20,8 +20,8 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017), `raw-decoder` (0019). A new ADR adds a bullet to both files of its topic
-(or a new topic) and to this list — not inline here.
+`preview-tiers` (0017), `raw-decoder` (0019), `volume-identity` (0020). A new ADR adds a bullet to
+both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
 
@@ -143,7 +143,18 @@ via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`d
 `docs/research/retina-raw-decoder.md`). Its own `vendor/LibRaw` submodule needs
 `git submodule update --init spikes/retina/vendor/LibRaw` before it builds.
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
-same "don't build on top of it" caveat applies.
+same "don't build on top of it" caveat applies. `spikes/homing` (#71/ADR-0020's volume-identity
+research: candidate identity keys measured against a drive-letter change/detach-reattach/reformat
+survival table, a `volume`/`root`/`asset` SQLite schema, size+name/partial-BLAKE3/full-BLAKE3/
+EXIF-natural-key relink tiers, and a `sysinfo`-poll-vs-`CM_Register_Notification` mount-detection
+comparison — lib+bin split so its currently-CLI-unwired helpers don't trip `dead_code` the way a
+bin-only spike would; `lib.rs` re-exports `fingerprint`/`mount_events`/`path`/`relink`/`schema`/
+`volume`) is Windows-only research written in a Linux/WSL sandbox with no mountable NTFS volume:
+its `windows_impl` modules are unverified against real hardware (see ADR-0020's own sandbox-note
+and Measured-results section, all marked TBD pending a reference-machine pass), while its
+cross-platform schema/fingerprint/path logic is real, tested (20 unit tests), and — unlike
+`den`/`pelt-*`/`retina` — not path-gated out of CI's normal `clippy`/`test` jobs, since it needs no
+heavy native build (same as `sniff`).
 
 ## Development workflow
 
