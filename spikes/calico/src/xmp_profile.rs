@@ -16,7 +16,7 @@
 
 use thiserror::Error;
 
-use crate::dcp::{DcpError, DcpProfile};
+use crate::dcp::{DcpError, DcpProfile, TableEncoding};
 use crate::huesatmap::HueSatMap;
 
 #[derive(Debug, Error)]
@@ -38,6 +38,9 @@ pub enum LookProfileError {
 pub struct LookProfile {
     pub name: String,
     pub look_table: HueSatMap,
+    /// From the embedded IFD's `ProfileLookTableEncoding` (falling back to
+    /// `ProfileHueSatMapEncoding` when the look table came from `hue_sat_map1`, see below).
+    pub encoding: TableEncoding,
 }
 
 /// Attempts to parse a `.xmp` look-profile file's embedded look table. On
@@ -68,6 +71,11 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim())?;
 
     let profile = DcpProfile::parse(&bytes).map_err(LookProfileError::UnrecognizedTableFormat)?;
+    let encoding = if profile.look_table.is_some() {
+        profile.look_table_encoding
+    } else {
+        profile.hue_sat_map_encoding
+    };
     let look_table = profile.look_table.or(profile.hue_sat_map1).ok_or(
         LookProfileError::UnrecognizedTableFormat(DcpError::MissingTag(
             51959,
@@ -75,7 +83,11 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
         )),
     )?;
 
-    Ok(LookProfile { name, look_table })
+    Ok(LookProfile {
+        name,
+        look_table,
+        encoding,
+    })
 }
 
 #[cfg(test)]

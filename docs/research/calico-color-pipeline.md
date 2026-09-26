@@ -30,14 +30,6 @@ trilinear filtering weights, not a bug — expect this gap to shrink on the user
 
 **Real, tested, in this sandbox:**
 
-- `spikes/retina`'s new `dump-linear` subcommand (extends the existing LibRaw shim with a
-  demosaic-only decode path — no WB/color-matrix/gamma applied). **Not compiled or tested in this
-  sandbox**: retina's own `vendor/LibRaw` git submodule isn't checked out here (same constraint
-  every other retina session hits — `git submodule update --init spikes/retina/vendor/LibRaw`
-  first), and retina is excluded from the workspace's normal `clippy`/`test` jobs for exactly this
-  reason (see CLAUDE.md's CI path-gating note). The Rust/C++ additions were written and reviewed
-  by hand against the existing shim's own conventions, and are syntax-checked via `cargo fmt
-  --check -p retina` (which parses the file without needing the C++ build), but not run.
 - `spikes/calico`'s DCP/DNG-tag parser, CCT solver, matrix math, HueSatMap/tone-curve/ΔE
   implementations, and CPU render pipeline — all real, unit-tested.
 - The wgpu 3D-texture HueSatMap kernel and its CPU/GPU parity test — real, runs against lavapipe.
@@ -47,12 +39,21 @@ trilinear filtering weights, not a bug — expect this gap to shrink on the user
 
 **Pending the user's reference-machine pass** (real DCP/XMP files, real LRC exports, real NEFs):
 
-1. Export 6-10 Nikon Z8 NEFs from `H:\Photos\Furries\Socials\2025\2025-12-27 - RAWs`
-   (mixed HE/HE*/Lossless, varied scenes including saturated colors and skin/fur tones).
+- `spikes/retina`'s new `dump-linear` subcommand (extends the existing LibRaw shim with a
+  demosaic-only decode path — no WB/color-matrix/gamma applied). **Not compiled or tested in this
+  sandbox**: retina's own `vendor/LibRaw` git submodule isn't checked out here (same constraint
+  every other retina session hits — `git submodule update --init spikes/retina/vendor/LibRaw`
+  first), and retina is excluded from the workspace's normal `clippy`/`test` jobs for exactly this
+  reason (see CLAUDE.md's CI path-gating note). The Rust/C++ additions were written and reviewed
+  by hand against the existing shim's own conventions, and are syntax-checked via `cargo fmt
+  --check -p retina` (which parses the file without needing the C++ build), but not run.
+
+1. Export 6-10 Nikon Z8 NEFs from the user's own source NEF folder (mixed HE/HE*/Lossless, varied
+   scenes including saturated colors and skin/fur tones).
 2. In Lightroom Classic, export each as a 16-bit sRGB TIFF, twice — once with **Adobe Standard**
    (or Adobe Color) applied, once with **Adobe Vivid** — all develop sliders zeroed, As Shot white
-   balance, no lens corrections/sharpening/noise reduction/crop. Save both sets to
-   `G:\Export\nicti`.
+   balance, no lens corrections/sharpening/noise reduction/crop. Save both sets to the user's
+   local export folder.
 3. `git submodule update --init spikes/retina/vendor/LibRaw`, then for each NEF:
    `cargo run -p retina --bin retina -- dump-linear <nef> --out <dir>`.
 4. Locate the installed DCP file(s) for the camera model(s) used (typically under

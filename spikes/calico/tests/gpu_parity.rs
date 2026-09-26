@@ -28,9 +28,11 @@ fn make_test_map() -> HueSatMap {
     // one documented CPU/GPU divergence (see gpu.rs's module doc).
     let (hue_div, sat_div, val_div) = (12, 4, 3);
     let mut data = Vec::with_capacity(hue_div * sat_div * val_div);
+    // DNG SDK storage order: value outermost, hue middle, saturation innermost (huesatmap.rs's
+    // module doc / `index()`) -- must match or this test would validate the wrong convention.
     for v in 0..val_div {
-        for s in 0..sat_div {
-            for h in 0..hue_div {
+        for h in 0..hue_div {
+            for s in 0..sat_div {
                 let hue_shift = 5.0 * (h as f32 / hue_div as f32 * std::f32::consts::TAU).sin();
                 let sat_scale = 0.8 + 0.2 * (s as f32 / (sat_div - 1) as f32);
                 let val_scale = 0.9 + 0.1 * (v as f32 / (val_div - 1) as f32);

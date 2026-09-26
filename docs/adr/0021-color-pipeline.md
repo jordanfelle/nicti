@@ -8,7 +8,7 @@
 
 ## Context
 
-#38 sits at the head of Nicti's critical path: it blocks #41 (RAW → linear → working-space
+Issue #38 sits at the head of Nicti's critical path: it blocks #41 (RAW → linear → working-space
 pipeline on GPU), which blocks #44 (Tapetum, the stage-cached render graph), which in turn gates
 roughly a dozen develop/build tickets. The question this ADR answers: how does Nicti get from
 decoded camera RGB to a display-referred image that matches Lightroom Classic closely enough that
@@ -106,12 +106,17 @@ normal `clippy`/`test` jobs.
   a standard, published method guaranteeing no ringing between points). Falls back to a commonly
   reproduced "medium contrast" default curve when a profile has none — sourced from public
   raw-processing discussions, not an Adobe primary document, and documented as an approximation.
-- **`pipeline.rs`** — the CPU reference, in this stage order: linearize (black/white-level scale)
-  → white balance (as-shot `cam_mul`) → camera→XYZ(D50) (`cct.rs`'s illuminant-interpolated
-  matrix) → working space → HueSatMap (in gamma-encoded linear-ProPhoto RGB, a documented 1/1.8
-  power-curve approximation of ACR's own undisclosed encoding — the DNG spec is clear that
-  HueSatMap/LookTable operate in *some* ProPhoto-referenced perceptual space, just not exactly
-  which) → baseline exposure offset → LookTable (same HSV representation) → tone curve → sRGB.
+- **`pipeline.rs`** — the CPU reference, in this stage order: linearize (LibRaw's own
+  black-subtracted, 16-bit-scaled output, per `linear_input.rs`) → white balance (as-shot
+  `cam_mul`, only for the ForwardMatrix branch below) → camera→XYZ(D50) (`cct.rs`'s
+  illuminant-interpolated matrix — the white-point *search* always uses the ColorMatrix inverse,
+  regardless of ForwardMatrix availability, per the DNG spec; the *final* matrix uses ForwardMatrix
+  when both illuminants have one, which then expects white-balanced input, or the ColorMatrix
+  fallback, which expects raw un-white-balanced input since its Bradford adaptation already
+  corrects the illuminant) → working space → HueSatMap (in the representation
+  `ProfileHueSatMapEncoding` specifies — linear when absent/0, sRGB-encoded when 1; there is no
+  "gamma 1.8" encoding in the DNG spec) → baseline exposure offset → LookTable (per its own
+  `ProfileLookTableEncoding`) → tone curve → sRGB.
 - **`deltae.rs`** — CIEDE2000 (Sharma, Wu & Dalal 2005) plus sRGB→Lab conversion, tested against
   that paper's own published near-identical-color test pairs (the classic ΔE00≈1.0000 hue-wrap
   edge case several independent implementations get wrong).
@@ -135,10 +140,12 @@ normal `clippy`/`test` jobs.
   ΔE-style perceptual library isn't worth a new dependency for a formula this size. Also, unlike
   `nicti-prowl`, the comparison here needs Lab-space CIEDE2000 specifically (the ADR's own decision
   rule), not a generic image-similarity score.
-- **Reproducing Adobe's exact tone-curve spline / HueSatMap perceptual encoding** — both are
-  undisclosed; this ADR uses documented, standard stand-ins (Fritsch-Carlson monotonic spline;
-  1/1.8 gamma encoding) and lets the ΔE measurement (not a claim of bit-exact reproduction) be the
-  actual bar.
+- **Reproducing Adobe's exact tone-curve spline** — undisclosed; this ADR uses a documented,
+  standard stand-in (Fritsch-Carlson monotonic spline) and lets the ΔE measurement (not a claim of
+  bit-exact reproduction) be the actual bar. (The HueSatMap/LookTable representation itself is
+  *not* a stand-in — `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` are real DNG-spec tags,
+  parsed directly; an earlier draft of this ADR incorrectly described a "1/1.8 gamma" guess here,
+  caught during review before this ADR's first merge.)
 
 ## Measured results
 
@@ -146,11 +153,11 @@ normal `clippy`/`test` jobs.
 neither can exist in this sandbox, see Context). Not fabricated here.
 
 - **Reference NEFs**: 6-10 Z8 files (mixed HE/HE*/Lossless, varied scenes including saturated
-  colors and skin/fur tones) pulled from
-  `H:\Photos\Furries\Socials\2025\2025-12-27 - RAWs`.
+  colors and skin/fur tones) pulled from the user's own source NEF folder (local path, not
+  committed here — see `docs/research/calico-color-pipeline.md`).
 - **LRC exports**: 16-bit TIFF, sRGB, **two sets** — Adobe Standard (or Adobe Color) and Adobe
   Vivid — all develop sliders zeroed, As Shot white balance, no lens corrections/sharpening/NR/
-  crop. Exported to `G:\Export\nicti`.
+  crop. Exported to the user's local export folder (not committed here).
 - **Procedure**: `retina dump-linear <nef> --out <dir>` for each reference NEF, then
   `calico render <tiff> <json> --dcp <path-to-installed-dcp> [--look <path-to-vivid-xmp>] --space
   <candidate> --out <png>` for each working-space candidate, then `calico compare <ours.png>

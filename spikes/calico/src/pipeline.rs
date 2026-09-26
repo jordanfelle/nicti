@@ -1,30 +1,32 @@
 //! CPU reference pipeline: linear camera RGB (from `retina dump-linear`) -> a display-referred
 //! image in a chosen working space, following ADR-0021's stage order.
 //!
-//! HueSatMap/LookTable application (DNG spec 6.3.7) is defined over a nonlinear ("gamma-encoded")
-//! ProPhoto RGB representation regardless of the pipeline's own working-space choice -- this uses
-//! a standard 1/1.8 power curve as a documented approximation of ACR's own encoding (undisclosed
-//! exactly), consistent with several independent open-source DCP implementations' public
-//! write-ups. See ADR-0021's Candidates/Deferred sections; this is exactly the kind of fidelity
-//! gap the user's reference-machine ΔE pass is meant to catch.
+//! HueSatMap/LookTable application (DNG spec 6.3.7) is defined over the representation each
+//! table's own `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` tag specifies (`Linear` when
+//! the tag is absent, per spec -- there is no "gamma 1.8" encoding in the spec itself; an earlier
+//! draft of this pipeline assumed one unconditionally, see dcp.rs's `TableEncoding`).
 
 use image::{ImageBuffer, Rgb, RgbImage};
 
-use crate::cct::{solve_camera_to_xyz, Illuminant};
-use crate::dcp::DcpProfile;
+use crate::cct::{solve_camera_to_xyz, CameraToXyz, Illuminant};
+use crate::dcp::{DcpProfile, TableEncoding};
 use crate::huesatmap::{hsv_to_rgb, rgb_to_hsv, HueSatMap};
 use crate::linear_input::{linearize_sample, LinearInput};
 use crate::matrix::{mat_vec_mul, Vec3};
 use crate::tonecurve::ToneCurve;
-use crate::workspace::{srgb_oetf, Space, WorkingSpace};
+use crate::workspace::{srgb_eotf, srgb_oetf, Space, WorkingSpace};
 
-const PROPHOTO_GAMMA: f64 = 1.8;
-
-fn prophoto_encode(c: f64) -> f64 {
-    c.max(0.0).powf(1.0 / PROPHOTO_GAMMA)
+fn table_encode(encoding: TableEncoding, c: f64) -> f64 {
+    match encoding {
+        TableEncoding::Linear => c.max(0.0),
+        TableEncoding::Srgb => srgb_oetf(c.max(0.0)),
+    }
 }
-fn prophoto_decode(c: f64) -> f64 {
-    c.max(0.0).powf(PROPHOTO_GAMMA)
+fn table_decode(encoding: TableEncoding, c: f64) -> f64 {
+    match encoding {
+        TableEncoding::Linear => c,
+        TableEncoding::Srgb => srgb_eotf(c),
+    }
 }
 
 /// Blends two hue-sat maps' *sampled output* at the same (hue, sat, val) query point by `weight`
@@ -53,11 +55,12 @@ fn apply_hue_sat(
     map1: &HueSatMap,
     map2: Option<&HueSatMap>,
     weight: f64,
+    encoding: TableEncoding,
 ) -> Vec3 {
     let encoded = [
-        prophoto_encode(rgb_linear_prophoto[0]),
-        prophoto_encode(rgb_linear_prophoto[1]),
-        prophoto_encode(rgb_linear_prophoto[2]),
+        table_encode(encoding, rgb_linear_prophoto[0]),
+        table_encode(encoding, rgb_linear_prophoto[1]),
+        table_encode(encoding, rgb_linear_prophoto[2]),
     ];
     let hsv = rgb_to_hsv(encoded);
     let adj = sample_blended(map1, map2, hsv[0], hsv[1], hsv[2], weight);
@@ -68,15 +71,15 @@ fn apply_hue_sat(
     ];
     let out_encoded = hsv_to_rgb(new_hsv);
     [
-        prophoto_decode(out_encoded[0]),
-        prophoto_decode(out_encoded[1]),
-        prophoto_decode(out_encoded[2]),
+        table_decode(encoding, out_encoded[0]),
+        table_decode(encoding, out_encoded[1]),
+        table_decode(encoding, out_encoded[2]),
     ]
 }
 
 pub struct RenderOptions<'a> {
     pub profile: &'a DcpProfile,
-    pub look: Option<&'a HueSatMap>,
+    pub look: Option<(&'a HueSatMap, TableEncoding)>,
     pub working_space: WorkingSpace,
     pub tone_curve: &'a ToneCurve,
 }
@@ -106,7 +109,7 @@ pub fn render(input: &LinearInput, opts: &RenderOptions) -> RgbImage {
         color_matrix: profile.color_matrix2,
         forward_matrix: profile.forward_matrix2,
     };
-    let (cct, camera_to_xyz_d50) = solve_camera_to_xyz(neutral, &illum1, &illum2);
+    let (cct, camera_to_xyz) = solve_camera_to_xyz(neutral, &illum1, &illum2);
     let hue_sat_weight =
         crate::cct::interpolation_weight(cct, profile.illuminant1_cct, profile.illuminant2_cct);
 
@@ -129,6 +132,9 @@ pub fn render(input: &LinearInput, opts: &RenderOptions) -> RgbImage {
             ];
             // WB via as-shot multipliers, normalized so green is unity (the conventional DNG
             // AsShotNeutral scaling -- absolute scale doesn't matter here, only channel ratios).
+            // Only feed this to the matrix when it's the ForwardMatrix (WhiteBalanced) branch --
+            // the ColorMatrix (Raw) branch's Bradford adaptation already corrects the illuminant,
+            // so white-balancing *and* applying that matrix would double-correct it.
             let g = meta.cam_mul[1] as f64;
             let wb: Vec3 = [
                 cam_rgb[0] * (meta.cam_mul[0] as f64 / g),
@@ -136,13 +142,20 @@ pub fn render(input: &LinearInput, opts: &RenderOptions) -> RgbImage {
                 cam_rgb[2] * (meta.cam_mul[2] as f64 / g),
             ];
 
-            let xyz_d50 = mat_vec_mul(&camera_to_xyz_d50, wb);
+            let xyz_d50 = match &camera_to_xyz {
+                CameraToXyz::WhiteBalanced(m) => mat_vec_mul(m, wb),
+                CameraToXyz::Raw(m) => mat_vec_mul(m, cam_rgb),
+            };
 
             let prophoto_rgb = mat_vec_mul(&prophoto.from_xyz_d50, xyz_d50);
             let hue_sat_applied = match (&profile.hue_sat_map1, &profile.hue_sat_map2) {
-                (Some(map1), map2) => {
-                    apply_hue_sat(prophoto_rgb, map1, map2.as_ref(), hue_sat_weight)
-                }
+                (Some(map1), map2) => apply_hue_sat(
+                    prophoto_rgb,
+                    map1,
+                    map2.as_ref(),
+                    hue_sat_weight,
+                    profile.hue_sat_map_encoding,
+                ),
                 (None, _) => prophoto_rgb,
             };
 
@@ -153,7 +166,7 @@ pub fn render(input: &LinearInput, opts: &RenderOptions) -> RgbImage {
             ];
 
             let looked = match opts.look {
-                Some(look) => apply_hue_sat(exposed, look, None, 1.0),
+                Some((look, encoding)) => apply_hue_sat(exposed, look, None, 1.0, encoding),
                 None => exposed,
             };
 

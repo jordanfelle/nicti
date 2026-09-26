@@ -47,44 +47,47 @@ pub struct Illuminant {
 /// D50 white point, the DNG profile connection space.
 const D50: Vec3 = [0.9642, 1.0, 0.8249];
 
+/// The two DNG-spec camera->XYZ(D50) matrix contracts, distinguished because callers (`pipeline.rs`)
+/// must feed each the right kind of camera-RGB input:
+/// - **ForwardMatrix always expects *white-balanced* input** (each channel already divided by
+///   AsShotNeutral) -- DNG spec 6.3.7.
+/// - **The ColorMatrix-derived fallback expects raw, *not* white-balanced input** -- it maps
+///   un-white-balanced camera RGB (calibrated under the estimated illuminant) to XYZ relative to
+///   that illuminant's own white, and the Bradford step folded into this matrix does the
+///   white-point correction instead of a separate per-pixel WB multiply. Applying `cam_mul` WB
+///   *and* this matrix double-corrects the illuminant (a gray subject renders with a color cast).
+pub enum CameraToXyz {
+    Raw(Mat3),
+    WhiteBalanced(Mat3),
+}
+
 /// Iteratively finds the shooting illuminant's CCT and the corresponding camera->XYZ(D50) matrix
 /// for a given AsShotNeutral (camera-space RGB of a neutral subject, i.e. proportional to
 /// `1/cam_mul`).
 ///
-/// Returns `(cct, camera_to_xyz_d50)`. When both matrices carry a `ForwardMatrix`, that's used
-/// directly (DNG spec 6.3.7: ForwardMatrix already maps camera -> XYZ(D50), no AnalogBalance/
-/// chromatic-adaptation step needed). Otherwise the interpolated `ColorMatrix` (XYZ(D50) ->
-/// camera) is inverted, which yields camera -> XYZ *relative to the estimated illuminant's own
-/// white*, then Bradford-adapted back to D50 (the DNG spec's documented fallback path for
-/// cameras without a ForwardMatrix).
+/// The white-point search (the iteration below) always uses the interpolated `ColorMatrix`
+/// inverse applied to `neutral_camera` -- per the DNG spec, this is true regardless of whether a
+/// `ForwardMatrix` exists, because `ForwardMatrix` expects already-white-balanced input, which
+/// isn't known until this search converges. `ForwardMatrix` (when both illuminants have one) is
+/// used only for the *final* matrix, after CCT convergence.
 pub fn solve_camera_to_xyz(
     neutral_camera: Vec3,
     illum1: &Illuminant,
     illum2: &Illuminant,
-) -> (f64, Mat3) {
+) -> (f64, CameraToXyz) {
     let mut cct = 5000.0;
+    let mut last_xy = cct_to_approx_xy(cct);
     for _ in 0..16 {
         let g = interpolation_weight(cct, illum1.cct, illum2.cct);
-        let camera_to_xyz = match (illum1.forward_matrix, illum2.forward_matrix) {
-            (Some(f1), Some(f2)) => mat_add_scaled(&f2, &f1, g),
-            _ => {
-                let color_matrix = mat_add_scaled(&illum2.color_matrix, &illum1.color_matrix, g);
-                let inv = mat_invert(&color_matrix);
-                // `inv` maps camera -> XYZ relative to the *estimated illuminant's* white, since
-                // ColorMatrix was calibrated to map that illuminant's neutral to XYZ(D50)'s
-                // neutral without a separate adaptation step baked in (DNG spec 6.3.7). Re-adapt
-                // to D50 so both code paths return the same reference white.
-                let illum_white = xyz_from_xy(cct_to_approx_xy(cct).0, cct_to_approx_xy(cct).1);
-                let adapt = bradford_adapt(illum_white, D50);
-                crate::matrix::mat_mul(&adapt, &inv)
-            }
-        };
-        let xyz = mat_vec_mul(&camera_to_xyz, neutral_camera);
+        let color_matrix = mat_add_scaled(&illum2.color_matrix, &illum1.color_matrix, g);
+        let inv = mat_invert(&color_matrix);
+        let xyz = mat_vec_mul(&inv, neutral_camera);
         let sum = xyz[0] + xyz[1] + xyz[2];
         if sum.abs() < 1e-12 {
             break;
         }
         let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+        last_xy = (x, y);
         let new_cct = xy_to_cct_mccamy(x, y).clamp(1500.0, 25000.0);
         if (new_cct - cct).abs() < 1.0 {
             cct = new_cct;
@@ -93,17 +96,20 @@ pub fn solve_camera_to_xyz(
         cct = new_cct;
     }
     let g = interpolation_weight(cct, illum1.cct, illum2.cct);
-    let camera_to_xyz = match (illum1.forward_matrix, illum2.forward_matrix) {
-        (Some(f1), Some(f2)) => mat_add_scaled(&f2, &f1, g),
+    let matrix = match (illum1.forward_matrix, illum2.forward_matrix) {
+        (Some(f1), Some(f2)) => CameraToXyz::WhiteBalanced(mat_add_scaled(&f2, &f1, g)),
         _ => {
             let color_matrix = mat_add_scaled(&illum2.color_matrix, &illum1.color_matrix, g);
             let inv = mat_invert(&color_matrix);
-            let (ix, iy) = cct_to_approx_xy(cct);
-            let adapt = bradford_adapt(xyz_from_xy(ix, iy), D50);
-            crate::matrix::mat_mul(&adapt, &inv)
+            // Bradford-adapt from the *actual solved* chromaticity (last_xy), not a re-derived
+            // Planckian-locus point for the final CCT -- the latter drops the tint (Duv) of the
+            // real neutral, which `last_xy` (from the converged iteration) already captures.
+            let illum_white = xyz_from_xy(last_xy.0, last_xy.1);
+            let adapt = bradford_adapt(illum_white, D50);
+            CameraToXyz::Raw(crate::matrix::mat_mul(&adapt, &inv))
         }
     };
-    (cct, camera_to_xyz)
+    (cct, matrix)
 }
 
 /// Approximate Planckian-locus xy for a given CCT (Kim et al. 2002 approximation) -- used only to
@@ -167,8 +173,11 @@ mod tests {
             color_matrix: crate::matrix::IDENTITY,
             forward_matrix: None,
         };
-        let (cct, m) = solve_camera_to_xyz([1.0, 1.0, 1.0], &illum1, &illum2);
+        let (cct, matrix) = solve_camera_to_xyz([1.0, 1.0, 1.0], &illum1, &illum2);
         assert!(cct > 3000.0, "expected a mid/high CCT, got {cct}");
+        let CameraToXyz::Raw(m) = matrix else {
+            panic!("expected the ColorMatrix (Raw) branch: neither illuminant has a ForwardMatrix");
+        };
         let xyz = mat_vec_mul(&m, [1.0, 1.0, 1.0]);
         assert!(xyz[1] > 0.0);
     }

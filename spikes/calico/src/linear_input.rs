@@ -42,10 +42,15 @@ pub fn load(tiff_path: &Path, json_path: &Path) -> anyhow::Result<LinearInput> {
     Ok(LinearInput { meta, image })
 }
 
-/// Per-channel neutral estimate: raw-domain black-subtracted, normalized to [0, 1] by
-/// `black`/`maximum` (identical scaling every LibRaw decode applies, per shim.h).
-pub fn linearize_sample(raw: u16, channel: usize, meta: &LinearMeta) -> f64 {
-    let black = meta.black as f64 + meta.cblack[channel] as f64;
-    let white = meta.maximum as f64;
-    ((raw as f64 - black) / (white - black)).max(0.0)
+/// `retina dump-linear`'s `LibRaw::dcraw_process()` call already runs `scale_colors()` (black
+/// subtraction + per-channel scaling to the 16-bit output range) before this ever sees a sample --
+/// `shim.h`'s own doc comment says so. An earlier version of this function re-subtracted
+/// `black`/`cblack` and re-divided by the raw sensor `maximum` on top of that, which
+/// double-applies the black-level correction and uses the wrong (pre-scaling) denominator; for a
+/// 14-bit sensor this can push values above `1.0` and corrupts every downstream color/tone stage.
+/// `meta.black`/`meta.maximum`/`meta.cblack` are kept in the sidecar for reference (and because
+/// LibRaw's own `maximum` field can change *during* `scale_colors()`, so a later consumer
+/// shouldn't assume it means "pre-scaling sensor max"), not consumed here.
+pub fn linearize_sample(raw: u16, _channel: usize, _meta: &LinearMeta) -> f64 {
+    raw as f64 / u16::MAX as f64
 }

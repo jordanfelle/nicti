@@ -3,7 +3,7 @@
 //! hand-computed expected sRGB output. Exercises the full `pipeline.rs::render` path without any
 //! real NEF or DCP.
 
-use calico::dcp::DcpProfile;
+use calico::dcp::{DcpProfile, TableEncoding};
 use calico::matrix::{diag, mat_vec_mul, xyz_from_xy, IDENTITY};
 use calico::pipeline::{render, RenderOptions};
 use calico::tonecurve::ToneCurve;
@@ -31,6 +31,8 @@ fn synthetic_profile() -> DcpProfile {
         look_table: None,
         tone_curve_points: None,
         baseline_exposure_offset: 0.0,
+        hue_sat_map_encoding: TableEncoding::Linear,
+        look_table_encoding: TableEncoding::Linear,
     }
 }
 
@@ -38,19 +40,21 @@ fn synthetic_profile() -> DcpProfile {
 fn neutral_gray_renders_to_neutral_srgb() {
     let width = 2;
     let height = 1;
-    // Raw samples: black=0, maximum=1000, a mid-gray neutral value of 500 on every channel, no
-    // per-channel black offset, and a 1:1 as-shot WB (cam_mul all equal) so no correction is
-    // applied beyond linearization.
+    // `retina dump-linear`'s output is already black-subtracted and scaled to the full 16-bit
+    // range by LibRaw's own `scale_colors()` (see `linear_input.rs::linearize_sample`), so a raw
+    // sample of `u16::MAX / 2` is a mid-gray neutral value here -- `black`/`maximum` are no longer
+    // consulted by `linearize_sample` and are set to nonsense-but-harmless values below to prove
+    // that. 1:1 as-shot WB (cam_mul all equal) so no correction is applied beyond linearization.
     let mut image: ImageBuffer<Rgb<u16>, Vec<u16>> = ImageBuffer::new(width, height);
     for x in 0..width {
-        image.put_pixel(x, 0, Rgb([500, 500, 500]));
+        image.put_pixel(x, 0, Rgb([u16::MAX / 2, u16::MAX / 2, u16::MAX / 2]));
     }
     let meta = calico::linear_input::LinearMeta {
         make: "Test".into(),
         model: "Synthetic".into(),
         width,
         height,
-        black: 0,
+        black: 999,
         maximum: 1000,
         cam_mul: [1.0, 1.0, 1.0, 1.0],
         pre_mul: [1.0, 1.0, 1.0, 1.0],

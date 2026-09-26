@@ -30,7 +30,10 @@ fn rgb_to_hsv(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
-    let h = hsv.x;
+    // Wrap into [0, 360) -- new_hsv.x (hue + a HueSatMap shift) can land outside that range when
+    // the shift crosses the 0/360 seam, and WGSL's `%` keeps the dividend's sign (unlike the CPU
+    // `rem_euclid` in huesatmap.rs), so an unwrapped negative h picks the wrong sector below.
+    let h = hsv.x - 360.0 * floor(hsv.x / 360.0);
     let s = clamp(hsv.y, 0.0, 1.0);
     let v = hsv.z;
     let c = v * s;
@@ -64,16 +67,18 @@ fn apply_hue_sat_map(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num
     let rgb = input_pixels[flat_index].rgb;
     let hsv = rgb_to_hsv(rgb);
 
-    // Texture coordinates: hue wraps via the sampler's Repeat address mode (u in [0,1) maps to a
-    // full 360deg turn), sat/val clamp via ClampToEdge. Hardware trilinear filtering treats texel
-    // i's *center* as sitting at (i+0.5)/N, not at i/N -- huesatmap.rs's CPU sampler places table
-    // entry i's data exactly at grid position i/N (hue, a tiling axis) or i/(N-1) (sat/val, an
-    // edge-to-edge axis), so both need a coordinate remap or the GPU silently samples a half-texel
-    // off (confirmed: this was exactly the size of `gpu_parity`'s first real mismatch, a bug an
-    // earlier draft here didn't catch until that test actually ran).
+    // Texture coordinates: gpu.rs's upload maps texture width -> saturation, height -> hue,
+    // depth -> value (matching map.data's natural value-outer/hue-mid/saturation-inner memory
+    // order with no transpose needed). Hue wraps via the sampler's Repeat address mode on v (u in
+    // [0,1) maps to a full 360deg turn), sat/val clamp via ClampToEdge. Hardware trilinear
+    // filtering treats texel i's *center* as sitting at (i+0.5)/N, not at i/N -- huesatmap.rs's
+    // CPU sampler places table entry i's data exactly at grid position i/N (hue, a tiling axis)
+    // or i/(N-1) (sat/val, an edge-to-edge axis), so both need a coordinate remap or the GPU
+    // silently samples a half-texel off (confirmed: this was exactly the size of `gpu_parity`'s
+    // first real mismatch, a bug an earlier draft here didn't catch until that test actually ran).
     let dims = vec3<f32>(textureDimensions(hue_sat_map));
-    let u = hsv.x / 360.0 + 0.5 / dims.x;
-    let v = select((hsv.y * (dims.y - 1.0) + 0.5) / dims.y, 0.5, dims.y <= 1.0);
+    let u = select((hsv.y * (dims.x - 1.0) + 0.5) / dims.x, 0.5, dims.x <= 1.0);
+    let v = hsv.x / 360.0 + 0.5 / dims.y;
     let w = select((hsv.z * (dims.z - 1.0) + 0.5) / dims.z, 0.5, dims.z <= 1.0);
     let adj = textureSampleLevel(hue_sat_map, hue_sat_sampler, vec3<f32>(u, v, w), 0.0).xyz;
 

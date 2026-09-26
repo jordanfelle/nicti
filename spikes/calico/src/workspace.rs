@@ -87,6 +87,18 @@ pub fn srgb_oetf(linear: f64) -> f64 {
     }
 }
 
+/// Inverse of [`srgb_oetf`]: encoded sRGB-like signal -> linear. Used for
+/// `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` value 1 (DNG spec 6.3.7's "sRGB"
+/// representation for a HueSatMap/LookTable's HSV coordinates).
+pub fn srgb_eotf(encoded: f64) -> f64 {
+    let c = encoded.clamp(0.0, 1.0);
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,10 +11,14 @@ Full reasoning/history: `docs/decisions/color.md`.
 
 - **Color pipeline (#38)** — `docs/adr/0021`: **Proposed**, pending a reference-machine ΔE
   measurement run against real LRC exports (no LRC install / real Adobe profile / reference image
-  exists in this sandbox — ADR-0003 forbids adding one). Stage order: linearize → WB (`cam_mul`) →
-  camera→XYZ(D50) (CCT-interpolated `ColorMatrix`/`ForwardMatrix`, DNG spec 6.3.7) → working space
-  → HueSatMap (gamma-encoded linear-ProPhoto RGB, 1/1.8 approximation) → baseline exposure →
-  LookTable → tone curve (Fritsch-Carlson monotonic spline) → sRGB.
+  exists in this sandbox — ADR-0003 forbids adding one). Stage order: linearize (LibRaw's own
+  black-subtracted, 16-bit-scaled output) → WB (`cam_mul`, ForwardMatrix branch only) →
+  camera→XYZ(D50) (CCT-interpolated `ColorMatrix`/`ForwardMatrix`, DNG spec 6.3.7 — white-point
+  *search* always uses ColorMatrix, ForwardMatrix only for the final matrix, expects
+  white-balanced input; ColorMatrix fallback expects raw input) → working space → HueSatMap (per
+  `ProfileHueSatMapEncoding`: linear when absent/0, sRGB when 1 — no "gamma 1.8" in the spec) →
+  baseline exposure → LookTable (per `ProfileLookTableEncoding`) → tone curve (Fritsch-Carlson
+  monotonic spline) → sRGB.
 - **Profile source: parse the user's own installed Adobe `.dcp`/`.xmp` at runtime**, never bundle
   one (ADR-0003) — falls back to LibRaw's built-in camera matrix when none is installed. Adobe
   Raw "Look" `.xmp` profiles (e.g. Adobe Vivid) have an undocumented embedded look-table encoding
@@ -22,9 +26,14 @@ Full reasoning/history: `docs/decisions/color.md`.
   (`UnrecognizedTableFormat`) rather than guessing; unresolved pending a real sample file.
 - **Working-space candidates**: linear ProPhoto (ACR's own), Rec.2020, ACEScg — picked by lowest
   measured ΔE00 against LRC exports, not decided yet.
+- **HueSatMap storage order**: value outermost, hue middle, saturation innermost (DNG SDK's
+  `dng_hue_sat_map::SetDivisions`) — `huesatmap.rs`'s `index()` reads the parsed bytes directly in
+  this order, no transpose in `dcp.rs`.
 - **3D-texture GPU kernel**: first 3D-texture pattern in this repo (glint's own kernels are
-  storage-buffer-only, ADR-0005). Hardware trilinear filtering centers texel `i` at `(i+0.5)/N`,
-  not `i/N` — `huesatmap.rs`'s CPU sampler uses the latter; `gpu.rs`/`shaders/color.wgsl` remap
+  storage-buffer-only, ADR-0005). Texture axes: width=saturation, height=hue, depth=value (matches
+  the storage order above with no transpose on upload); sampler Repeat on height (hue wraps),
+  ClampToEdge on width/depth. Hardware trilinear filtering centers texel `i` at `(i+0.5)/N`, not
+  `i/N` — `huesatmap.rs`'s CPU sampler uses the latter; `gpu.rs`/`shaders/color.wgsl` remap
   coordinates accordingly. CPU/GPU parity confirmed on lavapipe (~0.05-0.06 max ΔRGB, attributed
   to lavapipe's own lower-precision filtering, not a bug — verified via a separate `textureLoad`
   nearest-fetch readback check).

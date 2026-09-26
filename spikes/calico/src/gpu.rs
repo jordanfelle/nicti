@@ -78,9 +78,14 @@ impl GpuContext {
 }
 
 fn upload_hue_sat_texture(ctx: &GpuContext, map: &HueSatMap) -> (wgpu::TextureView, wgpu::Sampler) {
+    // `map.data`'s natural memory order is value-outermost/hue-middle/saturation-innermost (see
+    // huesatmap.rs's module doc -- this is the DNG SDK's own on-disk order, not a choice made
+    // here). A `write_texture` upload is row-major with the texture's *width* varying fastest, so
+    // texture width maps to saturation (not hue) to upload `map.data` byte-for-byte with no
+    // transpose; the shader and sampler address modes below follow the same axis assignment.
     let size = wgpu::Extent3d {
-        width: map.hue_divisions as u32,
-        height: map.sat_divisions as u32,
+        width: map.sat_divisions as u32,
+        height: map.hue_divisions as u32,
         depth_or_array_layers: map.val_divisions as u32,
     };
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
@@ -118,8 +123,8 @@ fn upload_hue_sat_texture(ctx: &GpuContext, map: &HueSatMap) -> (wgpu::TextureVi
         bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(map.hue_divisions as u32 * 8), // 4 x f16 = 8 bytes/texel
-            rows_per_image: Some(map.sat_divisions as u32),
+            bytes_per_row: Some(map.sat_divisions as u32 * 8), // 4 x f16 = 8 bytes/texel
+            rows_per_image: Some(map.hue_divisions as u32),
         },
         size,
     );
@@ -127,8 +132,8 @@ fn upload_hue_sat_texture(ctx: &GpuContext, map: &HueSatMap) -> (wgpu::TextureVi
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("hue_sat_sampler"),
-        address_mode_u: wgpu::AddressMode::Repeat, // hue wraps
-        address_mode_v: wgpu::AddressMode::ClampToEdge, // saturation
+        address_mode_u: wgpu::AddressMode::ClampToEdge, // saturation
+        address_mode_v: wgpu::AddressMode::Repeat,      // hue wraps
         address_mode_w: wgpu::AddressMode::ClampToEdge, // value
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,

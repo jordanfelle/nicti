@@ -3,10 +3,12 @@
 //! (section 6.3.7's "look" and "hue/sat map" tables share this exact table format and application
 //! rule -- calico's `HueSatMap` type serves both `dcp.rs` tags).
 //!
-//! Table layout matches the DNG spec: `hue_divisions * sat_divisions * val_divisions` entries,
-//! each `[hue_shift_deg, sat_scale, val_scale]`, in hue-major/sat-mid/val-minor order (hue varies
-//! slowest). The hue axis wraps (entry `hue_divisions` is entry `0` again, no duplicate stored);
-//! the sat/val axes clamp at the ends.
+//! Table layout matches the DNG SDK's actual storage order (`dng_hue_sat_map::SetDivisions`:
+//! `fHueStep = satDivisions`, `fValStep = hueDivisions * fHueStep`) -- **value outermost, hue in
+//! the middle, saturation innermost** (saturation varies fastest), not the hue-major order this
+//! module's doc originally (and wrongly) claimed. `hue_divisions * sat_divisions * val_divisions`
+//! entries, each `[hue_shift_deg, sat_scale, val_scale]`. The hue axis wraps (entry
+//! `hue_divisions` is entry `0` again, no duplicate stored); the sat/val axes clamp at the ends.
 
 #[derive(Debug, Clone)]
 pub struct HueSatMap {
@@ -19,7 +21,8 @@ pub struct HueSatMap {
 
 impl HueSatMap {
     fn index(&self, h: usize, s: usize, v: usize) -> [f32; 3] {
-        let idx = (v * self.sat_divisions + s) * self.hue_divisions + h;
+        // DNG SDK order: value outermost, hue middle, saturation innermost.
+        let idx = (v * self.hue_divisions + h) * self.sat_divisions + s;
         self.data[idx]
     }
 

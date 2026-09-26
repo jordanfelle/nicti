@@ -48,11 +48,17 @@ pub fn dump_linear(path: &Path, out_dir: &Path) -> anyhow::Result<()> {
     handle
         .decode(&data)
         .map_err(|e| anyhow::anyhow!("decode {}: {e}", path.display()))?;
+
+    // Captured *before* `process_linear()`, not after: LibRaw's `scale_colors()` (run inside
+    // `dcraw_process()`) can mutate `imgdata.color.maximum` as part of applying the black-level
+    // correction, so a post-process read of `black`/`maximum` doesn't necessarily reflect the
+    // sensor-native values the sidecar's doc comment promises.
+    let meta = handle.metadata();
+
     handle
         .process_linear()
         .map_err(|e| anyhow::anyhow!("process_linear {}: {e}", path.display()))?;
 
-    let meta = handle.metadata();
     let linear = handle.linear_metadata();
     let image = handle.linear_image()?;
 

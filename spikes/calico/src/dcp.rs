@@ -44,17 +44,39 @@ const TAG_PROFILE_LOOK_TABLE_DIMS: u16 = 51958;
 const TAG_PROFILE_LOOK_TABLE_DATA: u16 = 51959;
 const TAG_PROFILE_TONE_CURVE: u16 = 50940;
 const TAG_BASELINE_EXPOSURE_OFFSET: u16 = 51109;
+const TAG_PROFILE_HUE_SAT_MAP_ENCODING: u16 = 51107;
+const TAG_PROFILE_LOOK_TABLE_ENCODING: u16 = 51108;
+
+/// `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` (DNG 1.4+, spec section 6.3.7): which
+/// representation a HueSatMap/LookTable's HSV coordinates are defined in. A missing tag means
+/// `Linear` (the spec's default) -- there is no "gamma 1.8" encoding in the spec at all, contrary
+/// to an earlier draft of this parser that assumed one unconditionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableEncoding {
+    Linear,
+    Srgb,
+}
+
+fn table_encoding(tags: &HashMap<u16, TagValue>, tag: u16) -> TableEncoding {
+    match tags.get(&tag) {
+        Some(TagValue::Longs(v)) if v.first() == Some(&1) => TableEncoding::Srgb,
+        _ => TableEncoding::Linear,
+    }
+}
 
 /// DNG's `LightSource` enum values relevant here (spec section 6.3.7's calibration illuminants).
 /// Not exhaustive -- only the values real DCPs commonly use.
 pub fn light_source_to_cct(value: u16) -> f64 {
     match value {
+        1 => 5500.0,  // Daylight
         17 => 2856.0, // Standard Light A
         18 => 4874.0, // Standard Light B
         19 => 6774.0, // Standard Light C
-        20 => 6504.0, // D65
-        21 => 6500.0, // Daylight
-        23 => 5500.0, // Fine Weather / D55
+        20 => 5503.0, // D55
+        21 => 6504.0, // D65
+        22 => 7504.0, // D75
+        23 => 5003.0, // D50
+        24 => 3200.0, // ISO studio tungsten
         // A raw Kelvin value packed directly is rare in practice for DCPs (they use the named
         // enum), so an unrecognized value defaults to D65 rather than panicking -- a wrong
         // default here shows up immediately in `calico compare`'s numbers, not silently.
@@ -284,6 +306,10 @@ pub struct DcpProfile {
     pub tone_curve_points: Option<Vec<(f64, f64)>>,
     /// EV offset applied before the tone curve, if the profile specifies one.
     pub baseline_exposure_offset: f64,
+    /// `ProfileHueSatMapEncoding`; defaults to `Linear` when absent, per spec.
+    pub hue_sat_map_encoding: TableEncoding,
+    /// `ProfileLookTableEncoding`; defaults to `Linear` when absent, per spec.
+    pub look_table_encoding: TableEncoding,
 }
 
 impl DcpProfile {
@@ -334,16 +360,13 @@ impl DcpProfile {
             _ => String::from("(unnamed)"),
         };
 
-        // UNVERIFIED against a real DCP, per ADR-0021/ADR-0003: this assumes the DNG spec's
-        // ProfileHueSatMapData/ProfileLookTableData tables are stored hue-major/sat-mid/val-minor
-        // (hue slowest-varying), matching `HueSatMap::index`'s `(v*sat+s)*hue+h` layout -- read
-        // from memory, not cross-checked against a real file, since none can exist in this
-        // sandbox. If it's actually the reverse nesting, every entry gets silently assigned to
-        // the wrong (hue, sat, val) grid point without any parse error to catch it. The
-        // reference-machine pass (docs/research/calico-color-pipeline.md) is the first point
-        // this can be checked for real -- verify with a known, distinctive real profile (e.g. one
-        // whose behavior at a specific hue/sat is visually obvious) before trusting this ADR's
-        // measured ΔE numbers as reflecting THIS table's stage rather than a mis-indexed one.
+        // The raw bytes here are copied straight from the file in on-disk order (no reordering),
+        // so `HueSatMap::index`'s formula is what determines which (hue, sat, val) grid point
+        // each entry lands on. That formula matches the DNG SDK's actual storage order (value
+        // outermost, hue middle, saturation innermost, per `dng_hue_sat_map::SetDivisions`) --
+        // still worth a sanity check against a real, distinctive profile during the
+        // reference-machine pass (docs/research/calico-color-pipeline.md), since no real DCP has
+        // been available to test against in this sandbox.
         let hue_sat_map = |dims_tag: u16, data_tag: u16| -> Option<HueSatMap> {
             let TagValue::Longs(dims) = tags.get(&dims_tag)? else {
                 return None;
@@ -353,10 +376,16 @@ impl DcpProfile {
             }
             let (hue_div, sat_div, val_div) =
                 (dims[0] as usize, dims[1] as usize, dims[2] as usize);
+            if hue_div == 0 || sat_div == 0 {
+                return None;
+            }
             let TagValue::Floats(values) = tags.get(&data_tag)? else {
                 return None;
             };
-            let expected = hue_div * sat_div * val_div.max(1) * 3;
+            let expected = hue_div
+                .checked_mul(sat_div)?
+                .checked_mul(val_div.max(1))?
+                .checked_mul(3)?;
             if values.len() != expected {
                 return None;
             }
@@ -373,11 +402,18 @@ impl DcpProfile {
         let tone_curve_points = match tags.get(&TAG_PROFILE_TONE_CURVE) {
             Some(TagValue::Floats(values)) if values.len() >= 4 && values.len() % 2 == 0 => {
                 #[allow(clippy::chunks_exact_to_as_chunks)]
-                let points = values
+                let points: Vec<(f64, f64)> = values
                     .chunks_exact(2)
                     .map(|c| (c[0] as f64, c[1] as f64))
                     .collect();
-                Some(points)
+                // `ToneCurve::new` asserts strictly-increasing x -- a malformed/adversarial DCP
+                // could otherwise panic the whole parse. Drop to the ACR default curve instead of
+                // trusting untrusted file content to satisfy that invariant.
+                if points.windows(2).all(|w| w[1].0 > w[0].0) {
+                    Some(points)
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -410,6 +446,8 @@ impl DcpProfile {
             look_table: hue_sat_map(TAG_PROFILE_LOOK_TABLE_DIMS, TAG_PROFILE_LOOK_TABLE_DATA),
             tone_curve_points,
             baseline_exposure_offset,
+            hue_sat_map_encoding: table_encoding(&tags, TAG_PROFILE_HUE_SAT_MAP_ENCODING),
+            look_table_encoding: table_encoding(&tags, TAG_PROFILE_LOOK_TABLE_ENCODING),
         })
     }
 }
@@ -501,6 +539,7 @@ mod tests {
     #[test]
     fn light_source_lookup_known_values() {
         assert_eq!(light_source_to_cct(17), 2856.0);
-        assert_eq!(light_source_to_cct(20), 6504.0);
+        assert_eq!(light_source_to_cct(20), 5503.0);
+        assert_eq!(light_source_to_cct(21), 6504.0);
     }
 }

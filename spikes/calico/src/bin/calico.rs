@@ -84,7 +84,7 @@ fn cmd_render(
             let look = calico::xmp_profile::parse(&text)
                 .map_err(|e| anyhow::anyhow!("parsing look profile {}: {e}", p.display()))?;
             eprintln!("using look profile '{}'", look.name);
-            Some(look.look_table)
+            Some((look.look_table, look.encoding))
         }
         None => None,
     };
@@ -96,7 +96,7 @@ fn cmd_render(
 
     let opts = RenderOptions {
         profile: &profile,
-        look: look.as_ref(),
+        look: look.as_ref().map(|(table, encoding)| (table, *encoding)),
         working_space: space,
         tone_curve: &tone_curve,
     };
@@ -124,7 +124,8 @@ fn cmd_compare(
     // comparison, per ADR-0021's decision rule.
     let step = 4u32;
     let mut diffs = Vec::new();
-    let mut heatmap = image::RgbImage::new(ours.width() / step, ours.height() / step);
+    let mut heatmap =
+        image::RgbImage::new(ours.width().div_ceil(step), ours.height().div_ceil(step));
 
     for y in (0..ours.height()).step_by(step as usize) {
         for x in (0..ours.width()).step_by(step as usize) {
