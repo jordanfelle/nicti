@@ -59,7 +59,7 @@ Constraints already fixed by earlier ADRs/docs:
   actually return the right disk's signature) is not, and stays exactly the "spec + tooling merged,
   baseline measurement deferred" gap ADR-0006/0007 describe. Every schema/fingerprint/relink/path
   finding below (the parts of the spike that never needed Windows at all) is real, measured
-  against this sandbox's Rust toolchain: 26 unit tests pass, `cargo clippy -p homing --all-targets
+  against this sandbox's Rust toolchain: 28 unit tests pass, `cargo clippy -p homing --all-targets
   --all-features -- -D warnings` is clean on both the native Linux target and the
   `x86_64-pc-windows-gnu` cross-compile, and the crate participates in the workspace's normal
   (non-path-gated) `clippy`/`test` jobs like `sniff` does. The volume-identity survival table and
@@ -212,7 +212,7 @@ real LRC-edited DNG, as hypothesized): TBD.
 
 ### Sandbox-measured (real, not TBD)
 
-- `cargo test -p homing --all-targets --all-features`: 26/26 unit tests pass (schema, fingerprint,
+- `cargo test -p homing --all-targets --all-features`: 28/28 unit tests pass (schema, fingerprint,
   path normalization, identity-key selection logic — everything not requiring a live Windows
   volume).
 - `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean.

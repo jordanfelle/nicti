@@ -176,6 +176,25 @@ fn current_volume_for(dir: &std::path::Path) -> Result<(String, volume::VolumeIn
     anyhow::bail!("no mounted volume found containing {}", dir.display())
 }
 
+/// The portion of `dir`'s canonicalized path that sits *below* `mount_point` -- what
+/// `insert_root`'s `rel_path` should be. Passing an empty string unconditionally (an earlier
+/// draft's bug) is only correct when `dir` *is* the volume root; if it's a subfolder (e.g.
+/// `H:\Photos`), an empty root_rel would make every asset resolve to `H:\<rel>` instead of
+/// `H:\Photos\<rel>`, silently pointing at the wrong path.
+fn root_rel_path_for(dir: &std::path::Path, mount_point: &str) -> Result<String> {
+    let abs = dir
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", dir.display()))?;
+    let abs_str = abs.to_string_lossy().replace('\\', "/");
+    let abs_str = abs_str.strip_prefix("//?/").unwrap_or(&abs_str);
+    let mp_norm = mount_point.trim_end_matches(['\\', '/']).replace('\\', "/");
+    Ok(abs_str
+        .strip_prefix(&mp_norm)
+        .unwrap_or("")
+        .trim_start_matches('/')
+        .to_string())
+}
+
 fn cmd_build(
     root_dir: &std::path::Path,
     db_path: &std::path::Path,
@@ -309,6 +328,7 @@ fn cmd_relink(scan_dir: &std::path::Path, db_path: &std::path::Path) -> Result<(
             Some(id) => id,
             None => {
                 let (identity_key, info, mount_point) = current_volume_for(scan_dir)?;
+                let root_rel = root_rel_path_for(scan_dir, &mount_point)?;
                 let vid = schema::upsert_volume(
                     &conn,
                     &identity_key,
@@ -318,7 +338,7 @@ fn cmd_relink(scan_dir: &std::path::Path, db_path: &std::path::Path) -> Result<(
                     &mount_point,
                     relink::now_unix(),
                 )?;
-                let rid = schema::insert_root(&conn, vid, "")?;
+                let rid = schema::insert_root(&conn, vid, &root_rel)?;
                 new_root_id = Some(rid);
                 rid
             }
@@ -363,4 +383,35 @@ fn cmd_bench(dir: &std::path::Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_rel_path_for;
+    use tempfile::TempDir;
+
+    #[test]
+    fn root_rel_path_for_is_empty_when_dir_is_the_volume_root() {
+        let dir = TempDir::new().unwrap();
+        let abs = dir.path().canonicalize().unwrap();
+        let mount_point = abs.to_string_lossy().replace('\\', "/");
+        assert_eq!(root_rel_path_for(dir.path(), &mount_point).unwrap(), "");
+    }
+
+    #[test]
+    fn root_rel_path_for_captures_a_subfolder_below_the_mount_point() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("Photos").join("2026");
+        std::fs::create_dir_all(&sub).unwrap();
+        let mount_point = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(
+            root_rel_path_for(&sub, &mount_point).unwrap(),
+            "Photos/2026"
+        );
+    }
 }

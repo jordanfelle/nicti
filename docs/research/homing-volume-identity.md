@@ -41,7 +41,7 @@ describe — flagged explicitly here rather than glossed over.
 What *is* real, from this sandbox:
 
 - `spikes/homing`'s cross-platform modules (`path.rs`, `schema.rs`, `fingerprint.rs`, `relink.rs`,
-  and `volume::identity_key`'s pure selection logic) compile and pass **26/26 unit tests**.
+  and `volume::identity_key`'s pure selection logic) compile and pass **28/28 unit tests**.
 - `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean on both the native
   Linux target and the `x86_64-pc-windows-gnu` cross-compile.
 - The full workspace sweep with `homing` added — `cargo fmt --all -- --check`, `cargo clippy
@@ -204,6 +204,22 @@ the current code before fixing, not applied blindly:
 
 Every fix above is covered by a new or extended unit test (26 total, up from 20 after the
 adversarial-review round). None of CodeRabbit's 9 findings were dismissed as invalid.
+
+**Second pass** (against the fix commit above) found 2 more, both real, both fixed:
+
+- **The new `root` registered for a relink's `scan_dir` always used an empty relative path** —
+  correct only when `scan_dir` *is* the volume root. If it's a subfolder (e.g. `H:\Photos`), the
+  stored chain would resolve to `H:\<rel>` instead of `H:\Photos\<rel>`, a wrong path. Fixed with a
+  new `root_rel_path_for` helper (mirrors `current_volume_for`'s own path-normalization logic),
+  covered by two new tests.
+- **`mbr_disk_signature`'s buffer had two real bugs**, not just an insufficient-size guess:
+  `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` doesn't reliably report the buffer size actually needed on
+  failure (per Microsoft's own documentation — no dependable `ERROR_INSUFFICIENT_BUFFER`-plus-size
+  contract), so a fixed 4-partition-slot guess could fail outright on a larger real MBR disk; and
+  the `Vec<u8>` buffer being cast to `*const DRIVE_LAYOUT_INFORMATION_EX` was never alignment-safe
+  in the first place (`Vec<u8>` only guarantees byte alignment). Fixed: a growing retry loop
+  (double the buffer on any failure, up to 8 attempts) over a properly-aligned
+  `Vec<DRIVE_LAYOUT_INFORMATION_EX>` buffer instead.
 
 ## Follow-ups filed, not solved inline
 

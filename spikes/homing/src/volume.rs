@@ -313,44 +313,63 @@ pub mod windows_impl {
         let device_path = format!(r"\\.\PhysicalDrive{disk_number}");
         let file = fs::File::open(&device_path).ok()?;
         let handle: HANDLE = file.as_raw_handle() as HANDLE;
+
         // `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`'s response is variable-length (a fixed header
-        // followed by a `PartitionEntry` array whose real size depends on the disk's actual
-        // partition count) -- the fields this function reads (`PartitionStyle`, the MBR/GPT
-        // union) sit in the fixed header, before that array, so a buffer sized for the header
-        // plus a handful of partition slots is enough for the call to succeed without needing
-        // to size it for every partition the disk might have.
-        const PARTITION_SLOTS: usize = 4;
-        let buf_size = std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>()
-            + PARTITION_SLOTS * std::mem::size_of::<PARTITION_INFORMATION_EX>();
-        let mut buf = vec![0u8; buf_size];
-        let mut returned: u32 = 0;
-        let ok = unsafe {
-            DeviceIoControl(
-                handle,
-                IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
-                std::ptr::null(),
-                0,
-                buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
-                &mut returned,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return None;
+        // followed by a `PartitionEntry` array sized by the disk's actual partition count).
+        // Microsoft's own guidance for this IOCTL is explicit that a too-small buffer isn't
+        // guaranteed to report back a usable required size (no reliable
+        // ERROR_INSUFFICIENT_BUFFER-plus-exact-size contract) -- the documented recovery is to
+        // retry with a doubled buffer on any failure, not to size it once from a fixed guess (an
+        // earlier draft's bug: a 4-partition guess that a real MBR disk with more partitions
+        // could exceed, silently losing the signature and, with it, `identity_key`). This also
+        // fixes a real alignment bug in that same earlier draft: `Vec<u8>` only guarantees
+        // `u8`-alignment, so casting its pointer to `*const DRIVE_LAYOUT_INFORMATION_EX` isn't
+        // sound even when it happens to work in practice -- `Vec<DRIVE_LAYOUT_INFORMATION_EX>`
+        // guarantees the buffer's alignment actually matches what the struct needs.
+        const MAX_ATTEMPTS: u32 = 8;
+        let mut element_count: usize = 1
+            + (4 * std::mem::size_of::<PARTITION_INFORMATION_EX>())
+                .div_ceil(std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>());
+        for _ in 0..MAX_ATTEMPTS {
+            let mut buf: Vec<DRIVE_LAYOUT_INFORMATION_EX> = (0..element_count)
+                .map(|_| DRIVE_LAYOUT_INFORMATION_EX::default())
+                .collect();
+            let byte_len = element_count * std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>();
+            let mut returned: u32 = 0;
+            let ok = unsafe {
+                DeviceIoControl(
+                    handle,
+                    IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+                    std::ptr::null(),
+                    0,
+                    buf.as_mut_ptr() as *mut _,
+                    byte_len as u32,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                // Don't try to distinguish "buffer too small" from any other failure via
+                // GetLastError -- this IOCTL doesn't reliably map to ERROR_INSUFFICIENT_BUFFER,
+                // per Microsoft's own docs. Just grow and retry; give up after MAX_ATTEMPTS.
+                element_count *= 2;
+                continue;
+            }
+            // SAFETY: DeviceIoControl succeeded; `buf`'s first element is a valid, aligned,
+            // fully-initialized `DRIVE_LAYOUT_INFORMATION_EX` (the header fields this function
+            // reads are always at the start of the response, regardless of partition count).
+            let layout = &buf[0];
+            // DRIVE_LAYOUT_INFORMATION_EX::PartitionStyle is `u32`, unlike
+            // PARTITION_INFORMATION_EX::PartitionStyle (`PARTITION_STYLE`, an `i32` alias) above
+            // -- two different windows-sys struct defs for what the Win32 API treats as the same
+            // logical enum, hence the cast.
+            if layout.PartitionStyle != PARTITION_STYLE_MBR as u32 {
+                return None;
+            }
+            // SAFETY: PartitionStyle == MBR guarantees the union's Mbr arm is initialized.
+            return Some(unsafe { layout.Anonymous.Mbr }.Signature);
         }
-        // SAFETY: DeviceIoControl succeeded and `buf` was sized for at least
-        // `size_of::<DRIVE_LAYOUT_INFORMATION_EX>()` bytes, which is all this reads.
-        let layout = unsafe { &*(buf.as_ptr() as *const DRIVE_LAYOUT_INFORMATION_EX) };
-        // DRIVE_LAYOUT_INFORMATION_EX::PartitionStyle is `u32`, unlike
-        // PARTITION_INFORMATION_EX::PartitionStyle (`PARTITION_STYLE`, an `i32` alias) above --
-        // two different windows-sys struct defs for what the Win32 API treats as the same
-        // logical enum, hence the cast.
-        if layout.PartitionStyle != PARTITION_STYLE_MBR as u32 {
-            return None;
-        }
-        // SAFETY: PartitionStyle == MBR guarantees the union's Mbr arm is initialized.
-        Some(unsafe { layout.Anonymous.Mbr }.Signature)
+        None
     }
 
     fn format_guid(guid: &windows_sys::core::GUID) -> String {
