@@ -1,0 +1,69 @@
+## Color pipeline
+
+Covers #38's camera-color-profile parsing, working-space choice, and the CPU + GPU render
+pipeline from linear camera RGB to a display-referred image.
+
+- **Decision (#38)**: `docs/adr/0021-color-pipeline.md` — parse the user's own installed Adobe
+  `.dcp`/`.xmp` camera profiles at runtime (never bundle one, per ADR-0003's "never bundle
+  proprietary Adobe data" policy), falling back to LibRaw's built-in camera matrix when no profile
+  is installed. A from-scratch DNG-spec Camera Profile tag reader (`spikes/calico/src/dcp.rs`)
+  over a minimal hand-rolled TIFF/IFD parser reads `ColorMatrix1/2`, `ForwardMatrix1/2`,
+  `CalibrationIlluminant1/2`, `ProfileHueSatMapDims/Data1/Data2`, `ProfileLookTableDims/Data`,
+  `ProfileToneCurve`, and `BaselineExposureOffset` — tested only against synthetic DCPs built
+  byte-for-byte in test code, never a real Adobe file.
+- **Pipeline stage order**: linearize (black/white-level scale) → white balance (as-shot
+  `cam_mul`) → camera→XYZ(D50) via `cct.rs`'s CCT-interpolated matrix (DNG spec 6.3.7's
+  dual-illuminant blend, using McCamy's published 1992 xy→CCT approximation as a documented
+  stand-in for Adobe's own undisclosed solver) → the chosen working space → HueSatMap (applied in
+  a gamma-encoded, "1/1.8 power curve", linear-ProPhoto RGB representation — the DNG spec is clear
+  HueSatMap/LookTable operate in *some* ProPhoto-referenced perceptual space, just not exactly
+  which encoding, so this is a documented approximation) → baseline exposure offset → LookTable
+  (same representation) → tone curve (a Fritsch-Carlson monotonic cubic Hermite spline through the
+  profile's `ProfileToneCurve` control points, or a commonly-reproduced "medium contrast" default
+  curve when the profile has none) → sRGB for display/comparison output.
+- **Working-space candidates, not yet decided**: linear ProPhoto/ROMM (ACR's own internal space),
+  linear Rec.2020, and ACEScg (AP1 primaries) are all implemented and measured the same way; the
+  decision rule (ADR-0021) picks whichever scores the lowest mean CIEDE2000 against LRC-exported
+  references once that reference-machine pass runs. HueSatMap/LookTable still apply in
+  ProPhoto-referenced HSV regardless of which working space wins, since that's how the DCP tables
+  themselves are defined.
+- **Adobe Raw "Look" `.xmp` profiles are a real gap, not silently faked**: `xmp_profile.rs`
+  attempts to decode an embedded look table (e.g. from an installed Adobe Vivid preset) as a
+  DCP-style TIFF IFD, since Adobe is known to reuse DNG tag semantics for these — but with no real
+  sample file available under this project's licensing constraints (ADR-0003 forbids adding one,
+  and guessing at an undocumented binary format from zero samples risks silently wrong colors), it
+  returns a clear `UnrecognizedTableFormat` error rather than a guess when the embedded data
+  doesn't parse as expected. Whether the installed Adobe Vivid `.xmp` actually decodes this way is
+  one of the open questions the reference-machine pass answers.
+- **GPU 3D-texture kernel is a real first for this repo**: `spikes/glint`'s ADR-0005 kernels are
+  storage-buffer-only by design (texture-specific concerns were explicitly left to whichever
+  ticket needed them first — see `glint/src/gpu.rs`'s own scoping note). `spikes/calico/src/gpu.rs`
+  is that ticket: a wgpu compute kernel applying a single `HueSatMap` via a real `Rgba16Float` 3D
+  texture, `Repeat` addressing on the wrapping hue axis, `ClampToEdge` on saturation/value,
+  hardware trilinear filtering. Getting a real CPU/GPU parity test to pass against lavapipe (this
+  sandbox's software Vulkan fallback) required finding and fixing a real bug: hardware trilinear
+  filtering treats texel `i`'s center as sitting at normalized coordinate `(i+0.5)/N`, not `i/N` —
+  the CPU-side `HueSatMap::sample`/`sample_gpu_style` functions use the latter convention, so the
+  GPU shader's texture-coordinate calculation needs an explicit remap (`gpu.rs` and
+  `shaders/color.wgsl`'s comments carry the full derivation). A separate diagnostic (a
+  `textureLoad`-based nearest-fetch readback, not committed to the repo) additionally confirmed the
+  texture *upload* itself — data layout, `bytes_per_row`/`rows_per_image` — was correct throughout;
+  the parity test's remaining ~0.05-0.06 max per-channel deviation is attributed to lavapipe's own
+  lower-precision fixed-point trilinear filtering weights, a software-rasterizer characteristic
+  rather than an algorithm bug, and is expected to shrink on real GPU hardware.
+- **`retina dump-linear`, the decoder hand-off**: rather than making `spikes/calico` depend on
+  `retina`'s LibRaw FFI/git-submodule (which would drag calico into the same CI path-gating retina
+  needs), `retina` gained a `dump-linear` subcommand that demosaics with white balance, the color
+  matrix, and gamma all disabled (LibRaw's own `output_color=0`/`gamm={1,1}`/`no_auto_bright=1`/
+  `user_mul={1,1,1,1}` params), writing a 16-bit linear-camera-RGB TIFF plus a JSON metadata
+  sidecar (`black`/`maximum`/`cam_mul`/`pre_mul`/`cam_xyz`/`cblack`) that calico reads directly —
+  no shared Rust type between the two crates, just a documented JSON shape both sides keep in
+  sync. LibRaw's demosaic here is explicitly a stand-in for this hand-off only; the real demosaic
+  algorithm choice stays #40's decision, and could shift ADR-0021's measured ΔE numbers once
+  decided.
+- **Deferred, filed as follow-up issues** (see ADR-0021's Consequences): the reference-machine ΔE
+  measurement run itself (this ADR's whole Measured-results section); the Adobe Vivid `.xmp`
+  look-table decode, if the reference-machine pass confirms it doesn't parse as a DCP-style IFD;
+  per-pixel black-level shading beyond the four per-channel `cblack` scalars retina already
+  exposes; real GPU hardware timing for the 3D-texture kernel (correctness only was this pass's
+  goal, not throughput).

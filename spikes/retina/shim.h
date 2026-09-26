@@ -70,4 +70,42 @@ const char *retina_model(const RetinaLibRaw *handle);
 // body -- not expected for retina's Nikon-only sweep, but checked rather than assumed).
 const uint16_t *retina_raw_image(const RetinaLibRaw *handle, size_t *out_len);
 
+// --- #38/calico support: demosaic-only decode, no WB/color-matrix/gamma applied ---
+//
+// Must be called after a successful retina_libraw_decode_buffer, before any getter below. Sets
+// LibRaw's own dcraw_process() parameters so the only transform it performs is demosaicing plus
+// the black/white-level linear scaling every LibRaw decode does regardless of settings --
+// deliberately NOT applying white balance (user_mul = {1,1,1,1} disables LibRaw's own cam_mul/
+// pre_mul auto-selection), NOT converting to any output color space (output_color = 0, "raw"),
+// and NOT applying a gamma/tone curve (gamm = {1,1}, linear). calico's own pipeline.rs applies
+// WB, the camera-to-XYZ matrix, and tone curve itself from the metadata this shim also exposes
+// (retina_cam_xyz/retina_pre_mul/retina_cblack alongside the existing retina_cam_mul), so the
+// two must not double-apply any of those stages.
+RetinaStatus retina_libraw_process_linear(RetinaLibRaw *handle);
+
+// Pointer + length (in ushorts) of the demosaiced RGBG image (imgdata.image), valid only after a
+// successful retina_libraw_process_linear. Length is iwidth * iheight * 4 (4 ushorts/pixel: R,
+// G, B, G2 -- G2 is folded into G by LibRaw during raw2image for non-Bayer-4-color sensors, which
+// covers every body ref-10k contains, so Rust only reads channels 0/1/2). Dimensions are
+// retina_iwidth()/retina_iheight() (post-crop, i.e. the *usable* image, not raw_width/raw_height).
+const uint16_t *retina_linear_image(const RetinaLibRaw *handle, size_t *out_len);
+
+// Writes exactly 4 floats: LibRaw's own daylight-calibration multipliers (imgdata.color.pre_mul),
+// distinct from retina_cam_mul's as-shot multipliers -- DNG's dual-illuminant interpolation needs
+// both to estimate a correlated color temperature from the as-shot neutral.
+void retina_pre_mul(const RetinaLibRaw *handle, float out[4]);
+
+// Writes exactly 12 floats (row-major 4x3: up to 4 camera channels x XYZ). Rows for unused
+// channels (colors < 4) are zero. This is LibRaw's own camera->XYZ matrix (imgdata.color.cam_xyz),
+// derived from whichever profile LibRaw picked for this camera model -- a fallback for cameras
+// or DCP-less setups where calico has no ForwardMatrix/ColorMatrix of its own; ADR-0021 covers
+// when each is used.
+void retina_cam_xyz(const RetinaLibRaw *handle, float out[12]);
+
+// Writes exactly 4 unsigned ints: the per-channel black-level additions LibRaw already folded
+// into retina_black() as a single scalar (imgdata.color.cblack[0..3]). Does NOT include LibRaw's
+// per-pixel black pattern map (cblack[4]/cblack[5] and beyond) -- large-scale black-level shading
+// patterns are out of scope for this research pass; see ADR-0021's Deferred section.
+void retina_cblack(const RetinaLibRaw *handle, uint32_t out[4]);
+
 }

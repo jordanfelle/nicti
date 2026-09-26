@@ -8,7 +8,8 @@ paths:
 
 Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
-- **RAW decoder (#37)** — `docs/adr/0019`: **Proposed**, pending a decode-latency product call
+- **RAW decoder (#37)** — `docs/adr/0019`: **Accepted** — build #41 on the unoptimized PR #826
+  decode (~1-2.4s/file) as-is, optimize later, rather than gating on profiling/vectorization first
   (the LGPL question is resolved — LGPL-2.1 §§5-6 permit combining `rawler`/LibRaw into Nicti's
   AGPL-3.0-or-later work, no "or-later" grant needed, see `licensing` topic). **LibRaw patched
   with the still-open
