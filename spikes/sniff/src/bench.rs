@@ -52,6 +52,8 @@ struct SampleResult {
     file: String,
     micros: u128,
     ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,20 +158,30 @@ pub(crate) fn read_cold_range(
     // rather than just the length, and remember how far the caller's real start is into it.
     let aligned_offset = (offset / ALIGN) * ALIGN;
     let front_pad = (offset - aligned_offset) as usize;
-    let aligned_len = ((front_pad + len) as u64).div_ceil(ALIGN) * ALIGN;
+    let content_end = front_pad + len;
+    let aligned_len = (content_end as u64).div_ceil(ALIGN) * ALIGN;
     let mut buf = AlignedBuf::new(aligned_len as usize, ALIGN as usize);
-    let mut total = 0usize;
-    loop {
-        let n = file.seek_read(
-            &mut buf.as_mut_slice()[total..],
-            aligned_offset + total as u64,
-        )?;
-        if n == 0 {
-            break;
-        }
-        total += n;
+    // A single seek_read of the whole aligned window, not a total-tracking loop: if the OS ever
+    // returns fewer bytes than requested (observed on a slower drive -- confirmed via
+    // `os error 87`, ERROR_INVALID_PARAMETER), resuming from `buf.as_mut_slice()[total..]` passes
+    // a buffer address of `base_ptr + total` to the next call, which is only guaranteed
+    // sector-aligned if `total` itself is a multiple of ALIGN -- not guaranteed by a short read in
+    // general (the explicit `aligned_offset + total` this loop passed as the *file offset* was
+    // itself fine, since `seek_read` doesn't rely on an implicit cursor -- the buffer-address
+    // side was the actual violation). Retrying the identical seek_read call (same aligned_offset,
+    // same full aligned_len) on the same handle needs no reopen -- `seek_read` is positional, not
+    // cursor-based -- so every attempt's buffer address (the allocation's own base) and file
+    // offset (`aligned_offset`, fixed) stay aligned by construction.
+    let mut n = file.seek_read(buf.as_mut_slice(), aligned_offset)?;
+    if n < content_end {
+        n = file.seek_read(buf.as_mut_slice(), aligned_offset)?;
     }
-    let trimmed = buf.into_trimmed_vec(total);
+    if n < content_end {
+        return Err(std::io::Error::other(format!(
+            "short read after retry: got {n} of {content_end} bytes (offset {offset}, len {len})"
+        )));
+    }
+    let trimmed = buf.into_trimmed_vec(n);
     let start = front_pad.min(trimmed.len());
     let end = (start + len).min(trimmed.len());
     Ok(trimmed[start..end].to_vec())
@@ -377,11 +389,14 @@ pub fn run(
                 .par_iter()
                 .map(|f| {
                     let start = Instant::now();
-                    let ok = run_one(f, mode, io, cold).is_ok();
+                    let result = run_one(f, mode, io, cold);
+                    let ok = result.is_ok();
+                    let error = result.err();
                     SampleResult {
                         file: f.file_name().unwrap().to_string_lossy().to_string(),
                         micros: start.elapsed().as_micros(),
                         ok,
+                        error,
                     }
                 })
                 .collect()

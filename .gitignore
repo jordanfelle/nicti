@@ -1,4 +1,4 @@
-/bench-results/
+bench-results/
 *.NEF
 *.dng
 /target
