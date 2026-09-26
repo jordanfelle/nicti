@@ -208,7 +208,7 @@ fn compare(
     // difference. A shift within tolerance still gets resampled (a no-op to within float
     // precision at that magnitude); only skipping this for an exact zero shift would be a
     // meaningless special case.
-    let mut cand_srgb = align::resample_rgb(&cand_srgb_raw, width, height, shift);
+    let (mut cand_srgb, resample_valid) = align::resample_rgb(&cand_srgb_raw, width, height, shift);
     if let Some(model_path) = denoise_model {
         let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
         println!(
@@ -246,9 +246,21 @@ fn compare(
 
     // The candidate was already resampled onto the reference's pixel grid above (before this
     // point), so the mask/gain-fit/metrics below operate on registered, not just cropped, data.
-    let mask: Vec<bool> = align::clip_mask(&ref_srgb, &cand_srgb, 1.0 / 255.0, 1.0 - 1.0 / 255.0);
+    // `resample_valid` (computed pre-denoise, from the shift's own in-bounds check) is combined
+    // with `clip_mask` rather than relied on alone: a denoise stage's receptive field can smear a
+    // real, non-black value into a pixel `resample_rgb` filled with 0.0 for being out of bounds,
+    // at which point `clip_mask`'s own near-black check on the post-denoise image would no longer
+    // catch it. Only affects the least-squares gain fit here -- PSNR/SSIM below use a separate,
+    // rectangular crop (`align::valid_rect`) instead of this per-pixel mask, since a scattered
+    // mask can't drive `ssim`'s windowed scoring, which needs a contiguous 2D region.
+    let clip = align::clip_mask(&ref_srgb, &cand_srgb, 1.0 / 255.0, 1.0 - 1.0 / 255.0);
+    let mask: Vec<bool> = clip
+        .iter()
+        .zip(resample_valid.iter())
+        .map(|(&c, &v)| c && v)
+        .collect();
     let masked_frac = mask.iter().filter(|&&m| m).count() as f64 / mask.len() as f64;
-    println!("unmasked (unclipped) fraction: {masked_frac:.4}");
+    println!("unmasked (unclipped, resample-valid) fraction: {masked_frac:.4}");
 
     let gain = align::fit_gain(&ref_srgb, &cand_srgb, &mask);
     println!("fitted per-image gain: {gain:.6}");
@@ -257,8 +269,37 @@ fn compare(
         .map(|&v| (v as f64 * gain) as f32)
         .collect();
 
-    let psnr = nicti_prowl::metrics::psnr(&ref_srgb, &gained);
-    let ssim = nicti_prowl::metrics::ssim_rgb(&ref_srgb, &gained, width, height);
+    // Score only the rectangle every pixel of which had an in-bounds source coordinate during
+    // resampling -- excludes the resample-invalid border from PSNR/SSIM too, not just the gain
+    // fit above, so a denoiser can't smear invalid border content into the reported quality
+    // numbers. A real image at a real shift always has one (see align::valid_rect's own doc); a
+    // shift approaching the image's own half-width/height is a degenerate case worth a loud
+    // warning, not a silent fallback that could plausibly look like a real number.
+    let (ref_scored, gained_scored, rect_width, rect_height) = match align::valid_rect(
+        width, height, shift,
+    ) {
+        Some(rect) => {
+            let (_, _, rect_width, rect_height) = rect;
+            (
+                align::crop_rgb(&ref_srgb, width, rect),
+                align::crop_rgb(&gained, width, rect),
+                rect_width,
+                rect_height,
+            )
+        }
+        None => {
+            println!(
+                    "WARNING: shift ({:.4}, {:.4}) too large relative to image size ({width}x{height}) \
+                     for any rectangle to be guaranteed valid -- scoring the full frame, which includes \
+                     the resample-invalid border",
+                    shift.dx, shift.dy
+                );
+            (ref_srgb.clone(), gained.clone(), width, height)
+        }
+    };
+
+    let psnr = nicti_prowl::metrics::psnr(&ref_scored, &gained_scored);
+    let ssim = nicti_prowl::metrics::ssim_rgb(&ref_scored, &gained_scored, rect_width, rect_height);
     println!("PSNR: {psnr:.3} dB");
     println!("SSIM: {ssim:.6}");
 

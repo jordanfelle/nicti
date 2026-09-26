@@ -30,6 +30,11 @@ pub enum AiDenoiseError {
     Ort(String),
     #[error("model output length {actual} doesn't match expected {expected} (width*height*3)")]
     UnexpectedOutputLength { actual: usize, expected: usize },
+    #[error(
+        "invalid TileConfig {{ tile: {tile}, overlap: {overlap} }}: tile must be nonzero and \
+         overlap must be strictly less than tile"
+    )]
+    InvalidTileConfig { tile: u32, overlap: u32 },
 }
 
 fn ort_err(e: impl std::fmt::Display) -> AiDenoiseError {
@@ -184,6 +189,8 @@ impl TiledDenoiser {
         let pixels = width as usize * height as usize;
         anyhow_ensure_len(rgb_hwc.len(), pixels * 3)?;
 
+        validate_tile_config(config)?;
+
         let stride = config.tile.saturating_sub(config.overlap).max(1);
         let mut accum = vec![0.0f64; pixels * 3];
         let mut weight = vec![0.0f64; pixels];
@@ -292,6 +299,21 @@ fn build_padded_tile(rgb_hwc: &[f32], w: TileWindow) -> Vec<f32> {
         }
     }
     tile_data
+}
+
+/// Rejects a degenerate `TileConfig` as a clean `Err`, rather than letting it reach the tiling
+/// loop -- `tile == 0` would otherwise only surface via `build_padded_tile`'s own assert (a
+/// panic, not a `Result`), and `overlap >= tile` silently degrades to an extremely slow 1px
+/// stride rather than failing (see `feather_weight`'s own doc comment: correct but not what a
+/// caller almost certainly meant).
+fn validate_tile_config(config: TileConfig) -> Result<(), AiDenoiseError> {
+    if config.tile == 0 || config.overlap >= config.tile {
+        return Err(AiDenoiseError::InvalidTileConfig {
+            tile: config.tile,
+            overlap: config.overlap,
+        });
+    }
+    Ok(())
 }
 
 fn anyhow_ensure_len(actual: usize, expected: usize) -> Result<(), AiDenoiseError> {
@@ -419,6 +441,44 @@ mod tests {
         assert_eq!(tile[3], (2 * 10 + 1) as f32); // (col=2,row=1)
         assert_eq!(tile[6], 12.0); // (col=1,row=2): col*10 + row = 1*10+2
         assert_eq!(tile[9], (2 * 10 + 2) as f32); // (col=2,row=2)
+    }
+
+    #[test]
+    fn validate_tile_config_rejects_zero_tile() {
+        let result = validate_tile_config(TileConfig {
+            tile: 0,
+            overlap: 0,
+        });
+        assert!(matches!(
+            result,
+            Err(AiDenoiseError::InvalidTileConfig {
+                tile: 0,
+                overlap: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_tile_config_rejects_overlap_at_or_past_tile() {
+        assert!(validate_tile_config(TileConfig {
+            tile: 256,
+            overlap: 256
+        })
+        .is_err());
+        assert!(validate_tile_config(TileConfig {
+            tile: 256,
+            overlap: 300
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn validate_tile_config_accepts_sane_values() {
+        assert!(validate_tile_config(TileConfig {
+            tile: 256,
+            overlap: 16
+        })
+        .is_ok());
     }
 
     #[test]

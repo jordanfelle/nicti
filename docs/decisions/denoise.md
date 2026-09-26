@@ -38,10 +38,12 @@ candidates measured, the alignment bugs found and fixed, and the real Windows-na
   considered). Both sourced as ready ONNX exports from the public `deepghs/image_restoration` HF
   repo (MIT re-export license), sidestepping the PyTorch→ONNX conversion the plan originally
   expected to need. Both candidates beat the classic-demosaic-only baseline in every one of 3 real
-  scenes measured, at both a 256px-crop level and full 6064×4040 resolution. SCUNet won PSNR+SSIM
-  on 2 of 3 scenes and SSIM on all 3; NAFNet's one clear win (sewingmachine PSNR) held consistently
-  between crop-level and full-resolution measurements, an open, unresolved PSNR-vs-SSIM
-  disagreement on that one scene.
+  scenes measured, at both a 256px-crop level and full 6064×4040 resolution. At full resolution,
+  SCUNet won PSNR+SSIM cleanly on 2 of 3 scenes; NAFNet won **both** PSNR and SSIM on the third
+  (sewingmachine) — a clean win there, not a split. The crop-level sample for that same scene had
+  shown a PSNR-vs-SSIM disagreement between the two candidates that didn't hold once measured on
+  the full frame, meaning the crop was an atypical patch rather than a real, unresolved metric
+  conflict.
 
 - **LibRaw's wavelet denoise is broken in the vendored PR#826 fork, not fixed.** Any nonzero
   `threshold` corrupts `imgdata.image`'s reported buffer size to a single-channel size, at every

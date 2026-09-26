@@ -178,10 +178,22 @@ pub fn fit_gain(reference: &[f32], moving: &[f32], mask: &[bool]) -> f64 {
 /// lands on `reference`'s pixel grid, undoing the shift `estimate_shift` found (`moving` sampled
 /// at `(x+dx, y+dy)` matches `reference` at `(x,y)`, so this builds `out(x,y) =
 /// moving.sample_bilinear(x+dx, y+dy)` for every pixel and channel). Samples falling outside
-/// `moving`'s bounds (a real possibility at the image edges after a shift) are written as `0.0` --
-/// these land in the near-black region `clip_mask` already excludes from scoring/fitting, so they
-/// don't need special handling here.
-pub fn resample_rgb(rgb_hwc: &[f32], width: u32, height: u32, shift: Shift) -> Vec<f32> {
+/// `moving`'s bounds (a real possibility at the image edges after a shift) are written as `0.0`,
+/// and the returned `Vec<bool>` (one entry per pixel, not per channel) marks those positions
+/// `false` -- **not enough on its own to exclude them from scoring** if a caller runs an AI
+/// denoise stage afterward: the model's own receptive field can smear a real, non-black value
+/// into a filled border pixel, at which point a naive "still near-black" check
+/// (`clip_mask`'s original justification) no longer holds. Callers that denoise after resampling
+/// should crop to a rectangle known to be entirely valid (every pixel's shifted source coordinate
+/// in-bounds) using the shift itself, not just rely on this per-pixel mask post-denoise -- see
+/// `rods.rs`'s own use of this return value's second element only for the (still valid) pre-
+/// denoise gain fit, and its separate shift-derived rectangular crop before PSNR/SSIM.
+pub fn resample_rgb(
+    rgb_hwc: &[f32],
+    width: u32,
+    height: u32,
+    shift: Shift,
+) -> (Vec<f32>, Vec<bool>) {
     assert_eq!(rgb_hwc.len(), width as usize * height as usize * 3);
 
     let channel = |c: usize| -> Plane {
@@ -194,15 +206,63 @@ pub fn resample_rgb(rgb_hwc: &[f32], width: u32, height: u32, shift: Shift) -> V
     let planes: [Plane; 3] = std::array::from_fn(channel);
 
     let mut out = vec![0.0f32; rgb_hwc.len()];
+    let mut valid = vec![false; width as usize * height as usize];
     for y in 0..height {
         for x in 0..width {
             let sx = x as f64 + shift.dx;
             let sy = y as f64 + shift.dy;
             let idx = (y * width + x) as usize;
+            let mut any_missing = false;
             for (c, plane) in planes.iter().enumerate() {
-                out[idx * 3 + c] = plane.sample_bilinear(sx, sy).unwrap_or(0.0);
+                match plane.sample_bilinear(sx, sy) {
+                    Some(v) => out[idx * 3 + c] = v,
+                    None => {
+                        out[idx * 3 + c] = 0.0;
+                        any_missing = true;
+                    }
+                }
             }
+            valid[idx] = !any_missing;
         }
+    }
+    (out, valid)
+}
+
+/// The largest rectangle, inset symmetrically from every edge by `shift`'s own magnitude (rounded
+/// up, plus 1 for `sample_bilinear`'s own footprint), that's guaranteed to be entirely valid after
+/// [`resample_rgb`] -- every pixel inside it had an in-bounds source coordinate to sample from, so
+/// none of it came from a `0.0` fill a denoise stage could have smeared into a false-valid value.
+/// Simpler and more robust against that smearing than trying to track per-pixel validity through
+/// an arbitrary downstream filter: a rectangle is directly usable by `metrics::ssim`'s windowed
+/// scoring, which needs a contiguous 2D region, not a scattered pixel mask.
+///
+/// Returns `Some((x0, y0, valid_width, valid_height))`, or `None` if the shift is large enough
+/// relative to the image that no non-empty rectangle can be guaranteed valid (the required inset
+/// would meet or exceed the image's own center) -- this is a real "no valid data" case, not a
+/// degenerate one to paper over: silently shrinking the *required* inset to fit a smaller image
+/// would return a rectangle that's *not* actually guaranteed valid (some of its pixels would still
+/// have an out-of-bounds source coordinate), which defeats the whole point of this function.
+/// Callers must handle `None` explicitly (e.g. fall back to scoring the full frame with a loud
+/// warning) rather than assuming a rectangle always exists.
+pub fn valid_rect(width: u32, height: u32, shift: Shift) -> Option<(u32, u32, u32, u32)> {
+    let inset = shift.dx.abs().max(shift.dy.abs()).ceil() as u32 + 1;
+    if 2 * inset >= width || 2 * inset >= height {
+        return None;
+    }
+    let valid_width = width - 2 * inset;
+    let valid_height = height - 2 * inset;
+    Some((inset, inset, valid_width, valid_height))
+}
+
+/// Extracts the interleaved-RGB sub-rectangle `(x0, y0, rect_width, rect_height)` out of a full
+/// `width`x`height` image, for cropping down to a [`valid_rect`] before scoring.
+pub fn crop_rgb(rgb_hwc: &[f32], width: u32, rect: (u32, u32, u32, u32)) -> Vec<f32> {
+    let (x0, y0, rect_width, rect_height) = rect;
+    let mut out = Vec::with_capacity(rect_width as usize * rect_height as usize * 3);
+    for y in y0..y0 + rect_height {
+        let row_start = ((y * width + x0) * 3) as usize;
+        let row_end = row_start + rect_width as usize * 3;
+        out.extend_from_slice(&rgb_hwc[row_start..row_end]);
     }
     out
 }
@@ -305,7 +365,7 @@ mod tests {
             moving_rgb[i * 3 + 2] = v;
         }
 
-        let resampled = resample_rgb(&moving_rgb, 64, 64, shift);
+        let (resampled, valid) = resample_rgb(&moving_rgb, 64, 64, shift);
 
         // Compare over the interior only (margin 4px), away from the edges a 1.3/-0.7px shift
         // pushes out of `moving`'s bounds.
@@ -316,12 +376,69 @@ mod tests {
                 let expected = reference.get(x as i64, y as i64).unwrap();
                 let actual = resampled[idx * 3];
                 max_abs_diff = max_abs_diff.max((actual - expected).abs());
+                assert!(
+                    valid[idx],
+                    "expected interior pixel ({x},{y}) to be marked valid"
+                );
             }
         }
         assert!(
             max_abs_diff < 0.01,
             "expected resampled to match reference in the interior, max abs diff {max_abs_diff}"
         );
+
+        // The top-left corner (0,0) samples at (1.3,-0.7): y is out of moving's bounds, so it
+        // must be marked invalid, matching the 0.0 fill resample_rgb writes for it.
+        assert!(
+            !valid[0],
+            "expected (0,0) to be marked invalid after a shift that pushes it out of bounds"
+        );
+    }
+
+    #[test]
+    fn valid_rect_insets_by_shift_magnitude_plus_one() {
+        let (x0, y0, w, h) =
+            valid_rect(64, 64, Shift { dx: 1.3, dy: -0.7 }).expect("rect should exist");
+        assert_eq!((x0, y0), (3, 3));
+        assert_eq!((w, h), (58, 58));
+    }
+
+    #[test]
+    fn valid_rect_every_pixel_is_actually_valid_after_resampling() {
+        // Regression test for a real bug an adversarial review found: an earlier version of
+        // valid_rect clamped its inset down to fit small images, silently returning a rectangle
+        // that violated its own "guaranteed valid" contract. This exercises the full pipeline --
+        // resample a synthetic image at a real shift, then check every pixel inside the returned
+        // rect is actually marked valid by resample_rgb itself, not just that the coordinates
+        // match the inset arithmetic.
+        let reference = synthetic_scene(64, 64);
+        let shift = Shift { dx: 1.3, dy: -0.7 };
+        let moving_luma = shift_plane(&reference, shift.dx, shift.dy);
+        let mut moving_rgb = vec![0.0f32; 64 * 64 * 3];
+        for (i, &v) in moving_luma.samples.iter().enumerate() {
+            moving_rgb[i * 3] = v;
+            moving_rgb[i * 3 + 1] = v;
+            moving_rgb[i * 3 + 2] = v;
+        }
+        let (_, valid) = resample_rgb(&moving_rgb, 64, 64, shift);
+        let (x0, y0, w, h) = valid_rect(64, 64, shift).expect("rect should exist");
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let idx = (y * 64 + x) as usize;
+                assert!(
+                    valid[idx],
+                    "expected ({x},{y}) inside valid_rect to be marked valid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valid_rect_returns_none_for_a_shift_larger_than_the_image() {
+        // A shift this large relative to an 8x8 image means no non-empty rectangle can be
+        // guaranteed valid -- must report that honestly (None) rather than silently returning a
+        // rectangle whose coordinates fall outside the image or whose pixels aren't really valid.
+        assert_eq!(valid_rect(8, 8, Shift { dx: 100.0, dy: 0.0 }), None);
     }
 
     #[test]

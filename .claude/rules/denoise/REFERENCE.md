@@ -17,8 +17,9 @@ Full reasoning/history: `docs/decisions/denoise.md`.
   (BJDD, demosaicnet_pytorch) both had genuine blockers (BJDD's own undocumented 3-channel input
   convention + Drive-hosted PyTorch weights; demosaicnet's noise-aware variant never shipped).
 - **Path B pick (provisional): classic AHD demosaic (FBDD 0) + SCUNet-PSNR.** Beat NAFNet-SIDD on
-  PSNR+SSIM in 2/3 scenes and SSIM in all 3; cleanest training-data provenance of any candidate
-  (purely synthetic degradations). Both `deepghs/image_restoration` ONNX re-exports (MIT), no
+  PSNR+SSIM cleanly on 2/3 scenes at full resolution; NAFNet wins both metrics on the third
+  (sewingmachine). Cleanest training-data provenance of any candidate (purely synthetic
+  degradations). Both `deepghs/image_restoration` ONNX re-exports (MIT), no
   PyTorch conversion needed.
 - **LibRaw's wavelet denoise is broken in the vendored PR#826 fork** — any nonzero `threshold`
   corrupts `imgdata.image`'s buffer size, at every magnitude tested. Not fixed; classic-NR baseline

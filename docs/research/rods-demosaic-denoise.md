@@ -155,11 +155,14 @@ the resample step demonstrably fixes the dominant component).
 | sewingmachine | **29.866 dB / 0.815** | 24.508 dB / 0.780 |
 
 **Both candidates beat the classic-demosaic-only baseline in every case measured.** At full
-resolution, **SCUNet is the stronger candidate overall** — wins PSNR and SSIM on 2 of 3 scenes,
-and wins SSIM even on the one scene it loses PSNR on. NAFNet's one clear win (sewingmachine PSNR,
-29.87 vs 24.51) is consistent in direction between crop-level and full-resolution measurements.
-The PSNR/SSIM disagreement on that scene (NAFNet ahead on PSNR, SCUNet ahead on SSIM) wasn't
-resolved with a visual crop inspection this pass — flagged as an open question.
+resolution, **SCUNet is the stronger candidate overall** — wins PSNR *and* SSIM cleanly on 2 of 3
+scenes (bananapi, couch). NAFNet wins **both** PSNR and SSIM on the third (sewingmachine,
+29.87dB/0.815 vs 24.51dB/0.780) — a clean win, not a split, at full resolution. The 256px crop
+sample *did* show a PSNR/SSIM disagreement on that same scene (NAFNet ahead on PSNR, SCUNet ahead
+on SSIM, see the crop-level table above) that **doesn't hold at full resolution** — the crop was
+evidently an atypical patch for that scene, not representative of the whole frame. Treat the
+full-resolution numbers as the more reliable signal; a visual inspection of why the crop diverged
+wasn't done this pass, flagged as an open question if it matters later.
 
 ### Speed
 
@@ -200,8 +203,8 @@ cross-compiles cleanly, no C/C++ dependency to fight (unlike `retina`'s vendored
 | Path | Real candidate found? | Built/measured? | Verdict |
 |---|---|---|---|
 | A: Bayer-domain joint demosaic+denoise | Yes (BJDD) — real Bayer weights, but 3-channel non-raw input convention + Drive-hosted PyTorch | No | Moves to v2; revisit if Path B fails LRC bar |
-| B: classic demosaic + AI denoise, NAFNet-SIDD | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers | Real improvement over baseline everywhere measured; loses to SCUNet on SSIM everywhere and PSNR on 2/3 scenes |
-| B: classic demosaic + AI denoise, SCUNet-PSNR | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers, edge-tile bug found+fixed | **Strongest candidate measured this pass** — best PSNR+SSIM on 2/3 scenes, best SSIM on all 3; cleanest training-data provenance (purely synthetic, no real-photo dataset question) |
+| B: classic demosaic + AI denoise, NAFNet-SIDD | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers | Real improvement over baseline everywhere measured; loses to SCUNet on PSNR+SSIM on 2/3 scenes, but wins both on sewingmachine |
+| B: classic demosaic + AI denoise, SCUNet-PSNR | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers, edge-tile bug found+fixed | **Strongest candidate measured this pass** — best PSNR+SSIM on 2/3 scenes; cleanest training-data provenance (purely synthetic, no real-photo dataset question) |
 
 ## Consequences
 

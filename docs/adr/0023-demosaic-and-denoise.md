@@ -70,11 +70,12 @@ ticket's 2-day cap. See `docs/research/rods-demosaic-denoise.md` for the full ac
 Two real, ONNX-ready candidates were measured — NAFNet-SIDD-width64 and SCUNet-PSNR, both public
 MIT/Apache-2.0 licensed re-exports, no PyTorch conversion needed. Both candidates beat the
 classic-demosaic-only baseline in **every** scene measured (3 real Nikon Z6 scenes, crop-level and
-full-resolution). **SCUNet is the stronger candidate overall** — best PSNR+SSIM on 2 of 3 scenes,
-best SSIM on all 3 scenes, and the cleanest training-data provenance of any candidate considered
-(purely synthetic degradations, no real-photo dataset provenance question at all). NAFNet's one
-clear advantage (sewingmachine PSNR, consistent between crop-level and full-resolution
-measurements) is noted but doesn't change the overall pick.
+full-resolution). **SCUNet is the stronger candidate overall** — wins PSNR and SSIM cleanly on 2
+of 3 scenes at full resolution, and has the cleanest training-data provenance of any candidate
+considered (purely synthetic degradations, no real-photo dataset provenance question at all).
+NAFNet wins **both** PSNR and SSIM on the third scene (sewingmachine) at full resolution — a clean
+win there, not a split; the crop-level sample showed a PSNR/SSIM disagreement on that same scene
+that didn't hold once measured on the full frame. This one scene doesn't change the overall pick.
 
 **This status stays Proposed, not Accepted, until:**
 1. A real LRC AI Denoise export batch exists to compare against (the decision rule's actual gate).
@@ -130,7 +131,7 @@ Real LRC comparison numbers: **not yet measured** — pending the user's own LRC
 |---|---|---|---|
 | Path A: Bayer-domain joint demosaic+denoise (BJDD) | Yes | No — blocked on Drive-hosted PyTorch + undocumented 3-channel input convention | Moves to v2; revisit if Path B fails the LRC bar |
 | Path A: Bayer-domain joint demosaic+denoise (demosaicnet) | No — noise-aware variant never shipped in this port | No | Not a real candidate as-is |
-| Path B: NAFNet-SIDD | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU | Real improvement everywhere; loses to SCUNet on SSIM everywhere, PSNR on 2/3 scenes |
+| Path B: NAFNet-SIDD | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU | Real improvement everywhere; loses to SCUNet on PSNR+SSIM on 2/3 scenes, but wins both on sewingmachine |
 | **Path B: SCUNet-PSNR (this ADR's pick)** | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU, one real bug found+fixed | Strongest measured candidate; cleanest provenance (purely synthetic training data) |
 
 ## Consequences
