@@ -100,9 +100,11 @@ research didn't independently re-verify pixel output against an oracle, and a su
 here is not itself proof the output is uncorrupted (Context's "336.7M samples bit-exact against
 Adobe DNG Converter" claim is the PR thread's own reported result, not reproduced here; treat
 HE/HE\* as production-ready only after that independent oracle check is actually done, see
-Deferred item 8). The Lossless bucket *is* independently pixel-verified, via the cross-decoder
-diff below. rawler correctly and safely rejects every HE/HE\* file — it never crashes or returns
-garbage, it just can't decode them,
+Deferred item 8). **The Lossless bucket's per-pixel diff below covers 2 representative files**
+(one Z8, one D7500), not all 129 — `compare`'s hash check ran against the full bucket (0/129
+exact match, consistent with the pattern below), but the per-pixel histogram characterization
+itself wasn't re-run file-by-file across the whole bucket. rawler correctly and safely rejects
+every HE/HE\* file — it never crashes or returns garbage, it just can't decode them,
 confirming ADR-0001's finding under real files, not just the PR's own synthetic test set.
 
 **Correctness — cross-decoder agreement (Lossless only, the only mode both decoders speak)**: an
