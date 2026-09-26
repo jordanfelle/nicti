@@ -101,22 +101,28 @@ with whatever else was running that pass), not a `ravif` behavior worth a claim 
   compression win comes partly from accepting a lower SSIM at this quality setting, not purely
   from better efficiency at equal quality — a correction to ADR-0017's own stated assumption, not
   a contradiction of its numeric findings.
-- **Real lossy WebP is worse than AVIF on every measured axis at comparable size, and worse than
-  JPEG on both speed axes at comparable quality.** At its smallest setting (q75, 527,556 B — close
-  to AVIF's size range), WebP's SSIM (0.8847) is the lowest of any config measured, including every
-  AVIF speed. At its highest quality (q85, 1,062,616 B, SSIM 0.9285 — close to JPEG's own SSIM),
-  WebP still needs ~9.5x longer to encode than JPEG (633ms vs. 66.6ms, 633.4/66.6 — the same order
-  of magnitude as AVIF's own encode-throughput cost above) and its read+decode p95 (93.0ms) is
-  nearly **3x** JPEG's own (31.8ms) — the worst decode latency of any codec/setting in this table,
-  missing the &lt;50ms interactive budget by the widest margin measured. WebP additionally requires
-  a real C toolchain dependency (`libwebp-sys`), unlike AVIF's pure-Rust path.
+- **Real lossy WebP is worse than the size-comparable AVIF setting on every measured axis, and
+  worse than JPEG on both speed axes at comparable quality.** WebP q75 (527,556 B) is closest in
+  size to AVIF speed 10 (549,102 B, the nearest size match in this table) — against that specific
+  setting, WebP is slower to encode (538ms vs. 341ms), slower to decode at p95 (67.1ms vs. 59.4ms),
+  and lower-SSIM (0.8847 vs. 0.9024). This is **not** true against every AVIF speed
+  indiscriminately: WebP q75 is actually faster than AVIF **speed 6** specifically (538ms vs.
+  794ms encode, 67.1ms vs. 77.4ms decode p95) — SSIM is the one axis where WebP loses to every AVIF
+  speed tested (0.8847 vs. 0.898-0.902). At its highest quality (q85, 1,062,616 B, SSIM 0.9285 —
+  close to JPEG's own SSIM), WebP still needs ~9.5x longer to encode than JPEG (633ms vs. 66.6ms,
+  633.4/66.6 — the same order of magnitude as AVIF's own encode-throughput cost above) and its
+  read+decode p95 (93.0ms) is nearly **3x** JPEG's own (31.8ms) — the worst decode latency of any
+  codec/setting in this table, missing the &lt;50ms interactive budget by the widest margin
+  measured. WebP additionally requires a real C toolchain dependency (`libwebp-sys`), unlike AVIF's
+  pure-Rust path.
 
 **Recommendation:**
 
 - **JPEG remains the correct T2 v1 choice.** Nothing measured this pass changes ADR-0017's
   decision — AVIF's encode-throughput cost, even at its fastest tested speed, is still ~5x JPEG's,
-  and real lossy WebP measures worse than both JPEG and AVIF on every latency and quality axis
-  that matters for an interactive tier.
+  and real lossy WebP measures worse than JPEG on every latency and quality axis at comparable
+  quality, and worse than the size-comparable AVIF setting on every axis (SSIM is the one axis
+  where it loses to every AVIF speed tested, not just the size-comparable one).
 - **A faster AVIF speed (9 or 10) is worth reconsidering for #64/#72** (archival/cold tiers, where
   the encode-throughput budget doesn't bind the way it does for T2): at speed 10, AVIF's
   read+decode latency gap to JPEG narrows enough (32.8ms vs. 24.9ms p50) that it's a much more
@@ -144,8 +150,9 @@ with whatever else was running that pass), not a `ravif` behavior worth a claim 
   in general" — file that context against whichever issue picks up the archival/cold-tier preview
   format question next, rather than re-deriving it from scratch.
 - **Real lossy WebP is now closed out, not just deferred.** ADR-0017 left it unmeasured; this pass
-  measured it and found it worse than both existing candidates on every axis that matters — no
-  further WebP research is warranted for Nicti's preview pipeline without a new, specific reason.
+  measured it and found it worse than JPEG at comparable quality, worse than the size-comparable
+  AVIF setting on every axis, and worse than every AVIF speed on SSIM specifically — no further
+  WebP research is warranted for Nicti's preview pipeline without a new, specific reason.
 - `spikes/sniff/src/codec.rs`'s `Codec` enum now has three variants (`Jpeg`/`Avif`/`Webp`) and
   `encode()` takes an explicit `speed: u8` parameter instead of the old hardcoded
   `AVIF_SPEED` constant — any future codec research building on this spike should extend that

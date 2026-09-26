@@ -78,9 +78,11 @@ enum Command {
         codec: codec::Codec,
         #[arg(long, default_value_t = 80)]
         quality: u8,
-        /// AVIF-only: ravif's 1 (fastest/largest) - 10 (slowest/smallest) encode-effort dial.
-        /// Ignored by JPEG/WebP. #143's sweep axis -- see `codec.rs`'s module doc.
-        #[arg(long, default_value_t = 6)]
+        /// AVIF-only: ravif's 1 (slowest, highest effort) - 10 (fastest, lowest effort)
+        /// encode-effort dial. Ignored by JPEG/WebP. #143's sweep axis -- see `codec.rs`'s module
+        /// doc. `ravif::Encoder::with_speed` panics outside 1..=10, so this is range-checked here
+        /// rather than left to fail deep inside an encode call.
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(1..=10))]
         avif_speed: u8,
         #[arg(long, value_enum, default_value = "sqlite")]
         cache_format: cache::Format,

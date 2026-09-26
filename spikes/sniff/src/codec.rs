@@ -121,13 +121,20 @@ fn decode_avif(bytes: &[u8]) -> Result<DecodedRgb, String> {
     }
 }
 
-/// libwebp's own `WebPConfig::new()` default (used by `Encoder::encode`'s `encode_simple` path,
-/// which this function calls) sets `method = 4`, the same effort/ratio point `cwebp` defaults to
-/// -- not swept as a bench axis here, unlike AVIF's `speed`, since #143 only asks for one lossy
-/// WebP quality sweep, not a second effort-level sweep.
+/// libwebp's own `WebPConfig::new()` default (used by `encode_simple`) sets `method = 4`, the same
+/// effort/ratio point `cwebp` defaults to -- not swept as a bench axis here, unlike AVIF's
+/// `speed`, since #143 only asks for one lossy WebP quality sweep, not a second effort-level
+/// sweep.
+///
+/// Calls `encode_simple` directly rather than the crate's own `Encoder::encode` convenience
+/// wrapper, which `.unwrap()`s the same result internally -- that would panic the whole benchmark
+/// run on an out-of-range quality (`encode_simple` rejects anything outside `0.0..=100.0`) instead
+/// of surfacing it as an encode failure `tier_bench.rs`'s `run` already counts and reports.
 fn encode_webp(img: &DecodedRgb, quality: u8) -> Result<Vec<u8>, String> {
     let encoder = webp::Encoder::from_rgb(&img.rgb, img.width, img.height);
-    let encoded = encoder.encode(quality as f32);
+    let encoded = encoder
+        .encode_simple(false, quality as f32)
+        .map_err(|e| format!("{e:?}"))?;
     Ok(encoded.to_vec())
 }
 
@@ -236,6 +243,18 @@ mod tests {
         assert_eq!(decoded.width, width);
         assert_eq!(decoded.height, height);
         assert_decoded_content_preserved(&decoded.rgb);
+    }
+
+    /// libwebp rejects quality outside `0.0..=100.0`; `--quality` is a plain `u8` (0-255), so this
+    /// is reachable from the CLI. Must surface as an `Err` (an encode failure `tier_bench.rs`
+    /// counts and reports), not a panic that takes down the whole benchmark run -- a real bug
+    /// caught by hostile PR review (the crate's own `Encoder::encode` convenience wrapper
+    /// `.unwrap()`s this internally).
+    #[test]
+    fn webp_out_of_range_quality_errors_instead_of_panicking() {
+        let img = gradient_image(8, 8);
+        let result = encode(Codec::Webp, &img, 150, 6);
+        assert!(result.is_err(), "expected an error, got {result:?}");
     }
 
     #[test]
