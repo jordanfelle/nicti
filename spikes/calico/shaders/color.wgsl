@@ -1,7 +1,12 @@
 // GPU port of huesatmap.rs's single-map sample + apply (dual-map illuminant blending and the
 // hue-wrap-aware angle interpolation at wraparound-discontinuous hue-shift values stay CPU-only
-// -- see gpu.rs's module doc for why). Input/output are vec4<f32> (rgb + unused pad), already in
-// gamma-encoded ("1/1.8") linear-ProPhoto-RGB space per pipeline.rs's stage order.
+// -- see gpu.rs's module doc for why). Input/output are vec4<f32> (rgb + unused pad), linear
+// ProPhoto RGB per pipeline.rs's stage order. This standalone feasibility kernel applies the
+// HueSatMap directly to hue/sat/val from linear RGB with no ProfileHueSatMapEncoding step --
+// unlike pipeline.rs's CPU `apply_hue_sat` (which encodes only the V coordinate, per DNG's real
+// spec; there is no "gamma 1.8" encoding anywhere in it), this kernel doesn't need one since
+// `tests/gpu_parity.rs` compares it against `sample_gpu_style` directly, bypassing
+// `table_encode`/`table_decode` on both sides.
 
 @group(0) @binding(0) var<storage, read> input_pixels: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> output_pixels: array<vec4<f32>>;
