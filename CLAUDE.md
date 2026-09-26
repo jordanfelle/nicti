@@ -20,7 +20,8 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021). A new ADR adds a bullet to
+`preview-tiers` (0017), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
+`lrc-migration` (0022). A new ADR adds a bullet to
 both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -167,6 +168,9 @@ are storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a
 test passing against lavapipe; pure Rust, no FFI, not path-gated. See
 `docs/research/calico-color-pipeline.md`) is real, tested (26 unit tests + 3 integration tests),
 pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
+`spikes/shed` (#61/ADR-0022's `.lrcat` schema-mapping research — schema/inventory/develop-settings
+reading plus a pre-commit privacy check against the real catalog's own keyword/path strings; see
+`docs/research/shed-lrcat-schema.md`) is real, tested (10 unit tests), not path-gated.
 
 ## Development workflow
 
