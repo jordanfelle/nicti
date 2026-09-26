@@ -1,6 +1,7 @@
 mod compression;
 mod frame;
 mod libraw_ffi;
+mod linear;
 mod rawler_backend;
 mod watch;
 
@@ -88,6 +89,14 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// For #38/calico: demosaics one NEF with WB/color-matrix/gamma disabled and writes a linear
+    /// 16-bit TIFF + metadata JSON sidecar `calico render` can consume. LibRaw-only (rawler has
+    /// no equivalent raw-color demosaic-only mode) -- see `src/linear.rs`.
+    DumpLinear {
+        path: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -122,6 +131,7 @@ fn main() -> anyhow::Result<()> {
         Command::Peek { path, decoder, n } => peek(&path, decoder, n),
         Command::Diff { path } => diff(&path),
         Command::Scan { dir, decoder, out } => scan(&dir, decoder, &out),
+        Command::DumpLinear { path, out } => linear::dump_linear(&path, &out),
     }
 }
 

@@ -293,6 +293,23 @@ comparison baseline) — all permissive, no new `deny.toml` entry needed, `cargo
 enumeration/`DeviceIoControl` FFI) is the same crate/license `spikes/sniff`'s
 `FILE_FLAG_NO_BUFFERING` work already covers (see CLAUDE.md's package-map note on `sniff`).
 
+**Update (2026-09-26, [#38](https://github.com/jordanfelle/nicti/issues/38)'s `calico` spike,
+`docs/adr/0021-color-pipeline.md`):** the "never bundle" Adobe DCP/LCP row above (and [^dcp1]'s
+own caveat) is about **redistributing** a real Adobe camera profile inside this repo or a shipped
+build — that's unaffected and stays forbidden. What's new here is **runtime parsing** of a DCP/XMP
+profile file already present on the *user's own machine* (installed there by their own separate,
+licensed Adobe Camera Raw/Lightroom Classic install) — reading a file the user already has a legal
+copy of, at runtime, on their own system, is not a redistribution act at all, so ADR-0003's
+"never bundle" concern doesn't reach it; nothing Adobe's is ever copied into this repo, a build
+artifact, or distributed to any other user. `spikes/calico`'s `dcp.rs`/`xmp_profile.rs` parsers
+are tested exclusively against synthetic fixtures built byte-for-byte in test code for exactly
+this reason — no real Adobe profile file exists anywhere in this repo or its test data. New
+dependencies: `roxmltree` v0.20 (MIT/Apache-2.0, XMP/RDF-XML parsing) and `base64` v0.22 (MIT/
+Apache-2.0, decoding embedded look-table data) are both permissive, no new `deny.toml` entry
+needed; `byteorder` v1.5 (`Unlicense OR MIT`, new to the workspace, DCP/TIFF-IFD byte-order
+reads) is also permissive and needs no new entry. `cargo deny --workspace --all-features check
+licenses` passes clean.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -473,7 +490,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^rx1]: rexiv2 GPL-3.0-or-later — `SPDX-License-Identifier: GPL-3.0-or-later` header at the top of https://github.com/felixc/rexiv2/blob/main/README.md — verified 2026-09-23
 [^xmp1]: Adobe XMP Toolkit SDK BSD-3-Clause — GitHub license API for https://github.com/adobe/XMP-Toolkit-SDK — verified 2026-09-23
 [^dng1]: Adobe DNG SDK EULA — https://scancode-licensedb.aboutcode.org/adobe-dng-sdk.html (quotes the EULA text) — verified 2026-09-23
-[^dcp1]: No Adobe DCP redistribution grant found — absence of a redistribution grant in Adobe's DNG SDK EULA and general Adobe product-EULA norms; **not a single definitive primary-source sentence naming DCP files specifically** — treated conservatively, re-verify if this becomes a real dependency
+[^dcp1]: No Adobe DCP redistribution grant found — absence of a redistribution grant in Adobe's DNG SDK EULA and general Adobe product-EULA norms; **not a single definitive primary-source sentence naming DCP files specifically** — treated conservatively, re-verify if this becomes a real dependency. **Became a real dependency 2026-09-26** ([#38](https://github.com/jordanfelle/nicti/issues/38)/`docs/adr/0021-color-pipeline.md`): re-verified as still applying only to redistribution, not to `spikes/calico` parsing a profile file already installed on the user's own machine at runtime — see this file's 2026-09-26 update above for the full reasoning.
 [^lcp1]: No Adobe LCP redistribution grant found — same caveat as [^dcp1], weakest-sourced claim in this audit; third-party (Sigma) LCP manual copyright language referenced but not an Adobe primary source
 [^dc1]: dcamprof GPL-3.0 — GitHub license API for https://github.com/Beep6581/dcamprof — verified 2026-09-23
 [^ort1]: ONNX Runtime MIT — https://github.com/microsoft/onnxruntime/blob/main/LICENSE and ThirdPartyNotices.txt — verified 2026-09-23

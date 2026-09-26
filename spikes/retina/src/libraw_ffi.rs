@@ -36,6 +36,12 @@ unsafe extern "C" {
     fn retina_make(handle: *const RetinaLibRawOpaque) -> *const c_char;
     fn retina_model(handle: *const RetinaLibRawOpaque) -> *const c_char;
     fn retina_raw_image(handle: *const RetinaLibRawOpaque, out_len: *mut usize) -> *const u16;
+
+    fn retina_libraw_process_linear(handle: *mut RetinaLibRawOpaque) -> RetinaStatus;
+    fn retina_linear_image(handle: *const RetinaLibRawOpaque, out_len: *mut usize) -> *const u16;
+    fn retina_pre_mul(handle: *const RetinaLibRawOpaque, out: *mut f32);
+    fn retina_cam_xyz(handle: *const RetinaLibRawOpaque, out: *mut f32);
+    fn retina_cblack(handle: *const RetinaLibRawOpaque, out: *mut u32);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,6 +132,57 @@ impl LibRawHandle {
         }
         Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
     }
+
+    /// Runs LibRaw's demosaic with WB/color-matrix/gamma disabled (see shim.h). Must be called
+    /// after `decode` and before `linear_image`/`linear_metadata`.
+    pub fn process_linear(&mut self) -> Result<(), LibRawError> {
+        let status = unsafe { retina_libraw_process_linear(self.ptr) };
+        if status != 0 {
+            let msg = unsafe {
+                let s = retina_strerror(status);
+                if s.is_null() {
+                    "<null>".to_string()
+                } else {
+                    CStr::from_ptr(s).to_string_lossy().into_owned()
+                }
+            };
+            return Err(LibRawError::Status {
+                code: status,
+                message: msg,
+            });
+        }
+        Ok(())
+    }
+
+    /// The demosaiced RGBG plane produced by `process_linear` (4 ushorts/pixel: R, G, B, G2).
+    /// Borrowed from the handle, same lifetime rules as `raw_image`.
+    pub fn linear_image(&self) -> Result<&[u16], LibRawError> {
+        let mut len = 0usize;
+        let ptr = unsafe { retina_linear_image(self.ptr, &mut len as *mut usize) };
+        if ptr.is_null() {
+            return Err(LibRawError::NoRawImage);
+        }
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+
+    /// Metadata needed to interpret `linear_image` colorimetrically (WB, camera-to-XYZ matrix,
+    /// per-channel black) -- separate from `metadata()` since it's only valid after
+    /// `process_linear`, not after a plain `decode`.
+    pub fn linear_metadata(&self) -> LinearMetadata {
+        let mut pre_mul = [0f32; 4];
+        let mut cam_xyz = [0f32; 12];
+        let mut cblack = [0u32; 4];
+        unsafe {
+            retina_pre_mul(self.ptr, pre_mul.as_mut_ptr());
+            retina_cam_xyz(self.ptr, cam_xyz.as_mut_ptr());
+            retina_cblack(self.ptr, cblack.as_mut_ptr());
+        }
+        LinearMetadata {
+            pre_mul,
+            cam_xyz,
+            cblack,
+        }
+    }
 }
 
 impl Drop for LibRawHandle {
@@ -166,4 +223,13 @@ pub struct DecodedMetadata {
     pub maximum: u32,
     pub cam_mul: [f32; 4],
     pub rgb_cam: [f32; 12],
+}
+
+/// Metadata from `LibRawHandle::linear_metadata`, valid only after `process_linear`. See shim.h's
+/// `retina_pre_mul`/`retina_cam_xyz`/`retina_cblack` for exact field semantics.
+#[derive(Debug, Clone)]
+pub struct LinearMetadata {
+    pub pre_mul: [f32; 4],
+    pub cam_xyz: [f32; 12],
+    pub cblack: [u32; 4],
 }
