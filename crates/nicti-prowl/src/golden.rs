@@ -172,7 +172,7 @@ impl GoldenStore {
 /// exists to catch -- can hold luma constant while shifting hue, which a luma-only comparison
 /// would score as a perfect match. See `tests::ssim_detects_color_only_shift_luma_constant` for a
 /// worked example.
-fn ssim(a: &RgbImage, b: &RgbImage) -> f64 {
+pub fn ssim(a: &RgbImage, b: &RgbImage) -> f64 {
     assert_eq!(
         a.dimensions(),
         b.dimensions(),
