@@ -138,8 +138,9 @@ spikes/retina/vendor/LibRaw` before building if it's missing.
 
 ## Recommendations for #41
 
-- Implement `nicti-decode`'s `RawDecoder` using LibRaw+#826, once the LGPL or-later question
-  (ADR-0019's Licensing section) is answered.
+- Implement `nicti-decode`'s `RawDecoder` using LibRaw+#826 — the LGPL question is resolved (see
+  ADR-0019's Licensing section), the remaining gate is the decode-latency product call in its
+  Decision section.
 - Adopt `RawFrame`'s shape (metadata + Bayer plane) as the decode output type; it already matches
   what #41/#44's render-graph design expects to consume.
 - Budget decode latency explicitly in #44's render-graph cache design — 1-2.4s per HE/Lossless

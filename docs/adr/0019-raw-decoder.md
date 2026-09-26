@@ -35,7 +35,7 @@ separately-developed decoder will ship instead) but has not disputed its correct
 |---|---|---|---|---|
 | LibRaw 0.22.2 (stock) | ❌ | ✅ | LGPL-2.1 or CDDL-1.0 | No HE support in any released version |
 | **LibRaw + PR #826** (`yogthos/LibRaw@nikon-he-decoder`) | ✅ | ✅ | LGPL-2.1 or CDDL-1.0 (inherited — every new file carries LibRaw's standard dual header, see Flags below) | Chosen candidate |
-| rawler 0.8.0 | ❌ (explicit `DecoderFailed`, no crash) | ✅ | LGPL-2.1 (or-later status unconfirmed) | Kept as a correctness cross-check for the Lossless/Uncompressed path only |
+| rawler 0.8.0 | ❌ (explicit `DecoderFailed`, no crash) | ✅ | LGPL-2.1 (compatible with Nicti's AGPL-3.0-or-later via LGPL-2.1 §§5–6, see Licensing below — no "or-later" grant needed) | Kept as a correctness cross-check for the Lossless/Uncompressed path only |
 | rawspeed | ❌ | ✅ (Z9 lossless-only, per public issue trackers) | LGPL-2.1-or-later | No Rust binding; not evaluated further |
 
 ## Spike: `spikes/retina`

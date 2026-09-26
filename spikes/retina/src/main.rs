@@ -266,6 +266,17 @@ fn diff(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The last `n` samples of the first `row_width`-wide row, or fewer if `row_width` (a real
+/// decoded field, not a constant) or `cfa`'s own length is smaller than `n` -- a hostile review
+/// caught the original `&cfa[(row_width - 8)..row_width]` underflowing/panicking on any real file
+/// with a row narrower than 8 samples (this is debug tooling, not something a malformed file
+/// should be able to crash outright).
+fn last_n(cfa: &[u16], row_width: usize, n: usize) -> &[u16] {
+    let end = row_width.min(cfa.len());
+    let start = end.saturating_sub(n);
+    &cfa[start..end]
+}
+
 fn peek(path: &Path, decoder: Decoder, n: usize) -> anyhow::Result<()> {
     let data = fs::read(path)?;
     match decoder {
@@ -276,10 +287,7 @@ fn peek(path: &Path, decoder: Decoder, n: usize) -> anyhow::Result<()> {
             let cfa = handle.raw_image().map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{meta:?}");
             println!("first {n}: {:?}", &cfa[..n.min(cfa.len())]);
-            println!(
-                "row0 last 8: {:?}",
-                &cfa[(meta.raw_width as usize - 8)..meta.raw_width as usize]
-            );
+            println!("row0 last 8: {:?}", last_n(cfa, meta.raw_width as usize, 8));
             println!(
                 "sum={} nonzero={}",
                 cfa.iter().map(|&v| v as u64).sum::<u64>(),
@@ -298,10 +306,7 @@ fn peek(path: &Path, decoder: Decoder, n: usize) -> anyhow::Result<()> {
             )?;
             if let rawler::rawimage::RawImageData::Integer(v) = &raw_image.data {
                 println!("first {n}: {:?}", &v[..n.min(v.len())]);
-                println!(
-                    "row0 last 8: {:?}",
-                    &v[(raw_image.width - 8)..raw_image.width]
-                );
+                println!("row0 last 8: {:?}", last_n(v, raw_image.width, 8));
                 println!(
                     "sum={} nonzero={}",
                     v.iter().map(|&x| x as u64).sum::<u64>(),
