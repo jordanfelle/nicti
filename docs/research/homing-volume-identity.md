@@ -38,6 +38,20 @@ two-IOCTL `mbr_disk_signature` chain actually return the right disk's signature)
 exactly the "spec + tooling merged, baseline measurement deferred" shape ADR-0006/0007/#90
 describe — flagged explicitly here rather than glossed over.
 
+**This gap turned out real, not just theoretical**: `cargo test (windows)` failed on real GitHub
+Actions CI (`windows-latest`) even after the cross-compile check above went clean, because two of
+this crate's own unit tests built a `mount_point` test fixture with a bare `Path::canonicalize()`
+call and compared it against `root_rel_path_for`'s own canonicalized-and-verbatim-stripped path.
+`canonicalize()` never returns a Windows verbatim (`\\?\...`) path in this Linux/WSL sandbox, so
+the two sides matched here; on real Windows it always does, so they never matched there — a
+same-shaped bug to the exact `\\?\` handling `current_volume_for` was already fixed for earlier in
+this branch, just reintroduced independently in a test fixture. Fixed by extracting the
+canonicalize-and-strip logic into one function (`canonicalized_slash_path`) that both the
+production code and every test fixture now call, so a test can no longer independently
+reconstruct (and silently diverge from) that logic. This is exactly the category of bug the
+Sandbox constraint above warned couldn't be ruled out locally — confirmed real, not resolved by
+better local tooling, only by actually running on Windows.
+
 What *is* real, from this sandbox:
 
 - `spikes/homing`'s cross-platform modules (`path.rs`, `schema.rs`, `fingerprint.rs`, `relink.rs`,

@@ -134,16 +134,29 @@ fn cmd_watch(seconds: u64, backend: WatchBackend, interval_secs: u64) -> Result<
     Ok(())
 }
 
+/// Canonicalizes `path` and returns it as a forward-slash string with any Windows verbatim
+/// prefix stripped. `Path::canonicalize` on Windows can return a verbatim path (`\\?\H:\...`),
+/// which after slash normalization becomes `//?/H:/...` -- real mount points (from
+/// `GetVolumePathNamesForVolumeNameW`, via `volume::windows_impl::enumerate`) never carry this
+/// prefix, so anything compared against one must have it stripped too. This one function is the
+/// only place that does the canonicalize-and-strip -- `current_volume_for`/`root_rel_path_for`
+/// and their own tests all call it, specifically so a test fixture can never independently
+/// reconstruct this logic and quietly drift from what production code actually does (exactly
+/// what happened before this function existed: two tests built their own `mount_point` fixture
+/// via a bare `canonicalize()` with no verbatim-prefix strip, which matched in this Linux/WSL
+/// sandbox -- `canonicalize()` never produces a verbatim path here -- but failed on real Windows
+/// CI, since a real mount point and a raw canonicalized path are never directly comparable).
+fn canonicalized_slash_path(path: &std::path::Path) -> Result<String> {
+    let abs = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", path.display()))?;
+    let abs_str = abs.to_string_lossy().replace('\\', "/");
+    Ok(abs_str.strip_prefix("//?/").unwrap_or(&abs_str).to_string())
+}
+
 fn current_volume_for(dir: &std::path::Path) -> Result<(String, volume::VolumeInfo, String)> {
     let volumes = volume::windows_impl::enumerate()?;
-    let abs = dir
-        .canonicalize()
-        .with_context(|| format!("canonicalizing {}", dir.display()))?;
-    // `Path::canonicalize` on Windows can return a verbatim path (`\\?\H:\...`), which after
-    // slash normalization becomes `//?/H:/...` -- strip that prefix so it lines up with the
-    // enumerated mount points, which never carry it.
-    let abs_str = abs.to_string_lossy().replace('\\', "/");
-    let abs_str = abs_str.strip_prefix("//?/").unwrap_or(&abs_str);
+    let abs_str = canonicalized_slash_path(dir)?;
 
     // Two bugs an earlier draft had: (1) a bare `starts_with` matches a sibling path with a
     // shared prefix that isn't a real path-component boundary (e.g. mount point `C:/Mount` would
@@ -182,11 +195,7 @@ fn current_volume_for(dir: &std::path::Path) -> Result<(String, volume::VolumeIn
 /// `H:\Photos`), an empty root_rel would make every asset resolve to `H:\<rel>` instead of
 /// `H:\Photos\<rel>`, silently pointing at the wrong path.
 fn root_rel_path_for(dir: &std::path::Path, mount_point: &str) -> Result<String> {
-    let abs = dir
-        .canonicalize()
-        .with_context(|| format!("canonicalizing {}", dir.display()))?;
-    let abs_str = abs.to_string_lossy().replace('\\', "/");
-    let abs_str = abs_str.strip_prefix("//?/").unwrap_or(&abs_str);
+    let abs_str = canonicalized_slash_path(dir)?;
     let mp_norm = mount_point.trim_end_matches(['\\', '/']).replace('\\', "/");
     // Same component-boundary requirement `current_volume_for` enforces: a bare `strip_prefix`
     // would treat mount point `H:/Mount` as a prefix of `H:/MountOther/Photos` too, silently
@@ -401,14 +410,19 @@ fn cmd_bench(dir: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::root_rel_path_for;
+    use super::{canonicalized_slash_path, root_rel_path_for};
     use tempfile::TempDir;
 
     #[test]
     fn root_rel_path_for_is_empty_when_dir_is_the_volume_root() {
         let dir = TempDir::new().unwrap();
-        let abs = dir.path().canonicalize().unwrap();
-        let mount_point = abs.to_string_lossy().replace('\\', "/");
+        // Built through the same canonicalize-and-strip helper `root_rel_path_for` itself uses
+        // for `dir`, not a raw `canonicalize()` -- a real mount point never carries the verbatim
+        // (`\\?\`) prefix Windows' `canonicalize()` can add, and an earlier draft of this test
+        // built its `mount_point` fixture with a bare `canonicalize()`, which happened to match
+        // in this Linux/WSL sandbox (canonicalize never produces a verbatim path here) but failed
+        // on real Windows CI, where it always does.
+        let mount_point = canonicalized_slash_path(dir.path()).unwrap();
         assert_eq!(root_rel_path_for(dir.path(), &mount_point).unwrap(), "");
     }
 
@@ -417,12 +431,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let sub = dir.path().join("Photos").join("2026");
         std::fs::create_dir_all(&sub).unwrap();
-        let mount_point = dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
+        let mount_point = canonicalized_slash_path(dir.path()).unwrap();
         assert_eq!(
             root_rel_path_for(&sub, &mount_point).unwrap(),
             "Photos/2026"
@@ -436,17 +445,14 @@ mod tests {
         // file. This function must reject it the same way, not silently return a
         // wrong-but-non-crashing "ther/Photos". Both directories are real (canonicalize must
         // succeed) so the rejection under test is the strip_prefix component check itself, not
-        // an I/O error from a nonexistent path.
+        // an I/O error from a nonexistent path or (an earlier draft's bug) a spurious mismatch
+        // from comparing a verbatim-prefixed mount point against a stripped one.
         let base = TempDir::new().unwrap();
         let mount = base.path().join("Mount");
         let sibling = base.path().join("MountOther").join("Photos");
         std::fs::create_dir_all(&mount).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
-        let mount_point = mount
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
+        let mount_point = canonicalized_slash_path(&mount).unwrap();
         assert!(root_rel_path_for(&sibling, &mount_point).is_err());
     }
 }
