@@ -164,13 +164,16 @@ this section's footnote for what that number looked like before the Windows run)
 | Dx12 | AMD Radeon(TM) Graphics (iGPU) | 9.083 ms | 9.251 ms | 9.251 ms |
 | Dx12 | Microsoft Basic Render Driver (software) | 26.396 ms | 28.108 ms | 28.108 ms |
 
-**Against the <16ms/update interactive-heal target: the Vulkan/RTX 5080 combination Nicti actually
-ships on clears it with ~40x headroom** (0.386ms vs. 16ms). Even the AMD iGPU stays under budget;
-only the software fallback misses it, and Nicti's v1 target assumes a real GPU is present.
-`wgpu::Backends::PRIMARY` enumerated both Vulkan and Dx12 adapters on Windows (unlike this WSL
-sandbox, which only ever sees Vulkan); Dx12 is marginally faster here but ADR-0005 already ruled
-it out for lacking `SHADER_F16`, which Tapetum's (#44) cache tiers need — a constraint this kernel
-doesn't itself exercise, so the two backends being close doesn't reopen that decision.
+**Against the <16ms/update interactive-heal kernel-budget proxy: the Vulkan/RTX 5080 combination
+Nicti actually ships on clears it with ~40x headroom** (0.386ms vs. 16ms) — again, this is the
+`TIMESTAMP_QUERY`-bracketed Jacobi-dispatch time only, not an end-to-end interactive-update
+measurement (host-side setup/upload/readback aren't included; see the Decision rule section
+above). Even the AMD iGPU stays under budget; only the software fallback misses it, and Nicti's
+v1 target assumes a real GPU is present. `wgpu::Backends::PRIMARY` enumerated both Vulkan and Dx12
+adapters on Windows (unlike this WSL sandbox, which only ever sees Vulkan); Dx12 is marginally
+faster here but ADR-0005 already ruled it out for lacking `SHADER_F16`, which Tapetum's (#44)
+cache tiers need — a constraint this kernel doesn't itself exercise, so the two backends being
+close doesn't reopen that decision.
 
 | Operation | Result |
 |---|---|
