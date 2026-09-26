@@ -1,0 +1,27 @@
+[package]
+name = "shed"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #61: .lrcat schema mapping research. Reads a Lightroom Classic catalog read-only (immutable, never a live/locked one), inventories its schema and aggregate structure, parses Adobe_imageDevelopSettings/Adobe_libraryImageDevelopHistoryStep develop-settings Lua literals, and checks the diff for anything privacy-sensitive (keyword/collection/path names) before it's committed. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "shed"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shed"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+anyhow = "1"
+thiserror = "2"
+agprefs = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

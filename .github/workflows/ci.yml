@@ -241,13 +241,17 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # #127: unlike every other cache in this workflow, this one never saves, even from
-          # main. den (linux) isn't a required check, only runs when path-gated in, and den
-          # itself is slated for deletion once #22 lands (#123) -- its Linux cache entry
-          # (1.46GiB, measured via `gh cache list`) was 14% of this repo's total cache usage
-          # against GitHub's 10GB/repo limit for a job nothing else depends on being warm.
-          # den (windows) is required, so its own cache still saves normally.
-          save-if: false
+          # #154: #127 set this to `false` to free ~1.46GiB of the repo's 10GB cache limit, but
+          # that made every den (linux) run compile all eight bundled native catalog engines
+          # (DuckDB, RocksDB, both SQLite forks, ...) from scratch on every main push and every
+          # PR touching `Cargo.{toml,lock}`/this workflow file -- measured regression: 2-3min
+          # warm -> 25-33min cold (run 36270527245: clippy 12.5min, each `cargo test` step
+          # ~7min). Restored to the same `save-if` every other job in this workflow uses.
+          # Budget check at restore time (`gh cache list`): ~6.5GiB across the other entries,
+          # +~1.5GiB for this one lands at ~8GiB, still under the 10GB/repo limit -- re-check
+          # with `gh cache list` if new caches get added later. `pelt-linux`/`retina-linux`
+          # stay at `save-if: false`: their cold cost (4min/2.5min) isn't worth caching.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # den (#67/ADR-0008 and follow-ups, see CLAUDE.md's package map) is a throwaway research
       # spike, not part of the shipping v1 target -- see the #117 issue this job was split out
       # to address: every catalog-engine candidate it bundles (SQLite, DuckDB, LMDB, Turso, redb,
@@ -366,6 +370,41 @@ jobs:
       # prove out on it, not just Linux.
       - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
       - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
+
+  windows-required-gate:
+    name: den/pelt windows (required check gate)
+    # #166: den (windows)/pelt (windows) are both branch-protection-required checks AND
+    # path-gated (see den-linux's own if: comment above) -- this repo's CLAUDE.md used to assume
+    # a path-gated-out "skipped" result still satisfies a required check, but classic branch
+    # protection actually treats `skipped` as NOT satisfying the requirement, which silently
+    # blocked merge on every PR that doesn't touch spikes/den/**, spikes/pelt-*/**, or
+    # Cargo.{toml,lock}/this workflow file (confirmed on #162, which needed `gh pr merge --admin`
+    # twice to get past it). This job is what's actually registered as the required check
+    # instead: it has no path-gated `if:` of its own, so it's never itself skipped, and only
+    # fails when den-windows/pelt-windows genuinely failed or were cancelled -- a skipped
+    # upstream result still passes the gate, which is the behavior that was actually intended.
+    needs: [den-windows, pelt-windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check den (windows)/pelt (windows) didn't actually fail
+        env:
+          DEN_RESULT: ${{ needs.den-windows.result }}
+          PELT_RESULT: ${{ needs.pelt-windows.result }}
+        run: |
+          echo "den (windows): $DEN_RESULT"
+          echo "pelt (windows): $PELT_RESULT"
+          fail=0
+          for r in "$DEN_RESULT" "$PELT_RESULT"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" = "1" ]; then
+            echo "::error::den (windows) or pelt (windows) failed or was cancelled"
+            exit 1
+          fi
+          echo "ok: both passed, or were correctly path-gate-skipped"
 
   retina-linux:
     name: retina (linux)

@@ -32,18 +32,21 @@ Covers the GPU compute API choice, the (proposed) GUI framework decision, and th
   egui's/GPUI's built-in virtualized-list primitive, so both had to hand-roll grid-windowing math
   (`spikes/pelt/src/virtualize.rs`) for #68's grid gate. Final selection waits on
   `bench/pelt/pelt.ahk`+`run-pelt.ps1` numbers from the reference machine.
-- **Healing/removal**: `docs/adr/0007-healing-and-removal.md` — **Proposed, pending a
-  reference-machine measurement pass**. Ships both classic clone/heal (CPU Poisson-Jacobi solve +
-  a `wgpu` compute-shader twin, proven correct against each other in `spikes/groom/`) and AI
-  removal (MobileSAM+LaMa via `ort`/`load-dynamic`, per ADR-0004 §3's already-decided pattern) as
-  two `SpotKind` variants of one `HealStage`, not competing alternatives. No real ONNX weights
-  exist in this sandbox — the AI-removal wrappers prove the loading/error-handling shape only.
-  Re-verified LaMa's Places2 training-data flag (still unresolved — the primary source stays
-  unreachable, a mirror confirms Places2's own non-commercial/no-redistribution terms) and
-  researched MI-GAN as an alternative, which turned out **not** to be cleaner (same Places2
-  exposure, plus its own unresolved weights-license-legitimacy question) — see
-  `docs/research/groom-healing-removal.md`. Measured CPU-only timings (clone_stamp 0.12ms/op,
-  spot_heal 0.25ms/op, auto_source_pick 0.05ms/op) and `HealStage` serialized sizes (120/1,511/
-  7,531 bytes at 1/10/50 spots); GPU/CUDA numbers deferred to the reference machine. Proposes
-  (not commits) heal/remove's stage-order placement for #44: after lens correction, before global
-  tone, in linear space.
+- **Healing/removal**: `docs/adr/0007-healing-and-removal.md` — **Accepted** (2026-09-26, #97's
+  reference-machine pass). Ships both classic clone/heal (CPU Poisson-Jacobi solve + a `wgpu`
+  compute-shader twin, proven correct against each other in `spikes/groom/`) and AI removal
+  (MobileSAM+LaMa via `ort`/`load-dynamic`, per ADR-0004 §3's already-decided pattern) as two
+  `SpotKind` variants of one `HealStage`, not competing alternatives. No real ONNX weights exist
+  yet — the AI-removal wrappers prove the loading/error-handling shape only, latency/quality still
+  TBD pending #51's real checkpoints. Re-verified LaMa's Places2 training-data flag (still
+  unresolved — the primary source stays unreachable, a mirror confirms Places2's own
+  non-commercial/no-redistribution terms) and researched MI-GAN as an alternative, which turned
+  out **not** to be cleaner (same Places2 exposure, plus its own unresolved
+  weights-license-legitimacy question) — see `docs/research/groom-healing-removal.md`. Measured
+  CPU timings (clone_stamp 0.12ms/op, spot_heal 0.25ms/op, auto_source_pick 0.05ms/op) and
+  `HealStage` serialized sizes (120/1,511/7,531 bytes at 1/10/50 spots). **#97 measured the GPU
+  Poisson-solve on the real RTX 5080/Windows box: 0.386ms p50 (Vulkan) against the <16ms/update
+  target** — ~40x headroom, clearing the last open speed question this ADR had (AI-removal
+  latency stays gated on #51's weights, not on hardware access). Proposes (not commits)
+  heal/remove's stage-order placement for #44: after lens correction, before global tone, in
+  linear space.

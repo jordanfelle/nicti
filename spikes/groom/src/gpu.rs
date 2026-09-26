@@ -1,10 +1,11 @@
 //! wgpu device/adapter setup and dispatch for the Poisson-Jacobi compute shader, following
 //! `spikes/glint/src/gpu.rs`'s pattern (adapter enumeration, `SHADER_F16`/`TIMESTAMP_QUERY`
 //! feature probing, the 2D dispatch-grid workaround for wgpu's 65535-per-dimension workgroup
-//! limit). Simplified relative to glint in one deliberate way: no GPU-timestamp harness, since
-//! this ticket's perf work is CPU-only in this sandbox (see `tests/throughput.rs`) and real GPU
-//! numbers are explicitly deferred to the reference-machine follow-up (ADR-0007's Measured
-//! results section).
+//! limit). #97 added the `TIMESTAMP_QUERY`-based timing harness that this module's original
+//! comment said was deliberately dropped -- that was true only because the research sandbox had
+//! no GPU-backed adapter to time against; #97's reference-machine pass runs on real hardware, so
+//! `run_poisson_jacobi` now reports `Some(elapsed_ns)` whenever the adapter supports it, mirroring
+//! `spikes/glint::gpu::run_live_chain`'s exact shape.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -46,6 +47,8 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub backend: wgpu::Backend,
     pub adapter_name: String,
+    pub device_type: wgpu::DeviceType,
+    pub timestamp_period_ns: f32,
 }
 
 impl GpuContext {
@@ -65,19 +68,34 @@ impl GpuContext {
 
     fn from_adapter(adapter: wgpu::Adapter) -> Option<Self> {
         let info = adapter.get_info();
+        let features = adapter.features();
+        let mut required_features = wgpu::Features::empty();
+        if features.contains(wgpu::Features::TIMESTAMP_QUERY) {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("groom device"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: adapter.limits(),
             ..Default::default()
         }))
         .ok()?;
+        let timestamp_period_ns = queue.get_timestamp_period();
         Some(Self {
             device,
             queue,
             backend: info.backend,
             adapter_name: info.name,
+            device_type: info.device_type,
+            timestamp_period_ns,
         })
+    }
+
+    pub fn supports_timestamps(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
     }
 }
 
@@ -99,7 +117,10 @@ fn storage_buffer(
 /// storage buffers (one dispatch per iteration, alternating which buffer is `in`/`out`) -- the
 /// GPU-side twin of `cpu_reference::poisson_jacobi_cpu`. `guidance`/`initial`/`mask` must all be
 /// `width * height` long; `mask` is `1u` for interior/unknown pixels, `0u` for fixed boundary
-/// pixels, matching `cpu_reference`'s `bool` mask one-to-one.
+/// pixels, matching `cpu_reference`'s `bool` mask one-to-one. The second return value is
+/// `Some(elapsed_ns)` (in-GPU-timeline duration spanning every Jacobi dispatch, via
+/// `TIMESTAMP_QUERY`) iff the adapter supports it -- mirrors `spikes/glint::gpu::run_live_chain`'s
+/// shape, see #97.
 pub fn run_poisson_jacobi(
     ctx: &GpuContext,
     guidance: &[[f32; 4]],
@@ -108,7 +129,7 @@ pub fn run_poisson_jacobi(
     width: u32,
     height: u32,
     iterations: u32,
-) -> Vec<[f32; 4]> {
+) -> (Vec<[f32; 4]>, Option<f64>) {
     let device = &ctx.device;
     let total = (width * height) as usize;
     assert_eq!(guidance.len(), total);
@@ -201,6 +222,34 @@ pub fn run_poisson_jacobi(
 
     let (wg_x, wg_y) = workgroup_grid((total as u32).div_ceil(WORKGROUP_SIZE));
 
+    // A zero-iteration solve never writes into the query set (the loop below never runs a
+    // pass), which would make `resolve_query_set` resolve unwritten queries -- skip timing
+    // entirely in that degenerate case rather than special-casing the resolve step.
+    let use_timestamps = ctx.supports_timestamps() && iterations > 0;
+    let query_set = use_timestamps.then(|| {
+        device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("groom poisson timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        })
+    });
+    let resolve_buf = use_timestamps.then(|| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("poisson timestamp resolve"),
+            size: 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    });
+    let timestamp_readback = use_timestamps.then(|| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("poisson timestamp readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    });
+
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("groom poisson encoder"),
     });
@@ -210,9 +259,24 @@ pub fn run_poisson_jacobi(
         } else {
             &bind_group_b_to_a
         };
+        // Timestamp writes span every Jacobi dispatch (start of the first pass, end of the
+        // last), not one pass per iteration. wgpu requires at least one of begin/end set
+        // whenever `ComputePassTimestampWrites` is present at all, so only the first and last
+        // passes get one -- every pass in between gets `None`.
+        let timestamp_writes = if it == 0 || it == iterations - 1 {
+            query_set
+                .as_ref()
+                .map(|qs| wgpu::ComputePassTimestampWrites {
+                    query_set: qs,
+                    beginning_of_pass_write_index: (it == 0).then_some(0),
+                    end_of_pass_write_index: (it == iterations - 1).then_some(1),
+                })
+        } else {
+            None
+        };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("poisson pass"),
-            timestamp_writes: None,
+            timestamp_writes,
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, bind_group, &[]);
@@ -229,6 +293,10 @@ pub fn run_poisson_jacobi(
         mapped_at_creation: false,
     });
     encoder.copy_buffer_to_buffer(final_buf, 0, &staging_buf, 0, buf_size);
+    if let (Some(qs), Some(resolve)) = (&query_set, &resolve_buf) {
+        encoder.resolve_query_set(qs, 0..2, resolve, 0);
+        encoder.copy_buffer_to_buffer(resolve, 0, timestamp_readback.as_ref().unwrap(), 0, 16);
+    }
     ctx.queue.submit(Some(encoder.finish()));
 
     let slice = staging_buf.slice(..);
@@ -241,7 +309,25 @@ pub fn run_poisson_jacobi(
         .expect("readback buffer not mapped")
         .to_vec();
     let out: &[[f32; 4]] = bytemuck::cast_slice(&data);
-    out.to_vec()
+    let result = out.to_vec();
+
+    let elapsed_ns = timestamp_readback.map(|ts_buf| {
+        let ts_slice = ts_buf.slice(..);
+        ts_slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+        let raw = ts_slice
+            .get_mapped_range()
+            .expect("timestamp buffer not mapped");
+        let timestamps: &[u64] = bytemuck::cast_slice(&raw);
+        let (start, end) = (timestamps[0], timestamps[1]);
+        drop(raw);
+        ts_buf.unmap();
+        (end - start) as f64 * ctx.timestamp_period_ns as f64
+    });
+
+    (result, elapsed_ns)
 }
 
 #[cfg(test)]

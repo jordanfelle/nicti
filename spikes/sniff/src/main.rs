@@ -67,17 +67,32 @@ enum Command {
     /// `--quality`. Either way, populates `--cache-format` then reads back in random order.
     /// Prints one JSON `TierBenchResult`.
     TierBench {
-        root: PathBuf,
+        /// One or more roots to draw the sample from (each is walked non-recursively). Accepts
+        /// multiple values so #143's stratified-subset folders can be passed without making the
+        /// walk itself recursive: `--root a --root b`.
+        #[arg(long = "root", required = true)]
+        roots: Vec<PathBuf>,
         #[arg(long, value_enum, default_value = "t2-screen")]
         tier: tier_bench::Tier,
         #[arg(long, value_enum, default_value = "jpeg")]
         codec: codec::Codec,
         #[arg(long, default_value_t = 80)]
         quality: u8,
+        /// AVIF-only: ravif's 1 (slowest, highest effort) - 10 (fastest, lowest effort)
+        /// encode-effort dial. Ignored by JPEG/WebP. #143's sweep axis -- see `codec.rs`'s module
+        /// doc. `ravif::Encoder::with_speed` panics outside 1..=10, so this is range-checked here
+        /// rather than left to fail deep inside an encode call.
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(1..=10))]
+        avif_speed: u8,
         #[arg(long, value_enum, default_value = "sqlite")]
         cache_format: cache::Format,
         #[arg(long)]
         sample_limit: Option<usize>,
+        /// Also decode each encoded payload right after its (untimed) encode and score it
+        /// against the pre-encode resized source with `nicti_prowl::golden::ssim`, so the sweep
+        /// can tell "smaller/faster" apart from "smaller/faster because it also looks worse".
+        #[arg(long, default_value_t = false)]
+        ssim: bool,
         #[arg(long, default_value = "bench-results/sniff-tier-bench")]
         out_dir: PathBuf,
     },
@@ -116,21 +131,25 @@ fn main() -> std::io::Result<()> {
             &out_dir,
         ),
         Command::TierBench {
-            root,
+            roots,
             tier,
             codec,
             quality,
+            avif_speed,
             cache_format,
             sample_limit,
+            ssim,
             out_dir,
         } => {
             let result = tier_bench::run(
-                &root,
+                &roots,
                 tier,
                 codec,
                 quality,
+                avif_speed,
                 cache_format,
                 sample_limit,
+                ssim,
                 &out_dir,
             )
             .map_err(|e| std::io::Error::other(e.to_string()))?;

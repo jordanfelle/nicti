@@ -98,8 +98,10 @@ ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG rese
 #29's preview-tier-strategy comparison: a from-scratch TIFF/EXIF/Nikon-MakerNote IFD walker (now
 generic over `source::ByteSource` — `SliceSource`/`FileSource` — for #29's ranged, seek-and-read
 extraction) — no LibRaw/rawler dependency, deliberately, to stay clear of #37's still-open decoder
-choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF
-tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust), `cache.rs`'s three
+choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF-vs-WebP
+tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust, plus lossy WebP via the
+C-linked `webp`/`libwebp-sys`, added for #143's ADR-0022 follow-up alongside a swept `avif-speed`
+axis and `nicti-prowl`-reused SSIM scoring — see the committed `run-codec-sweep.ps1`), `cache.rs`'s three
 cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
 per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
 benchmark with a `--io {whole,ranged}` axis; `sniff inventory` cross-checked byte-exact against
@@ -173,6 +175,10 @@ are storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a
 test passing against lavapipe; pure Rust, no FFI, not path-gated. See
 `docs/research/calico-color-pipeline.md`) is real, tested (26 unit tests + 3 integration tests),
 pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
+`spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
+reading plus a pre-commit privacy check against the real catalog's own keyword/path strings; see
+`docs/research/shed-lrcat-schema.md`) is real, tested (17 unit tests on Unix, 16 on Windows), not
+path-gated.
 
 ## Development workflow
 
@@ -256,11 +262,27 @@ it only covers Cargo dependencies, not native libraries, ML models, or data file
 rely on `docs/licensing.md` being updated at review time.
 
 **Windows is the required (blocking) platform (#17)**, not Linux: `cargo fmt`, `cargo clippy
-(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, `den (windows)`, and
-`pelt (windows)` are the branch-protection-required checks, matching the actual v1 target
+(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, and `den/pelt windows
+(required check gate)` are the branch-protection-required checks, matching the actual v1 target
 (README's Scope section). `cargo clippy (linux)`/`cargo test (linux)`/`den (linux)`/
 `pelt (linux)` still run on every PR (Linux stays CI-only, catches platform-specific bugs early)
 but aren't required to merge.
+
+**`den (windows)`/`pelt (windows)` are themselves NOT in the required-checks list (#166)** --
+despite being the jobs that actually do the Windows den/pelt work, listing them directly caused
+classic branch protection to block merge on every PR that path-gates them out to `skipped`
+(GitHub treats a required check reporting `skipped` as not satisfying the requirement, contrary
+to what this file used to claim -- confirmed on #162, which needed `gh pr merge --admin` twice).
+`den/pelt windows (required check gate)` is the actual required check instead: it has no
+path-gated `if:` of its own (so it's never itself skipped), and only fails when
+`den-windows`/`pelt-windows` genuinely failed or were cancelled -- a skipped upstream result
+still passes the gate. If a new path-gated Windows-required job is ever added, route it through
+this same gate rather than listing it directly in branch protection. Trade-off: the gate trusts
+`skipped` unconditionally, so it can't tell "correctly path-gated" apart from "`dorny/paths-filter`
+patterns drifted and should have matched but didn't" -- before #166 that case was accidentally
+fail-closed (blocked merge, forcing a human to look), after it's fail-open (merges silently). Same
+failure class the `changes` job's own comment above already worries about; worth remembering if
+den/pelt's path-filter patterns are ever restructured.
 
 **`spikes/den`'s eight bundled native catalog-engine builds, and `spikes/pelt-egui`/`pelt-iced`/
 `pelt-slint`'s GUI-framework spikes, are both path-gated the same way (#117, #127)**, not part of
@@ -279,7 +301,11 @@ false`, #127) — neither is a required check, and den is already slated for del
 main's cache and skip the save step, which used to be a 20-30 minute cost on the Windows job by
 itself and was pushing this repo's cache usage over GitHub's 10GB/repo limit.
 `CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level env) additionally strips debuginfo from both Rust and
-den's bundled C/C++ builds, which was most of that cache size. `spikes/**` is also excluded from
+den's bundled C/C++ builds, which was most of that cache size. **den (linux)'s own `save-if:
+false` was reverted in #154** (2026-09-26): it caused a measured 2-3min -> 25-33min regression
+(every run recompiling all eight bundled native engines from scratch) that outweighed the ~1.5GiB
+cache-budget saving -- it now saves on push to main like every other job here. `pelt-linux`/
+`retina-linux` still use `save-if: false` (cold cost is only 4min/2.5min). `spikes/**` is also excluded from
 Renovate (`renovate.json`) for the same reason — den bundles five already-rejected engine
 candidates (ADR-0009/0010/0014/0015/0016) that generate bump-PR churn nobody will act on.
 **`spikes/den` itself is slated for deletion once #22 lands, and `spikes/pelt-*` once ADR-0006
@@ -296,3 +322,11 @@ to resolve its crate graph — including running `den`'s bundled DuckDB/RocksDB/
 scripts from scratch — which measured 18m34s of a 35m51s total run on #126's PR, almost entirely
 spent on code that never ships. CodeQL isn't a required check, so this was pure runner-time waste,
 not a merge blocker.
+
+**A duration watcher (#160) files a `ci-slow` GitHub issue when a `CI`/`CodeQL Advanced` job
+runs over its budget in `.github/ci-budgets.json` on two consecutive main-branch runs** (one slow
+run alone is treated as noise, e.g. a cold cache right after a `Cargo.lock` bump) — see
+`.github/scripts/ci_duration_watch.py` and `.github/workflows/ci-duration-watch.yml`. A PR that
+legitimately makes a job slower raises that job's budget in `ci-budgets.json` in the same PR,
+rather than leaving the watcher to keep re-filing against a budget everyone's already accepted
+missing.

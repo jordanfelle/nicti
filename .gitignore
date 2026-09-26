@@ -4,3 +4,4 @@ bench-results/
 /target
 *.pdb
 .DS_Store
+__pycache__/
