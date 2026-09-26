@@ -120,6 +120,14 @@ fn compare(
     );
     let (full_width, full_height) = reference.image.dimensions();
 
+    if let Some(size) = crop {
+        // A zero (or otherwise degenerate) crop flows unvalidated into every downstream stage --
+        // caught in adversarial review producing a debug-build subtract-with-overflow panic (and
+        // in release, an out-of-bounds slice index once the wrapped value gets `.min()`-clamped
+        // back into range) inside ai.rs's build_padded_tile. Reject it here instead, where the
+        // real invariant (a crop must be a real, positive size) actually belongs.
+        anyhow::ensure!(size > 0, "--crop must be greater than 0, got {size}");
+    }
     let (width, height) = match crop {
         Some(size) => (size.min(full_width), size.min(full_height)),
         None => (full_width, full_height),

@@ -123,16 +123,33 @@ typedef enum RetinaDemosaicQuality {
   RETINA_DEMOSAIC_AAHD = 12,
 } RetinaDemosaicQuality;
 
+// Not a real LibRaw status code (LibRaw's own codes are small negative integers from its own
+// enum) -- this shim's own sentinel for retina_libraw_process_classic's wavelet-threshold guard
+// below. retina_strerror() falls through to LibRaw's own libraw_strerror(), which returns an
+// "Unknown error" string for any code it doesn't recognize, so this is safe to surface through
+// the same error-reporting path callers already use.
+#define RETINA_ERROR_WAVELET_UNSUPPORTED (-1000000)
+
 // Must be called after a successful retina_libraw_decode_buffer, before any getter below. Unlike
 // retina_libraw_process_linear (which deliberately disables WB/FBDD/wavelet-NR so calico can
 // apply color correction itself), this runs LibRaw's classic pipeline with white balance applied
 // (use_camera_wb=1, the as-shot cam_mul) and the caller's choice of demosaic algorithm plus
-// LibRaw's own noise-reduction knobs -- FBDD (0=off, 1=before demosaic, 2=before demosaic +
-// smoother) and post-demosaic wavelet denoise threshold (0 = off). Still output_color=0 ("raw")
-// and gamm={1,1} (linear): #40's `rods` spike applies the same fixed cam_xyz->sRGB matrix +
-// sRGB OETF to every candidate (classic and AI alike) rather than going through LibRaw's own
-// output-color-space conversion, so demosaic/NR differences aren't confounded by a second color
-// pipeline. See docs/research/rods-demosaic-denoise.md.
+// LibRaw's FBDD noise reduction (0=off, 1=before demosaic, 2=before demosaic + smoother). Still
+// output_color=0 ("raw") and gamm={1,1} (linear): #40's `rods` spike applies the same fixed
+// cam_xyz->sRGB matrix + sRGB OETF to every candidate (classic and AI alike) rather than going
+// through LibRaw's own output-color-space conversion, so demosaic/NR differences aren't confounded
+// by a second color pipeline. See docs/research/rods-demosaic-denoise.md.
+//
+// `wavelet_threshold` must be exactly 0.0 (LibRaw's own wavelet denoise stage is a no-op at that
+// value) -- any nonzero value returns RETINA_ERROR_WAVELET_UNSUPPORTED without calling
+// dcraw_process() at all. This is a real, confirmed bug in the vendored PR#826 fork, not overly
+// defensive validation: wavelet_denoise() corrupts imgdata.image's actual allocated size whenever
+// threshold != 0 (at every magnitude tested), but retina_classic_image() below always reports the
+// caller-expected iwidth*iheight*4 length regardless of what LibRaw really allocated -- so calling
+// dcraw_process() with a nonzero threshold and then reading through that mismatched length is an
+// out-of-bounds read. See docs/research/rods-demosaic-denoise.md and this repo's `denoise` topic
+// (.claude/rules/denoise/REFERENCE.md) for the full root-cause writeup. Fix this guard, not just
+// the caller, if the underlying LibRaw bug is ever actually root-caused.
 RetinaStatus retina_libraw_process_classic(RetinaLibRaw *handle,
                                             RetinaDemosaicQuality quality,
                                             int fbdd_noiserd,

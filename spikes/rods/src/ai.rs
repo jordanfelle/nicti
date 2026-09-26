@@ -270,6 +270,16 @@ struct TileWindow {
 }
 
 fn build_padded_tile(rgb_hwc: &[f32], w: TileWindow) -> Vec<f32> {
+    // A zero-sized window has no last-real-row/column to clamp to (the `- 1` below would
+    // underflow) -- this is a real caller bug (an empty image or an empty tile), not something
+    // to silently wrap around in release builds. `assert!`, not `debug_assert!`: this guards
+    // against undefined behavior (an out-of-bounds read past `rgb_hwc`'s end once the
+    // wrapped-around value is `.min()`-clamped back into range), not just a logic error worth
+    // catching only in debug.
+    assert!(
+        w.tile_w > 0 && w.tile_h > 0 && w.source_width > 0 && w.source_height > 0,
+        "build_padded_tile requires a nonzero tile and source size, got {w:?}"
+    );
     let mut tile_data = vec![0.0f32; w.tile_size as usize * w.tile_size as usize * 3];
     for row in 0..w.tile_size {
         let src_row = (w.y + row.min(w.tile_h - 1)).min(w.source_height - 1);
@@ -386,6 +396,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a nonzero tile and source size")]
+    fn build_padded_tile_rejects_zero_sized_window() {
+        // Regression test for a real adversarial-review finding: a zero-sized window (e.g. from
+        // an unvalidated `--crop 0`) used to underflow `tile_h - 1`/`tile_w - 1`, which in a
+        // release build wrapped to u32::MAX, got silently `.min()`-clamped back into range, and
+        // produced an out-of-bounds read into `rgb_hwc` rather than a clean panic.
+        let img = test_image();
+        build_padded_tile(&img, window(0, 0, 0, 0, 4));
     }
 
     #[test]

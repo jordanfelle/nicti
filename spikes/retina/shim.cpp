@@ -194,6 +194,14 @@ RetinaStatus retina_libraw_process_classic(RetinaLibRaw *handle,
                                             RetinaDemosaicQuality quality,
                                             int fbdd_noiserd,
                                             float wavelet_threshold) {
+  // See shim.h's RETINA_ERROR_WAVELET_UNSUPPORTED doc comment: this vendored fork's
+  // wavelet_denoise() corrupts imgdata.image's real allocated size for any nonzero threshold,
+  // and retina_classic_image() below has no way to detect that after the fact -- rejected here,
+  // before dcraw_process() ever runs, rather than trusted to a caller.
+  if (wavelet_threshold != 0.0f) {
+    return RETINA_ERROR_WAVELET_UNSUPPORTED;
+  }
+
   LibRaw *lr = as_libraw(handle);
   libraw_output_params_t &p = lr->imgdata.params;
 
@@ -209,7 +217,7 @@ RetinaStatus retina_libraw_process_classic(RetinaLibRaw *handle,
 
   p.user_qual = static_cast<int>(quality);
   p.fbdd_noiserd = fbdd_noiserd;
-  p.threshold = wavelet_threshold; // 0.0 = LibRaw's own wavelet denoise stage is a no-op
+  p.threshold = 0.0; // enforced above; always the no-op value regardless of the caller's argument
 
   return lr->dcraw_process();
 }
