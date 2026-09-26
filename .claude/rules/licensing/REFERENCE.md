@@ -26,5 +26,5 @@ Full reasoning/history: `.claude/docs/licensing/README.md`.
   blocker either way. Architecturally incompatible regardless of licensing: no DAG/per-stage
   cache (opposite of Tapetum/#44's design), monolithic module structure (no Claw-style
   extension points), untyped JSON sidecar edit storage (no catalog DB). See
-  `docs/research/stalk-prior-art.md` for the full
-  RapidRAW/vkdt/Ansel findings and file:line citations.
+  `docs/research/stalk-prior-art.md` for the full RapidRAW/vkdt/Ansel findings and file:line
+  citations.

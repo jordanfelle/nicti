@@ -25,7 +25,8 @@ Covers the third-party license policy (and its 2026-09-24 amendment) and the out
   mean GPL-2.0-only if relicensed, which this same amendment denies; #37 still needs to resolve
   that before treating rawler as pre-cleared. Reopens RapidRAW (#69) as a potential adopt/fork
   candidate, not just prior-art study, since it's also AGPL-3.0 — see the new tickets filed
-  alongside this ADR for follow-up.
+  alongside this ADR for follow-up. **Resolved 2026-09-26 — see the next bullet: not adopted,
+  study-only (ADR-0018).**
 - **RapidRAW adopt/fork question, resolved**: `docs/adr/0018-rapidraw-adopt-or-fork.md` —
   **not adopted, whole or by module; study-only**. Full findings (RapidRAW, vkdt, Ansel; file:line
   cited architecture and license checks) in `docs/research/stalk-prior-art.md`. The decisive
