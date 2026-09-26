@@ -1,4 +1,4 @@
-# ADR-0021: T2 preview-codec follow-up — faster AVIF speeds + real lossy WebP
+# ADR-0022: T2 preview-codec follow-up — faster AVIF speeds + real lossy WebP
 
 - **Status:** Accepted
 - **Date:** 2026-09-26

@@ -20,7 +20,7 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017, 0021), `raw-decoder` (0019), `volume-identity` (0020). A new ADR adds a bullet to
+`preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021). A new ADR adds a bullet to
 both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -99,7 +99,7 @@ generic over `source::ByteSource` — `SliceSource`/`FileSource` — for #29's r
 extraction) — no LibRaw/rawler dependency, deliberately, to stay clear of #37's still-open decoder
 choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF-vs-WebP
 tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust, plus lossy WebP via the
-C-linked `webp`/`libwebp-sys`, added for #143's ADR-0021 follow-up alongside a swept `avif-speed`
+C-linked `webp`/`libwebp-sys`, added for #143's ADR-0022 follow-up alongside a swept `avif-speed`
 axis and `nicti-prowl`-reused SSIM scoring — see the committed `run-codec-sweep.ps1`), `cache.rs`'s three
 cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
 per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
@@ -141,8 +141,11 @@ to be deleted once its own ticket promotes it (as #20 just did for
 `spikes/sheath`/`spikes/dewclaw`), and `spikes/retina` (#37/ADR-0019's RAW decoder comparison —
 vendors LibRaw's HE/HE\*-capable fork as a git submodule at `spikes/retina/vendor/LibRaw`, compiled
 via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`diff` against rawler
-0.8.0, plus `scan` for a manifest-free directory walk and `watch` for #24's `notify` research; see
-`docs/research/retina-raw-decoder.md`). Its own `vendor/LibRaw` submodule needs
+0.8.0, plus `scan` for a manifest-free directory walk and `watch` for #24's `notify` research;
+also `dump-linear` (#38/ADR-0021: demosaics one NEF with white balance/color-matrix/gamma all
+disabled via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
+`spikes/calico` to consume, without calico depending on retina's FFI/submodule); see
+`docs/research/retina-raw-decoder.md`. Its own `vendor/LibRaw` submodule needs
 `git submodule update --init spikes/retina/vendor/LibRaw` before it builds.
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies. `spikes/homing` (#71/ADR-0020's volume-identity
@@ -156,7 +159,16 @@ its `windows_impl` modules are unverified against real hardware (see ADR-0020's 
 and Measured-results section, all marked TBD pending a reference-machine pass), while its
 cross-platform schema/fingerprint/path logic is real, tested (29 unit tests), and — unlike
 `den`/`pelt-*`/`retina` — not path-gated out of CI's normal `clippy`/`test` jobs, since it needs no
-heavy native build (same as `sniff`).
+heavy native build (same as `sniff`). `spikes/calico` (#38/ADR-0021's color-pipeline research: a
+from-scratch DNG-spec Camera Profile (`.dcp`) tag reader over a hand-rolled TIFF/IFD parser,
+DNG-spec CCT-based dual-illuminant matrix interpolation, three working-space candidates
+(ProPhoto/Rec.2020/ACEScg), a HueSatMap/LookTable trilinear HSV implementation with hue-wrap-aware
+interpolation, a Fritsch-Carlson monotonic tone-curve spline, CIEDE2000 comparison tooling, a CPU
+reference pipeline, and — this repo's first 3D-texture wgpu kernel (`spikes/glint`'s own kernels
+are storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a real CPU/GPU parity
+test passing against lavapipe; pure Rust, no FFI, not path-gated. See
+`docs/research/calico-color-pipeline.md`) is real, tested (26 unit tests + 3 integration tests),
+pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
 
 ## Development workflow
 
@@ -170,21 +182,29 @@ git checkout main && git pull origin main
 git worktree add ../nicti-wt-myfeature -b feat/myfeature
 ```
 
-**Assign yourself to the GitHub issue immediately when starting work on it** — same turn as
-creating the worktree, before the first edit, not deferred until the PR is open:
-```bash
-gh issue edit <N> --repo jordanfelle/nicti --add-assignee jordanfelle
-```
-Unlike `shutterpaws-tech`'s Scrumboy board (`doing`/`testing`/`done` columns), a plain GitHub
-issue has no separate "in progress" status — the assignee field on an open issue *is* that
-signal here. Skipping it (as happened on #143, caught only when asked "why is it not assigned")
-leaves the issue looking unclaimed to anything reading the tracker, including `/nicti-backlog`'s
-own "assigned to you" vs. "unassigned" split.
-
 Compile-feedback loop: `cargo check`, not `cargo build` — skips codegen/linking. Full
 `cargo build`/`cargo test` only when the binary or test execution is actually needed. (This
 section's efficiency rules are agent-specific; a human contributor doesn't need them — see
 CONTRIBUTING.md instead.)
+
+## Issue lifecycle — assign + label the moment work starts
+
+The instant a worktree/branch is created for a GitHub issue — before the first edit, not after —
+run, for that issue number `N`:
+
+```bash
+gh issue edit N --repo jordanfelle/nicti --add-assignee jordanfelle --add-label in-progress
+```
+
+(`in-progress` is a real label in this repo, not a placeholder — create it with `gh label create`
+if it's ever missing.) When the PR merges, `gh issue close N` and drop the `in-progress` label in
+the same turn as the merge — don't leave it dangling on a closed issue.
+
+This is this repo's equivalent of the Shutterpaws/Scrumboy board-sync rule (see the launch-root
+`~/git/CLAUDE.md`'s ticket-lifecycle rule) — same reasoning, adapted to plain GitHub Issues
+instead of a Scrumboy board: an issue sitting unassigned and unlabeled while a branch is actively
+open on it is invisible to anyone (including a future session) checking what's already spoken
+for. Missed once on #38 (2026-09-26) — the worktree and PR were created without this step.
 
 ## PR conventions
 

@@ -1454,6 +1454,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "calico"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytemuck",
+ "byteorder",
+ "clap",
+ "half",
+ "image",
+ "pollster",
+ "roxmltree 0.20.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "wgpu 30.0.1",
+]
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8521,6 +8541,7 @@ dependencies = [
  "cc",
  "clap",
  "csv",
+ "image",
  "nicti-prowl",
  "notify",
  "rawler",

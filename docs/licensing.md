@@ -293,8 +293,25 @@ comparison baseline) — all permissive, no new `deny.toml` entry needed, `cargo
 enumeration/`DeviceIoControl` FFI) is the same crate/license `spikes/sniff`'s
 `FILE_FLAG_NO_BUFFERING` work already covers (see CLAUDE.md's package-map note on `sniff`).
 
+**Update (2026-09-26, [#38](https://github.com/jordanfelle/nicti/issues/38)'s `calico` spike,
+`docs/adr/0021-color-pipeline.md`):** the "never bundle" Adobe DCP/LCP row above (and [^dcp1]'s
+own caveat) is about **redistributing** a real Adobe camera profile inside this repo or a shipped
+build — that's unaffected and stays forbidden. What's new here is **runtime parsing** of a DCP/XMP
+profile file already present on the *user's own machine* (installed there by their own separate,
+licensed Adobe Camera Raw/Lightroom Classic install) — reading a file the user already has a legal
+copy of, at runtime, on their own system, is not a redistribution act at all, so ADR-0003's
+"never bundle" concern doesn't reach it; nothing Adobe's is ever copied into this repo, a build
+artifact, or distributed to any other user. `spikes/calico`'s `dcp.rs`/`xmp_profile.rs` parsers
+are tested exclusively against synthetic fixtures built byte-for-byte in test code for exactly
+this reason — no real Adobe profile file exists anywhere in this repo or its test data. New
+dependencies: `roxmltree` v0.20 (MIT/Apache-2.0, XMP/RDF-XML parsing) and `base64` v0.22 (MIT/
+Apache-2.0, decoding embedded look-table data) are both permissive, no new `deny.toml` entry
+needed; `byteorder` v1.5 (`Unlicense OR MIT`, new to the workspace, DCP/TIFF-IFD byte-order
+reads) is also permissive and needs no new entry. `cargo deny --workspace --all-features check
+licenses` passes clean.
+
 **Update (2026-09-26, [#143](https://github.com/jordanfelle/nicti/issues/143)'s preview-codec
-follow-up, `docs/adr/0021-preview-codec-followup.md`):** one new dependency for `spikes/sniff`'s
+follow-up, `docs/adr/0022-preview-codec-followup.md`):** one new dependency for `spikes/sniff`'s
 real lossy-WebP measurement, deliberately deferred from the 2026-09-25 update above (ADR-0017's
 own spike-stage comparison avoided a native C dependency). `webp` v0.3.1 is `MIT OR Apache-2.0`;
 its own dependency `libwebp-sys` v0.9.6 is `MIT` — both already covered by the existing
@@ -334,7 +351,7 @@ committing to this dependency.
 | [LMDB](https://www.openldap.org/software/release/license.html) (bundled via `lmdb-master-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | OpenLDAP Public License 2.8[^den3] | — | Static | ✅ (attribution-only, no copyleft) | ✅ | ✅ bundle OK — retain the license text per its own §3 condition |
 | [libSQL](https://github.com/tursodatabase/libsql) core, a SQLite C-source fork (bundled via `libsql-ffi`) | Catalog DB candidate ([#113](https://github.com/jordanfelle/nicti/issues/113)) | Public domain[^den6] — the bundled `bundled/src/sqlite3.c` retains SQLite's own standard "blessing" (public-domain dedication) notice throughout, confirmed by reading the actual bundled file, not assumed from the crate's own `license = "MIT"` Cargo.toml field (which describes the Rust binding, not the underlying forked C source — same "cargo-deny only sees what a crate declares" gap this file's LMDB row and `cfg_block` note already establish) | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
 | [RocksDB](https://github.com/facebook/rocksdb) core (vendored git submodule via `librocksdb-sys`) | Catalog DB candidate ([#115](https://github.com/jordanfelle/nicti/issues/115)) | Dual `Apache-2.0` **or** `GPL-2.0-only` (licensee's choice)[^den5] | — | Static | ✅ if the Apache-2.0 arm is elected (confirmed selectable — see the 2026-09-24 update above) | ✅ | ✅ bundle OK — elect the Apache-2.0 arm; the Rust binding crate itself (`rocksdb`) is Apache-2.0 only regardless |
-| [libwebp](https://github.com/webmproject/libwebp) core (bundled via `libwebp-sys`, the `webp` crate's own dependency) | Lossy-WebP tier-payload-format candidate ([#143](https://github.com/jordanfelle/nicti/issues/143)/ADR-0021), `spikes/sniff` only | BSD-3-Clause[^wp1], plus a separate perpetual royalty-free WebM patent grant (no copyleft obligation, standard for Google's WebM-family releases) | — | Static (`libwebp-sys` compiles the vendored C source via `cc`, same build model as `rusqlite`'s `bundled` feature) | ✅ | ✅ | ✅ bundle OK — attribution-only; the `webp`/`libwebp-sys` Rust crates are `MIT OR Apache-2.0`/`MIT` respectively, already covered by `deny.toml`'s existing allowlist, no new entry needed |
+| [libwebp](https://github.com/webmproject/libwebp) core (bundled via `libwebp-sys`, the `webp` crate's own dependency) | Lossy-WebP tier-payload-format candidate ([#143](https://github.com/jordanfelle/nicti/issues/143)/ADR-0022), `spikes/sniff` only | BSD-3-Clause[^wp1], plus a separate perpetual royalty-free WebM patent grant (no copyleft obligation, standard for Google's WebM-family releases) | — | Static (`libwebp-sys` compiles the vendored C source via `cc`, same build model as `rusqlite`'s `bundled` feature) | ✅ | ✅ | ✅ bundle OK — attribution-only; the `webp`/`libwebp-sys` Rust crates are `MIT OR Apache-2.0`/`MIT` respectively, already covered by `deny.toml`'s existing allowlist, no new entry needed |
 
 ## ML runtime (ONNX / CUDA / TensorRT)
 
@@ -489,7 +506,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^rx1]: rexiv2 GPL-3.0-or-later — `SPDX-License-Identifier: GPL-3.0-or-later` header at the top of https://github.com/felixc/rexiv2/blob/main/README.md — verified 2026-09-23
 [^xmp1]: Adobe XMP Toolkit SDK BSD-3-Clause — GitHub license API for https://github.com/adobe/XMP-Toolkit-SDK — verified 2026-09-23
 [^dng1]: Adobe DNG SDK EULA — https://scancode-licensedb.aboutcode.org/adobe-dng-sdk.html (quotes the EULA text) — verified 2026-09-23
-[^dcp1]: No Adobe DCP redistribution grant found — absence of a redistribution grant in Adobe's DNG SDK EULA and general Adobe product-EULA norms; **not a single definitive primary-source sentence naming DCP files specifically** — treated conservatively, re-verify if this becomes a real dependency
+[^dcp1]: No Adobe DCP redistribution grant found — absence of a redistribution grant in Adobe's DNG SDK EULA and general Adobe product-EULA norms; **not a single definitive primary-source sentence naming DCP files specifically** — treated conservatively, re-verify if this becomes a real dependency. **Became a real dependency 2026-09-26** ([#38](https://github.com/jordanfelle/nicti/issues/38)/`docs/adr/0021-color-pipeline.md`): re-verified as still applying only to redistribution, not to `spikes/calico` parsing a profile file already installed on the user's own machine at runtime — see this file's 2026-09-26 update above for the full reasoning.
 [^lcp1]: No Adobe LCP redistribution grant found — same caveat as [^dcp1], weakest-sourced claim in this audit; third-party (Sigma) LCP manual copyright language referenced but not an Adobe primary source
 [^dc1]: dcamprof GPL-3.0 — GitHub license API for https://github.com/Beep6581/dcamprof — verified 2026-09-23
 [^ort1]: ONNX Runtime MIT — https://github.com/microsoft/onnxruntime/blob/main/LICENSE and ThirdPartyNotices.txt — verified 2026-09-23

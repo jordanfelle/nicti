@@ -31,7 +31,7 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   reads (~8.7x), just not the gap-eliminating result the bug produced. See the ADR's own
   Measured-results section for the full account.
 
-- **Follow-up (#143)**: `docs/adr/0021-preview-codec-followup.md` — ADR-0017 left two things
+- **Follow-up (#143)**: `docs/adr/0022-preview-codec-followup.md` — ADR-0017 left two things
   unmeasured: whether a faster `ravif` speed preset (fixed at 6 there) tunes away AVIF's
   encode-throughput cost, and real lossy WebP (needs the C-linked `webp` crate, avoided in the
   original spike-stage comparison). Both measured this pass, plus a new SSIM quality axis

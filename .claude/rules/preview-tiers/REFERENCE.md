@@ -18,7 +18,7 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
 - **Gotcha**: `FILE_FLAG_NO_BUFFERING` can only be set at file-open time, not per-read — a bug that
   silently served "cold" reads from the OS page cache and produced a wrong headline number, caught
   by hostile pre-PR review. Real HDD-cold-ranged numbers: ~11-17x slower than NVMe.
-- **Follow-up (#143)** — `docs/adr/0021`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
+- **Follow-up (#143)** — `docs/adr/0022`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
   ADR-0017's fixed 6) against the #37/#136 stratified subset (ref-10k no longer exists, see #136).
   Faster speed narrows but doesn't close the gap (~5.1x slower than JPEG at speed 10, down from
   ~11.9x at speed 6 on this subset) — **JPEG stays the T2 v1 choice**, but AVIF speed 9-10 is now a named candidate

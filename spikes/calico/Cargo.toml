@@ -1,0 +1,33 @@
+[package]
+name = "calico"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #38 (ADR-0021): DCP camera-profile parsing (ColorMatrix/ForwardMatrix/HueSatMap/LookTable/ProfileToneCurve), a CPU + wgpu color pipeline from linear camera RGB (handed off from `retina dump-linear`) to a working-space image, and CIEDE2000 comparison tooling against LRC-exported references. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "calico"
+path = "src/lib.rs"
+
+[[bin]]
+name = "calico"
+path = "src/bin/calico.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["tiff", "png"] }
+byteorder = "1"
+roxmltree = "0.20"
+base64 = "0.22"
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+half = { version = "2", features = ["bytemuck"] }
+
+[dev-dependencies]
+tempfile = "3"
