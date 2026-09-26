@@ -203,9 +203,8 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 
 ## Prior art
 
-- **RapidRAW** uses `egui`/`eframe` for its UI[^pa1] (referenced in #69, prior-art research) —
-  the same "immediate-mode + wgpu" combination this ADR's leading candidate uses, from a project
-  with a directly comparable scope (a from-scratch RAW editor).
+- ~~**RapidRAW** uses `egui`/`eframe` for its UI~~ — **wrong, corrected 2026-09-26; see Amendments
+  below.** RapidRAW actually uses Tauri + a TypeScript/React frontend, not egui/eframe.
 - **vkdt** builds its own from-scratch Vulkan-native UI rather than adopting any of these four
   toolkits[^pa2] — a data point that a bespoke render-first UI is a real, if much higher-effort,
   alternative to any off-the-shelf Rust GUI toolkit, not evaluated as a fifth candidate here since
@@ -237,6 +236,20 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
   `pelt-slint`'s own manual visible-range logic) for both of them in this pass. This is a real,
   measured (in code, not in frame-time) ergonomics cost for whichever of those two might still win
   on the pending hardware numbers.
+
+## Amendments
+
+- **2026-09-26**: the Prior art section's RapidRAW citation was wrong — it claimed
+  `egui`/`eframe`, verified 2026-09-23, but RapidRAW actually uses Tauri + React (see
+  footnote `[^pa1]` and `docs/research/stalk-prior-art.md`, written during #69's prior-art
+  research). Root cause: the original claim was written without citing an actual file/line in
+  RapidRAW's own repo, only "confirmed via the project's own dependency manifest" with no
+  quoted line — #69's research re-checked it against the real `Cargo.toml` and found no such
+  dependency. **Load-bearing note, not just a historical fix**: this ADR's Decision itself is
+  unaffected — egui's lead comes from the Hard-gate/Measured-results sections (wgpu-30 match,
+  license, `CallbackTrait` maturity), all independently re-verified against egui's own crate and
+  untouched by this correction — but the error is a reminder to cite an actual file/line for any
+  future prior-art claim rather than an unsourced "confirmed via X" assertion.
 
 ## Spike: `spikes/pelt`, `spikes/pelt-egui`, `spikes/pelt-iced`, `spikes/pelt-slint`
 
@@ -306,8 +319,15 @@ calibration keys, same shape as `bench/lrc/hero-config.ini.example`.
 [^s3]: Slint crate family license expression, confirmed directly via
     `cargo deny --workspace --all-features check licenses` against this repo's own resolved
     dependency graph, not assumed from a registry listing — verified 2026-09-23
-[^pa1]: RapidRAW's `egui`/`eframe` UI — cited in #69 (prior-art research ticket); confirmed via
-    the project's own dependency manifest — verified 2026-09-23
+[^pa1]: ~~RapidRAW's `egui`/`eframe` UI~~ — this footnote's original 2026-09-23 claim was **wrong**.
+    RapidRAW's actual `src-tauri/Cargo.toml` (line 17) shows `tauri = "2.11"`, and its `src/` tree
+    is 117 `.tsx`/`.ts` files — a Tauri + React frontend, not egui/eframe. No `egui`/`eframe`
+    dependency exists anywhere in the manifest. Corrected 2026-09-26 during #69's prior-art
+    research (`docs/research/stalk-prior-art.md`), which re-verified directly against the
+    project's real `Cargo.toml` rather than trusting the original unsourced claim. Does not change
+    this ADR's Decision: the citation was Prior art context, not part of the Hard-gate/Measured
+    reasoning egui's lead is actually based on (wgpu-30 match, license, `CallbackTrait` maturity —
+    all independently verified against egui's own crate, unaffected by this correction).
 [^pa2]: vkdt's Vulkan-native UI (no third-party Rust GUI toolkit involved at all) — already cited
     in `docs/adr/0004-module-plugin-architecture.md` footnote `[^p4]` and
     `docs/adr/0005-gpu-compute-api.md`'s own Prior art section — https://github.com/hanatos/vkdt
