@@ -273,7 +273,11 @@ false`, #127) — neither is a required check, and den is already slated for del
 main's cache and skip the save step, which used to be a 20-30 minute cost on the Windows job by
 itself and was pushing this repo's cache usage over GitHub's 10GB/repo limit.
 `CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level env) additionally strips debuginfo from both Rust and
-den's bundled C/C++ builds, which was most of that cache size. `spikes/**` is also excluded from
+den's bundled C/C++ builds, which was most of that cache size. **den (linux)'s own `save-if:
+false` was reverted in #154** (2026-09-26): it caused a measured 2-3min -> 25-33min regression
+(every run recompiling all eight bundled native engines from scratch) that outweighed the ~1.5GiB
+cache-budget saving -- it now saves on push to main like every other job here. `pelt-linux`/
+`retina-linux` still use `save-if: false` (cold cost is only 4min/2.5min). `spikes/**` is also excluded from
 Renovate (`renovate.json`) for the same reason — den bundles five already-rejected engine
 candidates (ADR-0009/0010/0014/0015/0016) that generate bump-PR churn nobody will act on.
 **`spikes/den` itself is slated for deletion once #22 lands, and `spikes/pelt-*` once ADR-0006
