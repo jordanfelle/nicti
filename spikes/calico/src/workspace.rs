@@ -75,11 +75,15 @@ impl Space {
     }
 }
 
-/// sRGB's OETF (IEC 61966-2-1), applied per-channel to a linear sRGB sample in [0, 1] (values
-/// outside that range are clamped -- out-of-gamut handling belongs to #42's soft-proofing, not
-/// this research pass).
-pub fn srgb_oetf(linear: f64) -> f64 {
-    let c = linear.clamp(0.0, 1.0);
+/// sRGB's OETF (IEC 61966-2-1) core curve, unclamped -- callers decide whether/where clamping is
+/// appropriate (see [`srgb_oetf`] vs. `pipeline.rs`'s `table_encode`, which must NOT clamp: a
+/// HueSatMap/LookTable's input can legitimately exceed 1.0 in ProPhoto-space channels for
+/// saturated colors, before the pipeline's own exposure/tone-curve stages bring it back down, and
+/// clamping there would silently crush highlight detail and skew hue via per-channel clipping).
+/// Negative input is still floored to 0, since the curve isn't defined (and has no sensible
+/// continuation) below black.
+fn srgb_oetf_core(linear: f64) -> f64 {
+    let c = linear.max(0.0);
     if c <= 0.0031308 {
         c * 12.92
     } else {
@@ -87,11 +91,25 @@ pub fn srgb_oetf(linear: f64) -> f64 {
     }
 }
 
-/// Inverse of [`srgb_oetf`]: encoded sRGB-like signal -> linear. Used for
-/// `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` value 1 (DNG spec 6.3.7's "sRGB"
-/// representation for a HueSatMap/LookTable's HSV coordinates).
+/// sRGB's OETF, clamped to [0, 1] -- for final display-referred output only (out-of-gamut
+/// handling there belongs to #42's soft-proofing, not this research pass). Do not reuse this for
+/// an intermediate pipeline stage; see [`srgb_oetf_core`]'s doc.
+pub fn srgb_oetf(linear: f64) -> f64 {
+    srgb_oetf_core(linear.clamp(0.0, 1.0))
+}
+
+/// [`srgb_oetf_core`], unclamped -- for `pipeline.rs`'s `table_encode`. See that function's doc
+/// for why an intermediate HueSatMap/LookTable stage must not clamp to [0, 1] the way the final
+/// display-output `srgb_oetf` does.
+pub fn srgb_oetf_unclamped(linear: f64) -> f64 {
+    srgb_oetf_core(linear)
+}
+
+/// Inverse of [`srgb_oetf_core`], unclamped -- same reasoning as that function's doc. Used by
+/// `pipeline.rs`'s `table_decode` for `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` value 1
+/// (DNG spec 6.3.7's "sRGB" representation for a HueSatMap/LookTable's HSV coordinates).
 pub fn srgb_eotf(encoded: f64) -> f64 {
-    let c = encoded.clamp(0.0, 1.0);
+    let c = encoded.max(0.0);
     if c <= 0.04045 {
         c / 12.92
     } else {
@@ -140,5 +158,27 @@ mod tests {
     fn srgb_oetf_endpoints() {
         assert_eq!(srgb_oetf(0.0), 0.0);
         assert!((srgb_oetf(1.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn srgb_oetf_clamps_but_unclamped_variant_does_not() {
+        // A saturated color's ProPhoto-space value can exceed 1.0 -- the clamped `srgb_oetf`
+        // (final display output) must clamp it, but `srgb_oetf_unclamped` (an intermediate
+        // HueSatMap/LookTable stage, per pipeline.rs's `table_encode`) must not, or highlight
+        // detail and per-channel hue ratios get silently destroyed before the tone-curve stage
+        // ever runs.
+        assert!((srgb_oetf(2.0) - 1.0).abs() < 1e-9);
+        assert!(
+            srgb_oetf_unclamped(2.0) > 1.0,
+            "expected >1.0, got {}",
+            srgb_oetf_unclamped(2.0)
+        );
+    }
+
+    #[test]
+    fn srgb_eotf_is_unclamped_and_round_trips_above_one() {
+        let encoded = srgb_oetf_unclamped(1.5);
+        let back = srgb_eotf(encoded);
+        assert!((back - 1.5).abs() < 1e-9, "got {back}");
     }
 }

@@ -14,12 +14,17 @@ use crate::huesatmap::{hsv_to_rgb, rgb_to_hsv, HueSatMap};
 use crate::linear_input::{linearize_sample, LinearInput};
 use crate::matrix::{mat_vec_mul, Vec3};
 use crate::tonecurve::ToneCurve;
-use crate::workspace::{srgb_eotf, srgb_oetf, Space, WorkingSpace};
+use crate::workspace::{srgb_eotf, srgb_oetf, srgb_oetf_unclamped, Space, WorkingSpace};
 
+/// Deliberately unclamped in the `Srgb` case (via `srgb_oetf_unclamped`/`srgb_eotf`, not the
+/// clamped `srgb_oetf`): ProPhoto-space channel values routinely exceed 1.0 for saturated colors
+/// at this stage (before exposure/tone-curve), and clamping per-channel here would crush
+/// highlight detail and skew hue (an R channel clipping while G/B don't changes the R:G:B ratio
+/// `rgb_to_hsv` derives hue from).
 fn table_encode(encoding: TableEncoding, c: f64) -> f64 {
     match encoding {
         TableEncoding::Linear => c.max(0.0),
-        TableEncoding::Srgb => srgb_oetf(c.max(0.0)),
+        TableEncoding::Srgb => srgb_oetf_unclamped(c.max(0.0)),
     }
 }
 fn table_decode(encoding: TableEncoding, c: f64) -> f64 {
