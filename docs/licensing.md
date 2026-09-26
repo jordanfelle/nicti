@@ -247,6 +247,38 @@ permissive than MIT/Apache-2.0, no attribution requirement) rather than assumed 
 `cargo deny --workspace --all-features check licenses` now passes clean, same pre-existing
 `cfg_block` (Turso-only) warning as before, nothing else new from `fjall`.
 
+**Update (2026-09-25, [#29](https://github.com/jordanfelle/nicti/issues/29)'s preview-tier-strategy
+spike, `docs/adr/0017-preview-tier-strategy.md`):** new dependencies for `spikes/sniff`'s cache-
+format and tier-payload-format (JPEG vs AVIF, added at the user's request rather than decided from
+priors) comparison. `rusqlite` v0.40.2 (`bundled` feature) and `libsqlite3-sys` v0.38.2 are both
+MIT — same crate/license `spikes/den`'s 2026-09-24 update already covers, reused here for the
+`previews.db`/pack-index candidates, no new review needed. `jpeg-encoder` v0.6.1 is
+`(MIT OR Apache-2.0) AND IJG` — the `IJG` arm (Independent JPEG Group License, the crate's
+quantization-table code traces back to IJG's reference implementation) needed adding to
+`deny.toml`, permissive/FSF-Free with no copyleft terms, same category as ISC/Zlib/NCSA/BSL-1.0/
+0BSD already on the allowlist.
+
+AVIF candidates, both pure Rust (no C-toolchain dependency, unlike `image`'s `avif-native`/`dav1d`
+feature): `ravif` v0.13.0 (encode, BSD-3-Clause) and its own tree — `rav1e` v0.8.1 (BSD-2-Clause),
+`av1-grain` v0.2.5 (BSD-2-Clause), `av-scenechange` v0.14.1 (MIT), `avif-serialize` v0.8.9
+(BSD-3-Clause), `y4m`/`bitstream-io`/`nasm-rs` (MIT or MIT/Apache-2.0) — all already covered by the
+existing BSD-2-Clause/BSD-3-Clause/MIT/Apache-2.0 allowlist entries, no edit needed. `avif-decode`
+v3.0.0 (decode, BSD-3-Clause, `rav1d`-based — `rav1d` v1.1.0 itself is BSD-2-Clause, the
+`memorysafety` project's Rust port of the reference `dav1d` decoder) needed one real addition:
+`avif-parse` v2.1.0 (the AVIF-container/ISOBMFF demuxer `avif-decode` depends on) carries
+**MPL-2.0** — file-level weak copyleft, OSI-approved, FSF Free/Libre — added to `deny.toml`'s
+allowlist alongside the GPL/AGPL family already there, on the same combines-cleanly-into-
+Nicti's-own-AGPL-3.0-or-later reasoning as those entries, not a permissive-only case. `rgb` v0.8.53
+(MIT) and `imgref` v1.12.3 (CC0-1.0 OR Apache-2.0) are the pixel-buffer types `ravif`/`avif-decode`
+share — both already covered.
+
+Building `ravif`/`rav1e`/`rav1d` requires `nasm` (their optimized SIMD asm paths) — installed via
+`brew install nasm` on this dev machine; **`.github/workflows/ci.yml`'s four general
+clippy/test jobs (Linux and Windows) now install it too** (`apt-get install -y nasm` /
+`choco install nasm -y`, same job `sniff` already runs in via the plain `--workspace` sweep, not a
+path-gated job of its own like `den`/`pelt-*`). `cargo deny --workspace --all-features check
+licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) above.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

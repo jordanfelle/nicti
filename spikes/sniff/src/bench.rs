@@ -9,7 +9,8 @@
 //! the Windows-native reference-machine run, not from WSL.
 
 use crate::decode;
-use crate::ifd::Walker;
+use crate::ifd::{EmbeddedJpeg, Walker};
+use crate::source::{ByteSource, FileSource, SliceSource};
 use rand::seq::SliceRandom;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,22 @@ pub enum Mode {
     DecodeGrid,
     DecodeScreen,
     FullRead,
+    /// Walks the file once and collects every embedded-JPEG's (offset, len) -- simulates the
+    /// per-tier index an ingest pass would record so later reads never re-walk the IFD tree.
+    /// Only meaningful with `--io ranged` (see `IoMode`); under `--io whole` it still runs, just
+    /// without the whole-file-read-avoidance the mode exists to measure.
+    ExtractIndex,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum IoMode {
+    /// `fs::read` the whole file first, then locate/decode within the in-memory buffer --
+    /// the pessimistic upper bound `docs/research/sniff-embedded-jpeg.md` originally measured.
+    Whole,
+    /// Positioned reads only (`source::FileSource`): the IFD walk and header inspection touch
+    /// only the small windows they need, and only the target embedded JPEG's own byte range is
+    /// read in full (for decode modes) -- never the rest of the file.
+    Ranged,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -40,10 +57,25 @@ struct SampleResult {
 #[derive(Debug, Serialize)]
 struct RunResult {
     mode: String,
+    io: String,
     order: String,
     threads: usize,
     cold: bool,
     run_index: u32,
+    /// The sample root this run actually read from -- added after a real incident: a sweep
+    /// script reused one output directory for both an NVMe and an HDD config sharing the same
+    /// (mode, io, order, cold, threads) filename, and the second run's write silently clobbered
+    /// the first's, undetected until the pooled numbers didn't match physical expectations. This
+    /// field alone doesn't prevent a bad output-dir choice, but it lets a mismatch be caught by
+    /// inspecting the JSON itself, and lets multiple roots safely share one output directory.
+    root: String,
+    /// Host identity fields `docs/research/sniff-embedded-jpeg.md` flagged as missing from this
+    /// JSON (recorded by hand instead, in that doc's Throughput section). This covers what's
+    /// cheaply knowable from inside the process; CPU/GPU/driver/RAM/drive-model identity still
+    /// needs to be recorded by hand per `docs/benchmarks.md`'s methodology.
+    os: String,
+    arch: String,
+    hostname: String,
     samples: Vec<SampleResult>,
 }
 
@@ -90,30 +122,57 @@ impl Drop for AlignedBuf {
 
 #[cfg(windows)]
 fn read_cold(path: &Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
 
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_NO_BUFFERING)
         .open(path)?;
-    let len = file.metadata()?.len() as usize;
-    // NO_BUFFERING requires both the read length and the buffer's address to be aligned to the
-    // volume's sector size; 4096 covers every sector size in real use (512e and 4Kn drives
-    // alike), so round the read length up to the next 4096-byte boundary.
-    const ALIGN: usize = 4096;
-    let aligned_len = len.div_ceil(ALIGN) * ALIGN;
-    let mut buf = AlignedBuf::new(aligned_len, ALIGN);
+    let len = file.metadata()?.len();
+    read_cold_range(&file, 0, len as usize)
+}
+
+/// Sector-aligned, cache-bypassing ranged read: `offset`/`len` need not themselves be
+/// sector-aligned, only the underlying request is (rounded up/out to the nearest 4096-byte
+/// boundary, then trimmed back to the caller's exact window). Shared by `read_cold` above (the
+/// offset-0/whole-file case) and `source::FileSource`'s ranged cold path -- both need the same
+/// `FILE_FLAG_NO_BUFFERING` handle, just opened once per call site.
+///
+/// Note: `file` here must already have been opened with `FILE_FLAG_NO_BUFFERING` (see
+/// `read_cold` above and `source::FileSource::open`'s Windows cold path) -- this function only
+/// handles the sector-alignment math, not the flag itself.
+#[cfg(windows)]
+pub(crate) fn read_cold_range(
+    file: &std::fs::File,
+    offset: u64,
+    len: usize,
+) -> std::io::Result<Vec<u8>> {
+    use std::os::windows::fs::FileExt;
+
+    const ALIGN: u64 = 4096;
+    // NO_BUFFERING requires the read length, the buffer's address, AND the file offset to be
+    // aligned to the volume's sector size -- round the window out to the enclosing aligned range
+    // rather than just the length, and remember how far the caller's real start is into it.
+    let aligned_offset = (offset / ALIGN) * ALIGN;
+    let front_pad = (offset - aligned_offset) as usize;
+    let aligned_len = ((front_pad + len) as u64).div_ceil(ALIGN) * ALIGN;
+    let mut buf = AlignedBuf::new(aligned_len as usize, ALIGN as usize);
     let mut total = 0usize;
     loop {
-        let n = file.read(&mut buf.as_mut_slice()[total..])?;
+        let n = file.seek_read(
+            &mut buf.as_mut_slice()[total..],
+            aligned_offset + total as u64,
+        )?;
         if n == 0 {
             break;
         }
         total += n;
     }
-    Ok(buf.into_trimmed_vec(len))
+    let trimmed = buf.into_trimmed_vec(total);
+    let start = front_pad.min(trimmed.len());
+    let end = (start + len).min(trimmed.len());
+    Ok(trimmed[start..end].to_vec())
 }
 
 #[cfg(not(windows))]
@@ -127,25 +186,31 @@ fn read_warm(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(path)
 }
 
-fn locate_offset(data: &[u8], target_long_edge: Option<u32>) -> Option<(u64, u64)> {
-    let mut walker = Walker::new(data).ok()?;
-    let jpegs = walker.find_embedded_jpegs().ok()?;
-    if jpegs.is_empty() {
-        return None;
-    }
-    // Prefer the smallest embedded JPEG whose *actual* long edge (from its own SOF header, not
-    // the IFD's declared_width/height -- real Nikon NEF PreviewIFD/SubIFD entries carry no
-    // ImageWidth/ImageLength tags at all, only DNG SubIFDs do, so trusting declared_width/height
-    // here silently always fell through to the largest-byte_len candidate, i.e. always decoding
-    // the full 45MP embedded JPEG regardless of the requested tier) meets the target; else the
-    // largest overall.
+/// Only the first `HEADER_INSPECT_LEN` bytes of each candidate are read to inspect its SOF/DQT
+/// header -- comfortably past where SOF appears in every real file this spike has seen (APPn/DQT/
+/// SOF/DHT/SOS, all metadata, well before any entropy-coded scan data), and tiny next to the
+/// multi-MB `JpgFromRaw` candidate a whole-file read would otherwise pay for just to measure its
+/// dimensions.
+const HEADER_INSPECT_LEN: usize = 65536;
+
+/// Picks the smallest embedded JPEG whose *actual* long edge (from its own SOF header, not the
+/// IFD's declared_width/height -- real Nikon NEF PreviewIFD/SubIFD entries carry no
+/// ImageWidth/ImageLength tags at all, only DNG SubIFDs do, so trusting declared_width/height
+/// here silently always fell through to the largest-byte_len candidate, i.e. always decoding the
+/// full 45MP embedded JPEG regardless of the requested tier) meets `target_long_edge`; else the
+/// largest overall. Reads only a bounded header prefix per candidate via `walker`, not each
+/// candidate's full bytes.
+pub(crate) fn pick_candidate<S: ByteSource>(
+    walker: &mut Walker<S>,
+    jpegs: &[EmbeddedJpeg],
+    target_long_edge: Option<u32>,
+) -> Option<(u64, u64)> {
     let mut candidates: Vec<_> = jpegs
         .iter()
         .filter_map(|j| {
-            let start = j.file_offset as usize;
-            let end = (j.file_offset + j.byte_len) as usize;
-            let slice = data.get(start..end.min(data.len()))?;
-            let header = crate::jpeg_meta::inspect(slice);
+            let prefix_len = HEADER_INSPECT_LEN.min(j.byte_len as usize);
+            let prefix = walker.read_range(j.file_offset, prefix_len).ok()?;
+            let header = crate::jpeg_meta::inspect(&prefix);
             let long_edge = header
                 .width
                 .zip(header.height)
@@ -166,43 +231,96 @@ fn locate_offset(data: &[u8], target_long_edge: Option<u32>) -> Option<(u64, u64
     }
 }
 
-fn run_one(path: &Path, mode: Mode, cold: bool) -> Result<(), String> {
-    let read_fn = if cold { read_cold } else { read_warm };
+fn locate_offset(data: &[u8], target_long_edge: Option<u32>) -> Option<(u64, u64)> {
+    let mut walker = Walker::new(SliceSource::new(data)).ok()?;
+    let jpegs = walker.find_embedded_jpegs().ok()?;
+    if jpegs.is_empty() {
+        return None;
+    }
+    pick_candidate(&mut walker, &jpegs, target_long_edge)
+}
 
-    match mode {
-        Mode::FullRead => {
-            read_fn(path).map_err(|e| e.to_string())?;
+fn run_one(path: &Path, mode: Mode, io: IoMode, cold: bool) -> Result<(), String> {
+    if let Mode::FullRead = mode {
+        let read_fn = if cold { read_cold } else { read_warm };
+        read_fn(path).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    if let Mode::ExtractIndex = mode {
+        // Ranged by construction regardless of `io`: the whole point of this mode is the
+        // ingest-index-build cost, which `FileSource` always serves via positioned reads.
+        let source = FileSource::open(path, cold).map_err(|e| e.to_string())?;
+        let mut walker = Walker::new(source).map_err(|e| e.to_string())?;
+        walker.find_embedded_jpegs().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    match io {
+        IoMode::Whole => {
+            let read_fn = if cold { read_cold } else { read_warm };
+            let data = read_fn(path).map_err(|e| e.to_string())?;
+            match mode {
+                Mode::Locate => {
+                    locate_offset(&data, None).ok_or("no embedded JPEG")?;
+                }
+                Mode::Read => {
+                    let (off, len) = locate_offset(&data, None).ok_or("no embedded JPEG")?;
+                    let start = off as usize;
+                    let end = (off + len) as usize;
+                    data.get(start..end.min(data.len()))
+                        .ok_or("offset out of bounds")?;
+                }
+                Mode::DecodeGrid | Mode::DecodeScreen => {
+                    let target = if mode == Mode::DecodeGrid {
+                        decode::GRID_TIER_LONG_EDGE
+                    } else {
+                        decode::SCREEN_TIER_LONG_EDGE
+                    };
+                    let (off, len) =
+                        locate_offset(&data, Some(target)).ok_or("no embedded JPEG")?;
+                    let start = off as usize;
+                    let end = (off + len) as usize;
+                    let slice = data
+                        .get(start..end.min(data.len()))
+                        .ok_or("offset out of bounds")?;
+                    let decoded = decode::decode_jpeg(slice)?;
+                    decode::resize_to_long_edge(&decoded, target)?;
+                }
+                Mode::FullRead | Mode::ExtractIndex => unreachable!("handled above"),
+            }
             Ok(())
         }
-        Mode::Locate => {
-            let data = read_fn(path).map_err(|e| e.to_string())?;
-            locate_offset(&data, None).ok_or_else(|| "no embedded JPEG".to_string())?;
-            Ok(())
-        }
-        Mode::Read => {
-            let data = read_fn(path).map_err(|e| e.to_string())?;
-            let (off, len) = locate_offset(&data, None).ok_or("no embedded JPEG")?;
-            let start = off as usize;
-            let end = (off + len) as usize;
-            data.get(start..end.min(data.len()))
-                .ok_or("offset out of bounds")?;
-            Ok(())
-        }
-        Mode::DecodeGrid | Mode::DecodeScreen => {
-            let data = read_fn(path).map_err(|e| e.to_string())?;
-            let target = if mode == Mode::DecodeGrid {
-                decode::GRID_TIER_LONG_EDGE
-            } else {
-                decode::SCREEN_TIER_LONG_EDGE
-            };
-            let (off, len) = locate_offset(&data, Some(target)).ok_or("no embedded JPEG")?;
-            let start = off as usize;
-            let end = (off + len) as usize;
-            let slice = data
-                .get(start..end.min(data.len()))
-                .ok_or("offset out of bounds")?;
-            let decoded = decode::decode_jpeg(slice)?;
-            decode::resize_to_long_edge(&decoded, target)?;
+        IoMode::Ranged => {
+            let source = FileSource::open(path, cold).map_err(|e| e.to_string())?;
+            let mut walker = Walker::new(source).map_err(|e| e.to_string())?;
+            let jpegs = walker.find_embedded_jpegs().map_err(|e| e.to_string())?;
+            match mode {
+                Mode::Locate => {
+                    pick_candidate(&mut walker, &jpegs, None).ok_or("no embedded JPEG")?;
+                }
+                Mode::Read => {
+                    let (off, len) =
+                        pick_candidate(&mut walker, &jpegs, None).ok_or("no embedded JPEG")?;
+                    walker
+                        .read_range(off, len as usize)
+                        .map_err(|e| e.to_string())?;
+                }
+                Mode::DecodeGrid | Mode::DecodeScreen => {
+                    let target = if mode == Mode::DecodeGrid {
+                        decode::GRID_TIER_LONG_EDGE
+                    } else {
+                        decode::SCREEN_TIER_LONG_EDGE
+                    };
+                    let (off, len) = pick_candidate(&mut walker, &jpegs, Some(target))
+                        .ok_or("no embedded JPEG")?;
+                    let bytes = walker
+                        .read_range(off, len as usize)
+                        .map_err(|e| e.to_string())?;
+                    let decoded = decode::decode_jpeg(&bytes)?;
+                    decode::resize_to_long_edge(&decoded, target)?;
+                }
+                Mode::FullRead | Mode::ExtractIndex => unreachable!("handled above"),
+            }
             Ok(())
         }
     }
@@ -212,6 +330,7 @@ fn run_one(path: &Path, mode: Mode, cold: bool) -> Result<(), String> {
 pub fn run(
     root: &Path,
     mode: Mode,
+    io: IoMode,
     threads: usize,
     order: Order,
     cold: bool,
@@ -258,7 +377,7 @@ pub fn run(
                 .par_iter()
                 .map(|f| {
                     let start = Instant::now();
-                    let ok = run_one(f, mode, cold).is_ok();
+                    let ok = run_one(f, mode, io, cold).is_ok();
                     SampleResult {
                         file: f.file_name().unwrap().to_string_lossy().to_string(),
                         micros: start.elapsed().as_micros(),
@@ -275,18 +394,27 @@ pub fn run(
 
         let run_index = round - warmups;
         let mode_name = format!("{:?}", mode).to_lowercase();
+        let io_name = format!("{:?}", io).to_lowercase();
         let order_name = format!("{:?}", order).to_lowercase();
         let payload = RunResult {
             mode: mode_name.clone(),
+            io: io_name.clone(),
             order: order_name.clone(),
             threads,
             cold,
             run_index,
+            root: root.display().to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            hostname: std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "unknown".to_string()),
             samples: results,
         };
         let fname = format!(
-            "{}_{}_{}t_{}_run{}.json",
+            "{}_{}_{}_{}t_{}_run{}.json",
             mode_name,
+            io_name,
             order_name,
             threads,
             if cold { "cold" } else { "warm" },
@@ -399,7 +527,7 @@ mod tests {
         let large = fake_jpeg(640, 424, 100);
         let data = build_two_jpeg_file(&small, &large);
 
-        // Screen tier (2560px): neither candidate clears it, so the largest (640x424) wins.
+        // Screen tier (3840px): neither candidate clears it, so the largest (640x424) wins.
         let (_offset, len) = locate_offset(&data, Some(decode::SCREEN_TIER_LONG_EDGE))
             .expect("falls back to the largest candidate");
         assert_eq!(len, large.len() as u64);

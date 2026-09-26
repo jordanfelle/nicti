@@ -76,6 +76,16 @@ allow = [
     # *sole* license is exactly "GPL-2.0-only" should still fail this check; if one is ever needed,
     # that's a real ADR-0003 conversation (dual-licensing, a permissive fork, etc.), not an
     # allowlist edit.
+    # MPL-2.0: `avif-parse` (AVIF-container demuxer, pulled in by `avif-decode`, #29's spike-only
+    # AVIF-vs-JPEG tier-payload comparison). File-level weak copyleft, OSI-approved, FSF Free/Libre
+    # -- combines cleanly into a GPL-3.0-family work the same way the GPL/AGPL entries above do,
+    # not a permissive-only case like ISC/Zlib/NCSA above it.
+    "MPL-2.0",
+    # IJG: the Independent JPEG Group License, one arm of `jpeg-encoder`'s compound
+    # "(MIT OR Apache-2.0) AND IJG" license (the crate's JPEG-table/quantization code traces back
+    # to IJG's reference implementation). FSF Free/Libre, permissive, no copyleft terms -- same
+    # category as ISC/Zlib/NCSA/BSL-1.0/0BSD above.
+    "IJG",
 ]
 # Deliberately NOT listing any LGPL variant, even for r-efi's "MIT OR Apache-2.0 OR
 # LGPL-2.1-or-later" -- cargo-deny only needs ONE allowed arm of an OR expression to pass a crate

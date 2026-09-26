@@ -100,6 +100,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # #29: rav1e/rav1d (spikes/sniff's AVIF tier-payload-format candidate) build their
+      # optimized SIMD paths via nasm -- ubuntu-latest doesn't ship it by default.
+      - run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -143,6 +146,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # #29: see the Linux clippy job's own nasm comment above -- same requirement, Windows's
+      # own package manager.
+      - run: choco install nasm -y
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -162,6 +168,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # #29: see the clippy job's own nasm comment above -- same requirement here.
+      - run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -185,6 +193,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # #29: see the Linux clippy job's own nasm comment above -- same requirement here.
+      - run: choco install nasm -y
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

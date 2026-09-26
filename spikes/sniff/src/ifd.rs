@@ -5,7 +5,16 @@
 //! Nikon MakerNote's PreviewIFD) without depending on LibRaw or rawler. Not a general-purpose TIFF
 //! library -- it reads only the tags Sniff needs and is deliberately tolerant of malformed input
 //! (bounds-checked, cycle-guarded), since it will be pointed at thousands of real camera files.
+//!
+//! Generic over `ByteSource` (#29): every read here is a small, explicit range (the header, one
+//! IFD's entries, an external offset array, the MakerNote's 18-byte header) rather than a
+//! whole-file slice, so `Walker<FileSource>` performs the walk as a handful of positioned reads
+//! instead of paying for the full file's I/O just to locate a preview -- the pessimistic bound
+//! `docs/research/sniff-embedded-jpeg.md` measured and flagged as the biggest lever available.
+//! `Walker<SliceSource>` (tests, and any caller that already has the bytes in memory) behaves
+//! identically, just backed by a slice instead of a file handle.
 
+use crate::source::ByteSource;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,41 +130,66 @@ pub enum IfdError {
     Cycle(u64),
     #[error("too many IFDs visited (possible malicious/corrupt file)")]
     TooManyIfds,
+    #[error("I/O error reading source: {0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for IfdError {
+    fn from(e: std::io::Error) -> Self {
+        IfdError::Io(e.to_string())
+    }
 }
 
 const MAX_IFDS_VISITED: usize = 512;
 
-pub struct Walker<'a> {
-    data: &'a [u8],
+pub struct Walker<S: ByteSource> {
+    source: S,
     bo: ByteOrder,
+    ifd0_off: u32,
     visited: HashSet<u64>,
     ifds_visited: usize,
+    /// Total stream length, when the source can report it cheaply -- used only for the
+    /// `file_offset >= len` bounds check `jpeg_pair`/`strip_jpeg` already performed against
+    /// `self.data.len()` before this became ranged-read-based.
+    len: Option<u64>,
 }
 
-impl<'a> Walker<'a> {
-    pub fn new(data: &'a [u8]) -> Result<Self, IfdError> {
-        if data.len() < 8 {
+impl<S: ByteSource> Walker<S> {
+    pub fn new(mut source: S) -> Result<Self, IfdError> {
+        let header = source.read_at(0, 8)?;
+        if header.len() < 8 {
             return Err(IfdError::TooShort);
         }
-        let bo = match &data[0..2] {
+        let bo = match &header[0..2] {
             b"II" => ByteOrder::Little,
             b"MM" => ByteOrder::Big,
             _ => return Err(IfdError::BadByteOrder),
         };
-        let magic = bo.u16(&data[2..4]);
+        let magic = bo.u16(&header[2..4]);
         if magic != 42 {
             return Err(IfdError::BadMagic);
         }
+        let ifd0_off = bo.u32(&header[4..8]);
+        let len = source.len_hint();
         Ok(Walker {
-            data,
+            source,
             bo,
+            ifd0_off,
             visited: HashSet::new(),
             ifds_visited: 0,
+            len,
         })
     }
 
     fn ifd0_offset(&self) -> u32 {
-        self.bo.u32(&self.data[4..8])
+        self.ifd0_off
+    }
+
+    /// Reads an arbitrary byte range from the underlying source. For callers (e.g. `bench.rs`'s
+    /// tier-selection logic) that need to inspect or decode an `EmbeddedJpeg`'s bytes after
+    /// `find_embedded_jpegs` has returned its offset/len, without re-walking the IFD tree.
+    pub fn read_range(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, IfdError> {
+        Ok(self.source.read_at(offset, len)?)
     }
 
     /// Reads one IFD at `offset` (relative to `base`, which is 0 for the main TIFF header and
@@ -169,21 +203,22 @@ impl<'a> Walker<'a> {
         if self.ifds_visited > MAX_IFDS_VISITED {
             return Err(IfdError::TooManyIfds);
         }
-        let start = abs as usize;
-        if start + 2 > self.data.len() {
+        let count_bytes = self.source.read_at(abs, 2)?;
+        if count_bytes.len() < 2 {
             return Err(IfdError::OffsetOutOfBounds(abs));
         }
-        let count = self.bo.u16(&self.data[start..start + 2]) as usize;
-        let entries_start = start + 2;
-        let entries_end = entries_start
-            .checked_add(count * 12)
+        let count = self.bo.u16(&count_bytes) as usize;
+        let body_len = count
+            .checked_mul(12)
+            .and_then(|n| n.checked_add(4))
             .ok_or(IfdError::TruncatedIfd)?;
-        if entries_end + 4 > self.data.len() {
+        let body = self.source.read_at(abs + 2, body_len)?;
+        if body.len() < body_len {
             return Err(IfdError::TruncatedIfd);
         }
         let mut entries = Vec::with_capacity(count);
         for i in 0..count {
-            let e = &self.data[entries_start + i * 12..entries_start + i * 12 + 12];
+            let e = &body[i * 12..i * 12 + 12];
             let mut raw = [0u8; 4];
             raw.copy_from_slice(&e[8..12]);
             entries.push(IfdEntry {
@@ -193,12 +228,28 @@ impl<'a> Walker<'a> {
                 value_or_offset_raw: raw,
             });
         }
-        let next = self.bo.u32(&self.data[entries_end..entries_end + 4]);
+        let next = self.bo.u32(&body[count * 12..count * 12 + 4]);
         Ok((entries, next))
     }
 
     fn find_entry(entries: &[IfdEntry], tag: u16) -> Option<IfdEntry> {
         entries.iter().find(|e| e.tag == tag).copied()
+    }
+
+    fn in_bounds(&self, file_offset: u64) -> bool {
+        match self.len {
+            Some(len) => file_offset < len,
+            // Unknown total length (a source that can't report one): trust the offset: the
+            // eventual actual read (outside this walker's scope) will fail on a bad one anyway.
+            None => true,
+        }
+    }
+
+    fn clamp_len(&self, file_offset: u64, byte_len: u64) -> u64 {
+        match self.len {
+            Some(len) => byte_len.min(len.saturating_sub(file_offset)),
+            None => byte_len,
+        }
     }
 
     /// Resolves a JPEGInterchangeFormat(Offset)/Length pair, if both present, rebased onto
@@ -208,11 +259,10 @@ impl<'a> Walker<'a> {
         let len = Self::find_entry(entries, TAG_JPEG_IF_LENGTH)?;
         let file_offset = base + off.as_offset(self.bo) as u64;
         let byte_len = len.as_u32(self.bo) as u64;
-        if file_offset as usize >= self.data.len() {
+        if !self.in_bounds(file_offset) {
             return None;
         }
-        let clamped = byte_len.min(self.data.len() as u64 - file_offset);
-        Some((file_offset, clamped))
+        Some((file_offset, self.clamp_len(file_offset, byte_len)))
     }
 
     fn declared_dims(&self, entries: &[IfdEntry]) -> (Option<u32>, Option<u32>) {
@@ -238,11 +288,10 @@ impl<'a> Walker<'a> {
         }
         let file_offset = base + offsets.as_offset(self.bo) as u64;
         let byte_len = counts.as_u32(self.bo) as u64;
-        if file_offset as usize >= self.data.len() {
+        if !self.in_bounds(file_offset) {
             return None;
         }
-        let clamped = byte_len.min(self.data.len() as u64 - file_offset);
-        Some((file_offset, clamped))
+        Some((file_offset, self.clamp_len(file_offset, byte_len)))
     }
 
     fn emit_if_jpeg(
@@ -311,7 +360,7 @@ impl<'a> Walker<'a> {
             let exif_off = exif_entry.as_offset(self.bo);
             if let Ok((exif_entries, _)) = self.read_ifd(0, exif_off) {
                 if let Some(mn) = Self::find_entry(&exif_entries, TAG_MAKER_NOTE) {
-                    self.walk_nikon_maker_note(&mn, &mut out);
+                    self.walk_nikon_maker_note(&mn, &mut out)?;
                 }
             }
         }
@@ -319,7 +368,7 @@ impl<'a> Walker<'a> {
         Ok(out)
     }
 
-    fn read_offset_array(&self, entry: &IfdEntry) -> Result<Vec<u32>, IfdError> {
+    fn read_offset_array(&mut self, entry: &IfdEntry) -> Result<Vec<u32>, IfdError> {
         let n = entry.count as usize;
         if n == 0 {
             return Ok(Vec::new());
@@ -328,14 +377,15 @@ impl<'a> Walker<'a> {
             // Fits inline (n<=1 for LONG); just the one value.
             return Ok(vec![entry.as_offset(self.bo)]);
         }
-        let start = entry.as_offset(self.bo) as usize;
-        let end = start.checked_add(n * 4).ok_or(IfdError::TruncatedIfd)?;
-        if end > self.data.len() {
+        let start = entry.as_offset(self.bo) as u64;
+        let byte_len = n.checked_mul(4).ok_or(IfdError::TruncatedIfd)?;
+        let raw = self.source.read_at(start, byte_len)?;
+        if raw.len() < byte_len {
             return Err(IfdError::TruncatedIfd);
         }
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
-            out.push(self.bo.u32(&self.data[start + i * 4..start + i * 4 + 4]));
+            out.push(self.bo.u32(&raw[i * 4..i * 4 + 4]));
         }
         Ok(out)
     }
@@ -347,37 +397,44 @@ impl<'a> Walker<'a> {
     /// the start of the file or the start of the MakerNote data. This is the one genuinely
     /// nonstandard piece of the whole walk; every other IFD in this file uses file-absolute
     /// offsets (base 0).
-    fn walk_nikon_maker_note(&mut self, mn_entry: &IfdEntry, out: &mut Vec<EmbeddedJpeg>) {
-        let mn_off = mn_entry.as_offset(self.bo) as usize;
-        let Some(mn_data) = self.data.get(mn_off..) else {
-            return;
+    fn walk_nikon_maker_note(
+        &mut self,
+        mn_entry: &IfdEntry,
+        out: &mut Vec<EmbeddedJpeg>,
+    ) -> Result<(), IfdError> {
+        let mn_off = mn_entry.as_offset(self.bo) as u64;
+        // "Nikon\0" (6) + 2 version + 2 reserved + inner TIFF header (2 byte-order + 2 magic +
+        // 4 ifd-offset = 8) = 18 bytes, one read covers the whole check.
+        let mn_data = match self.source.read_at(mn_off, 18) {
+            Ok(d) => d,
+            Err(_) => return Ok(()),
         };
         if mn_data.len() < 18 || &mn_data[0..6] != b"Nikon\0" {
-            return;
+            return Ok(());
         }
-        let inner_header = &mn_data[10..];
+        let inner_header = &mn_data[10..18];
         let inner_bo = match &inner_header[0..2] {
             b"II" => ByteOrder::Little,
             b"MM" => ByteOrder::Big,
-            _ => return,
+            _ => return Ok(()),
         };
-        if inner_header.len() < 8 || inner_bo.u16(&inner_header[2..4]) != 42 {
-            return;
+        if inner_bo.u16(&inner_header[2..4]) != 42 {
+            return Ok(());
         }
-        let maker_base = (mn_off + 10) as u64;
+        let maker_base = mn_off + 10;
         let ifd_off = inner_bo.u32(&inner_header[4..8]);
 
         let (mn_ifd, _) = match self.read_ifd(maker_base, ifd_off) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(_) => return Ok(()),
         };
         let Some(preview_entry) = Self::find_entry(&mn_ifd, TAG_NIKON_PREVIEW_IFD) else {
-            return;
+            return Ok(());
         };
         let preview_off = preview_entry.as_offset(self.bo);
         let (preview_ifd, _) = match self.read_ifd(maker_base, preview_off) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(_) => return Ok(()),
         };
         self.emit_if_jpeg(
             &preview_ifd,
@@ -385,12 +442,92 @@ impl<'a> Walker<'a> {
             PreviewSource::NikonPreviewIfd,
             out,
         );
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::{FileSource, SliceSource};
+
+    fn walk(data: &[u8]) -> Walker<SliceSource<'_>> {
+        Walker::new(SliceSource::new(data)).expect("valid header")
+    }
+
+    /// `Walker<FileSource>` (ranged reads) must find the exact same embedded JPEGs as
+    /// `Walker<SliceSource>` (whole-buffer reads) on the same bytes -- the core correctness
+    /// requirement #29's seek-and-read implementation depends on: going ranged must never change
+    /// *what* is found, only how many bytes it costs to find it.
+    #[test]
+    fn file_source_and_slice_source_agree_on_nikon_maker_note_file() {
+        let mut b = FileBuilder::new();
+        let mn_off = b.offset();
+        b.buf.extend_from_slice(b"Nikon\0");
+        b.buf.extend_from_slice(&[0x02, 0x10, 0x00, 0x00]);
+        let inner_header_off = b.offset();
+        let maker_base = inner_header_off;
+        b.buf.extend_from_slice(&[b'I', b'I', 42, 0]);
+        b.buf.extend_from_slice(&8u32.to_le_bytes());
+
+        let (_mn_ifd_off, mn_value_positions) =
+            b.append_ifd(&[(TAG_NIKON_PREVIEW_IFD, TY_LONG, 1, 0)], 0);
+        let preview_ifd_off = b.offset();
+        let (_preview_ifd_start, preview_value_positions) = b.append_ifd(
+            &[
+                (TAG_IMAGE_WIDTH, TY_SHORT, 1, 1920),
+                (TAG_IMAGE_LENGTH, TY_SHORT, 1, 1280),
+                (TAG_JPEG_IF_OFFSET, TY_LONG, 1, 0),
+                (TAG_JPEG_IF_LENGTH, TY_LONG, 1, FAKE_JPEG.len() as u32),
+            ],
+            0,
+        );
+        b.patch_u32(mn_value_positions[0], preview_ifd_off - maker_base);
+        let jpeg_off = b.append_bytes(FAKE_JPEG);
+        b.patch_u32(preview_value_positions[2], jpeg_off - maker_base);
+
+        let (exif_ifd_off, _) = b.append_ifd(&[(TAG_MAKER_NOTE, 7, 1, mn_off)], 0);
+        let (ifd0_off, _) = b.append_ifd(&[(TAG_EXIF_IFD, TY_LONG, 1, exif_ifd_off)], 0);
+        let data = b.finish(ifd0_off);
+
+        let tmp = std::env::temp_dir().join(format!(
+            "sniff-ifd-parity-test-{}-{}",
+            std::process::id(),
+            jpeg_off
+        ));
+        std::fs::write(&tmp, &data).unwrap();
+
+        let mut slice_walker = Walker::new(SliceSource::new(&data)).expect("slice header");
+        let slice_jpegs = slice_walker.find_embedded_jpegs().expect("slice walk");
+
+        let mut file_walker =
+            Walker::new(FileSource::open(&tmp, false).expect("open")).expect("file header");
+        let file_jpegs = file_walker.find_embedded_jpegs().expect("file walk");
+
+        std::fs::remove_file(&tmp).ok();
+
+        assert_eq!(slice_jpegs.len(), file_jpegs.len());
+        for (s, f) in slice_jpegs.iter().zip(file_jpegs.iter()) {
+            assert_eq!(s.source, f.source);
+            assert_eq!(s.file_offset, f.file_offset);
+            assert_eq!(s.byte_len, f.byte_len);
+            assert_eq!(s.declared_width, f.declared_width);
+            assert_eq!(s.declared_height, f.declared_height);
+        }
+
+        // And the extracted JPEG bytes themselves must be byte-identical, via each walker's own
+        // `read_range` -- not just the offset/len bookkeeping.
+        let s = &slice_jpegs[0];
+        let f = &file_jpegs[0];
+        let slice_bytes = slice_walker
+            .read_range(s.file_offset, s.byte_len as usize)
+            .unwrap();
+        let file_bytes = file_walker
+            .read_range(f.file_offset, f.byte_len as usize)
+            .unwrap();
+        assert_eq!(slice_bytes, file_bytes);
+        assert_eq!(slice_bytes, FAKE_JPEG);
+    }
 
     /// Builds a little-endian TIFF file byte-by-byte, tracking absolute offsets as it goes so
     /// tests never hardcode a magic-number offset -- every offset used is derived from
@@ -474,7 +611,7 @@ mod tests {
         );
         let data = b.finish(ifd0_off);
 
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         let jpegs = walker.find_embedded_jpegs().expect("walk");
         assert_eq!(jpegs.len(), 1);
         let j = &jpegs[0];
@@ -501,7 +638,7 @@ mod tests {
         let (ifd0_off, _) = b.append_ifd(&[(TAG_IMAGE_WIDTH, TY_SHORT, 1, 8256)], ifd1_off);
         let data = b.finish(ifd0_off);
 
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         let jpegs = walker.find_embedded_jpegs().expect("walk");
         assert_eq!(jpegs.len(), 1);
         assert_eq!(jpegs[0].source, PreviewSource::ThumbnailIfd);
@@ -529,7 +666,7 @@ mod tests {
         let (ifd0_off, _) = b.append_ifd(&[(TAG_SUB_IFDS, TY_LONG, 1, sub_ifd_off)], 0);
         let data = b.finish(ifd0_off);
 
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         let jpegs = walker.find_embedded_jpegs().expect("walk");
         assert_eq!(jpegs.len(), 1);
         let j = &jpegs[0];
@@ -599,7 +736,7 @@ mod tests {
         let (ifd0_off, _) = b.append_ifd(&[(TAG_EXIF_IFD, TY_LONG, 1, exif_ifd_off)], 0);
         let data = b.finish(ifd0_off);
 
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         let jpegs = walker.find_embedded_jpegs().expect("walk");
         assert_eq!(jpegs.len(), 1);
         let j = &jpegs[0];
@@ -612,13 +749,19 @@ mod tests {
 
     #[test]
     fn rejects_too_short_buffer() {
-        assert!(matches!(Walker::new(&[0u8; 4]), Err(IfdError::TooShort)));
+        assert!(matches!(
+            Walker::new(SliceSource::new(&[0u8; 4])),
+            Err(IfdError::TooShort)
+        ));
     }
 
     #[test]
     fn rejects_bad_byte_order_marker() {
         let data = [b'X', b'X', 42, 0, 0, 0, 0, 8];
-        assert!(matches!(Walker::new(&data), Err(IfdError::BadByteOrder)));
+        assert!(matches!(
+            Walker::new(SliceSource::new(&data)),
+            Err(IfdError::BadByteOrder)
+        ));
     }
 
     #[test]
@@ -634,7 +777,7 @@ mod tests {
         b.buf.extend_from_slice(&ifd0_off.to_le_bytes()); // next == self
         let data = b.finish(ifd0_off);
 
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         // The cycle is on the "next IFD" chain, which the walker tolerates (breaks the loop
         // rather than erroring the whole walk) -- it should still return cleanly with no
         // embedded JPEGs found.
@@ -649,7 +792,7 @@ mod tests {
         // Claims 5 entries but the buffer ends immediately after the count field.
         let mut data = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
         data.extend_from_slice(&5u16.to_le_bytes());
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         assert!(matches!(
             walker.find_embedded_jpegs(),
             Err(IfdError::TruncatedIfd) | Err(IfdError::OffsetOutOfBounds(_))
@@ -694,7 +837,7 @@ mod tests {
         let (ifd0_off, _) = b.append_ifd(&[(TAG_SUB_IFDS, TY_LONG, 1, sub_ifd_off)], 0);
         let data = b.finish(ifd0_off);
 
-        let mut walker = Walker::new(&data).expect("valid header");
+        let mut walker = walk(&data);
         let jpegs = walker.find_embedded_jpegs().expect("walk");
         assert!(jpegs.is_empty());
     }

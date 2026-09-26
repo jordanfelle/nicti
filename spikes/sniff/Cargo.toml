@@ -21,6 +21,15 @@ clap = { version = "4", features = ["derive"] }
 rayon = "1"
 rand = "0.10"
 thiserror = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+jpeg-encoder = "0.6"
+# AVIF candidate for #29's tier-payload-format comparison, at the user's request -- both are pure
+# Rust (no C toolchain dependency, unlike `image`'s `avif-native`/`dav1d` decode path): `ravif`
+# (rav1e-based encode) and `avif-decode` (rav1d-based decode + avif-parse container demux).
+ravif = "0.13"
+avif-decode = { version = "3", default-features = false }
+rgb = "0.8"
+imgref = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }

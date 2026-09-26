@@ -1,8 +1,12 @@
 mod bench;
+mod cache;
+mod codec;
 mod decode;
 mod ifd;
 mod inventory;
 mod jpeg_meta;
+mod source;
+mod tier_bench;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -36,6 +40,10 @@ enum Command {
         root: PathBuf,
         #[arg(long, value_enum)]
         mode: bench::Mode,
+        /// Whole-file read (the original pessimistic-bound path) vs. ranged/positioned reads
+        /// (#29's seek-and-read implementation). See `bench::IoMode`.
+        #[arg(long, value_enum, default_value = "whole")]
+        io: bench::IoMode,
         #[arg(long, default_value_t = 1)]
         threads: usize,
         #[arg(long, value_enum, default_value = "manifest")]
@@ -53,6 +61,26 @@ enum Command {
         #[arg(long, default_value = "bench-results/sniff")]
         out_dir: PathBuf,
     },
+    /// #29's per-tier cache-format + payload-format comparison. `--tier t0-grid` reads
+    /// `nikon_preview_ifd` verbatim (`--codec`/`--quality` ignored). `--tier t2-screen` extracts
+    /// `JpgFromRaw`, resizes to `decode::SCREEN_TIER_LONG_EDGE`, and re-encodes with `--codec` at
+    /// `--quality`. Either way, populates `--cache-format` then reads back in random order.
+    /// Prints one JSON `TierBenchResult`.
+    TierBench {
+        root: PathBuf,
+        #[arg(long, value_enum, default_value = "t2-screen")]
+        tier: tier_bench::Tier,
+        #[arg(long, value_enum, default_value = "jpeg")]
+        codec: codec::Codec,
+        #[arg(long, default_value_t = 80)]
+        quality: u8,
+        #[arg(long, value_enum, default_value = "sqlite")]
+        cache_format: cache::Format,
+        #[arg(long)]
+        sample_limit: Option<usize>,
+        #[arg(long, default_value = "bench-results/sniff-tier-bench")]
+        out_dir: PathBuf,
+    },
 }
 
 fn main() -> std::io::Result<()> {
@@ -67,6 +95,7 @@ fn main() -> std::io::Result<()> {
         Command::Bench {
             root,
             mode,
+            io,
             threads,
             order,
             cold,
@@ -77,6 +106,7 @@ fn main() -> std::io::Result<()> {
         } => bench::run(
             &root,
             mode,
+            io,
             threads,
             order,
             cold,
@@ -85,5 +115,29 @@ fn main() -> std::io::Result<()> {
             sample_limit,
             &out_dir,
         ),
+        Command::TierBench {
+            root,
+            tier,
+            codec,
+            quality,
+            cache_format,
+            sample_limit,
+            out_dir,
+        } => {
+            let result = tier_bench::run(
+                &root,
+                tier,
+                codec,
+                quality,
+                cache_format,
+                sample_limit,
+                &out_dir,
+            )
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            serde_json::to_writer_pretty(std::io::stdout(), &result)
+                .map_err(std::io::Error::other)?;
+            println!();
+            Ok(())
+        }
     }
 }
