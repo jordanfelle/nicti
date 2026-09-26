@@ -357,3 +357,6 @@ tooling next.
 - `.github/workflows/ci.yml` now installs `nasm` in all four general clippy/test jobs for
   `ravif`/`rav1d`'s SIMD build — done in this PR, not deferred, but worth flagging here since it
   touches every PR's CI setup time going forward.
+
+**Follow-up (2026-09):** the faster-`ravif`-speed and real-lossy-WebP items above are measured in
+[ADR-0020](0020-preview-codec-followup.md) (#143).

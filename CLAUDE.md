@@ -20,7 +20,7 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017), `raw-decoder` (0019). A new ADR adds a bullet to both files of its topic
+`preview-tiers` (0017, 0020), `raw-decoder` (0019). A new ADR adds a bullet to both files of its topic
 (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -97,8 +97,10 @@ ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG rese
 #29's preview-tier-strategy comparison: a from-scratch TIFF/EXIF/Nikon-MakerNote IFD walker (now
 generic over `source::ByteSource` — `SliceSource`/`FileSource` — for #29's ranged, seek-and-read
 extraction) — no LibRaw/rawler dependency, deliberately, to stay clear of #37's still-open decoder
-choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF
-tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust), `cache.rs`'s three
+choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF-vs-WebP
+tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust, plus lossy WebP via the
+C-linked `webp`/`libwebp-sys`, added for #143's ADR-0020 follow-up alongside a swept `avif-speed`
+axis and `nicti-prowl`-reused SSIM scoring — see the committed `run-codec-sweep.ps1`), `cache.rs`'s three
 cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
 per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
 benchmark with a `--io {whole,ranged}` axis; `sniff inventory` cross-checked byte-exact against
