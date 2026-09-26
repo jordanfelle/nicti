@@ -59,19 +59,20 @@ pub fn decode(data: &[u8]) -> Result<RawFrame, RawlerError> {
             .unwrap_or(0),
         maximum: raw_image.whitelevel.0[0],
         // serde_json can serialize NaN (as `null`) but not deserialize it back into an `f32` --
-        // `compare` round-trips these through JSON, so NaN (rawler leaves an unused 4th
-        // wb_coeffs slot as NaN rather than 0.0 for a 3-channel Bayer CFA) needs sanitizing here.
-        cam_mul: [
-            raw_image.wb_coeffs[0],
-            raw_image.wb_coeffs[1],
-            raw_image.wb_coeffs[2],
-            raw_image
-                .wb_coeffs
-                .get(3)
-                .copied()
-                .filter(|v| v.is_finite())
-                .unwrap_or(0.0),
-        ],
+        // `compare` round-trips these through JSON. rawler leaves an unused 4th wb_coeffs slot as
+        // NaN rather than 0.0 for a 3-channel Bayer CFA, which is why this sanitizing exists at
+        // all -- but a hostile review caught that an earlier fix only applied it to that 4th
+        // slot, leaving indices 0-2 to the same failure mode on any real file where rawler
+        // couldn't determine a WB coefficient. Sanitize all four uniformly.
+        cam_mul: {
+            let sanitize = |v: f32| if v.is_finite() { v } else { 0.0 };
+            [
+                sanitize(raw_image.wb_coeffs[0]),
+                sanitize(raw_image.wb_coeffs[1]),
+                sanitize(raw_image.wb_coeffs[2]),
+                sanitize(raw_image.wb_coeffs.get(3).copied().unwrap_or(0.0)),
+            ]
+        },
         cfa_hash: crate::frame::hash_cfa(cfa),
         cfa_len: cfa.len(),
     })
