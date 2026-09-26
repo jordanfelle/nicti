@@ -1,0 +1,27 @@
+[package]
+name = "rods"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #40 (ADR-0023): alignment + full-reference quality metrics (PSNR/SSIM/LPIPS) and wall-clock timing harness comparing LibRaw classic demosaic+NR, AI denoise candidates (Path A/B), and LRC's own AI Denoise. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "rods"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rods"
+path = "src/bin/rods.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["tiff"] }
+nicti-prowl = { path = "../../crates/nicti-prowl" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -8592,6 +8592,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rods"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "nicti-prowl",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "rowan"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
