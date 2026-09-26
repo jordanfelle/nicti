@@ -14,8 +14,8 @@ Full reasoning/history: `.claude/docs/raw-decoder/README.md`.
   with the still-open
   [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826)** (Nikon HE/HE\* decoder), vendored
   as a git submodule pinned to `yogthos/LibRaw@nikon-he-decoder` — the only candidate that decodes
-  the real library at all (no released LibRaw/rawler/rawspeed version handles HE/HE\*, 88% of the
-  real Z8 files).
+  the real library's HE/HE\* files (no released LibRaw/rawler/rawspeed version handles HE/HE\*,
+  88% of the real Z8 files).
 - **Measured 100% decode success (261/261)** across a real subset pulled from the live library
   (HE/HE\*/Lossless, two camera bodies), zero crashes either decoder side. This measures decode
   success only, not independently re-verified pixel correctness for HE/HE\* — treat that as

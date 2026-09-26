@@ -10,8 +10,8 @@ reference set.
   grant needed, see the `licensing` topic). **LibRaw,
   patched with the still-open [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826)
   (Nikon HE/HE* decoder)**, vendored as a git submodule pinned to `yogthos/LibRaw@nikon-he-decoder`
-  — the only candidate that decodes the real library at all (no released LibRaw/rawler/rawspeed
-  version handles HE/HE*, which is 88% of the real Z8 files). Measured 100% decode success
+  — the only candidate that decodes the real library's HE/HE* files (no released LibRaw/rawler/
+  rawspeed version handles HE/HE*, which is 88% of the real Z8 files). Measured 100% decode success
   (261/261) across a real 261-file subset pulled from the live source library (HE/HE*/Lossless,
   two camera bodies), zero crashes either decoder side. This table measures decode success only,
   not pixel correctness — for HE/HE*, this research didn't independently re-verify pixel output

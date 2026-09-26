@@ -228,9 +228,10 @@ cargo-deny can verify license compatibility but not whether a shipped build actu
 ## Decision
 
 **LibRaw, patched with PR #826's HE/HE\* decoder, is the chosen decoder** for #41's eventual
-`nicti-decode` implementation — it's the only candidate that decodes the real library at all, and
-it did so with 100% success and zero crashes across every real file this research could throw at
-it. rawler stays in the toolbox as the Lossless-path correctness cross-check (`retina diff`'s
+`nicti-decode` implementation — it's the only candidate that decodes the real library's HE/HE\*
+files (88% of the real Z8 library), and it did so with 100% success and zero crashes across every
+real file this research could throw at it. rawler stays in the toolbox as the Lossless-path
+correctness cross-check (`retina diff`'s
 ±1-LSB histogram, not hash-equality), not as the primary or a fallback decoder — it structurally
 cannot read most of this library's Z8 files.
 
