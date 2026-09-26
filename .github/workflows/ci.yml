@@ -371,6 +371,41 @@ jobs:
       - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
       - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
 
+  windows-required-gate:
+    name: den/pelt windows (required check gate)
+    # #166: den (windows)/pelt (windows) are both branch-protection-required checks AND
+    # path-gated (see den-linux's own if: comment above) -- this repo's CLAUDE.md used to assume
+    # a path-gated-out "skipped" result still satisfies a required check, but classic branch
+    # protection actually treats `skipped` as NOT satisfying the requirement, which silently
+    # blocked merge on every PR that doesn't touch spikes/den/**, spikes/pelt-*/**, or
+    # Cargo.{toml,lock}/this workflow file (confirmed on #162, which needed `gh pr merge --admin`
+    # twice to get past it). This job is what's actually registered as the required check
+    # instead: it has no path-gated `if:` of its own, so it's never itself skipped, and only
+    # fails when den-windows/pelt-windows genuinely failed or were cancelled -- a skipped
+    # upstream result still passes the gate, which is the behavior that was actually intended.
+    needs: [den-windows, pelt-windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check den (windows)/pelt (windows) didn't actually fail
+        env:
+          DEN_RESULT: ${{ needs.den-windows.result }}
+          PELT_RESULT: ${{ needs.pelt-windows.result }}
+        run: |
+          echo "den (windows): $DEN_RESULT"
+          echo "pelt (windows): $PELT_RESULT"
+          fail=0
+          for r in "$DEN_RESULT" "$PELT_RESULT"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" = "1" ]; then
+            echo "::error::den (windows) or pelt (windows) failed or was cancelled"
+            exit 1
+          fi
+          echo "ok: both passed, or were correctly path-gate-skipped"
+
   retina-linux:
     name: retina (linux)
     needs: changes
