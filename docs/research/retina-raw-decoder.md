@@ -1,7 +1,7 @@
 # Retina: RAW decoder comparison (LibRaw+#826 vs rawler)
 
 Findings for [#37](https://github.com/jordanfelle/nicti/issues/37). Tooling: `spikes/retina/` —
-this is a findings doc, not an ADR; the decision itself is `docs/adr/0018-raw-decoder.md`.
+this is a findings doc, not an ADR; the decision itself is `docs/adr/0019-raw-decoder.md`.
 
 ## Method
 
@@ -10,7 +10,7 @@ this is a findings doc, not an ADR; the decision itself is `docs/adr/0018-raw-de
 the still-open PR [#826](https://github.com/LibRaw/LibRaw/pull/826)) or rawler 0.8.0
 (crates.io), producing a common `RawFrame` (metadata + a blake3 hash of the still-mosaiced Bayer
 plane). LibRaw is reached through a hand-written C-ABI shim (`shim.h`/`shim.cpp`), not
-bindgen — see ADR-0018's Spike section for why.
+bindgen — see ADR-0019's Spike section for why.
 
 Subcommands:
 - `scan <dir> --decoder {libraw,rawler} --out <out.jsonl>`: recursively decodes every
@@ -33,9 +33,9 @@ Subcommands:
 ## The vanished reference set
 
 `docs/benchmarks.md`'s frozen `ref-10k` (9,142 files, two 393GB copies on `H:\`/`E:\`) disappeared
-from disk mid-research, unrelated to this work (see ADR-0018's Context section). Per explicit user
+from disk mid-research, unrelated to this work (see ADR-0019's Context section). Per explicit user
 direction, that frozen-full-copy model is retired — the dataset needs to be accessible beyond one
-machine, which is a separate, deferred problem (see ADR-0018's Deferred list). This research
+machine, which is a separate, deferred problem (see ADR-0019's Deferred list). This research
 pulled a **261-file stratified subset directly from the live source library** instead:
 
 | Source | Files | Bucket |
@@ -137,7 +137,7 @@ spikes/retina/vendor/LibRaw` before building if it's missing.
 ## Recommendations for #41
 
 - Implement `nicti-decode`'s `RawDecoder` using LibRaw+#826, once the LGPL or-later question
-  (ADR-0018's Licensing section) is answered.
+  (ADR-0019's Licensing section) is answered.
 - Adopt `RawFrame`'s shape (metadata + Bayer plane) as the decode output type; it already matches
   what #41/#44's render-graph design expects to consume.
 - Budget decode latency explicitly in #44's render-graph cache design — 1-2.4s per HE/Lossless

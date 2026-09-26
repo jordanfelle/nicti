@@ -1,5 +1,5 @@
 //! Common decoded-frame shape both backends (LibRaw, rawler) produce, so `compare` can diff them
-//! independent of which decoder made either one. This is also the shape ADR-0018 proposes for
+//! independent of which decoder made either one. This is also the shape ADR-0019 proposes for
 //! `nicti-decode::RawDecoder`'s eventual decode method -- not implemented there yet, that's #41's
 //! promotion, not this spike's.
 
@@ -27,7 +27,7 @@ pub struct RawFrame {
     /// diffs, but it's an *exact-match* indicator only -- **a mismatch here is not itself a
     /// correctness failure for the Lossless/D7500 cross-check.** LibRaw and rawler decode
     /// Lossless NEF with a real, characterized, one-directional ±1 LSB rounding difference (see
-    /// `docs/adr/0018-raw-decoder.md`'s Correctness section), so their hashes never match on real
+    /// `docs/adr/0019-raw-decoder.md`'s Correctness section), so their hashes never match on real
     /// files -- use `diff`'s per-pixel histogram (max abs diff ≤ 1) as the actual correctness
     /// check, not hash equality.
     pub cfa_hash: String,

@@ -1,10 +1,10 @@
 ## RAW decoder
 
-Covers #37's RAW decoder research (ADR-0018): the LibRaw+PR#826 decision, the rawler
+Covers #37's RAW decoder research (ADR-0019): the LibRaw+PR#826 decision, the rawler
 cross-check methodology, RapidRAW's HE gap, measured performance, and the vanished `ref-10k`
 reference set.
 
-- **RAW decoder (#37)**: `docs/adr/0018-raw-decoder.md` — **Proposed**, pending a decode-latency
+- **RAW decoder (#37)**: `docs/adr/0019-raw-decoder.md` — **Proposed**, pending a decode-latency
   product call (see the ADR's own Decision section; the LGPL question is resolved — LGPL-2.1 §§5-6
   permit combining `rawler`/LibRaw into Nicti's AGPL-3.0-or-later work directly, no "or-later"
   grant needed, see the `licensing` topic). **LibRaw,

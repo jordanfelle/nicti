@@ -8,7 +8,7 @@ paths:
 
 Full reasoning/history: `.claude/docs/raw-decoder/README.md`.
 
-- **RAW decoder (#37)** — `docs/adr/0018`: **Proposed**, pending a decode-latency product call
+- **RAW decoder (#37)** — `docs/adr/0019`: **Proposed**, pending a decode-latency product call
   (the LGPL question is resolved — LGPL-2.1 §§5-6 permit combining `rawler`/LibRaw into Nicti's
   AGPL-3.0-or-later work, no "or-later" grant needed, see `licensing` topic). **LibRaw patched
   with the still-open

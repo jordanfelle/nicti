@@ -1,4 +1,4 @@
-# ADR-0018: RAW decoder
+# ADR-0019: RAW decoder
 
 - **Status:** Proposed (see Decision for exactly what's still open)
 - **Date:** 2026-09-25

@@ -18,7 +18,7 @@ to keep this file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017), `raw-decoder` (0018). A new ADR adds a bullet to both files of its topic
+`preview-tiers` (0017), `raw-decoder` (0019). A new ADR adds a bullet to both files of its topic
 (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -134,7 +134,7 @@ not part of the shared `Workload` trait since only these two engines are compare
 `gen.rs`'s synthetic-catalog generator is reusable for future Library-scale benchmarks, see
 `docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
 to be deleted once its own ticket promotes it (as #20 just did for
-`spikes/sheath`/`spikes/dewclaw`), and `spikes/retina` (#37/ADR-0018's RAW decoder comparison —
+`spikes/sheath`/`spikes/dewclaw`), and `spikes/retina` (#37/ADR-0019's RAW decoder comparison —
 vendors LibRaw's HE/HE\*-capable fork as a git submodule at `spikes/retina/vendor/LibRaw`, compiled
 via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`diff` against rawler
 0.8.0, plus `scan` for a manifest-free directory walk and `watch` for #24's `notify` research; see
