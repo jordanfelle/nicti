@@ -3,6 +3,14 @@
 //! repo is public and the catalog's keywords include real people's names -- #61's own write-up
 //! must describe the *shape* of the data (counts, table structure) without ever repeating a piece
 //! of it, and this is the mechanical check that a hand review can miss.
+//!
+//! **This is a floor under human review, not a substitute for it.** It only catches a
+//! byte-identical, case-sensitive substring of something already in the catalog -- it does
+//! nothing for a short name/handle under the 6-character floor, a different casing, a
+//! hyphenation/spacing variant, or a paraphrase (describing a person rather than quoting a
+//! keyword verbatim). "privacy-check: clean" means "no exact match was found," not "this diff
+//! contains nothing sensitive" -- every commit in this pass was also manually read before pushing
+//! for exactly this reason (see the ADR/research doc's own privacy note).
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;

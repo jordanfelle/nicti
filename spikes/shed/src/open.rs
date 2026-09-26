@@ -7,10 +7,8 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
-/// Opens `path` read-only via SQLite's `immutable=1` URI parameter (tells SQLite the file will
-/// never be modified by anyone -- including by another process -- for the lifetime of this
-/// connection, which also lets it skip locking entirely). Refuses when either sibling looks like a
-/// real, live process still has this catalog open:
+/// Opens `path` read-only via SQLite's `mode=ro` URI parameter, refusing beforehand when either
+/// sibling looks like a real, live process still has this catalog open:
 ///
 /// - a non-empty `.lock` file (Lightroom's own advisory lock -- confirmed against the user's real,
 ///   currently-open catalog: 70 bytes, `Lightroom.exe`'s path + PID)
@@ -24,6 +22,18 @@ use std::path::Path;
 /// -readonly` exploration session had already left zero-byte `-wal`/`-shm` files next to it.
 /// Checking size, not mere presence, is what tells a closed backup's harmless leftover apart from
 /// an actually-open catalog's real pending writes.
+///
+/// **Deliberately not `immutable=1`**: an earlier draft added it (it tells SQLite the file will
+/// never be modified by anyone, including another process, letting it skip its own locking
+/// protocol entirely) alongside this pre-check, on the theory that the two together were enough.
+/// They aren't -- the pre-check and the actual `open_with_flags` call below are two separate
+/// steps with a real gap between them (a live process could acquire the lock and start writing in
+/// that window), and `immutable=1` is exactly the flag that turns that gap from "SQLite would
+/// notice and error" into "SQLite has no mechanism to notice at all," risking a silent read of
+/// torn/inconsistent pages instead of a clean failure. Plain `mode=ro` keeps SQLite's normal
+/// shared-lock/WAL-aware read path active, so a real concurrent writer is still safely serialized
+/// against (or surfaced as a busy/lock error) rather than silently ignored -- the pre-check above
+/// is a fast, informative up-front rejection for the common case, not the only safety net.
 pub fn open_backup(path: &Path) -> Result<Connection> {
     let lock = sibling_with_suffix(path, ".lock");
     if non_empty(&lock)? {
@@ -45,7 +55,7 @@ pub fn open_backup(path: &Path) -> Result<Connection> {
         );
     }
 
-    let uri = format!("file:{}?mode=ro&immutable=1", path.display());
+    let uri = format!("file:{}?mode=ro", path.display());
     let conn = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,

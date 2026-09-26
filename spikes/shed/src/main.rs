@@ -38,6 +38,15 @@ fn main() -> Result<()> {
     }
 }
 
+/// Quotes `name` as a SQLite identifier, doubling any embedded `"` per SQLite's own escaping rule
+/// -- `sqlite_master.name` is trusted in the sense that it's schema metadata, not user input, but
+/// `shed` is a generic `.lrcat` reader (any file the caller points it at, not hardcoded to one
+/// catalog), and an unescaped `format!("...\"{table}\"...")` would let a table name containing a
+/// `"` break out of the quoted identifier and inject arbitrary SQL into the same statement.
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 fn cmd_schema(catalog: &std::path::Path) -> Result<()> {
     let conn = open::open_backup(catalog)?;
     let mut stmt =
@@ -46,12 +55,11 @@ fn cmd_schema(catalog: &std::path::Path) -> Result<()> {
         .query_map([], |r| r.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for table in tables {
+        let quoted = quote_identifier(&table);
         let count: i64 = conn
-            .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
-                r.get(0)
-            })
+            .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |r| r.get(0))
             .with_context(|| format!("counting {table}"))?;
-        let mut col_stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
+        let mut col_stmt = conn.prepare(&format!("PRAGMA table_info({quoted})"))?;
         let cols: Vec<(String, String)> = col_stmt
             .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -95,6 +103,27 @@ fn cmd_privacy_check(catalog: &std::path::Path, files: &[PathBuf]) -> Result<()>
         anyhow::bail!(
             "privacy-check found {} match(es) -- do not commit",
             hits.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_identifier_wraps_a_plain_name() {
+        assert_eq!(quote_identifier("Adobe_images"), "\"Adobe_images\"");
+    }
+
+    #[test]
+    fn quote_identifier_escapes_an_embedded_quote() {
+        // Real risk this guards: `shed` is a generic `.lrcat` reader, and a table name containing
+        // a `"` would otherwise let a caller-controlled name break out of the quoted identifier
+        // and inject arbitrary SQL into the same statement (`cmd_schema`'s COUNT/PRAGMA queries).
+        assert_eq!(
+            quote_identifier(r#"evil" ; DROP TABLE Adobe_images; --"#),
+            "\"evil\"\" ; DROP TABLE Adobe_images; --\""
         );
     }
 }
