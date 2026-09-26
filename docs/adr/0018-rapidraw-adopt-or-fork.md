@@ -74,10 +74,10 @@ given the monolithic-module conflict above.
 
 - **#37 (RAW decoder)**: cite RapidRAW's and vkdt's independent convergence on `rawler`/dnglab as
   evidence it's the community's leading pure-Rust option. The LGPL-2.1 compatibility question is
-  now resolved (see above) — not an open item for #37 anymore. The per-release §6(d)
-  distribution-mechanics checklist (binary and complete source available from the same place,
-  notice, shipped license text — see ADR-0019's deferred item 2) still applies before
-  `nicti-decode` ships either dependency.
+  now resolved (see above) — not an open item for #37 anymore. The per-release §6 distribution
+  checklist still applies before `nicti-decode` ships either dependency: §6(d) (binary and
+  complete source available from the same place), plus the separate notice and shipped
+  license-text requirements — see ADR-0019's deferred item 2.
 - **#44/#45 (Tapetum)**: use vkdt's Vulkan DAG (`docs/research/stalk-prior-art.md`'s vkdt section)
   as the real prior-art reference for the stage-cache design, not RapidRAW's.
 - **#48/#51 (masking/healing)**: read RapidRAW's SAM/LaMa/Depth-Anything integration code as a
