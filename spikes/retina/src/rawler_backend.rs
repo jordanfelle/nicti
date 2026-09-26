@@ -48,9 +48,14 @@ pub fn decode(data: &[u8]) -> Result<RawFrame, RawlerError> {
         top_margin: 0,
         left_margin: 0,
         // Not LibRaw's `filters` bitmask (rawler's `CFA` has no equivalent encoding) -- just the
-        // plane count, informational only. `compare` diffs `cfa_hash`, not this field.
+        // distinct-color count, informational only. `compare` diffs `cfa_hash`, not this field.
         filters: raw_image.camera.cfa.unique_colors() as u32,
-        colors: raw_image.cpp as i32,
+        // NOT `raw_image.cpp` -- a hostile review caught that field's actual meaning (rawler's
+        // own doc comment: "number of components per pixel, 1 for bayer, 3 for RGB") is always 1
+        // for every real file in this research, not the distinct-CFA-color count LibRaw's
+        // `colors` field holds (typically 3 for Nikon's RGGB Bayer). Same value as `filters`
+        // above -- rawler doesn't have two distinct concepts here the way LibRaw does.
+        colors: raw_image.camera.cfa.unique_colors() as i32,
         black: raw_image
             .blacklevel
             .levels
