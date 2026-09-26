@@ -1,0 +1,40 @@
+## Masking
+
+Covers the AI-segmentation model choice, the brush/gradient local-adjustment geometry model, and
+the mask-group compose model that ties them together.
+
+- **Masking**: `docs/adr/0024-masking.md` — **Proposed, pending a reference-machine pass** (real
+  BiRefNet/MobileSAM weights, real photos including fursuiters, and #44's own gating). Model
+  choice: BiRefNet (one-shot subject/background) + MobileSAM (interactive click/box refine, real
+  two-session encoder/decoder split, unlike `spikes/groom`'s single-tensor collapse for its own
+  healing case). SAM2 re-checked (its SA-V dataset license, previously flagged unverified, is
+  confirmed CC-BY-4.0) but not adopted — heavier, video-oriented, no gap MobileSAM doesn't already
+  cover for stills. Sky segmentation: no clean model adopted this pass (RapidRAW's own `skyseg`
+  fine-tune of U-2-Net has an unverified third-party checkpoint provenance); ships as a classic
+  luminance/blue-dominance heuristic, flood-filled from the top row so a disconnected bright/blue
+  region elsewhere in frame isn't picked up.
+- **Mask-group model**: `spikes/siamese/src/compose.rs`'s `MaskGroup`/`MaskComponent`, named to
+  match Lightroom Classic's own `MaskGroupBasedCorrections` shape so #49/#62's importer maps onto
+  it directly. Resolves two conflicts the research pass found: `model_version` is a `String` (not
+  groom's `u32` — groom/#51 should align to this), and a mask's inverse is expressed as
+  `invert: bool` on a *component* sharing the same `AiRecipe`, not a second model recipe — the
+  bake key (`ai_bake_key()`) is defined independently of `invert`/`opacity`, so a mask and its
+  inverse (the hero scenario's own "Select Subject" + "Select Subject, Invert" pair) share one bake
+  key and the model runs once.
+- **Cache-key design**: AI masks infer against a **fixed neutral render** (post-lens-correction,
+  default tone), not the user's live edit stack — otherwise every slider drag would invalidate
+  every AI mask, and the hero scenario's 50-image bulk-sync would re-run the model 50 times over
+  for reasons unrelated to what's actually being selected.
+- **Geometry**: `spikes/siamese/src/geometry.rs` — linear gradient, radial gradient, and brush
+  (ordered strokes, each own add/erase, dabs blend via `max` within a stroke so overlapping dabs
+  don't double-darken).
+- **Refinement**: `spikes/siamese/src/refine.rs` — a guided filter (He, Sun & Tang), not a plain
+  bilinear alpha upsample, so a preview-resolution AI mask's boundary snaps back to the full-res
+  photo's own edges rather than staying a soft blur across the subject boundary.
+- **GPU**: four WGSL kernels (gradient rasterize x2, brush rasterize, compose step, masked-adjust
+  apply), each checked against its CPU reference within `1e-4` in `spikes/siamese/tests/gpu_parity.rs`
+  (9 tests, passing against lavapipe in this sandbox).
+- **No real ONNX weights obtained this pass** — a full BiRefNet export exists publicly (~970MB)
+  but downloading/running it was out of this pass's time budget, same call ADR-0007 made for
+  LaMa/MobileSAM. `spikes/siamese/src/segment.rs` proves only the `ort`/`load-dynamic`
+  loading/error-handling shape (`ModelNotFound` on a missing file), same as groom's own `ai.rs`.

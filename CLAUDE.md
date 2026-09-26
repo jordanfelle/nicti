@@ -21,7 +21,7 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
 `preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`lrc-migration` (0023). A new ADR adds a bullet to
+`lrc-migration` (0023), `masking` (0024). A new ADR adds a bullet to
 both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -173,7 +173,12 @@ pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 des
 `spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
 reading plus a pre-commit privacy check against the real catalog's own keyword/path strings; see
 `docs/research/shed-lrcat-schema.md`) is real, tested (17 unit tests on Unix, 16 on Windows), not
-path-gated.
+path-gated. `spikes/siamese` (#48/ADR-0024's masking research: BiRefNet/MobileSAM segmentation
+scaffolding over `ort`/`load-dynamic` (no real weights, same posture as `groom/ai.rs`), the
+brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` AI+geometry
+compose model with a shared bake key for a mask and its inverse, a guided-filter preview-to-full-
+res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe; see
+`docs/research/siamese-masking.md`) is real, tested (23 unit + 9 GPU-parity tests), not path-gated.
 
 ## Development workflow
 

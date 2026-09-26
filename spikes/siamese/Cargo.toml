@@ -1,0 +1,30 @@
+[package]
+name = "siamese"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #48 (ADR-0025): BiRefNet/MobileSAM segmentation for subject/sky masks via ort/load-dynamic, the brush+gradient local-adjustment geometry model, the AI+geometry mask-group compose model (add/subtract/intersect/invert -- inverse shares its AI recipe's bake key), a preview-to-full-res guided-filter upsample, and a wgpu compute-shader twin of gradient/brush/compose/masked-adjust-apply. Not a production crate."
+
+[lib]
+name = "siamese"
+path = "src/lib.rs"
+
+[[bin]]
+name = "siamese"
+path = "src/bin/siamese.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"
