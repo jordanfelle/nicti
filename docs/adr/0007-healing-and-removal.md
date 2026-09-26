@@ -50,8 +50,10 @@ Constraints already fixed by earlier ADRs/docs:
   real photos with known-good ground truth nor real inpainting weights, so no quality number is
   claimed here — this rule is stated for #51 to apply, not satisfied by this ADR.
 - **Speed — interactive spot-heal**: **< 16ms/update on GPU** (a hypothesis carried over from
-  ADR-0005's 60fps budget). **Validated by #97**: 0.386ms p50 on the reference RTX 5080 (Vulkan
-  backend) — well within budget, ~40x headroom.
+  ADR-0005's 60fps budget). **GPU kernel proxy measured by #97**: 0.386ms p50 on the reference
+  RTX 5080 (Vulkan backend) — well within the kernel-budget proxy, with ~40x headroom. The
+  `TIMESTAMP_QUERY` interval spans only the Jacobi dispatches, not host-side setup, buffer upload,
+  or readback — this is not an end-to-end interactive-update measurement.
 - **Speed — AI removal**: a **bake-time** operation (per ADR-0002's stage model, baked once and
   cached, not recomputed per frame), with a stated latency budget of **< 2s/removal on a CUDA
   execution provider** — still *to be validated*, gated on #51 obtaining real MobileSAM/LaMa

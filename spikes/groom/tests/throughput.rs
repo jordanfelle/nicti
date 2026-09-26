@@ -156,6 +156,13 @@ fn poisson_jacobi_gpu_throughput() {
     let (guidance, initial, mask) = make_patch(width, height);
 
     for ctx in &contexts {
+        if ctx.device_type == wgpu::DeviceType::Cpu {
+            eprintln!(
+                "backend {:?} adapter={}: software adapter, skipping (this test requires real GPU hardware)",
+                ctx.backend, ctx.adapter_name
+            );
+            continue;
+        }
         if !ctx.supports_timestamps() {
             eprintln!(
                 "backend {:?}: no TIMESTAMP_QUERY, wall-clock numbers would be unreliable, skipping",

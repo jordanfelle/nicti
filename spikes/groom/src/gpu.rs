@@ -47,6 +47,7 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub backend: wgpu::Backend,
     pub adapter_name: String,
+    pub device_type: wgpu::DeviceType,
     pub timestamp_period_ns: f32,
 }
 
@@ -86,6 +87,7 @@ impl GpuContext {
             queue,
             backend: info.backend,
             adapter_name: info.name,
+            device_type: info.device_type,
             timestamp_period_ns,
         })
     }
