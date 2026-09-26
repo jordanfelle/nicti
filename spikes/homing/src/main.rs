@@ -139,17 +139,39 @@ fn current_volume_for(dir: &std::path::Path) -> Result<(String, volume::VolumeIn
     let abs = dir
         .canonicalize()
         .with_context(|| format!("canonicalizing {}", dir.display()))?;
+    // `Path::canonicalize` on Windows can return a verbatim path (`\\?\H:\...`), which after
+    // slash normalization becomes `//?/H:/...` -- strip that prefix so it lines up with the
+    // enumerated mount points, which never carry it.
     let abs_str = abs.to_string_lossy().replace('\\', "/");
+    let abs_str = abs_str.strip_prefix("//?/").unwrap_or(&abs_str);
+
+    // Two bugs an earlier draft had: (1) a bare `starts_with` matches a sibling path with a
+    // shared prefix that isn't a real path-component boundary (e.g. mount point `C:/Mount` would
+    // also match `C:/MountOther`); (2) among multiple genuinely-matching mount points, the first
+    // one enumerated (not the most specific/longest one) would win. Track the longest
+    // component-boundary match instead of returning on the first hit.
+    let mut best: Option<(usize, volume::VolumeInfo, String)> = None;
     for v in volumes {
         for mp in &v.mount_points {
             let mp_norm = mp.trim_end_matches(['\\', '/']).replace('\\', "/");
-            if abs_str.starts_with(&mp_norm) {
-                let key = volume::identity_key(&v).with_context(|| {
-                    format!("volume at {mp} has no usable identity key -- see ADR-0020")
-                })?;
-                return Ok((key, v.clone(), mp.clone()));
+            let component_match = abs_str == mp_norm
+                || abs_str
+                    .strip_prefix(&mp_norm)
+                    .is_some_and(|rest| rest.starts_with('/'));
+            if component_match
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_len, _, _)| mp_norm.len() > *best_len)
+            {
+                best = Some((mp_norm.len(), v.clone(), mp.clone()));
             }
         }
+    }
+    if let Some((_, v, mp)) = best {
+        let key = volume::identity_key(&v).with_context(|| {
+            format!("volume at {mp} has no usable identity key -- see ADR-0020")
+        })?;
+        return Ok((key, v, mp));
     }
     anyhow::bail!("no mounted volume found containing {}", dir.display())
 }
@@ -225,32 +247,83 @@ fn cmd_relink(scan_dir: &std::path::Path, db_path: &std::path::Path) -> Result<(
         }
         let rel = entry.path().strip_prefix(scan_dir).unwrap_or(entry.path());
         let rel_path = path::normalize_rel_path(rel);
-        let size = entry.metadata()?.len();
-        let hash = fingerprint::partial_hash(entry.path())?;
-        candidates.insert(rel_path, (size, hash));
+        // One unreadable/truncated-mid-read candidate must not abort the scan for every other
+        // candidate -- an earlier draft used `?` here, so a single bad file on the unrecognized
+        // volume would silently prevent every other asset from getting a chance to relink.
+        let size = match entry.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => continue,
+        };
+        // Compute both hash tiers for each candidate: `homing build --tier full` stores a
+        // full-file hash on the asset side, but relink only ever computed a partial hash here --
+        // an unchanged full-tier asset on an offline volume could never match by fingerprint at
+        // all and would be reported `Lost` even when its real file was sitting right there. This
+        // is relink-time-only work (not routine import), so paying for both tiers per candidate
+        // is acceptable.
+        let partial_hash = match fingerprint::partial_hash(entry.path()) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        let full_hash = match fingerprint::full_hash(entry.path()) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        candidates.insert(rel_path, (size, partial_hash, full_hash));
     }
 
     let results = relink::relink_against_unknown_volume(&conn, &candidates)?;
+
+    // Persist every successful match into the catalog -- an earlier draft only ever printed the
+    // match to stdout, so a later `homing resolve` would still read each asset's stale (offline
+    // volume's) root_id/rel_path and report it unresolved forever. `scan_dir` itself becomes a
+    // new `root` under whichever volume currently owns it (registered lazily, only if at least
+    // one match needs it, so a scan that finds nothing doesn't create an unused root row).
+    let mut new_root_id: Option<i64> = None;
     let mut relinked = 0;
     let mut lost = 0;
     for (id, outcome) in &results {
-        match outcome {
+        let matched_path = match outcome {
             relink::ResolveOutcome::RelinkedByFingerprint(p) => {
-                relinked += 1;
                 println!("asset {id} -> relinked to {p} (fingerprint match)");
+                Some(p)
             }
             relink::ResolveOutcome::RelinkedBySizeName(p) => {
-                relinked += 1;
                 println!(
                     "asset {id} -> relinked to {p} (size+name only, no fingerprint available)"
                 );
+                Some(p)
             }
             relink::ResolveOutcome::Lost => {
                 lost += 1;
                 println!("asset {id} -> lost, no match");
+                None
             }
-            _ => {}
-        }
+            _ => None,
+        };
+        let Some(matched_path) = matched_path else {
+            continue;
+        };
+        relinked += 1;
+
+        let root_id = match new_root_id {
+            Some(id) => id,
+            None => {
+                let (identity_key, info, mount_point) = current_volume_for(scan_dir)?;
+                let vid = schema::upsert_volume(
+                    &conn,
+                    &identity_key,
+                    info.label.as_deref(),
+                    info.total_bytes,
+                    info.removable,
+                    &mount_point,
+                    relink::now_unix(),
+                )?;
+                let rid = schema::insert_root(&conn, vid, "")?;
+                new_root_id = Some(rid);
+                rid
+            }
+        };
+        schema::relink_asset(&conn, *id, root_id, matched_path, &path::fold(matched_path))?;
     }
     println!("relinked: {relinked}, lost: {lost}");
     Ok(())

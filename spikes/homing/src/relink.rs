@@ -147,8 +147,15 @@ pub enum ResolveOutcome {
 }
 
 /// The "tree moved onto an unrecognized volume" scenario: given a currently-mounted, previously
-/// unknown volume's file listing (path -> (size, partial_hash)), tries to relink every `asset`
-/// row whose owning volume is offline, cheapest tier first.
+/// unknown volume's file listing (path -> (size, partial_hash, full_hash)), tries to relink every
+/// `asset` row whose owning volume is offline, cheapest tier first.
+///
+/// Candidates carry *both* hash tiers because an asset's stored `fingerprint` could have been
+/// computed at either tier at import time (`homing build --tier partial` vs. `--tier full`) --
+/// the asset row itself doesn't record which tier produced it, so a candidate whose fingerprint
+/// matches at *either* tier counts as a match, rather than only ever comparing against the one
+/// tier this function used to compute unconditionally (which silently failed to relink any
+/// full-tier asset, since it never had a partial hash to compare against).
 ///
 /// Each candidate path can be claimed by at most one asset: without this, two offline assets
 /// that happen to share the same size+fingerprint (a genuine duplicate photo, or a partial-hash
@@ -165,7 +172,7 @@ pub enum ResolveOutcome {
 /// last-resort shot at a match via size+filename alone, rather than being unconditionally `Lost`.
 pub fn relink_against_unknown_volume(
     conn: &Connection,
-    candidate_files: &HashMap<String, (u64, String)>,
+    candidate_files: &HashMap<String, (u64, String, String)>,
 ) -> Result<Vec<(i64, ResolveOutcome)>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.rel_path, a.size_bytes, a.fingerprint
@@ -188,8 +195,15 @@ pub fn relink_against_unknown_volume(
         .collect();
 
     let mut by_size: HashMap<u64, Vec<String>> = HashMap::new();
-    let mut by_size_name: HashMap<fingerprint::SizeNameKey, String> = HashMap::new();
-    for (path, (size, _fp)) in candidate_files {
+    // Every candidate path sharing a `SizeNameKey`, not just the first one seen: two
+    // fingerprint-less files (e.g. `IMG_0001.NEF` from two different camera bodies, both dumped
+    // into dated folders) can genuinely share size+filename. `or_insert_with` collapsing this to
+    // a single winner would be both wrong (the second asset reports `Lost` even when a second
+    // real candidate exists) and non-deterministic (`HashMap` iteration order decides which
+    // asset "wins" the single slot, so the outcome could vary between runs on identical input).
+    // Sorted so the pick among multiple candidates is at least deterministic.
+    let mut by_size_name: HashMap<fingerprint::SizeNameKey, Vec<String>> = HashMap::new();
+    for (path, (size, _partial, _full)) in candidate_files {
         by_size.entry(*size).or_default().push(path.clone());
         let file_name = Path::new(path)
             .file_name()
@@ -200,18 +214,27 @@ pub fn relink_against_unknown_volume(
                 size_bytes: *size,
                 file_name,
             })
-            .or_insert_with(|| path.clone());
+            .or_default()
+            .push(path.clone());
+    }
+    for paths in by_size_name.values_mut() {
+        paths.sort();
     }
 
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut results = Vec::new();
     for (asset_id, rel_path, size_bytes, fingerprint) in offline_assets {
+        let fp_matches_either_tier = |candidate_path: &str, fp: &str| -> bool {
+            candidate_files
+                .get(candidate_path)
+                .is_some_and(|(_, partial, full)| fp == partial || fp == full)
+        };
         let by_path = candidate_files
             .get(&rel_path)
             .filter(|_| !claimed.contains(&rel_path));
         let matched = match (fingerprint.as_deref(), by_path) {
-            (Some(fp), Some((candidate_size, candidate_fp)))
-                if fp == candidate_fp && size_bytes == *candidate_size =>
+            (Some(fp), Some((candidate_size, _, _)))
+                if size_bytes == *candidate_size && fp_matches_either_tier(&rel_path, fp) =>
             {
                 Some(rel_path.clone())
             }
@@ -219,12 +242,7 @@ pub fn relink_against_unknown_volume(
                 .get(&size_bytes)
                 .into_iter()
                 .flatten()
-                .find(|path| {
-                    !claimed.contains(*path)
-                        && candidate_files
-                            .get(*path)
-                            .is_some_and(|(_, candidate_fp)| candidate_fp == fp)
-                })
+                .find(|path| !claimed.contains(*path) && fp_matches_either_tier(path, fp))
                 .cloned(),
             (None, _) => None,
         };
@@ -241,7 +259,9 @@ pub fn relink_against_unknown_volume(
                     size_bytes,
                     file_name,
                 })
-                .filter(|path| !claimed.contains(*path))
+                .into_iter()
+                .flatten()
+                .find(|path| !claimed.contains(*path))
                 .cloned()
         } else {
             None
@@ -375,8 +395,14 @@ mod tests {
         let fp2 = fingerprint::partial_hash(&path2).unwrap();
         let size1 = fs::metadata(&path1).unwrap().len();
         let size2 = fs::metadata(&path2).unwrap().len();
-        candidates.insert("Renamed/IMG_0001.NEF".to_string(), (size1, fp1));
-        candidates.insert("Renamed/IMG_0002.NEF".to_string(), (size2, fp2));
+        candidates.insert(
+            "Renamed/IMG_0001.NEF".to_string(),
+            (size1, fp1, "unused-full-hash-1".to_string()),
+        );
+        candidates.insert(
+            "Renamed/IMG_0002.NEF".to_string(),
+            (size2, fp2, "unused-full-hash-2".to_string()),
+        );
 
         let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
         assert_eq!(results.len(), 2);
@@ -422,7 +448,10 @@ mod tests {
         let mut candidates = HashMap::new();
         let fp = fingerprint::partial_hash(&dir.path().join("IMG_A.NEF")).unwrap();
         let size = fs::metadata(dir.path().join("IMG_A.NEF")).unwrap().len();
-        candidates.insert("Recovered/only_copy.NEF".to_string(), (size, fp));
+        candidates.insert(
+            "Recovered/only_copy.NEF".to_string(),
+            (size, fp, "unused-full-hash".to_string()),
+        );
 
         let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
         assert_eq!(results.len(), 2);
@@ -463,11 +492,19 @@ mod tests {
         // the exact shape the size+name fallback exists for.
         candidates.insert(
             "2026/09/IMG_0001.NEF".to_string(),
-            (size1, "unused-fingerprint".to_string()),
+            (
+                size1,
+                "unused-fingerprint".to_string(),
+                "unused-full-hash".to_string(),
+            ),
         );
         candidates.insert(
             "2026/09/IMG_0002.NEF".to_string(),
-            (size2, "unused-fingerprint".to_string()),
+            (
+                size2,
+                "unused-fingerprint".to_string(),
+                "unused-full-hash".to_string(),
+            ),
         );
 
         let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
@@ -475,5 +512,118 @@ mod tests {
         for (_, outcome) in &results {
             assert!(matches!(outcome, ResolveOutcome::RelinkedBySizeName(_)));
         }
+    }
+
+    #[test]
+    fn relink_matches_a_full_tier_asset_via_its_full_hash() {
+        let conn = open_in_memory().unwrap();
+        let vid = schema::upsert_volume(&conn, "ntfs64:aaa", None, None, false, "H:\\", now_unix())
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        write_sample_files(&dir);
+        // homing build --tier full stores a full-file hash on the asset, not a partial one --
+        // this is exactly the case an earlier draft's relink (which only ever computed a
+        // partial hash for candidates) could never match: the stored fingerprint and the
+        // candidate's only computed hash live in different hash spaces.
+        build(&conn, vid, "", dir.path(), Some(Tier::Full)).unwrap();
+        schema::mark_offline_except(&conn, &[]).unwrap();
+
+        let mut candidates = HashMap::new();
+        let path1 = dir.path().join("IMG_0001.NEF");
+        let path2 = dir.path().join("IMG_0002.NEF");
+        let size1 = fs::metadata(&path1).unwrap().len();
+        let size2 = fs::metadata(&path2).unwrap().len();
+        let full1 = fingerprint::full_hash(&path1).unwrap();
+        let full2 = fingerprint::full_hash(&path2).unwrap();
+        // partial hash deliberately wrong/unused here -- the match must come from the full-hash
+        // slot, proving the "either tier" comparison actually checks both.
+        candidates.insert(
+            "Renamed/IMG_0001.NEF".to_string(),
+            (size1, "wrong-partial".to_string(), full1),
+        );
+        candidates.insert(
+            "Renamed/IMG_0002.NEF".to_string(),
+            (size2, "wrong-partial".to_string(), full2),
+        );
+
+        let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
+        assert_eq!(results.len(), 2);
+        for (_, outcome) in &results {
+            assert!(matches!(outcome, ResolveOutcome::RelinkedByFingerprint(_)));
+        }
+    }
+
+    #[test]
+    fn relink_matches_distinct_size_name_duplicates_to_distinct_candidates() {
+        let conn = open_in_memory().unwrap();
+        let vid = schema::upsert_volume(&conn, "ntfs64:aaa", None, None, false, "H:\\", now_unix())
+            .unwrap();
+        let root_id = schema::insert_root(&conn, vid, "").unwrap();
+        // Two different offline assets sharing size+filename -- e.g. IMG_0001.NEF from two
+        // different camera bodies, each dumped into its own dated folder. Neither has a
+        // fingerprint, so both fall through to the size+name tier and share the same
+        // `SizeNameKey`. `or_insert_with`'s old single-winner behavior would report one of these
+        // Lost even though a second real candidate exists for it.
+        schema::insert_asset(
+            &conn,
+            root_id,
+            &schema::NewAsset {
+                rel_path: "camera_a/IMG_0001.NEF",
+                rel_path_fold: "camera_a/img_0001.nef",
+                size_bytes: 100,
+                mtime_unix: 1,
+                fingerprint: None,
+                natural_key: None,
+            },
+        )
+        .unwrap();
+        schema::insert_asset(
+            &conn,
+            root_id,
+            &schema::NewAsset {
+                rel_path: "camera_b/IMG_0001.NEF",
+                rel_path_fold: "camera_b/img_0001.nef",
+                size_bytes: 100,
+                mtime_unix: 1,
+                fingerprint: None,
+                natural_key: None,
+            },
+        )
+        .unwrap();
+        schema::mark_offline_except(&conn, &[]).unwrap();
+
+        // Two real candidates on the unrecognized volume, same size+filename, different paths.
+        let mut candidates = HashMap::new();
+        candidates.insert(
+            "recovered/batch1/IMG_0001.NEF".to_string(),
+            (
+                100u64,
+                "unused-fingerprint-1".to_string(),
+                "unused-full-1".to_string(),
+            ),
+        );
+        candidates.insert(
+            "recovered/batch2/IMG_0001.NEF".to_string(),
+            (
+                100u64,
+                "unused-fingerprint-2".to_string(),
+                "unused-full-2".to_string(),
+            ),
+        );
+
+        let results = relink_against_unknown_volume(&conn, &candidates).unwrap();
+        assert_eq!(results.len(), 2);
+        let matched_paths: std::collections::HashSet<String> = results
+            .iter()
+            .filter_map(|(_, outcome)| match outcome {
+                ResolveOutcome::RelinkedBySizeName(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            matched_paths.len(),
+            2,
+            "both assets must match distinct candidates, not collapse onto the same one -- got {matched_paths:?}"
+        );
     }
 }

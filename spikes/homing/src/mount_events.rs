@@ -70,7 +70,7 @@ pub mod windows_impl {
     /// lifetime) -- deferred to the reference-machine pass itself, tracked in
     /// `docs/research/homing-volume-identity.md`'s Deferred section rather than blocking this
     /// spike's schema/fingerprint work on it. `poll_for` above is what `homing watch` actually
-    /// runs today; this stub exists so the CLI's `--backend notify` flag has a real (if
+    /// runs today; this stub exists so the CLI's `--backend push` flag has a real (if
     /// unimplemented) arm to report against instead of silently falling back to polling.
     pub fn watch_push(_deadline: Instant) -> Result<Vec<MountEvent>> {
         anyhow::bail!(

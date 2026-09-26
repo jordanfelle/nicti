@@ -38,7 +38,7 @@ Covers #71's volume-identity key, the volume/root/asset schema, and file-fingerp
   mountable NTFS volume — `spikes/homing`'s Windows-only code (`volume::windows_impl`,
   `mount_events::windows_impl`) is written against `windows-sys`' documented API shapes but has
   never been compiled or run; the schema/fingerprint/path logic (cross-platform, no `cfg(windows)`
-  gate) is real, measured: 23 unit tests pass, full workspace `clippy`/`test`/`fmt`/`cargo deny`
+  gate) is real, measured: 26 unit tests pass, full workspace `clippy`/`test`/`fmt`/`cargo deny`
   are clean with `homing` added (not path-gated, like `sniff` — no heavy native build). **ADR-0020
   stays Proposed** until the reference-machine (RTX 5080/Windows) pass fills in the
   volume-identity survival table, mount-detection latency/CPU comparison, and fingerprint-cost

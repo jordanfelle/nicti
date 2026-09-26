@@ -39,16 +39,32 @@ Constraints already fixed by earlier ADRs/docs:
   instead (the same approach #37's `retina scan` already validated), not a `ref-10k` copy.
 - v1 targets Windows only (#4/E0's PRD sign-off); non-Windows volume identity is deferred to #73.
 - **Sandbox note**, matching ADR-0006/0007's own precedent: this research pass ran in a Linux/WSL
-  sandbox with no Windows toolchain, no mountable NTFS volumes, and no way to attach/detach a real
-  or virtual drive. The `spikes/homing` crate's Windows-only code (`volume::windows_impl`,
-  `mount_events::windows_impl`) is therefore **written but unverified** — it type-checks against
-  `windows-sys`' documented API shapes but has never been compiled or run. Every schema/fingerprint
-  finding below (the parts of the spike that don't need Windows — `schema.rs`, `fingerprint.rs`,
-  `relink.rs`, `path.rs`) is real, measured against this sandbox's Rust toolchain: 23 unit tests
-  pass, `cargo clippy -p homing --all-targets --all-features -- -D warnings` is clean, and the
-  crate participates in the workspace's normal (non-path-gated) `clippy`/`test` jobs like `sniff`
-  does. The volume-identity survival table and the Windows throughput/latency numbers are
-  placeholders pending the reference-machine pass — see Measured results below.
+  sandbox with no Windows machine, no mountable NTFS volumes, and no way to attach/detach a real
+  or virtual drive. **This sandbox does have a cross-compilation path** (rustup's own
+  `x86_64-pc-windows-gnu` toolchain, distinct from the Homebrew-installed `rustc` this session
+  otherwise uses), so `volume::windows_impl`/`mount_events::windows_impl`'s Windows-only code is
+  now real, compiler-checked evidence, not just "written and hoped correct": `cargo check`/`cargo
+  clippy --target x86_64-pc-windows-gnu -p homing` are clean. This caught real bugs the first
+  draft had — a wrong `windows-sys` module path for `DRIVE_REMOVABLE`, a nonexistent
+  `PARTITION_INFORMATION_MBR::Signature` field (the MBR disk signature is actually a whole-disk
+  property from a *different* IOCTL against the owning `PhysicalDriveN` device, not a
+  per-partition one — see `volume.rs`'s `mbr_disk_signature`), and one unused import — all fixed
+  and re-verified by this same cross-compile check (also confirmed independently by GitHub
+  Actions' real `windows-latest` CI runner on this PR, which caught the same two compile errors
+  before this fix). **What cross-compiling still cannot prove**: none of this exercises the actual
+  Win32 API calls against real hardware — no volume was ever enumerated, no `DeviceIoControl` call
+  ever executed, no drive was ever attached/detached/reformatted. The type/shape correctness gap
+  is closed; the runtime-behavior gap (does `FindFirstVolumeW` actually enumerate what's expected,
+  does the NTFS-serial/GPT-GUID survival table hold, does `mbr_disk_signature`'s two-IOCTL chain
+  actually return the right disk's signature) is not, and stays exactly the "spec + tooling merged,
+  baseline measurement deferred" gap ADR-0006/0007 describe. Every schema/fingerprint/relink/path
+  finding below (the parts of the spike that never needed Windows at all) is real, measured
+  against this sandbox's Rust toolchain: 26 unit tests pass, `cargo clippy -p homing --all-targets
+  --all-features -- -D warnings` is clean on both the native Linux target and the
+  `x86_64-pc-windows-gnu` cross-compile, and the crate participates in the workspace's normal
+  (non-path-gated) `clippy`/`test` jobs like `sniff` does. The volume-identity survival table and
+  the Windows throughput/latency numbers are still placeholders pending the reference-machine pass
+  — see Measured results below.
 
 ## Decision rule (stated before measuring)
 
@@ -196,7 +212,7 @@ real LRC-edited DNG, as hypothesized): TBD.
 
 ### Sandbox-measured (real, not TBD)
 
-- `cargo test -p homing --all-targets --all-features`: 23/23 unit tests pass (schema, fingerprint,
+- `cargo test -p homing --all-targets --all-features`: 26/26 unit tests pass (schema, fingerprint,
   path normalization, identity-key selection logic — everything not requiring a live Windows
   volume).
 - `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean.

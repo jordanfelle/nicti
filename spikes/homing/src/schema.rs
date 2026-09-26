@@ -16,12 +16,17 @@ pub fn open_in_memory() -> Result<Connection> {
     Ok(conn)
 }
 
+/// Idempotent: every statement uses `IF NOT EXISTS`, since `cmd_build` calls this on every
+/// `homing build` invocation regardless of whether `db_path` already exists -- a plain
+/// `CREATE TABLE` would fail with "table volume already exists" on the second call against the
+/// same catalog file, which the remap-test script's own workflow (repeated `build`/`resolve`
+/// runs against one `homing.sqlite3`) depends on not happening.
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
 
-        CREATE TABLE volume (
+        CREATE TABLE IF NOT EXISTS volume (
             id              INTEGER PRIMARY KEY,
             identity_key    TEXT NOT NULL UNIQUE,
             label           TEXT,
@@ -34,7 +39,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
         -- A registered folder tracked for assets, scoped to one volume. #72's archive-transition
         -- toggles `archived` here, not per-asset.
-        CREATE TABLE root (
+        CREATE TABLE IF NOT EXISTS root (
             id          INTEGER PRIMARY KEY,
             volume_id   INTEGER NOT NULL REFERENCES volume(id),
             rel_path    TEXT NOT NULL,
@@ -42,7 +47,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE(volume_id, rel_path)
         );
 
-        CREATE TABLE asset (
+        CREATE TABLE IF NOT EXISTS asset (
             id              INTEGER PRIMARY KEY,
             root_id         INTEGER NOT NULL REFERENCES root(id),
             rel_path        TEXT NOT NULL,
@@ -54,9 +59,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE(root_id, rel_path)
         );
 
-        CREATE INDEX idx_asset_root_fold ON asset(root_id, rel_path_fold);
-        CREATE INDEX idx_asset_fingerprint ON asset(fingerprint) WHERE fingerprint IS NOT NULL;
-        CREATE INDEX idx_asset_natural_key ON asset(natural_key) WHERE natural_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_asset_root_fold ON asset(root_id, rel_path_fold);
+        CREATE INDEX IF NOT EXISTS idx_asset_fingerprint ON asset(fingerprint) WHERE fingerprint IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_asset_natural_key ON asset(natural_key) WHERE natural_key IS NOT NULL;
         "#,
     )?;
     Ok(())
@@ -178,6 +183,26 @@ pub fn insert_asset(conn: &Connection, root_id: i64, asset: &NewAsset) -> Result
     Ok(conn.last_insert_rowid())
 }
 
+/// Re-points an existing `asset` row at a new `root`/`rel_path` -- the persistence step
+/// `relink_against_unknown_volume`'s match result needs, once a match is confirmed, so a later
+/// `resolve()` actually finds it under its new location instead of still reading the stale
+/// (offline volume's) `root_id`/`rel_path` forever. Without this, `homing relink` only ever
+/// reported a match to stdout and never updated the catalog, so the asset stayed unresolved on
+/// every subsequent `homing resolve` run.
+pub fn relink_asset(
+    conn: &Connection,
+    asset_id: i64,
+    new_root_id: i64,
+    new_rel_path: &str,
+    new_rel_path_fold: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3 WHERE id = ?4",
+        rusqlite::params![new_root_id, new_rel_path, new_rel_path_fold, asset_id],
+    )?;
+    Ok(())
+}
+
 /// Resolves `(volume_identity_key, root_rel_path, asset_rel_path)` to a live absolute path, given
 /// the currently-mounted volumes' identity->mount_point map. Returns `None` when the owning
 /// volume is offline -- callers (search/facet counts/the folder panel) filter these out rather
@@ -234,6 +259,13 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrate_is_idempotent_against_an_existing_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+    }
 
     #[test]
     fn upsert_volume_is_idempotent_and_updates_last_seen() {

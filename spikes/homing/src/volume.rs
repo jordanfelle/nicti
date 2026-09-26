@@ -68,14 +68,15 @@ pub mod windows_impl {
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH};
+    use windows_sys::Win32::Foundation::{HANDLE, MAX_PATH};
     use windows_sys::Win32::Storage::FileSystem::{
         FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetVolumeInformationW,
         GetVolumePathNamesForVolumeNameW,
     };
     use windows_sys::Win32::System::Ioctl::{
-        FSCTL_GET_NTFS_VOLUME_DATA, IOCTL_DISK_GET_PARTITION_INFO_EX, NTFS_VOLUME_DATA_BUFFER,
-        PARTITION_INFORMATION_EX, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR,
+        DRIVE_LAYOUT_INFORMATION_EX, FSCTL_GET_NTFS_VOLUME_DATA, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+        IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER, NTFS_VOLUME_DATA_BUFFER,
+        PARTITION_INFORMATION_EX, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, STORAGE_DEVICE_NUMBER,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -264,12 +265,92 @@ pub mod windows_impl {
                 Some((Some(guid), None, None))
             }
             PARTITION_STYLE_MBR => {
-                // SAFETY: PartitionStyle == MBR guarantees the union's Mbr arm is initialized.
-                let mbr = unsafe { out.Anonymous.Mbr };
-                Some((None, Some(mbr.Signature), Some(out.StartingOffset as u64)))
+                // `PARTITION_INFORMATION_EX`'s MBR arm (`PARTITION_INFORMATION_MBR`) has no
+                // signature field at all -- only `PartitionType`/`BootIndicator`/
+                // `RecognizedPartition`/`HiddenSectors`/`PartitionId`. An earlier draft read a
+                // nonexistent `mbr.Signature` here (caught by real Windows CI, not by this
+                // sandbox, which can't compile this module at all). The MBR disk signature is a
+                // whole-*disk* property, not a per-partition one: it lives on
+                // `DRIVE_LAYOUT_INFORMATION_MBR`, returned by `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`
+                // against the owning `\\.\PhysicalDriveN` device handle, found via
+                // `IOCTL_STORAGE_GET_DEVICE_NUMBER` on this same volume handle.
+                let signature = disk_number_for(guid_path).and_then(mbr_disk_signature);
+                Some((None, signature, Some(out.StartingOffset as u64)))
             }
             _ => Some((None, None, None)),
         }
+    }
+
+    fn disk_number_for(guid_path: &str) -> Option<u32> {
+        let path = guid_path.trim_end_matches('\\');
+        let file = fs::File::open(path).ok()?;
+        let handle: HANDLE = file.as_raw_handle() as HANDLE;
+        let mut out = STORAGE_DEVICE_NUMBER {
+            DeviceType: 0,
+            DeviceNumber: 0,
+            PartitionNumber: 0,
+        };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                std::ptr::null(),
+                0,
+                &mut out as *mut _ as *mut _,
+                std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some(out.DeviceNumber)
+    }
+
+    fn mbr_disk_signature(disk_number: u32) -> Option<u32> {
+        let device_path = format!(r"\\.\PhysicalDrive{disk_number}");
+        let file = fs::File::open(&device_path).ok()?;
+        let handle: HANDLE = file.as_raw_handle() as HANDLE;
+        // `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`'s response is variable-length (a fixed header
+        // followed by a `PartitionEntry` array whose real size depends on the disk's actual
+        // partition count) -- the fields this function reads (`PartitionStyle`, the MBR/GPT
+        // union) sit in the fixed header, before that array, so a buffer sized for the header
+        // plus a handful of partition slots is enough for the call to succeed without needing
+        // to size it for every partition the disk might have.
+        const PARTITION_SLOTS: usize = 4;
+        let buf_size = std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>()
+            + PARTITION_SLOTS * std::mem::size_of::<PARTITION_INFORMATION_EX>();
+        let mut buf = vec![0u8; buf_size];
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+                std::ptr::null(),
+                0,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // SAFETY: DeviceIoControl succeeded and `buf` was sized for at least
+        // `size_of::<DRIVE_LAYOUT_INFORMATION_EX>()` bytes, which is all this reads.
+        let layout = unsafe { &*(buf.as_ptr() as *const DRIVE_LAYOUT_INFORMATION_EX) };
+        // DRIVE_LAYOUT_INFORMATION_EX::PartitionStyle is `u32`, unlike
+        // PARTITION_INFORMATION_EX::PartitionStyle (`PARTITION_STYLE`, an `i32` alias) above --
+        // two different windows-sys struct defs for what the Win32 API treats as the same
+        // logical enum, hence the cast.
+        if layout.PartitionStyle != PARTITION_STYLE_MBR as u32 {
+            return None;
+        }
+        // SAFETY: PartitionStyle == MBR guarantees the union's Mbr arm is initialized.
+        Some(unsafe { layout.Anonymous.Mbr }.Signature)
     }
 
     fn format_guid(guid: &windows_sys::core::GUID) -> String {
@@ -294,7 +375,11 @@ pub mod windows_impl {
     }
 
     fn drive_type_is_removable(mount_point: &str) -> bool {
-        use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, DRIVE_REMOVABLE};
+        // DRIVE_REMOVABLE lives in Win32::System::WindowsProgramming, not
+        // Win32::Storage::FileSystem where GetDriveTypeW itself is defined -- an earlier draft
+        // guessed the wrong module (caught by real Windows CI, not this sandbox).
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+        use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOVABLE;
         let wide_mp = wide(mount_point);
         unsafe { GetDriveTypeW(wide_mp.as_ptr()) == DRIVE_REMOVABLE }
     }

@@ -49,6 +49,9 @@ function Invoke-Homing {
     param([string[]]$HomingArgs)
     Write-Host ">> homing $($HomingArgs -join ' ')" -ForegroundColor Cyan
     & $homingExe @HomingArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "homing $($HomingArgs -join ' ') failed with exit code $LASTEXITCODE"
+    }
 }
 
 function New-TestVhdx {
@@ -64,6 +67,9 @@ assign
     $scriptFile = [System.IO.Path]::GetTempFileName()
     Set-Content -Path $scriptFile -Value $diskpartScript
     diskpart /s $scriptFile
+    if ($LASTEXITCODE -ne 0) {
+        throw "diskpart failed with exit code $LASTEXITCODE"
+    }
     Remove-Item $scriptFile
 }
 
@@ -115,6 +121,13 @@ Mount-VHD -Path $vhdxPath
 $vhd = Get-VHD -Path $vhdxPath
 $partition = Get-Partition -DiskNumber $vhd.DiskNumber | Where-Object { $_.DriveLetter -or $_.AccessPaths }
 Add-PartitionAccessPath -DiskNumber $vhd.DiskNumber -PartitionNumber $partition.PartitionNumber -AccessPath $mountFolder
+if ($partition.DriveLetter) {
+    # Otherwise `homing resolve` can pass via the volume's existing drive-letter mount point --
+    # `enumerate`/`resolve` use the first mount point returned for the volume, not specifically
+    # the folder path, so leaving the letter attached would let this step pass without actually
+    # proving folder-only resolution.
+    Remove-PartitionAccessPath -DiskNumber $vhd.DiskNumber -PartitionNumber $partition.PartitionNumber -AccessPath "$($partition.DriveLetter):\"
+}
 Write-Host "Mounted at folder path $mountFolder -- expect 100% resolved:"
 Invoke-Homing @("resolve", "--db", $dbPath)
 
@@ -129,6 +142,14 @@ Invoke-Homing @("enumerate")
 Write-Host "RECORD: did both copies report the same identity_key? Did homing resolve pick one silently, or flag it? (No automatic assertion here -- ADR-0020's ambiguity-guard follow-up isn't implemented yet, this step is meant to surface exactly that gap.)"
 Dismount-VHD -Path $vhdxClone
 Remove-Item $vhdxClone
+
+# Step 6 removed the drive-letter access path (folder-only mount), and Step 8 below filters
+# partitions by `DriveLetter` -- restore one if Step 6's removal left the volume without one.
+$vhd = Get-VHD -Path $vhdxPath
+$partition = Get-Partition -DiskNumber $vhd.DiskNumber | Where-Object { $_.AccessPaths }
+if (-not $partition.DriveLetter) {
+    Add-PartitionAccessPath -DiskNumber $vhd.DiskNumber -PartitionNumber $partition.PartitionNumber -AssignDriveLetter
+}
 
 Write-Host "=== Step 8: reformat, then check whether the old rows resolve or need relink ===" -ForegroundColor Yellow
 $vhd = Get-VHD -Path $vhdxPath

@@ -5,20 +5,45 @@ document is the write-up: what was built, what was measured, and what's still pe
 
 ## Sandbox constraint
 
-This research pass ran in a Linux/WSL sandbox: no Windows toolchain, no mountable NTFS volume, no
+This research pass ran in a Linux/WSL sandbox: no Windows machine, no mountable NTFS volume, no
 way to attach/detach a real or virtual drive. `spikes/homing`'s Windows-only modules
-(`volume::windows_impl`, `mount_events::windows_impl`) are **written but unverified** — they
-type-check against `windows-sys`' documented API shapes (`FindFirstVolumeW`/`FindNextVolumeW`,
-`GetVolumeInformationW`, `FSCTL_GET_NTFS_VOLUME_DATA` via `DeviceIoControl`,
-`IOCTL_DISK_GET_PARTITION_INFO_EX`, `GetDriveTypeW`) but have never been compiled, let alone run
-against a real volume. This is the same shape as ADR-0006/0007/#90's own "spec + tooling merged,
-baseline measurement deferred" precedent — flagged explicitly here rather than glossed over.
+(`volume::windows_impl`, `mount_events::windows_impl`) were initially **written but unverified**,
+until this session found the sandbox does have a `x86_64-pc-windows-gnu` cross-compile path
+(rustup's own toolchain, separate from the Homebrew `rustc` otherwise used) and used it as a real
+compiler check, not just a type-shape guess: `cargo check`/`cargo clippy --target
+x86_64-pc-windows-gnu -p homing --all-targets --all-features -- -D warnings` are both clean.
+
+This caught real bugs on the first attempt — before this cross-compile check existed, real GitHub
+Actions CI on this PR's `windows-latest` runner failed with the same two compile errors this
+section describes, confirming the cross-compile check reproduces CI faithfully rather than being a
+weaker local proxy:
+
+- `windows_sys::Win32::Storage::FileSystem::DRIVE_REMOVABLE` doesn't exist — that constant lives
+  in `Win32::System::WindowsProgramming`, a different module (and Cargo feature) than
+  `GetDriveTypeW` itself, which is defined in `FileSystem`.
+- `PARTITION_INFORMATION_EX`'s MBR arm (`PARTITION_INFORMATION_MBR`) has no `Signature` field at
+  all — only `PartitionType`/`BootIndicator`/`RecognizedPartition`/`HiddenSectors`/`PartitionId`.
+  The MBR disk signature is a **whole-disk** property (`DRIVE_LAYOUT_INFORMATION_MBR::Signature`),
+  returned by a different IOCTL (`IOCTL_DISK_GET_DRIVE_LAYOUT_EX`) against the owning
+  `\\.\PhysicalDriveN` device handle, found via `IOCTL_STORAGE_GET_DEVICE_NUMBER` on the volume
+  handle — not a per-partition field on `IOCTL_DISK_GET_PARTITION_INFO_EX`'s response. Fixed by
+  adding `volume::windows_impl::disk_number_for`/`mbr_disk_signature`.
+
+**What cross-compiling still cannot prove**: none of this exercises the actual Win32 API calls
+against real hardware — no volume was ever enumerated, no `DeviceIoControl` call ever executed, no
+drive was ever attached/detached/reformatted. The type/shape-correctness gap (does this code even
+compile against the real windows-sys API) is now closed; the runtime-behavior gap (does
+`FindFirstVolumeW` actually enumerate what's expected, does the survival table hold, does the new
+two-IOCTL `mbr_disk_signature` chain actually return the right disk's signature) is not, and stays
+exactly the "spec + tooling merged, baseline measurement deferred" shape ADR-0006/0007/#90
+describe — flagged explicitly here rather than glossed over.
 
 What *is* real, from this sandbox:
 
 - `spikes/homing`'s cross-platform modules (`path.rs`, `schema.rs`, `fingerprint.rs`, `relink.rs`,
-  and `volume::identity_key`'s pure selection logic) compile and pass **23/23 unit tests**.
-- `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean.
+  and `volume::identity_key`'s pure selection logic) compile and pass **26/26 unit tests**.
+- `cargo clippy -p homing --all-targets --all-features -- -D warnings`: clean on both the native
+  Linux target and the `x86_64-pc-windows-gnu` cross-compile.
 - The full workspace sweep with `homing` added — `cargo fmt --all -- --check`, `cargo clippy
   --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude
   retina --all-targets --all-features -- -D warnings`, and the matching `cargo test` — all clean.
@@ -132,6 +157,53 @@ issues, all fixed before merge:
 Not fixed, correctly left as an open follow-up (see below): the volume-level identity-ambiguity
 guard (two *mounted volumes* sharing an identity key) is a different gap from the relink-level
 candidate-dedup bug above, and remains unimplemented.
+
+## CodeRabbit review
+
+CodeRabbit's automated PR review found 9 actionable issues against the PR as it stood after the
+adversarial-review fixes above (plus the real Windows CI compile failures this session found and
+fixed separately — see the Sandbox constraint section). Each was independently verified against
+the current code before fixing, not applied blindly:
+
+- **`current_volume_for`'s mount-point matching** (`main.rs`) had two real bugs: a bare
+  `starts_with` matched sibling paths sharing a prefix that wasn't a real path-component boundary
+  (e.g. mount point `C:/Mount` would also match `C:/MountOther`), and `Path::canonicalize` on
+  Windows can return a verbatim path (`\\?\H:\...`) that never lined up with the enumerated mount
+  points at all. Fixed: strip the verbatim prefix, require a full path-component match, and pick
+  the longest matching mount point among any genuine ties.
+- **`homing relink` never persisted a match** — it only printed the result, so a subsequent
+  `homing resolve` still read each asset's stale (offline volume's) `root_id`/`rel_path` and
+  reported it unresolved forever, defeating the whole point of relinking. Fixed:
+  `schema::relink_asset` re-points a matched asset at a new `root` (registered lazily for
+  `scan_dir`, under whichever volume currently owns it) and the candidate's relative path.
+- **One unreadable candidate aborted the entire relink scan** — `cmd_relink` used `?` on
+  `fingerprint::partial_hash`, so a single locked/corrupt file on the unrecognized volume prevented
+  every other candidate from getting a chance to match. Fixed: skip that candidate and continue.
+- **Relink could never match a full-tier asset** — `homing build --tier full` stores a full-file
+  hash on the asset, but `cmd_relink` only ever computed a partial hash for candidates, so the two
+  values could never be equal. Fixed: compute both hash tiers per candidate (relink-time-only
+  cost, not routine import) and match against either.
+- **`mount_events.rs`'s doc comment** named a nonexistent `--backend notify` flag; the real flag
+  value is `push` (`WatchBackend::Push`). Fixed, text-only.
+- **`by_size_name`'s `or_insert_with` collapsed genuine duplicates to one winner**, non-
+  deterministically (`HashMap` iteration order decided which asset "won" the shared slot) — two
+  fingerprint-less assets sharing size+filename (e.g. the same shot's filename from two camera
+  bodies) could see one falsely reported `Lost` even when a second real candidate existed. Fixed:
+  store every candidate path per `SizeNameKey`, sorted, and pick the first unclaimed one.
+- **`schema::migrate` wasn't idempotent** — plain `CREATE TABLE`/`CREATE INDEX` fail with "table
+  already exists" on a second call against an existing catalog file, which `cmd_build` does on
+  every invocation. This would have broken `remap-test.ps1`'s own repeated-command workflow
+  against one `homing.sqlite3`. Fixed: `IF NOT EXISTS` on every statement.
+- **`remap-test.ps1` two script-robustness gaps**: native command failures (`diskpart`,
+  `homing.exe`) weren't checked (`$ErrorActionPreference = "Stop"` doesn't cover native exit
+  codes), and Step 6 (folder-only mount test) never removed the volume's existing drive-letter
+  access path, so `homing resolve` could pass via the leftover letter without actually proving
+  folder-only resolution — with Step 8 needing a drive letter restored afterward, since it filters
+  partitions by `DriveLetter`. Both fixed; the script remains otherwise unrun (see Sandbox
+  constraint above).
+
+Every fix above is covered by a new or extended unit test (26 total, up from 20 after the
+adversarial-review round). None of CodeRabbit's 9 findings were dismissed as invalid.
 
 ## Follow-ups filed, not solved inline
 
