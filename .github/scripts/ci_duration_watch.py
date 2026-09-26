@@ -94,13 +94,16 @@ def slowest_steps(job: dict, n: int = 3) -> list[tuple[str, float]]:
 def find_open_issue(repo: str, title_substr: str) -> dict | None:
     # Listed directly (no --search): GitHub's search index has propagation lag, so a run that
     # searched for an issue another run just created could miss it and file a duplicate. Listing
-    # every open ci-slow issue and matching titles locally in Python has no such lag.
+    # every open ci-slow issue and matching titles locally in Python has no such lag. --limit
+    # 1000 (gh paginates transparently past its ~30-100/page API default) covers this repo's
+    # realistically bounded population many times over -- each distinct (job, workflow) pair
+    # gets at most one open issue ever, so the count tracks job count (~15-20), not run count.
     data = json.loads(
         subprocess.run(
             [
                 "gh", "issue", "list", "-R", repo,
                 "--label", LABEL, "--state", "open",
-                "--json", "number,title", "--limit", "100",
+                "--json", "number,title", "--limit", "1000",
             ],
             capture_output=True, text=True, check=True,
         ).stdout
