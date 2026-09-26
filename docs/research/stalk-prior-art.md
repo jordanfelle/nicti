@@ -196,10 +196,13 @@ the implementation language doesn't transfer.
 **License**: GPL-3.0 — repo-level metadata says just "GPL-3.0", but source file headers carry the
 full grant: `src/win/strptime.c:11` (and every other checked header) reads "(at your option) any
 later version" — confirmed **GPL-3.0-or-later**, not `-only`. GPL-3.0-or-later combines cleanly
-with Nicti's own AGPL-3.0-or-later: AGPLv3 §13 exists specifically to make it license-compatible
-with GPLv3 (and, by the `-or-later` grant on both sides, with future versions of either) — see the
-FSF's own "GPL-Compatible Free Software Licenses" list, which names GNU AGPLv3 explicitly[^ansel1]
-— so, in principle, Ansel code could be reused without a license conflict, same as RapidRAW.
+with Nicti's own AGPL-3.0-or-later: AGPLv3 §13 permits conveying a combination of AGPL-covered code
+with code licensed under (that specific version of) the GNU GPL, with the combination distributed
+under the terms of that GPL version — the FSF's own "GPL-Compatible Free Software Licenses" list
+confirms AGPLv3 is GPLv3-compatible on this basis[^ansel1]. (The separate `-or-later` grant each
+side carries is what would let either component accept a future FSF-published license version if
+invoked — a distinct permission from §13 itself, not conflated here.) So, in principle, Ansel code
+could be reused without a license conflict, same as RapidRAW.
 **Language**: C/GTK, a hard fork of darktable — **not Rust**, and its own architecture is
 darktable's well-known reorderable IOP module stack: `doc/history-split.md` (measuring an in-flight
 internal refactor, not upstream-facing docs, but load-bearing evidence of the real shape) confirms

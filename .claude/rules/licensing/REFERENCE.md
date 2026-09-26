@@ -20,10 +20,11 @@ Full reasoning/history: `.claude/docs/licensing/README.md`.
   requirement for `lensfun-rs` specifically (its `LGPL-3.0-or-later OR GPL-3.0` dual license
   combines cleanly) — **not** for `rawler` (bare `LGPL-2.1`, no `-or-later` confirmed; #37 must
   resolve before treating it as pre-cleared). Reopens RapidRAW (#69) as an adopt/fork candidate.
-- **RapidRAW adopt/fork, resolved** — `docs/adr/0018`: **not adopted, study-only**. Its real
-  ~583-crate dependency graph clears `deny.toml` with exactly one rejection (`rawler`'s bare
-  `LGPL-2.1`, same open #37 question above) — real corroborating evidence, not a blocker either
-  way. Architecturally incompatible regardless of licensing: no DAG/per-stage cache (opposite of
-  Tapetum/#44's design), monolithic module structure (no Claw-style extension points), untyped
-  JSON sidecar edit storage (no catalog DB). See `docs/research/stalk-prior-art.md` for the full
+- **RapidRAW adopt/fork, resolved** — `docs/adr/0018`: **not adopted, study-only**. Checked its
+  real ~583-crate dependency graph against `deny.toml`: 582 crates pass cleanly, one rejection
+  (`rawler`'s bare `LGPL-2.1`, same open #37 question above) — real corroborating evidence, not a
+  blocker either way. Architecturally incompatible regardless of licensing: no DAG/per-stage
+  cache (opposite of Tapetum/#44's design), monolithic module structure (no Claw-style
+  extension points), untyped JSON sidecar edit storage (no catalog DB). See
+  `docs/research/stalk-prior-art.md` for the full
   RapidRAW/vkdt/Ansel findings and file:line citations.

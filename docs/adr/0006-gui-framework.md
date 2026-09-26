@@ -203,8 +203,8 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 
 ## Prior art
 
-- ~~**RapidRAW** uses `egui`/`eframe` for its UI~~ — **wrong, corrected 2026-09-26; see Amendments
-  below.** RapidRAW actually uses Tauri + a TypeScript/React frontend, not egui/eframe.
+- ~~**RapidRAW** uses `egui`/`eframe` for its UI~~[^pa1] — **wrong, corrected 2026-09-26; see
+  Amendments below.** RapidRAW actually uses Tauri + a TypeScript/React frontend, not egui/eframe.
 - **vkdt** builds its own from-scratch Vulkan-native UI rather than adopting any of these four
   toolkits[^pa2] — a data point that a bespoke render-first UI is a real, if much higher-effort,
   alternative to any off-the-shelf Rust GUI toolkit, not evaluated as a fifth candidate here since
