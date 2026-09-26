@@ -79,17 +79,22 @@ with whatever else was running that pass), not a `ravif` behavior worth a claim 
 **Findings:**
 
 - **A faster `ravif` speed narrows the encode-throughput gap but doesn't close it.** Speed
-  6→10 cuts AVIF's own encode p50 by ~2.3x (794ms→341ms), bringing AVIF from ~9.5x slower than
-  JPEG at speed 6 (still directionally matching ADR-0017's own finding) down to ~5.1x slower at
-  speed 10 — a real improvement, but still far outside `docs/benchmarks.md`'s ingest budget
-  (~6ms/asset at 10k-in-60s), the same conclusion ADR-0017 reached, just with a smaller gap.
-  File size grows ~12% from speed 6 to speed 10 (488,807 B → 549,102 B) — the speed dial trades
-  some of AVIF's compression ratio for throughput, not free.
-- **AVIF's own decode latency improves at higher speed, independent of the encode-speed/size
-  tradeoff**: p95 read+decode drops from 77.4ms (speed 6) to 59.4ms (speed 10) — still over the
-  &lt;50ms interactive p95 budget at every speed tested, but meaningfully closer than ADR-0017's
-  own 65.0ms finding (measured on a different, larger dataset, so not a direct before/after, but
-  the same directional gap).
+  6→10 cuts AVIF's own encode p50 by ~2.3x (794ms→341ms), bringing AVIF from **~11.9x** slower
+  than JPEG at speed 6 (794.3/66.6 — worse than ADR-0017's own ~9.5x, but measured against a
+  different, incomparable dataset, not a like-for-like regression) down to ~5.1x slower at
+  speed 10 (341.0/66.6) — a real improvement, but still far outside `docs/benchmarks.md`'s ingest
+  budget (~6ms/asset at 10k-in-60s). File size grows ~12% from speed 6 to speed 10
+  (488,807 B → 549,102 B) — the speed dial trades some of AVIF's compression ratio for
+  throughput, not free.
+- **AVIF's own decode latency is noisy across the tested speeds, not a clean trend with encode
+  speed.** p95 read+decode ranges 40.4ms (speed 7) to 77.4ms (speed 6), with speeds 7 and 8
+  (40.4ms/48.3ms) actually clearing the &lt;50ms interactive budget while speeds 6, 9, and 10
+  (77.4ms/54.1ms/59.4ms) don't — no monotonic relationship to the speed setting, unlike the much
+  larger (~2.3x) and clearly-trending encode-time effect above. p50 read+decode does trend down
+  from speed 6 to speed 10 (44.9ms→32.8ms, vs. JPEG's 24.9ms), a real if noisy improvement. Given
+  the decoder itself is unchanged across speeds (only encode effort/partitioning differs), this
+  p95 noise is best read as measurement variance at this dataset's scale, not a real "AVIF decode
+  gets worse at higher speed" finding.
 - **SSIM reveals AVIF q75 is not actually "roughly comparable perceptual quality" to JPEG q85**,
   the assumption ADR-0017 stated without measuring it: JPEG q85 scores 0.9335 vs. AVIF's
   ~0.898-0.902 across every speed tested, despite AVIF's files being ~3x smaller. AVIF's real
@@ -100,11 +105,11 @@ with whatever else was running that pass), not a `ravif` behavior worth a claim 
   JPEG on both speed axes at comparable quality.** At its smallest setting (q75, 527,556 B — close
   to AVIF's size range), WebP's SSIM (0.8847) is the lowest of any config measured, including every
   AVIF speed. At its highest quality (q85, 1,062,616 B, SSIM 0.9285 — close to JPEG's own SSIM),
-  WebP still needs ~9.5x longer to encode than JPEG (633ms vs. 66.6ms, the same order of magnitude
-  AVIF was rejected for) and its read+decode p95 (93.0ms) is nearly **3x** JPEG's own (31.8ms) —
-  the worst decode latency of any codec/setting in this table, missing the &lt;50ms interactive
-  budget by the widest margin measured. WebP additionally requires a real C toolchain dependency
-  (`libwebp-sys`), unlike AVIF's pure-Rust path.
+  WebP still needs ~9.5x longer to encode than JPEG (633ms vs. 66.6ms, 633.4/66.6 — the same order
+  of magnitude as AVIF's own encode-throughput cost above) and its read+decode p95 (93.0ms) is
+  nearly **3x** JPEG's own (31.8ms) — the worst decode latency of any codec/setting in this table,
+  missing the &lt;50ms interactive budget by the widest margin measured. WebP additionally requires
+  a real C toolchain dependency (`libwebp-sys`), unlike AVIF's pure-Rust path.
 
 **Recommendation:**
 
@@ -127,7 +132,7 @@ with whatever else was running that pass), not a `ravif` behavior worth a claim 
 
 | Option | Verdict |
 |---|---|
-| AVIF at a faster `ravif` speed preset (7-10) | **Not adopted for T2 v1** — narrows but doesn't close the encode-throughput gap (~5.1x slower than JPEG at best, down from ~9.5x). Worth reconsidering for #64/#72's archival tiers, where the gap matters less and AVIF's decode-latency disadvantage shrinks further. |
+| AVIF at a faster `ravif` speed preset (7-10) | **Not adopted for T2 v1** — narrows but doesn't close the encode-throughput gap (~5.1x slower than JPEG at best, down from ~11.9x at speed 6). Worth reconsidering for #64/#72's archival tiers, where the gap matters less. |
 | Lossy WebP (`webp`/`libwebp-sys`, native C dependency) | **Rejected.** Worse than AVIF at comparable size (lowest SSIM of any config tested) and worse than JPEG at comparable quality (same order-of-magnitude encode-throughput cost as AVIF, plus the widest decode-latency miss of any config, plus a native dependency). |
 | JPEG (status quo, ADR-0017) | **Confirmed for T2 v1.** Unchanged by this pass's measurements. |
 

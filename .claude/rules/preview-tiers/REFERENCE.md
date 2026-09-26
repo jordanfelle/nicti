@@ -21,7 +21,7 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
 - **Follow-up (#143)** — `docs/adr/0021`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
   ADR-0017's fixed 6) against the #37/#136 stratified subset (ref-10k no longer exists, see #136).
   Faster speed narrows but doesn't close the gap (~5.1x slower than JPEG at speed 10, down from
-  ~9.5x at speed 6) — **JPEG stays the T2 v1 choice**, but AVIF speed 9-10 is now a named candidate
+  ~11.9x at speed 6 on this subset) — **JPEG stays the T2 v1 choice**, but AVIF speed 9-10 is now a named candidate
   for #64/#72's archival tiers. SSIM (new this pass) shows AVIF q75 is *not* actually comparable
   quality to JPEG q85 as ADR-0017 assumed (0.898-0.902 vs. 0.9335) despite being ~3x smaller.
   **Real lossy WebP measured and rejected** — worse SSIM than AVIF at comparable size, worse
