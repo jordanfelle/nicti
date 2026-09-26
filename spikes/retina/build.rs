@@ -201,6 +201,14 @@ fn main() {
         println!("cargo:rustc-link-arg=-ladvapi32");
     }
 
+    // Printing ANY `cargo:rerun-if-changed` opts this build script out of Cargo's default
+    // "rerun if anything in the package changes" behavior -- it switches to watching *only* the
+    // paths named here (confirmed: `cc::Build` itself never emits its own rerun-if-changed for
+    // the ~95 files passed to `.file()` above, so without this fix, editing a vendored LibRaw
+    // source -- e.g. syncing a future upstream fix into the submodule -- would silently not
+    // trigger a rebuild, caught by CodeRabbit). Watching the submodule directory itself (not each
+    // of the 95 files individually) is enough -- Cargo watches a named directory recursively.
     println!("cargo:rerun-if-changed=shim.cpp");
     println!("cargo:rerun-if-changed=shim.h");
+    println!("cargo:rerun-if-changed={}", libraw.display());
 }
