@@ -20,7 +20,9 @@ Full reasoning/history: `.claude/docs/gpu-gui-and-healing/README.md`.
   65535-per-dimension workgroup limit. **Never a full-frame host↔device round-trip in the hot
   path** (0.8–1.5s, confirmed expensive) — baked stage output stays GPU-resident.
 - **GUI framework** — `docs/adr/0006`: **Proposed, pending reference-machine pass**; hard-gate
-  findings final. GPUI eliminated (Windows backend has no wgpu/Vulkan path). egui currently leads
+  findings final. **Correction (2026-09-26)**: Prior-art section wrongly claimed RapidRAW uses
+  egui/eframe — it's Tauri+React; doesn't change the Decision. GPUI eliminated (Windows backend has
+  no wgpu/Vulkan path). egui currently leads
   (wgpu 30.0.0 match, MIT/Apache-2.0). Iced pins wgpu 27 (compat cost). Slint's GPU integration is
   cleanest but its license (`GPL-3.0-only OR LicenseRef-Slint-*`) needs its own ADR-0003 amendment
   to ship. Final pick waits on `bench/pelt/pelt.ahk`+`run-pelt.ps1` reference-machine numbers.
