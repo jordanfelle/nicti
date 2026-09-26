@@ -379,9 +379,12 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      "We vendor the library's source" alone doesn't reach that. What actually satisfies it: **Nicti
      is itself AGPL-3.0-or-later, open source, in this same public repository** — meaning the
      complete corresponding source of the *entire* combined executable (not just the vendored
-     libraries) is already required to be available to anyone who receives it (and, via AGPL §13,
-     to any network user) as a direct consequence of Nicti's own outbound license, independent of
-     anything LGPL asks for. §6(a)'s source condition is satisfied as a structural consequence of
+     libraries) is already published here, as a direct consequence of Nicti's own outbound license
+     — AGPL-3.0-or-later's §13 additionally extends this same source-offer obligation to remote
+     network users specifically for a *modified* version run as a network service (closing the
+     "hosted-service loophole" plain GPL leaves open, per ADR-0013), not a broader claim that §13
+     covers every possible deployment — independent of anything LGPL asks for. §6(a)'s source
+     condition is satisfied as a structural consequence of
      shipping Nicti as AGPL open source, not a separate packaging task — though the administrative
      step (crediting LibRaw/rawler + including the LGPL license text in the shipped product, per
      §6's own notice requirement) is still a real, distinct checklist item, separate from the

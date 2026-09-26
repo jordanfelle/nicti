@@ -201,8 +201,9 @@ findings correct/extend prior work — the middle one supersedes an earlier draf
    *"work that uses the Library"* (the whole combined executable, not just the vendored library)
    as object and/or source so a user can relink. That's satisfied structurally, not by vendoring
    alone: **Nicti is itself AGPL-3.0-or-later open source in this same public repo**, so the
-   complete corresponding source of the entire executable is already required to be available to
-   anyone who receives it (and, via AGPL §13, to any network user) — a strictly stronger
+   complete corresponding source of the entire executable is already published here (§13 further
+   extends the same source-offer obligation to remote network users of a *modified* version run
+   as a network service — not a claim that it covers every deployment) — a strictly stronger
    requirement than §6(a) asks for. No relicensing, no GPL-version question, no "or-later" grant
    needed. LibRaw's CDDL-1.0 arm is a moot alternative either way now (GPL-incompatible, and
    unneeded once the LGPL arm is confirmed usable directly).

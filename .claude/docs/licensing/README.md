@@ -39,9 +39,10 @@ Covers the third-party license policy (and its 2026-09-24 amendment) and the out
   object and/or source so a user can relink** (an earlier draft of this correction understated
   this, caught by a hostile review). That's satisfied structurally, not by vendoring alone:
   **Nicti is itself AGPL-3.0-or-later open source in this same public repo**, so the complete
-  corresponding source of the entire executable is already required to be available to anyone who
-  receives it (and, via AGPL §13, to any network user) — a strictly stronger requirement than
-  §6(a) asks for. FSF's own license-compatibility page corroborates: LGPLv2.1 is "compatible with
+  corresponding source of the entire executable is already published here (§13 further extends the
+  same source-offer obligation to remote network users of a *modified* version run as a network
+  service, not every deployment) — a strictly stronger requirement than §6(a) asks for. FSF's own
+  license-compatibility page corroborates: LGPLv2.1 is "compatible with
   GPLv2 and GPLv3." No relicensing, no GPL-version question, no "-or-later" grant needed. See
   `docs/licensing.md`'s Flags §2 for the full gnu.org-sourced citation trail; `raw-decoder`
   topic's own doc has the RAW-decoder-specific account. What remains is a real but small
