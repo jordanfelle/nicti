@@ -174,6 +174,39 @@ pub fn fit_gain(reference: &[f32], moving: &[f32], mask: &[bool]) -> f64 {
     }
 }
 
+/// Resamples an interleaved RGB `f32` image (`width*height*3` samples) so that `moving`'s content
+/// lands on `reference`'s pixel grid, undoing the shift `estimate_shift` found (`moving` sampled
+/// at `(x+dx, y+dy)` matches `reference` at `(x,y)`, so this builds `out(x,y) =
+/// moving.sample_bilinear(x+dx, y+dy)` for every pixel and channel). Samples falling outside
+/// `moving`'s bounds (a real possibility at the image edges after a shift) are written as `0.0` --
+/// these land in the near-black region `clip_mask` already excludes from scoring/fitting, so they
+/// don't need special handling here.
+pub fn resample_rgb(rgb_hwc: &[f32], width: u32, height: u32, shift: Shift) -> Vec<f32> {
+    assert_eq!(rgb_hwc.len(), width as usize * height as usize * 3);
+
+    let channel = |c: usize| -> Plane {
+        Plane {
+            width,
+            height,
+            samples: rgb_hwc.as_chunks::<3>().0.iter().map(|px| px[c]).collect(),
+        }
+    };
+    let planes: [Plane; 3] = std::array::from_fn(channel);
+
+    let mut out = vec![0.0f32; rgb_hwc.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let sx = x as f64 + shift.dx;
+            let sy = y as f64 + shift.dy;
+            let idx = (y * width + x) as usize;
+            for (c, plane) in planes.iter().enumerate() {
+                out[idx * 3 + c] = plane.sample_bilinear(sx, sy).unwrap_or(0.0);
+            }
+        }
+    }
+    out
+}
+
 /// A mask excluding samples near the clipped extremes of either image (highlights or deep
 /// blacks) -- these bias both the shift estimate's gradients and the gain fit, since a clipped
 /// region carries no real signal past the clip point in either image.
@@ -254,6 +287,41 @@ mod tests {
     fn within_tolerance_rejects_large_shift() {
         let shift = Shift { dx: 2.0, dy: 0.0 };
         assert!(!shift.within_tolerance(0.25));
+    }
+
+    #[test]
+    fn resample_rgb_undoes_a_known_shift() {
+        // Build a reference scene, shift it to make "moving", then resample moving by the same
+        // shift -- the result should match reference again (within bilinear-resample tolerance,
+        // tighter in the interior than at the edges where samples fall outside moving's bounds).
+        let reference = synthetic_scene(64, 64);
+        let shift = Shift { dx: 1.3, dy: -0.7 };
+        let moving_luma = shift_plane(&reference, shift.dx, shift.dy);
+
+        let mut moving_rgb = vec![0.0f32; 64 * 64 * 3];
+        for (i, &v) in moving_luma.samples.iter().enumerate() {
+            moving_rgb[i * 3] = v;
+            moving_rgb[i * 3 + 1] = v;
+            moving_rgb[i * 3 + 2] = v;
+        }
+
+        let resampled = resample_rgb(&moving_rgb, 64, 64, shift);
+
+        // Compare over the interior only (margin 4px), away from the edges a 1.3/-0.7px shift
+        // pushes out of `moving`'s bounds.
+        let mut max_abs_diff = 0.0f32;
+        for y in 4..60u32 {
+            for x in 4..60u32 {
+                let idx = (y * 64 + x) as usize;
+                let expected = reference.get(x as i64, y as i64).unwrap();
+                let actual = resampled[idx * 3];
+                max_abs_diff = max_abs_diff.max((actual - expected).abs());
+            }
+        }
+        assert!(
+            max_abs_diff < 0.01,
+            "expected resampled to match reference in the interior, max abs diff {max_abs_diff}"
+        );
     }
 
     #[test]

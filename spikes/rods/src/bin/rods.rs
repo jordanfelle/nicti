@@ -176,7 +176,13 @@ fn compare(
         println!("WARNING: shift exceeds tolerance -- scores below may reflect misregistration");
     }
 
-    let mut cand_srgb = cand_srgb_raw;
+    // Resample the candidate onto the reference's pixel grid before scoring or denoising --
+    // otherwise a real sub-pixel-or-larger shift (a real second exposure, not just decoder
+    // rounding) contaminates every metric below with misalignment error, not a demosaic/denoise
+    // difference. A shift within tolerance still gets resampled (a no-op to within float
+    // precision at that magnitude); only skipping this for an exact zero shift would be a
+    // meaningless special case.
+    let mut cand_srgb = align::resample_rgb(&cand_srgb_raw, width, height, shift);
     if let Some(model_path) = denoise_model {
         let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
         println!(
