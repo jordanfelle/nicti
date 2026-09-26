@@ -12,13 +12,17 @@ Full reasoning/history: `.claude/docs/catalog-engine/README.md`.
   `GLOB` not `LIKE` for prefix scans. Clears every gate at 2M assets except
   faceted-filter-with-facet-counts (closed by the facet-count cache below). DuckDB kept as the
   explicit fallback if the facet-query ceiling becomes a real problem.
-- **Turso** (`docs/adr/0009`), **redb** (`docs/adr/0010`), **RocksDB** (`docs/adr/0015`) —
-  **not adopted**: each misses 1-3 query-gate budgets at 2M by 1.5–5x, and crash-safety is left
-  inconclusive for all three (the in-process `mem::forget` crash simulation can't get past their
-  OS-level file locks — a structural test-harness limit, not a finding about the engines). RocksDB
-  additionally got the series' only concurrent-multi-writer measurement: beats SQLite's
-  single-writer-serialization ceiling on peak throughput but shows large untuned run-to-run
-  variance — SQLite still chosen, kept as reference data for a future multi-writer decision (#64).
+- **Turso** (`docs/adr/0009`) — **not adopted**: two query shapes already sit at the 600k-scale
+  budget edge, but the deciding factor was a 2M-row bulk-ingest run whose WAL file passed 19GB and
+  was still climbing linearly (not explained by a durability-pragma mismatch). Crash-safety left
+  inconclusive (same OS-lock structural limit as below). Revisit post-1.0, not never.
+- **redb** (`docs/adr/0010`), **RocksDB** (`docs/adr/0015`) — **not adopted**: each misses 1-3
+  query-gate budgets at 2M by 1.5–5x, and crash-safety is left inconclusive for both (the
+  in-process `mem::forget` crash simulation can't get past their OS-level file locks — a
+  structural test-harness limit, not a finding about the engines). RocksDB additionally got the
+  series' only concurrent-multi-writer measurement: beats SQLite's single-writer-serialization
+  ceiling on peak throughput but shows large untuned run-to-run variance — SQLite still chosen,
+  kept as reference data for a future multi-writer decision (#64).
 - **Facet-count cache** (`docs/adr/0011`) — **adopted**: trigger-maintained SQLite facet table,
   closes ADR-0008's one measured miss without a new dependency. Clears budget 33-89x at 600k/2M.
   Only answers keyword-narrowed facet queries; an unfiltered facet count needs a separate query.
