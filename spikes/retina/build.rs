@@ -161,6 +161,15 @@ fn main() {
     // without this.
     if target.contains("windows") {
         build.define("_USE_MATH_DEFINES", None);
+        // `libraw.h`'s public API is declared `DllDef` (libraw_types.h: `__declspec(dllexport)`
+        // when LIBRAW_BUILDLIB is set, `dllimport` otherwise), for LibRaw's own DLL build. retina
+        // links LibRaw's C++ source directly into a static archive, never as a DLL -- without
+        // this, MSVC hard-errors ("definition of dllimport function not allowed", confirmed by a
+        // real windows-latest CI run) since it refuses to *define* a function declared
+        // `dllimport`. MinGW's `-w`-suppressed build tolerated the mismatch silently, which is
+        // exactly why this got missed by local cross-compile testing and only surfaced on the
+        // real MSVC job.
+        build.define("LIBRAW_NODLL", None);
     }
     if target.contains("msvc") {
         build.define("_CRT_SECURE_NO_WARNINGS", None);
