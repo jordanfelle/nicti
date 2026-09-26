@@ -42,6 +42,46 @@ unsafe extern "C" {
     fn retina_pre_mul(handle: *const RetinaLibRawOpaque, out: *mut f32);
     fn retina_cam_xyz(handle: *const RetinaLibRawOpaque, out: *mut f32);
     fn retina_cblack(handle: *const RetinaLibRawOpaque, out: *mut u32);
+
+    fn retina_libraw_process_classic(
+        handle: *mut RetinaLibRawOpaque,
+        quality: i32,
+        fbdd_noiserd: i32,
+        wavelet_threshold: f32,
+    ) -> RetinaStatus;
+    fn retina_classic_image(handle: *const RetinaLibRawOpaque, out_len: *mut usize) -> *const u16;
+    fn retina_cfa_normalized(
+        handle: *const RetinaLibRawOpaque,
+        out: *mut f32,
+        out_len: usize,
+    ) -> bool;
+}
+
+/// Mirrors shim.h's `RetinaDemosaicQuality` / LibRaw's own `user_qual` enum. `Dcb`/`Aahd` only
+/// exist because retina's vendored fork (not upstream LibRaw) adds them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum DemosaicQuality {
+    Linear,
+    Vng,
+    Ppg,
+    Ahd,
+    Dcb,
+    Dht,
+    Aahd,
+}
+
+impl DemosaicQuality {
+    fn as_libraw_user_qual(self) -> i32 {
+        match self {
+            DemosaicQuality::Linear => 0,
+            DemosaicQuality::Vng => 1,
+            DemosaicQuality::Ppg => 2,
+            DemosaicQuality::Ahd => 3,
+            DemosaicQuality::Dcb => 4,
+            DemosaicQuality::Dht => 11,
+            DemosaicQuality::Aahd => 12,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -182,6 +222,67 @@ impl LibRawHandle {
             cam_xyz,
             cblack,
         }
+    }
+
+    /// Runs LibRaw's classic pipeline with WB applied and the caller's choice of demosaic
+    /// algorithm plus NR knobs (see shim.h's `retina_libraw_process_classic`). Must be called
+    /// after `decode` and before `classic_image`; exactly one of `process_linear`/
+    /// `process_classic` may be called per handle (see the shim's own doc comment) -- construct a
+    /// fresh `LibRawHandle` per processing mode if both outputs are needed for one file.
+    pub fn process_classic(
+        &mut self,
+        quality: DemosaicQuality,
+        fbdd_noiserd: i32,
+        wavelet_threshold: f32,
+    ) -> Result<(), LibRawError> {
+        let status = unsafe {
+            retina_libraw_process_classic(
+                self.ptr,
+                quality.as_libraw_user_qual(),
+                fbdd_noiserd,
+                wavelet_threshold,
+            )
+        };
+        if status != 0 {
+            let msg = unsafe {
+                let s = retina_strerror(status);
+                if s.is_null() {
+                    "<null>".to_string()
+                } else {
+                    CStr::from_ptr(s).to_string_lossy().into_owned()
+                }
+            };
+            return Err(LibRawError::Status {
+                code: status,
+                message: msg,
+            });
+        }
+        Ok(())
+    }
+
+    /// The demosaiced RGBG plane produced by `process_classic` (4 ushorts/pixel: R, G, B, G2) --
+    /// same layout/lifetime rules as `linear_image`.
+    pub fn classic_image(&self) -> Result<&[u16], LibRawError> {
+        let mut len = 0usize;
+        let ptr = unsafe { retina_classic_image(self.ptr, &mut len as *mut usize) };
+        if ptr.is_null() {
+            return Err(LibRawError::NoRawImage);
+        }
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+
+    /// A black-subtracted, white-normalized (0..1) copy of the still-mosaiced Bayer plane --
+    /// #40's Path A (Bayer-domain model) input. Length is `raw_width * raw_height`, tightly
+    /// packed (unlike `raw_image`, which preserves LibRaw's pitch padding).
+    pub fn cfa_normalized(&self) -> Result<Vec<f32>, LibRawError> {
+        let width = self.metadata().raw_width as usize;
+        let height = self.metadata().raw_height as usize;
+        let mut out = vec![0f32; width * height];
+        let ok = unsafe { retina_cfa_normalized(self.ptr, out.as_mut_ptr(), out.len()) };
+        if !ok {
+            return Err(LibRawError::NoRawImage);
+        }
+        Ok(out)
     }
 }
 
