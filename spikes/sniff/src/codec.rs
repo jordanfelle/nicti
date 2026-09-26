@@ -142,13 +142,31 @@ mod tests {
     }
 
     #[test]
-    fn avif_round_trip_preserves_dimensions() {
-        let img = solid_image(64, 32, 200, 100, 50);
+    fn avif_round_trip_preserves_dimensions_and_content() {
+        // A solid-color image would still "round-trip" even if decode lost all image
+        // variation (e.g. returned a single wrong-but-uniform color) -- a non-uniform gradient
+        // catches that a real, content-preserving decode happened, without requiring exact
+        // pixel equality (AVIF is lossy).
+        let (width, height) = (64u32, 32u32);
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgb.extend_from_slice(&[(x * 4) as u8, (y * 8) as u8, ((x + y) * 2) as u8]);
+            }
+        }
+        let img = DecodedRgb { width, height, rgb };
+
         let encoded = encode(Codec::Avif, &img, 80).expect("encode");
         assert!(!encoded.is_empty());
         let decoded = decode(Codec::Avif, &encoded).expect("decode");
-        assert_eq!(decoded.width, 64);
-        assert_eq!(decoded.height, 32);
+        assert_eq!(decoded.width, width);
+        assert_eq!(decoded.height, height);
+        let min = decoded.rgb.iter().copied().min().expect("pixels");
+        let max = decoded.rgb.iter().copied().max().expect("pixels");
+        assert!(
+            max > min,
+            "decoded AVIF lost all image content (uniform output)"
+        );
     }
 
     #[test]
