@@ -63,7 +63,7 @@ def fetch_jobs(repo: str, run_id: int) -> list[dict]:
 def previous_main_run(repo: str, workflow_id: int, before_run_id: int) -> dict | None:
     """Most recent successful main-branch run of the same workflow, strictly before before_run_id."""
     # No `event=push` filter: both watched workflows also run on `schedule` (see ci.yml's own
-    # weekly Monday cron, added for #117/#127) -- den/pelt's own jobs mostly only execute on
+    # weekly Monday cron, added for #117/#127) -- pelt/decode's own jobs mostly only execute on
     # that schedule run except on a directly-touching PR, so filtering to push-only here would
     # mean the "previous" run for those jobs is almost never found and the 2-run streak check
     # can never confirm, silently defeating the watcher for the exact regression class (#154)

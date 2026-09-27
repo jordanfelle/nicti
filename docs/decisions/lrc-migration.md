@@ -47,12 +47,15 @@ is the per-topic summary; those two are the full research trail.
 - **#53 feasibility**: 380,300 assets, ~1.77M develop-history-step rows (~4.7/image) give a real,
   usable before/after training set. Dataset construction itself is #53's own scope.
 - **`lrcat-extractor` (MPL-2.0) — real Cargo constraint found, not adopted as a dependency**: its
-  own `rusqlite = "0.38"` pin cannot coexist in this workspace's single Cargo.lock with `den`'s
-  unconditional `rusqlite = "^0.40"` — Cargo's `links = "sqlite3"` uniqueness is enforced
-  workspace-wide, not per binary, and this holds even with `lrcat-extractor` behind an optional,
-  default-off feature (Cargo still solves for every feature combination the workspace could
-  activate). Evaluated standalone (outside the workspace) instead: it opens/reads the real v13
-  catalog fine; a full feature-parity comparison against `shed`'s own reading is deferred to #62,
-  once `den` is gone or `lrcat-extractor` gets its own isolated build.
+  own `rusqlite = "0.38"` pin cannot coexist in this workspace's single Cargo.lock with the
+  workspace's own unconditional `rusqlite = "^0.40"` pins (`spikes/den` originally, now
+  `crates/nicti-catalog`/`homing`/`pupil`/`shed`/`sniff` since #123 deleted `den`) — Cargo's
+  `links = "sqlite3"` uniqueness is enforced workspace-wide, not per binary, and this holds even
+  with `lrcat-extractor` behind an optional, default-off feature (Cargo still solves for every
+  feature combination the workspace could activate). Evaluated standalone (outside the workspace)
+  instead: it opens/reads the real v13 catalog fine; a full feature-parity comparison against
+  `shed`'s own reading is deferred to #62, once `nicti-catalog`/its callers get their own isolated
+  build or `lrcat-extractor` bumps its pin (deleting `den` did not resolve this constraint — it
+  just moved onto the real crates).
 - **Version support**: only v13 (the user's current LRC) was available to measure; older-version
   support is a follow-up if/when needed, not built speculatively.

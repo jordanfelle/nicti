@@ -1,6 +1,5 @@
 ---
 paths:
-  - "spikes/den/**"
   - "crates/nicti-catalog/**"
 ---
 
@@ -33,7 +32,8 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   Rust-adjacent candidate to cleanly pass the crash-safety gate. Real 1.3–4x per-op overhead
   (async-dispatch), ~5x larger dependency graph. Flagged as the leading candidate to revisit when
   #64 (multi-machine catalog) becomes active — built-in offline-first sync. **Cannot link into the
-  same binary as `rusqlite`** (both bundle SQLite C symbols) — CI splits `den`'s test job.
+  same binary as `rusqlite`** (both bundle SQLite C symbols) — this required its own split test job
+  in the now-deleted `spikes/den` spike (ADR-0113's Spike section).
 - **fjall** (`docs/adr/0116`) — **not adopted**: cleanest Windows-build story (100% safe Rust, no
   `build.rs`) but fails 3/8 query gates at 600k already (the earliest/widest failure in the
   series), attributed to `Guard`/iterator overhead. Crash-safety inconclusive (same OS-lock class
@@ -41,23 +41,9 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 ## Package contents
 
-- **`spikes/den`** (#67/ADR-0067's catalog-database-engine comparison plus #102/ADR-0102's Turso
-  follow-up, #106/ADR-0106's `redb` follow-up, #103/ADR-0103's facet-count-cache follow-up,
-  #107/ADR-0107's schema-fit reconsideration, #113/ADR-0113's `libSQL` follow-up, #115/ADR-0115's
-  RocksDB follow-up, and #116/ADR-0116's `fjall` follow-up) — one module per candidate:
-  `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`libsql_engine.rs`/
-  `rocksdb_engine.rs`/`fjall_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind
-  matching Cargo features (`turso`, `redb`, `libsql`, `rocksdb`, `fjall` all default-off,
-  evaluated-not-adopted, kept for reference — `libsql` cannot be enabled in the same binary as
-  `sqlite`, both bundle their own SQLite C symbols and collide at link time, see ADR-0113's Spike
-  section; `rocksdb`/`fjall` have no such collision, see ADR-0115's/ADR-0116's Consequences; the
-  two facet-cache modules require `sqlite`, `facet_cache_duckdb` additionally requires `duckdb`),
-  plus `schema_fit.rs` (ADR-0021's JSON-column + append-only/burst-compacted history-table shape,
-  gated on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's genuinely concurrent
-  multi-writer-thread comparison between RocksDB and SQLite, gated on both `rocksdb` and `sqlite`,
-  not part of the shared `Workload` trait since only these two engines are compared this way). `gen.rs`'s
-  synthetic-catalog generator is reusable for future Library-scale benchmarks (see
-  `docs/benchmarks.md`). Not production code — don't build on top of a spike crate; **#22 has now
-  landed** (`crates/nicti-catalog`: `schema.rs`/`sqlite.rs`/`scruff.rs`), so this spike is slated
-  for deletion — see #123 for the follow-up cleanup (CI jobs, the Renovate rule, `deny.toml`
-  exceptions), not done as part of #22 itself.
+- **`crates/nicti-catalog`** (#22, landed) — the real production catalog implementation:
+  `schema.rs`/`sqlite.rs`/`scruff.rs`. Promotes the SQLite choice this topic's ADR series settled
+  on. `spikes/den` (the throwaway comparison spike backing ADR-0067/0102/0106/0103/0107/0113/
+  0115/0116 — one module per candidate engine plus a shared `Workload` trait and synthetic
+  catalog generator) was deleted in #123 once #22 landed; the per-candidate findings above are
+  the durable record, not the spike code itself.

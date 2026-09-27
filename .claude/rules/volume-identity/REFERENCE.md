@@ -51,5 +51,5 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   re-exports `fingerprint`/`mount_events`/`path`/`relink`/`schema`/`volume`. Windows-only research
   written in a Linux/WSL sandbox with no mountable NTFS volume: its `windows_impl` modules are
   unverified against real hardware, while its cross-platform schema/fingerprint/path logic is real,
-  tested (29 unit tests), and — unlike `den`/`pelt-*`/`retina` — not path-gated out of CI's normal
+  tested (29 unit tests), and — unlike `pelt-*`/`retina` — not path-gated out of CI's normal
   `clippy`/`test` jobs, since it needs no heavy native build (same as `sniff`).

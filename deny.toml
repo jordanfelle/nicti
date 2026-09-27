@@ -37,11 +37,6 @@ allow = [
     # candidate's own clipboard integration (arboard via egui/Slint, window_clipboard via iced).
     # Permissive, OSI-approved, no copyleft terms -- same category as ISC/Zlib/NCSA above.
     "BSL-1.0",
-    # 0BSD: `varint-rs`, a transitive dependency of `lsm-tree` (the LSM-tree engine `fjall` wraps,
-    # #116/ADR-0113's evaluation). The BSD Zero Clause License is OSI-approved and even more
-    # permissive than MIT/Apache-2.0 -- no attribution requirement at all -- same
-    # no-copyleft-terms category as ISC/Zlib/NCSA/BSL-1.0 above.
-    "0BSD",
     # OFL-1.1 / Ubuntu-font-1.0: `epaint_default_fonts` bundles actual font *data* (not just code)
     # under egui's `default_fonts` feature (#68/ADR-0068's pelt-egui spike). Both are OSI-approved,
     # permissive-for-redistribution open font licenses (SIL OFL is the standard license for
@@ -51,12 +46,6 @@ allow = [
     # #68/ADR-0068 rows.
     "OFL-1.1",
     "Ubuntu-font-1.0",
-    # CDLA-Permissive-2.0: `webpki-roots` (Mozilla's root CA bundle, republished as Rust source
-    # data), a build-time-only dependency of `libduckdb-sys`'s build script (`duckdb` -> `ureq` ->
-    # `webpki-roots`, #67/ADR-0050's `spikes/den`) -- not linked into any shipped binary. Same
-    # bundled-data category as OFL-1.1/Ubuntu-font-1.0 above: a Linux-Foundation-drafted
-    # permissive data license with no copyleft terms, standard for redistributing root-cert data.
-    "CDLA-Permissive-2.0",
     # GPL-3.0/AGPL-3.0/GPL-2.0-or-later: added 2026-09-24 per ADR-0018's amendment (#66/ADR-0106 --
     # Nicti's own outbound license is now AGPL-3.0-or-later, so these are combinable into it, not
     # a compatibility risk the way they were when the outbound license was still undecided).
