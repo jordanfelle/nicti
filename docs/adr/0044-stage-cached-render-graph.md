@@ -2,8 +2,10 @@
 
 - **Status:** Proposed — kernel-level decision rules (#2-#5) measured clean on the real reference
   RTX 5080; the full end-to-end pipeline and the hero scenario's own screen-capture pass are #45's
-  build, not measured here; three follow-ups filed ([#189](https://github.com/jordanfelle/nicti/issues/189),
-  [#190](https://github.com/jordanfelle/nicti/issues/190), [#191](https://github.com/jordanfelle/nicti/issues/191)) — see Consequences
+  build, not measured here; two follow-ups remain open ([#189](https://github.com/jordanfelle/nicti/issues/189),
+  [#190](https://github.com/jordanfelle/nicti/issues/190)) — see Consequences.
+  [#191](https://github.com/jordanfelle/nicti/issues/191) (lens-correction placement) is resolved,
+  see "Lens-correction placement, confirmed" under Decision.
 - **Date:** 2026-09-27
 - **Ticket:** [#44](https://github.com/jordanfelle/nicti/issues/44) Research: stage-cached render
   graph design (Tapetum)
@@ -78,6 +80,70 @@ Combining ADR-0021/0050/0037/0038/0048/0040's individual constraints into one gr
 - **Crop/rotate/zoom/pan**: an affine sample pass reading only the live suffix's output — never a
   Baked or Live node input (`geometry.rs`, `graph.rs`'s `changing_crop_invalidates_only_crop_itself`
   test).
+
+### Lens-correction placement, confirmed (#191)
+
+This ADR originally placed lens correction in the baked prefix, before *any* of ADR-0038's color
+pipeline, on ADR-0050's own proposed authority — flagged as an unconfirmed assumption (#39 had no
+ADR of its own settling it). This pass confirms the placement, for two independent reasons that
+both point the same way rather than one single hard constraint:
+
+1. **Chromatic-aberration correction is channel-space-bound.** Lensfun's (and embedded-NEF) CA
+   calibration data describes a per-channel spatial misalignment of the camera's own R/G/B
+   channels — it's measured and expressed in that channel space, not in XYZ or a working-space
+   profile-connection space. `nicti-cornea::LinearFrame` (#41) is exactly that space:
+   demosaiced-but-uncorrected, WB/color-matrix/gamma-free linear camera RGB. ADR-0038's
+   `cct.rs::solve_camera_to_xyz` linearly mixes R/G/B per pixel on the way to XYZ(D50); once that
+   mix has happened, the calibration data's per-channel shift no longer corresponds to anything —
+   there's no "R channel" left to shift independently. **CA correction must run before the
+   camera→XYZ matrix**, not merely "somewhere before tone."
+2. **Geometric resampling belongs in linear light.** Distortion-warp correction is an
+   interpolation over neighboring pixels; interpolating through a nonlinear tone curve produces
+   edge haloing and local brightness shifts that don't occur when the same warp is applied to
+   linear-referred data — the same reasoning ADR-0050 already used to place heal/remove's Poisson
+   solve before tone. Everything in ADR-0038's pipeline up through `LookTable` operates on
+   linear-referred per-pixel RGB values (WB is a per-channel scale, cam→XYZ/ProPhoto/HueSatMap/
+   LookTable are all matrix or LUT transforms of linear values) — with one caveat ADR-0038 itself
+   flags: `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` can run a profile-defined nonlinear
+   curve over the LUT's own *value* lookup axis when a profile sets that flag (true for real Adobe
+   profiles, including Adobe Vivid). That curve only reshapes how the 3D LUT is indexed, not the
+   RGB values entering/leaving the stage, so it doesn't change this argument's conclusion — but the
+   pipeline isn't as uniformly "just linear" as a first pass over it suggests. Only the tone-curve
+   step is genuinely nonlinear *on the pixel values themselves*. So distortion correction alone
+   would tolerate running anywhere before tone — it's reason 1 above (CA's channel-space
+   requirement) that actually pins it to the *front* of the color pipeline, not just somewhere
+   ahead of the tone curve.
+
+Distortion and CA correction are conventionally calibrated and applied together as one resampling
+pass in lens-correction tooling (lensfun and Adobe's own embedded-NEF correction both bundle
+distortion + CA + vignette into one profile) — reason 1's channel-space constraint on CA would
+then pin distortion too, once #39 decides whether Nicti's own implementation keeps them bundled.
+This is an assumption about #39's likely implementation shape, not something independently
+verified against lensfun's actual API in this pass.
+
+**A caveat this pass surfaced, not a third confirming argument**: ADR-0061's LRC catalog-schema
+mapping (`docs/research/shed-lrcat-schema.md`, `docs/adr/0061`) documents that LRC's own Lens
+Corrections panel — the feature #39 is scoped to replicate — includes user-adjustable manual
+distortion, manual vignette, and defringe (CA) amount sliders, not just a fixed profile lookup.
+Lens correction's params are therefore not fully determined by the lens/body/focal-length/aperture
+tuple alone, the way this pass first assumed. That doesn't itself argue for a *different*
+placement — ADR-0050's `HealStage` already shows that a stage with per-edit, user-drawn parameters
+(spot position, radius, feather) still belongs in the baked prefix, not the live suffix, because
+"baked" means "cacheable by its own param hash," not "parameter-free" — but it does mean lens
+correction's bakeability isn't a free, independent argument the way this pass originally claimed;
+it rests on the same "not a live-drag-every-frame slider" architectural choice as heal/remove,
+which #39 will need to confirm still holds once it designs the actual manual-slider UX (a
+real-time-preview vignette-amount drag, in particular, would be a live-suffix-shaped interaction,
+not a baked one).
+
+**Conclusion: ADR-0044's original placement of lens correction in the baked prefix, before ADR-0038's
+color pipeline, is confirmed on the channel-space argument (reason 1) — the strongest and only
+truly independent constraint found this pass.** The linear-light argument (reason 2) is consistent
+with, but doesn't independently require, that same placement. This resolves the placement question
+this ticket (#191) was scoped to answer; it does not resolve #39's own broader scope (picking
+`lensfun-rs` vs. embedded-NEF data as the correction-data source, verifying NIKKOR Z lens coverage,
+or designing the manual distortion/vignette/defringe slider UX this pass surfaced as a real open
+question), which stays open and unblocked.
 
 ### Cache key
 
@@ -222,10 +288,12 @@ tiering rather than treating "baked" as a single all-or-nothing state per image.
   synthetic gradient, explicitly not a promise about real content. Filed alongside #45's real render
   output, once there's real baked output to measure against.
   Follow-up: [#190](https://github.com/jordanfelle/nicti/issues/190).
-- **Real follow-up: lens-correction placement.** No ADR places lens correction relative to color
-  (#39 has no ADR yet) — this ADR's stage order above assumes lens correction sits in the baked
-  prefix per ADR-0050's own proposal, but #39 itself hasn't confirmed this.
-  Follow-up: [#191](https://github.com/jordanfelle/nicti/issues/191).
+- **Resolved: lens-correction placement.** [#191](https://github.com/jordanfelle/nicti/issues/191)
+  confirmed this ADR's baked-prefix placement (see "Lens-correction placement, confirmed" under
+  Decision) — CA correction's channel-space requirement pins it before ADR-0038's camera→XYZ
+  matrix. Bakeability itself stays conditional on #39's manual-slider UX design (LRC's own Lens
+  Corrections panel has manual distortion/vignette/defringe sliders), not a given regardless of it.
+  #39's broader scope (correction-data source, lens coverage, that UX question) stays open.
 - **`docs/licensing.md` updated in this PR**: two new crates (`zstd`, `lz4_flex`), both permissive,
   already covered by `deny.toml`'s existing allowlist.
 - **New topic `render-graph`** added to `CLAUDE.md`'s topic list and `.claude/rules/`/
