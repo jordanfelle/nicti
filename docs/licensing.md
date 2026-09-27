@@ -382,6 +382,36 @@ compression candidates — `zstd` v0.13.3 (`MIT`) plus its own `zstd-safe`/`zstd
 siamese's own prior updates above. `cargo deny --workspace --all-features check licenses` passes
 clean, no new `deny.toml` entries needed.
 
+**Update (2026-09-27, [#56](https://github.com/jordanfelle/nicti/issues/56)'s `prey` spike,
+`docs/adr/0056-export-stack.md`):** six new direct crates (plus five more transitive ones, see
+the correction below), all confirmed via `cargo metadata`'s own
+`license` field, not assumed: `img-parts` v0.4.0 (`MIT OR Apache-2.0`), `little_exif` v0.6.23
+(already reviewed above, this spike is its first real user), `moxcms` v0.9.1 (`BSD-3-Clause OR
+Apache-2.0` — generates the embedded sRGB ICC profile at build/run time, no vendored profile
+file), `resvg`/`usvg` v0.48.1 (`Apache-2.0 OR MIT` each), `tiny-skia` v0.12.0 (`BSD-3-Clause`),
+and `bytes` v1.12.1 (`MIT`, a transitive dependency of `img-parts` promoted to direct since this
+spike constructs `Bytes` values itself). **Correction (2026-09-27, adversarial review):** the
+original version of this paragraph undercounted — five more genuinely new crates landed in
+`Cargo.lock` as transitive dependencies of `resvg`/`usvg`/`moxcms` and weren't individually
+disclosed: `brotli` v8.0.4 (`BSD-3-Clause AND MIT`), `crc` v3.4.0 (`MIT OR Apache-2.0`),
+`crc-catalog` v2.5.0 (`MIT OR Apache-2.0`), `dunce` v1.0.5 (`CC0-1.0 OR MIT-0 OR Apache-2.0`), and
+a second, older `quick-xml` v0.37.5 (`MIT`) alongside the already-disclosed `quick-xml` v0.41.0
+from #59/`scent`'s own update above (two versions coexist in the lock file since `img-parts`
+depends on 0.37 while this spike's own direct use elsewhere in the workspace pins 0.41 — normal
+Cargo dependency resolution, not a conflict). All five confirmed directly against their own
+`Cargo.toml`/registry `license` fields, all permissive, all already on `deny.toml`'s allowlist. One
+new **optional** crate, gated behind this spike's
+non-default `native` Cargo feature (mirrors `nicti-decode`'s `libraw` feature — off by default so
+ordinary CI/dev builds never need a C compiler + nasm): `mozjpeg` v0.10.13 (`IJG`) plus its own
+`mozjpeg-sys` v2.2.3 (`IJG AND Zlib AND BSD-3-Clause`, vendoring mozjpeg's C source and building
+it via `cc`+`nasm` — see the Native libraries table below). `cargo deny check licenses` passes
+clean against `Cargo.lock` (which already includes `mozjpeg`/`mozjpeg-sys` from a local
+`--features native` build) — no new `deny.toml` entries needed; `IJG`, `Zlib`, and
+`BSD-3-Clause` were all already on the allowlist. **ICC/EXIF/XMP write for TIFF output is out of
+scope for this pass** (see the research doc) — same class of gap ADR-0059 already flagged for
+DNG/TIFF: no crate in this workspace builds arbitrary TIFF tags, so embedding any of the three
+into a TIFF export needs a dedicated writer this spike didn't build.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
@@ -393,6 +423,7 @@ clean, no new `deny.toml` entries needed.
 | lensfun **database** (calibration data) | Lens correction | — | CC BY-SA 3.0[^lf1] | Data file, unmodified | ✅ (data obligation, not code) | ✅ | ✅ — share-alike only bites if Nicti *modifies* and redistributes the database |
 | [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0066), and this arm's confirmed "or later" grant combines cleanly | ✅ | ✅ no isolation/sign-off needed — same conclusion `rawler`/LibRaw reached too, **corrected 2026-09-25 by #37** (see Flags §2): LGPL-2.1 §§5-6 permit this regardless of an "-or-later" grant |
 | [Little CMS 2](https://github.com/mm2/Little-CMS) | Color management ([#42](https://github.com/jordanfelle/nicti/issues/42)) | MIT[^lcms1] | — | Static or dynamic | ✅ | ✅ | ✅ bundle OK |
+| [mozjpeg](https://github.com/mozilla/mozjpeg) (vendored via `mozjpeg-sys`) | Native JPEG encoder candidate ([#56](https://github.com/jordanfelle/nicti/issues/56), `spikes/prey`, `native` Cargo feature only) | `IJG AND Zlib AND BSD-3-Clause`[^mz1] — mozjpeg is a fork of libjpeg-turbo (`Zlib`/`BSD-3-Clause`), itself a fork of IJG's original `libjpeg` (the custom but OSI-recognized `IJG` license) | — | Static (`cc`+`nasm`-compiled by `mozjpeg-sys`'s build script) | ✅ | ✅ | ✅ bundle OK — all three license components already on `deny.toml`'s allowlist |
 | [kamadak-exif](https://crates.io/crates/kamadak-exif) | EXIF read | BSD-2-Clause[^kx1] | — | Static | ✅ | ✅ | ✅ bundle OK (read-only — see #47 below) |
 | [little_exif](https://crates.io/crates/little_exif) | EXIF/XMP write | MIT OR Apache-2.0[^le1] | — | Static | ✅ | ✅ | ✅ bundle OK |
 | [exiv2](https://github.com/Exiv2/exiv2/blob/main/src/exif.cpp) | EXIF/XMP/IPTC (candidate) | **GPL-2.0-or-later** (precise grant confirmed 2026-09-24 via project-specific evidence — `SPDX-License-Identifier: GPL-2.0-or-later` headers in its own source files, e.g. `src/exif.cpp`/`src/image.cpp`, and its README's License section; note the bundled `COPYING` file is just the generic FSF LGPL/GPL template distributed unedited and isn't project-specific evidence on its own, don't cite it as the source for this)[^ex1] | — | n/a | ⛔ | ✅ (the "-or-later" arm combines into Nicti's own AGPL-3.0-or-later) | ✅ **usable as of 2026-09-24** — Nicti's outbound license is now AGPL-3.0-or-later (#66/ADR-0066); kamadak-exif + little_exif remain the current choice (nothing wrong with them, no forced switch), but exiv2 is no longer license-excluded if a real reason to prefer it comes up |
@@ -602,3 +633,4 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^den6]: libSQL's bundled SQLite C fork public-domain notice — the "blessing" text repeated throughout `~/.cargo/registry/src/.../libsql-ffi-0.9.30/bundled/src/sqlite3.c`, the same standard SQLite public-domain dedication `sqlite.rs`'s own footnote (`[^den1]`) cites for plain `libsqlite3-sys` — verified 2026-09-24
 [^wp1]: libwebp core BSD-3-Clause — the vendored `vendor/COPYING` file inside `libwebp-sys` v0.9.6 (`~/.cargo/registry/src/.../libwebp-sys-0.9.6/vendor/COPYING`), read directly, matching the standard Google/WebM-project 3-clause BSD text; a separate `vendor/PATENTS` file in the same directory grants a perpetual, worldwide, royalty-free WebM patent license (terminable only if the licensee brings patent litigation over these implementations) — not a copyleft or attribution-beyond-BSD obligation, but distinct from the copyright license and worth citing separately — verified 2026-09-26
 [^lgpl1]: LGPL-2.1 §3 (relicense-to-GPL option, version choice is the redistributor's, not forced to GPL-2.0) and §§5–6 (permits combining/linking with a differently-licensed work without relicensing, provided that license permits modification + reverse engineering for debugging, plus notice + one of five source-availability options — for a statically-linked executable, §6(a) specifically requires the complete "work that uses the Library," i.e. the whole combined executable, as object and/or source so the user can relink, not just the LGPL'd library's own source) — https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html and https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt (full section text, §6 read in full), cross-checked against https://opensource.org/license/lgpl-2-1/ — verified 2026-09-25. FSF's license-compatibility page confirms LGPLv2.1 is "compatible with GPLv2 and GPLv3," and separately that GPLv3-family and AGPLv3-family works can combine separate modules/source files even though neither is a whole-program relicense of the other — https://www.gnu.org/licenses/license-list.en.html — verified 2026-09-25.
+[^mz1]: mozjpeg-sys v2.2.3's own `Cargo.toml` `license = "IJG AND Zlib AND BSD-3-Clause"` field (`~/.cargo/registry/src/.../mozjpeg-sys-2.2.3/Cargo.toml`), and the `mozjpeg` crate v0.10.13's own `license = "IJG"` — both resolved via `cargo metadata`'s `license` field, cross-checked against mozjpeg's own upstream `README-mozilla.md`/`LICENSE.md` describing it as a libjpeg-turbo (BSD-3-Clause/Zlib) fork retaining IJG's original license grant — verified 2026-09-27.
