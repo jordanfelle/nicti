@@ -78,9 +78,13 @@ above and the candidates themselves are already fixed so #202 is a pure execute-
 
 - **`bench/lrc/auto-tone.ahk`** — modeled on `bench/lrc/hero.ahk`/`setup.ahk`, same `<source-dir>`
   CLI-argument convention (not a frozen file list this PR can't validate — see below). Creates a
-  fresh **throwaway** catalog (never the user's real one), imports the sample set, Ctrl+A → Ctrl+U
-  over Library, waits for completion. No Ctrl+S/XMP write needed — results are read straight out
-  of the throwaway `.lrcat` via `pupil::truth`.
+  fresh **throwaway** catalog (never the user's real one), imports the sample set, selects all in
+  Library Grid, then a manual (not scripted) Quick Develop "Auto" click applies Auto Tone to the
+  whole selection — **not** a scripted Ctrl+U: a real, current (2026) LRC regression makes a
+  batch Ctrl+U over multiple selected photos silently apply to only the first one, which would
+  corrupt ground truth with no visible error. No Ctrl+S/XMP write needed — results are read
+  straight out of the throwaway `.lrcat` via `pupil::truth`, once Lightroom has fully exited (its
+  own guard refuses a catalog with a live lock file or pending WAL frames).
 - **The sample set itself is #202's job, not this PR's.** `nicti-prowl::refset::select` (the
   existing bucket picker) needs `ref-10k` and its manifest on disk (`NICTI_REF10K`), and ref-10k
   isn't present in this sandbox — see `docs/benchmarks.md`. #202 runs on the reference machine

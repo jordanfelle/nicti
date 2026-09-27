@@ -92,10 +92,19 @@ MsgBox "Import dialog is open. Navigate to:`n" sourceDir "`n`nSelect all files, 
 WinActivate("ahk_exe Lightroom.exe")
 Sleep(1000)
 
-; Select all (Library grid) then apply Auto Settings to the whole selection.
+; Select all in Library Grid view, then apply Auto Tone manually via Quick Develop -- NOT a
+; scripted Ctrl+U. A real, current (2026) Lightroom Classic regression (Adobe Community: "Batch
+; editing in Library module (presets, AI updates, auto tone) only applies to the first selected
+; photo in Lightroom Classic 15.3") means a blind Ctrl+U over a multi-photo selection can silently
+; leave every photo but the first at its default (untouched) settings -- exactly the failure mode
+; that would corrupt #202's ground truth with no visible error. Quick Develop's own Auto button is
+; the documented reliable path for a batch, and the manual click plus verification below catches
+; a version where it silently fails too.
+Send("g")
+Sleep(500)
 Send("^a")
 Sleep(500)
-Send("^u")
+MsgBox "Confirm every imported photo is now selected in the Library Grid (check the filmstrip/cell count against " sourceDir "'s file count).`n`nThen, in the Quick Develop panel (right side of Library), click the Auto button under Tone Control -- do NOT use Photo > Develop Settings > Auto Tone or Ctrl+U, both hit the same batch bug.`n`nAfter it finishes, spot-check 3-4 other photos besides the first/most-selected one to confirm they actually changed (not just the first) -- click OK here once verified."
 
-MsgBox "Auto Settings applied to the whole selection.`n`nWait for LRC's develop-settings write to finish (watch the activity spinner), then click OK -- this closes without saving XMP, since #202 reads the result straight out of:`n" catalogPath
+MsgBox "Quit Lightroom now (File > Exit), not just close the window -- `pupil` needs the catalog fully checkpointed and released, and refuses to open one with pending WAL frames or an active lock file.`n`nOnce Lightroom has exited, click OK here, then run `pupil` against:`n" catalogPath
 ExitApp 0

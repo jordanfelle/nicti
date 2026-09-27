@@ -1,43 +1,98 @@
 //! Reads LRC's own "Auto Settings" PV2012 slider values back out of a `.lrcat` (SQLite) --
-//! ground truth for `eval`'s comparison against `heuristic`/`fit`. Opened read-only + immutable,
-//! same convention as `spikes/shed`'s `open.rs`, since this must never touch a live/locked
-//! catalog. A small independent copy of the `agprefs`/`Adobe_imageDevelopSettings` parsing shed
-//! already does, not a path dependency -- see `input.rs`'s doc comment for why.
+//! ground truth for `eval`'s comparison against `heuristic`/`fit`. Opened read-only, refusing
+//! anything that looks like it could still be a live catalog -- the same guard `spikes/shed`'s
+//! `open.rs` already established (`.lock`/`-wal` sibling checks). A small independent copy of
+//! that guard and of the `agprefs`/`Adobe_imageDevelopSettings` parsing shed already does, not a
+//! path dependency -- see `input.rs`'s doc comment for why.
 
 use std::path::Path;
 
 use agprefs::{Agpref, Value};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 
 use crate::sliders::Sliders;
 
+/// Opens `lrcat_path` read-only, refusing beforehand if a non-empty `.lock` or `-wal` sibling
+/// suggests a real process (Lightroom itself, most likely) still has it open. **Deliberately not
+/// `immutable=1`/a `file:` URI**: `spikes/shed::open`'s own doc comment explains why both are
+/// unsafe here -- `immutable=1` can silently read stale or torn pages past this guard's own
+/// check-then-open gap instead of surfacing a clean error, and an unescaped `?`/`#` in `path`
+/// would corrupt the URI's own parsing. Plain read-only mode keeps SQLite's normal WAL-aware read
+/// path active. This means `#202`'s workflow must quit Lightroom (or otherwise let it checkpoint
+/// and release the catalog) before running `pupil` against the resulting `.lrcat` -- see
+/// `bench/lrc/auto-tone.ahk`'s closing prompt.
 pub fn open_readonly(lrcat_path: &Path) -> anyhow::Result<Connection> {
-    let uri = format!("file:{}?immutable=1", lrcat_path.display());
+    let lock = sibling_with_suffix(lrcat_path, ".lock");
+    if non_empty(&lock)? {
+        anyhow::bail!(
+            "{} has a non-empty lock file {} -- this looks like a live/open catalog (Lightroom \
+             itself, most likely), refusing to open it. Close Lightroom and retry.",
+            lrcat_path.display(),
+            lock.display()
+        );
+    }
+    let wal = sibling_with_suffix(lrcat_path, "-wal");
+    if non_empty(&wal)? {
+        anyhow::bail!(
+            "{} has a non-empty WAL file {} -- real uncommitted writes are pending, refusing to \
+             open it. Close Lightroom and retry.",
+            lrcat_path.display(),
+            wal.display()
+        );
+    }
     Ok(Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        lrcat_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?)
+}
+
+fn non_empty(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len() > 0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).map_err(|e| anyhow::anyhow!("statting {}: {e}", path.display())),
+    }
+}
+
+/// `path` with `suffix` appended to its file name, matching SQLite's own WAL sibling naming
+/// convention (`<full-name>-wal`, not `<stem>-wal.<ext>`) and Lightroom's own `<full-name>.lock`.
+fn sibling_with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 /// Looks up develop-settings text for a NEF by base file name (no extension), matching
 /// `AgLibraryFile.baseName` case-sensitively and `extension` case-insensitively -- LRC always
 /// lowercases `extension` on import but a caller might not know that, so this normalizes it.
+/// Errors (rather than silently picking one) if more than one row matches -- `baseName` +
+/// `extension` isn't guaranteed globally unique in a real catalog (e.g. the same-named file
+/// imported from two different folders), and silently attributing the wrong develop settings to
+/// a file would corrupt ground truth without any error at all.
 pub fn develop_settings_text(
     conn: &Connection,
     base_name: &str,
     extension: &str,
 ) -> anyhow::Result<Option<String>> {
-    conn.query_row(
+    let mut stmt = conn.prepare(
         "SELECT d.text
          FROM Adobe_imageDevelopSettings d
          JOIN Adobe_images i ON i.id_local = d.image
          JOIN AgLibraryFile f ON f.id_local = i.rootFile
-         WHERE f.baseName = ?1 AND LOWER(f.extension) = LOWER(?2)",
-        rusqlite::params![base_name, extension],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
+         WHERE f.baseName = ?1 AND LOWER(f.extension) = LOWER(?2)
+         LIMIT 2",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![base_name, extension])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let text: String = row.get(0)?;
+    anyhow::ensure!(
+        rows.next()?.is_none(),
+        "multiple develop-settings rows match {base_name}.{extension} -- baseName+extension isn't \
+         unique in this catalog, refusing to guess which one is right"
+    );
+    Ok(Some(text))
 }
 
 fn as_number(value: &Value) -> Option<f64> {
@@ -152,5 +207,59 @@ mod tests {
         assert!(truth_for_file(&conn, "nonexistent", "nef")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn develop_settings_text_errors_on_an_ambiguous_duplicate_base_name() {
+        let conn = fixture_conn();
+        // A second file with the same base name + extension, imported into a different folder --
+        // baseName+extension isn't unique in a real catalog.
+        conn.execute_batch(
+            "INSERT INTO AgLibraryFile (id_local, baseName, extension) VALUES (2, 'DSC_0001', 'NEF');
+             INSERT INTO Adobe_images (id_local, rootFile) VALUES (11, 2);
+             INSERT INTO Adobe_imageDevelopSettings (image, text) VALUES (11, 's = { Exposure2012 = -1.0 }');",
+        )
+        .unwrap();
+        assert!(develop_settings_text(&conn, "DSC_0001", "nef").is_err());
+    }
+
+    #[test]
+    fn open_readonly_opens_a_plain_closed_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.lrcat");
+        Connection::open(&path).unwrap();
+        assert!(open_readonly(&path).is_ok());
+    }
+
+    #[test]
+    fn open_readonly_refuses_a_non_empty_lock_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.lrcat");
+        Connection::open(&path).unwrap();
+        std::fs::write(dir.path().join("live.lrcat.lock"), b"Lightroom.exe:1234").unwrap();
+        let err = open_readonly(&path).unwrap_err();
+        assert!(err.to_string().contains("lock file"));
+    }
+
+    #[test]
+    fn open_readonly_refuses_a_non_empty_wal_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.lrcat");
+        Connection::open(&path).unwrap();
+        std::fs::write(dir.path().join("live.lrcat-wal"), b"pending frames").unwrap();
+        let err = open_readonly(&path).unwrap_err();
+        assert!(err.to_string().contains("WAL file"));
+    }
+
+    #[test]
+    fn open_readonly_tolerates_an_empty_wal_sibling() {
+        // A closed backup that anyone has ever opened with a plain read-only connection picks up
+        // empty (zero-byte) -wal/-shm siblings just from that read -- must not be mistaken for a
+        // live catalog (same gotcha shed's own open.rs documents).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.lrcat");
+        Connection::open(&path).unwrap();
+        std::fs::write(dir.path().join("closed.lrcat-wal"), b"").unwrap();
+        assert!(open_readonly(&path).is_ok());
     }
 }
