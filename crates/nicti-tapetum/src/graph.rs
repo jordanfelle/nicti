@@ -266,12 +266,27 @@ impl RenderGraph {
     /// registered stage's `default_params()`. Node ids not present in `registry` are an error --
     /// every node in a real graph is backed by a real stage, unlike `document`, which may
     /// legitimately be missing an entry for a stage still at its defaults.
+    ///
+    /// Skips `set_own_hash` entirely for a node whose freshly computed hash is unchanged from its
+    /// current one -- `set_own_hash` unconditionally clears the memoized `cache_key` for that
+    /// node and everything downstream, so calling this once per document edit would otherwise
+    /// blow away the whole graph's memoization on *every* call, even for nodes nothing actually
+    /// changed for. Returns the union of every changed node's own [`Invalidation`] (the real
+    /// rebake set a scheduler needs), rather than each call's own result being silently dropped.
+    ///
+    /// A malformed entry (containing a JSON `null`, per `nicti_pawprint::hash_value`'s own
+    /// "refuse rather than risk a cache-key collision" policy) fails this whole call rather than
+    /// falling back to that one stage's defaults -- deliberately stricter than `coat::parse`'s own
+    /// forward-compat fallback, which exists for a schema this build doesn't recognize, not for
+    /// data that's already corrupt in a way that would poison the cache key.
     pub fn apply_document(
         &mut self,
         document: &EditDocument,
         registry: &StageRegistry,
-    ) -> Result<(), ApplyDocumentError> {
+    ) -> Result<Invalidation, ApplyDocumentError> {
         let ids: Vec<String> = self.nodes.keys().cloned().collect();
+        let mut all = HashSet::new();
+        let mut bakes = HashSet::new();
         for id in ids {
             let stage = registry
                 .get(&id)
@@ -287,9 +302,14 @@ impl RenderGraph {
             let hash = stage
                 .cache_contribution(&entry)
                 .map_err(|e| ApplyDocumentError::Canonical(id.clone(), e))?;
-            self.set_own_hash(&id, hash)?;
+            if self.nodes.get(&id).map(|n| n.own_hash) == Some(hash) {
+                continue;
+            }
+            let invalidation = self.set_own_hash(&id, hash)?;
+            all.extend(invalidation.all);
+            bakes.extend(invalidation.bakes);
         }
-        Ok(())
+        Ok(Invalidation { all, bakes })
     }
 }
 
@@ -633,6 +653,57 @@ mod tests {
             tone_key_before,
             "tone's own cache key must change when its document entry changes"
         );
+    }
+
+    #[test]
+    fn apply_document_returns_the_real_invalidation_set_for_a_changed_node() {
+        let registry = tone_and_wb_registry();
+        let mut g = tone_and_wb_graph();
+        g.apply_document(&EditDocument::default(), &registry)
+            .unwrap();
+
+        let mut document = EditDocument::default();
+        document.stages.insert(
+            crate::stages::TONE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({"contrast": 0.5}),
+            },
+        );
+        let invalidation = g.apply_document(&document, &registry).unwrap();
+        assert_eq!(
+            invalidation.all,
+            [crate::stages::TONE.to_string()]
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            "only tone (not wb, its unchanged upstream) should appear in the returned invalidation"
+        );
+    }
+
+    #[test]
+    fn apply_document_skips_set_own_hash_and_preserves_memoization_when_nothing_changed() {
+        let registry = tone_and_wb_registry();
+        let mut g = tone_and_wb_graph();
+        let mut document = EditDocument::default();
+        document.stages.insert(
+            crate::stages::TONE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({"contrast": 0.5}),
+            },
+        );
+        g.apply_document(&document, &registry).unwrap();
+        let key_before = g.cache_key(crate::stages::TONE).unwrap();
+
+        // Re-applying the exact same document must be a full no-op: every node's freshly computed
+        // hash matches what it already has, so `set_own_hash` should never run and the returned
+        // invalidation set must be empty -- not just "the cache key happens to end up the same".
+        let invalidation = g.apply_document(&document, &registry).unwrap();
+        assert!(
+            invalidation.all.is_empty(),
+            "re-applying an unchanged document must invalidate nothing: {invalidation:?}"
+        );
+        assert_eq!(g.cache_key(crate::stages::TONE).unwrap(), key_before);
     }
 
     #[test]

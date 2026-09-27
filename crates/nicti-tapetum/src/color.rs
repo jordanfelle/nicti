@@ -131,24 +131,32 @@ fn planckian_locus_xy(cct: f32) -> (f32, f32) {
 /// the DNG spec's dual-illuminant solve. `tint`'s effect (a green-magenta shift) is applied as a
 /// small perpendicular offset in xy space, scaled to stay plausible across PV2012's -150..150
 /// range; `temp_k` moves along the Planckian locus.
+/// Clamps a division's denominator away from zero without flipping its sign -- `.max(epsilon)`
+/// alone silently turns any negative value (a real, reachable case for `camera_neutral`'s off-
+/// diagonal-heavy real camera matrices) into a small *positive* one, producing a wrong-signed,
+/// wildly-oversized gain instead of a merely-clamped one.
+fn clamp_denominator(value: f32, epsilon: f32) -> f32 {
+    if value.abs() < epsilon {
+        epsilon.copysign(value)
+    } else {
+        value
+    }
+}
+
 fn wb_gains_for_temp_tint(cam_xyz: &[f32; 12], temp_k: f32, tint: f32) -> [f32; 3] {
     let (x, y) = planckian_locus_xy(temp_k);
-    let y = y - tint * 0.0003;
+    let y = clamp_denominator(y - tint * 0.0003, 1e-6);
     let sum_xyz = [x, y, 1.0 - x - y];
     let xyz = [sum_xyz[0] / y, 1.0, sum_xyz[2] / y];
     // cam_xyz_to_mat3 returns XYZ->camera directly (no inversion needed here, unlike
     // camera_to_working_space_matrix, which needs camera->XYZ instead).
     let xyz_to_cam = cam_xyz_to_mat3(cam_xyz);
     let camera_neutral = mat3_apply(xyz_to_cam, xyz);
-    let g = if camera_neutral[1].abs() > 1e-6 {
-        camera_neutral[1]
-    } else {
-        1.0
-    };
+    let g = clamp_denominator(camera_neutral[1], 1e-6);
     [
-        g / camera_neutral[0].max(1e-6),
+        g / clamp_denominator(camera_neutral[0], 1e-6),
         1.0,
-        g / camera_neutral[2].max(1e-6),
+        g / clamp_denominator(camera_neutral[2], 1e-6),
     ]
 }
 
@@ -472,6 +480,55 @@ mod tests {
                 "temp_k={temp_k}: gains={gains:?}"
             );
         }
+    }
+
+    #[test]
+    fn clamp_denominator_preserves_sign_instead_of_flipping_it() {
+        // Regression test: `.max(epsilon)` alone would turn -0.5 into epsilon (a small positive
+        // number), not -epsilon -- silently flipping the sign of whatever divides by it.
+        assert_eq!(clamp_denominator(-0.5, 1e-6), -0.5);
+        assert_eq!(clamp_denominator(0.5, 1e-6), 0.5);
+        assert_eq!(clamp_denominator(-1e-9, 1e-6), -1e-6);
+        assert_eq!(clamp_denominator(1e-9, 1e-6), 1e-6);
+        assert_eq!(clamp_denominator(0.0, 1e-6), 1e-6);
+    }
+
+    #[test]
+    fn wb_gains_for_temp_tint_does_not_flip_sign_on_a_negative_camera_response() {
+        // Regression test for a real bug: a camera matrix with a negative off-diagonal entry can
+        // legitimately put `camera_neutral`'s R or B channel below zero at some chromaticity --
+        // `.max(epsilon)` alone would silently floor that up to a tiny *positive* number instead
+        // of clamping its magnitude, producing a wildly wrong-signed gain. This cam_xyz is
+        // engineered so the R-channel response at daylight-ish chromaticities goes negative.
+        let cam_xyz = [
+            -0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        let gains = wb_gains_for_temp_tint(&cam_xyz, 5500.0, 0.0);
+        assert!(
+            gains.iter().all(|g| g.is_finite()),
+            "gains must stay finite: {gains:?}"
+        );
+        // The old `.max(1e-6)` bug produced a gain with |g[0]| in the hundreds of thousands
+        // (dividing by a ~1e-6-floored near-zero denominator); a magnitude-clamped, sign-
+        // preserving denominator keeps the gain in a plausible WB range instead.
+        assert!(
+            gains[0].abs() < 100.0,
+            "gain magnitude should stay plausible, not blow up from a sign-flipped clamp: {gains:?}"
+        );
+    }
+
+    #[test]
+    fn wb_gains_for_temp_tint_handles_a_tint_extreme_enough_to_push_y_toward_zero() {
+        // At an extreme (out-of-slider-range) tint, `y` can approach zero -- clamp_denominator
+        // must keep the xyz->camera_neutral division finite rather than blowing up.
+        let cam_xyz = [
+            0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        let gains = wb_gains_for_temp_tint(&cam_xyz, 5500.0, 1_000_000.0);
+        assert!(
+            gains.iter().all(|g| g.is_finite()),
+            "gains must stay finite even for an extreme tint: {gains:?}"
+        );
     }
 
     #[test]
