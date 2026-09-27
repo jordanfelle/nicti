@@ -74,6 +74,10 @@ pub struct SharpnessScore(pub f64);
 /// global candidate below so a small in-focus subject against a defocused background scores as
 /// sharp, not blurred-on-average.
 fn max_over_tiles<F: Fn(&GrayFrame) -> f64>(frame: &GrayFrame, tile: u32, score_tile: F) -> f64 {
+    // `tile == 0` would leave `x`/`y` at 0 forever below -- an infinite loop, not a panic, caught
+    // by adversarial review. Every call site today hardcodes `DEFAULT_TILE = 64`, but this is a
+    // public fn with no other guard.
+    let tile = tile.max(1);
     let mut best = 0.0f64;
     let mut y = 0;
     while y < frame.dims.height {
@@ -329,6 +333,15 @@ mod tests {
                 Rgb([20, 20, 20])
             }
         })
+    }
+
+    #[test]
+    fn laplacian_variance_tiled_does_not_hang_on_a_zero_tile_size() {
+        // Regression test for an adversarial-review-caught bug: `tile == 0` used to leave the
+        // tiling loop's `x`/`y` counters stuck at 0 forever (an infinite loop, not a panic).
+        let frame = GrayFrame::from_rgb(&checkerboard(32, 32, 4));
+        let score = laplacian_variance_tiled(&frame, 0).0;
+        assert!(score >= 0.0);
     }
 
     fn box_blur(img: &RgbImage, radius: u32) -> RgbImage {
