@@ -5171,11 +5171,14 @@ name = "nicti-render"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "bytemuck",
  "nicti-claw",
  "nicti-pawprint",
+ "pollster",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "wgpu 30.0.1",
 ]
 
 [[package]]

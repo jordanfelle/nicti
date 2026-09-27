@@ -19,6 +19,19 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   `crates/nicti-pawprint::chain` (the hashing) plus `crates/nicti-render::graph::RenderGraph` (the
   DAG), with `set_own_hash` added as the missing "update a node in place" API — the spike's own
   cache-key test had no way to change one node without reconstructing the whole graph.
+
+  **Also landed in #45**: the real `RenderStage` execution trait (`crates/nicti-render::renderer`)
+  and the graph-driven `Renderer` that dispatches against it. A `Baked` node's `BakedExec` runs
+  only on a `cache::Tier` miss; every `Live`/`Geometry` node fuses into exactly one dispatch each,
+  keyed by a composite hash chaining its constituent nodes' cache keys — literally the same
+  `RenderGraph::cache_key` this ADR's own decision rule #1 is about, so the dispatch-count
+  invariant is a direct consequence of the already-proven graph semantics rather than a second,
+  independently-argued claim. Proven against counting mock stages (no real shader exists yet):
+  live-only change → 0 bake dispatches; crop-only change → 0 bake and 0 live dispatches;
+  unchanged re-render → 0 dispatches of any kind; undo → a cache hit; a baked-stage change →
+  rebakes exactly its `invalidated_bakes` set. `gpu.rs` (the shared `GpuContext`, adapted from
+  `spikes/glint`) and `frame.rs` (`FrameTexture`, always `Rgba16Float`) are the concrete GPU
+  plumbing this runs against — real wgpu, exercised against the lavapipe software adapter in CI.
 - **Cache tiers**: `spikes/loaf/src/cache.rs::Tier<V>`, a byte-budgeted LRU generic over a
   `size_of` closure, backs VRAM/RAM/disk with different budgets from the same eviction logic. A
   full-res (8280×5520) RGBA16F frame is ~349MB, a screen-res (3840-long-edge) frame is ~75MB — a

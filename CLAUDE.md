@@ -91,13 +91,16 @@ terse index: crate/spike → purpose → owning topic.
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39),
   `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
-- **`crates/nicti-render`** — the `RenderStage` extension point (execution signature still open,
-  #45's own GPU slice) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes
-  with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted VRAM/RAM/disk cache
-  tiers (`cache.rs`), and nearest-to-cursor bake prioritization (`prefetch.rs`) — promoted from
-  `spikes/loaf`. See [`render-graph`](.claude/rules/render-graph/REFERENCE.md). **Not yet renamed
-  to `nicti-tapetum`** — deferred to whoever lands the rest of the #45 stack, to avoid rebasing
-  onto a moving target; see the naming-convention section above.
+- **`crates/nicti-render`** — Tapetum's (#44/#45) stage-cached render graph and the real
+  `RenderStage` execution trait: a DAG of stage nodes with a blake3 cache key chained from
+  upstream (`graph.rs`), byte-budgeted VRAM/RAM/disk cache tiers (`cache.rs`), nearest-to-cursor
+  bake prioritization (`prefetch.rs`), the shared wgpu `GpuContext` (`gpu.rs`) and GPU-resident
+  `Rgba16Float` frame textures (`frame.rs`), and `renderer.rs`'s graph-driven `Renderer` (proves
+  ADR-0044's dispatch-count invariants against mock stages — the concrete decode/live-suffix/
+  geometry stages are a later slice). Promoted from `spikes/loaf`/`spikes/glint`. See
+  [`render-graph`](.claude/rules/render-graph/REFERENCE.md). **Not yet renamed to `nicti-tapetum`**
+  — deferred to whoever lands the rest of the #45 stack, to avoid rebasing onto a moving target;
+  see the naming-convention section above.
 - **`crates/nicti-pawprint`** — the non-destructive `EditDocument`/`StageEntry` (ADR-0021), its
   canonical-JSON + blake3 stage hashing (`canonical.rs`, feeding `nicti-render::graph`'s cache
   key), and append-only edit history with slider-drag compaction (`history.rs`) — promoted from

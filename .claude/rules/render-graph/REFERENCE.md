@@ -50,8 +50,26 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   `StageKind`, promoted from `spikes/loaf/src/graph.rs` with a persistent memoized cache key and
   the `set_own_hash` update API the spike lacked), `cache.rs` (`Tier<V>`, promoted from
   `spikes/loaf/src/cache.rs` with an `O(log n)` touch), `prefetch.rs` (`priority_order`, promoted
-  as-is). The `RenderStage` execution trait itself (GPU buffer bindings, the fused live-suffix
-  dispatch) is still open — #45's own GPU slice.
+  as-is), `gpu.rs` (the shared `GpuContext`, one wgpu device/queue per ADR-0016, adapted from
+  `spikes/glint/src/gpu.rs`), `frame.rs` (`FrameTexture`, always `Rgba16Float` — a core format
+  needing no `SHADER_F16` feature, unlike a raw f16 storage buffer — plus a `FramePool` free-list),
+  and `renderer.rs` (the real `RenderStage` execution trait extension — `kind`/`default_params`/
+  `cache_contribution`/`impl_version` — and the graph-driven `Renderer`: a `Baked` node dispatches
+  its `BakedExec` only on a `cache::Tier` miss; every `Live`/`Geometry` node fuses into exactly one
+  `LiveExec`/`GeometryExec` dispatch each, keyed by a composite hash of its constituent nodes'
+  cache keys, sorted before hashing so it doesn't depend on the caller's slice order the way
+  `graph::RenderGraph::cache_key` already doesn't for upstream ids). Proven against counting mock
+  stages: a live-only change costs 0 bake dispatches, a crop-only change costs 0 bake *and* 0 live
+  dispatches, an identical re-render costs 0 of anything, undoing back to a prior baked state is a
+  cache hit (true as long as `cache::Tier`'s byte budget hasn't evicted that entry meanwhile — a
+  performance guarantee, not a correctness one: a wrongly-evicted entry just costs a redundant
+  re-dispatch, never a wrong image, since a hit is only ever reused when `cache_key` already
+  proves the state matches), and a baked-stage change rebakes exactly its downstream set — each
+  test derives its expected count from `RenderGraph::invalidated_bakes` itself, not a hand-picked
+  number. The concrete decode/live-suffix/geometry stage implementations are a later #45 slice;
+  this only settles the shape every stage plugs into. `gpu::GpuContext::new` with an explicit
+  `GpuPreference::Backend` errors if no adapter matches that exact backend, rather than silently
+  falling back to a different one (only `Auto` falls back).
 - **`crates/nicti-pawprint`** (#21/#44/#45, landed) — `EditDocument`/`StageEntry`/`history`
   (promoted from `spikes/pawprint`) plus `canonical::{hash_value, chain}` (merging pawprint's
   original one-upstream `hash_stage`/`cache_key` with `spikes/loaf/src/hash.rs`'s DAG-generalized
