@@ -18,7 +18,15 @@ struct Uniforms {
     col1: vec4<f32>,
     col2: vec4<f32>,
     apply_oetf: u32,
-    _pad: vec3<u32>,
+    // Three scalar u32 pads, not a `vec3<u32>` -- a vecN pad field would itself need align 16 in
+    // WGSL's uniform-address-space layout rules (same as vec4), pushing this field (and the
+    // struct's total size) 12 bytes past what the host-side `DisplayUniforms` (three plain
+    // `[u32; 3]` array pads, 64 bytes total, no vecN alignment) actually allocates -- a real
+    // min-binding-size mismatch caught in review, not just a style choice. Matches
+    // `nicti-tapetum::stages::LiveUniforms`'s own scalar-tail pattern for the same reason.
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var frame_tex: texture_2d<f32>;

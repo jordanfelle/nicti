@@ -157,3 +157,68 @@ impl CallbackTrait for ViewportCallback {
         render_pass.draw(0..3, 0..1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nicti_tapetum::frame::Extent;
+    use nicti_tapetum::gpu::{GpuContext, GpuPreference};
+
+    /// Regression test for a real bug caught in this PR's own adversarial review: an earlier
+    /// version of `display.wgsl`'s `Uniforms` struct trailed with a `_pad: vec3<u32>`, which WGSL's
+    /// uniform-address-space layout rules give align 16 (same as any vecN) -- pushing the shader's
+    /// *reflected* struct size to 80 bytes, 16 more than `DisplayUniforms`'s actual 64-byte
+    /// `repr(C)` layout (plain `[u32; 3]` has no such alignment bump). Since the pipeline's bind
+    /// group layout is auto-derived (`layout: None`) from that reflected shader struct,
+    /// `create_bind_group`'s min-binding-size validation against the real 64-byte buffer would
+    /// panic the first time the Develop tab actually painted -- a path no unit test previously
+    /// exercised (`nicti-pelt` had no tests at all). This builds the exact same pipeline/buffer/
+    /// bind-group `ViewportCallback::prepare` builds, against a real device, so a future layout
+    /// drift between the Rust struct and the WGSL struct fails here instead of only in a live app.
+    #[test]
+    fn bind_group_creation_matches_the_shaders_reflected_uniform_layout() {
+        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
+            eprintln!("no wgpu adapter available in this environment, skipping");
+            return;
+        };
+
+        let target_format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut resources = ViewportResources::new(&gpu.device, target_format);
+        let frame = Arc::new(FrameTexture::new(
+            &gpu,
+            Extent {
+                width: 4,
+                height: 4,
+            },
+        ));
+
+        gpu.queue.write_buffer(
+            &resources.uniform_buf,
+            0,
+            bytemuck::bytes_of(&resources.uniforms),
+        );
+        let bind_group_layout = resources.pipeline.get_bind_group_layout(0);
+        resources.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test bind group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&frame.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: resources.uniform_buf.as_entire_binding(),
+                },
+            ],
+        }));
+
+        // wgpu's default uncaptured-error handler panics synchronously on a validation error
+        // (e.g. the min-binding-size mismatch this test guards against) during device.poll --
+        // reaching this line at all, with a real bind group produced, is the assertion.
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+        assert!(resources.bind_group.is_some());
+    }
+}
