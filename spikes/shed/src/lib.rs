@@ -2,6 +2,7 @@
 //! `docs/research/shed-lrcat-schema.md` is the write-up this spike feeds.
 
 pub mod develop;
+pub mod hashes;
 pub mod inventory;
 pub mod open;
 pub mod privacy;

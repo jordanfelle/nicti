@@ -9257,7 +9257,9 @@ version = "0.0.0"
 dependencies = [
  "agprefs",
  "anyhow",
+ "blake3",
  "clap",
+ "md5",
  "rusqlite",
  "serde",
  "serde_json",

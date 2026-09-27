@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use shed::{develop, inventory, open, privacy};
+use shed::{develop, hashes, inventory, open, privacy};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -25,6 +25,18 @@ enum Command {
     /// unowned, before `Develop`'s classifier was updated to assign each one an owner (counts
     /// only -- no value contents, some can carry user preset identifiers).
     DevelopUsage { catalog: PathBuf },
+    /// #158: NULL rate, length, character-class shape, and distinctness of `AgLibraryFile.md5`/
+    /// `importHash`, aggregates only -- never a raw value.
+    HashStats { catalog: PathBuf },
+    /// #158: recomputes a full-file MD5 (and a local copy of homing's tier-(b) partial BLAKE3,
+    /// for a cost-table data point) against a random sample of real files the catalog points at,
+    /// to check whether `md5` is genuinely a full-file hash. Reports counts and timing
+    /// percentiles only.
+    VerifyMd5 {
+        catalog: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        sample: usize,
+    },
     /// Fail if any of `files` contains a keyword/collection/path string pulled from `catalog`.
     PrivacyCheck {
         catalog: PathBuf,
@@ -43,6 +55,8 @@ fn main() -> Result<()> {
         Command::Inventory { catalog } => cmd_inventory(&catalog),
         Command::Develop { catalog } => cmd_develop(&catalog),
         Command::DevelopUsage { catalog } => cmd_develop_usage(&catalog),
+        Command::HashStats { catalog } => cmd_hash_stats(&catalog),
+        Command::VerifyMd5 { catalog, sample } => cmd_verify_md5(&catalog, sample),
         Command::PrivacyCheck { catalog, files } => cmd_privacy_check(&catalog, &files),
     }
 }
@@ -98,6 +112,20 @@ fn cmd_develop_usage(catalog: &std::path::Path) -> Result<()> {
     let conn = open::open_backup(catalog)?;
     let usage = develop::analyze_unowned_keys(&conn)?;
     println!("{}", serde_json::to_string_pretty(&usage)?);
+    Ok(())
+}
+
+fn cmd_hash_stats(catalog: &std::path::Path) -> Result<()> {
+    let conn = open::open_backup(catalog)?;
+    let stats = hashes::stats(&conn)?;
+    println!("{}", serde_json::to_string_pretty(&stats)?);
+    Ok(())
+}
+
+fn cmd_verify_md5(catalog: &std::path::Path, sample: usize) -> Result<()> {
+    let conn = open::open_backup(catalog)?;
+    let summary = hashes::verify_sample(&conn, sample)?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }
 

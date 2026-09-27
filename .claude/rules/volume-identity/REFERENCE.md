@@ -28,7 +28,12 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
 - **Relink tiers, cheapest first**: (a) size+name (weak) → (b) partial BLAKE3, 64KB head+tail
   (import-time default) → (c) full-file BLAKE3 (on-demand only — DNG in-place rewrites by LRC are
   expected to break this) → (d) EXIF natural key (body serial + `ImageNumber` 0xA306 + DateTimeOriginal
-  + SubSecTimeOriginal, all-or-nothing).
+  + SubSecTimeOriginal, all-or-nothing). Tier (a)'s `SizeNameKey` has no `mtime` field, despite an
+  earlier doc-comment describing it as "size+mtime+name" (fixed, #158).
+- **LRC's own `md5`/`importHash` cannot seed these tiers (#158/ADR-0158)**: `md5` was never
+  populated in the real catalog measured (0/380,298 rows), and `importHash`'s derivation is
+  unconfirmed despite being present and unique per-file — #62 computes tier (b) fresh at import
+  time as originally planned, rather than seeding from either LRC column.
 - **Mount detection**: `sysinfo` polling implemented; `CM_Register_Notification` push backend
   stubbed, not implemented — flagged follow-up, not a silent gap.
 - **ADR-0071 is Proposed, not Accepted** — this sandbox has no Windows/mountable NTFS volume, so

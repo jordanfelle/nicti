@@ -157,6 +157,12 @@ Real, measured this pass: table/column shapes (137 tables), all aggregate counts
 kind split, the root-folder drive-letter/relative-path split, and the `pick`/`rating` type gotcha.
 
 Deferred, not resolved here: `.lrcat-data` blob linkage, smart-collection rule-criteria mapping (no
-real example to measure against), `AgLibraryFile.md5`/`importHash` cross-check against
-`spikes/homing`'s own fingerprint tiers, and the exact per-parameter develop-setting conversion
-math (each owner ticket's own scope, not #61's).
+real example to measure against), and the exact per-parameter develop-setting conversion math
+(each owner ticket's own scope, not #61's).
+
+**`AgLibraryFile.md5`/`importHash` cross-check against `spikes/homing`'s own fingerprint tiers —
+resolved by #158/ADR-0158**: `md5` is NULL on all 380,298 rows in this catalog (not a completeness
+gap — nothing to use at all); `importHash` is 99.97% present and 100% distinct among non-NULL
+values (no duplicate groups), consistent with a per-file identifier rather than a per-import
+token, but its derivation is unconfirmed so #62 keeps it provenance-only. See ADR-0158 for the full
+measured breakdown.

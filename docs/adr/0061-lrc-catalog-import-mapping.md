@@ -40,9 +40,12 @@ additionally carry a non-empty `relativePathFromCatalog` (LRC's own portable-cat
 this split is real and not universal, so #62's importer must handle a root having only an absolute
 path. 1,057 folders, 380,298 files (2 fewer than `Adobe_images`' 380,300 — `Adobe_images` includes
 2 virtual copies, which share `AgLibraryFile` rows with their master via `masterImage`, not a
-missing-file bug). `AgLibraryFile.md5`/`importHash` are candidate relink inputs for #71's tiers
-(b)/(a) respectively, not yet cross-checked against `spikes/homing`'s own fingerprints in this pass
-— flagged as a follow-up (see Consequences).
+missing-file bug). `AgLibraryFile.md5`/`importHash` were flagged here as candidate relink inputs
+for #71's tiers, not yet cross-checked against `spikes/homing`'s own fingerprints in this pass —
+**#158/ADR-0158 resolved this and found the original (b)/(a) tier pairing was wrong in kind**: an
+MD5 value cannot seed a BLAKE3 tier at all, and if `md5` is a full-file hash it's closer to tier
+(c) (excluded from routine import for the DNG-rewrite reason ADR-0071 already gives), not tier (b).
+See ADR-0158 for the measured resolution.
 
 ### Q2: Library metadata
 
@@ -209,7 +212,8 @@ constraint above (either the workspace's `den` spike is gone by then per its own
     default to #40 with a real per-filter-type split #62 must apply (#51 for People/Reflection
     Removal, the new #174 for Super Resolution); `LensBlur` is provenance-only (zero real usage
     measured); `Preset`/`ToggleStyleAmount`/`ToggleStyleDigest` → #52.
-  - `AgLibraryFile.md5`/`importHash` cross-check against `spikes/homing`'s relink fingerprints (Q1).
+  - ~~`AgLibraryFile.md5`/`importHash` cross-check against `spikes/homing`'s relink fingerprints
+    (Q1)~~ **Resolved by #158/ADR-0158.**
   - `lrcat-extractor` adopt/fork re-evaluation once the `den`/`rusqlite` version conflict is no
     longer live in this workspace (Q8).
 - **`spikes/shed`** stays in the repo as #62's own starting point (schema/inventory/develop/

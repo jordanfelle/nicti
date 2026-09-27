@@ -61,6 +61,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0115](0115-rocksdb-evaluation.md) | 0015 | RocksDB (catalog store candidate) | Rejected |
 | [0116](0116-fjall-evaluation.md) | 0016 | fjall (catalog store candidate) | Rejected |
 | [0143](0143-preview-codec-followup.md) | 0022 | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
+| [0158](0158-lrc-hash-relink-seeding.md) | — | LRC `md5`/`importHash` vs homing's relink fingerprints | Accepted |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.

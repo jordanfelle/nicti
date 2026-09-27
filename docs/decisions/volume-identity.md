@@ -30,6 +30,12 @@ Covers #71's volume-identity key, the volume/root/asset schema, and file-fingerp
   are present — a partial key is treated as worse than none, since it would falsely match every
   other file missing the same fields. Real per-body MakerNote shutter-count extraction is
   deferred, tracked as a follow-up once #71 merges.
+  **#158/ADR-0158 cross-checked LRC's own `AgLibraryFile.md5`/`importHash` against these tiers**:
+  neither can seed tier (b) or (c) — `md5` was flagged in ADR-0061 as a candidate but turned out to
+  be NULL on every one of 380,298 real rows measured (never populated in this catalog at all, not a
+  partial gap), and `importHash`, while 99.97% present and 100% distinct among non-NULL values, has
+  an unconfirmed derivation, so it's kept as opaque provenance rather than used for relink or
+  dedupe. #62 computes tier (b) fresh at import time as originally planned.
   **Mount-change detection**: `sysinfo`-based polling is implemented
   (`spikes/homing/src/mount_events.rs`); `CM_Register_Notification` push-based detection is
   stubbed as an explicit, documented follow-up rather than silently missing — the issue's own ask

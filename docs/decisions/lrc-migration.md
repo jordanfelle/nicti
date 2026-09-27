@@ -38,6 +38,12 @@ is the per-topic summary; those two are the full research trail.
   provenance blob, translate only what's needed at import time.
 - **`.lrcat-data` blobs**: ~590 files, ~270MB each, referenced by `hasBigData` (26,195 of 380,307
   develop-settings rows) — exact linkage unconfirmed, flagged as a follow-up, not resolved.
+- **`md5`/`importHash` cross-check against homing's relink tiers (#158/ADR-0158)**: `md5` is NULL
+  on all 380,298 rows in this catalog — not a partial gap, nothing is there at all, so #62 must not
+  plan on it as a relink or dedupe input in any role. `importHash` is 99.97% present with every
+  non-NULL value distinct (no duplicate groups, shaped like a per-file id rather than a
+  per-import-session token), but its derivation is unconfirmed — kept as opaque provenance only,
+  same policy as every other raw LRC field this ADR already covers.
 - **#53 feasibility**: 380,300 assets, ~1.77M develop-history-step rows (~4.7/image) give a real,
   usable before/after training set. Dataset construction itself is #53's own scope.
 - **`lrcat-extractor` (MPL-2.0) — real Cargo constraint found, not adopted as a dependency**: its
