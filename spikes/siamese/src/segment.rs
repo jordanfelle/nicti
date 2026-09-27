@@ -52,27 +52,28 @@ fn ort_err(e: impl std::fmt::Display) -> SegmentError {
 
 /// Initializes the global `ort` environment exactly once -- same `OnceLock` pattern as
 /// `spikes/groom/src/ai.rs::ensure_ort_environment`, since the environment is process-global and
-/// `load-dynamic` requires this to run before any other `ort` API call.
+/// `load-dynamic` requires this to run before any other `ort` API call. Keep both in sync (#179).
 ///
-/// **Known gap, shared with groom's identical implementation, deliberately not fixed here:**
-/// `commit()` returns `false` both when the environment failed to initialize *and* when a
-/// different caller already committed a (possibly compatible) environment first -- this code
-/// treats both as a permanent error, cached forever by the `OnceLock`. If groom's and this
-/// module's wrappers ever ran in the same process, whichever committed second would fail every
-/// subsequent call, even with a perfectly usable environment already active. Fixing this properly
-/// means deciding how to verify an already-committed environment's compatibility (EP support,
-/// dylib path) before accepting it, which isn't a contained change and would need to touch both
-/// modules together to stay consistent -- filed as issue #179 rather than fixed unilaterally here.
+/// `EnvironmentBuilder::commit()` returning `false` is not a failure: per its own doc comment
+/// (ort 2.0.0-rc.13), `false` means "an environment has already been configured" -- `commit()`
+/// only inserts the builder into a process-global `OnceLock`, it never calls ONNX Runtime's
+/// `CreateEnv` itself, so there is no way for it to report a genuine init failure at all. A real
+/// failure (bad dylib, version mismatch) surfaces from `ort::init_from` above instead, and is
+/// already propagated by the `?`. So this proceeds either way once `init_from` succeeds -- if
+/// groom's and this module's wrappers ever run in the same process, whichever calls this second
+/// no longer fails every subsequent model load; it just reuses whichever environment committed
+/// first. **Known limitation**: `ort`'s public API exposes no way to inspect which dylib path or
+/// execution providers the winning environment actually used -- if two callers in the same
+/// process request genuinely incompatible configurations, the loser silently runs against the
+/// winner's environment instead of its own requested one, with no way to detect or warn about it
+/// here.
 fn ensure_ort_environment(dylib_path: &Path) -> Result<(), SegmentError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     let result = INIT.get_or_init(|| {
         let builder =
             ort::init_from(dylib_path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
-        if builder.commit() {
-            Ok(())
-        } else {
-            Err("ort environment commit() returned false".to_string())
-        }
+        builder.commit();
+        Ok(())
     });
     result.clone().map_err(SegmentError::Ort)
 }
@@ -317,5 +318,20 @@ mod tests {
             .segment(&image, 64, 64)
             .expect("a real model should load and run");
         assert_eq!(alpha.data.len(), alpha.width * alpha.height);
+    }
+
+    /// Proves #179's actual fix: a second `ensure_ort_environment` call in the same process (the
+    /// scenario that used to fail forever once any earlier caller -- this test, or `groom`, or a
+    /// future caller -- had already committed an environment) must succeed, not error. Needs a
+    /// real ONNX Runtime shared library to get past `ort::init_from`'s own dlopen, so this can't
+    /// run in CI (no real dylib on disk there) -- same posture as `runs_birefnet_if_present`.
+    #[test]
+    #[ignore = "needs a real ONNX Runtime shared library on disk"]
+    fn ensure_ort_environment_second_call_in_process_succeeds() {
+        let dylib_path = std::env::var("NICTI_TEST_ORT_DYLIB").expect("set NICTI_TEST_ORT_DYLIB");
+        let dylib_path = Path::new(&dylib_path);
+        ensure_ort_environment(dylib_path).expect("first call must succeed");
+        ensure_ort_environment(dylib_path)
+            .expect("second call must reuse the already-committed environment, not error");
     }
 }
