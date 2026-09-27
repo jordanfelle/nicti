@@ -15,6 +15,9 @@ and this doc is the canonical guide for making one.
 - **Linux GUI headers** (`libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, `libxi-dev`,
   `libxrandr-dev`, `libgl1-mesa-dev`, `libfontconfig1-dev`) — only if you're touching
   `spikes/pelt-egui`/`pelt-iced`/`pelt-slint` on Linux.
+- **libclang/LLVM** — only if you're touching `spikes/pelt-slint` (its `i-slint-renderer-skia`
+  dependency's `skia-bindings` crate needs `bindgen`, same requirement as any other bindgen-based
+  build). Not needed on Windows CI (the runner ships LLVM by default).
 - **The LibRaw submodule** — only if you're touching `crates/nicti-decode` or `spikes/retina`:
   ```bash
   git submodule update --init crates/nicti-decode/vendor/LibRaw
