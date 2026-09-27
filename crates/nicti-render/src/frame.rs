@@ -180,17 +180,7 @@ impl FramePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::GpuPreference;
-
-    fn test_gpu() -> Option<GpuContext> {
-        match GpuContext::new(GpuPreference::Auto) {
-            Ok(ctx) => Some(ctx),
-            Err(_) => {
-                eprintln!("no wgpu adapter available in this environment, skipping");
-                None
-            }
-        }
-    }
+    use crate::test_util::shared_test_gpu as test_gpu;
 
     #[test]
     fn byte_size_matches_the_documented_full_res_estimate() {

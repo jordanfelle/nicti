@@ -637,15 +637,7 @@ mod tests {
         assert_eq!(crop_stage().kind(), StageKind::Geometry);
     }
 
-    fn test_gpu() -> Option<GpuContext> {
-        match GpuContext::new(crate::gpu::GpuPreference::Auto) {
-            Ok(ctx) => Some(ctx),
-            Err(_) => {
-                eprintln!("no wgpu adapter available in this environment, skipping");
-                None
-            }
-        }
-    }
+    use crate::test_util::shared_test_gpu as test_gpu;
 
     /// A tiny synthetic 2x2 "RAW" frame with distinct per-pixel, per-channel values, non-zero
     /// black level and per-channel `cblack`, and a `maximum` that doesn't evenly divide -- picked
@@ -972,7 +964,6 @@ mod tests {
     #[test]
     fn full_pipeline_end_to_end_produces_correctly_colored_output() {
         let Some(gpu) = test_gpu() else { return };
-        let gpu = std::sync::Arc::new(gpu);
         let frame = synthetic_linear_frame();
         let extent = crate::frame::Extent {
             width: frame.width,

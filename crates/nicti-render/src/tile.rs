@@ -309,15 +309,7 @@ impl<'a> TiledRender<'a> {
 mod tests {
     use super::*;
 
-    fn test_gpu() -> Option<GpuContext> {
-        match GpuContext::new(crate::gpu::GpuPreference::Auto) {
-            Ok(ctx) => Some(ctx),
-            Err(_) => {
-                eprintln!("no wgpu adapter available in this environment, skipping");
-                None
-            }
-        }
-    }
+    use crate::test_util::shared_test_gpu as test_gpu;
 
     fn small_budget() -> TileBudget {
         TileBudget {
@@ -547,7 +539,6 @@ mod tests {
     #[test]
     fn tiled_render_with_a_correct_halo_matches_a_whole_frame_render() {
         let Some(gpu) = test_gpu() else { return };
-        let gpu = std::sync::Arc::new(gpu);
         let extent = Extent {
             width: 24,
             height: 24,

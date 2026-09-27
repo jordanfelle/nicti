@@ -133,7 +133,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let source_path = verified_source_path(&manifest, ref_root.as_deref(), &ref_id)?;
             let render = RealRender::decode(&source_path)?;
-            let decoded = render.render()?; // establishes a real baked chain output as input
+            let decoded = render.render_baked()?; // the live suffix's real predecessor
             let output = nicti_render::frame::FrameTexture::new(&render.gpu, render.extent);
             let protocol = Protocol::default();
             let stats = protocol.run(|| {
@@ -168,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let source_path = verified_source_path(&manifest, ref_root.as_deref(), &ref_id)?;
             let render = RealRender::decode(&source_path)?;
-            let decoded = render.render()?;
+            let decoded = render.render_live()?; // the crop/present's real predecessor
             let output = nicti_render::frame::FrameTexture::new(&render.gpu, render.extent);
             let protocol = Protocol::default();
             let stats = protocol.run(|| {
@@ -204,7 +204,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let source_path = verified_source_path(&manifest, ref_root.as_deref(), &ref_id)?;
             let render = RealRender::decode(&source_path)?;
-            let decoded = render.render()?;
+            let decoded = render.render_live()?; // the crop/present's real predecessor
 
             let roi = nicti_render::tile::Rect {
                 x: 0,

@@ -295,15 +295,7 @@ mod tests {
         }
     }
 
-    fn test_gpu() -> Option<Arc<GpuContext>> {
-        match GpuContext::new(crate::gpu::GpuPreference::Auto) {
-            Ok(ctx) => Some(Arc::new(ctx)),
-            Err(_) => {
-                eprintln!("no wgpu adapter available in this environment, skipping");
-                None
-            }
-        }
-    }
+    use crate::test_util::shared_test_gpu as test_gpu;
 
     /// Builds the hero-shaped graph (decode -> demosaic -> denoise -> lens -> heal, all Baked;
     /// then wb -> tone (Live); then crop (Geometry)) with the given per-node `own_hash` overrides

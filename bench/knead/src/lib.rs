@@ -141,6 +141,67 @@ impl RealRender {
             .map_err(|e| anyhow::anyhow!("render failed: {e:?}"))
     }
 
+    /// Runs only the baked prefix (decode + demosaic/denoise/lens/heal passthroughs), one-shot,
+    /// no caching -- the real input a live-suffix dispatch actually receives in the full
+    /// pipeline. Exists so a caller benchmarking the live-suffix or crop stage in isolation (the
+    /// `bench-live-suffix`/`bench-present`/`bench-tile` CLI subcommands) times it against its own
+    /// true predecessor's output, not [`Self::render`]'s already-fully-processed (post-crop)
+    /// final result -- a real bug an earlier version of this harness had (caught in #45 PR4's
+    /// adversarial review): re-running `LiveExec`/`GeometryExec` a second time over an image
+    /// that's already been through the live suffix and crop once doesn't crash (same extent),
+    /// but it isn't measuring the stage's real, single-pass cost against realistic input.
+    pub fn render_baked(&self) -> anyhow::Result<FrameTexture> {
+        let decode_exec = DecodeExec {
+            kernel: &self.decode_kernel,
+            frame: &self.frame,
+        };
+        let passthrough = PassthroughExec;
+        let baked_chain: [(&str, &dyn BakedExec); 5] = [
+            (DECODE, &decode_exec),
+            (DEMOSAIC, &passthrough),
+            (DENOISE, &passthrough),
+            (LENS, &passthrough),
+            (HEAL, &passthrough),
+        ];
+        let mut current: Option<FrameTexture> = None;
+        for (_, exec) in baked_chain {
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("knead baked prefix"),
+                    });
+            let output = FrameTexture::new(&self.gpu, self.extent);
+            exec.encode(&self.gpu, &mut encoder, current.as_ref(), &output);
+            self.gpu.queue.submit(Some(encoder.finish()));
+            current = Some(output);
+        }
+        current.ok_or_else(|| anyhow::anyhow!("baked chain is empty"))
+    }
+
+    /// Runs the baked prefix, then one live-suffix dispatch over it -- the real input a crop/
+    /// present dispatch actually receives in the full pipeline. See [`Self::render_baked`]'s own
+    /// doc comment for why this matters.
+    pub fn render_live(&self) -> anyhow::Result<FrameTexture> {
+        let baked = self.render_baked()?;
+        let output = FrameTexture::new(&self.gpu, self.extent);
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("knead live suffix"),
+            });
+        nicti_render::renderer::LiveExec::encode(
+            &self.live_kernel,
+            &self.gpu,
+            &mut encoder,
+            &baked,
+            &output,
+        );
+        self.gpu.queue.submit(Some(encoder.finish()));
+        Ok(output)
+    }
+
     /// Renders and reads the result back as a display-encoded (sRGB OETF) [`RgbImage`], for a
     /// golden comparison or a `.png` dump.
     pub fn render_to_image(&self) -> anyhow::Result<RgbImage> {
