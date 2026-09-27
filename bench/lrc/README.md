@@ -128,9 +128,12 @@ AutoHotkey64.exe auto-tone.ahk <BENCH_ROOT>\lrc-bench\auto-tone-set <BENCH_ROOT>
 
 Same throwaway-catalog and manual-import-dialog conventions as `setup.ahk` above, but with no
 edit-stack sync step: after selecting all in Library Grid, it prompts you to apply Auto Tone
-**manually via Quick Develop's "Auto" button** — not a scripted Ctrl+U. A real, current (2026) LRC
-regression makes batch Ctrl+U over a multi-photo selection silently apply to only the first photo,
-which would corrupt ground truth with no visible error; Quick Develop's Auto button is the
+**manually via Quick Develop's "Auto" button** — not a scripted Ctrl+U. A reported, current (2026)
+LRC regression (Adobe Community: "Batch editing in Library module (presets, AI updates, auto tone)
+only applies to the first selected photo in Lightroom Classic 15.3") means batch Ctrl+U over a
+multi-photo selection can silently apply to only the first photo, which would corrupt ground truth
+with no visible error — not independently reproduced here (no LRC install in this sandbox), but
+worth avoiding given multiple consistent real user reports. Quick Develop's Auto button is the
 documented reliable path, and the script prompts you to spot-check a few non-first photos before
 continuing. It then prompts you to fully quit Lightroom (not just close the window) before running
 `pupil` — the catalog must be checkpointed and released, since `pupil::truth::open_readonly`

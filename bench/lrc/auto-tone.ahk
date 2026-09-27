@@ -5,9 +5,9 @@
 ; Unlike hero.ahk/setup.ahk, this needs no manual edit-stack application and no Ctrl+S/XMP write:
 ; #202 reads the result straight out of this throwaway .lrcat via `pupil`'s `truth` module -- see
 ; ADR-0099's Decision section. Applying Auto Tone itself IS manual (Quick Develop's "Auto" button,
-; not a scripted Ctrl+U) -- a real, current (2026) Lightroom Classic regression makes batch Ctrl+U
-; over a multi-photo selection apply to only the first photo, which would silently corrupt ground
-; truth. This still follows setup.ahk's "don't automate the file-picker" caution: the import step
+; not a scripted Ctrl+U) -- see the reported (2026) Lightroom Classic batch-Ctrl+U regression cited
+; further down, which would silently corrupt ground truth if it applies here. This still follows
+; setup.ahk's "don't automate the file-picker" caution: the import step
 ; itself is also manual (see below), same reasoning as setup.ahk's own comment on why the
 ; edit-stack step isn't scripted there.
 ;
@@ -95,11 +95,13 @@ WinActivate("ahk_exe Lightroom.exe")
 Sleep(1000)
 
 ; Select all in Library Grid view, then apply Auto Tone manually via Quick Develop -- NOT a
-; scripted Ctrl+U. A real, current (2026) Lightroom Classic regression (Adobe Community: "Batch
-; editing in Library module (presets, AI updates, auto tone) only applies to the first selected
-; photo in Lightroom Classic 15.3") means a blind Ctrl+U over a multi-photo selection can silently
-; leave every photo but the first at its default (untouched) settings -- exactly the failure mode
-; that would corrupt #202's ground truth with no visible error. Quick Develop's own Auto button is
+; scripted Ctrl+U. A reported, current (2026) Lightroom Classic regression (Adobe Community:
+; "Batch editing in Library module (presets, AI updates, auto tone) only applies to the first
+; selected photo in Lightroom Classic 15.3") means a blind Ctrl+U over a multi-photo selection can
+; silently leave every photo but the first at its default (untouched) settings -- not independently
+; reproduced here (no LRC install in this sandbox), but worth avoiding given multiple consistent
+; real user reports -- exactly the failure mode that would corrupt #202's ground truth with no
+; visible error. Quick Develop's own Auto button is
 ; the documented reliable path for a batch, and the manual click plus verification below catches
 ; a version where it silently fails too.
 Send("g")

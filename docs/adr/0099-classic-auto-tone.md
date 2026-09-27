@@ -80,9 +80,13 @@ above and the candidates themselves are already fixed so #202 is a pure execute-
   CLI-argument convention (not a frozen file list this PR can't validate — see below). Creates a
   fresh **throwaway** catalog (never the user's real one), imports the sample set, selects all in
   Library Grid, then a manual (not scripted) Quick Develop "Auto" click applies Auto Tone to the
-  whole selection — **not** a scripted Ctrl+U: a real, current (2026) LRC regression makes a
-  batch Ctrl+U over multiple selected photos silently apply to only the first one, which would
-  corrupt ground truth with no visible error. No Ctrl+S/XMP write needed — results are read
+  whole selection — **not** a scripted Ctrl+U: a reported, current (2026) LRC regression (Adobe
+  Community: "Batch editing in Library module (presets, AI updates, auto tone) only applies to the
+  first selected photo in Lightroom Classic 15.3") means batch Ctrl+U over multiple selected photos
+  can silently apply to only the first one, which would corrupt ground truth with no visible
+  error — not independently reproduced against this repo's own LRC install (no LRC in this
+  sandbox), but multiple real user reports are consistent with each other. No Ctrl+S/XMP write
+  needed — results are read
   straight out of the throwaway `.lrcat` via `pupil::truth`, once Lightroom has fully exited (its
   own guard refuses a catalog with a live lock file or pending WAL frames).
 - **The sample set itself is #202's job, not this PR's.** `nicti-prowl::refset::select` (the
