@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use nicti_cornea::LinearFrame;
+use nicti_tapetum::coat::{ExposureParams, ToneParams, VibranceParams, WbParams};
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::Affine2D;
@@ -16,8 +17,8 @@ use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
-    DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
+    CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, CROP,
+    DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
 };
 
 const LIVE_IDS: [&str; 5] = [WB, WORKING_SPACE, EXPOSURE, TONE, VIBRANCE];
@@ -119,8 +120,20 @@ impl DevelopView {
         };
         let decode_kernel = DecodeKernel::new(&gpu);
         let live_kernel = LiveSuffixKernel::new(&gpu);
-        let matrix = color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz);
-        live_kernel.set_params(&gpu, matrix, 1.0, 0.0, 0.0);
+        let matrix = color::camera_to_working_space_matrix(
+            frame.cam_mul,
+            &frame.cam_xyz,
+            &WbParams::default(),
+        );
+        live_kernel.set_params(
+            &gpu,
+            &LiveParams {
+                working_space_matrix: matrix,
+                exposure: ExposureParams::default(),
+                tone: ToneParams::default(),
+                vibrance: VibranceParams::default(),
+            },
+        );
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(Affine2D::IDENTITY);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
