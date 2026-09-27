@@ -411,11 +411,10 @@ pub struct UnownedKeyUsage {
     /// writes on every image regardless of whether the AI Lens Blur filter was ever opened) from
     /// "the feature actually holds real data."
     pub active_count: i64,
-    /// `FilterList` only: each entry's `Filters[].Title` value (LRC's own internal AI-filter type
-    /// string, e.g. `"$$$/CRaw/Filter/Title/Denoise=Denoise"` -- not user data, this identifies
-    /// which filter panel was applied, not anything the user typed) with a row count. Confirmed
-    /// `FilterList` is not single-purpose: it holds Denoise, People Removal, Reflection Removal,
-    /// and Super Resolution entries, which don't share one owner ticket.
+    /// `FilterList` only: each entry's `Filters[].Title` value, canonicalized by
+    /// `canonicalize_filter_title` before use as a report key -- see that function's doc comment.
+    /// Confirmed `FilterList` is not single-purpose: it holds Denoise, People Removal, Reflection
+    /// Removal, and Super Resolution entries, which don't share one owner ticket.
     pub filter_titles: Option<BTreeMap<String, i64>>,
 }
 
@@ -434,6 +433,36 @@ fn is_active(value: &agprefs::Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Values(vals) => !vals.is_empty(),
         Value::Struct(fields) => !fields.is_empty(),
+    }
+}
+
+/// A sentinel bucket for a `FilterList.Filters[].Title` value that doesn't match LRC's own known
+/// localization-key shape -- see `canonicalize_filter_title`.
+const UNRECOGNIZED_FILTER_TITLE: &str = "<unrecognized filter title>";
+
+/// Every real `Title` value #157 observed looks like a Lightroom localization key:
+/// `"$$$/<path>/<Name>=<display label>"` (e.g. `"$$$/CRaw/Filter/Title/Denoise=Denoise"`,
+/// `"$$$/CRaw/Filter/PeopleRemoval/FilterPanelTitle=People Removal"`) -- Adobe's own fixed
+/// AI-filter-type identifiers, not user data. `analyze_unowned_keys` uses this value as a report
+/// key, though, so it must not blindly trust an arbitrary parsed string: a corrupt catalog, a
+/// future LRC version, or a hand-edited `.lrcat` could contain a `Title` that isn't one of these
+/// known identifiers at all. Only a value matching this exact shape (`$$$/` prefix, exactly one
+/// `=` splitting a key path from a short label) is reported verbatim; anything else collapses
+/// into `UNRECOGNIZED_FILTER_TITLE`, a fixed bucket with no raw content -- this keeps the tool's
+/// actual purpose (discovering which real, *known-shape* AI filters a catalog uses) while never
+/// serializing an unvalidated string as a JSON key.
+fn canonicalize_filter_title(title: &str) -> String {
+    let is_known_shape = title.starts_with("$$$/")
+        && title.matches('=').count() == 1
+        && title.split('=').nth(1).is_some_and(|label| {
+            !label.is_empty()
+                && label.len() <= 64
+                && label.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+        });
+    if is_known_shape {
+        title.to_string()
+    } else {
+        UNRECOGNIZED_FILTER_TITLE.to_string()
     }
 }
 
@@ -473,7 +502,9 @@ pub fn analyze_unowned_keys(conn: &Connection) -> Result<Vec<UnownedKeyUsage>> {
                 for filter in filters {
                     if let agprefs::Value::Struct(filter_fields) = filter {
                         if let Some(agprefs::Value::String(title)) = filter_fields.get("Title") {
-                            *filter_titles.entry(title.to_string()).or_insert(0) += 1;
+                            *filter_titles
+                                .entry(canonicalize_filter_title(title))
+                                .or_insert(0) += 1;
                         }
                     }
                 }
@@ -831,6 +862,46 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_filter_title_passes_through_known_shapes_and_buckets_the_rest() {
+        assert_eq!(
+            canonicalize_filter_title("$$$/CRaw/Filter/Title/Denoise=Denoise"),
+            "$$$/CRaw/Filter/Title/Denoise=Denoise"
+        );
+        assert_eq!(
+            canonicalize_filter_title(
+                "$$$/CRaw/Filter/PeopleRemoval/FilterPanelTitle=People Removal"
+            ),
+            "$$$/CRaw/Filter/PeopleRemoval/FilterPanelTitle=People Removal"
+        );
+        // No `$$$/` prefix at all.
+        assert_eq!(
+            canonicalize_filter_title("arbitrary user string"),
+            UNRECOGNIZED_FILTER_TITLE
+        );
+        // Right prefix, but no `=` splitting a key path from a label.
+        assert_eq!(
+            canonicalize_filter_title("$$$/CRaw/Filter/Title/Denoise"),
+            UNRECOGNIZED_FILTER_TITLE
+        );
+        // Two `=` signs -- not the expected one-split shape.
+        assert_eq!(
+            canonicalize_filter_title("$$$/a=b=c"),
+            UNRECOGNIZED_FILTER_TITLE
+        );
+        // Empty label after the `=`.
+        assert_eq!(
+            canonicalize_filter_title("$$$/a="),
+            UNRECOGNIZED_FILTER_TITLE
+        );
+        // Implausibly long label.
+        let long_label = "x".repeat(65);
+        assert_eq!(
+            canonicalize_filter_title(&format!("$$$/a={long_label}")),
+            UNRECOGNIZED_FILTER_TITLE
+        );
+    }
+
+    #[test]
     fn analyze_unowned_keys_distinguishes_present_from_active_and_breaks_down_filter_titles() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -854,14 +925,21 @@ mod tests {
             [r#"s = { LensBlur = {  } }"#],
         )
         .unwrap();
+        // A third row: a FilterList entry whose Title doesn't match LRC's known localization-key
+        // shape -- must collapse into the fixed sentinel bucket, not appear verbatim.
+        conn.execute(
+            "INSERT INTO Adobe_imageDevelopSettings (text) VALUES (?1)",
+            [r#"s = { FilterList = { Filters = { { Title = "not a real lrc title" } } } }"#],
+        )
+        .unwrap();
 
         let usage = analyze_unowned_keys(&conn).unwrap();
         let by_key: BTreeMap<&str, &UnownedKeyUsage> = usage.iter().map(|u| (u.key, u)).collect();
 
         assert_eq!(by_key["LensBlur"].present_count, 2);
         assert_eq!(by_key["LensBlur"].active_count, 0);
-        assert_eq!(by_key["FilterList"].present_count, 1);
-        assert_eq!(by_key["FilterList"].active_count, 1);
+        assert_eq!(by_key["FilterList"].present_count, 2);
+        assert_eq!(by_key["FilterList"].active_count, 2);
         assert_eq!(by_key["AllowFilters"].present_count, 1);
         assert_eq!(by_key["AllowFilters"].active_count, 1);
         assert_eq!(by_key["Preset"].present_count, 0);
@@ -871,6 +949,8 @@ mod tests {
             titles.get("$$$/CRaw/Filter/Title/Denoise=Denoise"),
             Some(&1)
         );
+        assert_eq!(titles.get(UNRECOGNIZED_FILTER_TITLE), Some(&1));
+        assert!(!titles.contains_key("not a real lrc title"));
         assert!(by_key["AllowFilters"].filter_titles.is_none());
     }
 }
