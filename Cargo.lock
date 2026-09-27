@@ -2292,6 +2292,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "crouch"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "clap",
+ "nicti-prowl",
+ "ort",
+ "pollster",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
+ "wgpu 30.0.1",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
