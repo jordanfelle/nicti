@@ -1,0 +1,29 @@
+[package]
+name = "scent"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #59 (ADR-0059): XMP interop with Lightroom Classic -- LRC-convention rating/label/keyword mapping, a preserve-everything XMP packet patcher, RAW-sidecar and JPEG-embedded read/write, and the nicti:/crs: write-gating logic ADR-0002 left open. Not a production crate."
+
+[lib]
+name = "scent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scent"
+path = "src/main.rs"
+
+[dependencies]
+quick-xml = "0.41"
+roxmltree = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+blake3 = "1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

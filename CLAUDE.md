@@ -21,8 +21,9 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
 `preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`lrc-migration` (0023), `masking` (0024), `culling` (0025), `denoise` (0040). A new ADR adds a
-bullet to both files of its topic (or a new topic) and to this list — not inline here.
+`lrc-migration` (0023), `masking` (0024), `culling` (0025), `denoise` (0040),
+`xmp-interop` (0059). A new ADR adds a bullet to both files of its topic (or a new topic) and to
+this list — not inline here.
 
 ## Performance targets and benchmarking
 
@@ -193,7 +194,15 @@ res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe; see
 capture-time reader, dHash/pHash/SSIM/DINOv2 similarity signals, two-level sequence-constrained
 grouping; see `docs/research/litter-burst-grouping.md` and `.claude/rules/culling/REFERENCE.md`)
 is real, tested (35 unit/integration tests), not path-gated, pending the reference-labelling
-measurement pass ADR-0025 describes.
+measurement pass ADR-0025 describes. `spikes/scent` (#59/ADR-0059's XMP-interop research — the
+LRC-convention rating/label/keyword field mapping, a `quick-xml`-based event-copy-and-patch packet
+reader/writer that preserves every property it doesn't own, `.xmp` sidecar naming + atomic write,
+JPEG-embedded APP1 XMP read/write (DNG/TIFF tag-700 write deferred, see the ADR), and the
+ADR-0002 conflict rule + `crs:` write-gate wired to real file mtimes/hashes; see
+`docs/research/scent-xmp-interop.md` and `.claude/rules/xmp-interop/REFERENCE.md`) is real, tested
+(28 unit + 2 env-gated real-file integration tests, all passing — the real-file tests skip cleanly
+in this sandbox, same constraint `homing` already documents), not path-gated, pending the
+follow-up hands-on LRC session the ADR describes before it can move to Accepted.
 
 ## Development workflow
 
