@@ -242,6 +242,22 @@ table.
 
 ## Amendments
 
+- **2026-09-27 (#241)**: the production UI crate this ADR points to is `crates/nicti-pelt` (not
+  `nicti-ui`, the name #241 was filed under) — matching the feline naming convention every other
+  crate uses, and reusing "pelt" from the now-superseded research spikes below (the visible coat
+  over Tapetum still fits the production shell). Device sharing (this ADR's own "one shared
+  device for compute and display" from ADR-0016) is implemented as: `nicti-pelt::run` passes
+  eframe's `WgpuSetup::CreateNew` a `device_descriptor` closure set to
+  `nicti_tapetum::gpu::device_descriptor_for` (the same features/limits `GpuContext::new` itself
+  requests, rather than eframe's own conservative default), then `PeltApp::new` wraps the
+  resulting `cc.wgpu_render_state`'s adapter/device/queue with the new
+  `GpuContext::from_device` constructor -- one real device, shared between egui's own render pass
+  and every Tapetum compute dispatch. A `FrameTexture`'s display -- linear ProPhoto RGB,
+  `Rgba16Float` -- into an 8-bit surface is a small dedicated fragment shader
+  (`nicti-pelt/shaders/display.wgsl`) applying the same `color::prophoto_to_srgb_linear_matrix()`/
+  sRGB-OETF pair `geometry::output_encode`'s CPU reference already uses, skipping the OETF when
+  the target format is itself `*Srgb` (the hardware already applies it on write in that case).
+
 - **2026-09-27 (#90)**: Status moved from Proposed to **Accepted — egui**. The planned
   reference-machine benchmark pass (`bench/pelt` against the three `pelt-*` spikes) was waived
   rather than run. Reasoning: the hard gates already fully determine the pick — Iced's wgpu-27 tax

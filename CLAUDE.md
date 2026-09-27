@@ -144,6 +144,16 @@ terse index: crate/spike → purpose → owning topic.
   `IngestReport::failed` rather than aborting the run). Runs serially; Pounce integration is a
   follow-up. See `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this
   promotes.
+- **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
+  eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
+  (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,
+  `shaders/display.wgsl`), placeholder library/loupe/develop view routing (`app.rs`), and a real
+  `nicti-lair` `SqliteCatalog` (`catalog.rs`). `render.rs` wires a synthetic gradient frame through
+  the real Tapetum pipeline for the Develop panel — loading a real NEF is #31's (loupe) scope, not
+  this ticket's. Named "pelt" (not the issue's own `nicti-ui`) to match the feline naming
+  convention below, reusing the name from the now-superseded `spikes/pelt-*` research spikes (#232
+  deletes those). Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
+  `nicti_pelt::run()` shim). See [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0068) →

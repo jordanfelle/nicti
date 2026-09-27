@@ -1,0 +1,18 @@
+[package]
+name = "nicti-pelt"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "The production app shell (#241): one eframe/egui window sharing its wgpu device with crates/nicti-tapetum (ADR-0016's 'one shared device'), a Tapetum-rendered frame painted via egui_wgpu::CallbackTrait (ADR-0068), placeholder library/loupe/develop view routing, and a real nicti-lair SqliteCatalog. Named after the visible coat over the tapetum lucidum, matching this repo's feline naming convention -- not the nicti-ui name #241 was filed under."
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.36"
+egui-wgpu = "0.36"
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+blake3 = "1"
+nicti-tapetum = { path = "../nicti-tapetum" }
+nicti-lair = { path = "../nicti-lair" }
+nicti-cornea = { path = "../nicti-cornea" }

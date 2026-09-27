@@ -98,37 +98,38 @@ impl GpuContext {
     }
 
     fn from_adapter(adapter: wgpu::Adapter) -> Result<Self, GpuError> {
+        let descriptor = device_descriptor_for(&adapter);
+        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))?;
+        Ok(Self::from_parts(&adapter, device, queue))
+    }
+
+    /// Builds a `GpuContext` around a `wgpu::Device`/`Queue` this crate didn't create itself --
+    /// the case a host application (`nicti-pelt`'s eframe window) that owns its own device needs,
+    /// so Tapetum's compute dispatches and the host's display draws share exactly one device
+    /// (ADR-0016's "one shared device for compute and display"), rather than Tapetum silently
+    /// creating a second one nothing else ever uses. The caller is responsible for having
+    /// requested `device` with (at least) [`device_descriptor_for`]'s own features/limits --
+    /// `eframe`'s `WgpuConfiguration::wgpu_setup` accepts a `device_descriptor` closure for
+    /// exactly this, see `nicti-pelt`'s own setup.
+    pub fn from_device(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self::from_parts(adapter, device, queue)
+    }
+
+    fn from_parts(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let info = adapter.get_info();
-        let features = adapter.features();
-        let mut required_features = wgpu::Features::empty();
-        if features.contains(wgpu::Features::TIMESTAMP_QUERY) {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        if features.contains(wgpu::Features::SHADER_F16) {
-            required_features |= wgpu::Features::SHADER_F16;
-        }
-        let limits = adapter.limits();
-
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("nicti-tapetum device"),
-                required_features,
-                required_limits: limits.clone(),
-                ..Default::default()
-            }))?;
-
+        let features = device.features();
+        let limits = device.limits();
         let timestamp_period_ns = queue.get_timestamp_period();
-
-        Ok(Self {
+        Self {
             device,
             queue,
             adapter_name: info.name,
             backend: info.backend,
             limits,
-            features: required_features,
+            features,
             timestamp_period_ns,
             is_software: info.device_type == wgpu::DeviceType::Cpu,
-        })
+        }
     }
 
     pub fn supports_timestamps(&self) -> bool {
@@ -137,6 +138,31 @@ impl GpuContext {
 
     pub fn supports_f16(&self) -> bool {
         self.features.contains(wgpu::Features::SHADER_F16)
+    }
+}
+
+/// The `wgpu::DeviceDescriptor` `GpuContext::new` requests from `adapter`: the adapter's own
+/// limits (not wgpu's conservative default, which caps well under a full-res 45MP frame) plus
+/// `TIMESTAMP_QUERY`/`SHADER_F16` when the adapter supports them. Exposed so a host that builds
+/// its own device against the same adapter (`nicti-pelt`'s eframe window, via
+/// `WgpuConfiguration::wgpu_setup`'s `device_descriptor` closure) requests the identical
+/// descriptor `GpuContext::from_device` then wraps -- without this, eframe's own default
+/// descriptor (`Limits::default()`, no optional features) would silently undersize the device
+/// Tapetum then has to render full-resolution frames through.
+pub fn device_descriptor_for(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let features = adapter.features();
+    let mut required_features = wgpu::Features::empty();
+    if features.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        required_features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
+    if features.contains(wgpu::Features::SHADER_F16) {
+        required_features |= wgpu::Features::SHADER_F16;
+    }
+    wgpu::DeviceDescriptor {
+        label: Some("nicti-tapetum device"),
+        required_features,
+        required_limits: adapter.limits(),
+        ..Default::default()
     }
 }
 
@@ -229,6 +255,51 @@ mod tests {
             }
             Err(e) => panic!("unexpected GPU error: {e}"),
         }
+    }
+
+    /// Regression test for `nicti-pelt`'s device-sharing path: a device requested via
+    /// `device_descriptor_for` and wrapped with `from_device` must report the same
+    /// features/limits `from_adapter` itself would have gotten from the *same* adapter -- if
+    /// these diverged, a host (eframe) building its own device this way could silently hand
+    /// Tapetum an undersized device (missing `SHADER_F16`, or wgpu's conservative default limits
+    /// instead of the adapter's own), passing every test here but failing only on a real
+    /// full-res frame.
+    ///
+    /// Deliberately compares against `from_adapter` on the *same* enumerated adapter instance,
+    /// not `GpuContext::new(GpuPreference::Auto)` -- on a multi-adapter machine, `new`'s own
+    /// backend-preference selection isn't guaranteed to land on the same physical adapter this
+    /// test enumerates first, which would make a mismatch mean nothing (two different adapters
+    /// legitimately have different limits) rather than proving `from_device` itself is correct
+    /// (caught in CodeRabbit's review of this PR).
+    #[test]
+    fn from_device_reports_the_same_features_and_limits_as_from_adapter() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
+        let Some(adapter) = adapters.into_iter().next() else {
+            eprintln!("no wgpu adapter available in this environment, skipping");
+            return;
+        };
+
+        let descriptor = device_descriptor_for(&adapter);
+        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
+            .expect("requesting a device with device_descriptor_for's own descriptor must succeed");
+        let via_from_device = GpuContext::from_device(&adapter, device, queue);
+
+        let via_from_adapter =
+            GpuContext::from_adapter(adapter).expect("requesting a second device must succeed");
+
+        assert_eq!(via_from_device.features, via_from_adapter.features);
+        assert_eq!(
+            via_from_device.limits.max_storage_buffer_binding_size,
+            via_from_adapter.limits.max_storage_buffer_binding_size
+        );
+        assert_eq!(
+            via_from_device.limits.max_texture_dimension_2d,
+            via_from_adapter.limits.max_texture_dimension_2d
+        );
     }
 
     /// An explicit `GpuPreference::Backend` for a backend with no enumerated adapter must error,

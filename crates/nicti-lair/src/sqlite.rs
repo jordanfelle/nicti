@@ -44,6 +44,16 @@ impl SqliteCatalog {
         })
     }
 
+    /// Total asset count across every root/volume -- a placeholder library-view figure
+    /// (`nicti-pelt`'s Library panel, #241) until #30's real paged/faceted grid query exists.
+    /// Inherent, not on `CatalogStore`: a plain count has no per-backend variation worth an
+    /// extension-point method yet, unlike the trait's other queries.
+    pub fn asset_count(&self) -> Result<u64, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM asset", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
     fn row_to_asset(row: &rusqlite::Row) -> rusqlite::Result<Asset> {
         Ok(Asset {
             id: row.get(0)?,
@@ -344,9 +354,48 @@ impl CatalogStore for SqliteCatalog {
 #[cfg(test)]
 mod tests {
     use super::empty_edit_document;
+    use super::SqliteCatalog;
 
     #[test]
     fn empty_edit_document_matches_the_on_disk_shape_adr_0021_documents() {
         assert_eq!(empty_edit_document(), r#"{"stages":{}}"#);
+    }
+
+    #[test]
+    fn asset_count_is_zero_on_a_fresh_catalog() {
+        let catalog = SqliteCatalog::open_in_memory().unwrap();
+        assert_eq!(catalog.asset_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn asset_count_reflects_inserted_assets() {
+        use crate::{CatalogStore, NewAsset};
+
+        let catalog = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = catalog.upsert_volume("test-volume", None, None, 0).unwrap();
+        let root_id = catalog.ensure_root(volume_id, "root").unwrap();
+        for i in 0..3 {
+            catalog
+                .insert_asset(
+                    root_id,
+                    &NewAsset {
+                        rel_path: format!("photo{i}.nef"),
+                        rel_path_fold: format!("photo{i}.nef"),
+                        size_bytes: 100,
+                        mtime_unix: 0,
+                        fingerprint: Some(format!("fp{i}")),
+                        natural_key: None,
+                        make: None,
+                        model: None,
+                        captured_at: None,
+                        width: None,
+                        height: None,
+                        imported_at: 0,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        assert_eq!(catalog.asset_count().unwrap(), 3);
     }
 }
