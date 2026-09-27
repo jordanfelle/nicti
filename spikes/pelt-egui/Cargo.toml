@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #68 (ADR-0006): egui/eframe GUI-framework candidate -- virtualized 2M-cell grid, loupe next/prev, and a custom wgpu viewport (egui_wgpu::CallbackTrait) driving spikes/pelt's live-chain compute kernel, measured for input latency via bench/whisker per hero-scenario.md's method. Not a production crate."
+description = "Throwaway spike for #68 (ADR-0068): egui/eframe GUI-framework candidate -- virtualized 2M-cell grid, loupe next/prev, and a custom wgpu viewport (egui_wgpu::CallbackTrait) driving spikes/pelt's live-chain compute kernel, measured for input latency via bench/whisker per hero-scenario.md's method. Not a production crate."
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }

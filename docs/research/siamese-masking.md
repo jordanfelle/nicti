@@ -1,9 +1,9 @@
-# Siamese: masking research write-up (#48, ADR-0024)
+# Siamese: masking research write-up (#48, ADR-0048)
 
 Feline name: Siamese/colorpoint cats carry a dark facial "mask" pattern — same naming logic as
 `groom` (grooming = removal) or `sniff` (fast-preview scent-tracking angle).
 
-This is the detailed research trail behind `docs/adr/0024-masking.md`'s Decision — read that ADR
+This is the detailed research trail behind `docs/adr/0048-masking.md`'s Decision — read that ADR
 first for the actual conclusions; this doc is what was tried and found along the way.
 
 ## Model survey
@@ -17,7 +17,7 @@ first for the actual conclusions; this doc is what was tried and found along the
 - A full ONNX export exists publicly at `huggingface.co/onnx-community/BiRefNet-ONNX`
   (`onnx/model.onnx`, confirmed reachable, **~970MB**). Downloading and running it was judged out
   of this pass's time budget — the same "obtaining actual checkpoints is out of scope for this
-  spike" call ADR-0007 made for LaMa/MobileSAM, applied here for the same reason (large download +
+  spike" call ADR-0050 made for LaMa/MobileSAM, applied here for the same reason (large download +
   CPU inference time on a model this size, in a single research pass that also had to cover
   geometry/compose/refine/GPU work). `spikes/siamese/src/segment.rs::BiRefNet` proves the loading
   shape only (`ModelNotFound` on a missing file; a real session-load attempt when a file is
@@ -88,8 +88,8 @@ direct answer to that specific risk if it holds up.
 
 ## LRC's own mask storage, cross-checked against this ADR's shape
 
-Per `spikes/shed/src/develop.rs` (#61/ADR-0023's own catalog-schema research) and
-`docs/adr/0002-non-destructive-edit-model.md`'s footnote on `crs:MaskGroupBasedCorrections`: LRC's
+Per `spikes/shed/src/develop.rs` (#61/ADR-0061's own catalog-schema research) and
+`docs/adr/0021-non-destructive-edit-model.md`'s footnote on `crs:MaskGroupBasedCorrections`: LRC's
 real catalogs (measured against a 380,307-asset real catalog) show `hasMasks` on 13,258 rows and
 `hasAIMasks` on 12,015 — AI masking is real, common usage, not a rare edge case, consistent with
 the hero scenario building it into the very first two mask ops of its edit stack. `#49`/`#62`'s
@@ -126,6 +126,6 @@ produce.
   encoder/decoder ONNX, ONNX Runtime's own prebuilt shared library) — all judged out of this
   pass's time budget rather than technically blocked; network access itself was available in this
   sandbox (confirmed via the HEAD requests above), unlike the no-GPU/no-real-weights sandbox
-  limitation ADR-0005/0006/0007/0021 all cite. The reference-machine follow-up issue should
+  limitation ADR-0016/0068/0050/0038 all cite. The reference-machine follow-up issue should
   attempt real inference, not just real hardware timing, since nothing here actually blocks it
   beyond time.

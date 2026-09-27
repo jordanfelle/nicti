@@ -1,4 +1,4 @@
-//! Throwaway spike for #33 (ADR-0025): burst/duplicate grouping. See each module's own doc
+//! Throwaway spike for #33 (ADR-0033): burst/duplicate grouping. See each module's own doc
 //! comment; `docs/research/litter-burst-grouping.md` has the full write-up.
 
 pub mod decode;

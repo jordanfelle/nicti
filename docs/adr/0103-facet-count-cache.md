@@ -1,48 +1,49 @@
-# ADR-0011: Facet-count cache for SQLite's faceted-filter gap
+# ADR-0103: Facet-count cache for SQLite's faceted-filter gap
 
 - **Status:** Accepted
 - **Date:** 2026-09-24
 - **Ticket:** [#103](https://github.com/jordanfelle/nicti/issues/103) Build: DuckDB-backed facet-count cache for SQLite's faceted-filter gap (or trigger-maintained alternative)
+- **Formerly:** ADR-0011 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0008 chose SQLite as the v1 catalog store but measured one real miss: faceted-filter-with-live-
+ADR-0067 chose SQLite as the v1 catalog store but measured one real miss: faceted-filter-with-live-
 facet-counts came in at 151ms p95 at 2M synthetic assets (re-measurements ranged 134.5–160ms across
 runs), against `docs/benchmarks.md`'s <100ms budget — root-caused to the outer predicate's own
 selectivity (`model = ? AND rating >= ?` matches roughly the whole "picks" population), not a
-fixable query-shape bug. ADR-0008 named two follow-up mitigations without attempting either: (a) a
+fixable query-shape bug. ADR-0067 named two follow-up mitigations without attempting either: (a) a
 trigger-maintained aggregate facet-count table inside SQLite (no new dependency), or (b) a
 DuckDB-backed read-side cache for this one query shape (SQLite stays the source of truth for
 everything else). #103 is the ticket for building and measuring both, and its own text states the
 decision rule up front: **the trigger approach should win by default unless it measurably can't hit
-budget or its write-path cost is unacceptable against ADR-0008's existing ≤5ms/≤16ms-under-load
+budget or its write-path cost is unacceptable against ADR-0067's existing ≤5ms/≤16ms-under-load
 point-update gates.**
 
 Both candidates were explicitly scoped narrow, per #103: not a second general-purpose store, not
-"replace SQLite," and not the "DuckDB as an OLAP sidecar" option ADR-0008 already declined when
+"replace SQLite," and not the "DuckDB as an OLAP sidecar" option ADR-0067 already declined when
 nothing measured needed it — a materialized/cached facet-count layer serving *only* the
 faceted-filter-with-counts query shape.
 
-**Sandbox note, distinct from ADR-0008's own:** this pass ran on the same Linux/WSL2 sandbox as
-ADR-0008/0009, but with **other Claude Code sessions concurrently building/testing unrelated
+**Sandbox note, distinct from ADR-0067's own:** this pass ran on the same Linux/WSL2 sandbox as
+ADR-0067/0102, but with **other Claude Code sessions concurrently building/testing unrelated
 worktrees on the same shared machine** (confirmed via `ps aux` mid-run: parallel `cargo build`/
 `cargo check` processes for `nicti-wt-redb` and `nicti-wt-duckdb-primary`, other in-flight spikes
 for this same account). This measurably inflated *absolute* latencies across the board relative to
-ADR-0008's original numbers — this pass's own plain-SQLite baseline at 2M (re-run in this session
+ADR-0067's original numbers — this pass's own plain-SQLite baseline at 2M (re-run in this session
 for a same-environment comparison, see below) shows faceted_filter at 513ms p95, ~3.4x slower than
-ADR-0008's 151-160ms on presumably-uncontended hardware, and `bulk_ingest` timings in particular
+ADR-0067's 151-160ms on presumably-uncontended hardware, and `bulk_ingest` timings in particular
 swing by more than 1.5x between runs of the *same* code path in ways only explainable by shared-CPU
 contention (see the Measured results' explicit callout). Every within-scale comparison below (plain
 SQLite vs. trigger vs. DuckDB-cache) was still run in the same contended environment close together
 in time, so the *relative* comparison between candidates stays meaningful; only `bulk_ingest`'s
 absolute numbers are unreliable enough to caveat explicitly rather than trust at face value.
 
-## Decision rule (stated before measuring, per ADR-0008/0009's own methodology)
+## Decision rule (stated before measuring, per ADR-0067/0102's own methodology)
 
 1. Does `faceted_filter` (the exact benchmarked shape: `model = "NIKON Z 8" AND rating >= 3 AND
    keyword` narrowed to one specific leaf, per `gen.rs`'s `BENCH_LEAF_KEYWORD`) clear the <100ms p95
    budget at 2M for each candidate?
-2. Does trigger-maintenance / cache-refresh cost added to the write path stay within ADR-0008's
+2. Does trigger-maintenance / cache-refresh cost added to the write path stay within ADR-0067's
    existing point-update gates (≤5ms per rating write, ≤16ms under a 100-write burst)?
 3. Is the trigger-maintained table's/cache's answer actually correct — checked against a
    from-scratch recomputation, not just fast?
@@ -55,8 +56,8 @@ absolute numbers are unreliable enough to caveat explicitly rather than trust at
 ## Decision
 
 **Trigger-maintained SQLite facet table.** It clears the 100ms budget by 49-168x at 2M (2.48/3.05ms
-p50/p95 — 49-52x vs. ADR-0008's own 151-160ms on quieter hardware, 168x vs. this session's own
-513ms contended-hardware plain-SQLite baseline), and the actual per-write-op gate ADR-0008 sets
+p50/p95 — 49-52x vs. ADR-0067's own 151-160ms on quieter hardware, 168x vs. this session's own
+513ms contended-hardware plain-SQLite baseline), and the actual per-write-op gate ADR-0067 sets
 (`write_rating`, a single point update, ≤5ms) is cleared with enormous margin at both scales
 (0.06-0.21ms at 600k, 0.17-0.27ms at 2M). It adds no new dependency and no second store to keep
 consistent.
@@ -69,18 +70,18 @@ benchmark bug described in full below, found by a hostile review and fixed befor
 numbers were finalized. The corrected numbers put the burst in the same rough range as (and at
 600k slightly above) the ≤16ms-under-load reference #103's own issue text names — still small in
 absolute terms (culling one image's rating is a single-row event in practice, not a 100-row batch),
-still comfortably below any hard gate ADR-0008 itself actually sets for this op (it lists
+still comfortably below any hard gate ADR-0067 itself actually sets for this op (it lists
 `rate_burst_100` as "informative, not gated" for every candidate, plain SQLite included), and still
 roughly 2x slower than the DuckDB-cache candidate's equivalent write path (which touches no
 trigger at all) — a real, if modest, trade-off worth a future implementer's attention rather than a
 number to gloss over. Per #103's own stated default (trigger wins unless it can't hit budget *or*
-its write cost is unacceptable against ADR-0008's gates), the deciding budget it must clear is
+its write cost is unacceptable against ADR-0067's gates), the deciding budget it must clear is
 `write_rating`'s ≤5ms, which it clears by more than an order of magnitude at both scales — the
 trigger approach still wins, just not with the "negligible cost" framing an earlier, buggy
 measurement pass would have supported.
 
 **The DuckDB-backed cache also works, measured honestly, and is kept explicit as the fallback**
-(same posture ADR-0008 gave DuckDB as primary-store fallback) if a real schema in #22 finds some
+(same posture ADR-0067 gave DuckDB as primary-store fallback) if a real schema in #22 finds some
 other reason the trigger approach doesn't fit (e.g., a facet dimension too expensive to maintain
 incrementally via triggers). Its own real cost — refreshing the cache — is not hidden: 0.84-0.86s
 at 600k, and 9.6-13.1s at 2M (both scales' two numbers are "after a bulk ingest" / "after a 100-row
@@ -95,7 +96,7 @@ without calling `refresh()`) shows the cached answer diverging from a from-scrat
 every time, exactly the "adds a dependency and a consistency surface" cost #103 asked to be
 quantified rather than asserted. Its own `faceted_filter` margin over budget also shrank under this
 session's heaviest contention (2M post-refresh: 14.27/14.80ms p50/p95, a 6.8x margin vs. the ~50x+
-margin measured at lighter contention) — still clears ADR-0008's own ≥3x reference-machine
+margin measured at lighter contention) — still clears ADR-0067's own ≥3x reference-machine
 threshold for trusting a WSL number as final, but a real illustration of how sensitive this whole
 comparison is to concurrent load on shared hardware, not just a property of the query itself.
 
@@ -103,10 +104,10 @@ comparison is to concurrent load on shared hardware, not just a property of the 
 
 Backed by `spikes/den/facet_cache_trigger.rs` (candidate 1), `spikes/den/facet_cache_duckdb.rs`
 (candidate 2), and a re-run of the existing plain-SQLite `sqlite.rs` in this same session (for a
-same-environment baseline, not ADR-0008's original numbers, which ran on different — less
+same-environment baseline, not ADR-0067's original numbers, which ran on different — less
 contended — hardware). p50/p95/max over 5 measured runs, 1 discarded warm-up, per
 `docs/benchmarks.md`'s methodology, at 600k and 2M synthetic assets (same generator, same seed,
-same `ref-10k-manifest.csv` distributions as ADR-0008/0009).
+same `ref-10k-manifest.csv` distributions as ADR-0067/0102).
 
 ### Faceted filter (the gated query: `model="NIKON Z 8"`, `rating>=3`, keyword narrowed to
 `BENCH_LEAF_KEYWORD`) — the actual gate
@@ -114,19 +115,19 @@ same `ref-10k-manifest.csv` distributions as ADR-0008/0009).
 | Scale | Plain SQLite (this session) | Trigger-maintained | DuckDB cache (post-refresh) |
 |---|---|---|---|
 | 600k | 39.95 / 42.09 ms | **0.447 / 0.745 ms** ✅ (56-89x) | 1.517 / 1.635 ms ✅ (26-28x) |
-| 2M | 411.8 / 513.2 ms ⛔ (budget miss, worse than ADR-0008's own 151-160ms — contended hardware, see Context) | **2.479 / 3.054 ms** ✅ (~33x margin vs. the 100ms gate; ~49-52x vs. ADR-0008's original 2M baseline; ~168x vs. this session's own contended baseline) | 14.27 / 14.80 ms ✅ (~6.8x — thinner than the 600k margin, see the note below the Decision on this session's heaviest-contention run) |
+| 2M | 411.8 / 513.2 ms ⛔ (budget miss, worse than ADR-0067's own 151-160ms — contended hardware, see Context) | **2.479 / 3.054 ms** ✅ (~33x margin vs. the 100ms gate; ~49-52x vs. ADR-0067's original 2M baseline; ~168x vs. this session's own contended baseline) | 14.27 / 14.80 ms ✅ (~6.8x — thinner than the 600k margin, see the note below the Decision on this session's heaviest-contention run) |
 
-Both candidates clear the 2M budget by a wide enough margin (>3x) that, per ADR-0008's own
+Both candidates clear the 2M budget by a wide enough margin (>3x) that, per ADR-0067's own
 reference-machine rule, this doesn't need a less-contended re-run to be treated as final for the
 *decision* itself (the contention only inflates the plain-SQLite baseline's absolute number, which
 is exactly the problem being fixed either way).
 
 ### Write-path cost (the ops each design's maintenance touches), 2M scale
 
-| Op | Plain SQLite (this session) | Trigger-maintained | Budget (ADR-0008) |
+| Op | Plain SQLite (this session) | Trigger-maintained | Budget (ADR-0067) |
 |---|---|---|---|
 | `write_rating` (single) | 0.018 / 0.078 ms | 0.173 / 0.272 ms | ≤ 5 ms |
-| `rate_burst_100` | 0.826 / 2.099 ms | 8.973 / 11.421 ms | ≤ 16 ms (informative in ADR-0008, used here as the "under load" reference) |
+| `rate_burst_100` | 0.826 / 2.099 ms | 8.973 / 11.421 ms | ≤ 16 ms (informative in ADR-0067, used here as the "under load" reference) |
 | `tag_keyword_10k` (not budget-gated) | 40.47 / 63.78 ms | 38.19 / 41.42 ms | — |
 | `bulk_ingest`, 2M rows (informative; see contention caveat) | 214.1 s | 163.5 s | — |
 
@@ -148,8 +149,8 @@ all 5 measured calls. Only the warm-up call ever changed the rating; every measu
 the *same* value the previous call had just set, so the trigger's `WHEN` guard evaluated false and
 the trigger body never ran during any measured call — the reported numbers were the cost of a bare
 `UPDATE` with a no-op trigger check, not real trigger-maintenance cost. This is the same class of
-bug ADR-0008/0009 already found once in this exact benchmark harness (`tag_keyword`'s reused-keyword
-bug, see ADR-0008's Spike section) — a different concrete mechanism (a trigger `WHEN` guard rather
+bug ADR-0067/0102 already found once in this exact benchmark harness (`tag_keyword`'s reused-keyword
+bug, see ADR-0067's Spike section) — a different concrete mechanism (a trigger `WHEN` guard rather
 than accumulating duplicate rows), same root cause (a benchmark op that isn't idempotent-safe across
 repeated timed calls silently does less work on later calls than the first). Fixed by alternating
 the target rating every call (`bin/den.rs`'s `bench_trigger_facet`/`bench_duckdb_facet_cache`) so
@@ -166,7 +167,7 @@ not that triggers make ingest faster. The 600k numbers show the expected directi
 every keyword insert. Treat the 2M `bulk_ingest` row as **directionally uninformative, not as
 "triggers are free at bulk-ingest scale"** — a re-run on quiet hardware is the honest way to get a
 trustworthy number here, out of scope for this pass since `bulk_ingest` is explicitly "informative,
-not gated" in ADR-0008's own methodology.
+not gated" in ADR-0067's own methodology.
 
 ### DuckDB cache: refresh cost (the real, quantified "consistency surface" cost)
 
@@ -246,10 +247,10 @@ fully-unfiltered case), but this is worth a maintainer's attention if a future c
 
 | Option | Verdict |
 |---|---|
-| Trigger-maintained SQLite facet table | **Chosen.** Clears the 2M budget by 58-88x, write-path cost negligible against ADR-0008's gates, no new dependency, no second store. Verified correct against a from-scratch recomputation both at ingest and under a write burst. |
+| Trigger-maintained SQLite facet table | **Chosen.** Clears the 2M budget by 58-88x, write-path cost negligible against ADR-0067's gates, no new dependency, no second store. Verified correct against a from-scratch recomputation both at ingest and under a write burst. |
 | DuckDB-backed read-side cache | Also clears budget with a comparable margin, but adds a second store, a real (if non-gating) refresh cost (2.8-3.6s at 2M), and a demonstrated staleness window between refreshes. Kept explicit as the fallback if a future facet dimension doesn't fit the trigger approach, not adopted now. |
 | Full rebuild refresh (DuckDB candidate) | **Chosen for the DuckDB candidate specifically**, over incremental refresh. SQLite's schema has no change-log/watermark column to identify "changed since last refresh" — adding one would give `assets`/`asset_keywords` the same per-write bookkeeping the trigger candidate already does more directly, at which point the trigger candidate is strictly simpler for the same cost. The aggregation itself runs inside SQLite (an indexed join + `GROUP BY`), so only the small aggregated result (bounded by distinct `(model, rating, keyword)` combinations, not row count) crosses into DuckDB — not a full raw-row export every refresh. |
-| Do nothing (leave SQLite's plain scan) | Rejected — this is the exact gap #103 exists to close; ADR-0008 already flagged it as the one measured miss. |
+| Do nothing (leave SQLite's plain scan) | Rejected — this is the exact gap #103 exists to close; ADR-0067 already flagged it as the one measured miss. |
 
 ## Consequences
 
@@ -264,11 +265,11 @@ fully-unfiltered case), but this is worth a maintainer's attention if a future c
   either a separate, simpler `(model, rating) -> COUNT(*)` maintained table (a small addition to the
   same trigger set, not attempted in this pass since nothing in #103's own benchmark needed it) or a
   fallback to `sqlite.rs`'s existing from-scratch query for that specific shape.
-- **DuckDB as a dependency is still not needed for v1's catalog store**, consistent with ADR-0008's
-  own conclusion — the trigger-maintained table closes the one gap ADR-0008 left open, without
+- **DuckDB as a dependency is still not needed for v1's catalog store**, consistent with ADR-0067's
+  own conclusion — the trigger-maintained table closes the one gap ADR-0067 left open, without
   adding DuckDB (or any new crate) to the shipping dependency graph. `docs/licensing.md` needs no
   update from this ADR: both candidates were built entirely from `rusqlite`/`duckdb`, already
-  dependencies of `spikes/den` since ADR-0008.
+  dependencies of `spikes/den` since ADR-0067.
 - **If #22 later finds a facet dimension the trigger approach can't maintain cheaply** (e.g., a much
   higher-cardinality dimension than this benchmark's ~11 broad + per-event-leaf keyword
   vocabulary), `facet_cache_duckdb.rs`'s refresh-based design is the proven fallback — already built,
@@ -280,7 +281,7 @@ fully-unfiltered case), but this is worth a maintainer's attention if a future c
 
 ## Spike: `spikes/den/`
 
-Adds to the `spikes/den/` crate from ADR-0008/0009 (see that ADR's own Spike section for the
+Adds to the `spikes/den/` crate from ADR-0067/0102 (see that ADR's own Spike section for the
 generator/workload/cross-engine-test infrastructure this reuses unchanged):
 
 - `src/facet_cache_trigger.rs` — the trigger-maintained SQLite candidate: same schema/pragmas as

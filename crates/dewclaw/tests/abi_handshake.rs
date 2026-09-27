@@ -5,7 +5,7 @@
 //! This deliberately tests the *handshake protocol* — a host that checks a declared version
 //! number before trusting anything else — not a real cross-rustc-version struct layout break
 //! (which would require building the fixture with a different compiler than `nicti-claw`
-//! itself, out of scope here; see docs/adr/0004 for the caveat).
+//! itself, out of scope here; see docs/adr/0019 for the caveat).
 
 #[path = "support/mod.rs"]
 mod support;

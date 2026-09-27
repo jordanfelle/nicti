@@ -1,6 +1,6 @@
 //! Reads `retina dump-linear`'s output pair (a 16-bit linear-camera-RGB TIFF + JSON metadata
 //! sidecar) without depending on the `retina` crate itself (which needs the LibRaw FFI/submodule
-//! this spike deliberately stays free of -- see ADR-0021). The JSON shape here must stay in sync
+//! this spike deliberately stays free of -- see ADR-0038). The JSON shape here must stay in sync
 //! with `spikes/retina/src/linear.rs`'s `LinearMeta`; there's no shared type between the two
 //! crates since retina can't build in every environment calico needs to build in.
 

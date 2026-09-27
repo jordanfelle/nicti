@@ -2,7 +2,7 @@
 
 Covers the catalog database engine decision (SQLite) and every evaluated alternative/follow-up: Turso, redb, RocksDB, the facet-count cache, DuckDB, libSQL, and fjall.
 
-- **Catalog database engine**: `docs/adr/0008-catalog-database-engine.md` — **SQLite** (`rusqlite`,
+- **Catalog database engine**: `docs/adr/0067-catalog-database-engine.md` — **SQLite** (`rusqlite`,
   WAL), with a `(model, rating)` composite index and `GLOB` (not `LIKE`) for every prefix-scan
   predicate — this build's `LIKE`-to-index-range-scan transform never triggered, confirmed via
   `EXPLAIN QUERY PLAN`. Measured in `spikes/den/` against a corrected-cardinality synthetic
@@ -22,8 +22,8 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   flag (no Windows path exists in the crate); `pglite-oxide` doesn't compile against its own
   published dependency graph on any target (`wasmer-wasix` vs `virtual-net`, confirmed on two
   versions). Unblocks #22, #23, #24, #25, #71.
-- **Turso Database, evaluated post-ADR-0008**: `docs/adr/0009-turso-database-evaluation.md` —
-  **not adopted**. The only pure-Rust catalog candidate (matching ADR-0001's own stated
+- **Turso Database, evaluated post-ADR-0067**: `docs/adr/0102-turso-database-evaluation.md` —
+  **not adopted**. The only pure-Rust catalog candidate (matching ADR-0015's own stated
   preference), with real Windows-CI and MIT-license evidence, but its pre-1.0 status shows up
   where it matters: two query shapes already sit at the 600k-scale budget edge due to a
   confirmed-missing `LIKE`/`GLOB` prefix-scan optimization (a competing "missing index"
@@ -34,9 +34,9 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   abandoned transaction hit `database is locked`, but a hostile re-review and a follow-up
   experiment produced two results that don't fully agree on why — see the ADR's own crash-safety
   row for the full, genuinely unresolved account, plus a new `Workload::prepare_for_forget` hook
-  this investigation added. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
+  this investigation added. ADR-0067 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
   Revisit post-1.0, not never.
-- **`redb`, evaluated post-ADR-0009**: `docs/adr/0010-redb-evaluation.md` — **not adopted**. The
+- **`redb`, evaluated post-ADR-0102**: `docs/adr/0106-redb-evaluation.md` — **not adopted**. The
   strongest hard-gate evidence of any pure-Rust candidate so far (real Windows CI, MIT/Apache-2.0
   license, 1.0-plus and zero dependencies, unlike Turso's pre-1.0 status) — but two query shapes
   miss the 2M budget (range query ~1.5x over, filename search ~5x over), root-caused to a real,
@@ -45,10 +45,10 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   pattern on read-heavy workloads specifically). Crash-safety is **inconclusive**, but for a
   cleanly understood reason this time, not a murky one like Turso's: a direct follow-up experiment
   confirmed the reopen failure is an OS-level advisory lock scoped to the one leaked file
-  descriptor (not a process-wide guard like LMDB's) — the same *class* of fd-scoped lock ADR-0009
+  descriptor (not a process-wide guard like LMDB's) — the same *class* of fd-scoped lock ADR-0102
   found in Turso, which this in-process `mem::forget` technique can never get past regardless of
-  engine. ADR-0008 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
-- **RocksDB, evaluated post-ADR-0010**: `docs/adr/0015-rocksdb-evaluation.md` — **not adopted**.
+  engine. ADR-0067 is unchanged: SQLite stays chosen, DuckDB stays the fallback.
+- **RocksDB, evaluated post-ADR-0106**: `docs/adr/0115-rocksdb-evaluation.md` — **not adopted**.
   Strong Windows-build/license/maintenance evidence (including a real Windows CI gotcha found and
   mirrored into this repo's own CI: `librocksdb-sys`'s `bindgen`-generated FFI bindings need
   libclang, which conflicts with GitHub's `windows-latest` runner's bundled msys64 install unless
@@ -60,7 +60,7 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   is even configured, so that specific mechanism an earlier draft named isn't actually in play.
   Crash-safety is **inconclusive**, same class of
   finding as LMDB/Turso/redb: a leaked `LOCK` file blocks reopening the same forgotten path in this
-  in-process technique, confirmed (via a direct probe, same methodology as ADR-0009/0010) to be
+  in-process technique, confirmed (via a direct probe, same methodology as ADR-0102/0106) to be
   scoped to that specific path, not a process-wide guard like LMDB's. **The concurrent-multi-writer
   comparison this ADR exists to produce — measured for the first time in this series, since every
   prior candidate was only ever benchmarked single-threaded — has a genuine, nuanced answer**:
@@ -80,14 +80,14 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   (RocksDB's own documented write-stall backpressure mechanism and this session's own heavily-loaded
   shared host are both plausible, uneliminated explanations) — not a clean win either way. A tuned re-run (larger
   block cache/write buffers, bloom-filter tuning) is the named,
-  unattempted follow-up if RocksDB is ever reconsidered. ADR-0008 is unchanged: SQLite stays
+  unattempted follow-up if RocksDB is ever reconsidered. ADR-0067 is unchanged: SQLite stays
   chosen, DuckDB stays the fallback — but this ADR's own numbers are the first real evidence in
   this repo of what SQLite's concurrency tradeoff actually costs, worth remembering if a future
   multi-writer feature (#64) ever forces a re-decision.
-- **Facet-count cache for SQLite's faceted-filter gap**: `docs/adr/0011-facet-count-cache.md` —
-  **trigger-maintained SQLite facet table**, closing ADR-0008's one measured miss (faceted-filter
+- **Facet-count cache for SQLite's faceted-filter gap**: `docs/adr/0103-facet-count-cache.md` —
+  **trigger-maintained SQLite facet table**, closing ADR-0067's one measured miss (faceted-filter
   at 2M) without adding a new dependency. Clears the <100ms budget by ~33-89x at 600k/2M (well
-  under 1ms-3ms p95); the actual per-write gate ADR-0008 sets (`write_rating` ≤5ms) clears with
+  under 1ms-3ms p95); the actual per-write gate ADR-0067 sets (`write_rating` ≤5ms) clears with
   10x+ margin at both scales, though a 100-row rating burst (a proxy for #43's rate-and-advance
   culling pattern) is a real, non-negligible added cost (9-20ms, vs. plain SQLite's <2.1ms) — found
   via a benchmark bug (a trigger `WHEN`-guard no-op on repeated same-value writes) that a hostile
@@ -99,25 +99,25 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   `(model, rating, keyword)`-grain facet table only answers a *keyword-narrowed* facet query
   correctly — an unfiltered/no-keyword facet count needs a separate table or `sqlite.rs`'s own
   from-scratch query. Unblocks #22's facet-count implementation.
-- **DuckDB as v1 primary catalog store, reconsidered post-ADR-0008**:
-  `docs/adr/0012-duckdb-as-primary-catalog-store.md` — **not adopted**. ADR-0008's decision is
+- **DuckDB as v1 primary catalog store, reconsidered post-ADR-0067**:
+  `docs/adr/0107-duckdb-as-primary-catalog-store.md` — **not adopted**. ADR-0067's decision is
   unchanged, now for a demonstrated technical reason instead of a soft one: #22's planned
-  append-only history log with burst-compaction (ADR-0002) needs frequent UPDATE+DELETE-heavy
+  append-only history log with burst-compaction (ADR-0021) needs frequent UPDATE+DELETE-heavy
   operations, and a real prototype (`spikes/den/src/schema_fit.rs`) measured DuckDB compacting the
   same history runs SQLite compacts **~80x slower per operation** (4.297ms/op vs 0.054ms/op,
   960,000 raw rows down to 19,963 compacted rows), turning a ~1-second workload into an ~86-second
-  one — a well-understood transaction-commit-overhead effect (matches ADR-0008's own single-row
+  one — a well-understood transaction-commit-overhead effect (matches ADR-0067's own single-row
   `write_rating` cost roughly doubled), not a benchmark artifact. DuckDB's JSON support
   (`json_extract`) is confirmed real and usable — that part of the schema-fit question favors
   DuckDB — but doesn't offset the compaction cost. #103's separate SQLite-trigger-vs-DuckDB-sidecar
   facet-cache work is unaffected by this outcome.
-- **libSQL, evaluated post-ADR-0012**: `docs/adr/0014-libsql-evaluation.md` — **not adopted for
-  v1** (not a permanent rejection — see below). Unlike Turso Database (ADR-0009, a from-scratch
-  Rust rewrite) and `redb` (ADR-0010), libSQL is an actual fork of SQLite's own C source, and it
+- **libSQL, evaluated post-ADR-0107**: `docs/adr/0113-libsql-evaluation.md` — **not adopted for
+  v1** (not a permanent rejection — see below). Unlike Turso Database (ADR-0102, a from-scratch
+  Rust rewrite) and `redb` (ADR-0106), libSQL is an actual fork of SQLite's own C source, and it
   shows: it's the first KV-shaped-or-pure-Rust-adjacent candidate in this series to **cleanly
   pass** the crash-safety hard gate (0/20 reopen failures, real `PRAGMA integrity_check`), where
   LMDB/Turso/`redb` all left it inconclusive. Measured gates match plain SQLite's own margins
-  exactly, including the same known 2M faceted-filter miss (already mitigated by ADR-0011).
+  exactly, including the same known 2M faceted-filter miss (already mitigated by ADR-0103).
   #113's own specific question — does the embedded-replica feature cost anything when unused —
   resolves cleanly at the source level (opening a local file never constructs the `Sync`/
   `Offline`/`Remote` `DbType` variants or spawns any background task), but a real 1.3–4x
@@ -135,7 +135,7 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   same C symbols) — required fixing two pre-existing cfg-gating gaps in `bin/den.rs`/
   `tests/facet_cache.rs` and splitting `.github/workflows/ci.yml`'s `cargo test` job so `den` gets
   its own feature-scoped commands instead of one blanket `--all-features` invocation.
-- **fjall, evaluated post-ADR-0014**: `docs/adr/0016-fjall-evaluation.md` — **not adopted**. The
+- **fjall, evaluated post-ADR-0113**: `docs/adr/0116-fjall-evaluation.md` — **not adopted**. The
   cleanest Windows-build story of any catalog candidate so far (fjall and its own `lsm-tree`
   dependency have no `build.rs` at all — 100% safe Rust, no native C/C++ core to audit) and a real,
   active maintenance signal (v3.1.10, 25 days old at spike time) — but **fails 3 of 8 measured
@@ -157,6 +157,6 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   genuinely open, uncommitted batch, then `mem::forget`ing it — structurally cannot leave any
   on-disk trace for fjall at all, unlike every prior candidate. Unlike libSQL, fjall has **no
   bundled native C source**, so it links cleanly into the same `den` binary as every other
-  candidate (no CI job split needed, unlike ADR-0014's mandatory `--exclude den` fix). One real
+  candidate (no CI job split needed, unlike ADR-0113's mandatory `--exclude den` fix). One real
   `deny.toml` edit was needed: `varint-rs` (transitive via `lsm-tree`) carries `0BSD`, not
   previously allowlisted.

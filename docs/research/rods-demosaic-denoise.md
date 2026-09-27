@@ -117,7 +117,7 @@ OETF), not linear camera RGB — both candidates are SIDD/synthetic-noise traine
 WB-applied, phone-ISP-style images, and linear light would be badly out-of-distribution. Scoring
 stays in that same fixed encoding, applied identically to every candidate, so quality differences
 measure demosaic/denoise choices, not a second color pipeline. Deliberately not calico's real DCP
-pipeline (ADR-0021, still its own open research pass) — this is LibRaw's own no-profile fallback
+pipeline (ADR-0038, still its own open research pass) — this is LibRaw's own no-profile fallback
 treatment, correct enough to compare candidates against each other and (eventually) LRC on equal
 footing.
 
@@ -243,7 +243,7 @@ cross-compiles cleanly, no C/C++ dependency to fight (unlike `retina`'s vendored
 ## Spike: `spikes/rods`
 
 Feline name: rods, as in rod cells, the retina's low-light receptors — pairs with `retina`
-(#37/ADR-0019). Not production code, same "don't build on top of it" status as this repo's other
+(#37/ADR-0037). Not production code, same "don't build on top of it" status as this repo's other
 spikes; expect it deleted once a future ticket promotes the parts worth keeping.
 
 - **`src/linear_input.rs`**: reads `retina dump-classic`/`dump-linear`'s TIFF+JSON output pair,

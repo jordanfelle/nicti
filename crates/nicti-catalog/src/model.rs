@@ -1,5 +1,5 @@
 //! Row types the `CatalogStore` trait's methods pass in and out — kept separate from `sqlite.rs`
-//! so a future non-SQLite backend (DuckDB, ADR-0008's named fallback) can implement the same
+//! so a future non-SQLite backend (DuckDB, ADR-0067's named fallback) can implement the same
 //! trait against the same shapes.
 
 /// One asset row, as read back from the catalog.
@@ -42,7 +42,7 @@ pub struct NewAsset {
     pub imported_at: i64,
 }
 
-/// Preview cache tiers a catalog store can hold. Only T0 (the grid preview, ADR-0017) is written
+/// Preview cache tiers a catalog store can hold. Only T0 (the grid preview, ADR-0029) is written
 /// at import time — T1-T3 are a render-pipeline concern, not catalog storage, but the column
 /// already carries a tier discriminator so a later ticket can add them without a schema change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

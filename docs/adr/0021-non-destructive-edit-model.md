@@ -1,8 +1,9 @@
-# ADR-0002: Non-destructive edit model
+# ADR-0021: Non-destructive edit model
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
 - **Ticket:** #21 Research: non-destructive edit model
+- **Formerly:** ADR-0002 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -259,7 +260,7 @@ stays read-only rather than being dropped or guessed at.
 All claims fetched/verified 2026-09-23 by three parallel research passes (LRC/ACR; darktable +
 RawTherapee; Rust serialization formats), each citing a primary source where one exists. Adobe has
 never published the `.lrcat` schema or its sidecar-conflict-resolution algorithm — those claims
-rest on reverse-engineering and community reports, flagged below as such, matching how ADR-0001
+rest on reverse-engineering and community reports, flagged below as such, matching how ADR-0015
 flagged its own unverifiable claims rather than passing them off as primary-sourced.
 
 ### Lightroom Classic / ACR

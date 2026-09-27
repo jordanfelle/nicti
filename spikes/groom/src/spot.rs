@@ -1,8 +1,8 @@
 //! `HealStage` / `Spot`: the edit-model representation for clone/heal/remove operations, per
-//! `docs/adr/0002-non-destructive-edit-model.md`'s `StageEntry { schema_version, params }`
+//! `docs/adr/0021-non-destructive-edit-model.md`'s `StageEntry { schema_version, params }`
 //! pattern -- `HealStage` is the `params` shape a `"heal"` stage entry would carry, not a
 //! replacement for `StageEntry` itself (that struct lives in the future `nicti-render`/catalog
-//! crate, per ADR-0002/#22, not here).
+//! crate, per ADR-0021/#22, not here).
 //!
 //! **Geometry choice:** each `Spot`'s destination is a **circle** (`center` + `radius`), not a
 //! freehand brush path. A brush path (`Vec<(f32, f32)>`) is strictly more expressive, but a
@@ -11,7 +11,7 @@
 //! circle-based, and (c) keeps the size-comparison test's numbers meaningful rather than
 //! dependent on an arbitrarily long path. If #51 needs freehand strokes, extending `Spot` with a
 //! `Geometry` enum (`Circle { center, radius }` vs `Path(Vec<(f32, f32)>)`) is a compatible,
-//! additive change under `schema_version`'s migration story (ADR-0002 §"Schema evolution").
+//! additive change under `schema_version`'s migration story (ADR-0021 §"Schema evolution").
 //!
 //! `cache_key()` follows `spikes/pawprint/src/lib.rs::cache_key`'s canonical-JSON + `blake3`
 //! pattern exactly: chain the caller-supplied upstream hash with this stage's own canonical hash,
@@ -34,9 +34,9 @@ pub enum SpotKind {
 }
 
 /// A model-based mask recipe (never derived pixels) for a `Remove` spot -- the "the recipe, not
-/// the pixels" rule ADR-0002 already applies to AI masks generally. `model_version` pinning
+/// the pixels" rule ADR-0021 already applies to AI masks generally. `model_version` pinning
 /// means a future MobileSAM/LaMa upgrade is an explicit, opt-in re-run on old edits rather than a
-/// silent quality change, exactly as ADR-0002 states for AI masks elsewhere.
+/// silent quality change, exactly as ADR-0021 states for AI masks elsewhere.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaskRecipe {
     pub model_id: String,
@@ -115,9 +115,9 @@ impl Spot {
     }
 }
 
-/// The `params` payload a `"heal"` `StageEntry` (ADR-0002) would carry: an ordered list of spots,
+/// The `params` payload a `"heal"` `StageEntry` (ADR-0021) would carry: an ordered list of spots,
 /// applied in list order (earlier spots first) -- order matters here in a way it deliberately
-/// doesn't for ADR-0002's `stages` map, since two spots overlapping the same pixels give a
+/// doesn't for ADR-0021's `stages` map, since two spots overlapping the same pixels give a
 /// different result depending on which is applied last.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HealStage {
@@ -144,7 +144,7 @@ fn canonicalize(value: &mut Value) {
 
 /// Canonical bytes for a `HealStage`: `serde_json` (default `Map`, `preserve_order` off, so keys
 /// are already sorted) plus explicit float normalization -- the same two-part recipe
-/// `docs/adr/0002-non-destructive-edit-model.md` settles on for `StageEntry` hashing generally.
+/// `docs/adr/0021-non-destructive-edit-model.md` settles on for `StageEntry` hashing generally.
 fn canonical_bytes(stage: &HealStage) -> Vec<u8> {
     let mut value = serde_json::to_value(stage).expect("HealStage always serializes to JSON");
     canonicalize(&mut value);
@@ -203,8 +203,8 @@ mod tests {
                 .collect();
             let stage = HealStage { spots };
             let bytes = canonical_bytes(&stage);
-            // Informal comparison against ADR-0002's ~563-byte/5-stage-document reference point
-            // (see docs/adr/0007-healing-and-removal.md's "Measured results" for the actual
+            // Informal comparison against ADR-0021's ~563-byte/5-stage-document reference point
+            // (see docs/adr/0050-healing-and-removal.md's "Measured results" for the actual
             // numbers this run produced) -- not a hard assertion on an exact byte count, since
             // that would make this test brittle to any field-naming change. The real assertion
             // is monotonicity: more spots must never serialize smaller.

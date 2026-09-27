@@ -261,7 +261,7 @@ pub fn run(
 
 /// Decodes `encoded` back and scores it against `source` (the pre-encode resized image) with
 /// `nicti_prowl::golden::ssim`. Runs after the timed encode call, never inside it -- SSIM is a
-/// research-quality signal, not part of the latency numbers ADR-0017's comparison depends on.
+/// research-quality signal, not part of the latency numbers ADR-0029's comparison depends on.
 fn score_ssim(
     codec_kind: Codec,
     encoded: &[u8],

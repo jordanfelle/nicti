@@ -16,7 +16,7 @@ official.
 Phase-1 coexistence ([#60](https://github.com/jordanfelle/nicti/issues/60)) means Nicti and
 Lightroom Classic both read and write the same files during the transition before `.lrcat` import
 ([#61](https://github.com/jordanfelle/nicti/issues/61)/[#62](https://github.com/jordanfelle/nicti/issues/62)).
-ADR-0002 already set the frame this ticket was handed:
+ADR-0021 already set the frame this ticket was handed:
 
 - The catalog database is authoritative; XMP is an interop/recovery layer, not the source of truth.
 - Three XMP responsibilities, not one: **(a)** LRC-convention metadata (rating/flag/label/keywords)
@@ -25,9 +25,9 @@ ADR-0002 already set the frame this ticket was handed:
   masks, so LRC/ACR can display Nicti's edits during the transition.
 - A newer-wins conflict rule (content hash, then mtime, with an ambiguity window that flags for
   manual review) — proven in the abstract in `spikes/pawprint/src/xmp.rs`, but "actually reading a
-  file's mtime and applying the resolution... is real I/O plumbing left to #59" (ADR-0002 line 212).
+  file's mtime and applying the resolution... is real I/O plumbing left to #59" (ADR-0021 line 212).
 
-ADR-0002 explicitly left three things open for this ticket: the field-level mapping for layer (a),
+ADR-0021 explicitly left three things open for this ticket: the field-level mapping for layer (a),
 how layer-(c) writes are gated, and the real XMP library/packet structure (the pawprint spike's
 packet format is a stated placeholder, not a proposal).
 
@@ -60,7 +60,7 @@ crate is preferred over one that pulls in a new C/C++ build, all else equal.
 
 Real, tested code (35 tests: 33 unit + 2 env-gated real-file integration tests that skip cleanly
 without the env vars set, plus CLI smoke-tested end-to-end on a synthetic sidecar — see the
-research doc). Four modules, matching the scope handed off by ADR-0002:
+research doc). Four modules, matching the scope handed off by ADR-0021:
 
 - **`lrc_fields`** — layer (a): `LrcMeta { rating, label, keywords, hierarchical_keywords }`, read
   from (and patched into) a real packet.
@@ -74,8 +74,8 @@ research doc). Four modules, matching the scope handed off by ADR-0002:
   temp-file-then-rename write.
 - **`embedded`** — JPEG APP1 XMP segment read/write, with a from-scratch JPEG segment walker (no
   new image-parsing dependency). **DNG/TIFF tag-700 write is out of scope** — see below.
-- **`conflict`** — ADR-0002's `resolve_conflict` re-hosted against real file mtimes/hashes (BLAKE3,
-  already a workspace dependency since ADR-0020), plus the layer-(c) write gate this ADR decides
+- **`conflict`** — ADR-0021's `resolve_conflict` re-hosted against real file mtimes/hashes (BLAKE3,
+  already a workspace dependency since ADR-0071), plus the layer-(c) write gate this ADR decides
   below.
 
 ### Library choice: `quick-xml`, not `roxmltree`/`little_exif`/the Adobe XMP Toolkit/`exiv2`
@@ -83,7 +83,7 @@ research doc). Four modules, matching the scope handed off by ADR-0002:
 `roxmltree` (already a workspace dependency, used read-only by `spikes/calico`) has no write
 support at all — disqualified by the decision rule's write requirement. `little_exif` and the
 Adobe XMP Toolkit SDK are both already cleared in `docs/licensing.md`, and `exiv2`/`rexiv2` have
-been usable since ADR-0013's AGPL switch — but none of them are built around "parse the whole
+been usable since ADR-0066's AGPL switch — but none of them are built around "parse the whole
 document as a stream of events, patch just the ones you care about, emit the rest unchanged",
 which is exactly this spike's requirement (preserving `crs:` and every other tool's data
 byte-for-byte-in-spirit). `quick-xml`'s `Reader`/`Writer` event API fits that shape directly.
@@ -127,8 +127,8 @@ that changes tag 700's length would corrupt every IFD entry pointing past it, wh
 TIFF-rewrite problem, not a segment splice. `spikes/sniff`'s existing from-scratch TIFF/IFD walker
 could be reused for a **read**-only path (locating tag 700's bytes) reasonably cheaply, but a safe
 **write** needs a dedicated TIFF writer this spike didn't build. This also interacts with
-ADR-0020: any DNG content change (embedded XMP included) already breaks a full-file BLAKE3 hash
-regardless of how it's produced, falling back to ADR-0020's partial-hash/EXIF-natural-key relink
+ADR-0071: any DNG content change (embedded XMP included) already breaks a full-file BLAKE3 hash
+regardless of how it's produced, falling back to ADR-0071's partial-hash/EXIF-natural-key relink
 tiers — so writing embedded DNG XMP wouldn't introduce a *new* identity problem, but it doesn't
 remove the existing one either.
 
@@ -142,7 +142,7 @@ blocking for phase-1 coexistence.
 
 ### Conflict resolution wired to real files
 
-`conflict::resolve_conflict` reimplements ADR-0002's rule (identical content hash → no conflict;
+`conflict::resolve_conflict` reimplements ADR-0021's rule (identical content hash → no conflict;
 otherwise newer mtime wins; mtimes within an ambiguity window → flag for manual review) against
 real `blake3::hash`/`fs::metadata` reads, via `conflict::hash_and_mtime`. Reimplemented rather than
 imported from `spikes/pawprint` — a spike-depending-on-another-spike isn't this repo's convention
@@ -150,7 +150,7 @@ imported from `spikes/pawprint` — a spike-depending-on-another-spike isn't thi
 
 ### The `crs:` write gate (layer c)
 
-ADR-0002 asked this ticket to pick between "write `crs:` only when Nicti can confirm LRC hasn't
+ADR-0021 asked this ticket to pick between "write `crs:` only when Nicti can confirm LRC hasn't
 independently edited the photo since Nicti's last write" and "restrict `crs:` writes to an explicit
 export action." **Decision: the former** — `conflict::should_write_crs(last_written_hash,
 current_sidecar_hash)` returns `true` only if the sidecar's current hash still matches what Nicti
@@ -159,14 +159,14 @@ keeps the projection live during normal editing (an "export for LRC preview" act
 LRC's preview stale between exports, undermining the whole point of a best-effort live projection)
 while never silently clobbering an edit LRC just made to the same sidecar. The actual field-level
 `crs:` mapping (which mask-correction properties to emit) is out of scope here — that's
-masking's own territory (#48/ADR-0024) — this ADR only resolves the write-gating *policy*
-ADR-0002 asked for.
+masking's own territory (#48/ADR-0048) — this ADR only resolves the write-gating *policy*
+ADR-0021 asked for.
 
 ## Measured results
 
 - **38 tests pass** in `spikes/scent` (36 unit, 2 env-gated real-file integration tests that skip
   cleanly here — no real LRC-written files exist in this Linux/WSL sandbox, same constraint
-  ADR-0020's `homing` spike already documents). `cargo clippy -p scent --all-targets -D warnings`
+  ADR-0071's `homing` spike already documents). `cargo clippy -p scent --all-targets -D warnings`
   and `cargo fmt -p scent -- --check` both pass clean.
 - **Content-preservation is proven for both formats, at different precision levels.**
   `embedded::tests::write_preserves_bytes_outside_the_segment` proves true byte-identity outside
@@ -187,7 +187,7 @@ ADR-0002 asked for.
 - **No real LRC-written file was available to measure against this pass** — the two env-gated
   integration tests (`real_lrc_sidecars.rs`, `real_embedded.rs`) are written and wired to
   `NICTI_TEST_REAL_NEF_DIR`/a new `NICTI_TEST_REAL_EMBEDDED_DIR`, but this sandbox has neither the
-  files nor a mountable path to them (same constraint as ADR-0020). Running them for real, plus the
+  files nor a mountable path to them (same constraint as ADR-0071). Running them for real, plus the
   hands-on LRC session below, is what promotes this ADR to Accepted.
 
 ## Adversarial review
@@ -299,5 +299,5 @@ Explicitly unverified, pending the follow-up hands-on LRC session (tracked as a 
   a custom label set/hierarchical keywords on throwaway file copies, save metadata, then inspect
   what actually landed in XMP) — this is the gate from Proposed to Accepted.
 - **Explicitly deferred**: DNG/TIFF embedded-XMP write (see above); the `crs:` field-level mask
-  mapping itself (masking's own territory, #48/ADR-0024); LRC's Pick-flag XMP mapping (unverified,
+  mapping itself (masking's own territory, #48/ADR-0048); LRC's Pick-flag XMP mapping (unverified,
   above).

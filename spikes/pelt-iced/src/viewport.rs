@@ -5,15 +5,15 @@
 //! run every frame. Unlike egui_wgpu's `CallbackTrait::prepare` (which is handed egui's shared
 //! command encoder), iced's `Primitive::prepare` gets no encoder -- the compute dispatch here
 //! creates and submits its own, a real, iced-imposed structural difference worth noting in
-//! ADR-0006, not a design choice made by this spike.
+//! ADR-0068, not a design choice made by this spike.
 //!
 //! **wgpu version note:** this crate depends on `wgpu = "27"` (not `"30"`, unlike `pelt-egui` and
-//! ADR-0005), because `iced_wgpu` 0.14.0 itself pins wgpu 27.0.1 -- see that crate's own
+//! ADR-0016), because `iced_wgpu` 0.14.0 itself pins wgpu 27.0.1 -- see that crate's own
 //! `Cargo.lock`, checked 2026-09-23. Rust's type system requires the exact same `wgpu` crate
 //! version to unify `wgpu::Device`/`wgpu::RenderPass` types between this file and iced's
 //! internals; a `wgpu = "30"` dependency here would simply fail to compile against iced's API,
-//! not silently degrade. This is real, load-bearing evidence for ADR-0006's gate on wgpu-version
-//! compatibility with ADR-0005's wgpu-30 choice, not a hypothetical.
+//! not silently degrade. This is real, load-bearing evidence for ADR-0068's gate on wgpu-version
+//! compatibility with ADR-0016's wgpu-30 choice, not a hypothetical.
 
 use iced::widget::shader::{self, Viewport};
 use iced::Rectangle;

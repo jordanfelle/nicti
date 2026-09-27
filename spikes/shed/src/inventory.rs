@@ -13,7 +13,7 @@ pub struct Inventory {
     pub virtual_copy_count: i64,
     pub root_folder_count: i64,
     /// Roots whose `absolutePath` starts with a drive letter (`C:/...`) -- the LRC folder model
-    /// ADR-0020 already assumes, confirmed here rather than only inferred.
+    /// ADR-0071 already assumes, confirmed here rather than only inferred.
     pub drive_letter_root_count: i64,
     /// Roots that also carry a non-empty `relativePathFromCatalog` -- LRC's own portable-catalog
     /// fallback path, present alongside the absolute one on some roots but not all (a real,

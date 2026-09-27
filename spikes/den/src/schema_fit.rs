@@ -1,8 +1,8 @@
 //! #107 schema-fit prototype: is DuckDB's data model (columnar, JSON-as-a-type) actually a good
-//! or bad fit for #22's planned catalog schema (ADR-0002), rather than the OLTP-shaped
-//! filter/sort/range queries `workload.rs`/ADR-0008 already measured?
+//! or bad fit for #22's planned catalog schema (ADR-0021), rather than the OLTP-shaped
+//! filter/sort/range queries `workload.rs`/ADR-0067 already measured?
 //!
-//! Three concrete things ADR-0002 commits to that ADR-0008's `Workload` trait never exercised:
+//! Three concrete things ADR-0021 commits to that ADR-0067's `Workload` trait never exercised:
 //!
 //! 1. A JSON-ish per-stage edit-parameter map (`EditDocument::stages: BTreeMap<String,
 //!    StageEntry>`, `StageEntry.params: serde_json::Value`) — does DuckDB have a real JSON type
@@ -15,7 +15,7 @@
 //!    `(asset_id, stage_id)` — without a linear scan of the whole history table every time.
 //!
 //! This module builds a rough approximation of that shape against both surviving SQL candidates
-//! (SQLite and DuckDB; LMDB is out of scope here — ADR-0008 already rejected it as primary on the
+//! (SQLite and DuckDB; LMDB is out of scope here — ADR-0067 already rejected it as primary on the
 //! crash-safety gate, independent of this schema-fit question) and measures it directly, per
 //! #107's exit criteria: "prototype the actual planned #22 schema shape... against both engines
 //! if the fit question isn't answerable from documentation alone." Not production code — see
@@ -25,7 +25,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::time::Instant;
 
-/// One raw history tick as it would be appended before compaction — mirrors ADR-0002's "records
+/// One raw history tick as it would be appended before compaction — mirrors ADR-0021's "records
 /// one delta per stage change, tagged with a coalescing `control` key and a timestamp."
 #[derive(Debug, Clone)]
 pub struct RawTick {
@@ -41,7 +41,7 @@ const STAGES: &[&str] = &["white_balance", "tone", "mask_subject", "mask_sky", "
 
 /// Generates a burst-and-compact history shape for `asset_count` assets: each asset gets
 /// `bursts_per_asset` editing sessions, each session a burst of `ticks_per_burst` raw slider
-/// ticks on one randomly chosen stage — the "rapid slider drag" case ADR-0002 names explicitly,
+/// ticks on one randomly chosen stage — the "rapid slider drag" case ADR-0021 names explicitly,
 /// not a uniform one-row-per-edit stream. Returns the raw ticks in insertion order.
 pub fn generate_bursts(
     asset_count: u64,
@@ -79,7 +79,7 @@ pub fn generate_bursts(
 }
 
 /// Given one asset's raw ticks (already filtered to one `asset_id`), returns the compacted rows
-/// per ADR-0002's rule: consecutive ticks sharing `(stage_id, control)` collapse into a single
+/// per ADR-0021's rule: consecutive ticks sharing `(stage_id, control)` collapse into a single
 /// delta spanning the run (first `before`, last `after`). Ticks here are already grouped by burst
 /// (generation never interleaves two stages' ticks within a burst), so this is a straightforward
 /// linear compaction pass, not a full interval-merge — matches how `generate_bursts` produces one
@@ -165,7 +165,7 @@ pub mod duckdb_fit {
             Ok(start.elapsed())
         }
 
-        /// Simulates compaction as DuckDB would actually execute it: per ADR-0002, compaction only
+        /// Simulates compaction as DuckDB would actually execute it: per ADR-0021, compaction only
         /// merges *consecutive* deltas from one uninterrupted editing burst, not every row that
         /// ever touched this `(asset_id, stage_id, control)` key — a stage can be revisited in a
         /// later, unrelated burst, and those must NOT be folded into an earlier one. `seq` is
@@ -419,7 +419,7 @@ mod tests {
 
     // Scale note: 4,000 assets x 6 bursts x 40 ticks/burst = 960,000 raw history rows — modeling
     // several real editing sessions per asset over the catalog's lifetime, well past a single
-    // "slider drag" (ADR-0002's own example is ~200 ticks for *one* drag). Kept below the
+    // "slider drag" (ADR-0021's own example is ~200 ticks for *one* drag). Kept below the
     // 2M-asset/full-corpus scale `spikes/den`'s main benchmark uses (this measures one query
     // shape in isolation, not a full catalog), but large enough that a per-row cost problem would
     // show up as a real wall-clock number, not get lost in fixed overhead.
@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(dv, sv);
     }
 
-    // Ignored by default: at this scale, DuckDB's compaction cost (the ADR-0012 finding itself)
+    // Ignored by default: at this scale, DuckDB's compaction cost (the ADR-0107 finding itself)
     // makes this test take on the order of 18 minutes — the number IS the finding, but that's far
     // too slow to run on every `cargo test --workspace --all-targets --all-features` invocation in
     // CI. Run explicitly to reproduce the ADR's measured numbers:

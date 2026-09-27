@@ -1,4 +1,4 @@
-//! `pelt-slint`: Slint GUI-framework candidate spike for #68 (ADR-0006). A Rust-driven
+//! `pelt-slint`: Slint GUI-framework candidate spike for #68 (ADR-0068). A Rust-driven
 //! virtualized 2M-cell grid (Slint has no built-in equivalent to egui's `ScrollArea::show_rows`
 //! or GPUI's `uniform_list`, so this spike hand-rolls the visible-slice logic exactly like
 //! `pelt-iced` does), loupe next/prev, and a develop viewport importing an externally-rendered

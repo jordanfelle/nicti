@@ -2,7 +2,7 @@
 
 Covers #71's volume-identity key, the volume/root/asset schema, and file-fingerprint relinking.
 
-- **Identity key (#71)**: `docs/adr/0020-volume-identity-and-remapping.md` — NTFS 64-bit volume
+- **Identity key (#71)**: `docs/adr/0071-volume-identity-and-remapping.md` — NTFS 64-bit volume
   serial + GPT partition GUID when both are present, falling back to MBR signature + partition
   offset + 32-bit volume serial on non-GPT disks. Neither the mount manager's per-machine
   `\\?\Volume{GUID}` path nor `sysinfo`'s disk listing (mount point, name, removable flag — no
@@ -39,8 +39,8 @@ Covers #71's volume-identity key, the volume/root/asset schema, and file-fingerp
   `mount_events::windows_impl`) is written against `windows-sys`' documented API shapes but has
   never been compiled or run; the schema/fingerprint/path logic (cross-platform, no `cfg(windows)`
   gate) is real, measured: 29 unit tests pass, full workspace `clippy`/`test`/`fmt`/`cargo deny`
-  are clean with `homing` added (not path-gated, like `sniff` — no heavy native build). **ADR-0020
+  are clean with `homing` added (not path-gated, like `sniff` — no heavy native build). **ADR-0071
   stays Proposed** until the reference-machine (RTX 5080/Windows) pass fills in the
   volume-identity survival table, mount-detection latency/CPU comparison, and fingerprint-cost
   benchmarks — same "spec + tooling merged, baseline measurement deferred" shape as
-  ADR-0006/ADR-0007/#90.
+  ADR-0068/ADR-0050/#90.

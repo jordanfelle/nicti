@@ -1,7 +1,7 @@
 //! The mask-group model: an ordered composition of AI-recipe and vector-geometry sources, per
-//! ADR-0002's "the recipe, not the pixels" rule (`docs/adr/0002-non-destructive-edit-model.md:117-123`).
+//! ADR-0021's "the recipe, not the pixels" rule (`docs/adr/0021-non-destructive-edit-model.md:117-123`).
 //! Named `MaskGroup`/`MaskComponent` to match LRC's own `MaskGroupBasedCorrections` shape
-//! (`spikes/shed/src/develop.rs`, `docs/adr/0023-lrc-catalog-import-mapping.md:93`) so #49/#62's
+//! (`spikes/shed/src/develop.rs`, `docs/adr/0061-lrc-catalog-import-mapping.md:93`) so #49/#62's
 //! import maps onto it directly, not a differently-shaped Nicti-only structure.
 //!
 //! **Resolves two conflicts the `#48` research sweep found between `spikes/pawprint`'s spike data
@@ -28,7 +28,7 @@ use serde_json::Value;
 use crate::geometry::Geometry;
 use crate::image::Field;
 
-/// `{model_id, model_version, params, seed?}` -- never the derived pixels, per ADR-0002. Matches
+/// `{model_id, model_version, params, seed?}` -- never the derived pixels, per ADR-0021. Matches
 /// `spikes/groom/src/spot.rs::MaskRecipe`'s shape exactly, including `model_version: String`
 /// (see conflict 1 above).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,7 +71,7 @@ pub struct MaskComponent {
     pub opacity: f32,
 }
 
-/// The `params` payload a `"mask"` `StageEntry` (ADR-0002) would carry: an ordered list of
+/// The `params` payload a `"mask"` `StageEntry` (ADR-0021) would carry: an ordered list of
 /// components, composed left to right.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MaskGroup {
@@ -101,7 +101,7 @@ fn canonical_bytes<T: Serialize>(value: &T) -> Vec<u8> {
 
 /// The bake key for one `Ai` recipe: canonical hash of `{model_id, model_version, params, seed}`
 /// **plus** the caller-supplied upstream-model-input hash (the fixed neutral render the model
-/// actually ran against -- see `docs/adr/0024-masking.md`'s "AI model input is decoupled from tone
+/// actually ran against -- see `docs/adr/0048-masking.md`'s "AI model input is decoupled from tone
 /// sliders" proposal). Deliberately **independent of `invert`/`opacity`**: those are applied live
 /// after the bake, so two components sharing the same recipe (a mask and its inverse) get the same
 /// bake key and the model runs once. Returns `None` for a `Geometry` source, which has no bake
@@ -156,7 +156,7 @@ pub struct AlphaResolutionMismatch {
 /// `Geometry` component's own rasterized field (computed live -- see `geometry::Geometry::rasterize`).
 /// CPU reference the `gpu` module's WGSL compose kernel is checked against.
 ///
-/// **Deliberately does not silently resample a mismatched alpha** -- ADR-0024 requires the
+/// **Deliberately does not silently resample a mismatched alpha** -- ADR-0048 requires the
 /// preview-to-full-resolution path to go through a guided-filter refine (`refine.rs`), not an
 /// implicit resample buried inside compose; a caller that skips that step gets a clear
 /// [`AlphaResolutionMismatch`] error instead of `compose` guessing at what refinement to apply, or

@@ -98,17 +98,17 @@ void retina_pre_mul(const RetinaLibRaw *handle, float out[4]);
 // Writes exactly 12 floats (row-major 4x3: up to 4 camera channels x XYZ). Rows for unused
 // channels (colors < 4) are zero. This is LibRaw's own camera->XYZ matrix (imgdata.color.cam_xyz),
 // derived from whichever profile LibRaw picked for this camera model -- a fallback for cameras
-// or DCP-less setups where calico has no ForwardMatrix/ColorMatrix of its own; ADR-0021 covers
+// or DCP-less setups where calico has no ForwardMatrix/ColorMatrix of its own; ADR-0038 covers
 // when each is used.
 void retina_cam_xyz(const RetinaLibRaw *handle, float out[12]);
 
 // Writes exactly 4 unsigned ints: the per-channel black-level additions LibRaw already folded
 // into retina_black() as a single scalar (imgdata.color.cblack[0..3]). Does NOT include LibRaw's
 // per-pixel black pattern map (cblack[4]/cblack[5] and beyond) -- large-scale black-level shading
-// patterns are out of scope for this research pass; see ADR-0021's Deferred section.
+// patterns are out of scope for this research pass; see ADR-0038's Deferred section.
 void retina_cblack(const RetinaLibRaw *handle, uint32_t out[4]);
 
-// --- #40 support: classic demosaic + NR comparison (ADR-0023) ---
+// --- #40 support: classic demosaic + NR comparison (ADR-0061) ---
 //
 // Mirrors LibRaw's own `-q`/user_qual enum: 0=linear, 1=VNG, 2=PPG, 3=AHD, 4=DCB (patched build
 // only), 11=DHT, 12=AAHD (patched build only -- LibRaw upstream reserves 5-10 for other forks'
@@ -160,7 +160,7 @@ RetinaStatus retina_libraw_process_classic(RetinaLibRaw *handle,
 // ushorts/pixel R,G,B,G2; dimensions are retina_iwidth()/retina_iheight()).
 const uint16_t *retina_classic_image(const RetinaLibRaw *handle, size_t *out_len);
 
-// --- #40 support: Path A (Bayer-domain model) input (ADR-0023) ---
+// --- #40 support: Path A (Bayer-domain model) input (ADR-0061) ---
 //
 // Must be called after a successful retina_libraw_decode_buffer. Writes a black-subtracted,
 // white-normalized (divided by retina_maximum()-retina_black(), clamped to [0,1]) copy of the

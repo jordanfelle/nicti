@@ -1,11 +1,11 @@
-//! `pelt-egui`: egui/eframe GUI-framework candidate spike for #68 (ADR-0006). A virtualized
+//! `pelt-egui`: egui/eframe GUI-framework candidate spike for #68 (ADR-0068). A virtualized
 //! 2M-cell grid (egui's built-in `ScrollArea::show_rows`), a 50-frame loupe with next/prev, and a
 //! custom wgpu viewport rendering `pelt::live_chain`'s compute kernel, driven by a slider
 //! (exposure) and a pan drag (vibrance/white-balance). Not a production crate -- see
 //! `CLAUDE.md`'s package-map note on `spikes/*`.
 //!
 //! Driven externally by `bench/pelt/run-pelt.ps1` + `bench/pelt/pelt.ahk` for input-latency
-//! measurement (see `docs/adr/0006-gui-framework.md`), the same screen-capture method
+//! measurement (see `docs/adr/0068-gui-framework.md`), the same screen-capture method
 //! `bench/run-hero.ps1` uses against the LRC baseline.
 
 mod viewport;

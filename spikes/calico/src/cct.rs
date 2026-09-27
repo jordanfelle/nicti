@@ -4,7 +4,7 @@
 //! illuminant (typically ~2856K Standard Light A and ~6504K D65). To render a given AsShotNeutral
 //! (the raw-space color a neutral gray subject produces under the actual shooting light), the DNG
 //! spec has the reader iteratively estimate that light's CCT and blend the two illuminants'
-//! matrices by inverse-CCT weight -- see `docs/adr/0021-color-pipeline.md`'s Candidates section
+//! matrices by inverse-CCT weight -- see `docs/adr/0038-color-pipeline.md`'s Candidates section
 //! for why this project doesn't try to reproduce Adobe's exact (undisclosed) iteration; this uses
 //! the same publicly documented two-step process (interpolate -> estimate CCT -> re-interpolate)
 //! with McCamy's published approximation in place of Adobe's own CCT solver.

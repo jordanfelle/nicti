@@ -1,8 +1,9 @@
-# ADR-0008: Catalog database engine
+# ADR-0067: Catalog database engine
 
 - **Status:** Accepted
 - **Date:** 2026-09-24
 - **Ticket:** [#67](https://github.com/jordanfelle/nicti/issues/67) Research: embedded database engine (pglite-rs vs rusqlite vs DuckDB)
+- **Formerly:** ADR-0008 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -17,24 +18,24 @@ Constraints already fixed by earlier ADRs/docs:
 
 - `docs/benchmarks.md`: **filter/search/sort p95 < 100ms at 2M**; **cold start < 2s at 2M**. Every
   number in this ADR is judged against those two lines.
-- **v1 targets Windows only** (ADR-0001) — a Windows build/test hard gate, not a tiebreaker.
-- ADR-0003's license policy applies; any new dependency needs a `docs/licensing.md` row in the
+- **v1 targets Windows only** (ADR-0015) — a Windows build/test hard gate, not a tiebreaker.
+- ADR-0018's license policy applies; any new dependency needs a `docs/licensing.md` row in the
   same PR (done, see that file's 2026-09-24 update).
 - `crates/nicti-catalog/src/lib.rs` already holds the `CatalogStore` extension-point trait with no
   methods yet — this ADR's Consequences section is what #22 uses to fill them in.
 - **Sandbox note:** this research pass ran in a Linux/WSL sandbox with 32 cores and no Windows
-  machine available. Unlike ADR-0005/0006, this is not disqualifying for the *measured* gates —
+  machine available. Unlike ADR-0016/0068, this is not disqualifying for the *measured* gates —
   see the Decision rule's reference-machine clause below — but the *Windows-build* hard gate is
   necessarily evidence-based (crate source/`build.rs`/dependency-graph inspection, CI's
   `windows-latest` job) rather than a native run in this pass.
 
-## Decision rule (stated before measuring, per ADR-0005/0006's own methodology)
+## Decision rule (stated before measuring, per ADR-0016/0068's own methodology)
 
 ### Hard gates (an engine that fails one is not benchmarked)
 
 1. Builds and passes its own tests on `x86_64-pc-windows-msvc` (CI's `build-windows` job, extended
    by this PR to run `cargo test -p den --features sqlite,duckdb,lmdb`).
-2. License allowed under ADR-0003: permissive, or LGPL isolated behind a dylib.
+2. License allowed under ADR-0018: permissive, or LGPL isolated behind a dylib.
 3. Survives a mid-write crash: reopens cleanly, its own integrity check passes.
 4. Backs up online — no exclusive lock on the live store, no "optimize" step.
 5. Actively maintained: builds against its own currently-published dependency graph, with a real
@@ -63,9 +64,9 @@ ergonomics; margin over each budget.
 ### Reference-machine rule
 
 WSL numbers count as final when every measured gate clears its budget with **≥ 3x margin** — these
-are CPU/NVMe-bound workloads with no GPU dependency, unlike ADR-0005/0006's render-path numbers.
+are CPU/NVMe-bound workloads with no GPU dependency, unlike ADR-0016/0068's render-path numbers.
 A Windows re-run is only required for a gate within 3x of its budget. This is stated up front so
-this ADR doesn't stall in ADR-0006's "Proposed, pending measurement" state.
+this ADR doesn't stall in ADR-0068's "Proposed, pending measurement" state.
 
 ### Early exit
 
@@ -82,7 +83,7 @@ index, and `GLOB`, not `LIKE`, for every prefix-scan predicate.
 decision, not closed off here.** It passed every hard and measured gate with the largest margins
 of any candidate — including the OLTP-shaped point-update gate the issue's own framing predicted
 it would fail. SQLite is still the Decision because #22 already assumes a row-store schema
-(ADR-0002's `serde_json` edit-stack rows, append-only history log) that's a more natural fit for
+(ADR-0021's `serde_json` edit-stack rows, append-only history log) that's a more natural fit for
 SQLite's maturity and this project's Rust-ecosystem familiarity, and because DuckDB's bulk-write
 transaction cost (see `rate_burst_100` below) is a real, if currently non-gating, concern for a
 "rate an image and immediately advance" hot loop. If #22's schema work finds SQLite's facet-query

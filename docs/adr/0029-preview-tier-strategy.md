@@ -1,8 +1,9 @@
-# ADR-0017: Preview tier strategy
+# ADR-0029: Preview tier strategy
 
 - **Status:** Accepted
 - **Date:** 2026-09-25
 - **Ticket:** [#29](https://github.com/jordanfelle/nicti/issues/29) Research: preview tier strategy
+- **Formerly:** ADR-0017 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -74,7 +75,7 @@ Cross-cutting design points:
 - **Ingest records per-tier `(offset, len)`** for every NEF/DNG asset (this ADR's `source.rs`
   ranged reads make this a handful of small positioned reads, not a whole-file read or a
   re-walked IFD tree per later access).
-- **Cache key**: `(asset_id, tier, render_hash)`. `render_hash` is ADR-0002's blake3 edit-document
+- **Cache key**: `(asset_id, tier, render_hash)`. `render_hash` is ADR-0021's blake3 edit-document
   hash for a stage-rendered tier, or a fixed `embedded` sentinel for camera-JPEG-derived tiers
   (T0/T1/T2/T3 as specified above — none of them reflect user edits yet, since that needs Tapetum/
   #44/#41, out of scope here). Once an image has real develop edits, its T2/T3 tiers should show
@@ -289,7 +290,7 @@ Two very different payload sizes, since the right backend differs by size:
 At this size, **SQLite has the best and most consistent read latency** (lowest p95 *and* lowest
 max) despite a slower populate than Pack — and 1,042ms for 800 assets (~1.3ms/asset) is nowhere
 near the ingest budget regardless. **Recommendation: SQLite (`previews.db`) for T0** — consolidated
-single-file storage also matches this repo's general SQLite-where-it-fits preference (ADR-0008).
+single-file storage also matches this repo's general SQLite-where-it-fits preference (ADR-0067).
 
 **T2 (re-encoded JPEG q85, ~1.2 MB avg, 300-asset sample):**
 
@@ -359,4 +360,4 @@ tooling next.
   touches every PR's CI setup time going forward.
 
 **Follow-up (2026-09):** the faster-`ravif`-speed and real-lossy-WebP items above are measured in
-[ADR-0022](0022-preview-codec-followup.md) (#143).
+[ADR-0143](0143-preview-codec-followup.md) (#143).

@@ -2,7 +2,7 @@
 //! `spikes/glint/shaders/live_chain.wgsl` -- spikes don't build on spikes, see `CLAUDE.md`'s
 //! package-map note) plus a CPU reference and the fixed-size synthetic input frame the viewport
 //! interaction (slider drag + pan) runs against. This spike measures UI/compositor input latency,
-//! not GPU compute throughput -- `spikes/glint`/ADR-0005 already measured the kernel itself; this
+//! not GPU compute throughput -- `spikes/glint`/ADR-0016 already measured the kernel itself; this
 //! crate exists only to put *some* real wgpu compute work behind each toolkit's custom-viewport
 //! embedding, so the frame-interval numbers reflect an actual paint + present cycle, not an empty
 //! quad.
@@ -34,7 +34,7 @@ impl Default for LiveChainParams {
 /// Plain-`f32` reference, mirroring `spikes/glint/src/cpu_reference.rs::live_chain_pixel` exactly
 /// -- kept only so a `pelt-*` binary's manual smoke test can sanity-check its GPU output against
 /// something, not re-measured for correctness the way glint's own test suite already did for
-/// ADR-0005.
+/// ADR-0016.
 pub fn live_chain_pixel(
     rgb: [f32; 3],
     wb_gain: [f32; 3],

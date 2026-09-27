@@ -1,8 +1,9 @@
-# ADR-0003: Third-party license policy
+# ADR-0018: Third-party license policy
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
 - **Ticket:** #18 Research: dependency & ML-model license audit
+- **Formerly:** ADR-0003 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -101,12 +102,12 @@ process being followed at review time.
 
 ## Amendments
 
-- **2026-09-23 (#19/ADR-0004):** added `ISC` to the Rust-crate allowlist (`deny.toml` and the
+- **2026-09-23 (#19/ADR-0019):** added `ISC` to the Rust-crate allowlist (`deny.toml` and the
   section above), for `libloading` — a short permissive license, OSI-approved and FSF Free/Libre,
   functionally MIT-equivalent. No other allow-list change was needed for that ADR's other new
   dependencies (`wasmtime`/`wat`, both `Apache-2.0 WITH LLVM-exception`, already allowed).
 
-- **2026-09-24 (#66/ADR-0013): Nicti's outbound license is now decided — AGPL-3.0-or-later** — this
+- **2026-09-24 (#66/ADR-0066): Nicti's outbound license is now decided — AGPL-3.0-or-later** — this
   is the single biggest change to this policy since it was written, since the whole reason the
   original Decision section below denied GPL/AGPL was to keep the outbound-license choice open.
   That's no longer true. The rules below are **superseded** by this amendment where they conflict;
@@ -138,7 +139,7 @@ process being followed at review time.
       an "or-later" grant. §3 turns out not to be the applicable mechanism at all — **LGPL-2.1
       §§5–6 directly permit combining an LGPL-2.1 library into a differently-licensed larger
       work** (exactly LGPL's purpose), no relicensing and no "or-later" grant needed. No upstream
-      contact required; see `docs/adr/0019-raw-decoder.md`'s Licensing section and
+      contact required; see `docs/adr/0037-raw-decoder.md`'s Licensing section and
       `docs/licensing.md`'s Flags §2 for the full citation trail and the real remaining
       obligation (§6(d) distribution mechanics, not a compatibility question).
   - **ML model weights**: Ultralytics YOLO (AGPL-3.0, previously denied outright for the culling/
@@ -149,7 +150,7 @@ process being followed at review time.
     provenance* reason (InsightFace/RetinaFace, LaMa's Places2 flag) — those exclusions were never
     about copyleft compatibility and this amendment doesn't touch them; CLIP's model-card-discourages-
     deployment flag (a stated-position concern, not a license one).
-  - See `docs/adr/0013-outbound-license-agpl.md` for the full reasoning behind the license choice
+  - See `docs/adr/0066-outbound-license-agpl.md` for the full reasoning behind the license choice
     itself, and `docs/licensing.md`'s dated 2026-09-24 update for the concrete per-dependency
     verdicts this amendment changes.
 

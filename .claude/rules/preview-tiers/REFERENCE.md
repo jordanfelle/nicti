@@ -7,7 +7,7 @@ paths:
 
 Full reasoning/history: `docs/decisions/preview-tiers.md`.
 
-- **Preview tier strategy (#29)** — `docs/adr/0017`: T0 (grid, `nikon_preview_ifd` verbatim) → T1
+- **Preview tier strategy (#29)** — `docs/adr/0029`: T0 (grid, `nikon_preview_ifd` verbatim) → T1
   (loupe-fast, `sub_ifd_2`, RAM-only) → T2 (screen, `JpgFromRaw` decoded+resized to 3840px long
   edge, re-encoded JPEG) → T3 (1:1, `JpgFromRaw` full decode). Seek-and-read
   (`spikes/sniff/src/source.rs`) measured ~250x faster at p50 than #28's whole-file-read locate.
@@ -18,12 +18,12 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
 - **Gotcha**: `FILE_FLAG_NO_BUFFERING` can only be set at file-open time, not per-read — a bug that
   silently served "cold" reads from the OS page cache and produced a wrong headline number, caught
   by hostile pre-PR review. Real HDD-cold-ranged numbers: ~11-17x slower than NVMe.
-- **Follow-up (#143)** — `docs/adr/0022`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
-  ADR-0017's fixed 6) against the #37/#136 stratified subset (ref-10k no longer exists, see #136).
+- **Follow-up (#143)** — `docs/adr/0143`: AVIF re-measured at faster `ravif` speeds (7-10, vs.
+  ADR-0029's fixed 6) against the #37/#136 stratified subset (ref-10k no longer exists, see #136).
   Faster speed narrows but doesn't close the gap (~5.1x slower than JPEG at speed 10, down from
   ~11.9x at speed 6 on this subset) — **JPEG stays the T2 v1 choice**, but AVIF speed 9-10 is now a named candidate
   for #64/#72's archival tiers. SSIM (new this pass) shows AVIF q75 is *not* actually comparable
-  quality to JPEG q85 as ADR-0017 assumed (0.898-0.902 vs. 0.9335) despite being ~3x smaller.
+  quality to JPEG q85 as ADR-0029 assumed (0.898-0.902 vs. 0.9335) despite being ~3x smaller.
   **Real lossy WebP measured and rejected** — worse SSIM than AVIF at comparable size, worse
   encode/decode latency than JPEG at comparable quality, plus a native C dependency neither JPEG
   nor AVIF needs.
@@ -36,7 +36,7 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   LibRaw/rawler dependency (deliberately, to stay clear of #37's decoder choice); a
   `zune-jpeg`/`fast_image_resize` decode/resize path; `codec.rs`'s JPEG-vs-AVIF-vs-WebP
   tier-payload-format comparison (`ravif`/`avif-decode`, plus lossy WebP via `webp`/`libwebp-sys`,
-  added for #143's ADR-0022 follow-up, plus a swept `avif-speed` axis and `nicti-prowl`-reused SSIM
+  added for #143's ADR-0143 follow-up, plus a swept `avif-speed` axis and `nicti-prowl`-reused SSIM
   scoring — see the committed `run-codec-sweep.ps1`); `cache.rs`'s three cache-backend candidates
   (SQLite BLOBs/pack-file/file-per-preview); `tier_bench.rs`'s end-to-end per-tier harness; and a
   locate/read/decode-grid/decode-screen/extract-index/full-read latency benchmark with a
@@ -48,4 +48,4 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   address/file offset to the next call, surfacing as `os error 87` on HDD ~10-19% of the time,
   never on NVMe) — fixed by retrying the identical `seek_read` call on the same handle rather than
   resuming from a running offset. See `docs/research/sniff-embedded-jpeg.md` for #28's write-up and
-  `docs/adr/0017-preview-tier-strategy.md` for #29's.
+  `docs/adr/0029-preview-tier-strategy.md` for #29's.

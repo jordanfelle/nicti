@@ -7,7 +7,7 @@ paths:
 
 Full reasoning/history: `docs/decisions/culling.md`.
 
-- **Burst/duplicate grouping (#33)** — `docs/adr/0025`: con-day duplicates are pose sets 2-30s
+- **Burst/duplicate grouping (#33)** — `docs/adr/0033`: con-day duplicates are pose sets 2-30s
   apart, not sub-second bursts — time is a *constraint*, not the decision; a visual-similarity
   signal decides. Four candidates (dHash/pHash/SSIM/DINOv2), same grouping algorithm.
 - **Two-level groups: tight (pick one) nested inside set (collapsible)** — nesting is structural
@@ -27,8 +27,8 @@ Full reasoning/history: `docs/decisions/culling.md`.
 
 ## Package contents
 
-- **`spikes/litter`** (#33/ADR-0025's burst/duplicate-grouping research) — EXIF/Nikon-MakerNote
+- **`spikes/litter`** (#33/ADR-0033's burst/duplicate-grouping research) — EXIF/Nikon-MakerNote
   capture-time reader, dHash/pHash/SSIM/DINOv2 similarity signals, two-level
   sequence-constrained grouping. Real, tested (35 unit/integration tests), not path-gated,
-  pending the reference-labelling measurement pass ADR-0025 describes. See
+  pending the reference-labelling measurement pass ADR-0033 describes. See
   `docs/research/litter-burst-grouping.md`.

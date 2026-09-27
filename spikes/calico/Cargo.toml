@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #38 (ADR-0021): DCP camera-profile parsing (ColorMatrix/ForwardMatrix/HueSatMap/LookTable/ProfileToneCurve), a CPU + wgpu color pipeline from linear camera RGB (handed off from `retina dump-linear`) to a working-space image, and CIEDE2000 comparison tooling against LRC-exported references. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+description = "Throwaway spike for #38 (ADR-0038): DCP camera-profile parsing (ColorMatrix/ForwardMatrix/HueSatMap/LookTable/ProfileToneCurve), a CPU + wgpu color pipeline from linear camera RGB (handed off from `retina dump-linear`) to a working-space image, and CIEDE2000 comparison tooling against LRC-exported references. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
 
 [lib]
 name = "calico"

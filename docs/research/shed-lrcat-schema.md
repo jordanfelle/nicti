@@ -1,6 +1,6 @@
 # #61: .lrcat schema mapping (`spikes/shed`)
 
-See `docs/adr/0023-lrc-catalog-import-mapping.md` for the decision and its rationale. This document
+See `docs/adr/0061-lrc-catalog-import-mapping.md` for the decision and its rationale. This document
 is the write-up: the full table-by-table map, the develop-key→owner table, and the inventory
 aggregates `shed` measured against the user's own real 380,300-asset catalog backup (never the
 live working copy, never a keyword/collection/path value — see the ADR's privacy note).
@@ -29,7 +29,7 @@ names, with real row counts from the measured catalog:
 ## Folder model
 
 All 13 real root folders have a drive-letter-prefixed `absolutePath` (`[A-Za-z]:...`), confirming
-ADR-0020's assumption that LRC keys roots by drive letter rather than a stable volume id. 2 of the
+ADR-0071's assumption that LRC keys roots by drive letter rather than a stable volume id. 2 of the
 13 *also* carry a non-empty `relativePathFromCatalog` (LRC's own portable-catalog fallback,
 `../../<drive>:/...`) — not universal, so #62 must not assume every root has one.
 
@@ -127,7 +127,7 @@ still handle both.
 ## `.lrcat-data` blobs
 
 The backup zip's `.lrcat-data` directory lists ~590 `<id>.blob` files, ~270MB each (from the zip's
-own directory listing — never extracted; ADR-0003 forbids committing real Adobe data, and 590
+own directory listing — never extracted; ADR-0018 forbids committing real Adobe data, and 590
 files at ~270MB each was out of this pass's storage budget). `hasBigData`'s 26,195-row count is the
 only in-catalog signal this pass found referencing them; the exact blob-to-asset linkage is
 unconfirmed — flagged as a follow-up for whoever picks up the filed issue.
@@ -143,7 +143,7 @@ never queried which images have more than one row or confirmed the "2 missing" c
 
 ## `lrcat-extractor` evaluation
 
-Not adopted as a compiled workspace dependency — see ADR-0023 Q8 for the full Cargo `links`
+Not adopted as a compiled workspace dependency — see ADR-0061 Q8 for the full Cargo `links`
 uniqueness conflict this pass found with `den`'s `rusqlite = "^0.40"` pin. Evaluated standalone
 (outside this workspace, in a scratch Cargo project, per this session): it opened and read the
 real v13 catalog without error via its own `rusqlite = "0.38"`. A full feature-parity comparison

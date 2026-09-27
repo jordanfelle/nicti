@@ -47,12 +47,12 @@ to wire this design into.
    pure nearest-to-cursor sort, re-evaluated on demand rather than a stateful queue. `sim.rs`
    simulates one serial bake worker processing jobs in that order, using per-image bake costs from
    `cost_model.rs` — each constant cites its source ADR, and the mask-bake cost is explicitly
-   labelled a hypothesis (ADR-0024 itself has no real measurement yet).
+   labelled a hypothesis (ADR-0048 itself has no real measurement yet).
 
 ## A real bug this pass's own measurement caught
 
 The first real-hardware bench run (RTX 5080, screen resolution) measured the `live_suffix` kernel
-at ~400ms p50 — about 1000× higher than ADR-0005's own comparable `live_chain` figure (0.326ms p95
+at ~400ms p50 — about 1000× higher than ADR-0016's own comparable `live_chain` figure (0.326ms p95
 at 4K). The cause: `run_live_suffix` (and `run_present_sample`/`run_box_filter`) each rebuild the
 wgpu pipeline (including shader-module compilation — at least the driver observed here appears to
 defer this until first dispatch, not at module-creation time) and every buffer on *every* call.
@@ -64,11 +64,11 @@ in `new()`, re-dispatched via `write_buffer` + submit in `dispatch()`), is the e
 `spikes/glint::LiveChainKernel` already documents hitting and fixing, for the identical reason —
 its own doc comment even names the mechanism ("re-paying pipeline compilation and a full
 input-buffer upload on every iteration"). After the fix, the full-resolution `live_suffix` number
-(1.767ms p50 / 3.924ms p95) landed within a few percent of ADR-0005's own 45MP figure (2.08ms p50 /
+(1.767ms p50 / 3.924ms p95) landed within a few percent of ADR-0016's own 45MP figure (2.08ms p50 /
 3.88ms p95) — real corroborating evidence the fused-kernel approach performs the way that ADR
 predicted, once measured correctly.
 
-This was caught by comparing the first result against ADR-0005's already-published number rather
+This was caught by comparing the first result against ADR-0016's already-published number rather
 than accepting it at face value — the same discipline this repo's own ADRs (0021, 0024, 0040) all
 model in their own "measured vs hypothesis" framing.
 
@@ -80,7 +80,7 @@ See ADR-0044's own Measured results section for the full table; summarized here 
   (full res, 8280×5520).
 - `present_sample`: 0.215ms p50 / 0.222ms p95 (screen res) — 0.511ms p50 / 1.611ms p95 (full res).
 - `box_filter` (512×512 field, radius 2): 0.010-0.023ms.
-- VRAM: a full-res RGBA16F frame ≈349MB (matches ADR-0005's own cited ~360MB within the rounding
+- VRAM: a full-res RGBA16F frame ≈349MB (matches ADR-0016's own cited ~360MB within the rounding
   this pass's own test tolerates), a screen-res frame ≈75MB.
 - Disk compression (synthetic 75MB screen-res gradient, `#[ignore]`d test, explicitly not a
   real-photo claim): zstd ~3688× (11.3ms), lz4 ~247× (3.4ms).

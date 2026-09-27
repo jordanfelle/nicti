@@ -2,14 +2,14 @@
 paths:
   - "spikes/siamese/**"
   - "crates/nicti-ai/**"
-  - "docs/adr/0024-masking.md"
+  - "docs/adr/0048-masking.md"
 ---
 
 # Masking — Quick Reference
 
 Full reasoning/history: `docs/decisions/masking.md`.
 
-- **Masking (#48)** — `docs/adr/0024-masking.md`: **Proposed**, pending a reference-machine pass
+- **Masking (#48)** — `docs/adr/0048-masking.md`: **Proposed**, pending a reference-machine pass
   (real BiRefNet/MobileSAM weights, real photos including fursuiters, #44's own gating). Model
   choice: BiRefNet (one-shot subject/background) + MobileSAM (interactive click/box, real
   encoder/decoder split — the embedding bakes once, only the decoder re-runs per click). SAM2
@@ -33,12 +33,12 @@ Full reasoning/history: `docs/decisions/masking.md`.
   not just per entry point — a single multi-kernel file fails to compile). Parity-tested within
   `1e-4` against lavapipe (9 tests).
 - **No real ONNX weights** — same "prove the loading shape, not real inference" posture as
-  `spikes/groom/src/ai.rs` (ADR-0007). A full BiRefNet ONNX export exists publicly (~970MB) but
+  `spikes/groom/src/ai.rs` (ADR-0050). A full BiRefNet ONNX export exists publicly (~970MB) but
   wasn't downloaded (time budget, not a technical block — network access was confirmed available).
 
 ## Package contents
 
-- **`spikes/siamese`** (#48/ADR-0024's masking research) — BiRefNet/MobileSAM segmentation
+- **`spikes/siamese`** (#48/ADR-0048's masking research) — BiRefNet/MobileSAM segmentation
   scaffolding over `ort`/`load-dynamic` (no real weights, same posture as `groom/ai.rs`), the
   brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` AI+geometry
   compose model with a shared bake key for a mask and its inverse, a guided-filter

@@ -98,7 +98,7 @@ candidates measured, the alignment bugs found and fixed, and the real Windows-na
 - **Fixed color treatment used for scoring**: camera RGB → XYZ(D50) via LibRaw's own no-profile
   camera matrix → linear sRGB (a hardcoded, published Bradford-adapted matrix, a standard
   ICC-tooling constant, not project data) → sRGB OETF, applied identically to every candidate.
-  Deliberately not ADR-0021's real DCP/HueSatMap/LookTable color pipeline, which is still its own
+  Deliberately not ADR-0038's real DCP/HueSatMap/LookTable color pipeline, which is still its own
   open research pass this ticket didn't want to block on or duplicate.
 
 - **A real Rust toolchain-shadowing bug was found and fixed getting Windows-native testing

@@ -1,5 +1,5 @@
 //! libSQL (`tursodatabase/libsql`, crate `libsql`) backend — #113's follow-up candidate, added
-//! after ADR-0010 (`redb`) merged. Distinct from #102's Turso Database candidate
+//! after ADR-0106 (`redb`) merged. Distinct from #102's Turso Database candidate
 //! (`turso_engine.rs`): libSQL is an actual fork of SQLite's real C source (not a from-scratch
 //! Rust rewrite), so unlike `turso_engine.rs` there is no reason to expect a missing `LIKE`/`GLOB`
 //! prefix-scan optimization or a still-unproven WAL implementation — this schema uses `GLOB`
@@ -79,10 +79,10 @@ const SCHEMA: &[&str] = &[
     // These three single-column indexes are redundant for every query this workload actually
     // runs (model/rating/iso are only ever filtered via the composite indexes below), but
     // sqlite.rs carries them anyway, and a hostile review of an earlier draft of this file (and
-    // of ADR-0014) correctly caught that omitting them here made the "byte-identical schema"
+    // of ADR-0113) correctly caught that omitting them here made the "byte-identical schema"
     // claim false — they're a real write-path index-maintenance cost `sqlite.rs` pays that this
     // engine didn't, silently handicapping the SQLite side of the comparison rather than the
-    // libSQL side. Kept here, unlike `turso_engine.rs` (ADR-0009's own comparison scoped its claim
+    // libSQL side. Kept here, unlike `turso_engine.rs` (ADR-0102's own comparison scoped its claim
     // to "equivalent composite indexes" specifically to route around this same gap rather than
     // fix it) — added rather than just re-scoping the claim, since fixing the schema is more
     // honest than narrowing the sentence around it.

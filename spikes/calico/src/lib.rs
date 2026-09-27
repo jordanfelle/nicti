@@ -1,4 +1,4 @@
-//! Spike for #38 (ADR-0021): color pipeline research. See `docs/adr/0021-color-pipeline.md` and
+//! Spike for #38 (ADR-0038): color pipeline research. See `docs/adr/0038-color-pipeline.md` and
 //! `docs/research/calico-color-pipeline.md`.
 
 pub mod cct;

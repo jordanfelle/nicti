@@ -1,4 +1,4 @@
-//! Throwaway spike for #21 / `docs/adr/0002-non-destructive-edit-model.md`.
+//! Throwaway spike for #21 / `docs/adr/0021-non-destructive-edit-model.md`.
 //!
 //! Proves the claims the ADR makes: canonical per-stage hashing is stable
 //! and isolated to the stage that changed, history compaction collapses a
@@ -123,7 +123,7 @@ fn add_numbers(a: &serde_json::Number, b: &serde_json::Number) -> Value {
 /// Normalize -0.0 to 0.0 in place. NaN/Infinity can't reach here in the
 /// first place: `serde_json` refuses to serialize them (returns an error)
 /// as long as the `arbitrary_precision` feature stays off, which this
-/// spike's Cargo.toml doesn't enable — see docs/adr/0002's serialization
+/// spike's Cargo.toml doesn't enable — see docs/adr/0021's serialization
 /// appendix for the citation trail this relies on.
 fn canonicalize(value: &mut Value) {
     match value {

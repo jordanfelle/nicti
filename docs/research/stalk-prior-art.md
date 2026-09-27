@@ -2,9 +2,9 @@
 
 Findings for [#69](https://github.com/jordanfelle/nicti/issues/69), feeding #37 (RAW decoder), #38
 (color pipeline), #39 (lens corrections), #44/#45 (Tapetum render graph), #47 (crop/auto-level),
-#48/#51 (masking/healing), #56 (export), #68/ADR-0006 (GUI), and #99 (classic auto-tone). This is a
+#48/#51 (masking/healing), #56 (export), #68/ADR-0068 (GUI), and #99 (classic auto-tone). This is a
 findings doc, not an ADR; the RapidRAW adopt/fork decision itself is
-`docs/adr/0018-rapidraw-adopt-or-fork.md`.
+`docs/adr/0069-rapidraw-adopt-or-fork.md`.
 
 ## Method
 
@@ -30,7 +30,7 @@ the committed `LICENSE` file's boilerplate text, not a per-project grant stateme
 directly for an explicit election, the way the doc already does for Ansel below: no
 `SPDX-License-Identifier` header exists in any source file, and the README's own license section
 (`README.md:1013`) just says "GNU Affero General Public License v3.0 (AGPL-3.0)" with no
-`-only`/`-or-later` language. **Practical effect on ADR-0018's reasoning: none** — GPL-family
+`-only`/`-or-later` language. **Practical effect on ADR-0069's reasoning: none** — GPL-family
 licenses of the same base version are compatible with each other regardless of the `-only`/
 `-or-later` distinction (an `-or-later` grant is only an added permission on top of the same v3
 text, so a combined work can always be distributed under plain version 3, satisfying both sides)
@@ -50,19 +50,19 @@ RapidRAW's ~583-crate graph clears Nicti's existing allowlist without a single a
 by reading actual source headers (not just the crate's `Cargo.toml` line, which could reasonably be
 read as shorthand for either grant): every checked `rawler` source file
 (`rawler/src/tiles.rs:1`, etc.) carries `// SPDX-License-Identifier: LGPL-2.1`, no `-or-later`. This
-is the **same unresolved ambiguity ADR-0013 already flagged for upstream `rawler`** — RapidRAW's
+is the **same unresolved ambiguity ADR-0066 already flagged for upstream `rawler`** — RapidRAW's
 fork does not resolve it, since the fork only patched a highlights-clamping behavior
 (`934af4b2`, commit message "let highlights remain unbounded") and left every license header
 untouched. **#37 still needs to resolve this before adopting rawler in any form**, forked or not.
 
 ### Corrections to existing ADR claims
 
-- **ADR-0006 (`docs/adr/0006-gui-framework.md`) is wrong**: its Prior art section states RapidRAW
+- **ADR-0068 (`docs/adr/0068-gui-framework.md`) is wrong**: its Prior art section states RapidRAW
   uses `egui`/`eframe`, "confirmed via the project's own dependency manifest — verified 2026-09-23."
   The actual `src-tauri/Cargo.toml:17` shows `tauri = "2.11"`, and the `src/` tree (117 `.tsx`/`.ts`
   files) is a React frontend. There is no `egui`/`eframe` dependency anywhere in the manifest.
   Corrected directly in this PR — see that file's own Amendments note.
-- **ADR-0005's "RapidRAW uses wgpu" claim is correct** (`gpu_processing.rs`), but understate one
+- **ADR-0016's "RapidRAW uses wgpu" claim is correct** (`gpu_processing.rs`), but understate one
   detail: RapidRAW pins `wgpu = "29.0"` (Cargo.toml:26), one major version behind Nicti's own
   `wgpu` 30 choice, with an explicit comment in the manifest: `# Downgraded to prevent P3 color
   shifts on Apple devices`. Worth knowing if Nicti ever hits the same issue on macOS (v2, #73).
@@ -86,7 +86,7 @@ naming, surface-creation `cfg` gate, and shader line count all confirmed exact).
   HuggingFace repo (`CyberTimon/RapidRAW-Models`, `ai_processing.rs:22-59`) at runtime
   (`download_and_verify_model`, line 408), **not bundled** in the binary or repo. No weights are
   vendored, so there is no "does this repo's own license apply to weights" question — only the
-  weights' own upstream licenses matter, same open question ADR-0007 already has for LaMa's
+  weights' own upstream licenses matter, same open question ADR-0050 already has for LaMa's
   Places2 training-data provenance.
 - **Edit storage — per-image JSON sidecar, no catalog DB.** `<source>.rrdata`
   (`file_management.rs:406-413`, path built by `parse_virtual_path`, lines 387-417); virtual copies
@@ -103,7 +103,7 @@ naming, surface-creation `cfg` gate, and shader line count all confirmed exact).
   }
   ```
   `adjustments` is a single untyped blob, not a typed fixed-order stage map — the opposite of
-  Nicti's own ADR-0002 design (typed per-stage params, blake3-hashed individually for Tapetum's
+  Nicti's own ADR-0021 design (typed per-stage params, blake3-hashed individually for Tapetum's
   cache key). A `.rrexif` cache file and an optional `.xmp` sidecar (if configured) exist alongside
   it (lines 2547-2552). **Not directly portable to Nicti's catalog-authoritative model** — there is
   no DB row to map `.rrdata` onto; adopting RapidRAW's edit engine would mean rebuilding its
@@ -122,7 +122,7 @@ naming, surface-creation `cfg` gate, and shader line count all confirmed exact).
      (`generate_uncropped_preview`, `lib.rs:782-915`) instead returns a base64 data-URI string.
   This confirms the structural question the plan flagged: on the platform RapidRAW actually
   optimizes for (Windows/macOS), it avoids the full-frame host↔device round-trip Nicti's own
-  ADR-0005 rules out — **no conflict there**. The CPU-readback fallback path exists only for
+  ADR-0016 rules out — **no conflict there**. The CPU-readback fallback path exists only for
   platforms/settings where the direct-surface path isn't available.
 - **GPU pipeline — GPU-resident once uploaded, but with a real pre-GPU CPU stage.** Flare, blur
   (ping-pong across `ping_pong_view`/`sharpness_blur_view`/etc., `gpu_processing.rs:1466-1546`),
@@ -132,7 +132,7 @@ naming, surface-creation `cfg` gate, and shader line count all confirmed exact).
   CPU via `image::DynamicImage` *before* the result is uploaded to `GpuImageCache`
   (`lib.rs:412-441`, `gpu_processing.rs:1917-1947`). So "no full-frame host↔device round-trip" is
   true for the color/tone stages only, not the geometry stages — a real architectural difference
-  from Nicti's own decided all-GPU-resident stage chain (ADR-0002/ADR-0005), not a match.
+  from Nicti's own decided all-GPU-resident stage chain (ADR-0021/ADR-0016), not a match.
 - **Render graph — none. Confirmed absent, not just unfound.** No DAG, no per-stage cache, no
   blake3-style memoization. Every slider tweak re-runs the *entire* GPU pipeline top-to-bottom
   through `GpuProcessor::run` (`gpu_processing.rs:1185-1742`, reached via
@@ -144,9 +144,9 @@ naming, surface-creation `cfg` gate, and shader line count all confirmed exact).
   and pre-pipeline: a geometry-transform hash skip (`calculate_transform_hash`, `lib.rs:394-431`)
   and an input-texture-reupload skip when dimensions/geometry are unchanged
   (`GpuImageCache`, `gpu_processing.rs:1940-1946`). **This is the single most consequential finding
-  for #44/ADR-0018**: RapidRAW's actual render strategy is architecturally the opposite of
+  for #44/ADR-0069**: RapidRAW's actual render strategy is architecturally the opposite of
   Tapetum's planned design (a real per-stage-cached DAG). Adopting RapidRAW's GPU pipeline code
-  would mean adopting a design Nicti's own ADR-0002 already reasoned past, not a shortcut to it.
+  would mean adopting a design Nicti's own ADR-0021 already reasoned past, not a shortcut to it.
 - **Module structure — monolithic, no extension-point abstraction.** Free functions and concrete
   structs in flat per-concern files (confirmed: only four small utility traits exist in the entire
   backend — `IntoCowImage`, `FrameSource` (focus-stacking only), `FillChannel`/`SolidFill`
@@ -164,7 +164,7 @@ rewrite of darktable's C codebase, not a Rust project. Its own README (`vkdt/rea
 confirms: "the processing pipeline is a generic node graph (DAG) … all processing is done in
 glsl shaders/vulkan… the gui profits from this scheme as well and can display textures while they
 are still on GPU" — the closest prior-art match to Nicti's own already-decided GPU-resident,
-no-full-frame-round-trip design (ADR-0005) and Tapetum's planned stage-cache DAG (#44), even though
+no-full-frame-round-trip design (ADR-0016) and Tapetum's planned stage-cache DAG (#44), even though
 the implementation language doesn't transfer.
 
 - **RAW decode**: does use `rawler` — but via a thin WTFPL C-binding crate the vkdt author wrote
@@ -179,17 +179,17 @@ the implementation language doesn't transfer.
   loaded directory", `src/db/readme.md:7-8`) plus a minimal per-directory `vkdt.db` for
   rating/labels only (line 11-12) — no central catalog DB. Thumbnails cache to
   `.cache/vkdt/<murmur3-hash>.bc1`, GPU-native BC1-compressed on disk (line 17-19). This is a much
-  lighter-weight model than Nicti's own catalog-authoritative design (ADR-0002) and not directly
+  lighter-weight model than Nicti's own catalog-authoritative design (ADR-0021) and not directly
   reusable, but the "write processing params as a flat ascii key:value sidecar, no binary format
   needed" idea (`src/pipe/readme.md:57-67`, e.g. `exposure:ev:2.0`) is a plausible reference for
-  Nicti's own XMP `nicti:` namespace projection (ADR-0002).
+  Nicti's own XMP `nicti:` namespace projection (ADR-0021).
 - **Render graph**: real DAG with topological-sort scheduling directly to a Vulkan command buffer
   (`src/pipe/readme.md:1-45`) — one compute shader per node, with a distinct "self-configuring node
   layer" for cases where the graph shape depends on the current region-of-interest (line 34-42,
   e.g. a preview pipe with a smaller ROI). This is the single most directly relevant prior-art
   reference for #44 (Tapetum's stage-cached render graph design) of any project studied here — a
   real, shipping Vulkan DAG scheduler to compare design choices against, even though vkdt is C and
-  wgpu-vs-raw-Vulkan is already a settled question (ADR-0005).
+  wgpu-vs-raw-Vulkan is already a settled question (ADR-0016).
 
 ## Ansel
 
@@ -207,7 +207,7 @@ could be reused without a license conflict, same as RapidRAW.
 darktable's well-known reorderable IOP module stack: `doc/history-split.md` (measuring an in-flight
 internal refactor, not upstream-facing docs, but load-bearing evidence of the real shape) confirms
 each history item holds "a `dt_iop_module_t *` and a params blob typed by module"
-(`history-split.md:9`) — this is exactly the **reorderable op-stack model Nicti's ADR-0002 already
+(`history-split.md:9`) — this is exactly the **reorderable op-stack model Nicti's ADR-0021 already
 evaluated and rejected** in favor of a fixed-order stage-parameter map. Ansel is architecturally the
 least relevant of the three to Nicti's own decided design, matching the issue's own expectation
 ("less architecturally relevant, not Rust").
@@ -221,12 +221,12 @@ need a reference for interaction design, not for backend structure.
 - **#37 (RAW decoder)**: both RapidRAW and vkdt reach for the same underlying crate family
   (`rawler`/dnglab), by two different maintainers, independently confirming it's the community's
   leading pure-Rust decoder option — but **neither resolves the `LGPL-2.1` bare-identifier
-  ambiguity** ADR-0013 already flagged. That's still #37's own open question to close, not
+  ambiguity** ADR-0066 already flagged. That's still #37's own open question to close, not
   something this research settles.
 - **#38/#39 (color pipeline, lens corrections)**: RapidRAW evaluates color grading, curves, HSL,
   tonemapping, and LUTs together inside one monolithic per-tile shader
   (`gpu_processing.rs:1639-1647`) rather than as separable stages — not directly reusable given
-  Nicti's fixed-order stage-map design (ADR-0002), but a real data point that a single-pass
+  Nicti's fixed-order stage-map design (ADR-0021), but a real data point that a single-pass
   combined shader is a viable perf strategy if Tapetum's staging ever needs a "collapse contiguous
   color-only stages into one dispatch" optimization.
 - **#44/#45 (Tapetum)**: vkdt's Vulkan DAG (topological sort, per-ROI self-configuring subgraphs) is
@@ -238,14 +238,14 @@ need a reference for interaction design, not for backend structure.
   RapidRAW is confirmed to ship SAM-ViT-B masking, LaMa inpainting, and a CLIP-based
   search/tagging path (not masking) — real, shipping implementations worth studying at the
   algorithm level once the deep-dive names the actual entrypoint functions.
-- **#68/ADR-0006 (GUI)**: the corrected finding (Tauri+React, not egui) removes what was previously
-  cited as supporting evidence for egui — see the ADR-0006 Amendments note for whether this changes
+- **#68/ADR-0068 (GUI)**: the corrected finding (Tauri+React, not egui) removes what was previously
+  cited as supporting evidence for egui — see the ADR-0068 Amendments note for whether this changes
   anything material (it shouldn't: the citation was in Prior art, not Decision, and egui's lead
   came from its own wgpu-30 match and license, not from RapidRAW's stack).
 
 **Status: complete.** All three projects' architecture, license, and reuse questions raised by #69
 are answered above with file:line citations, each spot-checked against the actual source after the
-`ask-gemini` deep-dive returned. See `docs/adr/0018-rapidraw-adopt-or-fork.md` for the resulting
+`ask-gemini` deep-dive returned. See `docs/adr/0069-rapidraw-adopt-or-fork.md` for the resulting
 go/no-go recommendation.
 
 [^ansel1]: FSF, "Various Licenses and Comments about Them" (GPL-Compatible Free Software Licenses

@@ -12,7 +12,7 @@
 //! (`db.snapshot()`) gives a consistent cross-keyspace read view, analogous to `heed`'s `RwTxn`/
 //! `redb`'s `ReadTransaction`. This module uses one `Snapshot` per read method, mirroring
 //! `lmdb.rs`/`redb_engine.rs`'s "one read-txn per call" shape, even though this spike never
-//! exercises a concurrent writer (see ADR-0008's own scope note) so cross-keyspace consistency is
+//! exercises a concurrent writer (see ADR-0067's own scope note) so cross-keyspace consistency is
 //! never actually put under test here.
 //!
 //! **Real, structural finding, not a workaround**: fjall's atomic cross-keyspace write primitive
@@ -50,7 +50,7 @@
 //! doc comment explicitly says its held-open read transaction is "a real, if partial, safety
 //! property" with no upstream guarantee behind it) — but it is still not a purpose-built,
 //! coordinated-with-the-commit-boundary backup API, and this spike never exercises a concurrent
-//! writer during backup() for any engine (see ADR-0008's "two honest scope limits" note), so this
+//! writer during backup() for any engine (see ADR-0067's "two honest scope limits" note), so this
 //! gap doesn't affect any number measured here.
 //!
 //! **Background threads**: `Database::open` starts a small worker-thread pool (compaction/flush,

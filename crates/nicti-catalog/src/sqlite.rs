@@ -1,4 +1,4 @@
-//! `rusqlite`-backed `CatalogStore` (ADR-0008: SQLite, WAL). One `Connection` per store, guarded
+//! `rusqlite`-backed `CatalogStore` (ADR-0067: SQLite, WAL). One `Connection` per store, guarded
 //! by a `Mutex` — `rusqlite::Connection` needs `&mut self` for a transaction, and `Module` (via
 //! `CatalogStore`) requires `Send + Sync` since it's shared as `Arc<dyn CatalogStore>` through the
 //! Claw registry.
@@ -11,7 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::{Asset, CatalogError, CatalogStore, NewAsset, Preview, PreviewTier};
 use nicti_claw::Module;
 
-/// The empty `EditDocument` shape (`{ stages: BTreeMap<String, StageEntry> }`, ADR-0002),
+/// The empty `EditDocument` shape (`{ stages: BTreeMap<String, StageEntry> }`, ADR-0021),
 /// serialized by hand rather than depending on `spikes/pawprint` (a spike crate — not something
 /// production code builds on top of, per this repo's package-map convention). Whichever ticket
 /// promotes `pawprint`'s `EditDocument` to a production crate can replace this literal with a real

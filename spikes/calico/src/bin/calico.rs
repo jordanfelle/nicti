@@ -128,7 +128,7 @@ fn cmd_compare(
     );
 
     // 1/4 resolution: the demosaic stand-in's edge differences shouldn't dominate the
-    // comparison, per ADR-0021's decision rule.
+    // comparison, per ADR-0038's decision rule.
     let step = 4u32;
     let mut diffs = Vec::new();
     let mut heatmap =

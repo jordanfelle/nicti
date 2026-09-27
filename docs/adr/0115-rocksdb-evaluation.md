@@ -1,14 +1,15 @@
-# ADR-0015: RocksDB (`rocksdb` crate, LSM-tree embedded KV store), evaluated for the catalog store — not adopted
+# ADR-0115: RocksDB (`rocksdb` crate, LSM-tree embedded KV store), evaluated for the catalog store — not adopted
 
 - **Status:** Rejected (not a rejection of the LSM-tree angle itself — see Consequences, same
-  caveat ADR-0009/0010 made for Turso/redb)
+  caveat ADR-0102/0106 made for Turso/redb)
 - **Date:** 2026-09-24
 - **Ticket:** [#115](https://github.com/jordanfelle/nicti/issues/115) Research: RocksDB (via
   rust-rocksdb) as a catalog engine candidate
+- **Formerly:** ADR-0015 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0008 named LMDB's raw-KV/no-query-planner tradeoff shape but rejected it on an unmeasurable
+ADR-0067 named LMDB's raw-KV/no-query-planner tradeoff shape but rejected it on an unmeasurable
 crash-safety hard gate, not on performance. #115 asks a related but distinct question: RocksDB
 (`facebook/rocksdb`, via the `rocksdb` crate published by the `rust-rocksdb` GitHub org) is the
 LSM-tree engine specifically built for high write-concurrency production workloads (CockroachDB,
@@ -47,7 +48,7 @@ against the same 600k/2M synthetic scale.
 ### Hard gates (an engine that fails one is not benchmarked further)
 
 1. Builds and passes smoke tests on `x86_64-pc-windows-msvc` in CI.
-2. License allowed under ADR-0003 (confirm the Apache-2.0 arm is genuinely selectable, not just
+2. License allowed under ADR-0018 (confirm the Apache-2.0 arm is genuinely selectable, not just
    present as an unused alternative).
 3. Survives a mid-write crash: reopens cleanly, its own integrity check passes.
 4. Actively maintained: a release within the last 6 months and a real Rust API.
@@ -70,8 +71,8 @@ side-by-side number — not an assumption that RocksDB is better here just becau
 ## Decision
 
 **Not adopted.** Hard gates 1/2/4 all pass with strong, verifiable evidence (see below). Hard gate 3
-(crash-safety) is left **inconclusive** via this harness, for the same class of reason ADR-0008/
-0009/0010 already documented for LMDB/Turso/redb — not a defect in RocksDB, a limitation of the
+(crash-safety) is left **inconclusive** via this harness, for the same class of reason ADR-0067/
+0102/0106 already documented for LMDB/Turso/redb — not a defect in RocksDB, a limitation of the
 in-process `mem::forget` crash-simulation technique. The decision rests on the **measured gates**:
 two query shapes miss the 2M budget outright (range query ~1.8x over, filename search ~4.5x over) —
 worse in absolute terms than every prior candidate on these same two shapes — root-caused (tested,
@@ -92,7 +93,7 @@ variance does not resemble SQLite's own lock-file model, which produces a *clean
 (flat throughput, tail latency growing smoothly with thread count), not the noisy, non-monotonic
 pattern RocksDB showed. Combined with the two measured-gate misses and
 `rocksdb_engine.rs`'s own hand-maintained-secondary-index engineering cost (the same real cost
-ADR-0008/0010 already charged against LMDB/redb), RocksDB is not a better fit for #22 than SQLite
+ADR-0067/0106 already charged against LMDB/redb), RocksDB is not a better fit for #22 than SQLite
 today.
 
 ## Measured results
@@ -108,7 +109,7 @@ section's own caveat about a specific, real confound in that part of the run.
 |---|---|
 | 1. Windows build | ✅ Confirmed via `rust-rocksdb/rust-rocksdb`'s own `.github/workflows/rust.yml`: a real `windows-latest` job in its 3-OS test matrix, running `cargo nextest run --all` there — not just a doc claim. **One concrete, non-trivial Windows-specific build gotcha found and worth carrying into this repo's own CI, not just noted**: `librocksdb-sys` generates its FFI bindings with `bindgen`, which needs libclang on the build machine, and upstream's own Windows job has to `Remove-Item C:\msys64` and `choco install llvm -y` first to avoid a `libclang.dll` conflict with GitHub's `windows-latest` runner's own bundled msys64 install — mirrored exactly in this PR's `.github/workflows/ci.yml` change, not invented fresh. |
 | 2. License | ✅ Apache-2.0 (binding crate) with a genuinely selectable Apache-2.0 arm on the dual-licensed native core — see the Context section above for the full chain of evidence. Already on `deny.toml`'s allowlist; `docs/licensing.md` updated in this PR with the precise per-component breakdown. |
-| 3. Crash-safety | ⚠️ **Inconclusive — same class of harness limitation as LMDB/Turso/redb, confirmed and precisely scoped, not assumed.** `den crash --engine rocksdb --iterations 20` reported **20/20 reopen failures**: `IO error: lock hold by current process ... LOCK: No locks available`. RocksDB takes an OS-level `LOCK` file on the DB directory for the handle's lifetime, released on `Drop`/close; `mem::forget` skips that `Drop`, so the caller's later reopen of the *same* path fails. **A direct follow-up probe (mirroring ADR-0009/0010's own methodology) confirms this is scoped to the specific leaked path, not a process-wide guard like LMDB's** (ADR-0008's hard-gate-3 finding): opening a **different**, never-before-touched path in the same process, right after forgetting the first one, succeeds cleanly. Like ADR-0010's own equivalent probe for redb, this was a throwaway `src/bin/lock_probe.rs` binary, run once and deleted before this commit rather than kept as permanent test coverage — its result is transcribed here verbatim (`PATH B (fresh, never touched): opened OK` / `PATH A (same as forgotten): FAILED: ... LOCK: No locks available`), the same "confirmed by a since-deleted throwaway probe, not left as an uncited assertion" pattern this ADR series has used since ADR-0010, called out explicitly here rather than left implicit (a hostile review of this ADR correctly flagged that the claim had no artifact in the diff to check it against, same as it would for ADR-0010's own probe). This is the same *category* of finding as redb's own fd-scoped advisory lock (ADR-0010) — a real OS-level `SIGKILL` releases every lock the dying process held, which this in-process technique cannot faithfully simulate, so this should be read as "harness limitation, mechanism now precisely understood," not as a failing or passing result. A real fork+exec+SIGKILL harness remains the only way to actually settle it, per ADR-0008/0009/0010's own repeated, still-unbuilt follow-up. |
+| 3. Crash-safety | ⚠️ **Inconclusive — same class of harness limitation as LMDB/Turso/redb, confirmed and precisely scoped, not assumed.** `den crash --engine rocksdb --iterations 20` reported **20/20 reopen failures**: `IO error: lock hold by current process ... LOCK: No locks available`. RocksDB takes an OS-level `LOCK` file on the DB directory for the handle's lifetime, released on `Drop`/close; `mem::forget` skips that `Drop`, so the caller's later reopen of the *same* path fails. **A direct follow-up probe (mirroring ADR-0102/0106's own methodology) confirms this is scoped to the specific leaked path, not a process-wide guard like LMDB's** (ADR-0067's hard-gate-3 finding): opening a **different**, never-before-touched path in the same process, right after forgetting the first one, succeeds cleanly. Like ADR-0106's own equivalent probe for redb, this was a throwaway `src/bin/lock_probe.rs` binary, run once and deleted before this commit rather than kept as permanent test coverage — its result is transcribed here verbatim (`PATH B (fresh, never touched): opened OK` / `PATH A (same as forgotten): FAILED: ... LOCK: No locks available`), the same "confirmed by a since-deleted throwaway probe, not left as an uncited assertion" pattern this ADR series has used since ADR-0106, called out explicitly here rather than left implicit (a hostile review of this ADR correctly flagged that the claim had no artifact in the diff to check it against, same as it would for ADR-0106's own probe). This is the same *category* of finding as redb's own fd-scoped advisory lock (ADR-0106) — a real OS-level `SIGKILL` releases every lock the dying process held, which this in-process technique cannot faithfully simulate, so this should be read as "harness limitation, mechanism now precisely understood," not as a failing or passing result. A real fork+exec+SIGKILL harness remains the only way to actually settle it, per ADR-0067/0102/0106's own repeated, still-unbuilt follow-up. |
 | 4. Maintained | ✅ `v0.25.0`, pushed 2026-08-16 (5.5 weeks before this evaluation), 2,178 GitHub stars, not archived. The native RocksDB core it vendors is itself a mature, heavily production-proven engine (CockroachDB, TiKV, and many others) — the strongest real-world production-deployment evidence of any candidate evaluated in this series, though that maturity is about the C++ core, not the Rust binding layer specifically. |
 
 ### Measured gates, 600k assets
@@ -127,7 +128,7 @@ section's own caveat about a specific, real confound in that part of the run.
 | Bulk ingest, 600k rows (informative) | — | 5.45 s |
 | Online backup / checkpoint (informative, not gated) | — | 0.176 / 0.278 ms |
 
-Like redb (ADR-0010) and unlike SQLite/DuckDB/LMDB (ADR-0008), RocksDB already misses two gates at
+Like redb (ADR-0106) and unlike SQLite/DuckDB/LMDB (ADR-0067), RocksDB already misses two gates at
 600k scale, not just at 2M — worth stating plainly rather than only reporting the 2M table below.
 
 ### Measured gates, 2M assets (the planning-horizon scale the budget is stated against)
@@ -150,7 +151,7 @@ Like redb (ADR-0010) and unlike SQLite/DuckDB/LMDB (ADR-0008), RocksDB already m
 (used by `rocksdb_engine.rs::backup()`) is a first-class, purpose-built, online, no-exclusive-lock
 mechanism (hard-links unchanged SST files, copies only the small live WAL/manifest state) —
 directly analogous to SQLite's `VACUUM INTO`/DuckDB's `EXPORT DATABASE`/LMDB's `env.copy_to_path`,
-and notably **better** than redb's own admitted fallback to a bare `fs::copy` (ADR-0010) — RocksDB
+and notably **better** than redb's own admitted fallback to a bare `fs::copy` (ADR-0106) — RocksDB
 was the only KV-shaped, no-query-planner candidate in this whole series with a real backup API,
 not a gap. This isn't the deciding factor (the measured-gate misses are), but it's a genuine
 strength worth recording plainly rather than only reporting misses.
@@ -172,8 +173,8 @@ configured anywhere in `rocksdb_engine.rs`** — without one, standard block-bas
 bloom filters at all, so a bloom-filter-check cost specifically is not something this pass's
 default configuration would even incur; an earlier draft of this ADR wrongly asserted it did. This
 structural-cost family is still a real, distinct-from-LMDB explanation in kind (LMDB's direct
-mmap'd B-tree lookups clear both of these same two query shapes easily, per ADR-0008, and redb's
-own different but analogous per-page-checksum cost, ADR-0010, is the same class of finding), but
+mmap'd B-tree lookups clear both of these same two query shapes easily, per ADR-0067, and redb's
+own different but analogous per-page-checksum cost, ADR-0106, is the same class of finding), but
 the *specific* mechanism within it is not established here. **A known, unattempted mitigation**: a
 larger, explicitly-sized block cache and/or configuring a bloom-filter policy via
 `BlockBasedTableOptions` — this pass measured RocksDB's out-of-the-box default configuration
@@ -310,27 +311,27 @@ conclusion either way.
 | Option | Verdict |
 |---|---|
 | RocksDB (`rocksdb` crate) | **Rejected.** Strong Windows-build/license/maintenance evidence (including a real, concrete Windows CI gotcha — a bindgen/libclang conflict — found and mirrored into this repo's own CI). Two measured query shapes miss the 2M budget, one badly (filename search ~4.5x over, the worst of any candidate on this shape). The unflushed-memtable hypothesis for this was tested and ruled out (compaction was tried and did not help); the remaining LSM-read-cost explanation is consistent with RocksDB's architecture but not independently isolated by this pass — see the ADR's own Root-cause section. The concurrent-writer comparison this ADR exists to produce has a genuine, nuanced answer: RocksDB avoids SQLite's textbook single-writer serialization signature and can deliver up to ~8-12x SQLite's corrected throughput range, but its results under default settings were highly variable, including at least one run below SQLite's entire corrected range; the cause remains unresolved — not the clean, reputation-driven "RocksDB wins" story #115 was filed specifically to test against actual measurement. |
-| SQLite (`rusqlite`, WAL) | Unchanged from ADR-0008: still chosen. Its concurrent-writer signature (flat aggregate throughput, monotonically growing tail latency under contention) is now directly, cleanly measured for the first time in this series — confirming the real cost this candidate's own filing worried about, even though it isn't the deciding factor here (RocksDB's own measured-gate misses and tuning-dependent concurrent story are). |
-| LMDB (`heed`) | Unchanged from ADR-0008: still the best raw single-threaded numbers on every indexable op, still rejected on the same unmeasurable crash-safety hard gate. |
-| `redb` | Unchanged from ADR-0010: still not adopted, same per-read-cost story as this ADR's own findings for RocksDB (a different mechanism — redb's own confirmed per-page checksumming vs. RocksDB's hypothesized-but-not-isolated block-cache-miss cost, no bloom filters configured or tested here — same *shape* of finding: real per-read cost, not a fixable indexing gap). |
+| SQLite (`rusqlite`, WAL) | Unchanged from ADR-0067: still chosen. Its concurrent-writer signature (flat aggregate throughput, monotonically growing tail latency under contention) is now directly, cleanly measured for the first time in this series — confirming the real cost this candidate's own filing worried about, even though it isn't the deciding factor here (RocksDB's own measured-gate misses and tuning-dependent concurrent story are). |
+| LMDB (`heed`) | Unchanged from ADR-0067: still the best raw single-threaded numbers on every indexable op, still rejected on the same unmeasurable crash-safety hard gate. |
+| `redb` | Unchanged from ADR-0106: still not adopted, same per-read-cost story as this ADR's own findings for RocksDB (a different mechanism — redb's own confirmed per-page checksumming vs. RocksDB's hypothesized-but-not-isolated block-cache-miss cost, no bloom filters configured or tested here — same *shape* of finding: real per-read cost, not a fixable indexing gap). |
 
-ADR-0008's decision is unchanged: **SQLite remains chosen, DuckDB remains the proven fallback.**
+ADR-0067's decision is unchanged: **SQLite remains chosen, DuckDB remains the proven fallback.**
 
 ## Consequences
 
 - **The "SQLite's single-writer model is a scaling risk" concern this ADR exists to test is now
   directly measured, not assumed, for the first time in this series** — and it's real: SQLite's own
   concurrent-writer signature (flat throughput, tail latency growing with contention) is exactly
-  what the issue predicted. This doesn't change ADR-0008's decision because Nicti's own catalog
-  workload (a single-user desktop app, per ADR-0001) has nothing resembling #115's own
+  what the issue predicted. This doesn't change ADR-0067's decision because Nicti's own catalog
+  workload (a single-user desktop app, per ADR-0015) has nothing resembling #115's own
   multi-writer-thread stress shape in its real usage pattern today — but if a future feature (#64's
   multi-machine catalog, or any server-side/multi-process write path) ever needs genuine concurrent
   writers, **this ADR's own numbers are the first real evidence in this repo that SQLite's model
   would need to be revisited then**, and RocksDB (tuned, not default) is the strongest candidate on
   record for that specific future need — worth remembering rather than re-researching from scratch.
 - **#22 should not spend further design effort accommodating RocksDB.** Proceed on SQLite per
-  ADR-0008.
-- **The fork+exec+SIGKILL harness gap, flagged in ADR-0008/0009/0010, is now four-for-four**
+  ADR-0067.
+- **The fork+exec+SIGKILL harness gap, flagged in ADR-0067/0102/0106, is now four-for-four**
   (LMDB, Turso, redb, RocksDB all left this pass's crash-safety gate unresolved, for four different
   precisely-identified underlying mechanisms). Still out of scope for this pass; still looking more
   like standing infrastructure this project's database research should just have than an optional
@@ -340,7 +341,7 @@ ADR-0008's decision is unchanged: **SQLite remains chosen, DuckDB remains the pr
   both the measured-gate misses and the concurrent-writer variance point at the same class of
   fix (this pass deliberately measured defaults, matching how LMDB/redb were also evaluated
   untuned), not different ones.
-- **`tests/cross_engine.rs` now covers six engines**, unchanged in scope from ADR-0009/0010's own
+- **`tests/cross_engine.rs` now covers six engines**, unchanged in scope from ADR-0102/0106's own
   caveat about what it doesn't exercise (`crash_mid_ingest`, `rate_burst`, `backup()` still aren't
   asserted there for any engine) — still worth widening in a future pass, still not specific to
   this ADR's own conclusion.

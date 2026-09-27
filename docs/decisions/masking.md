@@ -3,7 +3,7 @@
 Covers the AI-segmentation model choice, the brush/gradient local-adjustment geometry model, and
 the mask-group compose model that ties them together.
 
-- **Masking**: `docs/adr/0024-masking.md` — **Proposed, pending a reference-machine pass** (real
+- **Masking**: `docs/adr/0048-masking.md` — **Proposed, pending a reference-machine pass** (real
   BiRefNet/MobileSAM weights, real photos including fursuiters, and #44's own gating). Model
   choice: BiRefNet (one-shot subject/background) + MobileSAM (interactive click/box refine, real
   two-session encoder/decoder split, unlike `spikes/groom`'s single-tensor collapse for its own
@@ -35,6 +35,6 @@ the mask-group compose model that ties them together.
   apply), each checked against its CPU reference within `1e-4` in `spikes/siamese/tests/gpu_parity.rs`
   (9 tests, passing against lavapipe in this sandbox).
 - **No real ONNX weights obtained this pass** — a full BiRefNet export exists publicly (~970MB)
-  but downloading/running it was out of this pass's time budget, same call ADR-0007 made for
+  but downloading/running it was out of this pass's time budget, same call ADR-0050 made for
   LaMa/MobileSAM. `spikes/siamese/src/segment.rs` proves only the `ort`/`load-dynamic`
   loading/error-handling shape (`ModelNotFound` on a missing file), same as groom's own `ai.rs`.

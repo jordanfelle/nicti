@@ -1,4 +1,4 @@
-//! ADR-0002's "a stage id this build doesn't recognize stays read-only rather than being
+//! ADR-0021's "a stage id this build doesn't recognize stays read-only rather than being
 //! dropped or guessed at", generalized to the registry level: looking up an id with no
 //! installed module returns `None` cleanly, never a panic or a guessed fallback.
 

@@ -1,5 +1,5 @@
 //! DINOv2 ViT-S/14 global-embedding wrapper, following `spikes/groom/src/ai.rs`'s
-//! `ort`/`load-dynamic` pattern (ADR-0004 §3): the native ONNX Runtime library and the `.onnx`
+//! `ort`/`load-dynamic` pattern (ADR-0019 §3): the native ONNX Runtime library and the `.onnx`
 //! model file both load lazily, from paths the caller provides, never bundled.
 //!
 //! **Unlike groom's MobileSAM/LaMa wrappers, this one runs against a real model**: a real ONNX

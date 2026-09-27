@@ -6,7 +6,7 @@
 //! general-purpose TIFF library -- it reads only the tags import needs and is deliberately
 //! tolerant of malformed input (bounds-checked, cycle-guarded), since it will be pointed at
 //! thousands of real camera files. Promoted to production here for #22's import pipeline, which
-//! uses it to produce the T0 grid preview (ADR-0017) without a RAW decode.
+//! uses it to produce the T0 grid preview (ADR-0029) without a RAW decode.
 //!
 //! Generic over `ByteSource`: every read here is a small, explicit range (the header, one IFD's
 //! entries, an external offset array, the MakerNote's 18-byte header) rather than a whole-file

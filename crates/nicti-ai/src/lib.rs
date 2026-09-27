@@ -1,8 +1,8 @@
-//! AI model provider extension point (ADR-0004 §7/§8). `ModelProvider` settles identity and
+//! AI model provider extension point (ADR-0019 §7/§8). `ModelProvider` settles identity and
 //! versioning only, via `Module` — inference execution, and the `ort`/`load-dynamic` boundary
-//! that defers the ONNX Runtime's own native-library load (ADR-0004 §3), are owned by the
+//! that defers the ONNX Runtime's own native-library load (ADR-0019 §3), are owned by the
 //! AI-labeled tickets (masking #48/#49, healing/removal #50/#51, culling #33/#34/#35/#36,
-//! auto-tone #53). #48's research (`docs/adr/0024-masking.md`, `spikes/siamese`) settles the
+//! auto-tone #53). #48's research (`docs/adr/0048-masking.md`, `spikes/siamese`) settles the
 //! model choice (BiRefNet + MobileSAM), the mask-group compose model, and the AI-recipe bake-key
 //! shape #49 builds this crate's real `ModelProvider` implementations on top of — not the trait
 //! signature itself, which stays #49's decision.

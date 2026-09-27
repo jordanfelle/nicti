@@ -1,5 +1,5 @@
 //! CIELAB conversion and CIEDE2000 (Sharma, Wu & Dalal 2005) -- the `calico compare` metric
-//! against LRC-exported references, per ADR-0021's decision rule.
+//! against LRC-exported references, per ADR-0038's decision rule.
 
 /// D65 reference white, 2 degree observer (matches sRGB, which is what both calico's own output
 /// and an LRC-exported sRGB TIFF are in).

@@ -6,7 +6,7 @@
 //!
 //! **This is a simulation, not a measurement** -- it uses `cost_model`'s per-image bake-stage
 //! durations (real for decode/denoise, a labelled hypothesis for mask bake) and a single serial
-//! bake worker (one shared `wgpu::Device`/one `ort::Session`, per ADR-0004/0005/0007's existing
+//! bake worker (one shared `wgpu::Device`/one `ort::Session`, per ADR-0019/0016/0050's existing
 //! "one shared GPU device" decisions -- Tapetum doesn't get to assume parallel GPU bake workers
 //! just because it wants a shorter sim number). It reports what the *scheduling policy* achieves
 //! given those costs, not what real end-to-end wall-clock time will be once #45 actually builds
@@ -34,7 +34,7 @@ pub struct BakeCost {
     pub decode: Duration,
     pub denoise: Duration,
     /// One mask bake per image, not two -- the hero scenario's "Select Subject" +
-    /// "Select Subject, Invert" pair share one `ai_bake_key` (ADR-0024's `compose.rs` finding:
+    /// "Select Subject, Invert" pair share one `ai_bake_key` (ADR-0048's `compose.rs` finding:
     /// `bake_keys_dedupe_the_shared_recipe_between_a_mask_and_its_inverse`), so the model runs
     /// once per image, not once per mask.
     pub mask_bake: Duration,

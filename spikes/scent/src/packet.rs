@@ -1,6 +1,6 @@
 //! Reads and patches a full XMP packet, preserving everything this spike
 //! doesn't own -- `crs:` mask corrections, `exif:`/`aux:` camera metadata,
-//! any other tool's namespace -- byte-for-byte, per ADR-0002's "XMP is an
+//! any other tool's namespace -- byte-for-byte, per ADR-0021's "XMP is an
 //! interop layer, not the source of truth for what Nicti doesn't already
 //! know about" framing.
 //!
@@ -20,7 +20,7 @@
 //! subject with properties split across them; this module only ever touches
 //! the first one found and leaves any others alone.
 //!
-//! The lossless `nicti:` recovery layer (ADR-0002 layer b) rides in this
+//! The lossless `nicti:` recovery layer (ADR-0021 layer b) rides in this
 //! same packet as a single `nicti:editDocument` attribute, opaque
 //! base64+JSON blob -- same shape `spikes/pawprint/src/xmp.rs` proved,
 //! now hosted on a real packet instead of a throwaway wrapper string.

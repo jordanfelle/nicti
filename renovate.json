@@ -22,7 +22,7 @@
       "pinDigests": false
     },
     {
-      "description": "spikes/pelt-iced deliberately pins wgpu = \"27\" (not ADR-0005's wgpu 30, unlike every other wgpu-using crate here) because iced_wgpu 0.14.0 itself pins wgpu 27.0.1 -- Rust requires the exact same wgpu crate version to unify wgpu::Device/RenderPass types between this crate and iced's internals, so a wgpu 30 bump here simply fails to compile (see ADR-0006's Hard gate 2). Revisit once Iced ships against wgpu 30.",
+      "description": "spikes/pelt-iced deliberately pins wgpu = \"27\" (not ADR-0016's wgpu 30, unlike every other wgpu-using crate here) because iced_wgpu 0.14.0 itself pins wgpu 27.0.1 -- Rust requires the exact same wgpu crate version to unify wgpu::Device/RenderPass types between this crate and iced's internals, so a wgpu 30 bump here simply fails to compile (see ADR-0068's Hard gate 2). Revisit once Iced ships against wgpu 30.",
       "matchManagers": ["cargo"],
       "matchPackageNames": ["wgpu"],
       "matchFileNames": ["spikes/pelt-iced/Cargo.toml"],
@@ -35,7 +35,7 @@
       "allowedVersions": "!/^3\\.0\\.0$/"
     },
     {
-      "description": "spikes/* are throwaway research crates deleted on promotion (see CLAUDE.md's package map section) -- spikes/den in particular pulls in eight catalog-engine candidates, five of them already evaluated-and-rejected (turso/redb/libsql/rocksdb/fjall, see the ADR-0009/0010/0014/0015/0016 bullets), so a bump PR against one of those is pure churn nobody will act on before the whole crate is deleted (#123, blocked on #22). A dependency shared with a real crates/* or root manifest still gets bumped normally via that manifest's own PR.",
+      "description": "spikes/* are throwaway research crates deleted on promotion (see CLAUDE.md's package map section) -- spikes/den in particular pulls in eight catalog-engine candidates, five of them already evaluated-and-rejected (turso/redb/libsql/rocksdb/fjall, see the ADR-0102/0106/0113/0115/0116 bullets), so a bump PR against one of those is pure churn nobody will act on before the whole crate is deleted (#123, blocked on #22). A dependency shared with a real crates/* or root manifest still gets bumped normally via that manifest's own PR.",
       "matchManagers": ["cargo"],
       "matchFileNames": ["spikes/**"],
       "enabled": false

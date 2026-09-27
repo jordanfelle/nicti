@@ -5,7 +5,7 @@
 //! random-order read latency.
 //!
 //! Not production code -- like the rest of `spikes/sniff`, this exists to produce the numbers
-//! `docs/adr/0017-preview-tier-strategy.md` cites, not to be built on directly.
+//! `docs/adr/0029-preview-tier-strategy.md` cites, not to be built on directly.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub trait CacheFormat {
     }
 }
 
-/// A) SQLite BLOBs in a separate `previews.db`. WAL mode (matches ADR-0008's catalog-DB choice,
+/// A) SQLite BLOBs in a separate `previews.db`. WAL mode (matches ADR-0067's catalog-DB choice,
 /// consistency across this repo's SQLite usage), one `previews` table keyed on `(asset_id, tier)`.
 pub struct SqliteBlobCache {
     conn: rusqlite::Connection,

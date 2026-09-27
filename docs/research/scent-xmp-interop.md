@@ -5,7 +5,7 @@ detail; the ADR is the decision record.
 
 ## Method
 
-ADR-0002 handed this ticket three open questions: the field-level LRC-metadata mapping, the real
+ADR-0021 handed this ticket three open questions: the field-level LRC-metadata mapping, the real
 XMP library/packet structure, and how to gate the `crs:` write-only projection. `spikes/scent`
 answers all three with real, tested code rather than a paper design:
 
@@ -18,14 +18,14 @@ answers all three with real, tested code rather than a paper design:
    only the first `rdf:Description`'s owned attributes are rewritten, and only its
    `dc:subject`/`lr:hierarchicalSubject` child blocks are replaced when a write touches keywords —
    everything else (an unrelated `crs:` property, another tool's namespace) is re-emitted
-   unchanged. This also hosts the lossless `nicti:editDocument` attribute (ADR-0002 layer b),
+   unchanged. This also hosts the lossless `nicti:editDocument` attribute (ADR-0021 layer b),
    replacing `spikes/pawprint`'s placeholder hand-built-string packet with a real one.
 3. **`sidecar.rs`** and **`embedded.rs`** are the two file-shapes LRC actually uses: a `.xmp`
    sidecar next to a RAW file, or an XMP packet embedded inside a JPEG's APP1 segment. Both are
    real read/write paths, not just read.
-4. **`conflict.rs`** re-derives ADR-0002's newer-wins rule against real file mtimes (via
+4. **`conflict.rs`** re-derives ADR-0021's newer-wins rule against real file mtimes (via
    `fs::metadata`) and content hashes (via `blake3`, already a workspace dependency since
-   ADR-0020), and adds the `crs:` write-gate policy this ADR decides.
+   ADR-0071), and adds the `crs:` write-gate policy this ADR decides.
 
 ## Candidates measured
 
@@ -38,7 +38,7 @@ this spike needs), and `quick-xml` (chosen — event-based Reader/Writer, pure R
 
 ## Real-file cross-check
 
-**None was possible this pass.** This spike was written in the same Linux/WSL sandbox ADR-0020's
+**None was possible this pass.** This spike was written in the same Linux/WSL sandbox ADR-0071's
 `homing` spike already flagged as having no mountable path to the user's real photo library — the
 37 real Z8 NEF+LRC-XMP sidecar pairs `spikes/litter`'s own test uses, and any real LRC-touched
 JPEG/DNG files, live on the user's Windows machine, not here.
@@ -72,7 +72,7 @@ different concepts, though not what XMP field, if any, carries Pick), and the re
   (not full byte-identical tag serialization — see the ADR's Measured results for that
   distinction).
 - JPEG-embedded XMP read/write, proven not to touch unrelated bytes.
-- The `crs:` write-gate policy (not its field-level content — that's masking's own ADR-0024).
+- The `crs:` write-gate policy (not its field-level content — that's masking's own ADR-0048).
 - The conflict rule wired to real file I/O.
 
 **Not reachable without a live Lightroom Classic install** (tracked as a follow-up issue, part of

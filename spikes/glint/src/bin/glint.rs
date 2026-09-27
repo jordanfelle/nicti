@@ -1,5 +1,5 @@
 //! Benchmark runner: prints a markdown results table (throughput + dispatch overhead + interop
-//! cost, per backend) plus hardware identity, for pasting into `docs/adr/0005-gpu-compute-api.md`.
+//! cost, per backend) plus hardware identity, for pasting into `docs/adr/0016-gpu-compute-api.md`.
 //! See `CLAUDE.md`'s package-map note -- this is spike tooling, not a production binary.
 
 use glint::gpu::GpuContext;

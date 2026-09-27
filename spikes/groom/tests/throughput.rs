@@ -78,7 +78,7 @@ fn cpu_clone_heal_and_auto_pick_throughput() {
     );
 
     // Loose sanity bounds, not perf assertions -- this test's purpose is to print real numbers
-    // for docs/adr/0007-healing-and-removal.md, not to gate CI on a timing threshold.
+    // for docs/adr/0050-healing-and-removal.md, not to gate CI on a timing threshold.
     assert!(clone_ms > 0.0);
     assert!(heal_ms > 0.0);
     assert!(pick_ms > 0.0);
@@ -113,7 +113,7 @@ fn summarize_after_warmup(values_ms: &[f64], warmup: usize) -> Option<(f64, f64,
 /// it doesn't shrink the dispatch) -- so this measures ~156x more raw work per iteration than the
 /// CPU number it's printed alongside. That makes it a strictly more conservative (pessimistic)
 /// proxy for the interactive-heal budget, not a matched-workload comparison; see #97's adversarial
-/// review for why this distinction matters for ADR-0007's Measured-results claims.
+/// review for why this distinction matters for ADR-0050's Measured-results claims.
 fn make_patch(width: usize, height: usize) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<u32>) {
     let mut guidance = Vec::with_capacity(width * height);
     let mut initial = Vec::with_capacity(width * height);
@@ -188,7 +188,7 @@ fn poisson_jacobi_gpu_throughput() {
         eprintln!(
             "groom GPU throughput (512x512, radius=20, {iterations} Jacobi iterations) \
              backend={:?} adapter={}: p50_ms={p50:.4} p95_ms={p95:.4} max_ms={max:.4} \
-             (target: <16ms/update interactive-heal budget, ADR-0007)",
+             (target: <16ms/update interactive-heal budget, ADR-0050)",
             ctx.backend, ctx.adapter_name
         );
         assert!(p50 > 0.0);

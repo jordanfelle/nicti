@@ -1,5 +1,5 @@
 //! Turso Database (`tursodatabase/turso`, crate `turso`) backend — #102's follow-up candidate,
-//! added after ADR-0008 merged. Pure-Rust, matching ADR-0001's own stated preference (memory
+//! added after ADR-0067 merged. Pure-Rust, matching ADR-0015's own stated preference (memory
 //! safety) unlike SQLite/DuckDB/LMDB, which are all C/C++ cores wrapped by a Rust binding.
 //!
 //! Two things confirmed during #102's own research, before writing this file, that shape the
@@ -152,7 +152,7 @@ impl Workload for TursoEngine {
         // Swap in a throwaway runtime so the *real* one (which actually ran whatever transaction
         // is about to be abandoned) can be taken by value and shut down cleanly, joining every
         // worker thread. This does NOT fully resolve this engine's own crash-safety question --
-        // see workload.rs's doc comment on this trait method, and ADR-0009's crash-safety row, for
+        // see workload.rs's doc comment on this trait method, and ADR-0102's crash-safety row, for
         // the complete (genuinely inconclusive) story. The throwaway runtime never runs anything,
         // so dropping it normally right after (when `self` itself is forgotten) is harmless.
         let old_rt = std::mem::replace(
@@ -375,7 +375,7 @@ impl Workload for TursoEngine {
         // gate in-place VACUUM behind --experimental-vacuum, with open issues on VACUUM INTO edge
         // cases) — tried first, falling back to a plain file copy (safe here specifically because
         // the benchmark's own backup calls are serial, never run against a concurrent writer; see
-        // ADR-0008's own equivalent caveat for the other three engines) if it errors.
+        // ADR-0067's own equivalent caveat for the other three engines) if it errors.
         let conn = self.conn.clone();
         let dest_sql = dest.to_string_lossy().replace('\'', "''");
         let vacuum_result = self

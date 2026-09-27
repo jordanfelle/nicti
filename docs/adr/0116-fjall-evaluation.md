@@ -1,17 +1,18 @@
-# ADR-0016: fjall, evaluated for the catalog store — not adopted
+# ADR-0116: fjall, evaluated for the catalog store — not adopted
 
 - **Status:** Rejected
 - **Date:** 2026-09-24
 - **Ticket:** [#116](https://github.com/jordanfelle/nicti/issues/116) Research: fjall (pure-Rust
   LSM embedded KV store) as a catalog engine candidate
+- **Formerly:** ADR-0016 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0008 chose SQLite (`rusqlite`) for v1. #102 (Turso Database, ADR-0009), #106 (`redb`,
-ADR-0010), and #113 (libSQL, ADR-0014) have all been evaluated since; #115 covers RocksDB in a
+ADR-0067 chose SQLite (`rusqlite`) for v1. #102 (Turso Database, ADR-0102), #106 (`redb`,
+ADR-0106), and #113 (libSQL, ADR-0113) have all been evaluated since; #115 covers RocksDB in a
 parallel evaluation. #116 asks about **fjall** (`fjall-rs/fjall`), a pure-Rust, LSM-tree-based
-embedded key-value store — same tradeoff shape as LMDB (ADR-0008) and `redb` (ADR-0010): a raw KV
-store with no query planner, needing hand-built secondary indexes, but matching ADR-0001's stated
+embedded key-value store — same tradeoff shape as LMDB (ADR-0067) and `redb` (ADR-0106): a raw KV
+store with no query planner, needing hand-built secondary indexes, but matching ADR-0015's stated
 preference for pure-Rust dependencies where a real option exists.
 
 Confirmed at spike time, not assumed from the issue's own framing:
@@ -30,8 +31,8 @@ Confirmed at spike time, not assumed from the issue's own framing:
   `build.rs` in either crate — 100% safe Rust (the crate itself carries
   `#![deny(unsafe_code)]`). This is stronger Windows-build evidence than a benign `build.rs`
   (there is no cross-platform linker-flag surface to get wrong at all, the exact class of bug
-  that hard-gate-failed `pglite-rs` in ADR-0008), and stronger than needing to read a bundled C
-  fork's own platform branches the way ADR-0014 had to for libSQL.
+  that hard-gate-failed `pglite-rs` in ADR-0067), and stronger than needing to read a bundled C
+  fork's own platform branches the way ADR-0113 had to for libSQL.
 
 ## Decision rule (stated before measuring, same standard as #102/#106/#113)
 
@@ -40,7 +41,7 @@ Reuse `spikes/den`'s shared `Workload` trait, same hard/measured gates as every 
 **Hard gates** (an engine that fails one is not benchmarked further):
 
 1. Builds and passes smoke tests on `x86_64-pc-windows-msvc` in CI.
-2. License allowed under ADR-0003 (permissive, or LGPL isolated behind a dylib).
+2. License allowed under ADR-0018 (permissive, or LGPL isolated behind a dylib).
 3. Survives `kill -9` during a write loop: reopens cleanly, integrity check passes.
 4. Actively maintained: a release within the last 6 months and a real Rust API.
 
@@ -48,7 +49,7 @@ Reuse `spikes/den`'s shared `Workload` trait, same hard/measured gates as every 
 filter/search/sort < 100ms p95; cold start < 2s; single write ≤ 5ms. Needs hand-maintained
 secondary indexes (no query planner), following `spikes/den/src/lmdb.rs`'s existing design as the
 template for how much indexing is a fair comparison for a raw-KV candidate — the same standard
-`redb_engine.rs` (ADR-0010) already followed, so `fjall_engine.rs` reuses `redb_engine.rs`'s exact
+`redb_engine.rs` (ADR-0106) already followed, so `fjall_engine.rs` reuses `redb_engine.rs`'s exact
 indexing strategy (one keyspace per indexed dimension, byte-encoded composite keys) rather than
 inventing a new one, keeping the comparison apples-to-apples.
 
@@ -60,7 +61,7 @@ Windows-build story of any candidate evaluated so far, though this pass's own co
 local/Linux-side reasoning about the absence of native code, not yet a real `windows-latest` CI
 run; that's on this PR's own CI to confirm, not asserted here as already-verified. Crash-safety is
 **inconclusive**, not a clean pass — for the same structural reason
-ADR-0009/ADR-0010 already documented for Turso Database/`redb`: this spike's in-process
+ADR-0102/ADR-0106 already documented for Turso Database/`redb`: this spike's in-process
 `mem::forget` crash simulation cannot distinguish a real `kill -9` (which releases every OS-level
 lock the dead process held) from a leaked file descriptor inside the *same, still-alive* test
 process — and fjall holds exactly that kind of OS-level advisory file lock (a `std::fs::File::
@@ -71,15 +72,15 @@ not just at the 2M planning horizon the way SQLite's one known miss or `redb`'s 
 showed up at 2M) — no other candidate in this series has missed this many gates this early.
 Combined with the real engineering cost visible in `fjall_engine.rs` (six hand-maintained
 secondary indexes, no query planner, same category of hand-rolled cost LMDB/`redb` already showed),
-fjall is not a better fit for #22 than SQLite (still the incumbent per ADR-0008/0012) or than
+fjall is not a better fit for #22 than SQLite (still the incumbent per ADR-0067/0107) or than
 `redb`/LMDB among the KV-shaped alternatives already evaluated.
 
 ## Measured results
 
 **Reference hardware:** this session's Linux/WSL2 sandbox, 32 cores, NVMe-backed — same box,
 same session, as the SQLite/LMDB/`redb` baselines below (run back-to-back, not reused from
-ADR-0008/0010, so the comparison is apples-to-apples on identical hardware/load). Per the
-reference-machine rule ADR-0008 established: WSL numbers count as final when every measured gate
+ADR-0067/0106, so the comparison is apples-to-apples on identical hardware/load). Per the
+reference-machine rule ADR-0067 established: WSL numbers count as final when every measured gate
 clears its budget with ≥ 3x margin; a Windows re-run is only required for a gate within 3x of its
 budget — moot here since fjall's misses are the *opposite* direction (2–5x *over* budget, not
 under), which is itself a hardware-independent, root-caused finding (see below), not a
@@ -89,9 +90,9 @@ close-margin case needing a Windows re-check.
 
 | Gate | Result |
 |---|---|
-| 1. Windows build | ✅ Strong source-level evidence: neither `fjall` nor its own `lsm-tree` dependency has a `build.rs` at all — no native C/C++ compilation step, no linker-flag surface (the exact bug class that hard-gate-failed `pglite-rs` in ADR-0008). The only `cfg(target_os = ...)` branches in the crate (`src/file.rs`, `src/db_config.rs`) are genuine, dedicated `windows`/`macos` branches, not a "does everything except macOS" pattern with no real Windows path. This PR extends `.github/workflows/ci.yml`'s `build-windows` job (`cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall`) — the authoritative confirmation is that CI run, not this local evidence alone. |
+| 1. Windows build | ✅ Strong source-level evidence: neither `fjall` nor its own `lsm-tree` dependency has a `build.rs` at all — no native C/C++ compilation step, no linker-flag surface (the exact bug class that hard-gate-failed `pglite-rs` in ADR-0067). The only `cfg(target_os = ...)` branches in the crate (`src/file.rs`, `src/db_config.rs`) are genuine, dedicated `windows`/`macos` branches, not a "does everything except macOS" pattern with no real Windows path. This PR extends `.github/workflows/ci.yml`'s `build-windows` job (`cargo test -p den --features sqlite,duckdb,lmdb,turso,redb,rocksdb,fjall`) — the authoritative confirmation is that CI run, not this local evidence alone. |
 | 2. License | ✅ `MIT OR Apache-2.0`, confirmed independently from crates.io and the bundled `LICENSE-MIT`/`LICENSE-APACHE` files — already on `deny.toml`'s allowlist. One real, mechanical allowlist edit was needed (unlike `redb`/Turso's zero-edit updates): `varint-rs` (a transitive dependency of `lsm-tree`) carries `0BSD`, not previously allowed — added as its own entry (OSI-approved, even more permissive than MIT/Apache-2.0, no attribution requirement). `cargo deny --workspace --all-features check licenses` passes clean after that one addition. |
-| 3. Crash-safety | ⚠️ **Inconclusive, not failed** — **20/20 reopen failures**, but every failure is the identical `FjallError: Locked`, from a fresh path on the very first attempt to reopen it (not a cross-iteration path-reuse artifact — `den crash`'s harness already uses a fresh path per iteration, per ADR-0009's own established practice). Root-caused at the source level, not assumed: `fjall`'s `LockedFileGuard` (`src/locked_file.rs`) takes a `std::fs::File::try_lock()` (an OS-level advisory lock) on a per-directory lock file when the store opens, released only by `LockedFileGuardInner`'s own `Drop` impl. `mem::forget`ing the engine (this spike's crash-simulation technique) skips `Drop` entirely, so the lock is never released for the rest of this *same, still-alive* test process — the identical structural limitation ADR-0009 found for Turso Database's `fcntl` lock and ADR-0010 found for `redb`'s OS-level byte-range lock, both scoped to the one leaked file descriptor rather than LMDB's process-wide open-environment table. A real `kill -9` doesn't have this problem (the OS reclaims every lock the dead process held), but this in-process technique cannot distinguish that from a bug — a real fork+exec+SIGKILL harness is the only way to actually resolve it, out of scope for this pass, same conclusion as every prior fd-scoped-lock finding in this series. |
+| 3. Crash-safety | ⚠️ **Inconclusive, not failed** — **20/20 reopen failures**, but every failure is the identical `FjallError: Locked`, from a fresh path on the very first attempt to reopen it (not a cross-iteration path-reuse artifact — `den crash`'s harness already uses a fresh path per iteration, per ADR-0102's own established practice). Root-caused at the source level, not assumed: `fjall`'s `LockedFileGuard` (`src/locked_file.rs`) takes a `std::fs::File::try_lock()` (an OS-level advisory lock) on a per-directory lock file when the store opens, released only by `LockedFileGuardInner`'s own `Drop` impl. `mem::forget`ing the engine (this spike's crash-simulation technique) skips `Drop` entirely, so the lock is never released for the rest of this *same, still-alive* test process — the identical structural limitation ADR-0102 found for Turso Database's `fcntl` lock and ADR-0106 found for `redb`'s OS-level byte-range lock, both scoped to the one leaked file descriptor rather than LMDB's process-wide open-environment table. A real `kill -9` doesn't have this problem (the OS reclaims every lock the dead process held), but this in-process technique cannot distinguish that from a bug — a real fork+exec+SIGKILL harness is the only way to actually resolve it, out of scope for this pass, same conclusion as every prior fd-scoped-lock finding in this series. |
 | 4. Maintained | ✅ `fjall` 3.1.10 published 2026-08-30 (25 days before this evaluation); steady 2026 release cadence (3.1.4 → 3.1.10, roughly monthly); GitHub repo (`fjall-rs/fjall`) not archived. Real, working API, not a stub — confirmed by reading the actual crate source (`Database`/`Keyspace`/`OwnedWriteBatch`/`Snapshot`), exercised end-to-end by `fjall_engine.rs` and its passing `cross_engine.rs` correctness test. |
 
 ### Measured gates, 600k assets (p50/p95, this session's own back-to-back run)
@@ -113,7 +114,7 @@ close-margin case needing a Windows re-check.
 
 | Query | Budget | SQLite | LMDB | redb | fjall |
 |---|---|---|---|---|---|
-| Faceted filter + facet counts | < 100ms | **172.1 / 201.0 ms ⛔ (known ADR-0008 gap)** | 0.035 / 0.059 ms ✅ | 0.056 / 0.140 ms ✅ | 0.16 / 0.31 ms ✅ |
+| Faceted filter + facet counts | < 100ms | **172.1 / 201.0 ms ⛔ (known ADR-0067 gap)** | 0.035 / 0.059 ms ✅ | 0.056 / 0.140 ms ✅ | 0.16 / 0.31 ms ✅ |
 | Sort by date, first 500 | < 100ms | 0.036 / 0.040 ms ✅ | 0.0038 / 0.0046 ms ✅ | 0.017 / 0.017 ms ✅ | 0.137 / 0.145 ms ✅ |
 | Folder-subtree count | < 100ms | 9.99 / 13.00 ms ✅ | **6.14 / 7.44 ms ✅** | **22.58 / 23.38 ms ✅** | **201.4 / 222.1 ms ⛔** |
 | Keyword-subtree query | < 100ms | 0.042 / 0.105 ms ✅ | 0.0018 / 0.0027 ms ✅ | 0.0085 / 0.0093 ms ✅ | 0.019 / 0.020 ms ✅ |
@@ -183,7 +184,7 @@ referenced by any active snapshot"), this is a *stronger* claim than `redb_engin
 bare-copy backup could honestly make (that module's own doc comment calls its held-open read
 transaction "a real, if partial, safety property" with no upstream guarantee behind it) — but it is
 still not commit-boundary-coordinated the way a purpose-built backup call is, and this spike never
-exercises a concurrent writer during backup for any engine (the same scope limit ADR-0008 already
+exercises a concurrent writer during backup for any engine (the same scope limit ADR-0067 already
 calls out), so this gap doesn't affect the number measured here either way.
 
 ## Options considered
@@ -191,16 +192,16 @@ calls out), so this gap doesn't affect the number measured here either way.
 | Option | Verdict |
 |---|---|
 | fjall | **Rejected.** Cleanest Windows-build story of any candidate (no native code, no `build.rs` at all) and a real, active maintenance signal — but fails 3 of 8 measured gates at both 600k and 2M (folder-subtree count, range query, filename search), by 2–5x, the widest and earliest measured-gate failure of any candidate in this series. Root-caused to fjall's own read-path overhead on broad prefix/range scans (partially, not fully, attributable to default LZ4 block compression; ruled out LSM-compaction-lag directly). Crash-safety inconclusive for the same fd-scoped-OS-lock reason as Turso/`redb`. |
-| SQLite (`rusqlite`, status quo) | **Kept**, per ADR-0008/0012/0014. Nothing in this evaluation changes that decision. |
-| LMDB (heed) | Still the best raw KV numbers on most indexable ops of any candidate measured so far — but this session's own 2M `range_query` p95 (150.7ms) misses the 100ms budget, a real, unremarked-until-hostile-review ~1.8x regression vs. ADR-0008's own 2M baseline for the same op (84.0ms, "thin" but passing there); not chosen as primary per ADR-0008's crash-safety-methodology reasoning either way, unchanged here. |
-| `redb` | Still not adopted per ADR-0010 (2M range-query/filename-search misses) — this session's numbers reconfirm that finding on the same hardware. |
+| SQLite (`rusqlite`, status quo) | **Kept**, per ADR-0067/0107/0113. Nothing in this evaluation changes that decision. |
+| LMDB (heed) | Still the best raw KV numbers on most indexable ops of any candidate measured so far — but this session's own 2M `range_query` p95 (150.7ms) misses the 100ms budget, a real, unremarked-until-hostile-review ~1.8x regression vs. ADR-0067's own 2M baseline for the same op (84.0ms, "thin" but passing there); not chosen as primary per ADR-0067's crash-safety-methodology reasoning either way, unchanged here. |
+| `redb` | Still not adopted per ADR-0106 (2M range-query/filename-search misses) — this session's numbers reconfirm that finding on the same hardware. |
 
 ## Consequences
 
-- **#22 should not adopt fjall for v1 or as a fallback.** SQLite stays chosen per ADR-0008/0012;
+- **#22 should not adopt fjall for v1 or as a fallback.** SQLite stays chosen per ADR-0067/0107;
   DuckDB stays the documented fallback if SQLite's own faceted-filter ceiling becomes a blocking
   problem in practice.
-- **fjall is not a strong candidate to revisit later either**, unlike libSQL (ADR-0014's "revisit
+- **fjall is not a strong candidate to revisit later either**, unlike libSQL (ADR-0113's "revisit
   for #64" recommendation): its measured gaps are on ordinary filter/range query shapes any v1 or
   v2 catalog workload needs, not on a feature (embedded-replica sync) that's simply unneeded yet.
   A future pass should only revisit fjall if a major-version release specifically claims to have
@@ -212,9 +213,9 @@ calls out), so this gap doesn't affect the number measured here either way.
   configuration in use, since both are real, independent, and only partially overlapping
   explanations here.
 - **`tests/cross_engine.rs` now covers seven engines** (added `fjall_matches_shared_workload`),
-  unchanged in scope from ADR-0010/0014's own caveat about what it doesn't exercise
+  unchanged in scope from ADR-0106/0113's own caveat about what it doesn't exercise
   (`crash_mid_ingest`, `rate_burst`, `backup()` still aren't asserted there for any engine).
-- **No CI job split was needed for fjall** (unlike libSQL/ADR-0014's mandatory `--exclude den` +
+- **No CI job split was needed for fjall** (unlike libSQL/ADR-0113's mandatory `--exclude den` +
   separate feature-scoped commands): fjall has no bundled native C source of its own, so it links
   cleanly into the same `den` binary as `sqlite`/`duckdb`/`lmdb`/`turso`/`redb` — confirmed
   directly with a local `--all-features` build, not assumed from "pure Rust ⇒ no collision."
@@ -266,6 +267,6 @@ One real `deny.toml` edit was needed: `varint-rs` v2.2.1 (transitively pulled in
 carries `0BSD`, not previously on the allowlist — added as its own permissive, OSI-approved entry
 (see this ADR's hard-gate-2 row). `docs/licensing.md` gets one update-log paragraph for `fjall`
 itself, documenting both the license confirmation and this one allowlist addition, per this repo's
-own ADR-0003-established process — no Native-libraries table row needed, since fjall has no
+own ADR-0018-established process — no Native-libraries table row needed, since fjall has no
 bundled native C/C++ core to document there at all (unlike SQLite/DuckDB/LMDB/libSQL, all of which
 needed one).

@@ -1,28 +1,29 @@
-# ADR-0012: Reconsidering DuckDB as the v1 primary catalog store
+# ADR-0107: Reconsidering DuckDB as the v1 primary catalog store
 
 - **Status:** Accepted
 - **Date:** 2026-09-24
 - **Ticket:** [#107](https://github.com/jordanfelle/nicti/issues/107) Requirements: reconsider DuckDB as the v1 primary catalog store (not just a sidecar)
+- **Formerly:** ADR-0012 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0008 chose SQLite for v1 despite DuckDB passing every measured gate at 2M assets with the best
+ADR-0067 chose SQLite for v1 despite DuckDB passing every measured gate at 2M assets with the best
 margins of any candidate, including the point-update gate the issue's own framing predicted it
 would fail. The one stated reason to keep SQLite anyway — "#22's row-store schema fits SQLite's
 maturity better" — was explicit about being a soft, ecosystem-familiarity argument, not a
-demonstrated technical mismatch, and ADR-0008's own Consequences section named "revisiting DuckDB
+demonstrated technical mismatch, and ADR-0067's own Consequences section named "revisiting DuckDB
 as primary" as a live option it didn't pursue. #107 asks the question directly: is that soft
 argument actually right, or does it not survive a real look at DuckDB's data model against #22's
-planned schema (ADR-0002)?
+planned schema (ADR-0021)?
 
 **Already settled, not re-litigated here** (per #107's own text): the "100-write rate burst" number
-in ADR-0008 (DuckDB 101.6/104.7ms vs SQLite's 0.35/0.42ms) is not a real weak point — it clears
+in ADR-0067 (DuckDB 101.6/104.7ms vs SQLite's 0.35/0.42ms) is not a real weak point — it clears
 `docs/benchmarks.md`'s actual per-keystroke Culling budget (`keypress -> next image displayed <
 50ms`) by ~50x once expressed as a per-write cost (~1ms/write). This ADR does not revisit that
 number. Also out of scope: #103's separate, narrower SQLite-trigger-vs-DuckDB-sidecar facet-cache
 work, running concurrently in its own branch — not touched or duplicated here.
 
-**What was actually open:** ADR-0002 commits #22 to three concrete schema properties ADR-0008's
+**What was actually open:** ADR-0021 commits #22 to three concrete schema properties ADR-0067's
 `Workload` trait (filter/sort/range/point-update queries on a flat `assets` table) never
 exercised at all:
 
@@ -32,7 +33,7 @@ exercised at all:
    tick, then most of the burst is deleted and replaced by a single merged row spanning it — a
    genuinely UPDATE/DELETE-heavy pattern, not a pure-insert stream, and one #107 explicitly flagged
    as *possibly* better suited to a columnar engine than to a row-store (which would have
-   undercut, not confirmed, ADR-0008's reasoning).
+   undercut, not confirmed, ADR-0067's reasoning).
 3. Reconstructing "the current effective edit stack for asset X" — the latest row per
    `(asset_id, stage_id)` — cheaply, not via a linear scan of the whole history table.
 
@@ -46,33 +47,33 @@ either way.
 
 Build a rough approximation of the real #22 shape — a JSON `params` column plus a `history` table
 with append + burst-compaction + "current effective stack" reconstruction — against both SQLite
-and DuckDB (LMDB is out of scope: ADR-0008 already rejected it as primary on the crash-safety gate,
+and DuckDB (LMDB is out of scope: ADR-0067 already rejected it as primary on the crash-safety gate,
 independent of this schema-fit question). Measure, don't assume:
 
 - Does DuckDB have real JSON query operations (path extraction), not just opaque-string storage?
 - Insert throughput for the raw-tick stream.
-- Compaction cost for the UPDATE+DELETE pattern ADR-0002's burst-compaction actually requires.
+- Compaction cost for the UPDATE+DELETE pattern ADR-0021's burst-compaction actually requires.
 - Query cost and SQL-dialect complexity for "current effective edit stack for asset X."
 
 DuckDB becomes the v1 default only if this schema-fit question comes out neutral-or-favorable for
-it, given it already leads on every other measured gate from ADR-0008. A decisive negative result
+it, given it already leads on every other measured gate from ADR-0067. A decisive negative result
 on any of these — not a soft preference — is what would keep SQLite chosen for a real, non-soft
 reason.
 
 ## Decision
 
-**SQLite stays the v1 catalog store. ADR-0008 is unchanged, now for a demonstrated technical
+**SQLite stays the v1 catalog store. ADR-0067 is unchanged, now for a demonstrated technical
 reason instead of a soft one.** DuckDB's JSON support is real and unremarkable to use (see below),
 but its history-log compaction cost is not a close call: DuckDB compacted the same runs SQLite
 compacted **~80x slower per operation** (4.297ms/op vs 0.054ms/op), turning a ~1-second operation
 into a ~86-second one at the same row count. This is not the "100-write rate burst" number #107
 already ruled out as non-gating — that number describes a bulk, batched write path; this one
-describes ADR-0002's actual, frequent, per-burst-completion compaction step, run 19,963 times as
+describes ADR-0021's actual, frequent, per-burst-completion compaction step, run 19,963 times as
 19,963 separate single-op transactions, one per genuinely completed, contiguous slider-drag/
 history-run (an earlier draft of this ADR miscounted this — see the correction note in Consequences
-below). The measured per-op cost lines up cleanly with ADR-0008's own already-measured
+below). The measured per-op cost lines up cleanly with ADR-0067's own already-measured
 single-row `write_rating` transaction-commit overhead on DuckDB (1.7–2.3ms), doubled for
-compaction's UPDATE+DELETE pair — a real, well-understood technical mismatch with ADR-0002's
+compaction's UPDATE+DELETE pair — a real, well-understood technical mismatch with ADR-0021's
 "no optimize catalog" constraint (bounded, continuous maintenance, not a periodic compaction pass
 the user has to run), not a benchmark artifact, even though it is a substantially smaller effect
 than an earlier draft of this ADR reported.
@@ -84,7 +85,7 @@ assets × 6 editing sessions × 40 raw slider ticks per session (one randomly ch
 burst, from `{white_balance, tone, mask_subject, mask_sky, crop}`) = 960,000 raw history rows,
 generated deterministically (`generate_bursts`, seed 7). Compaction collapses each *contiguous run
 of consecutive-`seq` ticks* sharing `(asset_id, stage_id, control)` down to a single merged row,
-exactly per ADR-0002's rule (first tick's `before`, last tick's `after`) — critically, a stage
+exactly per ADR-0021's rule (first tick's `before`, last tick's `after`) — critically, a stage
 revisited in a later, non-adjacent burst is its own separate run, not folded into an earlier one —
 19,963 runs actually needed compaction (a run of exactly 1 tick has nothing to compact). All
 numbers below are `cargo test --release` measurements; an earlier draft of this ADR captured debug
@@ -102,14 +103,14 @@ numbers below are `cargo test --release` measurements; an earlier draft of this 
 `docs/benchmarks.md`.** The finding is compaction: **~80x slower per operation**, and the total
 86-second wall time for 19,963 ops at this modest scale (4,000 assets — a fraction of the
 2M-asset planning horizon) means a real catalog's worth of compaction, run continuously as
-ADR-0002's design calls for, is not a one-off cost DuckDB pays once — it is DuckDB's steady-state
+ADR-0021's design calls for, is not a one-off cost DuckDB pays once — it is DuckDB's steady-state
 cost for a workload SQLite handles roughly two orders of magnitude faster. The "current effective
 edit stack" query is also markedly slower on DuckDB (~61x), though at an absolute ~1ms/call it
 would likely still be usable in isolation if compaction weren't the disqualifying factor first.
 
 **Root cause, not just observed:** each `compact_run` call does one `SELECT` to fetch the run's
 rows, one `UPDATE`, one bulk `DELETE`, and one transaction commit — the same per-transaction-commit
-overhead ADR-0008 already measured on DuckDB's single-row `write_rating` (1.7–2.3ms vs SQLite's
+overhead ADR-0067 already measured on DuckDB's single-row `write_rating` (1.7–2.3ms vs SQLite's
 0.012–0.04ms). The measured 4.297ms/op average lines up cleanly with that number roughly doubled
 (one UPDATE + one DELETE instead of `write_rating`'s single UPDATE) — a well-understood
 transaction-commit-overhead effect, not a mysterious or open one. This spike did not need to reach
@@ -129,7 +130,7 @@ autoload/autoinstall at first use. This passed locally (Linux, an already-warm e
 but failed outright on a fresh Windows CI runner with an extension-install file-move permission
 error — a real, reproducible gap, not a flake. Fixed by adding `"json"` to `spikes/den/Cargo.toml`'s
 `duckdb` feature list, which statically links it and removes the runtime network dependency
-entirely; this now matches what the original claim wrongly asserted was already true. If ADR-0002's
+entirely; this now matches what the original claim wrongly asserted was already true. If ADR-0021's
 edit-parameter JSON blob needed genuine path-based indexing/filtering inside the catalog (e.g.,
 "find every asset with `crop.aspect_ratio = 16:9`"), DuckDB's JSON support is at least as capable
 as SQLite's JSON1 for that specific need. This finding doesn't move the Decision because the
@@ -146,28 +147,28 @@ concern on either side.
 
 | Option | Verdict |
 |---|---|
-| SQLite (status quo, ADR-0008) | **Kept.** Same tradeoffs ADR-0008 already measured, now additionally confirmed as the correct choice for ADR-0002's specific history-log/compaction shape — not merely preferred by "ecosystem maturity." |
-| DuckDB as v1 primary | **Rejected**, on new evidence this pass specifically went looking for. Its JSON support is genuinely good and its OLTP-shaped point-update numbers (ADR-0008) remain the best of any candidate in isolation, but ADR-0002's compaction step — an UPDATE+DELETE-heavy, continuously-recurring operation, not a rare one — costs ~80x more per operation than on SQLite, a real per-transaction-commit-overhead effect (see Root cause above), not a benchmark artifact. |
+| SQLite (status quo, ADR-0067) | **Kept.** Same tradeoffs ADR-0067 already measured, now additionally confirmed as the correct choice for ADR-0021's specific history-log/compaction shape — not merely preferred by "ecosystem maturity." |
+| DuckDB as v1 primary | **Rejected**, on new evidence this pass specifically went looking for. Its JSON support is genuinely good and its OLTP-shaped point-update numbers (ADR-0067) remain the best of any candidate in isolation, but ADR-0021's compaction step — an UPDATE+DELETE-heavy, continuously-recurring operation, not a rare one — costs ~80x more per operation than on SQLite, a real per-transaction-commit-overhead effect (see Root cause above), not a benchmark artifact. |
 
 ## Prior art
 
-None beyond this repo's own ADR-0008/0009 — this is a targeted follow-up measurement on a schema
+None beyond this repo's own ADR-0067/0102 — this is a targeted follow-up measurement on a schema
 shape those ADRs didn't test, not a new engine comparison.
 
 ## Consequences
 
-- **ADR-0008's Decision is unchanged**, and its "kept explicit as the fallback" framing for DuckDB
+- **ADR-0067's Decision is unchanged**, and its "kept explicit as the fallback" framing for DuckDB
   should be read narrowly from here forward: DuckDB remains a candidate worth revisiting for a
-  pure filter/sort/search read path (exactly ADR-0008's own OLAP-sidecar framing), but **not** for
+  pure filter/sort/search read path (exactly ADR-0067's own OLAP-sidecar framing), but **not** for
   the catalog's history log — this ADR is new, first-class evidence against that specific use,
   not merely an unresolved caveat.
 - **#22's `CatalogStore` implementation should not consider DuckDB for the history table under
-  ADR-0002's compaction design**, even if a future need arises to reconsider the primary store for
-  other reasons. If ADR-0002's compaction strategy itself changes (e.g., a batched/deferred
+  ADR-0021's compaction design**, even if a future need arises to reconsider the primary store for
+  other reasons. If ADR-0021's compaction strategy itself changes (e.g., a batched/deferred
   compaction sweep instead of one-op-per-completed-burst), this finding should be re-measured
   against the new access pattern rather than assumed to still apply unchanged.
 - **#103's SQLite-trigger-vs-DuckDB-sidecar facet-cache work is unaffected and still needed** —
-  this ADR does not recommend switching primaries, so the facet-query ceiling ADR-0008 already
+  this ADR does not recommend switching primaries, so the facet-query ceiling ADR-0067 already
   identified (faceted-filter-with-counts at 2M, ~1.3–1.6x the budget) is not mooted by anything
   here. #103 should proceed independently of this ADR's outcome.
 - **DuckDB's JSON support is confirmed usable** should #22 or a later ticket ever want a DuckDB-backed
@@ -191,7 +192,7 @@ map). Adds, gated on both the `sqlite` and `duckdb` features already default-on 
 new dependency, no `docs/licensing.md` change needed):
 
 - `generate_bursts` / `compact`: a deterministic burst-and-compact history generator and reference
-  compaction function, modeling ADR-0002's "coalescing `control` key" rule directly (consecutive
+  compaction function, modeling ADR-0021's "coalescing `control` key" rule directly (consecutive
   same-`(stage_id, control)` ticks merge into one row spanning the run).
 - `duckdb_fit::Fit` / `sqlite_fit::Fit`: a `history` table (JSON `before`/`after` columns on
   DuckDB, TEXT on SQLite — SQLite's JSON1 operates on TEXT, it has no distinct JSON storage type)

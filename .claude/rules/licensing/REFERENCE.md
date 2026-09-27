@@ -10,11 +10,11 @@ paths:
 
 Full reasoning/history: `docs/decisions/licensing.md`.
 
-- **Third-party license policy** — `docs/adr/0003` + full audit in `docs/licensing.md` (Rust crate
+- **Third-party license policy** — `docs/adr/0018` + full audit in `docs/licensing.md` (Rust crate
   allowlist, ML-model bundle-vs-download criteria, no Adobe DCP/LCP data). **Amended 2026-09-24**
   (load-bearing, not historical) — read the Amendments section, not just the original Decision
   text. Update `docs/licensing.md` in the same PR as any new dependency/model.
-- **Outbound license: AGPL-3.0-or-later** — `docs/adr/0013`. Chosen over plain GPL-3.0 for the
+- **Outbound license: AGPL-3.0-or-later** — `docs/adr/0066`. Chosen over plain GPL-3.0 for the
   network-use clause (§13) — closes the hosted-service loophole, relevant to #58/#64. Un-excludes
   Ultralytics YOLO and exiv2/rexiv2 on license grounds. Removes the LGPL-cdylib-isolation
   requirement for `lensfun-rs` (its `LGPL-3.0-or-later OR GPL-3.0` dual license combines cleanly),
@@ -35,7 +35,7 @@ Full reasoning/history: `docs/decisions/licensing.md`.
   candidate — but **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler
   fork still rejects it, falling back to the embedded JPEG), so it isn't a shortcut past #37's own
   decoder work.
-- **RapidRAW adopt/fork, resolved** — `docs/adr/0018`: **not adopted, study-only**. Checked its
+- **RapidRAW adopt/fork, resolved** — `docs/adr/0069`: **not adopted, study-only**. Checked its
   real ~583-crate dependency graph against `deny.toml`: 582 crates pass cleanly, one rejection
   (`rawler`'s bare `LGPL-2.1`, already resolved compatible per the bullet above) — real
   corroborating evidence, not a blocker either way. Architecturally incompatible regardless of

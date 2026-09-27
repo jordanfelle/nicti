@@ -1,29 +1,30 @@
-# ADR-0009: Turso Database, evaluated for the catalog store — not adopted
+# ADR-0102: Turso Database, evaluated for the catalog store — not adopted
 
 - **Status:** Rejected (not a rejection of the pure-Rust idea itself — see Consequences)
 - **Date:** 2026-09-24
 - **Ticket:** [#102](https://github.com/jordanfelle/nicti/issues/102) Research: Turso Database (pure-Rust SQLite rewrite) as a catalog engine candidate
+- **Formerly:** ADR-0009 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0008 chose SQLite as the v1 catalog store and named its one real gap (faceted-filter-with-counts
+ADR-0067 chose SQLite as the v1 catalog store and named its one real gap (faceted-filter-with-counts
 missed the 2M budget by ~1.3–1.6x). That decision prompted #102: Turso Database
 (`tursodatabase/turso`, formerly "Limbo") is a from-scratch, pure-Rust rewrite of a
-SQLite-compatible engine — the only catalog candidate across ADR-0008/#102 that would actually
-match ADR-0001's own stated preference (memory safety, no C/C++ core). Worth its own hard-gate and
+SQLite-compatible engine — the only catalog candidate across ADR-0067/#102 that would actually
+match ADR-0015's own stated preference (memory safety, no C/C++ core). Worth its own hard-gate and
 measured pass, not a footnote, per #102's own framing — but #102 also named real caveats to weigh
 rather than assume away: pre-1.0 (`v0.8.0-pre.12`), "some features explicitly marked experimental,"
 and a distinct, more mature sibling project (`libSQL`) not to be confused with it.
 
 ## Decision rule
 
-Same hard-gate + measured-gate rule as ADR-0008, against the same `spikes/den/` `Workload` trait,
+Same hard-gate + measured-gate rule as ADR-0067, against the same `spikes/den/` `Workload` trait,
 generator, and 600k/2M synthetic scale.
 
 ## Decision
 
 **Not adopted.** Hard gate 1 (Windows build) and gate 2 (license) both pass with real evidence —
-better evidence, in fact, than any other candidate in ADR-0008 had going in. Hard gate 3
+better evidence, in fact, than any other candidate in ADR-0067 had going in. Hard gate 3
 (crash-safety) is left **inconclusive**, not failed — see below for why this pass's in-process
 technique couldn't settle it either way. The decision doesn't rest on that gate: a confirmed-real,
 already-open-upstream WAL-bloat problem during bulk ingest, two query shapes already at the
@@ -37,9 +38,9 @@ yet, which is exactly the risk #102 flagged before any code was written.
 
 | Gate | Result |
 |---|---|
-| 1. Windows build | ✅ Confirmed via `tursodatabase/turso`'s own `.github/workflows/rust.yml`: a real 3-OS matrix including a Windows runner, running both `cargo build --all-features` and `cargo nextest run --workspace --all-features` there — not just a doc claim. Materially stronger evidence than the pglite-rs/pglite-oxide eliminations in ADR-0008. |
+| 1. Windows build | ✅ Confirmed via `tursodatabase/turso`'s own `.github/workflows/rust.yml`: a real 3-OS matrix including a Windows runner, running both `cargo build --all-features` and `cargo nextest run --workspace --all-features` there — not just a doc claim. Materially stronger evidence than the pglite-rs/pglite-oxide eliminations in ADR-0067. |
 | 2. License | ✅ MIT, confirmed from crates.io's version-level API response for the crate itself (not a secondary source). |
-| 3. Crash-safety | ⚠️ **Inconclusive — this harness's in-process technique could not produce a trustworthy answer, on either side.** Using the exact same `crash_mid_ingest` technique that worked cleanly for SQLite/DuckDB (leave a transaction open, never `COMMIT`, `mem::forget` the handle), every reopen attempt failed with `database is locked` — 20/20 at default iteration count, still 1/1 in isolation. The first hypothesis (a leaked `tokio::runtime::Runtime`'s worker threads, never joined because `mem::forget` skips `Runtime::drop`) turned out to be incomplete: a hostile re-review read Turso's actual source (`turso_core`'s `io/unix.rs`) and found the real lock is a POSIX `fcntl(F_SETLK)` advisory lock tied to the `Database`/`Connection`'s own file descriptor, released only by closing that fd, process exit, or explicit unlock — none of which involve the tokio runtime at all. That reading predicts that shutting down *just* the runtime while still forgetting `_db`/`conn` should change nothing. It didn't hold up cleanly under direct experiment either way: a **minimal reproduction** (a bare `CREATE TABLE`, a few dozen rows, no indexes) *did* reopen successfully after shutting down only the runtime and still forgetting the database/connection handles — but the same fix, applied to the real `TursoEngine` under its actual multi-table, multi-index schema and 500-row `crash_mid_ingest` workload, still failed identically. Neither the pure "leaked runtime thread" theory nor the pure "fd-level fcntl lock, runtime is irrelevant" theory fully explains both results. What's confirmed is that this in-process `mem::forget` technique does not compose cleanly with Turso's own resource lifecycle for reasons not fully isolated in this pass — the same open question ADR-0008 already flagged as needing a real fork+exec+SIGKILL harness to resolve properly, now doubly true here. **This gate should be read as "not yet answered," not as "Turso's crash-safety is broken"** — a real `SIGKILL` unconditionally closes every fd and releases every lock a process held, which this in-process leak does not faithfully reproduce either way. |
+| 3. Crash-safety | ⚠️ **Inconclusive — this harness's in-process technique could not produce a trustworthy answer, on either side.** Using the exact same `crash_mid_ingest` technique that worked cleanly for SQLite/DuckDB (leave a transaction open, never `COMMIT`, `mem::forget` the handle), every reopen attempt failed with `database is locked` — 20/20 at default iteration count, still 1/1 in isolation. The first hypothesis (a leaked `tokio::runtime::Runtime`'s worker threads, never joined because `mem::forget` skips `Runtime::drop`) turned out to be incomplete: a hostile re-review read Turso's actual source (`turso_core`'s `io/unix.rs`) and found the real lock is a POSIX `fcntl(F_SETLK)` advisory lock tied to the `Database`/`Connection`'s own file descriptor, released only by closing that fd, process exit, or explicit unlock — none of which involve the tokio runtime at all. That reading predicts that shutting down *just* the runtime while still forgetting `_db`/`conn` should change nothing. It didn't hold up cleanly under direct experiment either way: a **minimal reproduction** (a bare `CREATE TABLE`, a few dozen rows, no indexes) *did* reopen successfully after shutting down only the runtime and still forgetting the database/connection handles — but the same fix, applied to the real `TursoEngine` under its actual multi-table, multi-index schema and 500-row `crash_mid_ingest` workload, still failed identically. Neither the pure "leaked runtime thread" theory nor the pure "fd-level fcntl lock, runtime is irrelevant" theory fully explains both results. What's confirmed is that this in-process `mem::forget` technique does not compose cleanly with Turso's own resource lifecycle for reasons not fully isolated in this pass — the same open question ADR-0067 already flagged as needing a real fork+exec+SIGKILL harness to resolve properly, now doubly true here. **This gate should be read as "not yet answered," not as "Turso's crash-safety is broken"** — a real `SIGKILL` unconditionally closes every fd and releases every lock a process held, which this in-process leak does not faithfully reproduce either way. |
 | 5. Maintained | ⚠️ Real, fast-turnaround development (multiple serious WAL/MVCC corruption-class bugs found and fixed within days to weeks per #102's own research), but with durability-relevant issues open in the same category as this ADR's own finding below, including one only 9 days old at research time. |
 
 **Measured gates, 600k assets** (2M was not completed — see the ingest-time finding below, which
@@ -91,9 +92,9 @@ before this evaluation).
 | Option | Verdict |
 |---|---|
 | Turso Database, pure-Rust rewrite (`turso` crate) | **Rejected.** Passes the license and Windows-build hard gates with real evidence. Crash-safety is inconclusive (this harness's in-process technique couldn't settle it — see Measured results), not a confirmed failure. Sits at the edge of budget on two query shapes at 600k due to a confirmed-missing optimizer feature (a competing "missing index" explanation was tested and ruled out). The deciding factor: severe WAL growth mid-ingest at 2M scale, confirmed not explained by a durability-pragma mismatch (tested directly), that made completing the run not worth the cost. |
-| `libSQL` (`tursodatabase/libsql`, the older C fork) | Not evaluated separately — it's the same SQLite engine family ADR-0008 already measured via `rusqlite`, with extras (embedded replicas, vector search) Nicti doesn't need yet. Nothing about it would change ADR-0008's own SQLite numbers. |
+| `libSQL` (`tursodatabase/libsql`, the older C fork) | Not evaluated separately — it's the same SQLite engine family ADR-0067 already measured via `rusqlite`, with extras (embedded replicas, vector search) Nicti doesn't need yet. Nothing about it would change ADR-0067's own SQLite numbers. |
 
-ADR-0008's decision is unchanged: **SQLite remains chosen, DuckDB remains the proven fallback.**
+ADR-0067's decision is unchanged: **SQLite remains chosen, DuckDB remains the proven fallback.**
 
 ## Consequences
 
@@ -102,8 +103,8 @@ ADR-0008's decision is unchanged: **SQLite remains chosen, DuckDB remains the pr
   Turso Database reaches 1.0 and its WAL/checkpoint behavior under sustained large-transaction load
   has real evidence of being fixed, not just claimed. This is a "not now," not a "never."
 - **#22 should not spend any further design effort accommodating Turso.** Proceed on SQLite per
-  ADR-0008.
-- **This evaluation doubles as a second, independent data point for ADR-0008's own crash-safety
+  ADR-0067.
+- **This evaluation doubles as a second, independent data point for ADR-0067's own crash-safety
   methodology**: two different engines (LMDB, Turso) both defeated the in-process
   `mem::forget`-based crash simulation. LMDB's cause is fully understood (a deliberate,
   process-wide open-environment guard). Turso's is not — a hostile re-review and a follow-up

@@ -3,7 +3,7 @@
 //! this module owns a *second*, separate DuckDB file holding only one materialized table —
 //! `facet_counts(model, rating, keyword, cnt)` — that `faceted_filter` reads instead of scanning
 //! `assets` from scratch. This is deliberately narrow, per #103's own scope: not "replace SQLite,"
-//! not "DuckDB as a general OLAP sidecar" (ADR-0008 already declined that when nothing measured
+//! not "DuckDB as a general OLAP sidecar" (ADR-0067 already declined that when nothing measured
 //! needed it) — a targeted materialized view for exactly one query shape.
 //!
 //! **Refresh strategy: full rebuild, not incremental — stated honestly, not glossed over.**

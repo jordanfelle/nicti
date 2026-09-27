@@ -1,8 +1,8 @@
 // The fused "live suffix" of Tapetum's render graph: everything downstream of the bake boundary
 // that must recompute every frame -- white balance -> exposure -> tone-curve LUT -> vibrance.
-// Ported from spikes/glint/shaders/live_chain.wgsl (#16/ADR-0005, already measured at 0.326ms p95
+// Ported from spikes/glint/shaders/live_chain.wgsl (#16/ADR-0016, already measured at 0.326ms p95
 // on the reference RTX 5080 at 4K, Vulkan) unchanged in kernel logic -- this is the same fused
-// dispatch ADR-0005 validated the *approach* for; loaf's own contribution is chaining it after a
+// dispatch ADR-0016 validated the *approach* for; loaf's own contribution is chaining it after a
 // real cache-key/graph model and measuring it as one stage of a larger pipeline, not re-deriving
 // the kernel itself. See src/gpu.rs::run_live_suffix and tests/gpu_parity.rs.
 

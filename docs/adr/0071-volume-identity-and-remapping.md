@@ -1,4 +1,4 @@
-# ADR-0020: Volume identity and drive remapping
+# ADR-0071: Volume identity and drive remapping
 
 - **Status:** Proposed — static findings (identity-field design, schema shape, fingerprint-tier
   design) are final; the survival-table and throughput/latency measurements are pending a
@@ -6,6 +6,7 @@
 - **Date:** 2026-09-26
 - **Ticket:** [#71](https://github.com/jordanfelle/nicti/issues/71) Research: dynamic drive
   remapping (Volume UUID + relative path)
+- **Formerly:** ADR-0020 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -23,22 +24,22 @@ unrecognized volume (e.g. a fresh external drive) — not just the archive-drive
 
 Constraints already fixed by earlier ADRs/docs:
 
-- **ADR-0002** already names this ticket as the owner of `asset` (file identity): "asset (file
+- **ADR-0021** already names this ticket as the owner of `asset` (file identity): "asset (file
   identity, #71) 1—N edit_variant," and defers the physical schema to #22 once #67 picked the DB
   engine.
-- **ADR-0008** picked SQLite (`rusqlite`, WAL) as the catalog engine, and its Consequences section
+- **ADR-0067** picked SQLite (`rusqlite`, WAL) as the catalog engine, and its Consequences section
   already flags "#71 (drive remapping) and any future full-text/filename-search work should treat
   leading substring search as a known, unindexable-in-any-of-these-three-engines gap" — this ADR's
   schema design works within that constraint (prefix/exact lookups via an index, no substring
   search promised).
-- **ADR-0011**'s facet-count cache is a real consequence of this ADR's offline semantics (below):
+- **ADR-0103**'s facet-count cache is a real consequence of this ADR's offline semantics (below):
   an offline volume's assets must not appear in facet counts, so the cache needs either
   per-volume partitioning or a subtraction step — flagged here for #22/#23, not solved by this ADR.
 - **#136** retired the frozen `ref-10k` reference set's per-machine full-copy model — this ADR's
   fingerprint-cost measurements use a stratified sample walked directly from the live library
   instead (the same approach #37's `retina scan` already validated), not a `ref-10k` copy.
 - v1 targets Windows only (#4/E0's PRD sign-off); non-Windows volume identity is deferred to #73.
-- **Sandbox note**, matching ADR-0006/0007's own precedent: this research pass ran in a Linux/WSL
+- **Sandbox note**, matching ADR-0068/0050's own precedent: this research pass ran in a Linux/WSL
   sandbox with no Windows machine, no mountable NTFS volumes, and no way to attach/detach a real
   or virtual drive. **This sandbox does have a cross-compilation path** (rustup's own
   `x86_64-pc-windows-gnu` toolchain, distinct from the Homebrew-installed `rustc` this session
@@ -57,7 +58,7 @@ Constraints already fixed by earlier ADRs/docs:
   is closed; the runtime-behavior gap (does `FindFirstVolumeW` actually enumerate what's expected,
   does the NTFS-serial/GPT-GUID survival table hold, does `mbr_disk_signature`'s two-IOCTL chain
   actually return the right disk's signature) is not, and stays exactly the "spec + tooling merged,
-  baseline measurement deferred" gap ADR-0006/0007 describe. Every schema/fingerprint/relink/path
+  baseline measurement deferred" gap ADR-0068/0050 describe. Every schema/fingerprint/relink/path
   finding below (the parts of the spike that never needed Windows at all) is real, measured
   against this sandbox's Rust toolchain: 29 unit tests pass, `cargo clippy -p homing --all-targets
   --all-features -- -D warnings` is clean on both the native Linux target and the
@@ -143,7 +144,7 @@ resolvability.
 - **`\\?\Volume{GUID}` as the identity key** — per-machine, assigned by the mount manager; not
   confirmed stable across a reformat either (untested in this pass, flagged as a real open
   question for the reference-machine run, not asserted either way).
-- **DuckDB/other catalog engine for this slice specifically** — out of scope; ADR-0008 already
+- **DuckDB/other catalog engine for this slice specifically** — out of scope; ADR-0067 already
   settled the engine for the whole catalog, this ADR only adds tables within it.
 
 ## Consequences
@@ -153,7 +154,7 @@ resolvability.
   owns.
 - **#72** (tiered thumbnail storage) hooks its SSD/archive transition into `root.archived`, keyed
   by the same volume resolution this ADR defines.
-- **ADR-0011's facet-count cache** must exclude offline volumes' assets from its counts — either
+- **ADR-0103's facet-count cache** must exclude offline volumes' assets from its counts — either
   per-volume-partitioned counts or a subtraction step at query time. Not solved here; flagged for
   #22/#23 to pick up when the real facet-count implementation lands.
 - **#24**'s filesystem watcher reconciles moves/renames/deletes *within* a volume already known to
@@ -172,7 +173,7 @@ resolvability.
 ## Measured results
 
 **Everything below needs the reference-machine (RTX 5080/Windows box) pass this ADR is Proposed
-pending** — same shape as ADR-0006/0007/0090's own "spec + tooling merged, baseline measurement
+pending** — same shape as ADR-0068/0050's own, and #90's, "spec + tooling merged, baseline measurement
 deferred" pattern. No placeholder number is asserted as real; every row below is explicitly TBD.
 
 ### Volume-identity field survival (per candidate field, per scenario)

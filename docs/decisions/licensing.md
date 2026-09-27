@@ -2,16 +2,16 @@
 
 Covers the third-party license policy (and its 2026-09-24 amendment) and the outbound AGPL-3.0-or-later decision.
 
-- **Third-party license policy**: `docs/adr/0003-third-party-license-policy.md`, backed by the
+- **Third-party license policy**: `docs/adr/0018-third-party-license-policy.md`, backed by the
   full per-dependency/per-model audit in `docs/licensing.md` — Rust crate allowlist, ML-model
   bundle-vs-on-demand-download criteria, and the "no Adobe DCP/LCP data" rule. **Amended
-  2026-09-24** (see ADR-0003's own Amendments section, load-bearing not historical): the original
+  2026-09-24** (see ADR-0018's own Amendments section, load-bearing not historical): the original
   LGPL-native-lib dynamic-linking rule and the blanket GPL/AGPL denial are both superseded now that
-  Nicti's own outbound license is decided (see the ADR-0013 bullet below) — read the amendment,
+  Nicti's own outbound license is decided (see the ADR-0066 bullet below) — read the amendment,
   not just the original 2026-09-23 Decision text. Update `docs/licensing.md` in the same PR as any
   new dependency or model.
-- **Outbound license: AGPL-3.0-or-later** — `docs/adr/0013-outbound-license-agpl.md`, resolving
-  #66 (open-source release prep) early because ADR-0003's permissive-only default was already
+- **Outbound license: AGPL-3.0-or-later** — `docs/adr/0066-outbound-license-agpl.md`, resolving
+  #66 (open-source release prep) early because ADR-0018's permissive-only default was already
   actively constraining in-flight decisions. Chosen specifically over plain GPL-3.0 for the
   network-use clause (§13) — closes the "run it as a hosted service, never share the source"
   loophole plain GPL leaves open, which matters given #58 (web gallery/upload) and #64
@@ -57,25 +57,25 @@ Covers the third-party license policy (and its 2026-09-24 amendment) and the out
   **#37 found RapidRAW doesn't actually decode HE/HE\* either** (its own rawler fork still rejects
   it, silently falling back to the embedded JPEG on Windows), so it isn't a shortcut past #37's
   own decoder work.
-- **RapidRAW adopt/fork question, resolved**: `docs/adr/0018-rapidraw-adopt-or-fork.md` —
+- **RapidRAW adopt/fork question, resolved**: `docs/adr/0069-rapidraw-adopt-or-fork.md` —
   **not adopted, whole or by module; study-only**. Full findings (RapidRAW, vkdt, Ansel; file:line
   cited architecture and license checks) in `docs/research/stalk-prior-art.md`. The decisive
   licensing result: running Nicti's own `deny.toml` against RapidRAW's real resolved dependency
   graph (`cargo deny check licenses`, 583 unique crates) produced exactly one rejection — `rawler
   v0.7.1`'s bare `LGPL-2.1` (no `-or-later`) — the same grant #37 separately resolved as
-  compatible via LGPL-2.1 §§5-6 (see the ADR-0013 bullet above), not an open question by the time
+  compatible via LGPL-2.1 §§5-6 (see the ADR-0066 bullet above), not an open question by the time
   this research ran; RapidRAW's own fork of it (`RapidRAW-DngLab`) doesn't change that. Every other
   crate in the graph clears Nicti's existing allowlist with zero additions needed — real, useful
   corroborating evidence for #37 either way, independent of the adopt/fork question. The adopt/fork
   question itself is answered no regardless of licensing: a per-Nicti-ADR compatibility table shows
-  RapidRAW's actual architecture conflicts with ADR-0002 (untyped JSON sidecar edit storage, no
-  catalog DB), ADR-0004 (monolithic free functions, no Claw-style extension points), and — the most
+  RapidRAW's actual architecture conflicts with ADR-0021 (untyped JSON sidecar edit storage, no
+  catalog DB), ADR-0019 (monolithic free functions, no Claw-style extension points), and — the most
   consequential finding — has **no DAG or per-stage render cache at all**, confirmed absent: every
   slider tweak re-runs the entire GPU pipeline top-to-bottom through one 1,997-line monolithic WGSL
   shader, the architectural opposite of Tapetum's (#44) planned stage-cached design. RapidRAW
   remains a valuable reference implementation to read while building #37/#44/#48 (real, shipping
   SAM-ViT-B/LaMa/Depth-Anything-V2/U-2-Net/CLIP integrations, all downloaded on demand rather than
   bundled), just not code to fork or a dependency to add. Also corrected two prior-art citations
-  found wrong during this research: ADR-0006 had claimed RapidRAW uses egui/eframe (it's actually
-  Tauri+React) and ADR-0005's wgpu note now reflects RapidRAW's real wgpu-29 pin — see those ADRs'
+  found wrong during this research: ADR-0068 had claimed RapidRAW uses egui/eframe (it's actually
+  Tauri+React) and ADR-0016's wgpu note now reflects RapidRAW's real wgpu-29 pin — see those ADRs'
   own Amendments/Prior-art sections in `docs/decisions/gpu-gui-and-healing.md`'s topic.

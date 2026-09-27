@@ -1,7 +1,7 @@
 //! A minimal TIFF/EXIF/Nikon-MakerNote reader, extending `spikes/sniff/src/ifd.rs`'s walker
 //! (#28/#29) with the tags #33's grouping signals actually need: capture time (with millisecond
 //! sub-second precision), Nikon's shutter count and continuous-release bit, camera serial number,
-//! orientation, and the Nikon MakerNote PreviewIFD's embedded JPEG (T0, per ADR-0017) for
+//! orientation, and the Nikon MakerNote PreviewIFD's embedded JPEG (T0, per ADR-0029) for
 //! perceptual-hash/embedding signals.
 //!
 //! Sniff's walker covers IFD0/next-IFD-chain/SubIFDs/the-MakerNote-preview generally, for finding
@@ -228,7 +228,7 @@ pub struct NefMeta {
     pub serial: Option<String>,
     pub shutter_count: Option<u32>,
     pub shooting_mode: Option<ShootingMode>,
-    /// The Nikon MakerNote PreviewIFD's embedded JPEG (T0, per ADR-0017) -- `None` if this file
+    /// The Nikon MakerNote PreviewIFD's embedded JPEG (T0, per ADR-0029) -- `None` if this file
     /// has no Nikon MakerNote or no PreviewIFD entry (an unsupported camera, not necessarily an
     /// error for the caller).
     pub preview: Option<EmbeddedJpeg>,

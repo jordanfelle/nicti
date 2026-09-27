@@ -1,4 +1,4 @@
-//! ADR-0002's "Recovery from sidecars" conflict rule, wired to real file
+//! ADR-0021's "Recovery from sidecars" conflict rule, wired to real file
 //! mtimes/hashes (the ADR left the actual I/O plumbing to #59), plus the
 //! layer-(c) `crs:` write gate the ADR explicitly asked this ticket to pick.
 //!
@@ -28,7 +28,7 @@ pub struct Side {
     pub mtime_ms: u128,
 }
 
-/// ADR-0002's rule: identical content is never a conflict regardless of
+/// ADR-0021's rule: identical content is never a conflict regardless of
 /// mtime; otherwise the later mtime wins, unless both mtimes fall within
 /// `ambiguity_window_ms` of each other, in which case this flags for manual
 /// review rather than guessing.
@@ -77,7 +77,7 @@ pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
     Ok((hash, mtime_ms))
 }
 
-/// ADR-0002's layer-(c) `crs:` write gate, resolved by #59 as: **write
+/// ADR-0021's layer-(c) `crs:` write gate, resolved by #59 as: **write
 /// `crs:` only if the sidecar's current hash still matches what Nicti last
 /// wrote there** -- i.e. LRC hasn't independently touched the file since.
 /// Otherwise, skip the write and flag the asset, rather than clobbering

@@ -4,8 +4,8 @@
 //! never have sub-IFDs or strips/tiles) and pulls out the tags calico's `pipeline.rs` needs.
 //!
 //! Tag IDs and semantics are from the DNG specification (Adobe DNG Specification 1.6.0.0,
-//! section 6, "Camera Profile Tags"). ADR-0021 records the never-bundle-real-DCPs licensing
-//! stance (ADR-0003) this parser exists under -- it reads DCPs already installed on the user's
+//! section 6, "Camera Profile Tags"). ADR-0038 records the never-bundle-real-DCPs licensing
+//! stance (ADR-0018) this parser exists under -- it reads DCPs already installed on the user's
 //! own machine, never a file this repo ships.
 
 use std::collections::HashMap;

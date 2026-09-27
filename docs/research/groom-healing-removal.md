@@ -2,7 +2,7 @@
 
 Findings for [#50](https://github.com/jordanfelle/nicti/issues/50), feeding
 [#51](https://github.com/jordanfelle/nicti/issues/51)'s AI-removal shipping decision and
-[docs/adr/0007-healing-and-removal.md](../adr/0007-healing-and-removal.md)'s design. Tooling:
+[docs/adr/0050-healing-and-removal.md](../adr/0050-healing-and-removal.md)'s design. Tooling:
 `spikes/groom/` — see that crate's own module docs. This is a findings doc, not an ADR; the
 shipping decision itself belongs to #51.
 
@@ -36,7 +36,7 @@ heal case.
 
 All three are comfortably inside a 16.7ms (60fps) interactive budget *on CPU, at this small patch
 size and iteration count* — not a claim about GPU throughput at hero-scenario resolution, which
-this sandbox cannot measure (see ADR-0007's Measured results section for the explicit "TBD —
+this sandbox cannot measure (see ADR-0050's Measured results section for the explicit "TBD —
 reference machine" markers on every GPU/CUDA number).
 
 The `wgpu` compute-shader Poisson solver (`shaders/poisson_jacobi.wgsl`) was checked for
@@ -166,4 +166,4 @@ pass); re-read `github.com/Picsart-AI-Research/MI-GAN`'s own `LICENSE-WEIGHTS` f
   evidence LaMa is definitely the only option.
 - **Real MobileSAM/LaMa ONNX weights and a real `ort`/ONNX-Runtime-dylib environment are needed**
   before #51 can validate this spike's `ai.rs` wrappers past their graceful-failure path, or
-  measure real inference latency against the <2s/removal budget ADR-0007 states as a hypothesis.
+  measure real inference latency against the <2s/removal budget ADR-0050 states as a hypothesis.

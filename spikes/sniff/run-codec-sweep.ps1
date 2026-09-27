@@ -2,7 +2,7 @@
 .SYNOPSIS
     #143's codec sweep: JPEG baseline, AVIF at ravif speeds 6-10, and lossy WebP at three
     qualities, all at T2 (screen tier), against the #37/#136 stratified NictiBench-subset (the
-    ref-10k replacement -- see ADR-0020).
+    ref-10k replacement -- see ADR-0071).
 
 .DESCRIPTION
     Follows docs/benchmarks.md's protocol: 1 discarded warm-up run, then 5 measured runs per

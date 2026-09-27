@@ -1,4 +1,4 @@
-//! Classic (non-AI) sky-mask heuristic -- the no-model fallback `docs/adr/0024-masking.md` records
+//! Classic (non-AI) sky-mask heuristic -- the no-model fallback `docs/adr/0048-masking.md` records
 //! for sky segmentation if no license-clear model checks out (see `docs/research/siamese-masking.md`
 //! for the model survey). Luminance/blue-ratio threshold, seeded from the top row and grown by
 //! flood fill so a bright non-sky region (e.g. a white wall) lower in the frame isn't picked up

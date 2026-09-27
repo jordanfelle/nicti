@@ -1,20 +1,21 @@
-# ADR-0023: Lightroom Classic catalog import mapping
+# ADR-0061: Lightroom Classic catalog import mapping
 
 - **Status:** Accepted
 - **Date:** 2026-09-26
 - **Ticket:** [#61](https://github.com/jordanfelle/nicti/issues/61) Research: .lrcat schema mapping
+- **Formerly:** ADR-0023 (sequential numbering, pre-#183)
 
 ## Context
 
 #62 (phase-2 LRC catalog import) and #53 (AI auto-tone training dataset) are both blocked on #61:
 neither can be planned until Nicti knows what's actually in a `.lrcat` file. Adobe has never
-published the schema (ADR-0002's footnote cites camerahacks/lightroom-database and
+published the schema (ADR-0021's footnote cites camerahacks/lightroom-database and
 hfiguiere/lrcat-extractor's `doc/lrcat_format.md` as the best available secondary sources), and
-until this pass, the repo had no field-level LRC-to-Nicti mapping anywhere — ADR-0002 named #61 as
+until this pass, the repo had no field-level LRC-to-Nicti mapping anywhere — ADR-0021 named #61 as
 the owner of that mapping and stopped there.
 
 This ADR is grounded in the user's own real catalog: a 10.7GB, 380,300-asset `.lrcat` (matching
-ADR-0017's own asset count from the same library, extracted the same way — a closed catalog
+ADR-0029's own asset count from the same library, extracted the same way — a closed catalog
 backup, read-only, aggregate findings only, never the live working copy). `spikes/shed` is the
 throwaway crate this research produced; every number below is `shed`'s measured output against
 that real file, not an estimate.
@@ -29,12 +30,12 @@ each commit, and every number cited is a count, not a value.
 ### Q1: Folder model
 
 LRC's model (`AgLibraryRootFolder` → `AgLibraryFolder` → `AgLibraryFile` → `Adobe_images`) maps
-directly onto ADR-0020's `volume`/`root`/`asset` three-level schema: `AgLibraryRootFolder` is
+directly onto ADR-0071's `volume`/`root`/`asset` three-level schema: `AgLibraryRootFolder` is
 `root`, `AgLibraryFolder` (parented, nested) collapses into `asset.rel_path`'s directory portion,
 and `AgLibraryFile` + `Adobe_images` together are `asset`.
 
 Measured: 13 root folders, all 13 with a drive-letter-prefixed `absolutePath` (confirming
-ADR-0020's assumption that LRC keys roots by drive letter, not a stable volume id), and 2 of the 13
+ADR-0071's assumption that LRC keys roots by drive letter, not a stable volume id), and 2 of the 13
 additionally carry a non-empty `relativePathFromCatalog` (LRC's own portable-catalog fallback) —
 this split is real and not universal, so #62's importer must handle a root having only an absolute
 path. 1,057 folders, 380,298 files (2 fewer than `Adobe_images`' 380,300 — `Adobe_images` includes
@@ -45,7 +46,7 @@ missing-file bug). `AgLibraryFile.md5`/`importHash` are candidate relink inputs 
 
 ### Q2: Library metadata
 
-Ratings, picks, and color labels follow ADR-0002:183-188's "follow LRC conventions" rule directly:
+Ratings, picks, and color labels follow ADR-0021:183-188's "follow LRC conventions" rule directly:
 `Adobe_images.rating` (REAL, `NULL`-able — 277,137 of 380,300 assets have no rating at all, not
 zero), `.pick` (0/1, virtually never set: 1 non-default value across the whole library), and
 `.colorLabels` (a label name string, e.g. `"Red"`; virtually unused here too, 4 non-empty rows).
@@ -73,7 +74,7 @@ follow-up. `AgLibraryCollectionImage`: 453 rows, the real collection's membershi
 ### Q4: Develop settings
 
 `Adobe_imageDevelopSettings.text` and `Adobe_libraryImageDevelopHistoryStep`'s own payload are both
-the same Lua table-literal format ADR-0002's footnote predicted: `s = { Key = Value, ... }`. The
+the same Lua table-literal format ADR-0021's footnote predicted: `s = { Key = Value, ... }`. The
 `agprefs` crate (MIT, already on `deny.toml`'s allowlist) parses this format directly —
 **`Agpref::parse` succeeded on all 380,307 real rows in this catalog, zero parse failures** —
 settling the adopt-vs-hand-roll question this ADR's Context raised: adopt `agprefs`, don't hand-roll
@@ -138,7 +139,7 @@ the per-parameter conversion math (that's each owner ticket's own scope).
 ### Q5: `.lrcat-data` blobs
 
 The backup zip's `.lrcat-data` directory holds ~590 files named `<id>.blob`, ~270MB each (measured
-from the zip's own directory listing, never extracted — ADR-0003 forbids committing real Adobe
+from the zip's own directory listing, never extracted — ADR-0018 forbids committing real Adobe
 data, and extracting 590 files at ~270MB each was out of scope for this pass's storage budget).
 `hasBigData`'s 26,195-row count on `Adobe_imageDevelopSettings` is the only in-catalog signal this
 pass found referencing them; the exact blob-to-asset linkage (whether it's `historySettingsID`,

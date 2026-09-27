@@ -1,8 +1,9 @@
-# ADR-0005: GPU compute API (`wgpu`)
+# ADR-0016: GPU compute API (`wgpu`)
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
 - **Ticket:** [#16](https://github.com/jordanfelle/nicti/issues/16) Research: GPU compute API
+- **Formerly:** ADR-0005 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -14,19 +15,19 @@ inference.
 
 Constraints already fixed by earlier ADRs/docs:
 
-- **ADR-0001** named `wgpu` and `ash` as the two viable candidates within Rust, and rated Rust's
+- **ADR-0015** named `wgpu` and `ash` as the two viable candidates within Rust, and rated Rust's
   GPU-compute ecosystem "Strong" on the strength of both existing.
 - v1 targets Windows + a high-end NVIDIA desktop (reference machine: RTX 5080, 16GB, driver
   616.56); macOS/Linux are v2 goals (#4/#66), so the architecture must not hard-code an
   NVIDIA-only or Windows-only path.
 - AI inference is **already decided**: ONNX Runtime via the `ort` crate, `load-dynamic`, with
-  CUDA/TensorRT execution providers (ADR-0004 §3, ADR-0003). This ADR decides the API for
+  CUDA/TensorRT execution providers (ADR-0019 §3, ADR-0018). This ADR decides the API for
   **render/pixel compute stages and display**, and the **interop boundary** with ORT — not the
   inference runtime itself.
 - Performance budgets (`docs/benchmarks.md`): slider→preview p95 ≤ 16.7ms (60fps); warm image
   switch < 100ms. Tapetum caches expensive stages (denoise, AI masks, lens correction) so they're
   baked once, not recomputed per frame — the hero scenario (#43) is gated on this design holding.
-- Any new dependency needs a `docs/licensing.md` row in the same PR (ADR-0003) — done, see that
+- Any new dependency needs a `docs/licensing.md` row in the same PR (ADR-0018) — done, see that
   file's 2026-09-23 update.
 
 ## Decision rule (stated before measuring, per this ADR's own methodology)
@@ -52,7 +53,7 @@ show is actually there.
 **Backend choice on Windows: default to Vulkan, not Dx12** — despite Dx12 being faster for the
 live-stage chain itself (see below), **Dx12 does not expose `Features::SHADER_F16` on this
 machine/driver/wgpu-30 combination, Vulkan does.** Tapetum's disk/RAM cache tiers are specified as
-"compressed half-float" (ADR-0002 context), so `SHADER_F16` availability is load-bearing, not
+"compressed half-float" (ADR-0021 context), so `SHADER_F16` availability is load-bearing, not
 optional. If a future wgpu release closes this Dx12 gap, this line should be revisited — it's a
 `wgpu`/driver-version fact, not a fundamental Vulkan-vs-Dx12 property.
 
@@ -193,7 +194,7 @@ and this spike doesn't isolate it.
   has no macOS build yet, v2 per #73), but worth remembering if the same color-shift symptom shows
   up once macOS support lands.
 - **vkdt** (darktable's from-scratch Vulkan rewrite) uses raw Vulkan directly, with a
-  Vulkan-native node-graph (DAG) pipeline (already referenced in ADR-0004 §context/footnote
+  Vulkan-native node-graph (DAG) pipeline (already referenced in ADR-0019 §context/footnote
   p4)[^pa2] — the closest prior art to the rejected `ash` option, but vkdt's own stated motivation
   is avoiding a full API-abstraction layer's overhead for a project with no cross-platform-GPU-API
   goal, which is a different constraint than Nicti's v2 macOS/AMD goal.
@@ -210,12 +211,12 @@ and this spike doesn't isolate it.
   code should still request Dx12 as a fallback (already proven working for everything except f16)
   rather than hard-requiring Vulkan, in case a future machine's Vulkan driver is broken/absent.
 - **VRAM budgeting for the hero scenario**: a 45MP RGBA16F intermediate is ~360MB; Tapetum's VRAM
-  cache tier (current image + neighbors, per ADR-0002/#44's design) must budget against this
+  cache tier (current image + neighbors, per ADR-0021/#44's design) must budget against this
   concretely, not an assumed number — this ADR's measured `max_buffer_size`/
   `max_storage_buffer_binding_size` numbers are the first real data point for that budget.
 - **Never do a full-frame host↔device round-trip in the hot path** — confirmed expensive
   (0.8–1.5s) by this spike's own harness, reinforcing (not just assuming) Tapetum's
-  GPU-resident-cache design from ADR-0002/#44.
+  GPU-resident-cache design from ADR-0021/#44.
 - **GUI framework (#68) coupling note**: Iced and egui are wgpu-native already; Slint has a wgpu
   integration path; GPUI's Windows backend is D3D11-based and would need shared-handle interop
   with wgpu's Dx12/Vulkan device — a real input to #68's own evaluation, not a decision made here.
@@ -265,7 +266,7 @@ already available via WSL and the decision rule doesn't require same-OS, only sa
     named candidates for that ticket's own evaluation; confirmed via the project's own
     dependency manifest, checked 2026-09-23.
 [^pa2]: vkdt Vulkan node-graph pipeline — already cited in
-    `docs/adr/0004-module-plugin-architecture.md` footnote `[^p4]`, https://github.com/hanatos/vkdt
+    `docs/adr/0019-module-plugin-architecture.md` footnote `[^p4]`, https://github.com/hanatos/vkdt
     — verified 2026-09-23.
 [^pa3]: darktable OpenCL acceleration with CPU fallback — https://www.darktable.org/about/features/
     and the project's own `src/common/opencl.c` — verified 2026-09-23.

@@ -30,7 +30,7 @@ ravif = "0.13"
 avif-decode = { version = "3", default-features = false }
 rgb = "0.8"
 imgref = "1"
-# Lossy-WebP candidate for #143 (ADR-0017's deferred follow-up): unlike ravif/avif-decode above,
+# Lossy-WebP candidate for #143 (ADR-0029's deferred follow-up): unlike ravif/avif-decode above,
 # this is a real C dependency (`libwebp-sys` vendors and compiles libwebp with `cc`) -- accepted
 # here because `rusqlite`'s `bundled` feature already compiles C in this same crate, so it's not a
 # new category of build requirement. `default-features = false` drops the optional `image` dep

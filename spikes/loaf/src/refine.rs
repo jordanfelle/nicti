@@ -1,7 +1,7 @@
 //! Preview-to-full-res mask refine: a guided filter (He, Sun & Tang, "Guided Image Filtering",
 //! 2010/2012 fast variant), per #44's own ticket body: "Masks at preview res first, refined to
 //! full res via edge-aware upsample (guided filter) only when zoomed/exporting." Ported from
-//! `spikes/siamese/src/refine.rs::guided_upsample` (#48/ADR-0024, already proven correct there:
+//! `spikes/siamese/src/refine.rs::guided_upsample` (#48/ADR-0048, already proven correct there:
 //! `a_real_edge_in_guidance_sharpens_a_softly_sampled_low_res_boundary`) -- spikes don't depend on
 //! each other, so this is a copy, not a reuse-by-dependency, adapted onto this module's own
 //! [`Field`] type instead of siamese's `image::Field`.

@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #21 (ADR-0002): edit-document hashing, history/compaction, and XMP recovery round-trip. Not a production crate."
+description = "Throwaway spike for #21 (ADR-0021): edit-document hashing, history/compaction, and XMP recovery round-trip. Not a production crate."
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

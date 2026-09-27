@@ -17,7 +17,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Enumerate every mounted volume and print its identity candidates as JSON -- the raw data
-    /// ADR-0020's survival table is built from.
+    /// ADR-0071's survival table is built from.
     Enumerate,
     /// Watch for volume attach/detach events for `seconds`, comparing the polling backend at
     /// `interval` against the (currently unimplemented) push backend.
@@ -182,7 +182,7 @@ fn current_volume_for(dir: &std::path::Path) -> Result<(String, volume::VolumeIn
     }
     if let Some((_, v, mp)) = best {
         let key = volume::identity_key(&v).with_context(|| {
-            format!("volume at {mp} has no usable identity key -- see ADR-0020")
+            format!("volume at {mp} has no usable identity key -- see ADR-0071")
         })?;
         return Ok((key, v, mp));
     }

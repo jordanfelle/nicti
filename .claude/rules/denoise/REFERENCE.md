@@ -36,7 +36,7 @@ Full reasoning/history: `docs/decisions/denoise.md`.
   pads every tile to a fixed size before inference; fixes a real ONNX reshape failure this same
   constraint caused at the image border. General, not SCUNet-specific in its code.
 - **Fixed color treatment for comparison**: camera RGB → XYZ(D50) via LibRaw's no-profile matrix →
-  linear sRGB (published Bradford-adapted constant) → sRGB OETF — deliberately not ADR-0021's real
+  linear sRGB (published Bradford-adapted constant) → sRGB OETF — deliberately not ADR-0038's real
   DCP pipeline (still its own open research pass).
 - **Toolchain gotcha**: cross-compiling to `x86_64-pc-windows-gnu` needs rustup's toolchain
   directory first on PATH for *both* `cargo` and `rustc` — cargo shells out to a bare `rustc`

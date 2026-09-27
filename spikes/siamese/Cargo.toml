@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #48 (ADR-0024): BiRefNet/MobileSAM segmentation for subject/sky masks via ort/load-dynamic, the brush+gradient local-adjustment geometry model, the AI+geometry mask-group compose model (add/subtract/intersect/invert -- inverse shares its AI recipe's bake key), a preview-to-full-res guided-filter upsample, and a wgpu compute-shader twin of gradient/brush/compose/masked-adjust-apply. Not a production crate."
+description = "Throwaway spike for #48 (ADR-0048): BiRefNet/MobileSAM segmentation for subject/sky masks via ort/load-dynamic, the brush+gradient local-adjustment geometry model, the AI+geometry mask-group compose model (add/subtract/intersect/invert -- inverse shares its AI recipe's bake key), a preview-to-full-res guided-filter upsample, and a wgpu compute-shader twin of gradient/brush/compose/masked-adjust-apply. Not a production crate."
 
 [lib]
 name = "siamese"

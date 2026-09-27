@@ -1,6 +1,6 @@
 # #33: burst/duplicate grouping (`spikes/litter`)
 
-Full write-up backing `docs/adr/0025-burst-duplicate-grouping.md`. See that ADR for the decision
+Full write-up backing `docs/adr/0033-burst-duplicate-grouping.md`. See that ADR for the decision
 rule and Consequences; this doc is the method and reproduction detail.
 
 ## Method
@@ -32,7 +32,7 @@ band a naive "burst" detector would target.
   CPU-only, no ML dependency.
 - **`time+phash`** — `image_hasher`'s Mean hash + DCT preprocessing. Same cost class as dHash.
 - **`time+ssim`** — reuses `nicti_prowl::golden::ssim` (the same hand-rolled single-scale SSIM
-  #17/ADR-0017 already built), resized to equal dimensions when the two T0s differ (a
+  #17/ADR-0029 already built), resized to equal dimensions when the two T0s differ (a
   mixed-camera pair).
 - **`time+dino`** — DINOv2 ViT-S/14 global embedding (CLS token), cosine similarity. Costs more
   per frame than a hash but ran successfully on CPU in this pass (see Real DINOv2 run below) —
@@ -69,7 +69,7 @@ on non-Z8 input.
 
 ## Real DINOv2 run
 
-Obtained (network access confirmed available, same as #48/ADR-0024's own context):
+Obtained (network access confirmed available, same as #48/ADR-0048's own context):
 
 - A real ONNX Runtime 1.19.2 Linux shared library:
   `https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz`
@@ -113,7 +113,7 @@ invariant in the UI, not just in `group.rs`'s own algorithm). Export downloads `
 
 `litter eval --nef-dir <dir> --labels labels.json --candidate all --sweep` scores every candidate
 against the exported labels, sweeping a small `(max_gap_secs, min_similarity)` grid per level and
-reporting the best-F1 operating point per candidate — see ADR-0025's Measured-results table.
+reporting the best-F1 operating point per candidate — see ADR-0033's Measured-results table.
 
 ## Reproducing
 

@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-Runs one measured pass of a #68 (ADR-0006) GUI-framework candidate interaction: records hardware
+Runs one measured pass of a #68 (ADR-0068) GUI-framework candidate interaction: records hardware
 identity, captures the screen while bench/pelt/pelt.ahk drives the already-running pelt-*
 binary, then crops and hands the capture to whisker for analysis. See
-docs/adr/0006-gui-framework.md and docs/benchmarks/hero-scenario.md (same method, applied here).
+docs/adr/0068-gui-framework.md and docs/benchmarks/hero-scenario.md (same method, applied here).
 
 .PARAMETER Candidate
 egui | iced | slint -- which pelt-<candidate> binary is already running and on screen.

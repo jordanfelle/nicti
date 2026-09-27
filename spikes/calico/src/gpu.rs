@@ -1,5 +1,5 @@
 //! GPU port of `huesatmap.rs`'s single-map sample+apply, as a 3D-texture wgpu compute kernel --
-//! the part of ADR-0021's Candidates the plan flagged as needing a real GPU-pattern validation
+//! the part of ADR-0038's Candidates the plan flagged as needing a real GPU-pattern validation
 //! (glint's own kernels are storage-buffer-only, see `spikes/glint/src/gpu.rs`'s scoping note;
 //! no 3D-texture pattern existed anywhere in this repo before this spike).
 //!
@@ -47,7 +47,7 @@ pub struct GpuContext {
 impl GpuContext {
     /// Enumerates every adapter wgpu can see. In WSL without a GPU-backed Vulkan ICD this falls
     /// back to lavapipe (software) -- fine for correctness parity, not for performance numbers
-    /// (same caveat as glint's `GpuContext::enumerate`, ADR-0005).
+    /// (same caveat as glint's `GpuContext::enumerate`, ADR-0016).
     pub fn enumerate() -> Vec<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,

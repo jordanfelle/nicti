@@ -1,23 +1,24 @@
-# ADR-0014: libSQL, evaluated for the catalog store — not adopted for v1
+# ADR-0113: libSQL, evaluated for the catalog store — not adopted for v1
 
 - **Status:** Rejected for v1 (not a rejection of the embedded-replica idea itself — see
   Consequences; revisit specifically when #64 becomes active)
 - **Date:** 2026-09-24
 - **Ticket:** [#113](https://github.com/jordanfelle/nicti/issues/113) Research: libSQL (real SQLite
   C-source fork with embedded replicas) as a catalog engine candidate
+- **Formerly:** ADR-0014 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0008 chose SQLite (`rusqlite`) for v1. #102 (Turso Database, ADR-0009) and #106 (`redb`,
-ADR-0010) were both evaluated and rejected; #107 (ADR-0012) separately re-confirmed SQLite over
-DuckDB for the specific append-only/burst-compacted history-log shape ADR-0002 requires. #113 asks
+ADR-0067 chose SQLite (`rusqlite`) for v1. #102 (Turso Database, ADR-0102) and #106 (`redb`,
+ADR-0106) were both evaluated and rejected; #107 (ADR-0107) separately re-confirmed SQLite over
+DuckDB for the specific append-only/burst-compacted history-log shape ADR-0021 requires. #113 asks
 a related but distinct question from either of those: **libSQL** (`tursodatabase/libsql`) is an
 actual fork of SQLite's own C source — not a from-scratch rewrite like Turso Database — with a
 maintained Rust crate (`libsql` on crates.io) adding **embedded replicas** (built-in offline-first
 sync) over plain SQLite. This could plausibly reduce or replace the custom sync layer already
 anticipated for v2's #64 (multi-machine catalog), instead of building sync from scratch on
-ADR-0002's history log. ADR-0009 itself declined to evaluate libSQL separately at the time
-("nothing about it would change ADR-0008's own SQLite numbers"), which #113 explicitly revisits
+ADR-0021's history log. ADR-0102 itself declined to evaluate libSQL separately at the time
+("nothing about it would change ADR-0067's own SQLite numbers"), which #113 explicitly revisits
 rather than assumes still holds.
 
 **Real caveat, not disqualifying but worth tracking** (named in #113 itself): the company's active
@@ -31,12 +32,12 @@ Reuse `spikes/den`'s shared `Workload` trait so this candidate is measured ident
 prior one. Hard gates:
 
 1. Builds and passes smoke tests on `x86_64-pc-windows-msvc` in CI.
-2. License allowed under ADR-0003 (already is — MIT).
+2. License allowed under ADR-0018 (already is — MIT).
 3. Survives `kill -9` during a write loop: reopens cleanly, integrity check passes.
 4. Actively maintained: a release within the last 6 months and a real Rust API.
 
 Measured gates at 600k/2M scale, against `docs/benchmarks.md`'s Library targets (same as
-ADR-0008/0009/0010): faceted filter/search/sort < 100ms p95; cold start < 2s; single write ≤5ms.
+ADR-0067/0102/0106): faceted filter/search/sort < 100ms p95; cold start < 2s; single write ≤5ms.
 
 **Additional question specific to this candidate** (#113's own framing): does the embedded-replica
 feature's sync/write path add meaningful overhead over plain SQLite for the common case (no active
@@ -47,7 +48,7 @@ directly below, not assumed either way.
 ## Decision
 
 **Not adopted for v1.** Every hard gate passes, including — uniquely among every KV-shaped or
-pure-Rust candidate this project has evaluated (LMDB/ADR-0008, Turso/ADR-0009, `redb`/ADR-0010,
+pure-Rust candidate this project has evaluated (LMDB/ADR-0067, Turso/ADR-0102, `redb`/ADR-0106,
 all left crash-safety **inconclusive**) — gate 3 (crash-safety), which libSQL **passes cleanly**:
 0/20 reopen failures, real `PRAGMA integrity_check` validation, the same result plain SQLite itself
 gets. This is expected, not a coincidence: libSQL is a genuine fork of SQLite's own C locking code,
@@ -65,7 +66,7 @@ blanket "every op" claim an earlier draft of this ADR made and a hostile review 
 (see the Spike section for the schema-completeness bug that draft's numbers were measured against).
 This is attributable to
 the crate's `async`-wrapped API (every call blocks on a `tokio::runtime::Runtime`, the same
-architectural shape ADR-0009 already measured overhead from in Turso Database, just smaller here),
+architectural shape ADR-0102 already measured overhead from in Turso Database, just smaller here),
 not to replication code actually running. Combined with a ~5x larger dependency graph pulled in by
 the crate's own default features (`tonic`/`tower`/`hyper`/`h2`, entirely unused by this engine's own
 code path) and no compelling reason to pay either cost for v1 (a single-machine catalog with no
@@ -78,13 +79,13 @@ strongest candidate on record for #64 specifically, once that ticket is real —
 
 | Gate | Result |
 |---|---|
-| 1. Windows build | ✅ (evidence, pending this PR's own CI run) `spikes/den` builds and links cleanly on this session's Linux sandbox with `libsql` enabled (`cargo build`/`cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso`), and `libsql-ffi-0.9.30`'s own `build.rs` was read directly (not assumed): unlike pglite-rs's disqualifying unconditional Unix-only linker flag (ADR-0008), libSQL's build script has no platform-exclusive code path outside features this evaluation doesn't enable (`bundled-sqlcipher`'s Windows-specific OpenSSL lib-name branch is the only `is_windows` logic in the file, and it's gated behind a feature not used here) — it compiles its bundled `sqlite3.c` fork via the standard `cc` crate, the same mechanism `libsqlite3-sys` itself uses for plain SQLite. This PR extends `.github/workflows/ci.yml`'s `build-windows` job with a real `cargo test -p den` invocation (see the Spike section for why it's a *separate* command from the other engines, not folded into the existing one) — the authoritative confirmation is that CI run, not this local Linux evidence alone. |
+| 1. Windows build | ✅ (evidence, pending this PR's own CI run) `spikes/den` builds and links cleanly on this session's Linux sandbox with `libsql` enabled (`cargo build`/`cargo test -p den --no-default-features --features libsql,duckdb,lmdb,turso`), and `libsql-ffi-0.9.30`'s own `build.rs` was read directly (not assumed): unlike pglite-rs's disqualifying unconditional Unix-only linker flag (ADR-0067), libSQL's build script has no platform-exclusive code path outside features this evaluation doesn't enable (`bundled-sqlcipher`'s Windows-specific OpenSSL lib-name branch is the only `is_windows` logic in the file, and it's gated behind a feature not used here) — it compiles its bundled `sqlite3.c` fork via the standard `cc` crate, the same mechanism `libsqlite3-sys` itself uses for plain SQLite. This PR extends `.github/workflows/ci.yml`'s `build-windows` job with a real `cargo test -p den` invocation (see the Spike section for why it's a *separate* command from the other engines, not folded into the existing one) — the authoritative confirmation is that CI run, not this local Linux evidence alone. |
 | 2. License | ✅ MIT — confirmed twice, independently: crates.io's version-level API response for `libsql` (every version back through 0.9.x, including the crate's newest 0.10.0-pre.4) reports `"license":"MIT"`, and the GitHub repo (`tursodatabase/libsql`) reports the same via its own `license` API field. Already on `deny.toml`'s allowlist (MIT is the very first entry) — no edit needed, confirmed by `cargo deny --workspace --all-features check licenses` passing clean (see below). |
-| 3. Crash-safety | ✅ **0/20 reopen failures** — `den crash --engine libsql --iterations 20`, using the identical `crash_mid_ingest` (open a transaction, insert half a batch, never `COMMIT`, `mem::forget` the handle) + `PRAGMA integrity_check` methodology every prior ADR in this series uses. This is the first KV-shaped-or-pure-Rust-adjacent candidate since ADR-0008's original SQLite/DuckDB pass to actually clear this gate rather than leave it inconclusive — expected, given libSQL forks SQLite's own C-level file-locking code rather than reimplementing it (Turso Database's from-scratch rewrite hit a POSIX `fcntl` lock whose interaction with this harness's `mem::forget` technique was never fully resolved, per ADR-0009; `redb`'s own OS-level byte-range lock hit the same structural limitation, per ADR-0010). |
-| 4. Maintained | ✅ Real, recent evidence on both fronts #113 asked to distinguish. **Crate release recency:** `libsql` 0.9.30 (the current stable/`max_stable_version`) published 2026-03-19; a newer 0.10.0-pre.4 pre-release published 2026-06-02 — about 3.7 months before this evaluation, comfortably inside the 6-month bar (Turso's own evaluated version in ADR-0009 was a pre-release too, so a pre-release counting here is consistent with that precedent). **Repo activity:** `tursodatabase/libsql` was pushed to 8 days before this evaluation (2026-09-16), 17,235 stars, 533 forks, not archived — this is a real, currently-active repo, not a frozen one, despite the org's newer attention on Turso Database. **Real API, not a stub:** confirmed by reading the actual crate source (`~/.cargo/registry/src/.../libsql-0.9.30/src/`), not just its docs — `Connection::execute`/`query`/`prepare`, `Rows::next`, `Row::get`/`get_value` are all real, working `async fn`s backed by a genuine SQLite connection, exercised end-to-end by this ADR's own `libsql_engine.rs` and its passing `cross_engine.rs` correctness test. |
+| 3. Crash-safety | ✅ **0/20 reopen failures** — `den crash --engine libsql --iterations 20`, using the identical `crash_mid_ingest` (open a transaction, insert half a batch, never `COMMIT`, `mem::forget` the handle) + `PRAGMA integrity_check` methodology every prior ADR in this series uses. This is the first KV-shaped-or-pure-Rust-adjacent candidate since ADR-0067's original SQLite/DuckDB pass to actually clear this gate rather than leave it inconclusive — expected, given libSQL forks SQLite's own C-level file-locking code rather than reimplementing it (Turso Database's from-scratch rewrite hit a POSIX `fcntl` lock whose interaction with this harness's `mem::forget` technique was never fully resolved, per ADR-0102; `redb`'s own OS-level byte-range lock hit the same structural limitation, per ADR-0106). |
+| 4. Maintained | ✅ Real, recent evidence on both fronts #113 asked to distinguish. **Crate release recency:** `libsql` 0.9.30 (the current stable/`max_stable_version`) published 2026-03-19; a newer 0.10.0-pre.4 pre-release published 2026-06-02 — about 3.7 months before this evaluation, comfortably inside the 6-month bar (Turso's own evaluated version in ADR-0102 was a pre-release too, so a pre-release counting here is consistent with that precedent). **Repo activity:** `tursodatabase/libsql` was pushed to 8 days before this evaluation (2026-09-16), 17,235 stars, 533 forks, not archived — this is a real, currently-active repo, not a frozen one, despite the org's newer attention on Turso Database. **Real API, not a stub:** confirmed by reading the actual crate source (`~/.cargo/registry/src/.../libsql-0.9.30/src/`), not just its docs — `Connection::execute`/`query`/`prepare`, `Rows::next`, `Row::get`/`get_value` are all real, working `async fn`s backed by a genuine SQLite connection, exercised end-to-end by this ADR's own `libsql_engine.rs` and its passing `cross_engine.rs` correctness test. |
 
 **Measured gates, 600k assets** (p50/p95 unless noted; SQLite column is this session's own
-`rusqlite` baseline run back-to-back with libSQL on the same box, not reused from ADR-0008, so the
+`rusqlite` baseline run back-to-back with libSQL on the same box, not reused from ADR-0067, so the
 #113-specific SQLite-vs-libSQL comparison is apples-to-apples on identical hardware/session):
 
 | Query | Budget | SQLite p50/p95 | libSQL p50/p95 |
@@ -106,7 +107,7 @@ strongest candidate on record for #64 specifically, once that ticket is real —
 
 | Query | Budget | SQLite p50/p95 | libSQL p50/p95 |
 |---|---|---|---|
-| Faceted filter + facet counts | < 100ms | **144.9 / 162.5 ms ⛔** (known ADR-0008 gap) | **160.4 / 162.7 ms ⛔** (same gap, inherited) |
+| Faceted filter + facet counts | < 100ms | **144.9 / 162.5 ms ⛔** (known ADR-0067 gap) | **160.4 / 162.7 ms ⛔** (same gap, inherited) |
 | Sort by date, first 500 | < 100ms | 0.019 / 0.045 ms ✅ | 0.074 / 0.098 ms ✅ |
 | Folder-subtree count | < 100ms | 7.81 / 8.30 ms ✅ | 7.33 / 8.11 ms ✅ (ties, within noise) |
 | Keyword-subtree query | < 100ms | 0.038 / 0.086 ms ✅ | 0.069 / 0.102 ms ✅ |
@@ -120,11 +121,11 @@ strongest candidate on record for #64 specifically, once that ticket is real —
 | Online backup (informative) | — | 1548 / 1686 ms | 1523 / 1570 ms |
 
 The one gate both engines miss (faceted-filter-with-counts at 2M) is not a new libSQL finding —
-it's the exact same gap ADR-0008 already identified and ADR-0011 already mitigated (a
+it's the exact same gap ADR-0067 already identified and ADR-0103 already mitigated (a
 trigger-maintained facet table); nothing about libSQL's own schema or query plan differs from
 `sqlite.rs`'s here (`libsql_engine.rs` runs byte-identical SQL text and, as of this ADR's own
 corrected version, an equivalent index set too — see the Spike section for the schema-completeness
-bug an earlier draft of this ADR had), so ADR-0011's mitigation would apply equally to a
+bug an earlier draft of this ADR had), so ADR-0103's mitigation would apply equally to a
 libSQL-backed store if one were ever built.
 
 **`folder_subtree_count` and `write_rating` are genuine ties, named explicitly rather than swept
@@ -163,7 +164,7 @@ engines, which is consistent with the overhead being **per-call async-dispatch c
 `Workload` method here
 blocks a `tokio::runtime::Runtime` on an `async fn` that itself awaits a `prepare()` + `query()` /
 `execute()` call chain — the identical architectural shape `turso_engine.rs` already measured
-overhead from in ADR-0009, just smaller in magnitude here since libSQL's actual query execution is
+overhead from in ADR-0102, just smaller in magnitude here since libSQL's actual query execution is
 real SQLite C, not a from-scratch Rust query engine) rather than from replication/sync code that,
 per the paragraph above, never runs at all. Queries that make more per-call round trips inside one
 `Workload` method (`tag_keyword_10k`'s 10,000 individual `INSERT`s, `sort_by_date_page`'s and
@@ -193,20 +194,20 @@ CI — needed a real fix; see the Spike section.
 
 | Option | Verdict |
 |---|---|
-| libSQL (`tursodatabase/libsql`) | **Rejected for v1, not for good.** Passes every hard gate, including the first clean crash-safety pass of any KV-shaped-or-pure-Rust-adjacent candidate in this series. Measured gates match plain SQLite's own margins exactly (same known 2M faceted-filter gap, already mitigated by ADR-0011). #113's own question resolves cleanly: no runtime cost from the embedded-replica feature when unconfigured (confirmed at the source level), but a real 1.3–4x per-op async-dispatch overhead on most ops (write_rating and folder-subtree-count tie) and a ~5x larger dependency graph exist regardless — real costs to pay for a feature (embedded-replica sync) v1 doesn't need yet. |
-| SQLite (`rusqlite`, status quo) | **Kept**, per ADR-0008/ADR-0012. Nothing in this evaluation changes that decision — libSQL doesn't out-measure plain SQLite on any gate that matters for a single-machine v1 catalog. |
+| libSQL (`tursodatabase/libsql`) | **Rejected for v1, not for good.** Passes every hard gate, including the first clean crash-safety pass of any KV-shaped-or-pure-Rust-adjacent candidate in this series. Measured gates match plain SQLite's own margins exactly (same known 2M faceted-filter gap, already mitigated by ADR-0103). #113's own question resolves cleanly: no runtime cost from the embedded-replica feature when unconfigured (confirmed at the source level), but a real 1.3–4x per-op async-dispatch overhead on most ops (write_rating and folder-subtree-count tie) and a ~5x larger dependency graph exist regardless — real costs to pay for a feature (embedded-replica sync) v1 doesn't need yet. |
+| SQLite (`rusqlite`, status quo) | **Kept**, per ADR-0067/ADR-0107. Nothing in this evaluation changes that decision — libSQL doesn't out-measure plain SQLite on any gate that matters for a single-machine v1 catalog. |
 
 ## Consequences
 
-- **#22 should not adopt libSQL for v1.** Proceed on SQLite per ADR-0008/ADR-0012, unchanged.
+- **#22 should not adopt libSQL for v1.** Proceed on SQLite per ADR-0067/ADR-0107, unchanged.
 - **libSQL is the leading candidate to revisit specifically when #64 (multi-machine catalog)
   becomes an active ticket, not a "maybe someday" note.** It is the only SQL-compatible engine
-  evaluated across ADR-0008/0009/0010/0012/this ADR that both (a) inherits real SQLite's own
+  evaluated across ADR-0067/0102/0106/0107/this ADR that both (a) inherits real SQLite's own
   crash-safety/reliability track record (confirmed here, cleanly, unlike every other alternative
   engine) and (b) ships a built-in offline-first sync mechanism (embedded replicas) that could
-  plausibly replace hand-rolling sync on top of ADR-0002's history log. Turso Database (the
+  plausibly replace hand-rolling sync on top of ADR-0021's history log. Turso Database (the
   from-scratch rewrite with the same org's newer engineering attention) was already rejected in
-  ADR-0009 for reasons unrelated to sync (WAL bloat, missing prefix-scan optimization) and doesn't
+  ADR-0102 for reasons unrelated to sync (WAL bloat, missing prefix-scan optimization) and doesn't
   change this ranking. When #64 is scoped, benchmark libSQL's actual embedded-replica sync
   round-trip cost specifically (not measured here — #113's own scope was the baseline/unconfigured
   case only) before committing to it over a custom sync layer.
@@ -220,7 +221,7 @@ CI — needed a real fix; see the Spike section.
   engine through one `--all-features` invocation the way it could before this candidate was added
   (see the Spike section for the concrete CI/feature-gating fix this required) — worth remembering
   if a future SQL-engine candidate also bundles its own bundled sqlite3.c fork.
-- **`tests/cross_engine.rs` now covers six engines**, unchanged in scope from ADR-0010's own
+- **`tests/cross_engine.rs` now covers six engines**, unchanged in scope from ADR-0106's own
   caveat about what it doesn't exercise (`crash_mid_ingest`, `rate_burst`, `backup()` still aren't
   asserted there for any engine) — still worth widening in a future pass, still not specific to
   this ADR's own conclusion.
@@ -240,7 +241,7 @@ two engines in this ADR is attributable to the engine, not to a different query 
 version of this file's `SCHEMA` omitted three single-column indexes (`idx_assets_model`,
 `idx_assets_rating`, `idx_assets_iso`) that `sqlite.rs` carries — copied forward from
 `turso_engine.rs`'s own schema, which has the identical gap but never claimed byte-identical
-schemas the way an earlier draft of this ADR did (ADR-0009 scoped its own claim to "equivalent
+schemas the way an earlier draft of this ADR did (ADR-0102 scoped its own claim to "equivalent
 **composite** indexes" specifically to route around this). None of this workload's queries filter
 on `model`/`rating`/`iso` alone (every query goes through a composite index instead), so the three
 missing indexes had no effect on any measured *query* time — but they are real write-path
@@ -294,7 +295,7 @@ No new `deny.toml` allowlist entry was needed (MIT is already allowed) — `carg
 --all-features check licenses` passes clean with libSQL's full dependency tree resolved, the same
 pre-existing `cfg_block` (Turso-only) warning as every prior ADR in this series, nothing new from
 `libsql`. `docs/licensing.md` does get two additions in this same PR, per this repo's own
-ADR-0003-established process: an update-log paragraph for the `libsql` crate itself (MIT,
+ADR-0018-established process: an update-log paragraph for the `libsql` crate itself (MIT,
 confirmed independently from both crates.io and the GitHub repo), and a new Native-libraries table
 row for the bundled `libsql-ffi` C fork specifically — its own license (public domain, verified by
 reading the actual bundled `sqlite3.c`'s blessing text) is distinct from the crate's own declared

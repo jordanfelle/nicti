@@ -1,7 +1,7 @@
 //! Byte-budgeted, content-keyed cache tiers (VRAM / RAM ring / disk), per #44's own ticket body:
 //! "Cache tiers: VRAM (current image + neighbors), RAM ring, disk (compressed half-float / mask
 //! alpha). Per-stage invalidation." Nothing in the repo has this shape yet -- `spikes/sniff`'s
-//! `cache.rs` is asset+tier keyed and never evicts (it's a persistent preview store, ADR-0017);
+//! `cache.rs` is asset+tier keyed and never evicts (it's a persistent preview store, ADR-0029);
 //! this is a content-keyed (`graph::RenderGraph::cache_key`), evicting, byte-budgeted cache for
 //! baked render-stage output, a different problem.
 //!

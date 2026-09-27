@@ -1,4 +1,4 @@
-# Enforces the Rust-crate license allowlist from docs/adr/0003-third-party-license-policy.md.
+# Enforces the Rust-crate license allowlist from docs/adr/0018-third-party-license-policy.md.
 # Scope: licenses only (advisories/bans/sources are out of scope here; Renovate covers vuln bumps).
 
 [graph]
@@ -15,11 +15,11 @@ allow = [
     "MIT-0",
     "Unlicense",
     "Unicode-3.0",
-    # ISC: added for `libloading` (ADR-0004/#19) -- functionally MIT-equivalent, a short
+    # ISC: added for `libloading` (ADR-0019/#19) -- functionally MIT-equivalent, a short
     # permissive license with no copyleft terms; OSI-approved and FSF Free/Libre.
     "ISC",
-    # Zlib: added for `foldhash` (wasmtime/cranelift's `hashbrown`, ADR-0004/#19) and `slotmap`
-    # (`glow`, wgpu-hal's GLES backend, ADR-0005/#16) -- both carry Zlib as their *sole* license
+    # Zlib: added for `foldhash` (wasmtime/cranelift's `hashbrown`, ADR-0019/#19) and `slotmap`
+    # (`glow`, wgpu-hal's GLES backend, ADR-0016/#16) -- both carry Zlib as their *sole* license
     # (no MIT/Apache-2.0 OR-arm), so unlike bytemuck/glow/raw-window-handle (which also list Zlib
     # but pass today via their own MIT/Apache-2.0 arm) these two needed it added outright. Same
     # permissive-with-no-copyleft-terms category as ISC above: OSI-approved, FSF Free/Libre.
@@ -27,37 +27,37 @@ allow = [
     # NCSA: `libfuzzer-sys`'s fuzz-target dependency, pulled in transitively via
     # `image` -> `ravif` -> `rav1e` -> `libfuzzer-sys` by the AVIF encoder feature the egui/iced/
     # Slint GUI-framework candidates all enable on `image` for their asset-loading paths (#68/
-    # ADR-0006's `pelt-*` spikes) -- not a choice made by this repo, and not linked into any
+    # ADR-0068's `pelt-*` spikes) -- not a choice made by this repo, and not linked into any
     # actual pelt-* binary's fuzzing path, just present in the resolved dependency graph.
     # Permissive, OSI-approved, no copyleft terms -- same category as ISC/Zlib above, added
     # globally rather than scoped to `libfuzzer-sys` since any future crate pulling in AVIF
     # support via `ravif` would hit the identical transitive dependency.
     "NCSA",
-    # BSL-1.0: `clipboard-win`/`error-code`, pulled in transitively by every #68/ADR-0006 `pelt-*`
+    # BSL-1.0: `clipboard-win`/`error-code`, pulled in transitively by every #68/ADR-0068 `pelt-*`
     # candidate's own clipboard integration (arboard via egui/Slint, window_clipboard via iced).
     # Permissive, OSI-approved, no copyleft terms -- same category as ISC/Zlib/NCSA above.
     "BSL-1.0",
     # 0BSD: `varint-rs`, a transitive dependency of `lsm-tree` (the LSM-tree engine `fjall` wraps,
-    # #116/ADR-0014's evaluation). The BSD Zero Clause License is OSI-approved and even more
+    # #116/ADR-0113's evaluation). The BSD Zero Clause License is OSI-approved and even more
     # permissive than MIT/Apache-2.0 -- no attribution requirement at all -- same
     # no-copyleft-terms category as ISC/Zlib/NCSA/BSL-1.0 above.
     "0BSD",
     # OFL-1.1 / Ubuntu-font-1.0: `epaint_default_fonts` bundles actual font *data* (not just code)
-    # under egui's `default_fonts` feature (#68/ADR-0006's pelt-egui spike). Both are OSI-approved,
+    # under egui's `default_fonts` feature (#68/ADR-0068's pelt-egui spike). Both are OSI-approved,
     # permissive-for-redistribution open font licenses (SIL OFL is the standard license for
     # bundling fonts, explicitly designed to permit this) -- but unlike the pure-code licenses
-    # above, this is exactly the kind of bundled-data case ADR-0003's Process section means by "a
+    # above, this is exactly the kind of bundled-data case ADR-0018's Process section means by "a
     # new dependency... gets a row in docs/licensing.md in the same PR" -- see that file's
-    # #68/ADR-0006 rows.
+    # #68/ADR-0068 rows.
     "OFL-1.1",
     "Ubuntu-font-1.0",
     # CDLA-Permissive-2.0: `webpki-roots` (Mozilla's root CA bundle, republished as Rust source
     # data), a build-time-only dependency of `libduckdb-sys`'s build script (`duckdb` -> `ureq` ->
-    # `webpki-roots`, #67/ADR-0007's `spikes/den`) -- not linked into any shipped binary. Same
+    # `webpki-roots`, #67/ADR-0050's `spikes/den`) -- not linked into any shipped binary. Same
     # bundled-data category as OFL-1.1/Ubuntu-font-1.0 above: a Linux-Foundation-drafted
     # permissive data license with no copyleft terms, standard for redistributing root-cert data.
     "CDLA-Permissive-2.0",
-    # GPL-3.0/AGPL-3.0/GPL-2.0-or-later: added 2026-09-24 per ADR-0003's amendment (#66/ADR-0010 --
+    # GPL-3.0/AGPL-3.0/GPL-2.0-or-later: added 2026-09-24 per ADR-0018's amendment (#66/ADR-0106 --
     # Nicti's own outbound license is now AGPL-3.0-or-later, so these are combinable into it, not
     # a compatibility risk the way they were when the outbound license was still undecided).
     # LGPL is *still* deliberately not listed here, though the reason changed 2026-09-25 (#37):
@@ -79,7 +79,7 @@ allow = [
     # combined into a GPL-3.0-family work (Nicti's own AGPL-3.0-or-later license) -- this is a
     # real incompatibility, not a leftover-caution omission like the ones below. A crate whose
     # *sole* license is exactly "GPL-2.0-only" should still fail this check; if one is ever needed,
-    # that's a real ADR-0003 conversation (dual-licensing, a permissive fork, etc.), not an
+    # that's a real ADR-0018 conversation (dual-licensing, a permissive fork, etc.), not an
     # allowlist edit.
     # MPL-2.0: `avif-parse` (AVIF-container demuxer, pulled in by `avif-decode`, #29's spike-only
     # AVIF-vs-JPEG tier-payload comparison). File-level weak copyleft, OSI-approved, FSF Free/Libre
@@ -98,7 +98,7 @@ allow = [
 # so adding an LGPL SPDX string here would have no upside and a real downside: cargo-deny can't
 # express "only as an OR-arm" -- it would also pass a future crate whose *sole* license is that
 # exact LGPL string. For `lensfun-rs` specifically, its confirmed or-later dual license needed no
-# special sign-off once Nicti's own license was already copyleft (ADR-0003's amendment). `rawler`
+# special sign-off once Nicti's own license was already copyleft (ADR-0018's amendment). `rawler`
 # (and LibRaw, vendored outside Cargo's graph entirely) turned out to need no "or-later" grant
 # either, once #37 checked LGPL-2.1's actual §§5-6 text (docs/licensing.md's Flags §2) -- but the
 # general principle (don't widen an allowlist just because cargo-deny's OR-arm matching makes it
@@ -106,15 +106,15 @@ allow = [
 # stays an explicit choice, not an oversight.
 confidence-threshold = 0.9
 
-# Spike-scoped exception (#68/ADR-0006): Slint's own crates carry
+# Spike-scoped exception (#68/ADR-0068): Slint's own crates carry
 # "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0" -- none of
 # which are on the allow-list above, and `LicenseRef-Slint-*` are Slint's own non-SPDX-registered
 # proprietary-with-exceptions license texts, not something cargo-deny can evaluate generically.
 # Scoped to exactly the Slint-published crate names (not a global allow, unlike ISC/Zlib/NCSA
 # above) so this never silently passes an unrelated future GPL-only crate. This is a research
 # spike only (`spikes/pelt-slint`, not a production crate, see CLAUDE.md's package-map note) --
-# if Slint is the ADR-0006 winner, ship-decision consequences documented there require an
-# ADR-0003 amendment and explicit sign-off before any of this ships in `nicti-render`/`nicti-ui`,
+# if Slint is the ADR-0068 winner, ship-decision consequences documented there require an
+# ADR-0018 amendment and explicit sign-off before any of this ships in `nicti-render`/`nicti-ui`,
 # the same standard already applied to LGPL-as-Cargo-dependency crates like `rawler`/`lensfun-rs`.
 [[licenses.exceptions]]
 allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]

@@ -1,13 +1,13 @@
-//! #22's real catalog schema, promoted from the spike prototypes ADR-0020 (`spikes/homing`) and
-//! ADR-0008/0011 (`spikes/den`) settled the shape of:
+//! #22's real catalog schema, promoted from the spike prototypes ADR-0071 (`spikes/homing`) and
+//! ADR-0067/0103 (`spikes/den`) settled the shape of:
 //!
-//! - `volume`/`root`/`asset`: three levels (ADR-0020) so a registered folder can move between
+//! - `volume`/`root`/`asset`: three levels (ADR-0071) so a registered folder can move between
 //!   drives (#72) as a single `root` row update, without touching every `asset` row underneath.
-//! - `preview`: the T0 grid-preview cache (ADR-0017), keyed by `(asset_id, tier)`.
-//! - `edit_variant`/`edit_history`: the physical shape ADR-0002 left for this ticket — one master
+//! - `preview`: the T0 grid-preview cache (ADR-0029), keyed by `(asset_id, tier)`.
+//! - `edit_variant`/`edit_history`: the physical shape ADR-0021 left for this ticket — one master
 //!   variant per asset (enforced by a partial unique index), each variant's edit document plus an
 //!   append-only history log.
-//! - `facet_counts`: the trigger-maintained `(model, rating)` aggregate ADR-0011 adopted, kept
+//! - `facet_counts`: the trigger-maintained `(model, rating)` aggregate ADR-0103 adopted, kept
 //!   current on every asset insert/update/delete rather than scanned fresh per query.
 //!
 //! Migrations are gated on `PRAGMA user_version` (real, persisted in the SQLite file header), not
@@ -23,12 +23,12 @@ CREATE TABLE volume (
     id              INTEGER PRIMARY KEY,
     identity_key    TEXT NOT NULL UNIQUE,
     label           TEXT,
-    -- Secondary identity signal (ADR-0020's `.nicti-volume` marker file, read-only-volume/clone
+    -- Secondary identity signal (ADR-0071's `.nicti-volume` marker file, read-only-volume/clone
     -- caveats and all) -- not the primary key, but a real disagreement with an already-registered
     -- volume under the same `identity_key` is refused rather than silently merged. This closes
-    -- part, not all, of ADR-0020's flagged "two volumes, same identity -> never auto-merge" gap;
+    -- part, not all, of ADR-0071's flagged "two volumes, same identity -> never auto-merge" gap;
     -- a genuine identity_key *collision* between two physically distinct volumes that also agree
-    -- on this marker is still unresolved, same as ADR-0020 itself leaves it (Proposed, not
+    -- on this marker is still unresolved, same as ADR-0071 itself leaves it (Proposed, not
     -- Accepted).
     marker_uuid     TEXT,
     online          INTEGER NOT NULL DEFAULT 1,
@@ -67,10 +67,10 @@ CREATE TABLE asset (
 CREATE INDEX idx_asset_root_fold ON asset(root_id, rel_path_fold);
 CREATE INDEX idx_asset_fingerprint ON asset(fingerprint) WHERE fingerprint IS NOT NULL;
 CREATE INDEX idx_asset_natural_key ON asset(natural_key) WHERE natural_key IS NOT NULL;
--- ADR-0008's composite facet index: (model, rating) range/equality scans.
+-- ADR-0067's composite facet index: (model, rating) range/equality scans.
 CREATE INDEX idx_asset_model_rating ON asset(model, rating);
 
--- T0 grid preview only, for now (ADR-0017): the Nikon PreviewIFD JPEG, copied verbatim at import
+-- T0 grid preview only, for now (ADR-0029): the Nikon PreviewIFD JPEG, copied verbatim at import
 -- time. T1/T2/T3 (RAM-only / pack-file / on-demand full decode) are a render-pipeline concern, not
 -- catalog storage, and land with whichever ticket wires up the render pipeline.
 CREATE TABLE preview (
@@ -82,8 +82,8 @@ CREATE TABLE preview (
     PRIMARY KEY (asset_id, tier)
 );
 
--- One row per edit variant (the master, plus any future virtual copy — ADR-0002's "virtual copies
--- = multiple edit rows"). `document` is the serialized `EditDocument` (ADR-0002's fixed-order
+-- One row per edit variant (the master, plus any future virtual copy — ADR-0021's "virtual copies
+-- = multiple edit rows"). `document` is the serialized `EditDocument` (ADR-0021's fixed-order
 -- stage-parameter map) as JSON text.
 CREATE TABLE edit_variant (
     id          INTEGER PRIMARY KEY,
@@ -93,11 +93,11 @@ CREATE TABLE edit_variant (
     document    TEXT NOT NULL,
     UNIQUE(asset_id, name)
 );
--- Enforces "one flagged master" per asset (ADR-0002's `asset 1—N edit_variant` shape) without a
+-- Enforces "one flagged master" per asset (ADR-0021's `asset 1—N edit_variant` shape) without a
 -- separate lookup table: a partial unique index over rows where is_master=1.
 CREATE UNIQUE INDEX idx_edit_variant_one_master ON edit_variant(asset_id) WHERE is_master = 1;
 
--- Append-only delta log (ADR-0002): `delta` is one compacted history entry's JSON. Burst
+-- Append-only delta log (ADR-0021): `delta` is one compacted history entry's JSON. Burst
 -- compaction and named, never-pruned snapshots are a write-path concern for whichever ticket
 -- implements live editing (the shape here just needs to hold them, per-variant, in order).
 CREATE TABLE edit_history (
@@ -109,8 +109,8 @@ CREATE TABLE edit_history (
     UNIQUE(variant_id, seq)
 );
 
--- ADR-0011's trigger-maintained facet-count aggregate, scoped to (model, rating) — the grain
--- ADR-0008's own composite index already covers. A keyword facet dimension isn't part of this
+-- ADR-0103's trigger-maintained facet-count aggregate, scoped to (model, rating) — the grain
+-- ADR-0067's own composite index already covers. A keyword facet dimension isn't part of this
 -- ticket's schema (no keyword table exists yet); extending this table/its triggers to a
 -- (model, rating, keyword) grain, the way `spikes/den/src/facet_cache_trigger.rs` prototyped, is
 -- left to whichever ticket adds keyword tagging.

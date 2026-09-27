@@ -1,4 +1,4 @@
-//! CPU vs GPU parity for the 3D-texture HueSatMap kernel (ADR-0021's GPU-feasibility question).
+//! CPU vs GPU parity for the 3D-texture HueSatMap kernel (ADR-0038's GPU-feasibility question).
 //! Skips cleanly when no wgpu adapter is available (matches glint's own correctness tests).
 
 use calico::gpu::{run_apply_hue_sat_map, GpuContext, GpuPixel};

@@ -1,15 +1,16 @@
-# ADR-0013: Nicti's outbound license — AGPL-3.0-or-later
+# ADR-0066: Nicti's outbound license — AGPL-3.0-or-later
 
 - **Status:** Accepted
 - **Date:** 2026-09-24
 - **Ticket:** [#66](https://github.com/jordanfelle/nicti/issues/66) v2: open-source release prep (license-choice portion resolved early — see Context)
+- **Formerly:** ADR-0013 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0003 deliberately did not pick Nicti's own outbound license — its own words: "This ADR doesn't
+ADR-0018 deliberately did not pick Nicti's own outbound license — its own words: "This ADR doesn't
 pick Nicti's own license; it sets the policy for what Nicti may depend on and bundle, evaluated
 against both realistic outbound-license families, so the #66 choice isn't constrained later by a
-dependency already baked in." That left ADR-0003's actual enforced policy (`deny.toml`, the
+dependency already baked in." That left ADR-0018's actual enforced policy (`deny.toml`, the
 Rust-crate allow/deny list) defaulting to permissive-only, denying GPL/AGPL outright, since a
 permissive-or-copyleft split needed *a* default to be CI-enforceable before the real choice landed.
 
@@ -29,12 +30,12 @@ service without ever distributing the binary. AGPL-3.0's §13 closes that gap. `
 open (not pinned to exactly v3.0) so a future FSF license revision doesn't require a fresh relicense
 decision, consistent with how most GPL-family projects grant their own license.
 
-## Consequences for ADR-0003's policy
+## Consequences for ADR-0018's policy
 
-ADR-0003's Rust-crate/native-library allow-deny rules existed specifically to keep options open
+ADR-0018's Rust-crate/native-library allow-deny rules existed specifically to keep options open
 while the outbound license was undecided. With AGPL-3.0-or-later now decided, several of those
-rules are the wrong default going forward — **see ADR-0003's own Amendments section for the actual
-policy changes**, made directly there rather than duplicated here, so ADR-0003 stays the single
+rules are the wrong default going forward — **see ADR-0018's own Amendments section for the actual
+policy changes**, made directly there rather than duplicated here, so ADR-0018 stays the single
 source of truth for what's allowed. Summary of what changes, in brief:
 
 - GPL-3.0-or-later and AGPL-3.0-or-later dependencies become allowed outright (previously denied).
@@ -46,7 +47,7 @@ source of truth for what's allowed. Summary of what changes, in brief:
   not project-specific evidence) — before clearing anything against this ADR. `docs/licensing.md`'s
   exiv2 entry is a worked example of checking this precisely (its own source's `SPDX-License-
   Identifier: GPL-2.0-or-later` headers and README confirm the `-or-later` grant).
-- The LGPL-as-Cargo-dependency dynamic-linking safe-harbor requirement (ADR-0003's `rawler`/
+- The LGPL-as-Cargo-dependency dynamic-linking safe-harbor requirement (ADR-0018's `rawler`/
   `lensfun-rs` flag) is **fully resolved — both crates.** That safe harbor exists to protect users
   of a *permissively-licensed or proprietary* combined work from having the whole program's source
   forced open by a statically-linked LGPL component. Nicti's own license is now already copyleft
@@ -57,7 +58,7 @@ source of truth for what's allowed. Summary of what changes, in brief:
   relicense-to-GPL mechanism (no confirmed "or-later" arm on the grant itself), but §3 turns out
   not to be the applicable mechanism at all — **LGPL-2.1 §§5–6 permit combining the library into
   Nicti's AGPL work directly, no relicensing and no "or-later" grant needed.** No upstream contact
-  required. See `docs/adr/0019-raw-decoder.md`'s Licensing section for the full citation trail; the
+  required. See `docs/adr/0037-raw-decoder.md`'s Licensing section for the full citation trail; the
   real remaining item is a per-release distribution-mechanics checklist (§6(d)), not a
   compatibility question.
 - Ultralytics YOLO (AGPL-3.0, previously denied for ML model bundling) becomes allowed.
@@ -83,10 +84,10 @@ source of truth for what's allowed. Summary of what changes, in brief:
 
 ## Consequences
 
-- `deny.toml`, ADR-0003, and `docs/licensing.md` are updated in this same PR — see their own diffs
-  and ADR-0003's new Amendments entry for the specifics.
+- `deny.toml`, ADR-0018, and `docs/licensing.md` are updated in this same PR — see their own diffs
+  and ADR-0018's new Amendments entry for the specifics.
 - #66 (open-source release prep) still has real remaining scope (contribution guide, plugin/
   extension-point SDK docs) — this ADR resolves only the license-choice portion of it early.
-- Anyone adding a new dependency going forward checks it against ADR-0003's *amended* rules, not
+- Anyone adding a new dependency going forward checks it against ADR-0018's *amended* rules, not
   the original 2026-09-23 text alone — read the Amendments section, which is now load-bearing, not
   historical color.

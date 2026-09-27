@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    #71/ADR-0020's VHDX-only drive-remapping proof: creates a small NTFS-formatted VHDX, attaches
+    #71/ADR-0071's VHDX-only drive-remapping proof: creates a small NTFS-formatted VHDX, attaches
     it, and runs `homing` through a letter change, a detach/reattach, a folder-mount-point remount,
     a duplicated-VHDX ambiguity case, and a reformat -- recording `homing resolve`'s output after
-    each step into ADR-0020's Measured-results survival table.
+    each step into ADR-0071's Measured-results survival table.
 
 .DESCRIPTION
     Per this session's scope decision: VHDX only, no physical-drive step. Requires an elevated
@@ -139,7 +139,7 @@ Mount-VHD -Path $vhdxPath
 Mount-VHD -Path $vhdxClone
 Write-Host "Both original and clone attached -- run 'homing enumerate' and manually confirm the ambiguity is flagged, not silently resolved:"
 Invoke-Homing @("enumerate")
-Write-Host "RECORD: did both copies report the same identity_key? Did homing resolve pick one silently, or flag it? (No automatic assertion here -- ADR-0020's ambiguity-guard follow-up isn't implemented yet, this step is meant to surface exactly that gap.)"
+Write-Host "RECORD: did both copies report the same identity_key? Did homing resolve pick one silently, or flag it? (No automatic assertion here -- ADR-0071's ambiguity-guard follow-up isn't implemented yet, this step is meant to surface exactly that gap.)"
 Dismount-VHD -Path $vhdxClone
 Remove-Item $vhdxClone
 
@@ -163,4 +163,4 @@ Invoke-Homing @("relink", "$($partition.DriveLetter):\", "--db", $dbPath)
 
 Write-Host "=== Cleanup ===" -ForegroundColor Yellow
 Dismount-VHD -Path $vhdxPath -ErrorAction SilentlyContinue
-Write-Host "Done. Transcribe this run's output into docs/adr/0020-volume-identity-and-remapping.md's Measured-results tables and docs/research/homing-volume-identity.md."
+Write-Host "Done. Transcribe this run's output into docs/adr/0071-volume-identity-and-remapping.md's Measured-results tables and docs/research/homing-volume-identity.md."
