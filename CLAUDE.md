@@ -91,13 +91,19 @@ terse index: crate/spike → purpose → owning topic.
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39),
   `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
-- **`crates/nicti-render`** — Tapetum's (#44/#45) stage-cached render graph and the real
-  `RenderStage` execution trait: a DAG of stage nodes with a blake3 cache key chained from
-  upstream (`graph.rs`), byte-budgeted VRAM/RAM/disk cache tiers (`cache.rs`), nearest-to-cursor
-  bake prioritization (`prefetch.rs`), the shared wgpu `GpuContext` (`gpu.rs`) and GPU-resident
-  `Rgba16Float` frame textures (`frame.rs`), and `renderer.rs`'s graph-driven `Renderer` (proves
-  ADR-0044's dispatch-count invariants against mock stages — the concrete decode/live-suffix/
-  geometry stages are a later slice). Promoted from `spikes/loaf`/`spikes/glint`. See
+- **`crates/nicti-render`** — Tapetum's (#44/#45) stage-cached render graph, the real
+  `RenderStage` execution trait, and the concrete decode/live-suffix/geometry pipeline: a DAG of
+  stage nodes with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted
+  VRAM/RAM/disk cache tiers (`cache.rs`), nearest-to-cursor bake prioritization (`prefetch.rs`),
+  the shared wgpu `GpuContext` (`gpu.rs`) and GPU-resident `Rgba16Float` frame textures
+  (`frame.rs`), `renderer.rs`'s graph-driven `Renderer` (proves ADR-0044's dispatch-count
+  invariants against mock stages), and the real stages themselves (`stages.rs`): decode (uploads
+  a `nicti_cornea::LinearFrame`, runs `normalize.wgsl`), passthrough slots for demosaic/denoise/
+  lens/heal (their own algorithms are #40/#39/#51), the fused live suffix (WB + camera→working
+  -space color + exposure + tone + vibrance, `color.rs`, `live_suffix.wgsl`), and crop
+  (`geometry.rs`, `present_sample.wgsl`) — every kernel has a GPU-vs-CPU parity test against a
+  CPU reference, plus one end-to-end test wiring the whole chain through `Renderer`. These tests
+  skip when no `wgpu` adapter is available. Promoted from `spikes/loaf`/`spikes/glint`. See
   [`render-graph`](.claude/rules/render-graph/REFERENCE.md). **Not yet renamed to `nicti-tapetum`**
   — deferred to whoever lands the rest of the #45 stack, to avoid rebasing onto a moving target;
   see the naming-convention section above.

@@ -69,10 +69,29 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   re-dispatch, never a wrong image, since a hit is only ever reused when `cache_key` already
   proves the state matches), and a baked-stage change rebakes exactly its downstream set — each
   test derives its expected count from `RenderGraph::invalidated_bakes` itself, not a hand-picked
-  number. The concrete decode/live-suffix/geometry stage implementations are a later #45 slice;
-  this only settles the shape every stage plugs into. `gpu::GpuContext::new` with an explicit
-  `GpuPreference::Backend` errors if no adapter matches that exact backend, rather than silently
-  falling back to a different one (only `Auto` falls back).
+  number. `gpu::GpuContext::new` with an explicit `GpuPreference::Backend` errors if no adapter
+  matches that exact backend, rather than silently falling back to a different one (only `Auto`
+  falls back).
+  - **`color.rs`/`geometry.rs`/`stages.rs`** (#45, landed): the concrete decode/live-suffix/
+    geometry pipeline wired to a real `nicti_cornea::LinearFrame`. `stages.rs` defines every stage
+    id (`nicti.decode`/`nicti.demosaic`/`nicti.denoise`/`nicti.lens`/`nicti.heal`/`nicti.wb`/
+    `nicti.working_space`/`nicti.exposure`/`nicti.tone`/`nicti.vibrance`/`nicti.crop`) and each
+    stage's `*Kernel` (built once, `set_params`/`set_transform` writes a uniform buffer per
+    render rather than rebuilding the pipeline): `DecodeKernel` uploads `LinearFrame.pixels`
+    (widened to u32 per channel -- WGSL has no u16 storage-buffer element type) and runs
+    `normalize.wgsl` (black/`cblack` subtraction, scale to ~[0,1]); demosaic/denoise/lens/heal are
+    `PassthroughExec` (a plain texture copy -- LibRaw already demosaiced, denoise/lens/heal have
+    no algorithm yet, #40/#39/#51); `LiveSuffixKernel` runs `live_suffix.wgsl`, fusing WB (ratio
+    over as-shot `cam_mul`) + camera→XYZ(D50)→ProPhoto (`color::camera_to_working_space_matrix`,
+    folded into one 3x3 on the CPU) + exposure + a simple cube-root-space contrast curve + a
+    luma-preserving vibrance boost, staying in linear ProPhoto RGB (the working space) end to end;
+    `CropKernel` runs `present_sample.wgsl`, a bilinear affine sample. **Deliberate simplification
+    vs. the original design sketch**: no `HueSatMap`/`LookTable` bindings are reserved (#42's
+    DCP-profile scope) -- unused texture bindings with no real content would be exactly the
+    half-finished scaffolding this repo's conventions ask to avoid; `color.rs`'s own doc comment
+    covers the tradeoff. Every kernel has a GPU-vs-CPU parity test against a CPU reference, plus
+    one end-to-end test wiring the whole chain through `Renderer` and checking both dispatch
+    counts and actual output pixels. These tests skip when no `wgpu` adapter is available.
 - **`crates/nicti-pawprint`** (#21/#44/#45, landed) — `EditDocument`/`StageEntry`/`history`
   (promoted from `spikes/pawprint`) plus `canonical::{hash_value, chain}` (merging pawprint's
   original one-upstream `hash_stage`/`cache_key` with `spikes/loaf/src/hash.rs`'s DAG-generalized
