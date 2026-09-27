@@ -50,3 +50,13 @@ Covers #71's volume-identity key, the volume/root/asset schema, and file-fingerp
   volume-identity survival table, mount-detection latency/CPU comparison, and fingerprint-cost
   benchmarks — same "spec + tooling merged, baseline measurement deferred" shape as
   ADR-0068/ADR-0050/#90.
+
+**#24 (2026-09-27): manual catalog sync, not a live watcher.** #24 was re-scoped from a continuous
+background filesystem watcher to a manual, user-triggered "Synchronize Folder" (LRC-style) sync —
+see ADR-0024. `crates/nicti-lair::patrol::sync_root` layers a catalog-side pass on top of Scruff's
+existing disk-side ingest: a file gone from an otherwise-reachable root is flagged
+(`asset.missing_since`) and kept, not deleted, unless the caller opts into `remove_missing`; an
+entire root that fails to resolve on disk (unplugged drive, changed letter) touches nothing and is
+left to this ADR's own offline-volume path instead of being misread as every file underneath it
+individually vanishing. This ADR's own offline-volume semantics (never delete, `volume.online`
+only, no greyed-out tree) are unchanged.

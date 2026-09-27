@@ -157,8 +157,10 @@ resolvability.
 - **ADR-0103's facet-count cache** must exclude offline volumes' assets from its counts — either
   per-volume-partitioned counts or a subtraction step at query time. Not solved here; flagged for
   #22/#23 to pick up when the real facet-count implementation lands.
-- **#24**'s filesystem watcher reconciles moves/renames/deletes *within* a volume already known to
-  the catalog. A move *across* volumes goes through this ADR's relink path instead, not #24's.
+- **#24**'s manual sync (renamed from a continuous filesystem watcher — see the Context update
+  below) reconciles moves/renames/deletes *within* a volume already known to the catalog, on a
+  user-triggered pass rather than continuously. A move *across* volumes goes through this ADR's
+  relink path instead, not #24's.
 - **Real MakerNote-based Nikon shutter-count extraction** (rather than the `ImageNumber` EXIF-tag
   proxy this ADR's natural key uses) is deferred — a real per-body offset table is a separate,
   larger piece of work than this spike's scope, tracked as a follow-up issue once #71 merges, not
@@ -223,3 +225,14 @@ real LRC-edited DNG, as hypothesized): TBD.
   path-gated — like `sniff`, it needs no heavy native build).
 - `cargo deny --workspace --all-features check licenses`: `licenses ok`, no new `deny.toml` entry
   needed (see `docs/licensing.md`'s 2026-09-26 update).
+
+## Context update (2026-09-27)
+
+#24 was re-scoped from a continuous background filesystem watcher (what this ADR's Consequences
+section originally described) to a manual, user-triggered "Synchronize Folder"-style sync, matching
+Lightroom Classic — see `docs/adr/0024-manual-catalog-sync.md`. This ADR's own offline-volume
+semantics are unchanged by that: #24 only ever acts on a root it can actually resolve on disk, and
+leaves a disconnected volume's rows exactly as this ADR describes (never deleted, `volume.online`
+the only thing that flips, no LRC-style greyed-out tree). #24's own "missing" concept is scoped to
+a *file* gone from a volume that's still connected and online — a materially different case from
+this ADR's *volume* gone entirely.

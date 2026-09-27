@@ -20,6 +20,11 @@ pub struct Asset {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub imported_at: i64,
+    /// Set (to a unix timestamp) when a sync (#24's `patrol::sync_root`) walked this asset's root
+    /// and found its file gone from disk. Cleared back to `None` if the file reappears at the same
+    /// path on a later sync, or if `relink_asset` re-points this row to a moved file. `None` means
+    /// present — ingest never sets this field itself, only `patrol` reads/writes it.
+    pub missing_since: Option<i64>,
 }
 
 /// A new (or re-scanned) asset, as ingest builds it. Passed to

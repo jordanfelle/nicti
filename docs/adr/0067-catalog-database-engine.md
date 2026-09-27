@@ -377,3 +377,11 @@ they'd otherwise have silently produced wrong conclusions:
   — while LMDB's equivalent secondary-index entry is a plain key overwrite, naturally idempotent.
   Fixed by numbering the keyword per call (`Bench.Tagged.{n}`), so every engine's timed call does an
   equivalent, non-compounding amount of work.
+
+## Context update (2026-09-27)
+
+This ADR's Context section's "#24 (filesystem watching)" reference is stale: #24 was re-scoped
+from a continuous background watcher to a manual, user-triggered sync — see
+`docs/adr/0024-manual-catalog-sync.md`. The engine choice and every measured result here are
+unaffected; #24 still runs its catalog-side pass as ordinary SQLite reads/writes through
+`CatalogStore`, same as ingest already does.

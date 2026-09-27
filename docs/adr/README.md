@@ -38,6 +38,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0018](0018-third-party-license-policy.md) | 0003 | Third-party license policy | Accepted |
 | [0019](0019-module-plugin-architecture.md) | 0004 | Module/plugin architecture (Claw) | Accepted |
 | [0021](0021-non-destructive-edit-model.md) | 0002 | Non-destructive edit model | Accepted |
+| [0024](0024-manual-catalog-sync.md) | — | Manual catalog sync, not a live filesystem watcher | Accepted |
 | [0029](0029-preview-tier-strategy.md) | 0017 | Preview tier strategy | Accepted |
 | [0033](0033-burst-duplicate-grouping.md) | 0025 | Burst/duplicate grouping | Proposed |
 | [0034](0034-blur-misfocus-eye-detection.md) | — | Blur/misfocus/eye detection | Proposed |

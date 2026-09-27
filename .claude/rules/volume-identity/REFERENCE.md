@@ -40,6 +40,13 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   `volume::windows_impl`/`mount_events::windows_impl` are unverified. Everything cross-platform
   (schema/fingerprint/path) is real: 29 tests pass, workspace clippy/test/fmt/cargo-deny clean.
   Reference-machine run required before Accepted — see ADR-0071's Measured results (all TBD).
+- **#24 (Accepted, ADR-0024): manual sync, not a live watcher.** Re-scoped from a continuous
+  background filesystem watcher to a manual "Synchronize Folder" (LRC-style) sync —
+  `crates/nicti-lair::patrol::sync_root` layers onto Scruff's disk-side `ingest_root`: a missing
+  file is flagged (`asset.missing_since`) and kept, deleted only if the caller opts into
+  `remove_missing`; a root that fails to resolve on disk touches nothing (this ADR's own
+  offline-volume path handles that case, not #24's). No change to this ADR's own offline-volume
+  semantics.
 
 ## Package contents
 

@@ -21,7 +21,7 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
-`preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071), `color` (0038),
+`preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033, 0034, 0035), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044), `develop` (0099, 0053), `jobs` (0054), `export` (0056). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
@@ -138,12 +138,16 @@ terse index: crate/spike → purpose → owning topic.
   `FILE_FLAG_NO_BUFFERING` benchmarking distinction, which stays `sniff`-only
 - **`crates/nicti-lair`** — `CatalogStore` extension point plus its real implementation (#22,
   landed): `schema.rs` (SQLite migrations — `volume`/`root`/`asset`, ADR-0071; `preview`, ADR-0029;
-  `edit_variant`/`edit_history`, ADR-0021; trigger-maintained `facet_counts`, ADR-0103),
-  `sqlite.rs` (`SqliteCatalog`), and `scruff.rs` (the Scruff import/ingest pipeline: scan → stat →
-  partial-BLAKE3 fingerprint → EXIF → T0 preview extraction → upsert, one bad file recorded in
-  `IngestReport::failed` rather than aborting the run). Runs serially; Pounce integration is a
-  follow-up. See `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this
-  promotes.
+  `edit_variant`/`edit_history`, ADR-0021; trigger-maintained `facet_counts`, ADR-0103; `asset.
+  missing_since`, ADR-0024), `sqlite.rs` (`SqliteCatalog`), `scruff.rs` (the Scruff import/ingest
+  pipeline: scan → stat → partial-BLAKE3 fingerprint → EXIF → T0 preview extraction → upsert, one
+  bad file recorded in `IngestReport::failed` rather than aborting the run), and `patrol.rs`
+  (Patrol, #24/ADR-0024, landed): the manual "Synchronize Folder"-style sync layered on top of
+  Scruff — after Scruff's disk-side pass, walks the catalog side, flagging (or, if opted into,
+  removing) any asset whose file has disappeared, and reporting any folder whose every asset is
+  now missing; an unresolvable root touches nothing, deferring to ADR-0071's offline-volume path.
+  Both run serially; Pounce integration is a follow-up. See `catalog-engine`/`volume-identity`/
+  `preview-tiers` topics for the design this promotes.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,
