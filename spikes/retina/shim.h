@@ -108,7 +108,7 @@ void retina_cam_xyz(const RetinaLibRaw *handle, float out[12]);
 // patterns are out of scope for this research pass; see ADR-0038's Deferred section.
 void retina_cblack(const RetinaLibRaw *handle, uint32_t out[4]);
 
-// --- #40 support: classic demosaic + NR comparison (ADR-0061) ---
+// --- #40 support: classic demosaic + NR comparison (ADR-0040) ---
 //
 // Mirrors LibRaw's own `-q`/user_qual enum: 0=linear, 1=VNG, 2=PPG, 3=AHD, 4=DCB (patched build
 // only), 11=DHT, 12=AAHD (patched build only -- LibRaw upstream reserves 5-10 for other forks'
@@ -160,7 +160,7 @@ RetinaStatus retina_libraw_process_classic(RetinaLibRaw *handle,
 // ushorts/pixel R,G,B,G2; dimensions are retina_iwidth()/retina_iheight()).
 const uint16_t *retina_classic_image(const RetinaLibRaw *handle, size_t *out_len);
 
-// --- #40 support: Path A (Bayer-domain model) input (ADR-0061) ---
+// --- #40 support: Path A (Bayer-domain model) input (ADR-0040) ---
 //
 // Must be called after a successful retina_libraw_decode_buffer. Writes a black-subtracted,
 // white-normalized (divided by retina_maximum()-retina_black(), clamped to [0,1]) copy of the

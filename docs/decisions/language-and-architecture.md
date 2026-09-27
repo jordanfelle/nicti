@@ -26,10 +26,12 @@ Covers the implementation-language decision, v1 platform/camera scope, the non-d
   handshake) specifically to satisfy LGPL's dynamic-linking safe harbor — **that specific reason no
   longer applies for `lensfun-rs`** as of ADR-0018's 2026-09-24 amendment (Nicti's own license is
   now copyleft, and `lensfun-rs`'s confirmed or-later dual license combines in cleanly regardless
-  of link type; see the ADR-0066 bullet in `docs/decisions/licensing.md`) **but still applies
-  for `rawler`**, whose LGPL grant
-  isn't confirmed to include an "or later" option — don't drop its isolation/sign-off requirement
-  without resolving that first. The `cdylib` boundary mechanism itself is still available and may
+  of link type; see the ADR-0066 bullet in `docs/decisions/licensing.md`) **and no longer applies
+  to `rawler` under LGPL-2.1 §§5-6 either** (#37's correction: LGPL-2.1 §§5-6 already permit
+  combining an LGPL library into a differently-licensed larger work with no relicensing at all,
+  regardless of an "or later" grant — see the licensing topic's REFERENCE.md). The remaining
+  requirement is a distribution-mechanics + notice checklist to verify per release, not an
+  isolation blocker. The `cdylib` boundary mechanism itself is still available and may
   still be worth using for other reasons (plugin flexibility, v2's WASM-plugin direction below). v2
   third-party plugins are directionally WASM (`wasmtime`) for non-hot-path extension points only —
   measured, not assumed, in `crates/nicti-claw/tests/wasm_vs_native.rs` — never for a third-party

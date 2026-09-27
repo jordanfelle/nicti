@@ -43,10 +43,11 @@ import sys
 _SHAPES = r"(?:\d+(?!\w)(?:[/,–]\s*\d+(?!\w))+|\d+(?!\w)(?:-[a-z][a-z0-9-]*)?(?:\.md)?)"
 RUN_PATTERN = re.compile(r"(?:ADR-|docs/adr/|(?<!\w)adr/)" + _SHAPES)
 LOCAL_LINK_PATTERN = re.compile(r"(?<=\]\()" + _SHAPES)
-# A filename-shaped token (a number plus a real slug and ".md") is checked against the exact set
-# of tracked filenames, not just its leading number -- otherwise "](0143-wrong-slug.md)" would
-# pass just because ADR-0143 exists under a *different* real filename (#195's review).
-FILENAME_TOKEN = re.compile(r"\d+-[a-z][a-z0-9-]*\.md")
+# A filename-shaped token (a number, optionally a real slug, and ".md") is checked against the
+# exact set of tracked filenames, not just its leading number -- otherwise "](0143-wrong-slug.md)"
+# or a slug-less "](0143.md)" would both pass just because ADR-0143 exists under a *different*
+# real filename (#195's review).
+FILENAME_TOKEN = re.compile(r"\d+(?:-[a-z][a-z0-9-]*)?\.md")
 NUM_PATTERN = re.compile(r"\d+")
 
 
