@@ -123,9 +123,13 @@ function render() {
       nameCap.textContent = f.filename;
       const input = document.createElement('input');
       input.type = 'number';
+      input.min = '0';
       input.value = gid;
       input.onchange = () => {
-        subjectId[i] = parseInt(input.value, 10) || 0;
+        const parsed = parseInt(input.value, 10);
+        const value = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+        subjectId[i] = value;
+        input.value = value;
       };
       div.append(img, nameCap, input);
       strip.appendChild(div);

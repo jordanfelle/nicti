@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rosette::cluster::dbscan_with_eps_sweep;
-use rosette::crop::{bbox_from_alpha, crop_image, pad_bbox, Alpha};
+use rosette::crop::{bbox_from_alpha, crop_image, pad_bbox, Alpha, BBox};
 use rosette::decode::decode_jpeg;
 use rosette::embed::{cosine_distance, Dinov2Embedder, Dinov3Embedder, Embedder, OpenClipEmbedder};
 use rosette::label::{read_labels, write_draft, DraftPhoto};
@@ -246,6 +246,36 @@ fn load_precomputed_mask(nef_dir: &Path, filename: &str) -> Option<Alpha> {
     })
 }
 
+/// Scales a bbox found in a mask's own coordinate space into the T0 image's coordinate space --
+/// a precomputed mask (e.g. from a segmentation model run at a fixed input resolution) has no
+/// reason to share the T0 preview's own dimensions. Caught by CodeRabbit: applying mask-space
+/// coordinates directly as image-space coordinates (the original code) silently produces a wrong
+/// -- possibly empty -- crop whenever the two resolutions differ, rather than an error or panic
+/// (`image::imageops::crop_imm` clamps out-of-bounds requests rather than panicking, which is
+/// exactly what let this go unnoticed). Returns `None` if the scaled bbox is empty/inverted, so
+/// the caller falls back to full-frame instead of cropping to nothing.
+fn scale_bbox_to_image(
+    bbox: BBox,
+    mask_dims: (usize, usize),
+    img_dims: (usize, usize),
+) -> Option<BBox> {
+    let (mask_w, mask_h) = mask_dims;
+    let (img_w, img_h) = img_dims;
+    if mask_w == 0 || mask_h == 0 {
+        return None;
+    }
+    let sx = img_w as f64 / mask_w as f64;
+    let sy = img_h as f64 / mask_h as f64;
+    let x0 = ((bbox.x0 as f64 * sx).floor() as usize).min(img_w);
+    let y0 = ((bbox.y0 as f64 * sy).floor() as usize).min(img_h);
+    let x1 = ((bbox.x1 as f64 * sx).ceil() as usize).min(img_w);
+    let y1 = ((bbox.y1 as f64 * sy).ceil() as usize).min(img_h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(BBox { x0, y0, x1, y1 })
+}
+
 fn maybe_crop(
     img: &image::RgbImage,
     nef_dir: &Path,
@@ -263,7 +293,15 @@ fn maybe_crop(
         return img.clone();
     };
     let (w, h) = img.dimensions();
-    let padded = pad_bbox(bbox, 0.2, w as usize, h as usize);
+    let Some(scaled) =
+        scale_bbox_to_image(bbox, (alpha.width, alpha.height), (w as usize, h as usize))
+    else {
+        eprintln!(
+            "--crop: mask for {filename} scaled to an empty/inverted bbox in image space; using full frame"
+        );
+        return img.clone();
+    };
+    let padded = pad_bbox(scaled, 0.2, w as usize, h as usize);
     crop_image(img, padded)
 }
 
@@ -416,4 +454,91 @@ fn eval(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_bbox_to_image_scales_up_from_a_smaller_mask() {
+        // Mask computed at half the T0 preview's resolution -- a bbox spanning [10,10)-(30,30) in
+        // mask space should double into [20,20)-(60,60) in image space.
+        let bbox = BBox {
+            x0: 10,
+            y0: 10,
+            x1: 30,
+            y1: 30,
+        };
+        let scaled = scale_bbox_to_image(bbox, (100, 100), (200, 200)).expect("valid bbox");
+        assert_eq!(
+            scaled,
+            BBox {
+                x0: 20,
+                y0: 20,
+                x1: 60,
+                y1: 60
+            }
+        );
+    }
+
+    #[test]
+    fn scale_bbox_to_image_scales_down_from_a_larger_mask() {
+        // Regression test for the CodeRabbit-caught bug: mask computed at a fixed model
+        // resolution (e.g. 1024x1024) much larger than a small T0 preview -- coordinates must be
+        // scaled down, not applied directly (which would silently clamp to a meaningless region).
+        let bbox = BBox {
+            x0: 512,
+            y0: 512,
+            x1: 768,
+            y1: 768,
+        };
+        let scaled = scale_bbox_to_image(bbox, (1024, 1024), (160, 120)).expect("valid bbox");
+        assert_eq!(
+            scaled,
+            BBox {
+                x0: 80,
+                y0: 60,
+                x1: 120,
+                y1: 90
+            }
+        );
+    }
+
+    #[test]
+    fn scale_bbox_to_image_identity_when_dimensions_match() {
+        let bbox = BBox {
+            x0: 5,
+            y0: 5,
+            x1: 15,
+            y1: 15,
+        };
+        let scaled = scale_bbox_to_image(bbox, (50, 50), (50, 50)).expect("valid bbox");
+        assert_eq!(scaled, bbox);
+    }
+
+    #[test]
+    fn scale_bbox_to_image_returns_none_for_zero_mask_dimensions() {
+        let bbox = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        };
+        assert!(scale_bbox_to_image(bbox, (0, 0), (100, 100)).is_none());
+    }
+
+    #[test]
+    fn scale_bbox_to_image_returns_none_when_image_has_a_zero_dimension() {
+        // A T0 image with a zero width/height (a degenerate decode) forces the scale factor to
+        // 0.0 on that axis, collapsing any bbox to zero width/height in image space -- must
+        // return None (full-frame fallback upstream), not an empty-but-`Some` bbox.
+        let bbox = BBox {
+            x0: 10,
+            y0: 10,
+            x1: 20,
+            y1: 20,
+        };
+        assert!(scale_bbox_to_image(bbox, (100, 100), (0, 50)).is_none());
+    }
 }
