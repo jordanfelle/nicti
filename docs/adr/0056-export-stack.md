@@ -7,7 +7,7 @@
 
 ## Context
 
-`crates/nicti-export`'s `Exporter` trait settles identity/versioning only (`pub trait Exporter:
+`crates/nicti-preen`'s `Exporter` trait settles identity/versioning only (`pub trait Exporter:
 Module {}`) -- its own doc comment defers resize/encode/metadata-write/watermark execution and
 the export method signature to this ticket and #57 (Build: export pipeline, currently blocked by
 this one). Four component choices were open: a SIMD resizer, a JPEG encoder (mozjpeg vs.
@@ -118,7 +118,7 @@ not picked this pass.
 
 ### Proposed `Exporter` execution shape (for #57)
 
-This pass didn't add a method to `crates/nicti-export`'s `Exporter` trait -- that's #57's
+This pass didn't add a method to `crates/nicti-preen`'s `Exporter` trait -- that's #57's
 implementation work -- but the pipeline this spike exercises end to end (see
 `bin/prey.rs::Pipeline`) sketches the shape #57 should implement: take a rendered
 RGBA/RGB working-space frame (Tapetum's eventual output, ADR-0044) plus an export spec (target

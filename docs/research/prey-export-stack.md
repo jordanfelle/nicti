@@ -2,7 +2,7 @@
 
 ## Method
 
-`crates/nicti-export` was an empty shell before this pass (`pub trait Exporter: Module {}`, no
+`crates/nicti-preen` was an empty shell before this pass (`pub trait Exporter: Module {}`, no
 execution method) -- four components needed a real candidate comparison before #57 could build a
 real export pipeline: resize, JPEG/TIFF/PNG encode, EXIF/XMP/ICC metadata write, and watermark
 compositing. `spikes/prey` measures each candidate with `nicti-prowl::perf::Protocol` (1 warm-up

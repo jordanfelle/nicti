@@ -2,7 +2,7 @@
 paths:
   - "spikes/prey/**"
   - "docs/adr/0056-export-stack.md"
-  - "crates/nicti-export/**"
+  - "crates/nicti-preen/**"
 ---
 # Export Stack — Quick Reference
 

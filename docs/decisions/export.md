@@ -4,7 +4,7 @@ Covers #56's export-stack research — full reasoning and every measured number 
 `docs/adr/0056-export-stack.md`. This file is the per-topic summary; that ADR is the full research
 trail.
 
-- **Handoff from ADR-0019**: `crates/nicti-export`'s `Exporter` trait was left as identity/
+- **Handoff from ADR-0019**: `crates/nicti-preen`'s `Exporter` trait was left as identity/
   versioning only, deferring resize/encode/metadata-write/watermark execution and the export
   method signature to this ticket and #57.
 - **Resize**: `fast_image_resize`'s Lanczos3 over a hand-converted linear-light buffer, not
