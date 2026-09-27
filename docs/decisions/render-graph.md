@@ -86,7 +86,20 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   (`prefetch::priority_order`, a pure function re-evaluated on every cursor move, not a stateful
   queue Tapetum itself owns), plus a documented stale-while-baking fallback (ADR-0029/#145) while a
   bake is in flight.
-- **Open**: lens-correction placement relative to color isn't confirmed by any ADR yet (#39 has
-  none) — this ADR assumed ADR-0050's proposed placement; follow-up #191. Real-photo (not
-  synthetic) disk-tier compression ratio: follow-up #190, blocked on #45 producing real baked
-  output to measure against.
+- **Resolved: lens-correction placement (#191)**. Confirmed lens correction belongs in the baked
+  prefix, before all of ADR-0038's color pipeline — on the channel-space argument, the only truly
+  independent constraint found: CA-correction data is calibrated in camera-native R/G/B channel
+  space (`nicti-cornea::LinearFrame`'s own space), and that channel identity is gone once
+  `cct.rs::solve_camera_to_xyz` linearly mixes channels on the way to XYZ, so CA correction must
+  precede the camera→XYZ matrix, not merely precede tone. Geometric distortion correction alone
+  would tolerate running anywhere before the tone curve; it's assumed (not independently verified
+  this pass) to be bundled with CA into one resampling pass, which is what would pin it too.
+  **Caveat surfaced, not resolved**: ADR-0061's LRC catalog-schema mapping shows LRC's own Lens
+  Corrections panel has user-adjustable manual distortion/vignette/defringe sliders, not just a
+  fixed profile lookup — so lens correction's bakeability rests on the same "not a live-drag
+  slider" architectural choice ADR-0050 already made for heal/remove's per-spot params, not on the
+  params being lens/body/aperture-fixed as first assumed. #39 still needs to confirm this holds
+  once it designs the manual-slider UX; #39's other scope (correction-data source, lens coverage)
+  stays open too.
+- **Open**: real-photo (not synthetic) disk-tier compression ratio: follow-up #190, blocked on #45
+  producing real baked output to measure against.

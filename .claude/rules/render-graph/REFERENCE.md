@@ -41,8 +41,15 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   (decode 1.7s, denoise 50.9s/ADR-0040) show full-res-first denoise cannot keep the hero
   scenario's 50-image bake queue ahead of a walking cursor (`stale_at_arrival = 50/50`) — needs a
   screen-res-first denoise pass, follow-up #189.
+- **Lens correction**: confirmed in the baked prefix, before ADR-0038's color pipeline (#191) — CA
+  correction is calibrated in camera-native RGB channel space, which no longer exists once
+  cam→XYZ mixes channels, so it must precede that matrix. Bakeability isn't a free second
+  argument, though: ADR-0061's LRC schema mapping shows LRC's own Lens Corrections panel has
+  manual distortion/vignette/defringe sliders, so this rests on the same "not a live-drag slider"
+  choice ADR-0050 made for heal/remove, for #39 to confirm once it designs that UX. #39's other
+  scope (correction-data source, lens coverage) stays open too.
 - **Open follow-ups**: #189 (screen-res-first denoise scheduling), #190 (real-photo compression
-  ratio, blocked on #45), #191 (confirm lens-correction placement, #39's own scope).
+  ratio, blocked on #45).
 
 ## Package contents
 
