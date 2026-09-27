@@ -1,10 +1,9 @@
-//! Proves #52's bulk paste/sync requirement: pasting the same change across
-//! many photos records exactly one history entry per photo (a batch), not
-//! one per underlying stage change, and both absolute and relative paste
-//! modes work.
+//! Proves #52's bulk paste/sync requirement: pasting the same change across many photos records
+//! exactly one history entry per photo (a batch), not one per underlying stage change, and both
+//! absolute and relative paste modes work. Promoted from `spikes/pawprint/tests/bulk_paste.rs`.
 
-use pawprint::history::History;
-use pawprint::{apply_relative, EditDocument, StageEntry};
+use nicti_pawprint::history::History;
+use nicti_pawprint::{apply_relative, EditDocument, StageEntry};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -47,10 +46,9 @@ fn absolute_bulk_paste_across_500_photos_records_one_batch_entry_each() {
 
 #[test]
 fn batch_touching_multiple_stages_is_still_exactly_one_history_entry() {
-    // The claim under test: "one history entry per photo, not one per
-    // stage change." A batch that only touches one stage can't distinguish
-    // "one entry per batch" from "one entry per stage" — this exercises the
-    // hero-scenario shape (WB + vibrance + masks all pasted together).
+    // The claim under test: "one history entry per photo, not one per stage change." A batch that
+    // only touches one stage can't distinguish "one entry per batch" from "one entry per stage" --
+    // this exercises the hero-scenario shape (WB + vibrance + masks all pasted together).
     let mut doc = EditDocument::default();
     doc.stages
         .insert("white_balance".into(), white_balance(4000, 0));

@@ -1,9 +1,8 @@
-//! Per-photo edit history: an append-only delta log plus named snapshots,
-//! with compaction that coalesces consecutive same-control deltas (a slider
-//! drag) into one step without losing the pre-drag undo target. A bulk
-//! paste/sync (#52) applies as one `Delta` covering every stage it touched,
-//! so it's genuinely one history entry per photo, and undoes as one step by
-//! construction rather than by grouping several log entries back together.
+//! Per-photo edit history: an append-only delta log plus named snapshots, with compaction that
+//! coalesces consecutive same-control deltas (a slider drag) into one step without losing the
+//! pre-drag undo target. A bulk paste/sync (#52) applies as one `Delta` covering every stage it
+//! touched, so it's genuinely one history entry per photo, and undoes as one step by construction
+//! rather than by grouping several log entries back together. Promoted from `spikes/pawprint`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,9 +22,9 @@ pub struct StageChange {
 pub struct Delta {
     pub batch_id: Uuid,
     pub changes: Vec<StageChange>,
-    /// Coalescing key for compaction (e.g. `"exposure_slider"`). `None` for
-    /// multi-stage batch operations — those are never merged by `compact`,
-    /// only single-stage single-control deltas are (a slider drag).
+    /// Coalescing key for compaction (e.g. `"exposure_slider"`). `None` for multi-stage batch
+    /// operations -- those are never merged by `compact`, only single-stage single-control deltas
+    /// are (a slider drag).
     pub control: Option<String>,
     pub timestamp_ms: u128,
 }
@@ -33,10 +32,9 @@ pub struct Delta {
 #[derive(Debug, Clone, Serialize)]
 enum LogEntry {
     Delta(Delta),
-    /// A named marker over the document state at this point. Doesn't itself
-    /// change the document (it's captured for reference/rollback by name,
-    /// not replayed), so it costs nothing in undo/redo and is never merged
-    /// away by `compact`.
+    /// A named marker over the document state at this point. Doesn't itself change the document
+    /// (it's captured for reference/rollback by name, not replayed), so it costs nothing in
+    /// undo/redo and is never merged away by `compact`.
     Snapshot {
         name: String,
         document: EditDocument,
@@ -46,8 +44,7 @@ enum LogEntry {
 pub struct History {
     document: EditDocument,
     log: Vec<LogEntry>,
-    /// One past the most recently applied entry; `log[cursor..]` is the redo
-    /// stack.
+    /// One past the most recently applied entry; `log[cursor..]` is the redo stack.
     cursor: usize,
 }
 
@@ -80,23 +77,21 @@ impl History {
         self.log.is_empty()
     }
 
-    /// Approximate on-disk size of the log as it stands, by actually
-    /// serializing it (not a guessed per-entry constant) — used for the
-    /// ADR's sizing table.
+    /// Approximate on-disk size of the log as it stands, by actually serializing it (not a
+    /// guessed per-entry constant) -- used for the ADR's sizing table.
     pub fn serialized_len(&self) -> usize {
         serde_json::to_vec(&self.log).map(|b| b.len()).unwrap_or(0)
     }
 
-    /// Apply one stage change, tagged with a coalescing `control` key. A
-    /// slider drag calls this once per tick; `compact()` later merges the
-    /// run into a single entry.
+    /// Apply one stage change, tagged with a coalescing `control` key. A slider drag calls this
+    /// once per tick; `compact()` later merges the run into a single entry.
     pub fn apply(&mut self, stage_id: &str, control: &str, after: StageEntry) {
         self.apply_at(stage_id, control, after, now_ms());
     }
 
-    /// Same as `apply`, but with an explicit timestamp instead of the wall
-    /// clock — lets tests simulate a real gap between two edit sessions
-    /// (e.g. "pre-drag baseline" vs. "the drag itself") without sleeping.
+    /// Same as `apply`, but with an explicit timestamp instead of the wall clock -- lets tests
+    /// simulate a real gap between two edit sessions (e.g. "pre-drag baseline" vs. "the drag
+    /// itself") without sleeping.
     pub fn apply_at(
         &mut self,
         stage_id: &str,
@@ -112,9 +107,9 @@ impl History {
         );
     }
 
-    /// Apply several stage changes as a single history entry — bulk
-    /// paste/sync (#52), so the whole batch is one entry per photo (not one
-    /// per changed stage) and undoes/redoes atomically by construction.
+    /// Apply several stage changes as a single history entry -- bulk paste/sync (#52), so the
+    /// whole batch is one entry per photo (not one per changed stage) and undoes/redoes
+    /// atomically by construction.
     pub fn apply_batch(&mut self, batch_id: Uuid, changes: Vec<(String, StageEntry)>) {
         self.push_delta(batch_id, changes, None, now_ms());
     }
@@ -166,9 +161,8 @@ impl History {
             .collect()
     }
 
-    /// The document state captured under a named snapshot, for viewing or
-    /// restoring "revert to this named snapshot" without walking undo one
-    /// step at a time.
+    /// The document state captured under a named snapshot, for viewing or restoring "revert to
+    /// this named snapshot" without walking undo one step at a time.
     pub fn snapshot_document(&self, name: &str) -> Option<&EditDocument> {
         self.log.iter().find_map(|e| match e {
             LogEntry::Snapshot { name: n, document } if n == name => Some(document),
@@ -176,9 +170,9 @@ impl History {
         })
     }
 
-    /// Undo the most recently applied entry (one whole batch, or one
-    /// compacted slider-drag run — every entry in the log is already an
-    /// atomic undo unit, so no cross-entry grouping is needed here).
+    /// Undo the most recently applied entry (one whole batch, or one compacted slider-drag run --
+    /// every entry in the log is already an atomic undo unit, so no cross-entry grouping is
+    /// needed here).
     pub fn undo(&mut self) -> bool {
         if self.cursor == 0 {
             return false;
@@ -225,17 +219,14 @@ impl History {
         true
     }
 
-    /// Coalesce consecutive single-stage deltas sharing the same `control`
-    /// key within `window_ms` of each other into a single delta spanning
-    /// the run (first entry's `before`, last entry's `after`). Only
-    /// single-stage, `control`-tagged deltas (from `apply`/`apply_at`) are
-    /// ever merged — a batch (`control: None`, possibly multiple stages)
-    /// never coalesces with anything, so a bulk paste always stays exactly
-    /// one entry, and never accidentally absorbs an unrelated slider tick.
-    /// Only compacts the applied prefix (`..cursor`) — refuses if there's a
-    /// pending redo, so compaction never corrupts a redo chain the user
-    /// might still walk forward into. Snapshots are never merged across or
-    /// away.
+    /// Coalesce consecutive single-stage deltas sharing the same `control` key within `window_ms`
+    /// of each other into a single delta spanning the run (first entry's `before`, last entry's
+    /// `after`). Only single-stage, `control`-tagged deltas (from `apply`/`apply_at`) are ever
+    /// merged -- a batch (`control: None`, possibly multiple stages) never coalesces with
+    /// anything, so a bulk paste always stays exactly one entry, and never accidentally absorbs
+    /// an unrelated slider tick. Only compacts the applied prefix (`..cursor`) -- refuses if
+    /// there's a pending redo, so compaction never corrupts a redo chain the user might still walk
+    /// forward into. Snapshots are never merged across or away.
     pub fn compact(&mut self, window_ms: u128) {
         if self.cursor != self.log.len() {
             return;
@@ -263,5 +254,82 @@ impl History {
         }
         self.cursor = merged.len();
         self.log = merged;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(v: i64) -> StageEntry {
+        StageEntry {
+            schema_version: 1,
+            params: serde_json::json!({ "v": v }),
+        }
+    }
+
+    #[test]
+    fn slider_drag_compacts_to_one_entry_and_keeps_pre_drag_undo_target() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("nicti.exposure", "exposure_slider", entry(0), 0);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 10);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(2), 20);
+        assert_eq!(h.len(), 3);
+
+        h.compact(50);
+        assert_eq!(h.len(), 1);
+        assert_eq!(
+            h.document().stages.get("nicti.exposure").unwrap().params,
+            serde_json::json!({ "v": 2 })
+        );
+
+        assert!(h.undo());
+        assert!(!h.document().stages.contains_key("nicti.exposure"));
+    }
+
+    #[test]
+    fn batch_paste_stays_one_entry_and_undoes_atomically() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_batch(
+            Uuid::new_v4(),
+            vec![
+                ("nicti.wb".to_string(), entry(1)),
+                ("nicti.tone".to_string(), entry(2)),
+            ],
+        );
+        assert_eq!(h.len(), 1);
+        assert!(h.undo());
+        assert!(h.document().stages.is_empty());
+        assert!(h.redo());
+        assert_eq!(h.document().stages.len(), 2);
+    }
+
+    #[test]
+    fn compact_never_merges_across_a_batch_entry() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("nicti.exposure", "exposure_slider", entry(0), 0);
+        h.apply_batch(Uuid::new_v4(), vec![("nicti.wb".to_string(), entry(9))]);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 10);
+        h.compact(1000);
+        assert_eq!(
+            h.len(),
+            3,
+            "batch entry must not be absorbed into either slider run"
+        );
+    }
+
+    #[test]
+    fn compact_refuses_when_a_redo_is_pending() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("nicti.exposure", "exposure_slider", entry(0), 0);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 10);
+        h.undo();
+        let len_before = h.len();
+        h.compact(1000);
+        assert_eq!(
+            h.len(),
+            len_before,
+            "compact must not run with a pending redo"
+        );
     }
 }

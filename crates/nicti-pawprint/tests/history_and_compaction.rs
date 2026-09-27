@@ -1,9 +1,9 @@
-//! Proves the ADR's history claims: undo/redo, a slider-drag burst
-//! compacting to one step without losing the pre-drag undo target, and a
-//! named snapshot surviving compaction untouched.
+//! Proves the ADR's history claims: undo/redo, a slider-drag burst compacting to one step without
+//! losing the pre-drag undo target, and a named snapshot surviving compaction untouched. Promoted
+//! from `spikes/pawprint/tests/history_and_compaction.rs`.
 
-use pawprint::history::History;
-use pawprint::{EditDocument, StageEntry};
+use nicti_pawprint::history::History;
+use nicti_pawprint::{EditDocument, StageEntry};
 use serde_json::json;
 
 fn exposure(value: f64) -> StageEntry {
@@ -39,9 +39,8 @@ fn undo_redo_round_trip() {
 fn slider_burst_compacts_to_one_step_and_undo_lands_pre_drag() {
     const WINDOW_MS: u128 = 500;
     let mut history = History::new(EditDocument::default());
-    // Pre-drag baseline, established well before the drag starts (a real
-    // gap, not just "the previous tick") so it doesn't get swept into the
-    // burst's coalescing window.
+    // Pre-drag baseline, established well before the drag starts (a real gap, not just "the
+    // previous tick") so it doesn't get swept into the burst's coalescing window.
     history.apply_at("global", "exposure_slider", exposure(0.0), 0);
     let drag_start_ms = 10 * WINDOW_MS;
     for tick in 1..=200u128 {

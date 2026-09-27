@@ -4,10 +4,14 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Render stage extension point (ADR-0019 §8). Crate boundary only — this is Tapetum's (#44/#45) future home; the render-stage execution signature (GPU buffer bindings, cache-key interaction) is explicitly left open by ADR-0019 §7 for #44/#16 to settle."
+description = "Render stage extension point (ADR-0019 §8) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes with a blake3 cache key chained from upstream (graph.rs), byte-budgeted VRAM/RAM/disk cache tiers (cache.rs), and nearest-to-cursor bake prioritization (prefetch.rs), promoted from spikes/loaf. The render-stage execution signature (GPU buffer bindings) is still open, left to #45's own GPU slice."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
+nicti-pawprint = { path = "../nicti-pawprint" }
+blake3 = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1"

@@ -1,7 +1,11 @@
 //! Render stage extension point (ADR-0019 §7/§8). `RenderStage` settles identity and versioning
-//! only, via `Module` — the real per-frame execution signature (GPU buffer bindings, cache-key
-//! interaction with Tapetum's stage cache) is deliberately left open here, owned by #16 (GPU
-//! compute API) and #44/#45 (Tapetum, the stage-cached render graph).
+//! only, via `Module` — the real per-frame execution signature (GPU buffer bindings) is left open
+//! here, owned by #45's own GPU slice. `graph`/`cache`/`prefetch` are Tapetum's (#44/#45)
+//! stage-cached render graph, promoted from `spikes/loaf`.
+
+pub mod cache;
+pub mod graph;
+pub mod prefetch;
 
 use nicti_claw::{Module, Registry};
 

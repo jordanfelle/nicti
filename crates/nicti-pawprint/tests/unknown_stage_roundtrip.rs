@@ -1,8 +1,9 @@
-//! Proves a stage id this build doesn't recognize (e.g. a Claw plugin
-//! stage that isn't installed locally) round-trips byte-identically instead
-//! of being silently dropped, since `StageEntry::params` is opaque `Value`.
+//! Proves a stage id this build doesn't recognize (e.g. a Claw plugin stage that isn't installed
+//! locally) round-trips byte-identically instead of being silently dropped, since
+//! `StageEntry::params` is opaque `Value`. Promoted from
+//! `spikes/pawprint/tests/unknown_stage_roundtrip.rs`.
 
-use pawprint::{EditDocument, StageEntry};
+use nicti_pawprint::{EditDocument, StageEntry};
 use serde_json::json;
 
 #[test]
