@@ -70,7 +70,18 @@ pub trait CatalogStore: Module {
     /// `edit_variant`, an empty `EditDocument`); a path that already exists updates its stat/
     /// fingerprint/EXIF fields in place instead of inserting a duplicate. Returns the asset id
     /// either way.
-    fn insert_asset(&self, root_id: i64, asset: &NewAsset) -> Result<i64, CatalogError>;
+    ///
+    /// `t0_preview` is written (or, if `None`, cleared) in the same transaction as the asset row
+    /// and its master variant — not a separate `put_preview`/`clear_preview` call afterward. Found
+    /// by CodeRabbit's review: two separate calls left a window where a crash between them could
+    /// commit the asset row but never write (or clear) its preview, leaving it silently out of
+    /// sync with the file it was extracted from until the next rescan.
+    fn insert_asset(
+        &self,
+        root_id: i64,
+        asset: &NewAsset,
+        t0_preview: Option<&Preview>,
+    ) -> Result<i64, CatalogError>;
 
     /// Re-points an existing asset at a new `(root_id, rel_path)` — the persistence step a
     /// fingerprint match under a different path needs (a file moved rather than newly imported).

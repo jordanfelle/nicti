@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 
 use nicti_decode::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 
-use crate::{CatalogError, CatalogStore, NewAsset, Preview, PreviewTier};
+use crate::{CatalogError, CatalogStore, NewAsset, Preview};
 
 /// v1 targets Nikon NEF only (ADR-0002's language-and-architecture topic) -- NRW is Nikon's
 /// compact-body variant of the same format. Widening this list is a future-camera-support
@@ -170,20 +170,27 @@ fn extract_t0_preview(path: &Path) -> Option<Preview> {
     })
 }
 
-/// RAW-extension files under `root_path`, recursively, in walk order.
-fn candidate_files(root_path: &Path) -> impl Iterator<Item = PathBuf> {
-    WalkDir::new(root_path)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| RAW_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
-        })
-        .map(|entry| entry.into_path())
+/// RAW-extension files under `root_path`, recursively, in walk order. A directory `WalkDir`
+/// can't read (permission denied, a broken symlink) surfaces as `Err` rather than being silently
+/// dropped -- found by CodeRabbit's review: `entry.ok()` used to discard that error outright, so
+/// every file under an unreadable subdirectory went unvisited *and* unreported, and a caller could
+/// see a clean `IngestReport` (`failed` empty) even though part of the tree was never scanned.
+fn candidate_files(root_path: &Path) -> impl Iterator<Item = Result<PathBuf, walkdir::Error>> {
+    WalkDir::new(root_path).into_iter().filter_map(|entry| {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => return Some(Err(e)),
+        };
+        if !entry.file_type().is_file() {
+            return None;
+        }
+        let is_raw = entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| RAW_EXTENSIONS.contains(&ext.to_lowercase().as_str()));
+        is_raw.then(|| Ok(entry.into_path()))
+    })
 }
 
 /// Scans `root_path` (already registered as `root_id` via [`CatalogStore::ensure_root`]) and
@@ -196,7 +203,15 @@ pub fn ingest_root(
 ) -> Result<IngestReport, CatalogError> {
     let mut report = IngestReport::default();
 
-    for path in candidate_files(root_path) {
+    for entry in candidate_files(root_path) {
+        let path = match entry {
+            Ok(path) => path,
+            Err(e) => {
+                let path = e.path().unwrap_or(root_path).to_path_buf();
+                report.failed.push((path, e.to_string()));
+                continue;
+            }
+        };
         if let Err(e) = ingest_one(store, root_id, root_path, &path, &mut report) {
             report.failed.push((path, e.to_string()));
         }
@@ -292,15 +307,10 @@ fn ingest_one(
         imported_at,
     };
 
-    let asset_id = store.insert_asset(root_id, &new_asset)?;
-    match preview {
-        Some(preview) => store.put_preview(asset_id, PreviewTier::T0, &preview)?,
-        // A rescan whose file no longer yields an extractable preview (an in-place edit that
-        // removed the embedded JPEG, a truncated/corrupted rewrite) must not leave a stale
-        // preview from an earlier scan sitting under this asset's row -- a no-op for a brand-new
-        // asset that never had one (found by CodeRabbit's review).
-        None => store.clear_preview(asset_id, PreviewTier::T0)?,
-    }
+    // The asset row and its T0 preview (written, or cleared if extraction found none this time)
+    // commit together in one transaction -- see `CatalogStore::insert_asset`'s own doc comment
+    // for why that atomicity matters (found by CodeRabbit's review).
+    store.insert_asset(root_id, &new_asset, preview.as_ref())?;
 
     if existing.is_some() {
         report.updated += 1;

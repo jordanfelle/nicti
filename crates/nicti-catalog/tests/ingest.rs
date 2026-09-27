@@ -295,6 +295,49 @@ fn a_corrupt_file_is_reported_as_failed_without_aborting_the_run() {
         .is_none());
 }
 
+/// Regression test for a finding from CodeRabbit's review: a subdirectory `WalkDir` can't read
+/// (permission denied) must be recorded in `IngestReport::failed`, not silently skipped leaving a
+/// report that claims a clean run despite part of the tree never being scanned. Unix-only --
+/// Windows ACLs don't work the same way `Permissions::set_readonly` implies, and this repo's
+/// Windows job is the required CI platform, so this stays gated rather than flaking there.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_subdirectory_is_reported_as_failed_without_aborting_the_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_nef(dir.path(), "visible.NEF");
+    let blocked = dir.path().join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    write_synthetic_nef(&blocked, "hidden.NEF");
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let volume_id = store
+        .upsert_volume("test-volume", None, None, 1000)
+        .unwrap();
+    let root_id = store.ensure_root(volume_id, "").unwrap();
+
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+
+    // Restore permissions so the tempdir can be cleaned up.
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(report.added, 1, "the visible file is still cataloged");
+    assert_eq!(
+        report.failed.len(),
+        1,
+        "the unreadable subdirectory must be reported, not silently skipped"
+    );
+    assert!(
+        store
+            .find_asset_by_path(root_id, "hidden.NEF")
+            .unwrap()
+            .is_none(),
+        "the file under the unreadable directory was never actually visited"
+    );
+}
+
 /// Regression test for a finding from CodeRabbit's review: a rescan whose file no longer yields
 /// an extractable preview must clear the stale one left by an earlier scan, not leave it sitting
 /// under the asset's row describing bytes the file no longer has.

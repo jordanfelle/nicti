@@ -171,7 +171,12 @@ impl CatalogStore for SqliteCatalog {
         Ok(rows)
     }
 
-    fn insert_asset(&self, root_id: i64, asset: &NewAsset) -> Result<i64, CatalogError> {
+    fn insert_asset(
+        &self,
+        root_id: i64,
+        asset: &NewAsset,
+        t0_preview: Option<&Preview>,
+    ) -> Result<i64, CatalogError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
@@ -223,6 +228,25 @@ impl CatalogStore for SqliteCatalog {
              ON CONFLICT(asset_id, name) DO NOTHING",
             params![asset_id, EMPTY_EDIT_DOCUMENT],
         )?;
+        match t0_preview {
+            Some(preview) => tx.execute(
+                "INSERT INTO preview (asset_id, tier, width, height, bytes) \
+                 VALUES (?1,?2,?3,?4,?5) \
+                 ON CONFLICT(asset_id, tier) DO UPDATE SET \
+                    width = excluded.width, height = excluded.height, bytes = excluded.bytes",
+                params![
+                    asset_id,
+                    PreviewTier::T0.as_str(),
+                    preview.width.map(|w| w as i64),
+                    preview.height.map(|h| h as i64),
+                    preview.bytes,
+                ],
+            )?,
+            None => tx.execute(
+                "DELETE FROM preview WHERE asset_id = ?1 AND tier = ?2",
+                params![asset_id, PreviewTier::T0.as_str()],
+            )?,
+        };
         tx.commit()?;
         Ok(asset_id)
     }
