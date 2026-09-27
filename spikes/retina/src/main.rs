@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use nicti_decode::DemosaicQuality;
+use nicti_cornea::DemosaicQuality;
 use nicti_prowl::manifest::{Manifest, Scope};
 use nicti_prowl::perf::Protocol;
 use serde::Serialize;
@@ -255,7 +255,7 @@ fn scan(dir: &Path, decoder: Decoder, out: &Path) -> anyhow::Result<()> {
 fn diff(path: &Path) -> anyhow::Result<()> {
     let data = fs::read(path)?;
 
-    let mut lr_handle = nicti_decode::LibRawHandle::new();
+    let mut lr_handle = nicti_cornea::LibRawHandle::new();
     lr_handle
         .decode(&data)
         .map_err(|e| anyhow::anyhow!("libraw: {e}"))?;
@@ -326,7 +326,7 @@ fn peek(path: &Path, decoder: Decoder, n: usize) -> anyhow::Result<()> {
     let data = fs::read(path)?;
     match decoder {
         Decoder::Libraw => {
-            let mut handle = nicti_decode::LibRawHandle::new();
+            let mut handle = nicti_cornea::LibRawHandle::new();
             handle.decode(&data).map_err(|e| anyhow::anyhow!("{e}"))?;
             let meta = handle.metadata();
             let cfa = handle.raw_image().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -366,7 +366,7 @@ fn peek(path: &Path, decoder: Decoder, n: usize) -> anyhow::Result<()> {
 fn decode_one(decoder: Decoder, data: &[u8]) -> Result<frame::RawFrame, String> {
     match decoder {
         Decoder::Libraw => {
-            let mut handle = nicti_decode::LibRawHandle::new();
+            let mut handle = nicti_cornea::LibRawHandle::new();
             handle.decode(data).map_err(|e| e.to_string())?;
             let meta = handle.metadata();
             let cfa = handle.raw_image().map_err(|e| e.to_string())?;

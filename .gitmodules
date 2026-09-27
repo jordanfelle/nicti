@@ -1,4 +1,4 @@
-[submodule "crates/nicti-decode/vendor/LibRaw"]
-	path = crates/nicti-decode/vendor/LibRaw
+[submodule "crates/nicti-cornea/vendor/LibRaw"]
+	path = crates/nicti-cornea/vendor/LibRaw
 	url = https://github.com/yogthos/LibRaw.git
 	branch = nikon-he-decoder

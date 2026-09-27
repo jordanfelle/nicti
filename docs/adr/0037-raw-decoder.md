@@ -129,7 +129,7 @@ This is a real, systematic, one-directional rounding difference — almost certa
 independent implementations invert Nikon's nonlinear Lossless-compression curve (a piecewise LUT),
 not a bug in either decoder or a sign either is wrong. **The correctness bar for Lossless NEF
 cross-checking is "max abs diff ≤ 1 LSB, one-directional," not "bit-exact."** Any future decoder
-work (a real `nicti-decode` implementation, or a third candidate) should adopt `retina diff`'s
+work (a real `nicti-cornea` implementation, or a third candidate) should adopt `retina diff`'s
 histogram check, not a hash comparison, for this format.
 
 **Performance — isolated single-file decode, real Windows `.exe` via WSL interop** (this WSL box
@@ -220,7 +220,7 @@ findings correct/extend prior work — the middle one supersedes an earlier draf
    compatibility blocker**: confirm the actual release mechanism satisfies §6(d) (binary and
    complete source available from the same place — natural for GitHub Releases, not automatic for
    every future channel) and give §6's prominent notice + include the LGPL license text for
-   LibRaw/rawler in the shipped product, before `nicti-decode` ships either dependency. Not
+   LibRaw/rawler in the shipped product, before `nicti-cornea` ships either dependency. Not
    blocking for `spikes/retina`'s research use either way.
 
 `deny.toml` gained a `rawler`-specific exception (not a global `LGPL-2.1` allow entry, since
@@ -230,7 +230,7 @@ cargo-deny can verify license compatibility but not whether a shipped build actu
 ## Decision
 
 **LibRaw, patched with PR #826's HE/HE\* decoder, is the chosen decoder** for #41's eventual
-`nicti-decode` implementation — it's the only candidate that decodes the real library's HE/HE\*
+`nicti-cornea` implementation — it's the only candidate that decodes the real library's HE/HE\*
 files (88% of the real Z8 library), and it did so with 100% success and zero crashes across every
 real file this research could throw at it. rawler stays in the toolbox as the Lossless-path
 correctness cross-check (`retina diff`'s
@@ -253,7 +253,7 @@ prerequisite for starting #41.
 1. **Swap PR #826 for LibRaw's own official HE snapshot once it ships** ("this fall," no firm
    date per ADR-0015) — re-run `retina scan`/`diff` against it when it lands; likely faster, and
    also makes the vendored fork's own out-of-bounds-read patch (see the Spike section above) moot.
-2. **Verify §6(d) and give §6's prominent notice + LGPL license text before `nicti-decode`
+2. **Verify §6(d) and give §6's prominent notice + LGPL license text before `nicti-cornea`
    ships** — confirm the actual release mechanism keeps the binary and complete corresponding
    source available from the same place (natural for GitHub Releases, not automatic for any
    future distribution channel) and include the LGPL license text for LibRaw/rawler in the shipped
@@ -273,8 +273,8 @@ prerequisite for starting #41.
 6. **Profile whether PR #826's HE/HE\* decode cost is fixable** (vectorization, threading within
    one decode) or is an inherent property of the format worth just budgeting for — needed before
    #41/#44 can commit to a develop-pipeline latency budget that includes decode.
-7. **Promote `spikes/retina` into a real crate** implementing `nicti-decode`'s `RawDecoder` trait
-   (currently an empty placeholder, see `crates/nicti-decode/src/lib.rs`) — this ADR's spike
+7. **Promote `spikes/retina` into a real crate** implementing `nicti-cornea`'s `RawDecoder` trait
+   (currently an empty placeholder, see `crates/nicti-cornea/src/lib.rs`) — this ADR's spike
    proves the approach works, #41 is the ticket that turns it into production code.
 8. **Independently re-verify HE/HE\* pixel correctness against an oracle** (Adobe DNG Converter,
    as the PR's own report already did) — this research's own decode-success table doesn't

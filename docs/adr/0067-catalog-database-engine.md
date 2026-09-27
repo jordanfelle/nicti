@@ -21,7 +21,7 @@ Constraints already fixed by earlier ADRs/docs:
 - **v1 targets Windows only** (ADR-0015) — a Windows build/test hard gate, not a tiebreaker.
 - ADR-0018's license policy applies; any new dependency needs a `docs/licensing.md` row in the
   same PR (done, see that file's 2026-09-24 update).
-- `crates/nicti-catalog/src/lib.rs` already holds the `CatalogStore` extension-point trait with no
+- `crates/nicti-lair/src/lib.rs` already holds the `CatalogStore` extension-point trait with no
   methods yet — this ADR's Consequences section is what #22 uses to fill them in.
 - **Sandbox note:** this research pass ran in a Linux/WSL sandbox with 32 cores and no Windows
   machine available. Unlike ADR-0016/0068, this is not disqualifying for the *measured* gates —
@@ -293,7 +293,7 @@ that same well-trodden lane rather than an unusual choice for this problem shape
 
 ## Consequences
 
-- **#22's `CatalogStore` methods** (`crates/nicti-catalog/src/lib.rs`) should be modeled on
+- **#22's `CatalogStore` methods** (`crates/nicti-lair/src/lib.rs`) should be modeled on
   `spikes/den/src/workload.rs`'s `Workload` trait — the same query set this ADR measured against,
   not a smaller one discovered later. Two concrete schema requirements carry forward directly:
   a composite `(model, rating)` index (or the general "match your two most common equality/range
@@ -313,7 +313,7 @@ that same well-trodden lane rather than an unusual choice for this problem shape
 
 ## Spike: `spikes/den/`
 
-**Deleted in #123** (2026-09-27), once #22 landed `crates/nicti-catalog` — see git history for
+**Deleted in #123** (2026-09-27), once #22 landed `crates/nicti-lair` — see git history for
 the full spike source. The description below is left as-is as the historical record of what the
 spike contained and measured.
 

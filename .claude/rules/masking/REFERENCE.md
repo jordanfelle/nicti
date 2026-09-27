@@ -1,7 +1,7 @@
 ---
 paths:
   - "spikes/siamese/**"
-  - "crates/nicti-ai/**"
+  - "crates/nicti-stalk/**"
   - "docs/adr/0048-masking.md"
 ---
 

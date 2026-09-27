@@ -20,7 +20,7 @@ immediately whenever the cursor moves, one serial bake worker (one shared `wgpu:
 stale-while-baking fallback while a bake is in flight" (ADR-0044's own "Bake scheduling contract
 (for Pounce, #54)" section). #55 (build) and #70 (the standalone hardware-bottleneck telemetry
 indicator, sharing this same telemetry source) both wait on this ticket.
-`crates/nicti-catalog::scruff` (the Scruff import pipeline, #22) also notes "wiring into Pounce is
+`crates/nicti-lair::scruff` (the Scruff import pipeline, #22) also notes "wiring into Pounce is
 a follow-up" — its own CPU/disk-bound scan work is a second real client of the throttling half of
 this design, not just GPU bake jobs.
 

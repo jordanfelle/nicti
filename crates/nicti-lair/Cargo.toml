@@ -1,5 +1,5 @@
 [package]
-name = "nicti-catalog"
+name = "nicti-lair"
 version = "0.0.0"
 edition = "2021"
 license.workspace = true
@@ -8,7 +8,7 @@ description = "Catalog schema + import/ingest pipeline (#22, ADR-0019 §8): SQLi
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
-nicti-decode = { path = "../nicti-decode" }
+nicti-cornea = { path = "../nicti-cornea" }
 nicti-pawprint = { path = "../nicti-pawprint" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 blake3 = "1"

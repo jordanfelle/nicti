@@ -5077,29 +5077,11 @@ name = "nicti"
 version = "0.0.0"
 
 [[package]]
-name = "nicti-ai"
+name = "nicti-calico"
 version = "0.0.0"
 dependencies = [
  "nicti-claw",
  "serde_json",
-]
-
-[[package]]
-name = "nicti-catalog"
-version = "0.0.0"
-dependencies = [
- "blake3",
- "kamadak-exif",
- "nicti-claw",
- "nicti-decode",
- "nicti-pawprint",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "unicode-normalization",
- "walkdir",
 ]
 
 [[package]]
@@ -5112,15 +5094,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nicti-color"
-version = "0.0.0"
-dependencies = [
- "nicti-claw",
- "serde_json",
-]
-
-[[package]]
-name = "nicti-decode"
+name = "nicti-cornea"
 version = "0.0.0"
 dependencies = [
  "cc",
@@ -5132,7 +5106,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nicti-export"
+name = "nicti-iris"
 version = "0.0.0"
 dependencies = [
  "nicti-claw",
@@ -5140,11 +5114,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "nicti-lens"
+name = "nicti-lair"
 version = "0.0.0"
 dependencies = [
+ "blake3",
+ "kamadak-exif",
  "nicti-claw",
+ "nicti-cornea",
+ "nicti-pawprint",
+ "rusqlite",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unicode-normalization",
+ "walkdir",
 ]
 
 [[package]]
@@ -5156,6 +5140,14 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "nicti-preen"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
 ]
 
 [[package]]
@@ -5184,6 +5176,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nicti-stalk"
+version = "0.0.0"
+dependencies = [
+ "nicti-claw",
+ "serde_json",
 ]
 
 [[package]]
@@ -6784,7 +6784,7 @@ dependencies = [
  "clap",
  "csv",
  "image",
- "nicti-decode",
+ "nicti-cornea",
  "nicti-prowl",
  "notify",
  "rawler",

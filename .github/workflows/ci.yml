@@ -23,7 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   # #117: drops Rust debuginfo, and (since cargo sets DEBUG=false for build scripts at debug=0,
   # but not at any nonzero level including line-tables-only) also makes native build scripts
-  # (e.g. nicti-decode's bundled LibRaw) compile without -g. This was the bulk of the multi-GB
+  # (e.g. nicti-cornea's bundled LibRaw) compile without -g. This was the bulk of the multi-GB
   # Windows/clippy rust-cache entries that were pushing this repo over GitHub's 10GB per-repo
   # cache limit (confirmed via `gh cache list` before this change: 7.2GB Windows + 2x2GB clippy =
   # 11.2GB, with the `test` job's own cache entry already evicted). Panic locations and
@@ -73,16 +73,16 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             decode:
-              # #37/#41: crates/nicti-decode bundles LibRaw's full C++ source (via a git
+              # #37/#41: crates/nicti-cornea bundles LibRaw's full C++ source (via a git
               # submodule, promoted out of spikes/retina in #41) and compiles it from scratch on
               # every touching PR -- same rationale as pelt above, moved out of the always-on
               # jobs so an unrelated PR doesn't pay for a C++ recompile. spikes/retina is included
               # too: its own research tooling (compare/sweep/scan/watch/dump-classic/dump-cfa for
-              # #40) depends on nicti-decode and needs the same path-gated job. .gitmodules is
+              # #40) depends on nicti-cornea and needs the same path-gated job. .gitmodules is
               # included since a submodule URL/branch/path change there affects this job's
-              # checkout step without necessarily touching any file under crates/nicti-decode/**
+              # checkout step without necessarily touching any file under crates/nicti-cornea/**
               # itself (CodeRabbit, PR #203).
-              - 'crates/nicti-decode/**'
+              - 'crates/nicti-cornea/**'
               - 'spikes/retina/**'
               - '.gitmodules'
               - 'Cargo.toml'
@@ -149,7 +149,7 @@ jobs:
       # windowing backends (X11/Wayland/GL), confirmed unneeded for the rest of the workspace
       # by the pelt-linux job passing without it once it's the only Linux job left compiling
       # them; if that job's build ever fails to link, that's the first place to look.
-      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --all-targets --all-features -- -D warnings
 
   clippy-windows:
     name: cargo clippy (windows)
@@ -171,7 +171,7 @@ jobs:
       # docs/adr/0015), so it -- not Linux -- is the platform whose clippy/test results should
       # gate merges. --workspace --exclude pelt-* mirrors the Linux job exactly (see its own
       # comment above for why each flag is required).
-      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test (linux)
@@ -191,7 +191,7 @@ jobs:
       #
       # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
       # the path-gated `pelt (linux)` job below.
-      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode
+      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea
 
   test-windows:
     name: cargo test (windows)
@@ -215,7 +215,7 @@ jobs:
       # the path-gated `pelt (windows)` job below. This is the single biggest driver of this
       # job's own compile time: cold, these three crates alone pull in 311 of the 543 unique
       # crates otherwise compiled here.
-      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode
+      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea
 
   pelt-linux:
     name: pelt (linux)
@@ -317,7 +317,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          # #37/#41: crates/nicti-decode/vendor/LibRaw is a git submodule (yogthos/LibRaw's HE/HE*
+          # #37/#41: crates/nicti-cornea/vendor/LibRaw is a git submodule (yogthos/LibRaw's HE/HE*
           # decoder fork, pinned to the exact commit this research verified; promoted here from
           # spikes/retina/vendor/LibRaw in #41) -- without this, build.rs's own check for
           # libraw/libraw.h fails with a clear panic rather than a confusing compile error, but it
@@ -330,15 +330,15 @@ jobs:
         with:
           # Not a required check, and a full from-scratch LibRaw C++ compile (~95 source files)
           # would otherwise ride along on every main push regardless of whether
-          # crates/nicti-decode or spikes/retina changed.
+          # crates/nicti-cornea or spikes/retina changed.
           save-if: false
-      # #37/#41/ADR-0019/ADR-0069: nicti-decode bundles LibRaw's real C++ source (compiled via
+      # #37/#41/ADR-0019/ADR-0069: nicti-cornea bundles LibRaw's real C++ source (compiled via
       # the `cc` crate, see build.rs) to decode the real photo library's Nikon HE/HE* files --
       # path-gated out of the always-on jobs, same reasoning as pelt above (a full C++
       # recompile on every unrelated PR). retina is checked in the same job since it depends on
-      # nicti-decode and is touched by the same filter.
-      - run: cargo clippy -p nicti-decode -p retina --all-targets --all-features -- -D warnings
-      - run: cargo test -p nicti-decode -p retina --all-targets --all-features
+      # nicti-cornea and is touched by the same filter.
+      - run: cargo clippy -p nicti-cornea -p retina --all-targets --all-features -- -D warnings
+      - run: cargo test -p nicti-cornea -p retina --all-targets --all-features
 
   decode-windows:
     name: decode (windows)
@@ -367,8 +367,8 @@ jobs:
       # Uses MSVC (the runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
       # covers this path; the MinGW-specific static-linking branch is exercised locally, not
       # by this job.
-      - run: cargo clippy -p nicti-decode -p retina --all-targets --all-features -- -D warnings
-      - run: cargo test -p nicti-decode -p retina --all-targets --all-features
+      - run: cargo clippy -p nicti-cornea -p retina --all-targets --all-features -- -D warnings
+      - run: cargo test -p nicti-cornea -p retina --all-targets --all-features
 
   cargo-deny:
     name: cargo deny (licenses)

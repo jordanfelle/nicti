@@ -14,7 +14,7 @@
 a one-line migrated stub: group near-identical frames (timestamp clustering + perceptual hash, or
 embeddings) so the user picks one per group. Nothing in the repo read capture time, shutter count,
 or burst tags before this pass; nothing did perceptual hashing or embeddings either
-(`crates/nicti-ai::ModelProvider` has no methods yet).
+(`crates/nicti-stalk::ModelProvider` has no methods yet).
 
 **Con duplicates are pose sets, not sub-second bursts.** A gap histogram over a real con day
 (Anthrocon 2026-07-03, 1,368 frames) shows most consecutive gaps at 2-10s; only 152 of 1,368 gaps
@@ -184,7 +184,7 @@ neither can exist in this sandbox, see Context). Not fabricated here.
 **Feeds [#36](https://github.com/jordanfelle/nicti/issues/36)** (AI culling assist integration)
 and **[#35](https://github.com/jordanfelle/nicti/issues/35)** (face/subject grouping, which can
 reuse `embed.rs`'s DINOv2 wrapper directly — same embedding, different downstream clustering
-question). `crates/nicti-ai::ModelProvider`'s first real method shape is a natural next step once
+question). `crates/nicti-stalk::ModelProvider`'s first real method shape is a natural next step once
 #36 wires a production embedding path in, but that trait change belongs to #36, not asserted here.
 
 **Follow-up filed**: the post-con labelling + measurement pass is

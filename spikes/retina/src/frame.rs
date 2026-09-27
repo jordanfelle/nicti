@@ -1,6 +1,6 @@
 //! Common decoded-frame shape both backends (LibRaw, rawler) produce, so `compare` can diff them
 //! independent of which decoder made either one. This is also the shape ADR-0037 proposes for
-//! `nicti-decode::RawDecoder`'s eventual decode method -- not implemented there yet, that's #41's
+//! `nicti-cornea::RawDecoder`'s eventual decode method -- not implemented there yet, that's #41's
 //! promotion, not this spike's.
 
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
-    pub fn from_libraw(meta: &nicti_decode::DecodedMetadata, cfa: &[u16]) -> Self {
+    pub fn from_libraw(meta: &nicti_cornea::DecodedMetadata, cfa: &[u16]) -> Self {
         RawFrame {
             make: meta.make.clone(),
             model: meta.model.clone(),

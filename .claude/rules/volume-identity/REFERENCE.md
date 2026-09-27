@@ -1,7 +1,7 @@
 ---
 paths:
   - "spikes/homing/**"
-  - "crates/nicti-catalog/**"
+  - "crates/nicti-lair/**"
 ---
 
 # Volume Identity — Quick Reference
@@ -14,13 +14,13 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   not the primary key (read-only volumes can't hold one; clones copy it).
 - **Two volumes, same identity → never auto-merge.** `spikes/homing/schema::upsert_volume`'s
   `ON CONFLICT DO UPDATE` collapses them by construction — **partially closed in
-  `crates/nicti-catalog::sqlite::SqliteCatalog::upsert_volume`** (#22, landed): a `marker_uuid`
+  `crates/nicti-lair::sqlite::SqliteCatalog::upsert_volume`** (#22, landed): a `marker_uuid`
   disagreement under the same `identity_key` now returns `CatalogError::VolumeIdentityConflict`
   instead of merging. Still not a full solution — a genuine `identity_key` *collision* between two
   physically distinct volumes that also agree on `marker_uuid` (or where neither side has one yet)
   remains unresolved, same as ADR-0071 itself leaves it (Proposed, not Accepted).
 - **Schema: `volume` / `root` / `asset`**, three levels — `root` (a registered folder) is what #72
-  moves between SSD/archive, one row, not a per-asset rewrite. `crates/nicti-catalog::schema`
+  moves between SSD/archive, one row, not a per-asset rewrite. `crates/nicti-lair::schema`
   implements this shape for real (#22, landed), promoted from `spikes/homing/src/schema.rs`.
 - **Offline volume → never delete rows**, only `volume.online = 0`. Folder panel collapses to one
   "not connected" node; assets drop out of grid/search/facet counts until reconnect. Rejects LRC's

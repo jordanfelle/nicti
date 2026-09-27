@@ -12,7 +12,7 @@ use std::sync::{Condvar, Mutex};
 /// once. Used to cap how many background chunks (CPU-bound tile work, disk-I/O-bound import
 /// scans) run concurrently, independent of the GPU/`ort` worker's own one-serial-job model --
 /// this throttles CPU/disk-side background work, e.g. Scruff's import scan
-/// (`crates/nicti-catalog::scruff`, "wiring into Pounce is a follow-up").
+/// (`crates/nicti-lair::scruff`, "wiring into Pounce is a follow-up").
 pub struct Throttle {
     state: Mutex<usize>,
     limit: usize,

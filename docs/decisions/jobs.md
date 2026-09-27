@@ -6,7 +6,7 @@ shaped its design.
 
 - **Scheduler**: `docs/adr/0054-job-scheduler-pounce.md` — **Proposed**, same-API and cross-API
   GPU contention both measured on the real reference RTX 5080; wiring into a real bake pipeline
-  and into Scruff's import scan (`crates/nicti-catalog::scruff`'s own "wiring into Pounce is a
+  and into Scruff's import scan (`crates/nicti-lair::scruff`'s own "wiring into Pounce is a
   follow-up" note) are #55's build, not this pass's.
 - **Model**: `spikes/crouch/src/job.rs::ChunkedJob` (`spec()` + `step() -> Yield | Done`) —
   cooperative cancellation checked only *between* chunks, never mid-chunk, since neither
