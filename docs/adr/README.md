@@ -38,12 +38,19 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0021](0021-color-pipeline.md) | Color pipeline | Proposed |
 | [0022](0022-preview-codec-followup.md) | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
 | [0023](0023-lrc-catalog-import-mapping.md) | Lightroom Classic catalog import mapping | Accepted |
+| [0024](0024-masking.md) | Masking | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.
 
 **Numbering note:** 0018 and 0019 both touch the RAW decoder question (adopt/fork research vs.
 the decoder itself); this is intentional, not a numbering error — cross-reference both.
+
+**Numbering collision in flight (2026-09-26):** PR #167 (#40, demosaic/denoise) also claims
+`0023` on its own branch, predating `0023-lrc-catalog-import-mapping.md`'s merge to `main`. This
+ADR claims `0024` as the next free slot as of this PR's branch point; whichever of #167/this PR
+merges second needs to renumber to the actual next-free slot at merge time, not assume `0024`/
+whatever it branched with still holds.
 
 ## Template
 
