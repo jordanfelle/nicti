@@ -661,6 +661,18 @@ impl CatalogStore for SqliteCatalog {
             )?),
             None => None,
         };
+
+        // Reject moving under itself or one of its own descendants -- either would corrupt the
+        // materialized path (the node's own id would appear twice, or a descendant would end up
+        // "above" its own ancestor). `old_path` is a literal id-based prefix of every descendant's
+        // path (including the node's own, trivially) and of no other keyword's, so this one
+        // string check covers both cases without an extra query.
+        if let Some(new_parent_path) = &new_parent_path {
+            if new_parent_path.starts_with(&old_path) {
+                return Err(CatalogError::WouldCreateCycle);
+            }
+        }
+
         let new_path = format!(
             "{}{}/",
             new_parent_path.unwrap_or_else(|| "/".to_string()),
@@ -1012,6 +1024,35 @@ impl CatalogStore for SqliteCatalog {
         new_parent_id: Option<i64>,
     ) -> Result<(), CatalogError> {
         let conn = self.conn.lock().unwrap();
+
+        // Unlike `keyword`, a collection has no materialized path to check with a single string
+        // comparison -- walk the `parent_id` chain from the proposed new parent upward instead,
+        // rejecting the move if it ever reaches `collection_id` itself (moving under itself or
+        // one of its own descendants, either of which would create a cycle: `delete_collection`'s
+        // subtree walk assumes a tree, not a graph, and would never terminate against one).
+        if let Some(new_parent_id) = new_parent_id {
+            let mut current = Some(new_parent_id);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = current {
+                if id == collection_id {
+                    return Err(CatalogError::WouldCreateCycle);
+                }
+                if !seen.insert(id) {
+                    // Already-corrupted data unrelated to this move (shouldn't happen once this
+                    // check is in place, but don't loop forever walking a pre-existing cycle).
+                    break;
+                }
+                current = conn
+                    .query_row(
+                        "SELECT parent_id FROM collection WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+            }
+        }
+
         conn.execute(
             "UPDATE collection SET parent_id = ?1 WHERE id = ?2",
             params![new_parent_id, collection_id],
@@ -1025,7 +1066,11 @@ impl CatalogStore for SqliteCatalog {
         // Collections form a small tree too (organizational nesting), same subtree-delete shape
         // as `delete_keyword` -- walked in Rust rather than a recursive CTE, since the tree is
         // expected to be shallow and this keeps the same style as the rest of this file.
+        // `seen` guards against a cycle in already-on-disk data (should be impossible going
+        // forward now that `move_collection` rejects one, but this walk must never hang against
+        // data that predates that check, or that got there some other way).
         let mut to_delete = vec![collection_id];
+        let mut seen: std::collections::HashSet<i64> = std::iter::once(collection_id).collect();
         let mut i = 0;
         while i < to_delete.len() {
             let parent = to_delete[i];
@@ -1033,7 +1078,11 @@ impl CatalogStore for SqliteCatalog {
             let children: Vec<i64> = stmt
                 .query_map([parent], |row| row.get(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            to_delete.extend(children);
+            for child in children {
+                if seen.insert(child) {
+                    to_delete.push(child);
+                }
+            }
             i += 1;
         }
         for id in &to_delete {
@@ -1465,6 +1514,54 @@ mod tests {
     }
 
     #[test]
+    fn move_keyword_into_itself_or_a_descendant_is_rejected() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store.create_keyword(None, "Parent").unwrap();
+        let child = store.create_keyword(Some(parent), "Child").unwrap();
+        let grandchild = store.create_keyword(Some(child), "Grandchild").unwrap();
+
+        assert!(
+            matches!(
+                store.move_keyword(parent, Some(parent)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a keyword under itself must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_keyword(parent, Some(child)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a keyword under its own child must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_keyword(parent, Some(grandchild)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a keyword under its own grandchild must be rejected"
+        );
+
+        // The tree must be untouched by any of the rejected attempts.
+        assert_eq!(
+            store
+                .keyword_by_path(&["Parent", "Child"])
+                .unwrap()
+                .unwrap()
+                .id,
+            child
+        );
+        assert_eq!(
+            store
+                .keyword_by_path(&["Parent", "Child", "Grandchild"])
+                .unwrap()
+                .unwrap()
+                .id,
+            grandchild
+        );
+    }
+
+    #[test]
     fn delete_keyword_removes_its_subtree_and_every_tag_link() {
         let store = SqliteCatalog::open_in_memory().unwrap();
         let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
@@ -1815,5 +1912,107 @@ mod tests {
         assert!(store.collection(parent).unwrap().is_none());
         assert!(store.collection(child).unwrap().is_none());
         assert!(store.collection_assets(child).unwrap().is_empty());
+    }
+
+    #[test]
+    fn move_collection_into_itself_or_a_descendant_is_rejected() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store
+            .create_collection(None, "Parent", CollectionKind::Manual)
+            .unwrap();
+        let child = store
+            .create_collection(Some(parent), "Child", CollectionKind::Manual)
+            .unwrap();
+        let grandchild = store
+            .create_collection(Some(child), "Grandchild", CollectionKind::Manual)
+            .unwrap();
+
+        assert!(
+            matches!(
+                store.move_collection(parent, Some(parent)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a collection under itself must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_collection(parent, Some(child)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a collection under its own child must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_collection(parent, Some(grandchild)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a collection under its own grandchild must be rejected"
+        );
+
+        // The tree, and the ability to delete it cleanly, must be untouched by the rejections --
+        // a would-be cycle that slipped through would make this hang instead of returning.
+        store.delete_collection(parent).unwrap();
+        assert!(store.collection(child).unwrap().is_none());
+        assert!(store.collection(grandchild).unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_keyword_into_an_existing_sibling_name_is_rejected() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store.create_keyword(None, "Parent").unwrap();
+        store.create_keyword(Some(parent), "Existing").unwrap();
+        let renaming = store.create_keyword(Some(parent), "Original").unwrap();
+
+        assert!(
+            store.rename_keyword(renaming, "Existing").is_err(),
+            "renaming onto an already-used sibling name must be rejected"
+        );
+        assert!(
+            store.rename_keyword(renaming, "existing").is_err(),
+            "the sibling-name check is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn hunt_keyset_pagination_breaks_ties_correctly_on_a_nullable_sort_field() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+
+        // Every asset shares the same rating (a tie on the sort key), so correctness here hinges
+        // entirely on the `id` tiebreaker, not the rating value itself.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let id = store
+                .insert_asset(root_id, &new_asset(&format!("{i}.NEF"), None), None)
+                .unwrap();
+            store.set_rating(&[id], Some(3)).unwrap();
+            ids.push(id);
+        }
+
+        let sort = Sort {
+            field: SortField::Rating,
+            direction: SortDirection::Asc,
+        };
+        let mut collected = Vec::new();
+        let mut after = None;
+        loop {
+            let page = Page { after, limit: 2 };
+            let page_ids = store.hunt(&Filter::default(), sort, &page).unwrap();
+            if page_ids.is_empty() {
+                break;
+            }
+            let last_id = *page_ids.last().unwrap();
+            collected.extend(page_ids);
+            after = Some(Cursor::Rating {
+                rating: Some(3),
+                id: last_id,
+            });
+        }
+
+        assert_eq!(
+            collected, ids,
+            "ties on rating must break by id, ascending, with no gaps or duplicates across pages"
+        );
     }
 }

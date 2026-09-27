@@ -49,6 +49,12 @@ pub enum CatalogError {
     /// error at the call site, not a data problem.
     #[error("cursor variant does not match the query's sort field")]
     CursorSortMismatch,
+    /// A `move_keyword`/`move_collection` call whose `new_parent_id` is the node itself, or one
+    /// of its own descendants — either would corrupt the tree (a keyword's materialized `path`
+    /// would embed itself twice; a collection's `parent_id` chain would cycle, and
+    /// `delete_collection`'s subtree walk would never terminate).
+    #[error("moving under itself or a descendant would create a cycle")]
+    WouldCreateCycle,
 }
 
 /// A catalog store backend. `Module` settles identity/versioning only (ADR-0019 §7); the
