@@ -1,4 +1,4 @@
-//! Full-reference quality metrics for #40/ADR-0025's demosaic+denoise comparison: PSNR and a
+//! Full-reference quality metrics for #40/ADR-0040's demosaic+denoise comparison: PSNR and a
 //! public f32 SSIM, operating on the `f32` sample arrays `spikes/rods`'s alignment step produces
 //! (display-encoded, 0..1 per channel) -- distinct from `golden.rs`'s SSIM, which is 8-bit-only
 //! and private to that module's `GoldenStore` use case. No shared implementation: `golden.rs`'s

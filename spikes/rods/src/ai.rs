@@ -1,4 +1,4 @@
-//! Path B's AI denoise stage (ADR-0025): a tiled `ort` wrapper around an NCHW-float,
+//! Path B's AI denoise stage (ADR-0040): a tiled `ort` wrapper around an NCHW-float,
 //! dynamic-shape ONNX denoiser (NAFNet-SIDD, SCUNet, or any model sharing that input/output
 //! contract -- confirmed for both via `onnxruntime`'s own input/output metadata before writing
 //! this). Runs on the fixed display-encoded sRGB image (`display::to_display_srgb`'s output),

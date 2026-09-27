@@ -6,7 +6,7 @@ use rods::{ai, align, display, linear_input};
 #[derive(Parser)]
 #[command(
     name = "rods",
-    about = "Spike for #40 (ADR-0025): demosaic + denoise comparison"
+    about = "Spike for #40 (ADR-0040): demosaic + denoise comparison"
 )]
 struct Cli {
     #[command(subcommand)]

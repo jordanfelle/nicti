@@ -1,10 +1,10 @@
 ## Demosaic and noise reduction
 
-Covers #40's demosaic + noise-reduction research (ADR-0025): the Path A/B split, the RawNIND
+Covers #40's demosaic + noise-reduction research (ADR-0040): the Path A/B split, the RawNIND
 ground-truth substitution, the classic-pipeline wavelet-denoise fork bug, the two AI denoise
 candidates measured, the alignment bugs found and fixed, and the real Windows-native CUDA numbers.
 
-- **Demosaic + NR (#40)**: `docs/adr/0025-demosaic-and-denoise.md` — **Proposed**, pending a real
+- **Demosaic + NR (#40)**: `docs/adr/0040-demosaic-and-denoise.md` — **Proposed**, pending a real
   LRC AI Denoise comparison and a real Z8 tripod verification pass (the real tripod shoot won't
   happen for weeks/months, by user decision 2026-09-26). Every quality number measured this pass is
   candidate-vs-ground-truth on RawNIND's real Nikon **Z6** frames (the same Z-mount mirrorless

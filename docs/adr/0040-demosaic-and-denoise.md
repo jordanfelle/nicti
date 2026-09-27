@@ -1,4 +1,4 @@
-# ADR-0025: Demosaic and noise reduction
+# ADR-0040: Demosaic and noise reduction
 
 - **Status:** Proposed — pending [#164](https://github.com/jordanfelle/nicti/issues/164) (real Z8
   tripod verification) and [#163](https://github.com/jordanfelle/nicti/issues/163) (LRC-relative

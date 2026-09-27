@@ -100,7 +100,7 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
-    /// For #40/ADR-0025: demosaics one NEF with LibRaw's classic pipeline (WB applied, caller's
+    /// For #40/ADR-0040: demosaics one NEF with LibRaw's classic pipeline (WB applied, caller's
     /// choice of demosaic algorithm + NR knobs), writing a linear 16-bit camera-RGB TIFF +
     /// metadata JSON sidecar `spikes/rods` compares against LRC. See `src/classic.rs`.
     DumpClassic {
@@ -117,7 +117,7 @@ enum Command {
         #[arg(long, default_value_t = 0.0)]
         wavelet: f32,
     },
-    /// For #40/ADR-0025's Path A: writes the still-mosaiced, black-subtracted,
+    /// For #40/ADR-0040's Path A: writes the still-mosaiced, black-subtracted,
     /// white-normalized Bayer plane (no WB, no demosaic) as a 16-bit grayscale TIFF + metadata
     /// JSON sidecar. See `src/cfa.rs`.
     DumpCfa {
