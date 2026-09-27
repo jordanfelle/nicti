@@ -62,6 +62,16 @@ pub enum BigTableError {
     Zlib(#[from] std::io::Error),
     #[error("decompressed size {actual} does not match the declared size {declared}")]
     SizeMismatch { declared: u32, actual: usize },
+    #[error(
+        "declared uncompressed size {declared} exceeds the {MAX_DECOMPRESSED_SIZE}-byte cap \
+         (dng_big_table.h's kMaxCompressedBigTableDecodedSize)"
+    )]
+    DeclaredSizeTooLarge { declared: u32 },
+    #[error(
+        "decompressed output exceeded the {MAX_DECOMPRESSED_SIZE}-byte cap before matching its \
+         declared size -- refusing to keep inflating (possible zip bomb)"
+    )]
+    DecompressedSizeExceededCap,
     #[error("stream too short: expected at least {needed} bytes, has {have}")]
     StreamTooShort { needed: usize, have: usize },
     #[error("unrecognized big-table magic {0} (expected 0 for a Look table)")]
@@ -81,6 +91,14 @@ const MAX_HUE_SAMPLES: u32 = 360;
 const MAX_SAT_SAMPLES: u32 = 256;
 const MAX_VAL_SAMPLES: u32 = 256;
 const MAX_TOTAL_SAMPLES: u32 = 36 * 32 * 16;
+
+/// `dng_big_table.h`'s `kMaxCompressedBigTableDecodedSize`: the SDK rejects a declared
+/// uncompressed size over this *before* allocating, and bounds the actual `zlib` output to it via
+/// a fixed-size destination buffer. `big_table_decode` enforces the same cap on both the declared
+/// size and the actual decompressed byte count, so a crafted small zlib stream with a very high
+/// compression ratio can't inflate to an unbounded allocation (a "zip bomb") before either check
+/// has a chance to reject it.
+const MAX_DECOMPRESSED_SIZE: u32 = 128 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct LookProfile {
@@ -160,9 +178,30 @@ fn big_table_decode(encoded: &str) -> Result<Vec<u8>, BigTableError> {
 
     let declared_size = u32::from_le_bytes(binary[0..4].try_into().unwrap());
 
+    if declared_size > MAX_DECOMPRESSED_SIZE {
+        return Err(BigTableError::DeclaredSizeTooLarge {
+            declared: declared_size,
+        });
+    }
+
+    // Bound the actual decompressed byte count too, not just the declared size -- a crafted zlib
+    // stream can decompress to far more than it declares (or a very high ratio to a huge amount),
+    // so `read_to_end` alone would keep inflating into an unbounded `Vec` before the size check
+    // below ever runs. Reading in capped chunks lets us bail out mid-stream instead.
     let mut decoder = ZlibDecoder::new(&binary[4..]);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    let cap = MAX_DECOMPRESSED_SIZE as usize;
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = decoder.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > cap {
+            return Err(BigTableError::DecompressedSizeExceededCap);
+        }
+        out.extend_from_slice(&chunk[..n]);
+    }
 
     if out.len() != declared_size as usize {
         return Err(BigTableError::SizeMismatch {
@@ -307,6 +346,11 @@ fn recompute_fingerprint(decoded: &DecodedLookTable) -> String {
     let mut buf = Vec::new();
     buf.extend_from_slice(&0u32.to_le_bytes()); // btt_LookTable
 
+    // `dng_look_table::PutStream` (the SDK function this mirrors) always re-derives the version
+    // tag from the current amount fields, discarding whatever version was on the wire when read --
+    // there is no stored "version" state anywhere in the SDK's own data model, only this
+    // computed-at-serialization-time value. So this must infer version the same way, not use
+    // whatever the source stream's version field said.
     let version: u32 = if decoded.min_amount != 1.0 || decoded.max_amount != 1.0 {
         2
     } else {
@@ -442,15 +486,27 @@ fn read_alt_text(node: roxmltree::Node) -> Option<String> {
 pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
     let doc = roxmltree::Document::parse(xmp_text)?;
 
+    // Two passes rather than one interleaved pass: `crs:LookTable` (the ID) and its matching
+    // `crs:Table_<id>` (the payload) are ordinary XML attributes with no ordering guarantee --
+    // XMP/RDF allows a subject's properties to be split across more than one `rdf:Description`
+    // about the same `rdf:about`, and even within one node, attribute order in the source text
+    // isn't guaranteed to put `LookTable` before `Table_<id>`. Matching them as they're seen in a
+    // single pass would let an unrelated `LookTable` value encountered later silently overwrite
+    // `table_id` after the right payload was already captured. Finding the ID first and only then
+    // searching for its payload removes that ordering dependency entirely.
+    let table_id = doc.descendants().find_map(|node| {
+        node.attributes()
+            .find(|attr| attr.name() == "LookTable")
+            .map(|attr| attr.value().to_string())
+    });
+
     let mut name = String::from("(unnamed look)");
-    let mut table_id: Option<String> = None;
     let mut table_payload: Option<String> = None;
     let mut unsupported_settings = Vec::new();
 
     for node in doc.descendants() {
         for attr in node.attributes() {
             match attr.name() {
-                "LookTable" => table_id = Some(attr.value().to_string()),
                 name if name.starts_with("Table_") => {
                     if Some(&name["Table_".len()..]) == table_id.as_deref() {
                         table_payload = Some(attr.value().to_string());
@@ -793,6 +849,69 @@ mod tests {
     }
 
     #[test]
+    fn table_attribute_before_look_table_id_in_source_order_still_matches() {
+        // crs:Table_<id> written *before* crs:LookTable on the same node -- attribute order in
+        // the source text isn't guaranteed, so this must still resolve correctly rather than
+        // silently missing the payload (the two-pass id-then-payload lookup in `parse` exists for
+        // exactly this).
+        let hue = 2;
+        let sat = 2;
+        let val = 2;
+        let data = synthetic_hue_sat_map(hue, sat, val);
+        let stream = encode_look_table_stream(hue, sat, val, &data, 0, None, None);
+        let encoded = big_table_encode(&stream);
+
+        let fake = DecodedLookTable {
+            look_table: HueSatMap {
+                hue_divisions: hue as usize,
+                sat_divisions: sat as usize,
+                val_divisions: val as usize,
+                data,
+            },
+            encoding: TableEncoding::Linear,
+            min_amount: 1.0,
+            max_amount: 1.0,
+            flags: 0,
+        };
+        let id = recompute_fingerprint(&fake);
+
+        let xmp = format!(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Table_{id}="{encoded}" crs:LookTable="{id}"/></rdf:RDF></x:xmpmeta>"#
+        );
+        parse(&xmp).expect("should decode regardless of attribute order");
+    }
+
+    #[test]
+    fn declared_size_over_cap_is_rejected_before_decompressing() {
+        let mut binary = Vec::new();
+        binary.extend_from_slice(&(MAX_DECOMPRESSED_SIZE + 1).to_le_bytes());
+        binary.extend_from_slice(&[0u8; 8]); // any bytes -- never reached
+        let encoded = base85_encode(&binary);
+        let err = big_table_decode(&encoded).unwrap_err();
+        assert!(matches!(err, BigTableError::DeclaredSizeTooLarge { .. }));
+    }
+
+    /// A crafted zlib stream that lies about its declared size (small) but actually decompresses
+    /// to more than the cap -- proves `big_table_decode` bails out mid-stream instead of fully
+    /// materializing an unbounded allocation (the zip-bomb DoS this cap exists to prevent).
+    #[test]
+    fn decompressed_output_over_cap_is_rejected_mid_stream() {
+        let huge_zeros = vec![0u8; MAX_DECOMPRESSED_SIZE as usize + 4096];
+
+        let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        zlib_encoder.write_all(&huge_zeros).unwrap();
+        let compressed = zlib_encoder.finish().unwrap();
+
+        let mut binary = Vec::new();
+        binary.extend_from_slice(&100u32.to_le_bytes()); // lies -- actual output is far bigger
+        binary.extend_from_slice(&compressed);
+        let encoded = base85_encode(&binary);
+
+        let err = big_table_decode(&encoded).unwrap_err();
+        assert!(matches!(err, BigTableError::DecompressedSizeExceededCap));
+    }
+
+    #[test]
     fn unsupported_clarity_and_tone_curve_settings_are_surfaced() {
         let hue = 2;
         let sat = 2;
@@ -903,6 +1022,17 @@ mod tests {
             [
                 0xc3, 0xfc, 0xd3, 0xd7, 0x61, 0x92, 0xe4, 0x00, 0x7d, 0xfb, 0x49, 0x6c, 0xca, 0x67,
                 0xe1, 0x3b
+            ]
+        );
+        // 80 bytes -- exercises the multi-block path (padding + carrying a0/b0/c0/d0 across
+        // chunks), unlike every vector above (all <= 55 bytes, single-block only).
+        assert_eq!(
+            md5(
+                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+            ),
+            [
+                0x57, 0xed, 0xf4, 0xa2, 0x2b, 0xe3, 0xc9, 0x55, 0xac, 0x49, 0xda, 0x2e, 0x21, 0x07,
+                0xb6, 0x7a
             ]
         );
     }
