@@ -61,11 +61,20 @@ impl GpuContext {
             GpuPreference::Auto => GpuPreference::from_env(),
             explicit => explicit,
         };
+        // `PRIMARY` (Vulkan/Metal/Dx12/BrowserWebGpu) excludes Gl, which wgpu classifies as
+        // `SECONDARY` -- enumerating only `PRIMARY` would mean an explicit `NICTI_WGPU_BACKEND=gl`
+        // request could never find an adapter even on a host with a working GL driver. An
+        // explicit backend request enumerates only that backend; `Auto` stays `PRIMARY`-only (it
+        // never falls back to Gl on its own).
+        let backends = match pref {
+            GpuPreference::Backend(b) => wgpu::Backends::from(b),
+            GpuPreference::Auto => wgpu::Backends::PRIMARY,
+        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
+        let adapters = pollster::block_on(instance.enumerate_adapters(backends));
 
         let adapter = match pref {
             // An explicit backend request must be honored exactly or fail -- silently falling
@@ -229,5 +238,15 @@ mod tests {
             Err(e) => panic!("expected NoAdapter, got {e}"),
             Ok(_) => panic!("expected an error requesting a backend with no adapter"),
         }
+    }
+
+    /// Regression test: `wgpu::Backends::PRIMARY` excludes Gl (`SECONDARY`), so enumerating only
+    /// `PRIMARY` -- as this code used to do unconditionally -- would mean an explicit
+    /// `GpuPreference::Backend(Gl)` could never find an adapter even on a host with a working GL
+    /// driver. `new()` now enumerates `Backends::from(b)` for an explicit request instead.
+    #[test]
+    fn gl_backend_is_excluded_from_primary_but_included_when_explicitly_requested() {
+        assert!(!wgpu::Backends::PRIMARY.contains(wgpu::Backends::GL));
+        assert!(wgpu::Backends::from(wgpu::Backend::Gl).contains(wgpu::Backends::GL));
     }
 }

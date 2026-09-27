@@ -85,22 +85,40 @@ pub struct RenderRequest<'a> {
     pub extent: Extent,
 }
 
-/// Chains every named node's cache key into one composite hash -- the fused live/geometry
-/// dispatch's own cache key, invalidated iff any one of its constituent nodes' keys changed.
-/// Sorted by id first (matching `RenderGraph::cache_key`'s own convention for upstream ids), so
-/// this doesn't silently depend on the caller's slice order -- `live_nodes`/`geometry_nodes` is
-/// only guaranteed stable across calls when it comes from a fixed literal or `RenderGraph`'s own
-/// `topological_order`; a caller building it from anything else (a filter, a set) could otherwise
-/// see the identical set of nodes hash differently between two renders and pay a spurious
-/// dispatch.
-fn composite_key(graph: &RenderGraph, ids: &[&str]) -> Result<blake3::Hash, GraphError> {
+/// Folds `extent` into `key` -- every cache key this module stores or looks up must be scoped to
+/// the target output size, or a render at one extent (e.g. screen resolution) could return a
+/// texture cached for a different one (e.g. full resolution) on a later render whose node cache
+/// keys are otherwise identical. A partial cache hit is just as real a risk: if only one baked
+/// node was evicted and gets re-encoded at a new extent, but reads a still-cached input from a
+/// previous extent, the stage's input and output would silently mismatch in size.
+fn keyed_by_extent(key: blake3::Hash, extent: Extent) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(key.as_bytes());
+    hasher.update(&extent.width.to_le_bytes());
+    hasher.update(&extent.height.to_le_bytes());
+    hasher.finalize()
+}
+
+/// Chains every named node's cache key into one composite hash, then folds in `extent` --
+/// the fused live/geometry dispatch's own cache key, invalidated iff any one of its constituent
+/// nodes' keys changed, or the target extent did. Sorted by id first (matching
+/// `RenderGraph::cache_key`'s own convention for upstream ids), so this doesn't silently depend
+/// on the caller's slice order -- `live_nodes`/`geometry_nodes` is only guaranteed stable across
+/// calls when it comes from a fixed literal or `RenderGraph`'s own `topological_order`; a caller
+/// building it from anything else (a filter, a set) could otherwise see the identical set of
+/// nodes hash differently between two renders and pay a spurious dispatch.
+fn composite_key(
+    graph: &RenderGraph,
+    ids: &[&str],
+    extent: Extent,
+) -> Result<blake3::Hash, GraphError> {
     let mut sorted: Vec<&str> = ids.to_vec();
     sorted.sort_unstable();
     let mut hasher = blake3::Hasher::new();
     for id in sorted {
         hasher.update(graph.cache_key(id)?.as_bytes());
     }
-    Ok(hasher.finalize())
+    Ok(keyed_by_extent(hasher.finalize(), extent))
 }
 
 /// Drives one render graph: caches `Baked` output per node (byte-budgeted, evicting LRU), and
@@ -150,7 +168,7 @@ impl Renderer {
 
         let mut current: Option<Arc<FrameTexture>> = None;
         for (id, exec) in req.baked_chain {
-            let key = req.graph.cache_key(id)?;
+            let key = keyed_by_extent(req.graph.cache_key(id)?, req.extent);
             if let Some(cached) = self.baked_cache.get(&key) {
                 current = Some(Arc::clone(cached));
                 continue;
@@ -163,7 +181,7 @@ impl Renderer {
         }
         let baked_output = current.ok_or(RenderError::EmptyBakedChain)?;
 
-        let live_key = composite_key(req.graph, req.live_nodes)?;
+        let live_key = composite_key(req.graph, req.live_nodes, req.extent)?;
         let live_output = if self.live_key == Some(live_key) {
             Arc::clone(
                 self.live_output
@@ -180,7 +198,7 @@ impl Renderer {
             output
         };
 
-        let geometry_key = composite_key(req.graph, req.geometry_nodes)?;
+        let geometry_key = composite_key(req.graph, req.geometry_nodes, req.extent)?;
         let geometry_output = if self.geometry_key == Some(geometry_key) {
             Arc::clone(
                 self.geometry_output
@@ -336,6 +354,66 @@ mod tests {
             width: 4,
             height: 4,
         }
+    }
+
+    #[test]
+    fn rendering_the_same_unchanged_graph_at_a_different_extent_is_never_a_cache_hit() {
+        // Regression test: a cache key that ignored `req.extent` could return a texture sized
+        // for a previous render's extent (e.g. screen resolution) when asked to render the same
+        // unchanged graph at a different one (e.g. full resolution) -- every layer (baked, live,
+        // geometry) must treat a changed extent as a fresh dispatch, never a hit.
+        let Some(gpu) = test_gpu() else { return };
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 1_000_000_000);
+
+        let g = hero_graph(&[]);
+        let chain = baked_chain(&g, &baked_exec);
+        let screen_res = Extent {
+            width: 4,
+            height: 4,
+        };
+        let full_res = Extent {
+            width: 8,
+            height: 8,
+        };
+
+        let out1 = renderer
+            .render(&RenderRequest {
+                graph: &g,
+                baked_chain: &chain,
+                live: &live_exec,
+                live_nodes: &["wb", "tone"],
+                geometry: &geom_exec,
+                geometry_nodes: &["crop"],
+                extent: screen_res,
+            })
+            .unwrap();
+        assert_eq!(out1.extent, screen_res);
+
+        let out2 = renderer
+            .render(&RenderRequest {
+                graph: &g,
+                baked_chain: &chain,
+                live: &live_exec,
+                live_nodes: &["wb", "tone"],
+                geometry: &geom_exec,
+                geometry_nodes: &["crop"],
+                extent: full_res,
+            })
+            .unwrap();
+        let stats = renderer.last_stats();
+        assert_eq!(
+            stats.bake_dispatches, 5,
+            "a new extent must re-dispatch every baked stage, not reuse the old-sized cache"
+        );
+        assert_eq!(stats.live_dispatches, 1);
+        assert_eq!(stats.geometry_dispatches, 1);
+        assert_eq!(
+            out2.extent, full_res,
+            "output must actually be sized for the new extent"
+        );
     }
 
     #[test]
