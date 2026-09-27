@@ -32,11 +32,19 @@ pub fn estimate(hist: &Histogram) -> Sliders {
     let shadow_clip = hist.fraction_below(0.02);
     let shadows2012 = (shadow_clip * 400.0).clamp(-100.0, 100.0);
 
+    // Whites/Blacks push the near-white/near-black clip points toward a target just short of
+    // full clipping (0.99/0.01): positive Whites when the 99.5th percentile has headroom below
+    // that target (extend the range), negative when it's already at or past it (pull back from
+    // clipping) -- and the mirror image for Blacks against the 0.5th percentile.
+    const NEAR_WHITE_TARGET: f64 = 0.99;
+    const NEAR_BLACK_TARGET: f64 = 0.01;
+    const CLIP_POINT_SCALE: f64 = 2000.0;
+
     let p995 = hist.percentile(99.5) as f64;
-    let whites2012 = ((1.0 - p995) * -200.0).clamp(-100.0, 100.0);
+    let whites2012 = ((NEAR_WHITE_TARGET - p995) * CLIP_POINT_SCALE).clamp(-100.0, 100.0);
 
     let p05 = hist.percentile(0.5) as f64;
-    let blacks2012 = (p05 * 200.0).clamp(-100.0, 100.0);
+    let blacks2012 = ((NEAR_BLACK_TARGET - p05) * CLIP_POINT_SCALE).clamp(-100.0, 100.0);
 
     Sliders {
         exposure2012,
@@ -88,7 +96,11 @@ mod tests {
         let clipped = Histogram::from_samples(samples);
         let s = estimate(&clipped);
         assert!(s.highlights2012 < 0.0);
-        assert!(s.whites2012 <= 0.0);
+        assert!(
+            s.whites2012 < 0.0,
+            "clipped whites should be strictly negative, got {}",
+            s.whites2012
+        );
     }
 
     #[test]
@@ -98,7 +110,28 @@ mod tests {
         let crushed = Histogram::from_samples(samples);
         let s = estimate(&crushed);
         assert!(s.shadows2012 > 0.0);
-        assert!(s.blacks2012 >= 0.0);
+        assert!(
+            s.blacks2012 > 0.0,
+            "crushed blacks should be strictly positive, got {}",
+            s.blacks2012
+        );
+    }
+
+    #[test]
+    fn unused_highlight_headroom_gets_positive_whites() {
+        // Nothing near white at all (max sample ~0.6) -- Whites should extend the range upward,
+        // the opposite direction from the clipped case above. A prior version of this formula had
+        // the sign backwards and this case would have caught it (that version returned ~0 here).
+        let headroom = uniform(0.2, 0.6, 200);
+        assert!(estimate(&headroom).whites2012 > 0.0);
+    }
+
+    #[test]
+    fn unused_shadow_headroom_gets_negative_blacks() {
+        // Nothing near black at all (min sample ~0.4) -- Blacks should deepen the range downward,
+        // the opposite direction from the crushed case above.
+        let headroom = uniform(0.4, 0.8, 200);
+        assert!(estimate(&headroom).blacks2012 < 0.0);
     }
 
     #[test]

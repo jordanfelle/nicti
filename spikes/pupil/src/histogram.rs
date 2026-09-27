@@ -35,7 +35,9 @@ impl Histogram {
         self.sorted.iter().sum::<f32>() / self.sorted.len() as f32
     }
 
-    /// Fraction of samples at or below `threshold` -- used to estimate shadow/black clipping mass.
+    /// Fraction of samples at or below `threshold` -- used to estimate shadow/black clipping
+    /// mass. A sample exactly at `threshold` counts here, not in `fraction_above` -- the two are
+    /// defined to always sum to `1.0`, never double-counting a boundary value.
     pub fn fraction_below(&self, threshold: f32) -> f64 {
         assert!(
             !self.sorted.is_empty(),
@@ -45,14 +47,11 @@ impl Histogram {
         count as f64 / self.sorted.len() as f64
     }
 
-    /// Fraction of samples at or above `threshold` -- used to estimate highlight clipping mass.
+    /// Fraction of samples strictly above `threshold` -- used to estimate highlight clipping
+    /// mass. `1.0 - fraction_below(threshold)`, so a sample exactly at `threshold` is never
+    /// counted by both this and `fraction_below`.
     pub fn fraction_above(&self, threshold: f32) -> f64 {
-        assert!(
-            !self.sorted.is_empty(),
-            "fraction_above of an empty histogram"
-        );
-        let below_count = self.sorted.partition_point(|&v| v < threshold);
-        (self.sorted.len() - below_count) as f64 / self.sorted.len() as f64
+        1.0 - self.fraction_below(threshold)
     }
 }
 
@@ -86,9 +85,20 @@ mod tests {
     }
 
     #[test]
-    fn fraction_above_counts_inclusively() {
+    fn fraction_above_excludes_the_threshold_value_itself() {
+        // A sample sits exactly at 1.0 -- it must count toward `fraction_below`, not
+        // `fraction_above`, or the two would sum to more than 1.0.
         let h = Histogram::from_samples(vec![0.0, 1.0, 1.0]);
-        assert!((h.fraction_above(1.0) - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(h.fraction_above(1.0), 0.0);
+        assert!((h.fraction_below(1.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fraction_below_and_above_never_double_count_a_boundary_value() {
+        // A sample sits exactly at the threshold (0.5) -- the old implementation counted it in
+        // both directions, summing to 2.0 instead of 1.0.
+        let h = Histogram::from_samples(vec![0.1, 0.5, 0.9]);
+        assert!((h.fraction_below(0.5) + h.fraction_above(0.5) - 1.0).abs() < 1e-9);
     }
 
     #[test]
