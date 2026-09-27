@@ -9,8 +9,11 @@ this script's graceful-ffmpeg-stop logic uses a .NET-Core-only ProcessStartInfo 
 null-references under Windows PowerShell 5.1.
 
 .PARAMETER Interaction
-switch | crop | zoom -- must match bench/lrc/hero-config.ini's [general] Interaction (drives the
-AHK script and hero-config.ini's own interaction-specific settings; independent of -Cold below).
+switch | crop | zoom | mixed -- must match bench/lrc/hero-config.ini's [general] Interaction
+(drives the AHK script and hero-config.ini's own interaction-specific settings; independent of
+-Cold below). For mixed (interaction D, #100), this script also passes hero.ahk an events-csv
+path (`$outDir\events.csv`) so it can write the per-flash kind/step attribution whisker's
+`analyze` reads -- see bench/whisker/README.md.
 
 .PARAMETER Config
 originals | smart-previews -- which LRC configuration this run is against (naming only; the
@@ -61,7 +64,7 @@ output isn't the one LRC is actually on. Leave unset unless the calibration dry-
 of the wrong screen.
 #>
 param(
-    [Parameter(Mandatory)] [ValidateSet("switch", "crop", "zoom")] [string]$Interaction,
+    [Parameter(Mandatory)] [ValidateSet("switch", "crop", "zoom", "mixed")] [string]$Interaction,
     [Parameter(Mandatory)] [ValidateSet("originals", "smart-previews")] [string]$Config,
     [switch]$Cold,
     [Parameter(Mandatory)] [string]$RunLabel,
@@ -249,7 +252,13 @@ if ($ffmpegProc.HasExited) {
 }
 
 Write-Host "Running hero.ahk ($Interaction) ..."
-$ahkProc = Start-Process -FilePath $AhkExe -ArgumentList @($AhkConfigPath) -PassThru
+$ahkArgs = @($AhkConfigPath)
+if ($Interaction -eq "mixed") {
+    # hero.ahk's mixed branch requires this as its 2nd arg -- see its own usage comment and
+    # bench/whisker/README.md's "Interaction D (mixed, #100)".
+    $ahkArgs += (Join-Path $outDir "events.csv")
+}
+$ahkProc = Start-Process -FilePath $AhkExe -ArgumentList $ahkArgs -PassThru
 if (-not $ahkProc.WaitForExit($DurationSeconds * 1000)) {
     Stop-Process -Id $ahkProc.Id -Force -ErrorAction SilentlyContinue
     $ffmpegProc.StandardInput.Write("q")
@@ -257,6 +266,17 @@ if (-not $ahkProc.WaitForExit($DurationSeconds * 1000)) {
     $ffmpegProc.WaitForExit(5000) | Out-Null
     if (-not $ffmpegProc.HasExited) { Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue }
     throw "hero.ahk did not exit within $DurationSeconds s (a blocking dialog? LRC window not found? a hung drag?) -- aborting. See $outDir for whatever capture exists."
+}
+if ($ahkProc.ExitCode -ne 0) {
+    # hero.ahk exits promptly (well inside DurationSeconds) on several real error paths -- a
+    # missing events-csv arg for -Interaction mixed, an unrecognized mixed sequence step, LRC's
+    # window not found. Without this check, WaitForExit above returns true immediately for those
+    # too, and the run would fall through to "stop capture" and be treated as complete.
+    $ffmpegProc.StandardInput.Write("q")
+    $ffmpegProc.StandardInput.Flush()
+    $ffmpegProc.WaitForExit(5000) | Out-Null
+    if (-not $ffmpegProc.HasExited) { Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue }
+    throw "hero.ahk exited with code $($ahkProc.ExitCode) -- aborting. See $outDir for whatever capture exists."
 }
 
 Start-Sleep -Seconds 1 # trailing settle buffer beyond hero.ahk's own trailing sleep

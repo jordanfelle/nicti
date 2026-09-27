@@ -1,7 +1,7 @@
 #Requires AutoHotkey v2.0
 ; hero.ahk - #43 hero-scenario input driver.
 ;
-; Drives one timed pass (switch, crop, or zoom) against a Lightroom Classic Develop-module
+; Drives one timed pass (switch, crop, zoom, or mixed) against a Lightroom Classic Develop-module
 ; session that's already set up per README.md (bench catalog loaded, 50-image hero set synced
 ; with the edit stack, first pass through the set already done to warm it). Draws a
 ; keypress-indicator square that flashes on every injected input so whisker's capture analysis
@@ -9,9 +9,14 @@
 ;
 ; Indicator-edge count per interaction (whisker's `events_detected`/`--edges`/`--window-edges`
 ; reference these positions): switch = 1 flash per keypress; crop/zoom = 3 flashes, [0] the
-; mode-entry keypress (r/Z), [1]/[2] the drag's start/end (see ScriptedDrag).
+; mode-entry keypress (r/Z), [1]/[2] the drag's start/end (see ScriptedDrag). mixed (interaction
+; D, #100) has a variable flash count driven by its `[mixed] Sequence` -- see EmitEdge/RunStep
+; below and `events.csv`'s per-flash kind/step attribution, which whisker's `analyze` reads
+; instead of relying on a fixed positional convention.
 ;
-; Usage: AutoHotkey64.exe hero.ahk <config.ini>
+; Usage: AutoHotkey64.exe hero.ahk <config.ini> [events-csv-path]
+; events-csv-path is only used (required) for Interaction=mixed -- see hero-scenario.md's
+; interaction D and bench/whisker's README ("Interaction D (mixed, #100)").
 ; See hero-config.ini.example for all keys.
 
 #SingleInstance Force
@@ -66,6 +71,25 @@ Flash(durationMs) {
 HideIndicator() {
     global whiteGui
     whiteGui.Hide()
+}
+
+; --- Interaction=mixed only (interaction D, #100): a running edge counter and the events.csv
+; file handle EmitEdge() appends to. Left unset (falsy) for switch/crop/zoom, which never call
+; EmitEdge -- their fixed 3-flash-per-capture shape lets whisker attribute edges positionally
+; instead. ---
+eventEdgeIndex := 0
+eventsCsvHandle := ""
+
+; Same edge timing as a plain Flash(), plus (for Interaction=mixed) one events.csv row so
+; whisker's `analyze` can tell this flash apart from any other -- a mixed sequence's flash layout
+; varies run to run (which step ran, how many times, in what order), so positional attribution
+; the way crop/zoom's fixed 3-flash shape uses doesn't work here.
+EmitEdge(kind, step, stepIndex) {
+    global eventEdgeIndex, eventsCsvHandle, indicatorFlashMs
+    if eventsCsvHandle
+        eventsCsvHandle.Write(eventEdgeIndex . "," . kind . "," . step . "," . stepIndex . "`n")
+    eventEdgeIndex += 1
+    Flash(indicatorFlashMs)
 }
 
 if !WinExist(lrcTitle) {
@@ -128,8 +152,94 @@ if interaction = "switch" {
     Sleep(settleWaitMs) ; captures the zoom-settled event before the pan drag begins
     ScriptedDrag(panStartX, panStartY, panEndX, panEndY, durationMs, steps)
     Send("z") ; back out of 1:1 zoom
+} else if interaction = "mixed" {
+    if A_Args.Length < 2 {
+        MsgBox "Interaction=mixed requires an events-csv path: hero.ahk hero-config.ini <events.csv>"
+        ExitApp 1
+    }
+    eventsCsvHandle := FileOpen(A_Args[2], "w")
+    if !eventsCsvHandle {
+        MsgBox "Could not open events-csv path for writing: " A_Args[2]
+        ExitApp 1
+    }
+    eventsCsvHandle.Write("edge,kind,step,step_index`n")
+
+    sequenceRaw := IniRead(configPath, "mixed", "Sequence", "switch,crop,auto-tone,switch,straighten")
+    repeats := Integer(IniRead(configPath, "mixed", "Repeats", "1"))
+    stepGapMs := Integer(IniRead(configPath, "mixed", "StepGapMs", "700"))
+    revertSettleMs := Integer(IniRead(configPath, "mixed", "RevertSettleMs", "500"))
+    straightenAutoX := Integer(IniRead(configPath, "mixed", "StraightenAutoX"))
+    straightenAutoY := Integer(IniRead(configPath, "mixed", "StraightenAutoY"))
+    ; The crop step (and the drag half of straighten's own overlay) reuses [crop]'s coordinates
+    ; rather than duplicating a second copy under [mixed] -- one calibration, not two.
+    cropStartX := Integer(IniRead(configPath, "crop", "StartX"))
+    cropStartY := Integer(IniRead(configPath, "crop", "StartY"))
+    cropEndX := Integer(IniRead(configPath, "crop", "EndX"))
+    cropEndY := Integer(IniRead(configPath, "crop", "EndY"))
+    cropDurationMs := Integer(IniRead(configPath, "crop", "DurationMs", "2000"))
+    cropSteps := Integer(IniRead(configPath, "crop", "Steps", "60"))
+
+    sequenceTokens := StrSplit(sequenceRaw, ",")
+    committedHistorySteps := 0
+    stepIndex := 0
+
+    ; Fixed cadence, not wait-for-settle: the very point of interaction D is to catch a step that
+    ; hasn't finished settling before the next one starts (a stale-cache regression), so waiting
+    ; for a full settle here would hide exactly what this interaction measures. whisker counts an
+    ; event whose settle search gets cut off by the next flash as "unsettled" rather than dropping
+    ; it -- see event_latencies_bounded's doc comment.
+    Loop repeats {
+        for token in sequenceTokens {
+            step := Trim(token)
+            if step = "switch" {
+                EmitEdge("switch", step, stepIndex)
+                Send("{Right}")
+            } else if step = "crop" {
+                EmitEdge("crop-enter", step, stepIndex)
+                Send("r")
+                Sleep(300) ; let crop mode's overlay settle before the drag itself is timed
+                ScriptedDrag(cropStartX, cropStartY, cropEndX, cropEndY, cropDurationMs, cropSteps, step, stepIndex)
+                Send("{Enter}")
+                committedHistorySteps += 1
+            } else if step = "auto-tone" {
+                EmitEdge("auto-tone", step, stepIndex)
+                Send("^u")
+                committedHistorySteps += 1
+            } else if step = "straighten" {
+                EmitEdge("crop-enter", step, stepIndex)
+                Send("r")
+                Sleep(300)
+                ; Flash before the click (not after) -- same convention every other event in this
+                ; file follows (EmitEdge/Flash immediately precedes the input it marks the t0 for),
+                ; so the settled-latency window starts at the click, not after it already happened.
+                EmitEdge("straighten", step, stepIndex)
+                Click(straightenAutoX, straightenAutoY) ; crop overlay's Auto-angle button
+                Send("{Enter}")
+                committedHistorySteps += 1
+            } else {
+                MsgBox "Unknown mixed sequence step: " step
+                eventsCsvHandle.Close() ; flush whatever rows were already written before exiting
+                ExitApp 1
+            }
+            stepIndex += 1
+            Sleep(stepGapMs)
+        }
+    }
+
+    EmitEdge("end", "end", stepIndex) ; trailing bounding flash, see hero-scenario.md interaction D
+    Sleep(revertSettleMs)
+    ; Undo every committed history step so every touched image returns to the synced edit stack --
+    ; same reasoning as crop's own RevertCropAfter, generalized across however many destructive
+    ; steps this sequence committed. UNVERIFIED whether LRC's Edit > Undo is catalog-global across
+    ; the images `switch` steps moved through, or only undoes history on whichever image is
+    ; currently selected when Ctrl+Z is sent -- the calibration dry-run (README.md) must confirm
+    ; every touched image actually reverts before trusting a real run; see that doc's checklist.
+    Loop committedHistorySteps
+        Send("^z")
+
+    eventsCsvHandle.Close()
 } else {
-    MsgBox "Unknown Interaction: " interaction " (expected switch, crop, or zoom)"
+    MsgBox "Unknown Interaction: " interaction " (expected switch, crop, zoom, or mixed)"
     ExitApp 1
 }
 
@@ -139,12 +249,17 @@ ExitApp 0
 ; Flashes the indicator at drag-start and drag-end (in addition to the mode-entry flash each
 ; caller already sent before this runs), so whisker's `drag --indicator-raw --window-edges 1,2`
 ; can derive the drag transition window from indicator edges instead of hand-picked frame numbers
-; -- see whisker::drag_window_from_edges.
-ScriptedDrag(x1, y1, x2, y2, durationMs, steps) {
+; -- see whisker::drag_window_from_edges. `mixedStep`/`mixedStepIndex`, when given (non-empty
+; step), route both flashes through EmitEdge (kinds "drag-start"/"drag-end") instead of a plain
+; Flash() -- only Interaction=mixed passes these; crop/zoom's own calls are unchanged.
+ScriptedDrag(x1, y1, x2, y2, durationMs, steps, mixedStep := "", mixedStepIndex := 0) {
     global indicatorFlashMs
     MouseMove(x1, y1, 0)
     Sleep(100)
-    Flash(indicatorFlashMs) ; edge: drag start
+    if mixedStep != ""
+        EmitEdge("drag-start", mixedStep, mixedStepIndex)
+    else
+        Flash(indicatorFlashMs) ; edge: drag start
     Click("down")
     Sleep(50)
     stepDelay := durationMs / steps
@@ -156,6 +271,9 @@ ScriptedDrag(x1, y1, x2, y2, durationMs, steps) {
         Sleep(stepDelay)
     }
     Sleep(50)
-    Flash(indicatorFlashMs) ; edge: drag end
+    if mixedStep != ""
+        EmitEdge("drag-end", mixedStep, mixedStepIndex)
+    else
+        Flash(indicatorFlashMs) ; edge: drag end
     Click("up")
 }

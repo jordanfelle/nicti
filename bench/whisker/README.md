@@ -36,6 +36,19 @@ and turns pixel-level frame differences into the latency/fps numbers `hero-scena
   to parse or analyze (bad `meta.json`, a missing indicator edge, mismatched frame counts) is
   listed in `skipped` rather than silently dropped from the pooled counts — always check that list
   before trusting a summary.
+- **Interaction D (`mixed`, #100)** — unlike switch/crop/zoom, a mixed capture's flash layout
+  isn't a fixed positional convention: `analyze` reads an `events.csv` sidecar (`edge,kind,step,
+  step_index`, one row per indicator flash, written by `hero.ahk`'s `mixed` interaction) to know
+  what each flash measures. Every settled-latency kind (`switch`, `crop-enter`, `auto-tone`,
+  `straighten`) is bounded to the *next* event's own flash (`event_latencies_bounded`) so one
+  event's settle search never bleeds into the next; a `drag-start`/`drag-end` pair pools an
+  interval the same way crop/zoom do. Each metric is pooled twice: `mixed/<kind>` (the aggregate)
+  and `mixed/<kind>@after-<predecessor-step>` (the step name immediately before this event's own
+  step occurrence, `"start"` for the sequence's first step) — the per-predecessor buckets are
+  what #100's cross-operation regression comparison reads. `events.csv`'s row count must equal the
+  capture's detected indicator-edge count, or the whole capture is skipped. A `settled_ms` sample
+  that's never found before the bound cuts it off is counted in `unsettled` (surfaced in
+  `summary.md`, not silently dropped) rather than reported as a bogus near-zero latency.
 
 ## Producing the raw inputs
 

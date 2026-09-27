@@ -41,7 +41,7 @@ Both configurations use the same throwaway catalog structure (`bench/lrc/setup.a
 
 ## Timed interactions
 
-All three run against the warm pass (every image in the set already visited once after sync — see
+All four run against the warm pass (every image in the set already visited once after sync — see
 Warm vs. cold below) unless noted. Each interaction is measured as 1 discarded warm-up run + 5
 measured runs, per `../benchmarks.md`.
 
@@ -83,14 +83,73 @@ screen coordinates, linear interpolation, injected at the capture's frame rate).
   the pan drag.
 - Same 5-image spread as interaction B.
 
+### D. Mixed sequence (#100)
+
+Interactions A-C each measure one operation type in isolation. A real edit session interleaves
+them (Import → White Balance → Auto Settings → Crop → Auto Straighten → Crop → Crop → Auto
+Settings, from a real LRC History panel), and the risk that isolation can't catch is a
+cross-operation regression — e.g. entering crop mode right after an auto-tone recompute costing
+more than entering it after a plain switch, because a per-stage cache invalidation from the
+auto-tone hasn't settled yet (exactly what #44/ADR-0044's render-graph design has to survive).
+Interaction D exercises that.
+
+**Step tokens** (each emits one or more indicator flashes, tagged in the capture's `events.csv`
+sidecar with a *kind* — see `bench/whisker/README.md`'s "Interaction D" section for how the
+analyzer reads it):
+
+| Step | Actions | Flash kinds → metric |
+|---|---|---|
+| `switch` | `{Right}` | `switch` → settled/first-change latency |
+| `crop` | `r`, scripted corner drag, `{Enter}` | `crop-enter` → settled latency; `drag-start`/`drag-end` → frame-interval |
+| `auto-tone` | `Ctrl+U` | `auto-tone` → settled latency |
+| `straighten` | `r`, click the crop overlay's Auto-angle button, `{Enter}` | `crop-enter` → settled latency; `straighten` → settled latency |
+
+Default sequence: `switch,crop,auto-tone,switch,straighten,switch,auto-tone,crop,straighten`,
+repeated 4 times (`hero-config.ini.example`'s `[mixed]` section) — chosen so every step type is
+exercised after at least two different predecessor steps (e.g. `crop` after both `switch` and
+`auto-tone`). A final `end` flash bounds the last real event's settle search.
+
+**Fixed step cadence, not wait-for-settle**: steps fire at a fixed gap (`StepGapMs`, default
+700ms, same rationale as interaction A's `InterKeyDelayMs`). Waiting for a full settle before the
+next step would hide the very regression this interaction exists to catch. An event whose settle
+search gets cut off by the next event's own flash (or the capture's end) is counted as
+**unsettled**, never silently dropped or reported as a bogus near-zero latency.
+
+**Revert**: every committed history step (each crop/straighten `Enter`, each auto-tone) is undone
+(`Ctrl+Z`, once per committed step) after the trailing `end` flash, so every run starts from the
+synced edit stack — same rationale as interaction B's `RevertCropAfter`. **Unverified**: whether
+LRC's Edit > Undo is catalog-global across every image a run's `switch` steps moved through, or
+only undoes history on whichever image is currently selected — the calibration dry-run (see
+`bench/lrc/README.md`) must confirm every touched image actually reverts before a real run's
+numbers are trusted.
+
+**Attribution**: `hero.ahk`'s mixed branch writes an `events.csv` sidecar (`edge,kind,step,
+step_index`, one row per flash) as it runs, so whisker attributes each indicator edge from what
+actually happened rather than a positional convention (unlike crop/zoom's fixed 3-flash shape).
+
+**Output buckets**: each metric is pooled twice — `mixed/<kind>` (the aggregate across every
+occurrence) and `mixed/<kind>@after-<predecessor-step>` (split by the step name immediately
+before this event's own step occurrence, `"start"` for the sequence's very first step). The
+per-predecessor buckets are the actual cross-operation comparison.
+
+**Regression rule**: flag any `(kind, predecessor)` bucket whose p95 exceeds the larger of (a)
+that same kind's own best-predecessor p95 within interaction D, or (b) the matching isolated
+pass's p95 where one exists (`switch` ↔ interaction A's settled latency, `drag` ↔ interaction B's
+interval) — by more than 20%, or more than one capture frame (16.7ms at 60fps), whichever margin
+is larger. The absolute p95 targets in `../benchmarks.md` still apply unchanged on top of this.
+
+**Nicti's own run of interaction D** (as opposed to this LRC baseline) additionally waits on #45
+(Tapetum, the render engine core) and #99 (Nicti's classic auto-tone) — this spec's LRC baseline
+doesn't, since LRC already has both Auto (`Ctrl+U`) and crop-overlay auto-straighten today.
+
 ## Warm vs. cold
 
 - **Warm (primary):** after the bulk edit + sync, step through the full 50-image set once
-  (untimed) so every image's stage output is cached, then run interactions A/B/C as the timed
+  (untimed) so every image's stage output is cached, then run interactions A/B/C/D as the timed
   passes. This is the hero scenario — matches "already-edited images" in #43's description.
 - **Cold (secondary):** per `../benchmarks.md`'s cold-run rules (reboot or `RAMMap.exe -Et` to
   flush the Windows standby list, LRC's own on-disk caches cleared), run interaction A once more
-  (switch only — cold crop/zoom on a never-visited image isn't part of the hero pain point).
+  (switch only — cold crop/zoom/mixed on a never-visited image isn't part of the hero pain point).
   Recorded for context, not judged against a target.
 
 ## Secondary metric: bulk-apply wall-clock

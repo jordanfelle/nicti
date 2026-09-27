@@ -88,8 +88,8 @@ pwsh .\run-hero-series.ps1 -Config originals -Interaction switch `
   -ResultsRoot <BENCH_ROOT>\bench-results\hero
 ```
 
-Repeat per config × interaction (`originals`/`smart-previews` × `switch`/`crop`/`zoom`), plus a
-cold switch pass with `-Cold` after reverting to a cold cache state (see
+Repeat per config × interaction (`originals`/`smart-previews` × `switch`/`crop`/`zoom`/`mixed`),
+plus a cold switch pass with `-Cold` after reverting to a cold cache state (see
 `docs/benchmarks.md`'s cold-run rules and `hero-scenario.md`'s Warm vs. cold section) — pass
 `-ResultsRoot <BENCH_ROOT>\bench-results\hero`, not the local-disk default, to keep multi-GB
 captures off the UNC session path. It stops on the first failed run rather than continuing past a
@@ -115,6 +115,26 @@ the first real run (and rechecked if the window moves/resizes):
    recording, and — after the run — the image in LRC is back to its pre-crop state (the
    `RevertCropAfter` undo). Do the same sanity pass once for `zoom` (also 3 edges: `Z` keypress +
    pan-start + pan-end).
+5. **`mixed` (interaction D, #100) dry-run**, in addition to the above: calibrate
+   `[mixed] StraightenAutoX/Y` against the crop overlay's Auto-angle button (same "open crop mode,
+   note the coordinate" method as step 3 above). Run one `mixed` pass, then confirm:
+   - The written `events.csv` (`$outDir\events.csv`) has exactly as many rows as
+     `whisker`'s detected indicator-edge count for that capture — a mismatch means a flash was
+     missed or double-counted and the capture must be re-run, not analyzed as-is.
+   - **Every image the sequence's `switch` steps moved through is back to the synced edit stack**
+     after the run's trailing undo pass — this is the one genuinely unverified assumption in
+     `hero.ahk`'s mixed branch (whether LRC's `Ctrl+Z` undoes catalog-globally across images, or
+     only on whichever image is currently selected). If it's per-image instead, `hero.ahk`'s undo
+     pass needs to navigate back to each touched image before undoing that image's own history —
+     don't trust a real run's numbers until this is confirmed either way.
+   - The `auto-tone`/`straighten` steps' own history entries actually appear in LRC's History
+     panel (not just the crop/switch ones) — a silently no-op `Ctrl+U` or a missed button click
+     would under-count `committedHistorySteps` and leave a real, un-reverted edit behind.
+   - **The Auto-angle button click actually lands on the button**: `straighten` is the first step
+     here to click a fixed coordinate outside a drag (`Click(StraightenAutoX, StraightenAutoY)`,
+     unlike every other click in this file, which is a drag-down/drag-up pair) — confirm visually
+     in the recording that it lands on the button and the straighten history entry appears, not
+     just that *some* flash fired at roughly the right time.
 
 ## Never automate on a machine you're actively using for something else
 

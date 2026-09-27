@@ -32,7 +32,10 @@ a new topic) and to this list — not inline here.
   area, warm/cold measurement rules, and the `ref-10k` frozen reference dataset (manifest at
   `docs/ref-10k-manifest.csv`). Finalized 2026-09-23 (#14). Every render-engine/perf-sensitive
   ticket (#43, #17, #40, etc.) measures against this.
-- **Hero-scenario benchmark (#43)**: spec at `docs/benchmarks/hero-scenario.md`. Tooling under
+- **Hero-scenario benchmark (#43)**: spec at `docs/benchmarks/hero-scenario.md`, including
+  interaction D's mixed-operation-sequence cross-regression check (#100) — see that doc's
+  "D. Mixed sequence" section and `bench/whisker/README.md`'s "Interaction D" section for how the
+  analyzer attributes flashes via a capture's `events.csv` sidecar. Tooling under
   `bench/`: `bench/select_hero_set.py` (deterministic 50-file working-set selection),
   `bench/lrc/` (AutoHotkey v2 driver + catalog setup for LRC — `hero.ahk` drives one timed pass,
   `navigate.ahk` positions the selection before a capture starts), `bench/run-hero.ps1` (one

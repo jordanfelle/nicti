@@ -296,6 +296,15 @@ fn main() -> anyhow::Result<()> {
                             "| {config} | {interaction} | effective_fps_p95 | — | — | {fps:.1} | — |\n"
                         ));
                     }
+                    // Only interaction D (`mixed/...`) ever pools this — a nonzero count is
+                    // itself a finding (an event whose settle search was cut off by the next
+                    // event's own flash), never noise to hide from the table.
+                    if stats.unsettled > 0 {
+                        md.push_str(&format!(
+                            "| {config} | {interaction} | unsettled | {} | — | — | — |\n",
+                            stats.unsettled
+                        ));
+                    }
                 }
             }
             std::fs::write(out_dir.join("summary.md"), &md)?;

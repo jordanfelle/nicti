@@ -143,6 +143,33 @@ pub fn event_latencies(
     (first_change, settled)
 }
 
+/// Same as [`event_latencies`], but the settled search is bounded to `[edge, end)` in
+/// transition-index space instead of running to the end of the capture — used by interaction D
+/// (#100), where several indicator-marked events share one capture and an earlier event's settle
+/// search must not run past the next event's own flash into transitions that belong to it. `end`
+/// is exclusive; pass `diffs.len()` for the capture's final event to get the original unbounded
+/// behavior. Reuses [`first_change_frame`]/[`settled_frame`] unchanged by slicing the search
+/// window first, so interactions A/B/C (which always call the unbounded [`event_latencies`])
+/// are unaffected.
+pub fn event_latencies_bounded(
+    diffs: &[f64],
+    edge: usize,
+    end: usize,
+    change_threshold: f64,
+    quiet_threshold: f64,
+    min_quiet_frames: usize,
+) -> (Option<usize>, Option<usize>) {
+    let end = end.min(diffs.len());
+    if edge >= end {
+        return (None, None);
+    }
+    let window = &diffs[..end];
+    let first_change = first_change_frame(window, edge, change_threshold);
+    let settled =
+        first_change.and_then(|fc| settled_frame(window, fc, quiet_threshold, min_quiet_frames));
+    (first_change, settled)
+}
+
 /// Frame indices in `[start, end)` where a visible change occurred — used for interaction B/C's
 /// drag frame-interval metric (how often the loupe actually repainted during a scripted drag).
 pub fn distinct_change_frames(
@@ -584,6 +611,45 @@ mod tests {
         let report = analyze_drag(&roi, 60.0, start, end, 0.05);
         // Two distinct repaints (150, then 210) inside the drag-start..drag-end window.
         assert_eq!(report.distinct_frames.len(), 2);
+    }
+
+    #[test]
+    fn event_latencies_bounded_matches_unbounded_when_end_covers_whole_capture() {
+        let s = switch_frames();
+        let diffs = s.diff_series();
+        let bounded = event_latencies_bounded(&diffs, 0, diffs.len(), 0.05, 0.02, 3);
+        let unbounded = event_latencies(&diffs, 0, 0.05, 0.02, 3);
+        assert_eq!(bounded, unbounded);
+        assert_eq!(bounded, (Some(1), Some(3)));
+    }
+
+    #[test]
+    fn event_latencies_bounded_reports_unsettled_when_next_event_cuts_off_the_search() {
+        // Same capture as `event_latencies_reports_settled_relative_to_first_change` (settles at
+        // frame 3), but `end` is cut off before the quiet run is fully visible -- must report
+        // None/"unsettled" instead of searching past `end` into whatever comes after it.
+        let s = switch_frames();
+        let diffs = s.diff_series();
+        let (first_change, settled) = event_latencies_bounded(&diffs, 0, 3, 0.05, 0.02, 3);
+        assert_eq!(first_change, Some(1));
+        assert_eq!(
+            settled, None,
+            "must not search past `end` into a later event's own transitions"
+        );
+    }
+
+    #[test]
+    fn event_latencies_bounded_edge_at_or_past_end_is_none() {
+        let s = switch_frames();
+        let diffs = s.diff_series();
+        assert_eq!(
+            event_latencies_bounded(&diffs, 3, 3, 0.05, 0.02, 3),
+            (None, None)
+        );
+        assert_eq!(
+            event_latencies_bounded(&diffs, 5, 3, 0.05, 0.02, 3),
+            (None, None)
+        );
     }
 
     #[test]
