@@ -136,17 +136,39 @@ pub fn cache_key(group: &MaskGroup, upstream_hash: blake3::Hash) -> blake3::Hash
     hasher.finalize()
 }
 
+/// A baked alpha `Field` a `lookup_baked_alpha` callback returned doesn't match `compose`'s own
+/// `width`/`height` -- e.g. the caller handed `compose` a still-preview-resolution alpha instead
+/// of refining it to full resolution first (`refine::guided_upsample`) before calling `compose`.
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error(
+    "baked alpha is {got_width}x{got_height}, but compose() expected {expected_width}x{expected_height} \
+     -- refine it to full resolution (e.g. via refine::guided_upsample) before calling compose()"
+)]
+pub struct AlphaResolutionMismatch {
+    pub expected_width: usize,
+    pub expected_height: usize,
+    pub got_width: usize,
+    pub got_height: usize,
+}
+
 /// Composes a `MaskGroup` into a single weight `Field`, given each `Ai` component's already-baked
 /// alpha (looked up by `ai_bake_key`, so a mask and its inverse share one lookup) and each
 /// `Geometry` component's own rasterized field (computed live -- see `geometry::Geometry::rasterize`).
 /// CPU reference the `gpu` module's WGSL compose kernel is checked against.
+///
+/// **Deliberately does not silently resample a mismatched alpha** -- ADR-0024 requires the
+/// preview-to-full-resolution path to go through a guided-filter refine (`refine.rs`), not an
+/// implicit resample buried inside compose; a caller that skips that step gets a clear
+/// [`AlphaResolutionMismatch`] error instead of `compose` guessing at what refinement to apply, or
+/// (before this fix) an out-of-bounds panic from indexing a shorter `weight.data` at `out.data`'s
+/// own length.
 pub fn compose(
     group: &MaskGroup,
     width: usize,
     height: usize,
     upstream_model_input_hash: blake3::Hash,
     lookup_baked_alpha: impl Fn(blake3::Hash) -> Option<Field>,
-) -> Field {
+) -> Result<Field, AlphaResolutionMismatch> {
     let mut out = Field::new(width, height, 0.0);
     for component in &group.components {
         let mut weight = match &component.source {
@@ -157,6 +179,14 @@ pub fn compose(
             }
             MaskSource::Geometry(geometry) => geometry.rasterize(width, height),
         };
+        if weight.width != width || weight.height != height {
+            return Err(AlphaResolutionMismatch {
+                expected_width: width,
+                expected_height: height,
+                got_width: weight.width,
+                got_height: weight.height,
+            });
+        }
         if component.invert {
             for v in &mut weight.data {
                 *v = 1.0 - *v;
@@ -183,7 +213,7 @@ pub fn compose(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -270,7 +300,8 @@ mod tests {
                 opacity: 1.0,
             }],
         };
-        let subject_field = compose(&group, 2, 1, upstream, |k| alphas.get(&k).cloned());
+        let subject_field = compose(&group, 2, 1, upstream, |k| alphas.get(&k).cloned())
+            .expect("baked alpha matches compose's own resolution");
 
         let inverse_group = MaskGroup {
             components: vec![MaskComponent {
@@ -280,7 +311,8 @@ mod tests {
                 opacity: 1.0,
             }],
         };
-        let inverse_field = compose(&inverse_group, 2, 1, upstream, |k| alphas.get(&k).cloned());
+        let inverse_field = compose(&inverse_group, 2, 1, upstream, |k| alphas.get(&k).cloned())
+            .expect("baked alpha matches compose's own resolution");
 
         for i in 0..2 {
             assert!((subject_field.data[i] + inverse_field.data[i] - 1.0).abs() < 1e-6);
@@ -306,7 +338,8 @@ mod tests {
             }],
         };
         let upstream = blake3::hash(b"unused");
-        let field = compose(&group, 4, 4, upstream, |_| panic!("must not be called"));
+        let field = compose(&group, 4, 4, upstream, |_| panic!("must not be called"))
+            .expect("geometry-only group never looks up a baked alpha");
         assert!(field.get(1, 1) > 0.0);
     }
 
@@ -344,7 +377,8 @@ mod tests {
             components: vec![base, subtract_all],
         };
         let upstream = blake3::hash(b"unused");
-        let field = compose(&group, 4, 4, upstream, |_| None);
+        let field = compose(&group, 4, 4, upstream, |_| None)
+            .expect("geometry-only group never looks up a baked alpha");
         assert!(field.data.iter().all(|&v| v.abs() < 1e-6));
     }
 
@@ -359,6 +393,39 @@ mod tests {
             seed: Some(1),
         };
         assert_eq!(recipe.model_version, "0.4.1");
+    }
+
+    #[test]
+    fn compose_rejects_a_mismatched_baked_alpha_resolution_instead_of_panicking() {
+        let upstream = blake3::hash(b"neutral-render-v1");
+        let recipe = subject_recipe();
+        let key = ai_bake_key(&MaskSource::Ai(recipe.clone()), upstream).unwrap();
+        // A still-preview-resolution alpha (4x3), while compose() is asked for the full 16x12
+        // resolution -- exactly the "caller skipped refine::guided_upsample" case this guards.
+        let mismatched = Field::new(4, 3, 1.0);
+        let mut alphas = HashMap::new();
+        alphas.insert(key, mismatched);
+
+        let group = MaskGroup {
+            components: vec![MaskComponent {
+                source: MaskSource::Ai(recipe),
+                op: Op::Add,
+                invert: false,
+                opacity: 1.0,
+            }],
+        };
+        let err = compose(&group, 16, 12, upstream, |k| alphas.get(&k).cloned()).expect_err(
+            "a resolution mismatch must be a clean Err, not an index-out-of-bounds panic",
+        );
+        assert_eq!(
+            err,
+            AlphaResolutionMismatch {
+                expected_width: 16,
+                expected_height: 12,
+                got_width: 4,
+                got_height: 3,
+            }
+        );
     }
 
     #[test]

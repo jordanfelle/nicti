@@ -53,6 +53,16 @@ fn ort_err(e: impl std::fmt::Display) -> SegmentError {
 /// Initializes the global `ort` environment exactly once -- same `OnceLock` pattern as
 /// `spikes/groom/src/ai.rs::ensure_ort_environment`, since the environment is process-global and
 /// `load-dynamic` requires this to run before any other `ort` API call.
+///
+/// **Known gap, shared with groom's identical implementation, deliberately not fixed here:**
+/// `commit()` returns `false` both when the environment failed to initialize *and* when a
+/// different caller already committed a (possibly compatible) environment first -- this code
+/// treats both as a permanent error, cached forever by the `OnceLock`. If groom's and this
+/// module's wrappers ever ran in the same process, whichever committed second would fail every
+/// subsequent call, even with a perfectly usable environment already active. Fixing this properly
+/// means deciding how to verify an already-committed environment's compatibility (EP support,
+/// dylib path) before accepting it, which isn't a contained change and would need to touch both
+/// modules together to stay consistent -- filed as issue #179 rather than fixed unilaterally here.
 fn ensure_ort_environment(dylib_path: &Path) -> Result<(), SegmentError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     let result = INIT.get_or_init(|| {
@@ -87,6 +97,25 @@ pub struct Alpha {
     pub data: Vec<f32>,
 }
 
+/// Converts an interleaved, row-major RGB buffer (`HWC`: `[r0,g0,b0, r1,g1,b1, ...]`, this
+/// module's own documented input convention) into planar `CHW` (`[r0,r1,...,rN, g0,g1,...,gN,
+/// b0,...,bN]`), the layout ONNX vision models -- including BiRefNet and MobileSAM's encoder --
+/// declare via a `[1, 3, H, W]` input shape. Feeding HWC data directly into a tensor *labeled*
+/// `[1, 3, H, W]` (as this module did before this fix) doesn't error -- the tensor's declared
+/// shape and its actual memory layout simply disagree, so a real model would silently read wrong
+/// channel/spatial values for any non-uniform image instead of failing loudly.
+fn rgb_hwc_to_chw(image: &[f32], width: usize, height: usize) -> Vec<f32> {
+    debug_assert_eq!(image.len(), width * height * 3);
+    let pixel_count = width * height;
+    let mut chw = vec![0.0f32; image.len()];
+    for i in 0..pixel_count {
+        chw[i] = image[i * 3];
+        chw[pixel_count + i] = image[i * 3 + 1];
+        chw[2 * pixel_count + i] = image[i * 3 + 2];
+    }
+    chw
+}
+
 /// Thin wrapper around a BiRefNet-style ONNX model: one RGB image in, one alpha mask out --
 /// unlike MobileSAM, this genuinely is single-input/single-output in the real model, no
 /// simplification needed on the input side. The output-identity caveat from groom's `ai.rs` still
@@ -114,8 +143,11 @@ impl BiRefNet {
     ) -> Result<Alpha, SegmentError> {
         debug_assert_eq!(image.len(), width * height * 3);
         let mut session = load_session(&self.model_path, &self.ort_dylib_path)?;
-        let tensor =
-            Tensor::from_array(([1usize, 3, height, width], image.to_vec())).map_err(ort_err)?;
+        let tensor = Tensor::from_array((
+            [1usize, 3, height, width],
+            rgb_hwc_to_chw(image, width, height),
+        ))
+        .map_err(ort_err)?;
         let outputs = session.run(ort::inputs![tensor]).map_err(ort_err)?;
         let (_shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         Ok(Alpha {
@@ -172,8 +204,11 @@ impl MobileSam {
     ) -> Result<Embedding, SegmentError> {
         debug_assert_eq!(image.len(), width * height * 3);
         let mut session = load_session(&self.encoder_path, &self.ort_dylib_path)?;
-        let tensor =
-            Tensor::from_array(([1usize, 3, height, width], image.to_vec())).map_err(ort_err)?;
+        let tensor = Tensor::from_array((
+            [1usize, 3, height, width],
+            rgb_hwc_to_chw(image, width, height),
+        ))
+        .map_err(ort_err)?;
         let outputs = session.run(ort::inputs![tensor]).map_err(ort_err)?;
         let (_shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         Ok(Embedding {
@@ -214,6 +249,15 @@ impl MobileSam {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_hwc_to_chw_deinterleaves_channels_correctly() {
+        // 2x1 image, HWC: pixel0=(1,2,3), pixel1=(4,5,6).
+        let hwc = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let chw = rgb_hwc_to_chw(&hwc, 2, 1);
+        // CHW: all-R, then all-G, then all-B.
+        assert_eq!(chw, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
 
     #[test]
     fn birefnet_reports_model_not_found_cleanly() {

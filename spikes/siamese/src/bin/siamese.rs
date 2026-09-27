@@ -159,7 +159,8 @@ fn run_compose_demo(out: &PathBuf) {
     };
     let composed = compose(&group, width, height, upstream, |k| {
         (k == key).then(|| baked.clone())
-    });
+    })
+    .expect("demo baked alpha matches the demo's own width/height");
 
     let inverse_group = MaskGroup {
         components: vec![MaskComponent {
@@ -171,7 +172,8 @@ fn run_compose_demo(out: &PathBuf) {
     };
     let inverse = compose(&inverse_group, width, height, upstream, |k| {
         (k == key).then(|| baked.clone())
-    });
+    })
+    .expect("demo baked alpha matches the demo's own width/height");
 
     let mut img = Image::new(width * 2, height, [0.0; 4]);
     for y in 0..height {
