@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 
+use crate::admission::Admission;
 use crate::cancel::{CancelToken, EditingGate};
 use crate::job::{ChunkedJob, JobId, JobSpec, Priority, Step};
 
@@ -22,15 +23,20 @@ pub struct Scheduler {
     foreground: VecDeque<Entry>,
     background: Vec<Entry>,
     editing_gate: EditingGate,
+    admission: Admission,
     next_id: u64,
 }
 
 impl Scheduler {
-    pub fn new(editing_gate: EditingGate) -> Self {
+    /// `vram_budget_bytes` is the total budget `admission::Admission` enforces against background
+    /// jobs (decision rule #5) -- foreground is never refused on VRAM grounds regardless of this
+    /// budget, see `admission.rs`'s own doc comment for why.
+    pub fn new(editing_gate: EditingGate, vram_budget_bytes: u64) -> Self {
         Scheduler {
             foreground: VecDeque::new(),
             background: Vec::new(),
             editing_gate,
+            admission: Admission::new(vram_budget_bytes),
             next_id: 0,
         }
     }
@@ -74,7 +80,10 @@ impl Scheduler {
     /// dropped (without running a chunk) rather than stepped -- checked at the chunk boundary,
     /// per `job.rs`'s own cooperative-cancellation contract. Background work is also withheld
     /// while [`EditingGate::is_editing`] is set (decision rule #4) -- an already-admitted
-    /// in-flight chunk isn't affected, since this method is only ever called between chunks.
+    /// in-flight chunk isn't affected, since this method is only ever called between chunks. A
+    /// background job whose declared VRAM exceeds the remaining budget is skipped for this pick
+    /// (not dropped -- it stays queued and may become admittable once another job releases its
+    /// own reservation), per `admission::Admission`'s own decision rule #5.
     pub fn run_next(&mut self) -> Option<(JobId, Step)> {
         while let Some(entry) = self.foreground.front() {
             if entry.cancel.is_cancelled() {
@@ -96,19 +105,23 @@ impl Scheduler {
             return None;
         }
 
-        while !self.background.is_empty() {
-            if self.background[0].cancel.is_cancelled() {
-                self.background.remove(0);
-                continue;
-            }
-            break;
-        }
-        if self.background.is_empty() {
-            return None;
-        }
-        let mut entry = self.background.remove(0);
-        let step = entry.job.step();
+        self.background.retain(|entry| !entry.cancel.is_cancelled());
+
+        let remaining = self.admission.remaining();
+        let pick = self
+            .background
+            .iter()
+            .position(|entry| entry.job.spec().vram_bytes <= remaining)?;
+        let mut entry = self.background.remove(pick);
         let id = entry.id;
+        let vram_bytes = entry.job.spec().vram_bytes;
+
+        self.admission
+            .admit(id, Priority::Background, vram_bytes)
+            .expect("checked against admission.remaining() above, must not be refused");
+        let step = entry.job.step();
+        self.admission.release(id);
+
         if step == Step::Yield {
             self.background.push(entry);
         }
@@ -152,17 +165,21 @@ mod tests {
     }
 
     fn spec(priority: Priority, image_index: usize) -> JobSpec {
+        spec_with_vram(priority, image_index, 0)
+    }
+
+    fn spec_with_vram(priority: Priority, image_index: usize, vram_bytes: u64) -> JobSpec {
         JobSpec {
             priority,
             kind: JobKind::Bake,
-            vram_bytes: 0,
+            vram_bytes,
             image_index: Some(image_index),
         }
     }
 
     #[test]
     fn foreground_always_dequeues_before_background() {
-        let mut scheduler = Scheduler::new(EditingGate::new());
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
         let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         scheduler.submit(Box::new(CountingJob {
@@ -186,7 +203,7 @@ mod tests {
 
     #[test]
     fn cancelled_job_is_dropped_at_next_chunk_boundary() {
-        let mut scheduler = Scheduler::new(EditingGate::new());
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
         let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (id, _cancel) = scheduler.submit(Box::new(CountingJob {
             spec: spec(Priority::Foreground, 0),
@@ -205,7 +222,7 @@ mod tests {
     #[test]
     fn editing_gate_withholds_background_work() {
         let gate = EditingGate::new();
-        let mut scheduler = Scheduler::new(gate.clone());
+        let mut scheduler = Scheduler::new(gate.clone(), u64::MAX);
         let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         scheduler.submit(Box::new(CountingJob {
             spec: spec(Priority::Background, 0),
@@ -225,7 +242,7 @@ mod tests {
 
     #[test]
     fn reprioritize_background_changes_next_pick() {
-        let mut scheduler = Scheduler::new(EditingGate::new());
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
         let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         scheduler.submit(Box::new(CountingJob {
             spec: spec(Priority::Background, 10),
@@ -248,7 +265,7 @@ mod tests {
 
     #[test]
     fn yielding_job_is_re_enqueued_not_dropped() {
-        let mut scheduler = Scheduler::new(EditingGate::new());
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
         let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         scheduler.submit(Box::new(CountingJob {
             spec: spec(Priority::Foreground, 0),
@@ -259,5 +276,43 @@ mod tests {
         assert_eq!(scheduler.run_next(), Some((JobId(0), Step::Yield)));
         assert_eq!(scheduler.run_next(), Some((JobId(0), Step::Done)));
         assert_eq!(*ticks.lock().unwrap(), vec!["fg", "fg"]);
+    }
+
+    #[test]
+    fn background_job_over_vram_budget_is_skipped_not_dropped() {
+        // Regression test for a real adversarial-review finding: `admission::Admission` was
+        // never wired into `Scheduler` at all, so decision rule #5 (a background job over budget
+        // is refused, not run) was only ever exercised in isolation by `admission.rs`'s own unit
+        // tests -- never through `run_next` itself.
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        scheduler.submit(Box::new(CountingJob {
+            spec: spec_with_vram(Priority::Background, 0, 1000), // over the 100-byte budget
+            remaining: 1,
+            ticks: ticks.clone(),
+            label: "too-big",
+        }));
+        assert_eq!(
+            scheduler.run_next(),
+            None,
+            "an over-budget background job must not run, but must stay queued"
+        );
+        assert!(ticks.lock().unwrap().is_empty());
+        assert_eq!(
+            scheduler.background_len(),
+            1,
+            "skipped for VRAM, not dropped -- still queued for a future pick"
+        );
+
+        // A second, smaller job that fits the budget is picked ahead of the still-too-big one.
+        scheduler.submit(Box::new(CountingJob {
+            spec: spec_with_vram(Priority::Background, 1, 50),
+            remaining: 1,
+            ticks: ticks.clone(),
+            label: "fits",
+        }));
+        assert!(scheduler.run_next().is_some());
+        assert_eq!(*ticks.lock().unwrap(), vec!["fits"]);
     }
 }

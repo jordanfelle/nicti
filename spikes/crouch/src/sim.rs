@@ -45,10 +45,20 @@ impl ChunkedBakeCost {
             out.push(self.decode);
         }
         let mut remaining = self.denoise_total;
-        while !remaining.is_zero() {
-            let chunk = remaining.min(self.denoise_chunk);
-            out.push(chunk);
-            remaining = remaining.saturating_sub(chunk);
+        // A zero-sized `denoise_chunk` with a nonzero `denoise_total` can't make progress through
+        // the loop below (`remaining.min(ZERO)` is always `ZERO`, so `remaining` never shrinks) --
+        // treat it as unchunked (one atomic chunk covering the whole total) rather than spinning
+        // forever. This is directly reachable from `bin/crouch.rs`'s `sim --denoise-chunk-ms 0`.
+        if self.denoise_chunk.is_zero() {
+            if !remaining.is_zero() {
+                out.push(remaining);
+            }
+        } else {
+            while !remaining.is_zero() {
+                let chunk = remaining.min(self.denoise_chunk);
+                out.push(chunk);
+                remaining = remaining.saturating_sub(chunk);
+            }
         }
         if !self.mask_bake.is_zero() {
             out.push(self.mask_bake);
@@ -63,9 +73,16 @@ impl ChunkedBakeCost {
     /// The largest single atomic unit this job ever runs without a foreground-preemption
     /// opportunity -- the real worst-case bound on foreground latency, per this module's own doc
     /// comment (decode and mask bake aren't chunked here, so whichever is larger than
-    /// `denoise_chunk` sets the bound).
+    /// `denoise_chunk` sets the bound). A zero `denoise_chunk` means denoise itself runs as one
+    /// unchunked unit (see `chunks()`'s own handling of this), so its atomic size is the whole
+    /// `denoise_total` in that case, not zero.
     pub fn worst_case_atomic_unit(&self) -> Duration {
-        self.decode.max(self.denoise_chunk).max(self.mask_bake)
+        let denoise_atomic = if self.denoise_chunk.is_zero() {
+            self.denoise_total
+        } else {
+            self.denoise_chunk
+        };
+        self.decode.max(denoise_atomic).max(self.mask_bake)
     }
 }
 
@@ -185,6 +202,21 @@ mod tests {
                 Duration::from_millis(10),
             ]
         );
+    }
+
+    #[test]
+    fn chunks_treats_a_zero_denoise_chunk_as_one_unchunked_unit_instead_of_looping_forever() {
+        // Regression test for a real adversarial-review finding: `remaining.min(ZERO)` is always
+        // ZERO, so the naive loop never shrinks `remaining` and spins forever -- directly
+        // reachable from `bin/crouch.rs`'s `sim --denoise-chunk-ms 0`.
+        let cost = ChunkedBakeCost {
+            decode: Duration::ZERO,
+            denoise_total: Duration::from_millis(100),
+            denoise_chunk: Duration::ZERO,
+            mask_bake: Duration::ZERO,
+        };
+        assert_eq!(cost.chunks(), vec![Duration::from_millis(100)]);
+        assert_eq!(cost.worst_case_atomic_unit(), Duration::from_millis(100));
     }
 
     #[test]

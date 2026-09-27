@@ -73,19 +73,55 @@ converted what could have looked like a flaky/uninteresting crash into the pass'
 argument for the scheduler's single-chunk-in-flight discipline: it isn't just about keeping
 latency low, an unthrottled background worker can genuinely take the whole GPU device down.
 
+## Three real bugs an adversarial review caught, all fixed before merge
+
+1. **An infinite loop in `sim::ChunkedBakeCost::chunks()`**: a zero `denoise_chunk` with a nonzero
+   `denoise_total` never made progress (`remaining.min(ZERO)` is always `ZERO`), directly reachable
+   from `bin/crouch.rs`'s `sim --denoise-chunk-ms 0`. Fixed by treating a zero chunk size as one
+   unchunked unit covering the whole total, matching `worst_case_atomic_unit`'s own accounting for
+   the same case. Caught by the review reasoning through the loop's own termination condition
+   against an adversarial input, not by running it (it doesn't self-terminate).
+2. **A measurement race in `gpu_contend::BusyKernel::dispatch_and_wait`**: it called
+   `wgpu::PollType::wait_indefinitely()`, which `wgpu-types`' own doc comment says waits for "the
+   most recent submission at the time of the poll," not necessarily the caller's own. Under
+   concurrent submission from a background contention thread sharing the same `wgpu::Device`/
+   `Queue`, that could be a *later* submission than this call's own, silently folding extra
+   background work into a measurement meant to be foreground-only -- worse at higher percentiles,
+   since a wider race window is rarer but costlier when it hits. Fixed by capturing each
+   submission's own `SubmissionIndex` (`Queue::submit`'s own return value, previously discarded)
+   and polling on exactly that. This materially changed the same-API contention numbers -- see
+   Raw numbers below for the corrected, re-measured table.
+3. **A doc/code mismatch on VRAM enforcement**: `job::JobSpec`'s own doc comment claimed VRAM was
+   checked before every background chunk, but `queue::Scheduler` never held or consulted an
+   `admission::Admission` anywhere -- decision rule #5 was only ever exercised by `admission.rs`'s
+   own isolated unit tests, never through the scheduler itself. Fixed by wiring `Admission` into
+   `Scheduler::run_next` (an over-budget background job is now skipped for the current pick, not
+   dropped, and re-tried once another job's reservation releases), with a new test
+   (`background_job_over_vram_budget_is_skipped_not_dropped`) exercising this through the
+   scheduler directly rather than `admission.rs` in isolation.
+
 ## Raw numbers
 
 See ADR-0054's own Measured results for the full tables; summarized here:
 
-- **Same-API (wgpu-vs-wgpu), throttled**: foreground alone ~0.3-0.5ms; under background chunks of
-  ~1/4/16/64ms nominal size, foreground measured 0.968/7.745/16.427/70.757ms p50 (1.386/8.087/
-  17.170/145.374ms p95) — tracks background chunk size roughly 1:1, worse at the tail.
+- **Same-API (wgpu-vs-wgpu), throttled**: foreground alone ~0.25ms; under background chunks of
+  ~1/4/16/64ms nominal size, foreground measured 0.929/3.807/15.826/67.576ms p50 (0.948/3.820/
+  15.845/68.161ms p95, close to p50 at every size) — tracks background chunk size roughly 1:1.
+  These are the corrected numbers after fixing a real `SubmissionIndex`-polling race an
+  adversarial review caught (see below) — the original, buggy run showed p95 values 1.1-2x their
+  own p50, which turned out to be substantially a measurement artifact, not real driver-level tail
+  variance.
 - **Same-API, unthrottled (stress test)**: ~1ms chunks alone produced p50=1948ms/p95=6260ms;
-  ~4ms and ~64ms chunks crashed the GPU device (Windows TDR, "Parent device is lost").
-- **Cross-API (ort/CUDA-vs-wgpu)**: foreground alone ~0.48-0.55ms; under 37 real SCUNet-256px CUDA
-  tile inferences over ~3s, foreground measured 0.481ms p50/0.616ms p95 — no measurable
-  contention. A CPU-EP sanity check completed only 5 tiles in the same window (~7x+ slower),
-  confirming the CUDA EP was genuinely active.
+  ~4ms and ~64ms chunks crashed the GPU device (Windows TDR, "Parent device is lost"). These
+  numbers predate the polling fix and weren't re-run afterward (to avoid deliberately
+  re-triggering a device crash) — the device-loss finding itself is unaffected either way, since
+  it's an independent driver-level failure, not a consequence of which submission a *different*
+  measurement waits on.
+- **Cross-API (ort/CUDA-vs-wgpu)**: foreground alone ~0.44-0.55ms; under 53 real SCUNet-256px CUDA
+  tile inferences over ~3s, foreground measured 0.440ms p50/0.486ms p95 — no measurable
+  contention. A CPU-EP sanity check completed only 5 tiles in the same window (~10x slower),
+  confirming the CUDA EP was genuinely active. This harness's two sides never share a
+  `wgpu::Device`, so it was never subject to the same-API polling race above.
 - **Sim**: `crouch sim` with no foreground demand reproduces ADR-0044's own hero-scenario numbers
   exactly (`first_image_ready=53.6s total_wall_time=2680s stale_at_arrival=50/50`), confirming the
   chunked model is a faithful extension. `worst_case_atomic_unit` with real ADR-0037/0040/0048
@@ -123,6 +159,6 @@ run directly via WSL interop (the built `.exe` invoked by its own path from WSL 
 `.bat` wrapper to prepend the pip-installed CUDA/cuDNN DLL directories to `PATH` before invoking
 the same `.exe`, since those DLLs live under the Windows user's pip venv, not a system directory).
 Picked up the real `NVIDIA GeForce RTX 5080 (Vulkan)` adapter, not lavapipe. `cargo test -p crouch`
-(31 tests, all passing) ran against lavapipe/llvmpipe software rendering in this sandbox's own
+(33 tests, all passing) ran against lavapipe/llvmpipe software rendering in this sandbox's own
 Linux side — correctness only, not timing, same as every other spike's own sandbox/reference-
 machine split.

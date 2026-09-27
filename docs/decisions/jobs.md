@@ -49,11 +49,12 @@ shaped its design.
   `busy.wgsl` compute kernel stands in for a real bake stage (ADR-0044's own persistent-kernel
   pattern, `spikes/loaf::gpu::LiveSuffixKernel`'s reasoning). Foreground latency under a
   background chunk running on the *same* `wgpu::Device`/`Queue` tracks the chunk's own duration
-  almost 1:1, worse at the tail: nominal 1/4/16/64ms background chunks measured 0.968/7.745/
-  16.427/70.757ms p50 foreground latency (1.386/8.087/17.170/145.374ms p95), against foreground-
-  alone baselines of 0.30-0.50ms. A background chunk needs to stay well under ~16ms for foreground
-  to reliably clear the 16.7ms slider-drag budget under contention — a real input to any future
-  same-API (wgpu-side) background chunk sizing decision.
+  almost 1:1: nominal 1/4/16/64ms background chunks measured 0.929/3.807/15.826/67.576ms p50
+  foreground latency (0.948/3.820/15.845/68.161ms p95, close to p50 at every size), against
+  foreground-alone baselines of ~0.25ms. A background chunk needs to stay well under ~16ms for
+  foreground to reliably clear the 16.7ms slider-drag budget under contention — a real input to
+  any future same-API (wgpu-side) background chunk sizing decision. (These are the corrected
+  numbers after fixing a real measurement race an adversarial review caught — see below.)
 - **Same-API contention, unthrottled (a deliberate stress test, not a design recommendation)**:
   fire-and-forget background submission (no wait between chunks) built an unbounded driver queue
   backlog — `wgpu::Device::poll(Wait)` drains everything already queued, and CPU submission for
@@ -71,12 +72,15 @@ shaped its design.
   tile inference via `ort`'s CUDA execution provider (`ort_contend::TileLoad`, trimmed from
   `spikes/rods::ai::TiledDenoiser`'s scaffolding — no tiling/blending logic needed, only "keep the
   session busy") ran concurrently with the foreground `wgpu`/Vulkan kernel with **no measurable
-  contention**: 37 real CUDA tile inferences (~45ms each per ADR-0040, roughly 1.6s of actual GPU
-  compute) completed over a ~3s measurement window while foreground measured 0.481ms p50/0.616ms
-  p95, indistinguishable from its own 0.478ms-alone baseline. A CPU execution-provider sanity check
-  completed only 5 tiles in the same wall-clock window (a 7x-plus difference), confirming the CUDA
+  contention**: 53 real CUDA tile inferences (~45ms each per ADR-0040, roughly 2.4s of actual GPU
+  compute) completed over a ~3s measurement window while foreground measured 0.440ms p50/0.486ms
+  p95, indistinguishable from its own 0.441ms-alone baseline. A CPU execution-provider sanity check
+  completed only 5 tiles in the same wall-clock window (a ~10x difference), confirming the CUDA
   EP was genuinely active rather than silently falling back to CPU (`ort` gives no cheaper way to
-  check this after the fact, per `spikes/rods`'s own note). Vulkan and CUDA evidently get scheduled
+  check this after the fact, per `spikes/rods`'s own note). Unlike the same-API case above, this
+  harness's two sides never share a `wgpu::Device`/`Queue` (the background side is a wholly
+  separate `ort`/CUDA session), so it was never subject to the same-API measurement race described
+  below. Vulkan and CUDA evidently get scheduled
   as independent contexts by this GPU's own hardware scheduler, unlike two `wgpu::Device` handles
   sharing one queue (which is itself a consequence of ADR-0016/0019/0050's own "one shared
   `wgpu::Device`" decision, not a property of GPUs in general). Practical consequence: chunk-size
@@ -84,6 +88,20 @@ shaped its design.
   (SCUNet denoise, and by the same reasoning likely the AI mask model) don't need chunking *for
   this specific reason* — though they may still need it for cancellation responsiveness and VRAM
   admission, independent of any contention concern.
+- **Adversarial-review findings, fixed before merge**: (1) `sim::ChunkedBakeCost::chunks()` never
+  terminated for a zero `denoise_chunk` with a nonzero `denoise_total` — fixed by treating that
+  case as one unchunked unit. (2) The same-API contention harness's `dispatch_and_wait` waited on
+  `wgpu::PollType::wait_indefinitely()`, which resolves against "the most recent submission at
+  poll time," not necessarily its own — under concurrent background submission this could fold
+  extra background work into a measurement meant to be foreground-only, worse at higher
+  percentiles (the same-API numbers above are the corrected, re-measured versions; the original
+  buggy run showed p95 values 1.1-2x their own p50). Fixed by capturing each submission's own
+  `SubmissionIndex` and polling on exactly that. (3) `job::JobSpec`'s own doc comment claimed VRAM
+  admission was enforced before every background chunk, but `queue::Scheduler` never actually held
+  or consulted an `Admission` — decision rule #5 was only ever validated by `admission.rs`'s own
+  isolated unit tests. Fixed by wiring `Admission` into `Scheduler` for real (an over-budget
+  background job is skipped for the current pick, not dropped, and re-tried once budget frees up),
+  with a new test exercising this through `Scheduler::run_next` itself.
 - **Tile-granular hero-scenario re-sim** (`sim.rs`, extends `spikes/loaf::sim` — copied, not
   depended-on): splits each image's bake into real chunks (atomic decode, N denoise tiles, atomic
   mask bake) and adds a periodic foreground demand serviceable only at a chunk boundary. With no

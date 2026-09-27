@@ -152,8 +152,10 @@ impl BusyKernel {
 
     /// Submits one dispatch, fire-and-forget (no wait) -- used by the background thread, which
     /// wants to keep the queue continuously busy with `iterations`-sized chunks rather than
-    /// synchronize after each one.
-    pub fn submit(&self, ctx: &GpuContext, iterations: u32) {
+    /// synchronize after each one. Returns the submission index so a caller that *does* want to
+    /// wait can target this exact submission (see [`BusyKernel::dispatch_and_wait`]'s own doc
+    /// comment on why that matters).
+    pub fn submit(&self, ctx: &GpuContext, iterations: u32) -> wgpu::SubmissionIndex {
         ctx.queue.write_buffer(
             &self.params_buf,
             0,
@@ -179,18 +181,31 @@ impl BusyKernel {
             let (wg_x, wg_y) = workgroup_grid(self.elements.div_ceil(WORKGROUP_SIZE));
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
-        ctx.queue.submit(Some(encoder.finish()));
+        ctx.queue.submit(Some(encoder.finish()))
     }
 
-    /// Submits one dispatch and blocks (host wall-clock, not GPU-timestamp) until it -- and
-    /// anything else already queued ahead of it on this device -- has completed. This is the
+    /// Submits one dispatch and blocks (host wall-clock, not GPU-timestamp) until *this specific
+    /// submission* -- and anything already queued ahead of it -- has completed. This is the
     /// number that matters for decision rule #1: a real UI thread waiting on this frame's render
-    /// experiences exactly this latency, whatever else is queued.
+    /// experiences exactly this latency, whatever else is queued ahead of it.
+    ///
+    /// **Must target this call's own submission index, not "whatever's most recent."**
+    /// `wgpu::PollType::Wait { submission_index: None, .. }` (what `wait_indefinitely()` builds)
+    /// waits for the most recent submission *at the time `poll` is called*, per its own doc
+    /// comment in `wgpu-types` -- under concurrent submission from another thread (a background
+    /// contention load), that submission can be a *later* one than this call's own, silently
+    /// folding extra background work into what's supposed to be a foreground-only measurement.
+    /// Caught in review: the first version of this method called `wait_indefinitely()` and
+    /// measured contention latency that included however much extra background work snuck in
+    /// during the race window between this call's own `submit` and its `poll`.
     pub fn dispatch_and_wait(&self, ctx: &GpuContext, iterations: u32) -> Duration {
         let start = Instant::now();
-        self.submit(ctx, iterations);
+        let index = self.submit(ctx, iterations);
         ctx.device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: None,
+            })
             .expect("device poll failed");
         start.elapsed()
     }

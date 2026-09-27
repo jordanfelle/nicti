@@ -21,26 +21,32 @@ Full reasoning/history: `docs/decisions/jobs.md`.
 - **Throttling**: hand-rolled counting-semaphore (`throttle::Throttle`) for CPU/disk-bound
   background work (Scruff's import scan is the first real client) — `governor` evaluated and
   rejected, it's rate-per-time shaped, not concurrency-limit shaped.
-- **VRAM admission** (`admission.rs`): a background job over the remaining budget is refused
-  outright, never queued to wait; foreground is never refused on VRAM grounds.
+- **VRAM admission** (`admission.rs`): a background job over the remaining budget is skipped for
+  the current pick (not dropped — re-tried once budget frees up), never run; foreground is never
+  refused on VRAM grounds. Wired into `queue::Scheduler::run_next` itself (an adversarial review
+  caught this only being enforced in `admission.rs`'s own isolated tests, not through the
+  scheduler — fixed, with a regression test through `run_next` directly).
 - **Telemetry** (`telemetry.rs`): `sysinfo` for CPU/RAM, DXGI (`IDXGIAdapter3::
   QueryVideoMemoryInfo`) for VRAM behind a `VramSource` trait — picked over `nvml-wrapper` for
   vendor neutrality (v1 target is Windows-only anyway). Windows-only code, unverified in this
   sandbox (no GPU adapter under WSL) — shared with #70's own bottleneck indicator.
 - **Same-API contention (real RTX 5080, throttled/realistic)**: foreground latency under a
-  background `wgpu` chunk tracks chunk size ~1:1 (worse at the tail) — 1/4/16/64ms nominal chunks
-  measured 0.97/7.7/16.4/70.8ms p50 foreground latency. Background chunks must stay well under
-  ~16ms to keep foreground inside the 16.7ms slider-drag budget under contention.
+  background `wgpu` chunk tracks chunk size ~1:1 — 1/4/16/64ms nominal chunks measured
+  0.93/3.8/15.8/67.6ms p50 foreground latency (p95 close to p50 at every size — corrected numbers
+  after fixing a real `SubmissionIndex` polling race an adversarial review caught, see
+  `docs/decisions/jobs.md`). Background chunks must stay well under ~16ms to keep foreground
+  inside the 16.7ms slider-drag budget under contention.
 - **Same-API contention, unthrottled (deliberate stress test)**: fire-and-forget background
   submission **crashed the GPU device** (Windows TDR, "Parent device is lost") at moderate chunk
   sizes — real evidence the scheduler's single-chunk-in-flight discipline is a correctness
   requirement, not tidiness. `gpu_contend::BackgroundLoad::start` (throttled) is the only mode a
   real caller should use; `start_unthrottled` exists only to reproduce this finding on demand.
-- **Cross-API contention (real RTX 5080)**: 37 real SCUNet-256px CUDA tile inferences (`ort`) ran
+- **Cross-API contention (real RTX 5080)**: 53 real SCUNet-256px CUDA tile inferences (`ort`) ran
   concurrently with the foreground `wgpu` kernel over ~3s with **no measurable contention**
-  (0.481ms p50 vs. ~0.48ms alone) — Vulkan and CUDA get scheduled as independent contexts on this
-  hardware, unlike two `wgpu::Device`s sharing one queue. CPU-EP sanity check (5 tiles vs. CUDA's
-  37 in the same window) confirms the CUDA EP was genuinely active.
+  (0.440ms p50 vs. ~0.44ms alone) — Vulkan and CUDA get scheduled as independent contexts on this
+  hardware, unlike two `wgpu::Device`s sharing one queue (this harness's two sides never share a
+  device, so it was never subject to the same-API polling race above). CPU-EP sanity check (5 tiles vs. CUDA's
+  53 in the same window) confirms the CUDA EP was genuinely active.
 - **Sim finding (`sim.rs`, tile-granular extension of `loaf::sim`)**: chunking denoise into tiles
   bounds only *its own* worst-case preemption latency — decode (~1.7s, ADR-0037) and mask bake
   (~1.0s, ADR-0048) aren't chunked in this model, so they set the real worst-case foreground-
@@ -65,6 +71,6 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `busy.wgsl` kernel + throttled/unthrottled `BackgroundLoad`, the wgpu-vs-wgpu contention
   harness), `ort_contend.rs` (`TileLoad`, trimmed from `spikes/rods::ai::TiledDenoiser`, the
   CUDA-vs-wgpu contention harness), `sim.rs` (tile-granular hero-scenario re-sim). `src/bin/
-  crouch.rs` exposes `bench-wgpu`/`bench-ort`/`sim` subcommands. 31 unit tests, real reference-
+  crouch.rs` exposes `bench-wgpu`/`bench-ort`/`sim` subcommands. 33 unit tests, real reference-
   hardware numbers for both contention cases (not just lavapipe correctness). See
   `docs/research/crouch-scheduler.md`.

@@ -106,6 +106,15 @@ else in this design for a `tokio`-flavored cancellation token to pay for itself.
 
 ### Real measurement: same-API (wgpu-vs-wgpu) contention
 
+**A methodology note on every "p95" figure in this ADR**: `nicti_prowl::perf::Protocol`'s default
+is 1 warmup + 5 measured runs, and its `percentile()` uses nearest-rank —
+`ceil(0.95 × 5) = 5`, i.e. the 5th of 5 sorted samples. Every "p95" reported here (and in ADR-0044,
+which uses the same protocol) is therefore literally the single worst of 5 runs, not a smoothed
+tail-percentile estimate over a larger sample. Read "p50/p95" in this ADR's own tables as
+"median/worst of 5," not as a claim about the underlying distribution's real 95th percentile —
+n=5 is thin for that, including for this ADR's own negative claim ("no measurable [cross-API]
+contention") below.
+
 **The realistic measurement uses a throttled background load** — one chunk submitted, waited on
 for its own completion, then the next — exactly matching the scheduler's own single-chunk-in-flight
 discipline (decision rule #3). A synthetic `busy.wgsl` compute kernel (tunable iteration count)
@@ -116,19 +125,34 @@ matching ADR-0044's own 0.375ms live-suffix figure):
 
 | Background chunk size (nominal) | Foreground alone | Foreground under contention (p50 / p95) |
 |---|---|---|
-| ~1ms | 0.30ms | 0.968ms / 1.386ms |
-| ~4ms | 0.50ms | 7.745ms / 8.087ms |
-| ~16ms | 0.44ms | 16.427ms / 17.170ms |
-| ~64ms | 0.34ms | 70.757ms / 145.374ms |
+| ~1ms | 0.25ms | 0.929ms / 0.948ms |
+| ~4ms | 0.23ms | 3.807ms / 3.820ms |
+| ~16ms | 0.26ms | 15.826ms / 15.845ms |
+| ~64ms | 0.26ms | 67.576ms / 68.161ms |
 
 **Decision rule #1's finding**: foreground latency under contention tracks background chunk size
-almost 1:1 (worse at the tail — the ~64ms case's p95 is over 2x its own chunk size, since a
-foreground request can land just after a chunk starts and must wait out nearly the whole thing).
-A background chunk must stay well under ~16ms for foreground to reliably clear the 16.7ms budget
-under contention — a real, load-bearing input to choosing SCUNet's tile size (ADR-0040 only
-measured 256px at 44.8ms; this ADR's own finding is that a 256px tile chunk would risk blowing the
-frame budget if a foreground dispatch lands during it, motivating a smaller tile size or explicit
-scheduling around `IS_EDITING`, not evaluated further here — see Consequences).
+almost 1:1, and — once a real measurement bug was fixed (see below) — p50 and p95 land close
+together at every chunk size, not a wide spread. A background chunk must stay well under ~16ms for
+foreground to reliably clear the 16.7ms budget under contention — a real, load-bearing input to
+choosing SCUNet's tile size (ADR-0040 only measured 256px at 44.8ms; this ADR's own finding is that
+a 256px tile chunk would risk blowing the frame budget if a foreground dispatch lands during it,
+motivating a smaller tile size or explicit scheduling around `IS_EDITING`, not evaluated further
+here — see Consequences).
+
+**A real measurement bug an adversarial review caught, and its effect on these numbers**: the
+first version of `dispatch_and_wait` called `wgpu::PollType::wait_indefinitely()`, which — per
+`wgpu-types`' own doc comment — waits for "the most recent submission at the time of the poll," not
+a specific one. Under concurrent submission from the background contention thread sharing the same
+`wgpu::Device`/`Queue`, a background chunk could land in the race window between foreground's own
+`submit()` and its `poll()`, silently folding extra background work into what was supposed to be a
+foreground-only measurement — worse at higher percentiles, since a wider race window is rarer but
+costlier when it hits. The original (buggy) run of this same table showed p95 figures 1.1-2x their
+own p50 (e.g. the ~64ms case: 70.757ms p50 / 145.374ms p95); after capturing each submission's own
+`SubmissionIndex` and polling on exactly that (`gpu_contend::BusyKernel::submit` now returns it,
+`dispatch_and_wait` waits on `PollType::Wait { submission_index: Some(index), .. }`), p50 and p95
+converged to within a few percent of each other at every chunk size, confirming the earlier spread
+was substantially a measurement artifact, not real driver-level tail variance. The table above is
+the corrected, re-measured version.
 
 **A second, deliberately pathological measurement — fire-and-forget, no backpressure at all —
 found a real GPU device crash.** Submitting background chunks as fast as the CPU can queue them
@@ -145,6 +169,10 @@ the scheduler's single-chunk-in-flight discipline (`queue::Scheduler::run_next` 
 chunk per call, `gpu_contend::BackgroundLoad::start`'s throttled default) is a correctness
 requirement, not tidiness — `BackgroundLoad::start_unthrottled` exists specifically to reproduce
 this finding on demand, gated behind an explicit CLI flag with a printed warning, never the default.
+(These unthrottled numbers predate the `SubmissionIndex` polling fix above; not re-run afterward to
+avoid deliberately re-triggering a GPU device crash. The fix doesn't change this finding either
+way — device loss is a real driver-level TDR reset, independent of which submission a *different*,
+throttled measurement waits on.)
 
 ### Real measurement: cross-API (ort/CUDA-vs-wgpu) contention
 
@@ -155,12 +183,16 @@ kernel as above, calibrated to ~0.4-0.5ms alone.
 
 | Background load | Foreground alone | Foreground under contention (p50 / p95) | Background chunks completed |
 |---|---|---|---|
-| CUDA EP, SCUNet 256px | 0.478ms | 0.481ms / 0.616ms | 37 (over ~3s) |
+| CUDA EP, SCUNet 256px | 0.441ms | 0.440ms / 0.486ms | 53 (over ~3s) |
 | CPU EP, SCUNet 256px (sanity check) | 0.553ms | 0.437ms / 0.469ms | 5 (over ~3s) |
 
+(Cross-API's foreground/background threads never share a `wgpu::Device`/`Queue` — the background
+side is an entirely separate `ort`/CUDA session — so the `SubmissionIndex` race described above
+never applied here in the first place; this table's numbers are unaffected by that fix.)
+
 **Decision rule #2's finding, and the pass's most surprising result: cross-API contention is
-effectively zero.** 37 real CUDA tile inferences (SCUNet-256px, ~45ms each per ADR-0040 — roughly
-1.6s of actual GPU-side CUDA compute) ran concurrently with the foreground Vulkan kernel across the
+effectively zero.** 53 real CUDA tile inferences (SCUNet-256px, ~45ms each per ADR-0040 — roughly
+2.4s of actual GPU-side CUDA compute) ran concurrently with the foreground Vulkan kernel across the
 measurement window, and foreground latency didn't move outside its own alone-measurement noise
 band. This is the opposite of the same-API case above: Vulkan and CUDA evidently get scheduled by
 the GPU's own hardware scheduler as independent contexts on this RTX 5080/driver combination, not
@@ -168,8 +200,8 @@ serialized behind one submission queue the way two `wgpu::Device` handles on the
 would be (worth noting: `wgpu`'s own single-shared-`Device` design, per ADR-0016/0019/0050, is what
 makes the same-API case above share one queue in the first place — this isn't a property of GPUs
 in general, it's a consequence of that earlier decision). **Sanity check**: the CPU execution
-provider completed only 5 tiles in the same wall-clock window the CUDA EP completed 37 in — a
-~7x-plus difference confirming the CUDA EP was genuinely active, not silently falling back to CPU
+provider completed only 5 tiles in the same wall-clock window the CUDA EP completed 53 in — a
+~10x difference confirming the CUDA EP was genuinely active, not silently falling back to CPU
 (`ort` gives no cheaper way to check this after the fact, per `spikes/rods`'s own note).
 
 **Practical consequence**: if Tapetum's AI mask bake and SCUNet denoise stages run through `ort`'s
@@ -221,6 +253,33 @@ Consequences).
 | Fire-and-forget background submission (no backpressure) | No | Confirmed on real hardware to crash the GPU device (Windows TDR) at moderate chunk sizes — kept only as an explicitly-flagged stress test, never the scheduler's real behavior |
 | Chunk decode/mask-bake to bound their own worst-case latency too | Not built this pass | Real engineering work (#37/#48 don't expose a streaming interface); flagged as a follow-up rather than solved speculatively here |
 
+## Adversarial review findings, fixed before merge
+
+A hostile review of this pass's own diff (per this repo's standing review convention) found three
+real issues, all fixed and covered by a regression test before this ADR's numbers were finalized:
+
+1. **A real infinite loop**: `sim::ChunkedBakeCost::chunks()` never terminated for a zero
+   `denoise_chunk` with a nonzero `denoise_total` (`remaining.min(ZERO)` never shrinks
+   `remaining`) — directly reachable from `bin/crouch.rs`'s `sim --denoise-chunk-ms 0`. Fixed by
+   treating a zero chunk size as one unchunked unit covering the whole total, matching
+   `worst_case_atomic_unit`'s own accounting.
+2. **A real measurement race in the same-API contention harness**: `dispatch_and_wait` waited on
+   `wgpu::PollType::wait_indefinitely()` (the *most recent* submission at poll time, not
+   necessarily this call's own), so a concurrent background submission could land in the race
+   window and inflate the measured foreground latency — worse at higher percentiles. Fixed by
+   capturing each submission's own `SubmissionIndex` and polling on exactly that. **This changed
+   the same-API contention table's numbers materially** — see that section's own methodology note
+   for the corrected, re-measured figures (the earlier p95 values were 1.1-2x their own p50; the
+   corrected ones land within a few percent). Cross-API (ort/CUDA) numbers were never affected —
+   that harness's two sides never share a `wgpu::Device`/`Queue`.
+3. **A doc/code mismatch**: `job::JobSpec`'s own doc comment claimed VRAM was "checked by
+   `admission::Admission` before a background job's next chunk is allowed to start," but
+   `queue::Scheduler` never actually held or consulted an `Admission` anywhere — decision rule #5
+   was validated only in `admission.rs`'s own isolated unit tests, never through the scheduler
+   itself. Fixed by wiring `Admission` into `Scheduler` (an over-budget background job is now
+   skipped for the current pick, not dropped, and re-tried once another job's reservation is
+   released), with a new test exercising this through `Scheduler::run_next` directly.
+
 ## Consequences
 
 - **Unblocks #55** (build: the real scheduler + activity panel) — `spikes/crouch`'s
@@ -253,7 +312,7 @@ Consequences).
 ## Spike: `spikes/crouch`
 
 Name: the motionless crouch before a pounce — the scheduler's idle/ready state, matching the
-Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 31 unit tests
+Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 33 unit tests
 (structural: priority ordering, cancellation, `IS_EDITING`, VRAM admission, throttling, sim chunk
 math), all passing in this sandbox (lavapipe/software GPU where GPU-dependent, real everywhere
 else). Modules: `job.rs` (`ChunkedJob`/`JobSpec`/`Step`), `queue.rs` (`Scheduler`, the two-class
