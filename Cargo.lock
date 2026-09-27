@@ -6767,6 +6767,8 @@ dependencies = [
 name = "nicti-decode"
 version = "0.0.0"
 dependencies = [
+ "cc",
+ "clap",
  "nicti-claw",
  "serde_json",
  "tempfile",
@@ -8687,10 +8689,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "blake3",
- "cc",
  "clap",
  "csv",
  "image",
+ "nicti-decode",
  "nicti-prowl",
  "notify",
  "rawler",

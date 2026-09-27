@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 
 use image::{ImageBuffer, Rgb};
 
-use crate::libraw_ffi::{DemosaicQuality, LibRawHandle};
 use crate::linear::LinearMeta;
+use nicti_decode::{DemosaicQuality, LibRawHandle};
 
 /// Writes `<stem>.<tag>.classic.tiff` + `.meta.json` into `out_dir` (created if missing).
 pub fn dump_classic(

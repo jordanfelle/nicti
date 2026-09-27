@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use image::{ImageBuffer, Luma};
 use serde::Serialize;
 
-use crate::libraw_ffi::LibRawHandle;
+use nicti_decode::LibRawHandle;
 
 #[derive(Debug, Serialize)]
 pub struct CfaMeta {

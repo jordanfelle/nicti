@@ -86,10 +86,18 @@ terse index: crate/spike → purpose → owning topic.
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39), `RenderStage`
   (Tapetum's future home, #44/#45), `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
-- **`crates/nicti-decode`** — `RawDecoder` extension point (#37/#40/#41, still unimplemented), plus
-  `embedded` (#22): the TIFF/EXIF/Nikon-MakerNote IFD walker promoted from `spikes/sniff`
-  (`Walker`/`FileSource`/`SliceSource`), used at import time to extract a NEF/DNG's embedded T0
-  grid preview without a RAW decode. Trimmed vs. `sniff`'s own copy: no cold/warm
+- **`crates/nicti-decode`** — `RawDecoder` extension point plus its real implementation (#41,
+  landed): `LibRawDecoder`/`decode_linear` (promoted from `spikes/retina`'s `libraw_ffi.rs` —
+  the FFI wrapper, `shim.cpp`/`shim.h`, `build.rs`, and the vendored `LibRaw` git submodule all
+  moved here) returns a `LinearFrame` (demosaiced-but-uncorrected linear camera RGB + the metadata
+  needed to color-correct it) — the input a `ColorProfile` implementation (#38/#42) needs to reach
+  a working-space image. `spikes/retina` still exists for #40's own comparison tooling
+  (`compare`/`sweep`/`scan`/`watch`/`dump-classic`/`dump-cfa`), now depending on this crate for its
+  decode step instead of vendoring its own copy. #40's demosaic/NR algorithm choice is
+  `spikes/rods`'s scope, not this crate's — `decode_linear` always uses LibRaw's own demosaic as a
+  placeholder. Also `embedded` (#22): the TIFF/EXIF/Nikon-MakerNote IFD walker promoted from
+  `spikes/sniff` (`Walker`/`FileSource`/`SliceSource`), used at import time to extract a NEF/DNG's
+  embedded T0 grid preview without a RAW decode. Trimmed vs. `sniff`'s own copy: no cold/warm
   `FILE_FLAG_NO_BUFFERING` benchmarking distinction, which stays `sniff`-only
 - **`crates/nicti-catalog`** — `CatalogStore` extension point plus its real implementation (#22,
   landed): `schema.rs` (SQLite migrations — `volume`/`root`/`asset`, ADR-0071; `preview`, ADR-0029;
@@ -107,7 +115,8 @@ terse index: crate/spike → purpose → owning topic.
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
 - **`spikes/den`** (#67+/ADR-0067/0102/0106/0103/0107/0066/0113/0115/0116, slated for deletion once #22 lands, see #123) →
   [`catalog-engine`](.claude/rules/catalog-engine/REFERENCE.md)
-- **`spikes/retina`** (#37/ADR-0037) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
+- **`spikes/retina`** (#37/ADR-0037; own decode step promoted to `crates/nicti-decode` in #41,
+  see that bullet above) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
 - **`spikes/homing`** (#71/ADR-0071, Windows-only, unverified in this sandbox) →
   [`volume-identity`](.claude/rules/volume-identity/REFERENCE.md)
 - **`spikes/calico`** (#38/ADR-0038) → [`color`](.claude/rules/color/REFERENCE.md)

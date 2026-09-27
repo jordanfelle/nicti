@@ -194,8 +194,8 @@ fn main() {
     if !vendor.join("libraw/libraw.h").exists() {
         panic!(
             "vendor/LibRaw submodule not checked out -- run `git submodule update --init \
-             spikes/retina/vendor/LibRaw` (retina is a spike crate, not part of the default \
-             build; see CLAUDE.md's CI path-gating note for retina)"
+             crates/nicti-decode/vendor/LibRaw` (nicti-decode is path-gated in CI, not part of \
+             the always-on jobs; see CLAUDE.md's CI path-gating note)"
         );
     }
 
