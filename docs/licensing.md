@@ -91,7 +91,7 @@ allowlist covered:
   non-SPDX-registered dual-commercial license texts, not something `cargo-deny` evaluates
   generically[^s5]. Scoped `[[licenses.exceptions]]` blocks were added per Slint-published crate
   name (not a global allow) since this is research-spike-only — **if Slint is ADR-0068's winner,
-  shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0018 amendment and explicit
+  shipping it in `nicti-tapetum`/a future `nicti-ui` needs its own ADR-0018 amendment and explicit
   sign-off**, the same standard already applied to LGPL-as-Cargo-dependency crates
   (rawler/lensfun-rs) above; this update does not grant that sign-off.
 - **Shared transitive dependency (all three candidates):** each toolkit's `image`-crate-based

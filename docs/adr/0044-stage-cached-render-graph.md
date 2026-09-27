@@ -33,7 +33,7 @@ left decisions open for Tapetum to make, rather than deciding them itself:
   segment, and reports SCUNet's real cost (50.9s/full-res image) as an input to Tapetum's own
   scheduling story, not something #40 itself schedules.
 
-Nothing in the repo executes a render stage or caches its output yet — `crates/nicti-render`
+Nothing in the repo executes a render stage or caches its output yet — `crates/nicti-tapetum`
 (`RenderStage: Module`) has no execution method, deliberately left to #16/#44/#45.
 
 **User decisions for this pass** (2026-09-27): measure on the real RTX 5080 reference machine
@@ -273,7 +273,7 @@ tiering rather than treating "baked" as a single all-or-nothing state per image.
 
 - **Unblocks #45** (render engine core): the stage order, cache-key scheme, and cache-tier design
   above are #45's starting point, not a re-derivation. #45 also owns: the real execution signature
-  `crates/nicti-render::RenderStage` still lacks, wiring a real GUI viewport (egui/pelt-egui's
+  `crates/nicti-tapetum::RenderStage` still lacks, wiring a real GUI viewport (egui/pelt-egui's
   `ViewportCallback` pattern, ADR-0068), and the actual screen-capture hero-scenario run
   (`docs/benchmarks/hero-scenario.md`'s own switch/crop/zoom protocol) this pass explicitly didn't
   attempt.

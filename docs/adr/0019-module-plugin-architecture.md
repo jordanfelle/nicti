@@ -189,7 +189,7 @@ loaded*, not how a render stage specifically executes.
   `spikes/sheath/src/registry.rs`) and the `DylibStage` C-ABI loader (generalizing
   `spikes/sheath/src/dylib.rs`) — the load-bearing crate this ADR is really about.
 - One crate per domain implementing `nicti-claw`'s traits: `nicti-cornea` (RAW decoders),
-  `nicti-calico` (camera color profiles), `nicti-iris` (lens-correction data), `nicti-render`
+  `nicti-calico` (camera color profiles), `nicti-iris` (lens-correction data), `nicti-tapetum`
   (render stages — later home of Tapetum, #44), `nicti-stalk` (AI model providers — the
   `ort`/`load-dynamic` boundary lives here), `nicti-preen` (exporters), `nicti-lair`
   (catalog store — #22's home).
@@ -251,7 +251,7 @@ Promoted from `spikes/sheath`/`spikes/dewclaw` to production crates in
 [#20](https://github.com/jordanfelle/nicti/issues/20): `crates/nicti-claw` (the `Module` trait,
 `Registry`/lazy-loading from §2, and the `DylibModule`/`VTable` C-ABI handshake from §4) and
 `crates/dewclaw` (the cdylib test fixture). §8's proposed crate layout was adopted as proposed —
-`nicti-cornea`, `nicti-calico`, `nicti-iris`, `nicti-render`, `nicti-stalk`, `nicti-preen`,
+`nicti-cornea`, `nicti-calico`, `nicti-iris`, `nicti-tapetum`, `nicti-stalk`, `nicti-preen`,
 `nicti-lair` each hold only their extension-point supertrait (`RawDecoder`, `ColorProfile`,
 `LensCorrection`, `RenderStage`, `ModelProvider`, `Exporter`, `CatalogStore`) plus a `Registry`
 type alias; no execution methods were added, since those belong to the tickets §7/§8 name. The

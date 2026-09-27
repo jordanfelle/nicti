@@ -16,11 +16,11 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   node's key changes iff its own params changed or any upstream node's did, proven both directions
   in `graph.rs`'s tests. Changing a live-suffix stage's params triggers **zero** bake dispatches, a
   structural graph property, not a timing coincidence. **Landed in #45** as
-  `crates/nicti-pawprint::chain` (the hashing) plus `crates/nicti-render::graph::RenderGraph` (the
+  `crates/nicti-pawprint::chain` (the hashing) plus `crates/nicti-tapetum::graph::RenderGraph` (the
   DAG), with `set_own_hash` added as the missing "update a node in place" API — the spike's own
   cache-key test had no way to change one node without reconstructing the whole graph.
 
-  **Also landed in #45**: the real `RenderStage` execution trait (`crates/nicti-render::renderer`)
+  **Also landed in #45**: the real `RenderStage` execution trait (`crates/nicti-tapetum::renderer`)
   and the graph-driven `Renderer` that dispatches against it. A `Baked` node's `BakedExec` runs
   only on a `cache::Tier` miss; every `Live`/`Geometry` node fuses into exactly one dispatch each,
   keyed by a composite hash chaining its constituent nodes' cache keys — literally the same
@@ -34,7 +34,7 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   plumbing this runs against — real wgpu, exercised against the lavapipe software adapter in CI.
 
   **Also landed in #45**: the concrete decode/live-suffix/geometry stages themselves
-  (`crates/nicti-render::{color,geometry,stages}`), wired to a real `nicti_cornea::LinearFrame`.
+  (`crates/nicti-tapetum::{color,geometry,stages}`), wired to a real `nicti_cornea::LinearFrame`.
   Decode uploads the frame's pixel data and runs a normalize pass (black/`cblack` subtraction,
   scale to ~[0,1]); demosaic/denoise/lens/heal are plain texture-copy passthroughs (LibRaw already
   demosaiced; denoise/lens/heal have no algorithm yet, #40/#39/#51); the live suffix fuses WB
@@ -52,7 +52,7 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   `size_of` closure, backs VRAM/RAM/disk with different budgets from the same eviction logic. A
   full-res (8280×5520) RGBA16F frame is ~349MB, a screen-res (3840-long-edge) frame is ~75MB — a
   resident N±2 screen-res window is under 2.5% of the reference machine's 16GB VRAM. **Landed in
-  #45** as `crates/nicti-render::cache::Tier<V>`, with the spike's own self-documented `O(n)`
+  #45** as `crates/nicti-tapetum::cache::Tier<V>`, with the spike's own self-documented `O(n)`
   linear-scan `touch` replaced by an `O(log n)` generation-counter `BTreeMap` (the eviction/budget
   semantics are unchanged; the disk-tier codec itself stayed with #190).
 - **Disk-tier compression**: zstd and lz4 both round-trip losslessly; a synthetic screen-res

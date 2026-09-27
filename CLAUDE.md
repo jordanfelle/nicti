@@ -91,7 +91,7 @@ terse index: crate/spike → purpose → owning topic.
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39),
   `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
-- **`crates/nicti-render`** — Tapetum's (#44/#45) stage-cached render graph, the real
+- **`crates/nicti-tapetum`** — Tapetum's (#44/#45) stage-cached render graph, the real
   `RenderStage` execution trait, and the concrete decode/live-suffix/geometry pipeline: a DAG of
   stage nodes with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted
   VRAM/RAM/disk cache tiers (`cache.rs`), nearest-to-cursor bake prioritization (`prefetch.rs`),
@@ -106,12 +106,11 @@ terse index: crate/spike → purpose → owning topic.
   skip when no `wgpu` adapter is available. Decode splits a full-res upload into row-strips
   (`stages::rows_per_strip`) to stay under a real adapter's `max_storage_buffer_binding_size`, and
   `tile.rs` (`TilePlanner`/`TiledRender`) tiles the output-side geometry pass for a full-res render
-  (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`. See
-  [`render-graph`](.claude/rules/render-graph/REFERENCE.md). **Not yet renamed to `nicti-tapetum`**
-  — deferred to whoever lands the rest of the #45 stack, to avoid rebasing onto a moving target;
-  see the naming-convention section above.
+  (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`, and renamed from
+  `nicti-render` to `nicti-tapetum` once the whole #45 stack merged, matching the naming-convention
+  section above. See [`render-graph`](.claude/rules/render-graph/REFERENCE.md).
 - **`crates/nicti-pawprint`** — the non-destructive `EditDocument`/`StageEntry` (ADR-0021), its
-  canonical-JSON + blake3 stage hashing (`canonical.rs`, feeding `nicti-render::graph`'s cache
+  canonical-JSON + blake3 stage hashing (`canonical.rs`, feeding `nicti-tapetum::graph`'s cache
   key), and append-only edit history with slider-drag compaction (`history.rs`) — promoted from
   `spikes/pawprint` (#21) and `spikes/loaf`'s DAG-generalized `hash::chain` (#44/#45). See
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
@@ -169,7 +168,7 @@ terse index: crate/spike → purpose → owning topic.
 - **`bench/knead`** (#45 PR4, workspace member) — real-NEF golden/perf harness for Tapetum, not a
   production crate; see [`render-graph`](.claude/rules/render-graph/REFERENCE.md). `spikes/loaf`
   (#44/ADR-0044), which this replaces the `bench` subcommand of, is deleted — its
-  `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` were already promoted into `crates/nicti-render`/
+  `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` were already promoted into `crates/nicti-tapetum`/
   `crates/nicti-pawprint`, see that same REFERENCE.md.
 
 The root placeholder binary crate (`src/main.rs`) still exists only so CI/lint tooling has

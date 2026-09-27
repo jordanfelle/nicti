@@ -8,7 +8,7 @@ description = "Real-NEF golden/perf harness for #45's render pipeline (feline; n
 
 [dependencies]
 nicti-cornea = { path = "../../crates/nicti-cornea", features = ["libraw"] }
-nicti-render = { path = "../../crates/nicti-render" }
+nicti-tapetum = { path = "../../crates/nicti-tapetum" }
 nicti-prowl = { path = "../../crates/nicti-prowl" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

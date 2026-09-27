@@ -205,7 +205,7 @@ and this spike doesn't isolate it.
 
 ## Consequences
 
-- **`nicti-render`** (Tapetum's future home, #45) owns a single shared `wgpu::Device`/`Queue` for
+- **`nicti-tapetum`** (Tapetum's future home, #45) owns a single shared `wgpu::Device`/`Queue` for
   both compute and display — one device avoids cross-device resource-sharing entirely.
 - **Backend selection defaults to Vulkan on Windows**, per the `SHADER_F16` finding above; the
   code should still request Dx12 as a fallback (already proven working for everything except f16)

@@ -267,7 +267,7 @@ research this sandbox can't execute directly:
 Feline name: groom, as in a cat grooming debris out of its coat — the removal half of
 "healing/removal." Not production code, same "don't build on top of it" status as
 `spikes/glint`/`spikes/pawprint`/`spikes/sniff` (see `CLAUDE.md`'s package-map note); expect it
-deleted once a future `nicti-render`-adjacent crate (or #51 directly) promotes the parts worth
+deleted once a future `nicti-tapetum`-adjacent crate (or #51 directly) promotes the parts worth
 keeping.
 
 - **`src/cpu_reference.rs`**: `Image`, `clone_stamp`, `poisson_jacobi_step`/`poisson_jacobi_cpu`,

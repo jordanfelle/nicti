@@ -20,7 +20,7 @@ static SHARED_GPU: OnceLock<Option<Arc<GpuContext>>> = OnceLock::new();
 ///
 /// **Regression fix (#45 PR4's adversarial review)**: before this, every GPU test module in this
 /// crate had its own private `test_gpu()` that called `GpuContext::new` fresh, per test. Once
-/// `tile.rs` added a real batch of new GPU tests, `cargo test -p nicti-render` at default (multi-
+/// `tile.rs` added a real batch of new GPU tests, `cargo test -p nicti-tapetum` at default (multi-
 /// threaded) parallelism started segfaulting (`SIGSEGV`) in this sandbox 3 of 5 runs -- reliably
 /// clean under `--test-threads=1`, confirming concurrent adapter/device requests were the trigger,
 /// not a logic bug. Sharing one device removes that concurrent-creation pressure entirely while
