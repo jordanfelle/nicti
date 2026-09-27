@@ -23,8 +23,10 @@
 //! judges pass/fail by the test process's exit status, not by what it printed before exiting.
 //! Build without running via `cargo test -p groom --test ort_cross_module --no-run`, then run the
 //! resulting binary directly (path printed by that command, under `target/debug/deps/`) with
-//! `--ignored --nocapture` -- the printed assertion output is the real pass/fail signal, not the
-//! process's exit status.
+//! `NICTI_TEST_ORT_DYLIB=<path-to-libonnxruntime.so> <binary-path> --ignored --nocapture` -- the
+//! env var must be set on that direct invocation too, since running the binary standalone skips
+//! whatever `cargo test`'s own harness would otherwise have inherited it from. The printed
+//! assertion output is the real pass/fail signal, not the process's exit status.
 
 #[test]
 #[ignore = "needs a real ONNX Runtime shared library on disk"]
