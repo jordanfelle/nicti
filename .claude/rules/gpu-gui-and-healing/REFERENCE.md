@@ -41,7 +41,9 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   wrappers prove only the loading/error-handling shape. LaMa's Places2 training-data license
   status is still unresolved (unreachable primary source); MI-GAN investigated as an alternative,
   not cleaner (same exposure). Proposed stage order for #44: after lens correction, before global
-  tone, in linear space.
+  tone, in linear space. **Model loading must follow ADR-0218**: offline inference by default, no
+  telemetry, no hosted API; weight fetch only as an explicit user-initiated + checksummed
+  download, never a silent auto-fetch.
   - **Gotcha (#97)**: this WSL sandbox has no NVIDIA Vulkan ICD registered at all — `wgpu` here
     only reaches the software `llvmpipe` adapter (88ms p50, not real hardware), even though
     `libcuda.so`/D3D12 interop libs under `/usr/lib/wsl/lib/` give real CUDA/D3D12 access.
@@ -63,7 +65,8 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   (ADR-0068's Hard-gate-1 early exit).
 - **`spikes/groom`** (#50/ADR-0050) — healing/removal research: CPU clone-stamp/Poisson-heal +
   auto-source-pick reference, a `wgpu` compute-shader Poisson twin proven correct against it,
-  `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox),
+  `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox,
+  and any real weight fetch must follow ADR-0218's user-initiated + checksummed download rule),
   crop/resize/feather compositing, and the `HealStage`/`Spot` edit-model representation with a
   pawprint-style `cache_key()`. See `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN
   licensing findings.

@@ -37,3 +37,11 @@ Covers the implementation-language decision, v1 platform/camera scope, the non-d
   measured, not assumed, in `crates/nicti-claw/tests/wasm_vs_native.rs` — never for a third-party
   render stage's per-pixel loop, which would need GPU shaders instead. **#20 landed the
   `nicti-claw` + per-domain crate layout** — see CLAUDE.md's Package map section.
+- **AI modules are local-only by default** — `docs/adr/0218-local-only-ai.md`: any `ModelProvider`
+  (`crates/nicti-stalk`) performing batch culling or edit-suggestion inference/training must not
+  telemetry or call a hosted API by default. Fetching model weights over the network is allowed
+  only as an explicit, checksum-verified user action, never a silent auto-fetch; once installed,
+  inference itself stays offline. A cloud-AI feature must be a separate, clearly distinct feature
+  behind a guided opt-in, not a settings toggle. Applies to third-party Claw modules too — #214's
+  manifest/consent/kill-switch research is the enforcement mechanism there. Feeds #49, #51, #53,
+  #34, #35, #36.

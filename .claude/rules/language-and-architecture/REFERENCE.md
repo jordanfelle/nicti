@@ -3,6 +3,7 @@ paths:
   - "crates/nicti-claw/**"
   - "crates/dewclaw/**"
   - "crates/nicti-pawprint/**"
+  - "crates/nicti-stalk/**"
   - "src/**"
   - "Cargo.toml"
 ---
