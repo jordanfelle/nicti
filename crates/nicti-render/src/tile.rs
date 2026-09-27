@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use crate::frame::{Extent, FrameTexture};
+use crate::frame::{read_frame, Extent, FrameTexture};
 use crate::geometry::Affine2D;
 use crate::gpu::GpuContext;
 use crate::renderer::GeometryExec;
@@ -229,84 +229,6 @@ fn compose_tile_transform(base: Affine2D, tile_origin: (f32, f32)) -> Affine2D {
         tx: base.a * ox + base.b * oy + base.tx,
         ty: base.c * ox + base.d * oy + base.ty,
     }
-}
-
-const BPP: u32 = 8; // Rgba16Float
-
-fn padded_bytes_per_row(width: u32) -> u32 {
-    let unpadded = width * BPP;
-    unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
-}
-
-/// Reads a `FrameTexture` back to row-major RGBA f32. Production code's own copy of
-/// `test_util::read_frame`'s technique (that module is `#[cfg(test)]`-only, so this real runtime
-/// path can't depend on it) -- same `COPY_BYTES_PER_ROW_ALIGNMENT` padding handling.
-fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
-    use half::f16;
-
-    let extent = frame.extent;
-    let unpadded_bpr = extent.width * BPP;
-    let padded_bpr = padded_bytes_per_row(extent.width);
-    let buffer_size = u64::from(padded_bpr) * u64::from(extent.height);
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("tile readback"),
-        size: buffer_size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("tile readback encoder"),
-        });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &frame.texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &staging,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bpr),
-                rows_per_image: Some(extent.height),
-            },
-        },
-        wgpu::Extent3d {
-            width: extent.width,
-            height: extent.height,
-            depth_or_array_layers: 1,
-        },
-    );
-    gpu.queue.submit(Some(encoder.finish()));
-
-    let slice = staging.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("device poll failed");
-    let raw = slice.get_mapped_range().expect("output buffer not mapped");
-
-    let mut out = Vec::with_capacity((extent.width * extent.height) as usize);
-    for y in 0..extent.height {
-        let row_start = (y * padded_bpr) as usize;
-        let row = &raw[row_start..row_start + unpadded_bpr as usize];
-        let u16s: &[u16] = bytemuck::cast_slice(row);
-        for px in u16s.as_chunks::<4>().0 {
-            out.push([
-                f16::from_bits(px[0]).to_f32(),
-                f16::from_bits(px[1]).to_f32(),
-                f16::from_bits(px[2]).to_f32(),
-                f16::from_bits(px[3]).to_f32(),
-            ]);
-        }
-    }
-    drop(raw);
-    staging.unmap();
-    out
 }
 
 impl<'a> TiledRender<'a> {
