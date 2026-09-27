@@ -6703,8 +6703,17 @@ dependencies = [
 name = "nicti-catalog"
 version = "0.0.0"
 dependencies = [
+ "blake3",
+ "kamadak-exif",
  "nicti-claw",
+ "nicti-decode",
+ "rusqlite",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unicode-normalization",
+ "walkdir",
 ]
 
 [[package]]
@@ -6730,6 +6739,8 @@ version = "0.0.0"
 dependencies = [
  "nicti-claw",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

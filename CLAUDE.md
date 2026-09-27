@@ -64,7 +64,9 @@ membrane (a cat's third eyelid), and that theme continues throughout. Examples a
 for planned subsystems: `Tapetum` (stage-cached render graph — the tapetum lucidum bounces light
 back through the retina for reuse, mapping to reusing baked stage output), `Claw` (on-demand
 module/plugin registry — claws stay sheathed until needed), `Pounce` (job scheduler with priority
-preemption), `Sniff` (embedded-JPEG fast preview path for culling).
+preemption), `Sniff` (embedded-JPEG fast preview path for culling), `Scruff` (import/ingest
+pipeline — the way a mother cat carries a kitten by the scruff of its neck is how a file gets
+moved into the catalog).
 
 ## Package map
 
@@ -79,11 +81,23 @@ terse index: crate/spike → purpose → owning topic.
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
-- **`crates/nicti-decode`/`nicti-color`/`nicti-lens`/`nicti-render`/`nicti-ai`/`nicti-export`/`nicti-catalog`**
+- **`crates/nicti-color`/`nicti-lens`/`nicti-render`/`nicti-ai`/`nicti-export`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
-  `RawDecoder` (#37/#40/#41), `ColorProfile` (#38/#42), `LensCorrection` (#39), `RenderStage`
-  (Tapetum's future home, #44/#45), `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57),
-  `CatalogStore` (#22's future home)
+  `ColorProfile` (#38/#42), `LensCorrection` (#39), `RenderStage`
+  (Tapetum's future home, #44/#45), `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
+- **`crates/nicti-decode`** — `RawDecoder` extension point (#37/#40/#41, still unimplemented), plus
+  `embedded` (#22): the TIFF/EXIF/Nikon-MakerNote IFD walker promoted from `spikes/sniff`
+  (`Walker`/`FileSource`/`SliceSource`), used at import time to extract a NEF/DNG's embedded T0
+  grid preview without a RAW decode. Trimmed vs. `sniff`'s own copy: no cold/warm
+  `FILE_FLAG_NO_BUFFERING` benchmarking distinction, which stays `sniff`-only
+- **`crates/nicti-catalog`** — `CatalogStore` extension point plus its real implementation (#22,
+  landed): `schema.rs` (SQLite migrations — `volume`/`root`/`asset`, ADR-0020; `preview`, ADR-0017;
+  `edit_variant`/`edit_history`, ADR-0002; trigger-maintained `facet_counts`, ADR-0011),
+  `sqlite.rs` (`SqliteCatalog`), and `scruff.rs` (the Scruff import/ingest pipeline: scan → stat →
+  partial-BLAKE3 fingerprint → EXIF → T0 preview extraction → upsert, one bad file recorded in
+  `IngestReport::failed` rather than aborting the run). Runs serially; Pounce integration is a
+  follow-up. See `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this
+  promotes.
 - **`spikes/pawprint`** (#21/ADR-0002) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0005) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0006) →

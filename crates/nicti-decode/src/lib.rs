@@ -5,6 +5,8 @@
 
 use nicti_claw::{Module, Registry};
 
+pub mod embedded;
+
 /// A RAW decoder backend. No decode method is defined here yet — that signature belongs to
 /// whichever of #37/#40/#41 settles it.
 pub trait RawDecoder: Module {}
