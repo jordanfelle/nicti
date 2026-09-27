@@ -47,6 +47,17 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
   white balance/color-matrix/gamma all disabled via LibRaw's own params, returning a `LinearFrame`
   (linear camera RGB + the metadata `spikes/calico`'s color pipeline needs) directly, no TIFF/JSON
   round-trip required for a production caller.
+  - **All of the above is gated behind a non-default `libraw` Cargo feature** (`LibRawDecoder`,
+    `LibRawHandle`, `DemosaicQuality`, and `build.rs`'s entire C++ compile step are `#[cfg]`-gated
+    on it, `cc`/`clap` are optional deps activated by it). `embedded` (below) is pure Rust and
+    always built — `nicti-catalog` depends on this crate for `embedded` alone with the feature
+    off, so it never needs `vendor/LibRaw` checked out or a C++ compiler. Discovered the hard way
+    on #41's own PR: a workspace `--exclude nicti-decode` on the always-on CI jobs doesn't actually
+    keep the C++ build out of them, since `nicti-catalog` (unexcluded) still pulls `nicti-decode`
+    in as a dependency and its `build.rs` used to run unconditionally — the feature gate is the
+    real fix; the CI `--exclude` is redundant belt-and-suspenders on top of it, not sufficient on
+    its own. `spikes/retina` and CI's own `decode-linux`/`decode-windows` job both request the
+    feature explicitly (`features = ["libraw"]` / `--all-features`).
 - **`spikes/retina`** (#37/ADR-0037's RAW decoder comparison, plus #40's own comparison tooling) —
   now a thin CLI depending on `crates/nicti-decode` for its decode step. Subcommands:
   `sweep`/`compare`/`diff` against rawler 0.8.0, `scan` for a manifest-free directory walk, `watch`

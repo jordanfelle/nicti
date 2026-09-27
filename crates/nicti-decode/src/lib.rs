@@ -10,10 +10,18 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use nicti_claw::{Module, Registry};
+#[cfg(feature = "libraw")]
 use serde_json::Value;
 
+// Gated behind the `libraw` feature (off by default): `LibRawHandle` calls into the vendored
+// LibRaw C++ archive `build.rs` compiles, and `nicti-catalog` depends on this crate for its
+// pure-Rust `embedded` module alone -- it must never need `vendor/LibRaw` checked out, a C++
+// compiler, or a link against `libretina_libraw.a` just to build. See build.rs's own doc comment
+// for the other half of this gate.
+#[cfg(feature = "libraw")]
 mod libraw_ffi;
 
+#[cfg(feature = "libraw")]
 pub use libraw_ffi::{
     DecodedMetadata, DemosaicQuality, LibRawError as FfiError, LibRawHandle, LinearMetadata,
 };
@@ -40,6 +48,7 @@ pub enum DecodeError {
         #[source]
         source: std::io::Error,
     },
+    #[cfg(feature = "libraw")]
     #[error("decoding {path:?}: {source}")]
     Decode {
         path: PathBuf,
@@ -100,8 +109,10 @@ pub struct LinearFrame {
 /// decode path (the missing-file I/O-error case is the only `decode_linear` test that exists).
 /// Treat the decode/demosaic/channel-drop path as re-verified-by-inspection, not re-tested, until
 /// it's actually run against a real file.
+#[cfg(feature = "libraw")]
 pub struct LibRawDecoder;
 
+#[cfg(feature = "libraw")]
 impl Module for LibRawDecoder {
     fn id(&self) -> &str {
         "nicti.decoder.libraw"
@@ -116,6 +127,7 @@ impl Module for LibRawDecoder {
     }
 }
 
+#[cfg(feature = "libraw")]
 impl RawDecoder for LibRawDecoder {
     fn decode_linear(&self, path: &Path) -> Result<LinearFrame, DecodeError> {
         let data = std::fs::read(path).map_err(|source| DecodeError::Io {
@@ -199,6 +211,7 @@ pub fn is_supported_raw(path: &Path) -> bool {
 mod tests {
     use super::*;
     use nicti_claw::Descriptor;
+    use serde_json::Value;
     use std::sync::Arc;
 
     struct Dummy;
@@ -249,6 +262,7 @@ mod tests {
         assert_eq!(resolved.id(), "nicti.decoder.dummy");
     }
 
+    #[cfg(feature = "libraw")]
     #[test]
     fn libraw_decoder_reports_module_identity() {
         let decoder = LibRawDecoder;
@@ -256,6 +270,7 @@ mod tests {
         assert_eq!(decoder.schema_version(), 1);
     }
 
+    #[cfg(feature = "libraw")]
     #[test]
     fn decode_linear_reports_io_error_for_missing_file() {
         let decoder = LibRawDecoder;

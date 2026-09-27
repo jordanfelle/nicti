@@ -95,7 +95,16 @@ terse index: crate/spike → purpose → owning topic.
   (`compare`/`sweep`/`scan`/`watch`/`dump-classic`/`dump-cfa`), now depending on this crate for its
   decode step instead of vendoring its own copy. #40's demosaic/NR algorithm choice is
   `spikes/rods`'s scope, not this crate's — `decode_linear` always uses LibRaw's own demosaic as a
-  placeholder. Also `embedded` (#22): the TIFF/EXIF/Nikon-MakerNote IFD walker promoted from
+  placeholder. **The LibRaw FFI/build.rs/submodule is entirely behind a non-default `libraw`
+  Cargo feature** (`LibRawDecoder`, `LibRawHandle`, and `build.rs`'s C++ compile all `#[cfg]`-gated
+  on it) — `nicti-catalog` depends on this crate for `embedded` alone with the feature off, so it
+  never needs `vendor/LibRaw` checked out or a C++ compiler; `spikes/retina` and the path-gated
+  `decode-linux`/`decode-windows` CI job both enable it explicitly. A CI-only `--exclude
+  nicti-decode` on the always-on clippy/test jobs is belt-and-suspenders on top of this, not the
+  actual mechanism — the feature gate is what actually keeps the C++ build off every PR that
+  doesn't touch it (a workspace `--exclude` alone doesn't stop a still-unexcluded dependent like
+  `nicti-catalog` from pulling the dependency's build script in anyway). Also `embedded` (#22): the
+  TIFF/EXIF/Nikon-MakerNote IFD walker promoted from
   `spikes/sniff` (`Walker`/`FileSource`/`SliceSource`), used at import time to extract a NEF/DNG's
   embedded T0 grid preview without a RAW decode. Trimmed vs. `sniff`'s own copy: no cold/warm
   `FILE_FLAG_NO_BUFFERING` benchmarking distinction, which stays `sniff`-only

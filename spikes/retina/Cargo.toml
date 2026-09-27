@@ -11,7 +11,7 @@ name = "retina"
 path = "src/main.rs"
 
 [dependencies]
-nicti-decode = { path = "../../crates/nicti-decode" }
+nicti-decode = { path = "../../crates/nicti-decode", features = ["libraw"] }
 nicti-prowl = { path = "../../crates/nicti-prowl" }
 rawler = "0.8"
 clap = { version = "4", features = ["derive"] }
