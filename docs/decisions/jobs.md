@@ -132,10 +132,23 @@ shaped its design.
   pip/winget, no NVIDIA developer login, same as #40's own note. `SCUNet-PSNR.onnx` was
   re-downloaded from `deepghs/image_restoration` (MIT, evaluate-only per `docs/licensing.md`'s
   existing row, not re-committed to the repo).
-- **Open follow-ups**: [#205](https://github.com/jordanfelle/nicti/issues/205) (measure a smaller
-  SCUNet tile size, 128px, if a same-API `wgpu` background chunk of similar duration to 256px is
-  ever introduced — ADR-0040 only measured 256px); [#206](https://github.com/jordanfelle/nicti/issues/206)
-  (decode/mask-bake chunking, or an explicit multi-lane concurrency model — CPU decode running
-  independent of the GPU/`ort` worker — to bound their own worst-case foreground-preemption
-  latency) — neither solved this pass, both genuine gaps in scope (#37 has no streaming decode
-  interface yet).
+- **[#205](https://github.com/jordanfelle/nicti/issues/205), measured**: a smaller 128px SCUNet
+  tile does *not* clear the same-API contention budget either, despite being the genuinely faster
+  tile. `bench-tile`'s isolated per-tile timing (no wgpu contention, just the chunk's own cost):
+  128px p50=33.3ms/p95=45.1ms, 256px p50=37.0ms/p95=51.5ms — 128px wins on both metrics, not the
+  ~4x gap a naive per-pixel extrapolation would suggest, because fixed per-call overhead (kernel
+  launch, H2D/D2H, ONNX Runtime dispatch) dominates at 128px, not the tile's own compute — but its
+  p95 (45.1ms) is still far past the ~16ms budget, so the per-call win doesn't matter for this
+  question. Separately, since 128px also needs 5.4x more tiles to cover a 6064×4040 frame at a
+  fixed 32px overlap (2646 vs. 486), its *estimated* whole-frame cost is actually ~4.9x worse
+  (~88.1s vs. ~18.0s) — two different measurements, two different verdicts: faster per call, worse
+  in total. CPU-EP sanity check at 128px (186.9ms, ~5.6x slower than CUDA) confirms CUDA was
+  genuinely active, though that speedup is itself far below ADR-0040's own ~36x at 256px — same
+  fixed-overhead effect. Moot in practice either way, since this ADR's own cross-API finding
+  already found SCUNet's real CUDA path has no contention cost — this only matters for a
+  hypothetical future same-API `wgpu` background chunk. See `docs/adr/0054`'s own "Follow-up
+  measurement (#205)" section.
+- **Open follow-up**: [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake
+  chunking, or an explicit multi-lane concurrency model — CPU decode running independent of the
+  GPU/`ort` worker — to bound their own worst-case foreground-preemption latency) — not solved
+  this pass, a genuine gap in scope (#37 has no streaming decode interface yet).

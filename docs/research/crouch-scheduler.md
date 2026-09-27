@@ -129,6 +129,64 @@ See ADR-0054's own Measured results for the full tables; summarized here:
   aren't chunked in this model, so they (not the tile-chunked denoise) set the real worst-case
   foreground-preemption bound.
 
+## Follow-up pass (#205): SCUNet 128px tile timing
+
+Added `bench-tile` to `src/bin/crouch.rs`: isolated per-tile SCUNet timing (`ort_contend::TileLoad`,
+no wgpu contention involved), plus `ort_contend::tiles_for_frame` — a pure helper mirroring
+`rods::ai::TiledDenoiser::denoise`'s own stride/edge-clamp loop, to turn a per-tile timing into an
+estimated whole-frame cost at a given tile size/overlap.
+
+**Environment check**: the venv (`C:\Users\hyper\crouch-ort-venv`) and `SCUNet-PSNR.onnx` from this
+ADR's original pass were still present — no reinstall needed this time (checked via `find` for
+`onnxruntime*.dll`/`*.onnx` under the Windows profile before assuming so, same as the original
+pass's own discipline). Reused the existing `run-crouch-ort.bat` pattern, pointed at this
+worktree's own build output (`run-crouch-205.bat`, since the original `.bat` hardcoded the old
+`nicti-wt-54-pounce` worktree path).
+
+**Commands** (via `\\wsl.localhost\...\crouch.exe`, invoked through `cmd.exe /c` since a `.bat`
+needs a real Windows shell, not plain WSL-interop exec):
+
+```
+cargo build --release --target x86_64-pc-windows-gnu -p crouch --bin crouch
+
+run-crouch-205.bat bench-tile --model-path C:\Users\hyper\crouch-ort-venv\SCUNet-PSNR.onnx \
+  --ort-dylib-path C:\Users\hyper\crouch-ort-venv\Lib\site-packages\onnxruntime\capi\onnxruntime.dll \
+  --ep cuda --tile-size 128 --tile-size 256 --out-dir C:\Users\hyper\crouch-ort-venv\bench-results-205
+
+run-crouch-205.bat bench-tile --model-path C:\Users\hyper\crouch-ort-venv\SCUNet-PSNR.onnx \
+  --ort-dylib-path C:\Users\hyper\crouch-ort-venv\Lib\site-packages\onnxruntime\capi\onnxruntime.dll \
+  --ep cpu --tile-size 128 --warmup 1 --measured 5 --out-dir C:\Users\hyper\crouch-ort-venv\bench-results-205
+```
+
+**Raw output**:
+
+```
+crouch-tile-128px-Cuda: p50=33.299ms p95=45.119ms max=57.432ms
+  tile=128px overlap=32 ep=Cuda: 2646 tiles/frame (6064x4040) -> estimated 88110ms/frame -- DOES NOT CLEAR
+crouch-tile-256px-Cuda: p50=37.044ms p95=51.534ms max=63.003ms
+  tile=256px overlap=32 ep=Cuda: 486 tiles/frame (6064x4040) -> estimated 18003ms/frame -- DOES NOT CLEAR
+crouch-tile-128px-Cpu:  p50=186.852ms p95=198.314ms max=198.314ms
+  tile=128px overlap=32 ep=Cpu: 2646 tiles/frame (6064x4040) -> estimated 494411ms/frame -- DOES NOT CLEAR
+```
+
+Hardware: NVIDIA GeForce RTX 5080, driver 616.56 (recorded by hand — `HardwareIdentity` doesn't
+capture GPU/driver, same caveat this ADR's own tables already note).
+
+**Reading these numbers**: 128px is genuinely faster per call than 256px on both p50 and p95
+(33.3ms vs. 37.0ms, 45.1ms vs. 51.5ms) rather than roughly a quarter of 256px's cost, because
+per-call overhead (kernel launch, H2D/D2H, ONNX Runtime session dispatch) is largely fixed
+regardless of tile size, and dominates at this scale — but that per-tile win still isn't enough to
+clear the ~16ms same-API budget (128px's p95, 45.1ms, is still far past it). Separately, since
+128px also needs 5.4x more tiles to cover the same 6064×4040 frame at a fixed 32px overlap (2646
+vs. 486), its estimated whole-frame cost is ~4.9x *worse* (~88.1s vs. ~18.0s) — two different
+measurements pointing opposite ways: faster per call, but worse in total because it needs so many
+more calls. The 128px CPU-EP sanity run
+confirms CUDA was genuinely active (33.3ms vs. 186.9ms, ~5.6x — comfortably past
+`suspiciously_close_to_cpu_speed`'s ~2x fallback-detection floor), but that ~5.6x speedup is itself
+far below ADR-0040's own ~36x at 256px — the same fixed-overhead effect eating a
+proportionally larger share of an already-small GPU number. See ADR-0054's own "Follow-up
+measurement (#205)" section for the decision-rule verdict and what this means for Pounce's design.
+
 ## What this means for #54's own design
 
 The two contention measurements point in different directions for the same design question ("does

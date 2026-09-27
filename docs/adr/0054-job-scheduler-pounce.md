@@ -215,6 +215,60 @@ day run in the background), but the CUDA-side bake stages don't need to be chunk
 reason* at all — though they may still need chunking for cancellation responsiveness (decision
 rule #3/#4) and for VRAM admission (decision rule #5), independent of any contention concern.
 
+### Follow-up measurement (#205): SCUNet 128px tile CUDA timing
+
+This ADR's own same-API contention finding above only measured SCUNet at the one tile size
+ADR-0040 happened to use (256px, 44.8ms). #205 asked whether a 128px tile clears the ~16ms
+same-API budget with real headroom, in case a same-API `wgpu` background chunk of comparable
+duration to a SCUNet tile is ever introduced (the cross-API case above already found CUDA-vs-wgpu
+contention itself isn't the constraint, so this only matters for a hypothetical future *wgpu*-side
+background chunk of similar cost).
+
+**Decision rule (stated before measuring)**: isolated 128px SCUNet-PSNR CUDA tile p95 vs. the
+~16ms same-API budget — clears with headroom at ≤12ms, marginal at 12-16ms, doesn't clear above
+16ms. `spikes/crouch`'s new `bench-tile` subcommand (`ort_contend::TileLoad`, the same isolated
+per-chunk harness as the cross-API measurement above, no wgpu contention involved — this only
+measures the chunk's own cost) with a larger sample (5 warmup + 50 measured, vs. this ADR's own
+n=5 elsewhere, since a ~30-40ms measurement needs more than 5 samples to trust a p95 claim).
+
+**Real RTX 5080 results**:
+
+| Tile size | p50 | p95 | max | Tiles/frame (6064×4040, 32px overlap) | Estimated frame total | Verdict |
+|---|---|---|---|---|---|---|
+| 128px | 33.299ms | 45.119ms | 57.432ms | 2646 | ~88.1s | **DOES NOT CLEAR** |
+| 256px | 37.044ms | 51.534ms | 63.003ms | 486 | ~18.0s | **DOES NOT CLEAR** |
+| 128px, CPU EP (sanity) | 186.852ms | 198.314ms | 198.314ms | 2646 | ~494.4s | (fallback check only) |
+
+**Finding: 128px does not clear the budget either, despite being the faster tile.** 128px is
+genuinely faster per call than 256px on both metrics that matter for the same-API budget check
+(p50 33.3ms vs. 37.0ms, p95 45.1ms vs. 51.5ms) — real evidence per-call overhead (kernel launch,
+H2D/D2H transfer, ONNX Runtime session dispatch) dominates at this scale, not the tile's own
+window-attention compute (cutting tile side length in half doesn't come close to halving wall
+time: 33.3ms is ~90% of 37.0ms, not ~25%). This ADR's own re-baseline of 256px (37.0ms) is also in
+the same range as ADR-0040's original 44.8ms — same order of magnitude on the same hardware, small
+variance expected between passes. **But 128px still doesn't clear the budget on its own terms**
+(p95 45.1ms is far past even the loose 16.7ms slider-drag budget, let alone this ticket's own
+tighter ≤12ms "with headroom" bar) — the per-call speedup over 256px isn't nearly large enough to
+matter for that question. And on the separate axis of estimated whole-frame cost, 128px is worse,
+not better: it needs 5.4x more tiles to cover the same frame (2646 vs. 486, at a fixed 32px
+overlap), so its estimated whole-frame cost is **~4.9x worse** than 256px (~88.1s vs. ~18.0s) even
+though each individual tile call is faster — the per-call win is outweighed by needing far more
+calls. Two separate measurements, two separate verdicts: 128px wins on per-tile latency, loses on
+both the same-API budget check and on whole-frame throughput. Neither tile size clears the budget
+this pass cared about, so this remains moot for now per the
+same reasoning as the original follow-up note (only relevant if a same-API `wgpu` background
+chunk of comparable duration is ever introduced; SCUNet itself runs over the cross-API CUDA path
+this ADR's own decision rule #2 already found has no contention cost). **Sanity check**: 128px
+CPU-EP timing (186.9ms) is a genuine ~5.6x slower than CUDA (33.3ms) — real speedup, well clear of
+`ort_contend::suspiciously_close_to_cpu_speed`'s ~2x-fallback-detection threshold, confirming CUDA
+was genuinely active — but this ~5.6x is itself far below ADR-0040's own ~36x at 256px, further
+evidence that per-call overhead (roughly fixed regardless of EP) eats a proportionally larger
+share of the already-small 128px GPU time.
+
+**Environment note**: the reference machine's `ort`/CUDA/cuDNN venv and `SCUNet-PSNR.onnx`
+checkpoint from this ADR's own earlier pass were still present, unlike the gap this ADR itself
+hit against #40's install — no reinstall needed this time.
+
 ### Tile-granular hero-scenario re-sim (`sim.rs`)
 
 Extends `spikes/loaf/src/sim.rs`'s own hero-scenario bake-queue simulation (copied, not
@@ -326,13 +380,15 @@ adversarial review above had itself just touched, one docs-only), all fixed:
   `job`/`queue`/`cancel`/`admission`/`throttle`/`telemetry` modules are its starting point.
 - **Shares its telemetry source with #70** (standalone bottleneck indicator) — `telemetry.rs`'s
   `HostTelemetrySource`/`VramSource`, not a second implementation.
-- **Real follow-up: measure a smaller SCUNet tile size (128px) for CUDA timing.** ADR-0040 only
-  measured 256px (44.8ms); this ADR's own same-API contention finding means a smaller tile is the
-  likely fix if 256px turns out to matter for foreground responsiveness in a real pipeline (it
-  doesn't for cross-API CUDA contention specifically, per this ADR's own finding — it would only
-  matter if a background *wgpu* chunk of similar duration existed, e.g. mask-refine's `box_filter`
-  passes at larger radii/resolutions than ADR-0044 measured).
-  Follow-up: [#205](https://github.com/jordanfelle/nicti/issues/205).
+- **[#205](https://github.com/jordanfelle/nicti/issues/205) measured, resolved**: a smaller 128px
+  SCUNet tile does *not* clear the same-API contention budget either (see the Follow-up
+  measurement section above), even though it's the genuinely faster tile per call (33.3ms vs.
+  37.0ms p50, 45.1ms vs. 51.5ms p95 — fixed per-call overhead dominates at 128px, not tile
+  compute). Its p95 still lands well past the ~16ms budget. Separately, 128px needs 5.4x more
+  tiles per frame, so its estimated whole-frame cost is worse despite the faster per-tile call.
+  Neither tile size is a fix if a same-API `wgpu` background chunk of comparable duration is ever
+  introduced; moot for now since this ADR's own cross-API finding already found SCUNet's actual
+  CUDA path has no contention cost.
 - **Real follow-up: decode/mask-bake chunking, or explicit cross-lane concurrency.** This ADR's
   own sim shows foreground latency is currently bounded by whichever atomic (non-chunked) stage is
   running, dominated by decode's ~1.7s. Not solved here — needs either a streaming decode interface
@@ -352,17 +408,18 @@ adversarial review above had itself just touched, one docs-only), all fixed:
 ## Spike: `spikes/crouch`
 
 Name: the motionless crouch before a pounce — the scheduler's idle/ready state, matching the
-Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 37 unit tests
+Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 42 unit tests
 (structural: priority ordering, cancellation, `IS_EDITING`, VRAM admission, throttling, sim chunk
-math), all passing in this sandbox (lavapipe/software GPU where GPU-dependent, real everywhere
-else). Modules: `job.rs` (`ChunkedJob`/`JobSpec`/`Step`), `queue.rs` (`Scheduler`, the two-class
+math, #205's own tile-count math), all passing in this sandbox (lavapipe/software GPU where
+GPU-dependent, real everywhere else). Modules: `job.rs` (`ChunkedJob`/`JobSpec`/`Step`), `queue.rs` (`Scheduler`, the two-class
 priority queue), `cancel.rs` (`CancelToken`/`EditingGate`), `admission.rs` (VRAM budget
 reservation), `throttle.rs` (hand-rolled concurrency-limit semaphore), `telemetry.rs`
 (`HostTelemetrySource`, `VramSource` + its Windows-only DXGI impl), `prefetch.rs` (copy of
 ADR-0044's own `priority_order`), `gpu_contend.rs` (persistent `busy.wgsl` kernel + throttled/
 unthrottled `BackgroundLoad`, the wgpu-vs-wgpu contention harness), `ort_contend.rs` (`TileLoad`,
 trimmed from `spikes/rods::ai::TiledDenoiser`, the CUDA-vs-wgpu contention harness), `sim.rs`
-(tile-granular hero-scenario re-sim). `src/bin/crouch.rs` exposes `bench-wgpu`/`bench-ort`/`sim`
-subcommands, writing `nicti-prowl`-format reports to `bench-results/` (reusing
-`nicti_prowl::perf::Protocol`, the same 1-warmup+5-measured protocol every other spike's own
-reference-machine pass uses).
+(tile-granular hero-scenario re-sim). `src/bin/crouch.rs` exposes
+`bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands, writing `nicti-prowl`-format reports to
+`bench-results/` (reusing `nicti_prowl::perf::Protocol`; `bench-tile` (#205) overrides the default
+1-warmup+5-measured protocol with a larger 5-warmup+50-measured sample, since its ~30-40ms
+measurements need more than 5 runs to trust a p95 claim).

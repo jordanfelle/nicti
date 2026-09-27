@@ -120,6 +120,23 @@ impl Protocol {
         Stats::from_samples(samples)
     }
 
+    /// Like [`Protocol::run`], but stops and propagates the first error from `f` instead of
+    /// panicking on it -- for a caller whose per-call work is fallible (e.g. an `ort` inference
+    /// call) and wants that error to reach its own `Result`-returning caller rather than
+    /// unwinding the whole process mid-measurement.
+    pub fn try_run<E, F: FnMut() -> Result<(), E>>(&self, mut f: F) -> Result<Stats, E> {
+        for _ in 0..self.warmup {
+            f()?;
+        }
+        let mut samples = Vec::with_capacity(self.measured);
+        for _ in 0..self.measured {
+            let start = Instant::now();
+            f()?;
+            samples.push(start.elapsed());
+        }
+        Ok(Stats::from_samples(samples))
+    }
+
     /// Refuses to run `f` unless `verify_report` is clean -- the enforcement point for
     /// docs/benchmarks.md's "verify before trusting a run" rule.
     pub fn run_verified<F: FnMut()>(
@@ -221,6 +238,43 @@ mod tests {
         assert!((stats.p50_ms - 30.0).abs() < 0.01);
         assert!((stats.p95_ms - 50.0).abs() < 0.01);
         assert!((stats.max_ms - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_run_executes_warmup_plus_measured_on_success() {
+        let calls = AtomicUsize::new(0);
+        let protocol = Protocol {
+            warmup: 1,
+            measured: 5,
+        };
+        let stats = protocol
+            .try_run(|| -> Result<(), &'static str> {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(stats.samples_ms.len(), 5);
+    }
+
+    #[test]
+    fn try_run_stops_and_propagates_on_first_error() {
+        let calls = AtomicUsize::new(0);
+        let protocol = Protocol {
+            warmup: 1,
+            measured: 5,
+        };
+        let result = protocol.try_run(|| -> Result<(), &'static str> {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 2 {
+                Err("boom")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result.unwrap_err(), "boom");
+        // Warmup (1, n==0) + 1 successful measured call (n==1) before the failing call (n==2).
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
