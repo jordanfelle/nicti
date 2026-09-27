@@ -41,8 +41,10 @@ is the per-topic summary; those two are the full research trail.
   `MaskDigest`/`OriginalInstanceDigest` content-addressed digests embedded in the develop-settings
   Lua text (not any catalog column) — AI mask rasters and AI Denoise/Enhance output rasters,
   TIFF-wrapped, accounting for 97.8% of real blob keys measured. These are LRC's own cached AI
-  outputs, not develop parameters: **#62's importer doesn't need to read `.lrcat-data` at all**,
-  consistent with masking/denoise's existing re-derive-don't-migrate stance.
+  outputs, not develop parameters: **#62's importer doesn't need to read `.lrcat-data` at all** —
+  an import pipeline has no destination for a third-party raster it isn't going to render with.
+  Whether these outputs are worth adopting as a golden/reference comparison dataset for #48/#40's
+  own models is a separate, explicitly open question, not decided either way here.
 - **`md5`/`importHash` cross-check against homing's relink tiers (#158/ADR-0158)**: `md5` is NULL
   on all 380,298 rows in this catalog — not a partial gap, nothing is there at all, so #62 must not
   plan on it as a relink or dedupe input in any role. `importHash` is 99.97% present with every

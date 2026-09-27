@@ -46,11 +46,21 @@ def read_varint(b: bytes, i: int) -> tuple[int, int]:
     return result, i
 
 
+# RocksDB BlobIndex::Type (blob_index.h): kInlinedTypeForSmallValues below min_blob_size
+# store the value directly in the SST rather than a blob-index record, so only kBlobType (and its
+# TTL variant) actually decode as (file_number, offset, size) -- treating every value as a blob
+# index regardless of this byte, as an earlier draft of this script did, quietly parses a small
+# inlined value's own payload bytes as bogus file/offset/size varints instead of skipping it.
+BLOB_INDEX_TYPES = {1, 3}  # kBlobType, kBlobTTLType
+
+
 def scan_sst_files(sst_dump_bin: str, lrcat_data_dir: str):
-    """Returns (num_keys, distinct_file_numbers, sizes, real_keys_set)."""
+    """Returns (num_keys, distinct_file_numbers, blob_index_by_key, real_keys_set), where
+    blob_index_by_key maps each real key to its (file_number, size) -- deduplicated per key, since
+    the same key can appear in more than one on-disk .sst across compaction levels and would
+    otherwise be double-counted in an aggregate size total."""
     real_keys = set()
-    file_numbers = set()
-    sizes = []
+    blob_index_by_key: dict[str, tuple[int, int]] = {}
     num_keys = 0
 
     for sst_path in sorted(glob.glob(os.path.join(lrcat_data_dir, "*.sst"))):
@@ -73,19 +83,21 @@ def scan_sst_files(sst_dump_bin: str, lrcat_data_dir: str):
                 continue  # e.g. the internal "rocksdbIntegrityId" bookkeeping key
             real_keys.add(key_str)
 
-            if val_hex:
+            if not val_hex:
+                continue
+            try:
                 val = bytes.fromhex(val_hex)
-                try:
-                    i = 1  # val[0] is the blob-index type byte (1 = kBlobType)
-                    fn, i = read_varint(val, i)
-                    _off, i = read_varint(val, i)
-                    sz, i = read_varint(val, i)
-                    file_numbers.add(fn)
-                    sizes.append(sz)
-                except (IndexError, ValueError):
-                    pass
+                if not val or val[0] not in BLOB_INDEX_TYPES:
+                    continue  # inlined small value (below min_blob_size) -- no blob file to point at
+                i = 1
+                fn, i = read_varint(val, i)
+                _off, i = read_varint(val, i)
+                sz, i = read_varint(val, i)
+                blob_index_by_key[key_str] = (fn, sz)
+            except (IndexError, ValueError):
+                continue  # malformed/truncated hex or varint for this one record -- skip it, don't abort the scan
 
-    return num_keys, file_numbers, sizes, real_keys
+    return num_keys, blob_index_by_key, real_keys
 
 
 def scan_catalog_fields(lrcat_path: str):
@@ -114,14 +126,17 @@ def main():
     args = ap.parse_args()
 
     print("== RocksDB .lrcat-data scan ==")
-    num_keys, file_numbers, sizes, real_keys = scan_sst_files(args.sst_dump_bin, args.lrcat_data_dir)
+    num_keys, blob_index_by_key, real_keys = scan_sst_files(args.sst_dump_bin, args.lrcat_data_dir)
+    file_numbers = {fn for fn, _sz in blob_index_by_key.values()}
+    sizes = [sz for _fn, sz in blob_index_by_key.values()]
     print(f"total SST entries: {num_keys}")
     print(f"real (32-char hex) blob keys: {len(real_keys)}")
+    print(f"real keys with a blob-type value (vs. inlined-small or unresolved): {len(blob_index_by_key)}")
     print(f"distinct blob file numbers referenced: {len(file_numbers)}")
     if file_numbers:
         print(f"blob file number range: {min(file_numbers)}..{max(file_numbers)}")
     if sizes:
-        print(f"blob value sizes: min={min(sizes)} max={max(sizes)} total={sum(sizes)}")
+        print(f"blob value sizes (deduplicated per key): min={min(sizes)} max={max(sizes)} total={sum(sizes)}")
 
     print()
     print("== Catalog field -> blob-key overlap ==")

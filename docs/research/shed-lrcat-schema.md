@@ -146,7 +146,9 @@ real blob keys (97.8%) in the measured catalog. Peeking the first ~4KB of a few 
 
 **Import policy**: these are LRC's own cached AI-feature outputs, not develop parameters — #62's
 importer doesn't need to read `.lrcat-data` at all; the provenance blob (raw develop text, already
-Q4's policy) is enough. Reproducible via
+Q4's policy) is enough. Whether they're worth adopting as a golden/reference comparison dataset for
+#48/#40's own models is a separate, explicitly open question (ADR-0156), not resolved here either
+way. Reproducible via
 `spikes/shed/tools/lrcat_data_linkage.py --lrcat <extracted .lrcat> --lrcat-data-dir <extracted
 .lrcat-data>` (stdlib-only, not a Cargo subcommand — see ADR-0156 for why `rocksdb` isn't a
 workspace dependency). See ADR-0156 for the full reasoning.
