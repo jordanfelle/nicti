@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use image::RgbImage;
 use nicti_cornea::{LibRawDecoder, LinearFrame, RawDecoder};
+use nicti_tapetum::coat::{ExposureParams, ToneParams, VibranceParams, WbParams};
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{read_frame, Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, Affine2D};
@@ -18,8 +19,8 @@ use nicti_tapetum::gpu::{GpuContext, GpuPreference};
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
-    DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
+    CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, CROP,
+    DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
 };
 
 /// One real render of a NEF: decodes it, runs it through the full graph at full resolution and
@@ -93,10 +94,22 @@ impl RealRender {
         );
         let decode_kernel = DecodeKernel::new(&gpu);
         let live_kernel = LiveSuffixKernel::new(&gpu);
-        let matrix = color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz);
+        let matrix = color::camera_to_working_space_matrix(
+            frame.cam_mul,
+            &frame.cam_xyz,
+            &WbParams::default(),
+        );
         // Neutral defaults: as-shot WB + the real color matrix, no exposure/tone/vibrance
         // adjustment -- see this module's own doc comment for why.
-        live_kernel.set_params(&gpu, matrix, 1.0, 0.0, 0.0);
+        live_kernel.set_params(
+            &gpu,
+            &LiveParams {
+                working_space_matrix: matrix,
+                exposure: ExposureParams::default(),
+                tone: ToneParams::default(),
+                vibrance: VibranceParams::default(),
+            },
+        );
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(Affine2D::IDENTITY);
 

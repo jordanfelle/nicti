@@ -90,12 +90,41 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   dispatches, each writing to the correct absolute row range of the one shared output texture.
 - **Open follow-ups**: #189 (screen-res-first denoise scheduling), #190 (real-photo compression
   ratio, blocked on #45).
+- **#46 slice 1/5 (typed params + Basic + WB, landed)**: `coat.rs` adds typed, `#[serde(default)]`
+  params structs per live stage (`WbParams`/`ExposureParams`/`ToneParams`/`VibranceParams`),
+  parsed from a `StageEntry`'s untyped JSON via `coat::parse`/`coat::default_value` -- until this,
+  `BasicStage::default_params`/`cache_contribution` existed but were never wired to a graph node's
+  `own_hash`, so a slider change never actually invalidated anything (every test built its own
+  `own_hash` by hand, e.g. `blake3::hash(id.as_bytes())`). `graph::RenderGraph::apply_document`
+  closes that gap: given an `EditDocument` + `StageRegistry`, it sets every graph node's `own_hash`
+  from `RenderStage::cache_contribution`, falling back to a stage's own `default_params()` when the
+  document has no entry. `LiveSuffixKernel::set_params` now takes one `stages::LiveParams` struct
+  (matrix + `ExposureParams`/`ToneParams`/`VibranceParams`) instead of four positional floats --
+  `bench/knead` updated to match. `color::apply_tone` grew from a single `contrast` float to the
+  full Basic panel (contrast/highlights/shadows/whites/blacks, `ToneParams`) -- whites/blacks are a
+  linear endpoint remap in perceptual space (positive whites moves the white point *down*,
+  brightening highlights; negative blacks moves the black point *up*, crushing shadows -- matching
+  LRC's own slider direction, not a same-sign offset), highlights/shadows are a luminance-weighted
+  additive shift via `smoothstep` masks -- a deliberately *global* v1 approximation of LRC's own
+  locally-adaptive highlights/shadows (a local-adaptive follow-up + a real LRC-export comparison
+  are #46's own later slices, once #202's reference-machine run exists). WB temp/tint
+  (`color::wb_gains_for_temp_tint`) estimates gains from this frame's single `cam_xyz` matrix (a
+  Planckian-locus xy approximation, computed in `f64` to avoid clippy's `excessive_precision` on
+  the published coefficients, cast to `f32` in the result) rather than #42/ADR-0038's dual-
+  illuminant DNG solve -- see the `color` topic's own REFERENCE.md for that scope split. `tint`
+  applies as a green-gain multiplier in the as-shot path (no chromaticity to shift without an
+  explicit temp) but as a perpendicular xy shift in the temp-override path -- two different
+  approximations, both documented, not accidentally inconsistent.
 
 ## Package contents
 
-- **`crates/nicti-tapetum`** (#45, landed) — `graph.rs` (the stage DAG, `RenderGraph`/`StageNode`/
-  `StageKind`, promoted from `spikes/loaf/src/graph.rs`, now deleted, with a persistent memoized
-  cache key and the `set_own_hash` update API the spike lacked), `cache.rs` (`Tier<V>`, promoted
+- **`crates/nicti-tapetum`** (#45, landed) — `coat.rs` (#46: typed `WbParams`/`ExposureParams`/
+  `ToneParams`/`VibranceParams`, `#[serde(default)]` so a missing/unrecognized field always parses
+  to something sane — see this file's own "#46 slice 1/5" bullet above), `graph.rs` (the stage DAG,
+  `RenderGraph`/`StageNode`/`StageKind`, promoted from `spikes/loaf/src/graph.rs`, now deleted, with
+  a persistent memoized cache key and the `set_own_hash` update API the spike lacked, plus #46's
+  `apply_document` — the "wire an `EditDocument`'s params into the graph's own_hash" step that
+  didn't exist before), `cache.rs` (`Tier<V>`, promoted
   from `spikes/loaf/src/cache.rs` with an `O(log n)` touch), `prefetch.rs` (`priority_order`,
   promoted as-is), `gpu.rs` (the shared `GpuContext`, one wgpu device/queue per ADR-0016, adapted
   from `spikes/glint/src/gpu.rs`), `frame.rs` (`FrameTexture`, always `Rgba16Float` — a core format
@@ -131,9 +160,10 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
     (widened to u32 per channel -- WGSL has no u16 storage-buffer element type) and runs
     `normalize.wgsl` (black/`cblack` subtraction, scale to ~[0,1]); demosaic/denoise/lens/heal are
     `PassthroughExec` (a plain texture copy -- LibRaw already demosaiced, denoise/lens/heal have
-    no algorithm yet, #40/#39/#51); `LiveSuffixKernel` runs `live_suffix.wgsl`, fusing WB (ratio
-    over as-shot `cam_mul`) + camera→XYZ(D50)→ProPhoto (`color::camera_to_working_space_matrix`,
-    folded into one 3x3 on the CPU) + exposure + a simple cube-root-space contrast curve + a
+    no algorithm yet, #40/#39/#51); `LiveSuffixKernel` runs `live_suffix.wgsl`, fusing WB (as-shot
+    `cam_mul`, or #46's manual temp/tint override) + camera→XYZ(D50)→ProPhoto
+    (`color::camera_to_working_space_matrix`, folded into one 3x3 on the CPU) + exposure + #46's
+    full Basic-panel tone (contrast/highlights/shadows/whites/blacks, `color::apply_tone`) + a
     luma-preserving vibrance boost, staying in linear ProPhoto RGB (the working space) end to end;
     `CropKernel` runs `present_sample.wgsl`, a bilinear affine sample. **Deliberate simplification
     vs. the original design sketch**: no `HueSatMap`/`LookTable` bindings are reserved (#42's

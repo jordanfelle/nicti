@@ -1,17 +1,25 @@
-//! CPU-side color math for the live suffix: as-shot white balance, the camera-RGB -> working
-//! -space (linear ProPhoto RGB) matrix chain, a simple tone curve, and a vibrance formula. Shared
-//! between building the live-suffix shader's uniform values and a pure-CPU reference used to
-//! prove the GPU kernel matches it (this crate's own goldens, before real ones exist in #45's
-//! tiling slice).
+//! CPU-side color math for the live suffix: white balance (as-shot, or a manual temp/tint
+//! override, #46), the camera-RGB -> working-space (linear ProPhoto RGB) matrix chain, Basic-panel
+//! tone controls, and a vibrance formula. Shared between building the live-suffix shader's uniform
+//! values and a pure-CPU reference used to prove the GPU kernel matches it (this crate's own
+//! goldens, before real ones exist in #45's tiling slice).
 //!
 //! **Deliberate simplification vs. the original design sketch**: no `HueSatMap`/`LookTable`
 //! bindings are reserved in the shader (#42's DCP-profile color pipeline). Wiring in unused
 //! texture bindings with no real content to sample would be exactly the kind of half-finished
 //! scaffolding this repo's own conventions ask to avoid -- #42 can extend the shader (and this
 //! module) when it lands, without needing this pipeline's *shape* pre-declared for it. Likewise,
-//! the tone curve here is a simple exposure/contrast formula rather than a 1D LUT texture --
-//! real, but intentionally the smallest thing that proves the pipeline end-to-end; swapping in a
-//! LUT later doesn't change any other stage.
+//! the tone curve here (see [`apply_tone`]) is a parametric formula rather than a 1D LUT texture --
+//! real, but intentionally the smallest thing that proves the pipeline end-to-end; #46's own tone-
+//! curve slice swaps in a LUT without changing any other stage.
+//!
+//! **WB temp/tint is also a v1 simplification**: [`wb_gains_for_temp_tint`] estimates camera-space
+//! gains from a single `LinearFrame::cam_xyz` matrix, not the DNG spec's own CCT-interpolated
+//! dual-illuminant solve (`spikes/calico::cct` implements the real thing, for when a DCP profile
+//! is available -- #42's still-Proposed scope). Good enough for a manual WB slider to move the
+//! image in the expected direction; not claimed to match Adobe's own temp/tint numbers exactly.
+
+use crate::coat::{ToneParams, WbParams};
 
 pub type Mat3 = [[f32; 3]; 3];
 
@@ -96,6 +104,80 @@ pub fn wb_gains(cam_mul: [f32; 4]) -> [f32; 3] {
     [cam_mul[0] / g, 1.0, cam_mul[2] / g]
 }
 
+/// Kim et al. 2002's Planckian-locus xy approximation for a given CCT -- the same published
+/// formula `spikes/calico::cct::cct_to_approx_xy` uses (duplicated here, not depended on, since
+/// that crate's `Mat3`/`Vec3` are `f64` and not a workspace dependency of this crate). Computed in
+/// `f64` (the formula's published coefficients need more precision than `f32` carries) and cast
+/// down to `f32` only in the result, matching every other coordinate this module works in.
+fn planckian_locus_xy(cct: f32) -> (f32, f32) {
+    let t = (cct as f64).clamp(1667.0, 25000.0);
+    let x = if t <= 4000.0 {
+        -0.2661239e9 / t.powi(3) - 0.2343589e6 / t.powi(2) + 0.8776956e3 / t + 0.179910
+    } else {
+        -3.0258469e9 / t.powi(3) + 2.1070379e6 / t.powi(2) + 0.2226347e3 / t + 0.240390
+    };
+    let y = if t <= 2222.0 {
+        -1.1063814 * x.powi(3) - 1.34811020 * x.powi(2) + 2.18555832 * x - 0.20219683
+    } else if t <= 4000.0 {
+        -0.9549476 * x.powi(3) - 1.37418593 * x.powi(2) + 2.09137015 * x - 0.16748867
+    } else {
+        3.0817580 * x.powi(3) - 5.87338670 * x.powi(2) + 3.75112997 * x - 0.37001483
+    };
+    (x as f32, y as f32)
+}
+
+/// Camera-space WB gains for a manually chosen temperature/tint, from this frame's own single
+/// `cam_xyz` matrix -- see this module's own doc comment for why this is a v1 approximation, not
+/// the DNG spec's dual-illuminant solve. `tint`'s effect (a green-magenta shift) is applied as a
+/// small perpendicular offset in xy space, scaled to stay plausible across PV2012's -150..150
+/// range; `temp_k` moves along the Planckian locus.
+/// Clamps a division's denominator away from zero without flipping its sign -- `.max(epsilon)`
+/// alone silently turns any negative value (a real, reachable case for `camera_neutral`'s off-
+/// diagonal-heavy real camera matrices) into a small *positive* one, producing a wrong-signed,
+/// wildly-oversized gain instead of a merely-clamped one.
+fn clamp_denominator(value: f32, epsilon: f32) -> f32 {
+    if value.abs() < epsilon {
+        epsilon.copysign(value)
+    } else {
+        value
+    }
+}
+
+fn wb_gains_for_temp_tint(cam_xyz: &[f32; 12], temp_k: f32, tint: f32) -> [f32; 3] {
+    let (x, y) = planckian_locus_xy(temp_k);
+    let y = clamp_denominator(y - tint * 0.0003, 1e-6);
+    let sum_xyz = [x, y, 1.0 - x - y];
+    let xyz = [sum_xyz[0] / y, 1.0, sum_xyz[2] / y];
+    // cam_xyz_to_mat3 returns XYZ->camera directly (no inversion needed here, unlike
+    // camera_to_working_space_matrix, which needs camera->XYZ instead).
+    let xyz_to_cam = cam_xyz_to_mat3(cam_xyz);
+    let camera_neutral = mat3_apply(xyz_to_cam, xyz);
+    let g = clamp_denominator(camera_neutral[1], 1e-6);
+    [
+        g / clamp_denominator(camera_neutral[0], 1e-6),
+        1.0,
+        g / clamp_denominator(camera_neutral[2], 1e-6),
+    ]
+}
+
+/// Resolves a stage's [`WbParams`] to camera-space gains: `temp_k: None` uses the frame's own
+/// as-shot `cam_mul`, with `tint` applied as a green-channel multiplier (there's no chromaticity
+/// to shift `tint`'s xy offset against without an explicit temperature); `Some(k)` overrides both
+/// via [`wb_gains_for_temp_tint`], which applies `tint` as a perpendicular xy shift instead. Either
+/// way, PV2012's Temp and Tint sliders stay independent -- a tint-only edit never requires an
+/// explicit temp.
+pub fn wb_gains_with_params(cam_mul: [f32; 4], cam_xyz: &[f32; 12], wb: &WbParams) -> [f32; 3] {
+    match wb.temp_k {
+        Some(k) => wb_gains_for_temp_tint(cam_xyz, k, wb.tint),
+        None => {
+            let mut gains = wb_gains(cam_mul);
+            let tint_mult = (1.0 - wb.tint * 0.0004).max(1e-3);
+            gains[1] *= tint_mult;
+            gains
+        }
+    }
+}
+
 /// Bradford-free XYZ(D50) -> linear ProPhoto RGB, the standard published matrix (ProPhoto RGB's
 /// own native white point is D50, so no chromatic-adaptation step is needed here -- a real
 /// illuminant-dependent adaptation, e.g. for a strongly non-D50 as-shot white balance, is #42's
@@ -136,33 +218,59 @@ pub fn prophoto_to_srgb_linear_matrix() -> Mat3 {
     )
 }
 
-/// The full camera-RGB -> working-space (linear ProPhoto) matrix, folding as-shot white balance
-/// (a diagonal gain matrix) and the camera -> XYZ(D50) -> ProPhoto chain into one 3x3 -- linear
-/// operations compose, so this is exactly equivalent to applying WB, then cam->XYZ, then
-/// XYZ->ProPhoto as three separate steps, computed once per render on the CPU rather than on
-/// every pixel on the GPU.
-pub fn camera_to_working_space_matrix(cam_mul: [f32; 4], cam_xyz: &[f32; 12]) -> Mat3 {
-    let wb = mat3_diag(wb_gains(cam_mul));
+/// The full camera-RGB -> working-space (linear ProPhoto) matrix, folding white balance (a
+/// diagonal gain matrix -- as-shot, or a manual temp/tint override, see [`wb_gains_with_params`])
+/// and the camera -> XYZ(D50) -> ProPhoto chain into one 3x3 -- linear operations compose, so this
+/// is exactly equivalent to applying WB, then cam->XYZ, then XYZ->ProPhoto as three separate
+/// steps, computed once per render on the CPU rather than on every pixel on the GPU.
+pub fn camera_to_working_space_matrix(
+    cam_mul: [f32; 4],
+    cam_xyz: &[f32; 12],
+    wb: &WbParams,
+) -> Mat3 {
+    let wb_mat = mat3_diag(wb_gains_with_params(cam_mul, cam_xyz, wb));
     // cam_xyz_to_mat3 returns XYZ->camera (see its own doc comment); invert to get camera->XYZ.
     let cam_to_xyz = mat3_invert(&cam_xyz_to_mat3(cam_xyz));
-    mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_mul(cam_to_xyz, wb))
+    mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_mul(cam_to_xyz, wb_mat))
 }
 
 pub fn exposure_multiplier(stops: f32) -> f32 {
     2f32.powf(stops)
 }
 
-/// A simple contrast curve applied per channel in a rough perceptual (cube-root) space, pivoting
-/// around mid-grey -- `contrast` of 0.0 is a no-op; positive steepens the curve, negative
-/// flattens it. Operates on non-negative linear values; a negative result never occurs since the
-/// curve only ever scales a non-negative cube-root value.
-pub fn apply_tone(rgb: [f32; 3], contrast: f32) -> [f32; 3] {
-    rgb.map(|c| {
-        let c = c.max(0.0);
-        let perceptual = c.cbrt();
-        let adjusted = (perceptual - 0.5) * (1.0 + contrast) + 0.5;
-        adjusted.max(0.0).powi(3)
-    })
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Basic-panel tone controls in a rough perceptual (cube-root) space: whites/blacks remap the
+/// endpoints, contrast pivots around mid-grey, and highlights/shadows apply a luminance-weighted
+/// additive shift (smooth masks favoring bright/dark pixels respectively). Every field at 0.0 is
+/// a no-op. This is a v1, deliberately *global* approximation of LRC's own locally-adaptive
+/// highlights/shadows (a real per-pixel-neighborhood version is a documented follow-up, not this
+/// ticket's scope) -- a rendered-image comparison against real LRC exports is #46's own follow-up
+/// once #202's reference-machine run exists. Operates on non-negative linear values; the final
+/// cube never goes negative since `shifted` is clamped first.
+pub fn apply_tone(rgb: [f32; 3], tone: &ToneParams) -> [f32; 3] {
+    // Positive `whites` moves the white point *down* (values reach 1.0 sooner -> brighter
+    // highlights); negative `blacks` moves the black point *up* (values reach 0.0 sooner ->
+    // crushed, darker shadows) -- matching LRC's own Whites-right-brightens/Blacks-left-darkens
+    // slider convention, not a naive same-sign offset.
+    let white_point = 1.0 - tone.whites * 0.3;
+    let black_point = -tone.blacks * 0.3;
+    let range = (white_point - black_point).max(1e-4);
+
+    let perceptual = rgb.map(|c| c.max(0.0).cbrt());
+    let remapped = perceptual.map(|p| (p - black_point) / range);
+    let contrasted = remapped.map(|p| (p - 0.5) * (1.0 + tone.contrast) + 0.5);
+
+    let luma = 0.2126 * contrasted[0] + 0.7152 * contrasted[1] + 0.0722 * contrasted[2];
+    let hi_w = smoothstep(0.35, 0.9, luma);
+    let sh_w = 1.0 - smoothstep(0.1, 0.65, luma);
+    let shifted =
+        contrasted.map(|p| p + tone.highlights * 0.25 * hi_w + tone.shadows * 0.25 * sh_w);
+
+    shifted.map(|p| p.max(0.0).powi(3))
 }
 
 /// Luma-preserving saturation boost, weighted more heavily on already-low-saturation pixels (the
@@ -225,7 +333,7 @@ mod tests {
             0.1, 0.0, 0.7, // XYZ->camera B row
             0.0, 0.0, 0.0, // unused G2 row
         ];
-        let m = camera_to_working_space_matrix(cam_mul, &cam_xyz);
+        let m = camera_to_working_space_matrix(cam_mul, &cam_xyz, &WbParams::default());
         let expected = mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_invert(&cam_xyz_to_mat3(&cam_xyz)));
         for r in 0..3 {
             for c in 0..3 {
@@ -265,14 +373,14 @@ mod tests {
             0.0, 0.0, 1.0, // B row
             0.0, 0.0, 0.0, // unused G2 row
         ];
-        let m = camera_to_working_space_matrix(cam_mul, &identity_cam_xyz);
+        let m = camera_to_working_space_matrix(cam_mul, &identity_cam_xyz, &WbParams::default());
         assert_eq!(m, XYZ_D50_TO_PROPHOTO);
     }
 
     #[test]
-    fn apply_tone_with_zero_contrast_is_a_near_identity() {
+    fn apply_tone_with_all_zero_params_is_a_near_identity() {
         let rgb = [0.2, 0.5, 0.8];
-        let out = apply_tone(rgb, 0.0);
+        let out = apply_tone(rgb, &ToneParams::default());
         for (a, b) in rgb.iter().zip(out.iter()) {
             assert!((a - b).abs() < 1e-4, "{a} vs {b}");
         }
@@ -280,10 +388,165 @@ mod tests {
 
     #[test]
     fn apply_tone_positive_contrast_increases_spread_from_pivot() {
-        let low = apply_tone([0.1, 0.1, 0.1], 0.5)[0];
-        let high = apply_tone([0.9, 0.9, 0.9], 0.5)[0];
+        let tone = ToneParams {
+            contrast: 0.5,
+            ..Default::default()
+        };
+        let low = apply_tone([0.1, 0.1, 0.1], &tone)[0];
+        let high = apply_tone([0.9, 0.9, 0.9], &tone)[0];
         assert!(low < 0.1, "low value should get darker: {low}");
         assert!(high > 0.9, "high value should get brighter: {high}");
+    }
+
+    #[test]
+    fn apply_tone_whites_brightens_a_near_white_pixel() {
+        let base = apply_tone([0.9, 0.9, 0.9], &ToneParams::default())[0];
+        let whites = apply_tone(
+            [0.9, 0.9, 0.9],
+            &ToneParams {
+                whites: 0.5,
+                ..Default::default()
+            },
+        )[0];
+        assert!(
+            whites > base,
+            "positive whites should brighten: {whites} vs {base}"
+        );
+    }
+
+    #[test]
+    fn apply_tone_blacks_darkens_a_near_black_pixel() {
+        let base = apply_tone([0.05, 0.05, 0.05], &ToneParams::default())[0];
+        let blacks = apply_tone(
+            [0.05, 0.05, 0.05],
+            &ToneParams {
+                blacks: -0.5,
+                ..Default::default()
+            },
+        )[0];
+        assert!(
+            blacks < base,
+            "negative blacks should darken: {blacks} vs {base}"
+        );
+    }
+
+    #[test]
+    fn apply_tone_highlights_only_affects_bright_pixels() {
+        let tone = ToneParams {
+            highlights: -0.8,
+            ..Default::default()
+        };
+        let dark_base = apply_tone([0.05, 0.05, 0.05], &ToneParams::default())[0];
+        let dark_shifted = apply_tone([0.05, 0.05, 0.05], &tone)[0];
+        assert!(
+            (dark_base - dark_shifted).abs() < 1e-3,
+            "a dark pixel should be nearly unaffected by highlights: {dark_base} vs {dark_shifted}"
+        );
+        let bright_base = apply_tone([0.95, 0.95, 0.95], &ToneParams::default())[0];
+        let bright_shifted = apply_tone([0.95, 0.95, 0.95], &tone)[0];
+        assert!(
+            bright_shifted < bright_base,
+            "negative highlights should darken a bright pixel: {bright_shifted} vs {bright_base}"
+        );
+    }
+
+    #[test]
+    fn wb_gains_with_params_as_shot_matches_wb_gains_when_tint_is_zero() {
+        let cam_mul = [2.0, 1.0, 1.5, 1.0];
+        let gains = wb_gains_with_params(
+            cam_mul,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &WbParams::default(),
+        );
+        assert_eq!(gains, wb_gains(cam_mul));
+    }
+
+    #[test]
+    fn wb_gains_with_params_temp_override_produces_finite_positive_gains() {
+        let cam_xyz = [
+            0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        for temp_k in [2500.0, 4200.0, 5500.0, 6500.0, 9000.0] {
+            let gains = wb_gains_with_params(
+                [1.0, 1.0, 1.0, 1.0],
+                &cam_xyz,
+                &WbParams {
+                    temp_k: Some(temp_k),
+                    tint: 0.0,
+                },
+            );
+            assert!(
+                gains.iter().all(|g| g.is_finite() && *g > 0.0),
+                "temp_k={temp_k}: gains={gains:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_denominator_preserves_sign_instead_of_flipping_it() {
+        // Regression test: `.max(epsilon)` alone would turn -0.5 into epsilon (a small positive
+        // number), not -epsilon -- silently flipping the sign of whatever divides by it.
+        assert_eq!(clamp_denominator(-0.5, 1e-6), -0.5);
+        assert_eq!(clamp_denominator(0.5, 1e-6), 0.5);
+        assert_eq!(clamp_denominator(-1e-9, 1e-6), -1e-6);
+        assert_eq!(clamp_denominator(1e-9, 1e-6), 1e-6);
+        assert_eq!(clamp_denominator(0.0, 1e-6), 1e-6);
+    }
+
+    #[test]
+    fn wb_gains_for_temp_tint_does_not_flip_sign_on_a_negative_camera_response() {
+        // Regression test for a real bug: a camera matrix with a negative off-diagonal entry can
+        // legitimately put `camera_neutral`'s R or B channel below zero at some chromaticity --
+        // `.max(epsilon)` alone would silently floor that up to a tiny *positive* number instead
+        // of clamping its magnitude, producing a wildly wrong-signed gain. This cam_xyz is
+        // engineered so the R-channel response at daylight-ish chromaticities goes negative.
+        let cam_xyz = [
+            -0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        let gains = wb_gains_for_temp_tint(&cam_xyz, 5500.0, 0.0);
+        assert!(
+            gains.iter().all(|g| g.is_finite()),
+            "gains must stay finite: {gains:?}"
+        );
+        // The old `.max(1e-6)` bug produced a gain with |g[0]| in the hundreds of thousands
+        // (dividing by a ~1e-6-floored near-zero denominator); a magnitude-clamped, sign-
+        // preserving denominator keeps the gain in a plausible WB range instead.
+        assert!(
+            gains[0].abs() < 100.0,
+            "gain magnitude should stay plausible, not blow up from a sign-flipped clamp: {gains:?}"
+        );
+    }
+
+    #[test]
+    fn wb_gains_for_temp_tint_handles_a_tint_extreme_enough_to_push_y_toward_zero() {
+        // At an extreme (out-of-slider-range) tint, `y` can approach zero -- clamp_denominator
+        // must keep the xyz->camera_neutral division finite rather than blowing up.
+        let cam_xyz = [
+            0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        let gains = wb_gains_for_temp_tint(&cam_xyz, 5500.0, 1_000_000.0);
+        assert!(
+            gains.iter().all(|g| g.is_finite()),
+            "gains must stay finite even for an extreme tint: {gains:?}"
+        );
+    }
+
+    #[test]
+    fn wb_gains_with_params_tint_shifts_green_gain_in_the_as_shot_path() {
+        let cam_mul = [1.0, 1.0, 1.0, 1.0];
+        let identity_cam_xyz = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let neutral = wb_gains_with_params(cam_mul, &identity_cam_xyz, &WbParams::default());
+        let tinted = wb_gains_with_params(
+            cam_mul,
+            &identity_cam_xyz,
+            &WbParams {
+                temp_k: None,
+                tint: 50.0,
+            },
+        );
+        assert_ne!(neutral[1], tinted[1]);
+        assert_eq!(neutral[0], tinted[0]);
+        assert_eq!(neutral[2], tinted[2]);
     }
 
     #[test]

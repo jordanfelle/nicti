@@ -100,6 +100,16 @@ unowned — see below):
 | #52 (presets) | `Preset`, `ToggleStyleAmount`, `ToggleStyleDigest` (#157) | 3 |
 | provenance-only, no owner ticket | `LensBlur` (#157) | 1 |
 
+**Scope note added by #46 (2026-09-27)**: this table is `spikes/shed`'s measured *key-import*
+routing, unchanged by #46 -- `classify_key` still sorts white balance/HSL/tone-curve LRC keys to
+`#42` here, and #62's future importer should keep doing so. Separately, #46 (not #62) is where
+those same three *user-facing sliders* (WB temp/tint, the parametric + point tone curve, HSL) are
+actually implemented as Tapetum render stages, rather than waiting on #42's still-Proposed
+DCP-profile color pipeline -- #42 keeps the DCP HueSatMap/LookTable camera-profile machinery, the
+working-space pick, and display/export color management. When #62 lands, its importer routes
+these three keys' *values* into the `nicti.wb`/`nicti.tone_curve`/`nicti.hsl` stage params #46
+defines, not into a `#42`-owned stage.
+
 **#157 resolved the 6 originally-unowned keys** (`FilterList`/`AllowFilters`/`LensBlur`/`Preset`/
 `ToggleStyleAmount`/`ToggleStyleDigest`) by measuring real presence/active-usage counts against
 this same catalog, rather than guessing from the key names alone:
