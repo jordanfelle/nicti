@@ -11,13 +11,13 @@ use std::sync::Arc;
 
 use image::RgbImage;
 use nicti_cornea::{LibRawDecoder, LinearFrame, RawDecoder};
-use nicti_render::color;
-use nicti_render::frame::{read_frame, Extent, FrameTexture};
-use nicti_render::geometry::{self, Affine2D};
-use nicti_render::gpu::{GpuContext, GpuPreference};
-use nicti_render::graph::{RenderGraph, StageKind, StageNode};
-use nicti_render::renderer::{BakedExec, RenderRequest, Renderer};
-use nicti_render::stages::{
+use nicti_tapetum::color;
+use nicti_tapetum::frame::{read_frame, Extent, FrameTexture};
+use nicti_tapetum::geometry::{self, Affine2D};
+use nicti_tapetum::gpu::{GpuContext, GpuPreference};
+use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
+use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
     DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
 };
@@ -191,7 +191,7 @@ impl RealRender {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("knead live suffix"),
             });
-        nicti_render::renderer::LiveExec::encode(
+        nicti_tapetum::renderer::LiveExec::encode(
             &self.live_kernel,
             &self.gpu,
             &mut encoder,

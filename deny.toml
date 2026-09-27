@@ -103,7 +103,7 @@ confidence-threshold = 0.9
 # above) so this never silently passes an unrelated future GPL-only crate. This is a research
 # spike only (`spikes/pelt-slint`, not a production crate, see CLAUDE.md's package-map note) --
 # if Slint is the ADR-0068 winner, ship-decision consequences documented there require an
-# ADR-0018 amendment and explicit sign-off before any of this ships in `nicti-render`/`nicti-ui`,
+# ADR-0018 amendment and explicit sign-off before any of this ships in `nicti-tapetum`/`nicti-ui`,
 # the same standard already applied to LGPL-as-Cargo-dependency crates like `rawler`/`lensfun-rs`.
 [[licenses.exceptions]]
 allow = ["GPL-3.0-only", "LicenseRef-Slint-Royalty-free-2.0", "LicenseRef-Slint-Software-3.0"]

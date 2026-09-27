@@ -1,7 +1,7 @@
 //! Canonical-JSON + blake3 hashing, promoted from `spikes/loaf/src/hash.rs` (itself generalized
 //! from `spikes/pawprint`'s original one-upstream-hash `hash_stage`/`cache_key`, and the identical
 //! copies in `spikes/groom::spot` / `spikes/siamese::compose`) to an arbitrary number of upstream
-//! hashes -- Tapetum's render graph (`crate::EditDocument` feeds `nicti_render::graph`) is a DAG,
+//! hashes -- Tapetum's render graph (`crate::EditDocument` feeds `nicti_tapetum::graph`) is a DAG,
 //! not a flat per-stage list, so a node can have more than one upstream (e.g. the AI-mask bake
 //! stage depends on both the neutral-render stage and its own recipe params).
 //!

@@ -29,7 +29,7 @@ impl FrameTexture {
     /// readback into a golden-image comparison or an export encoder).
     pub fn new(gpu: &GpuContext, extent: Extent) -> Self {
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("nicti-render frame"),
+            label: Some("nicti-tapetum frame"),
             size: wgpu::Extent3d {
                 width: extent.width,
                 height: extent.height,

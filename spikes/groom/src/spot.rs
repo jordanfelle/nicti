@@ -1,7 +1,7 @@
 //! `HealStage` / `Spot`: the edit-model representation for clone/heal/remove operations, per
 //! `docs/adr/0021-non-destructive-edit-model.md`'s `StageEntry { schema_version, params }`
 //! pattern -- `HealStage` is the `params` shape a `"heal"` stage entry would carry, not a
-//! replacement for `StageEntry` itself (that struct lives in the future `nicti-render`/catalog
+//! replacement for `StageEntry` itself (that struct lives in the future `nicti-tapetum`/catalog
 //! crate, per ADR-0021/#22, not here).
 //!
 //! **Geometry choice:** each `Spot`'s destination is a **circle** (`center` + `radius`), not a

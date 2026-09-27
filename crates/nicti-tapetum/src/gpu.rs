@@ -111,7 +111,7 @@ impl GpuContext {
 
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("nicti-render device"),
+                label: Some("nicti-tapetum device"),
                 required_features,
                 required_limits: limits.clone(),
                 ..Default::default()

@@ -147,7 +147,7 @@ This is a real, load-bearing, evidenced constraint, not a hypothetical: Rust's t
 requires the exact same `wgpu` crate version to unify `wgpu::Device`/`wgpu::RenderPass` types
 between a candidate's internals and any code Nicti writes against them (confirmed directly —
 `spikes/pelt-iced` had to depend on `wgpu = "27"`, not `"30"`, or it fails to compile against
-`iced_wgpu`'s own types). Shipping Iced today means either `nicti-render` targets wgpu 27 instead
+`iced_wgpu`'s own types). Shipping Iced today means either `nicti-tapetum` targets wgpu 27 instead
 of ADR-0016's wgpu 30 (losing whatever wgpu 30 brought — `Rgba32Float`/dispatch behavior wasn't
 re-audited against 27 this pass), or waiting on/forcing an iced upgrade. Not disqualifying by
 itself, but a real cost egui and Slint don't carry.
@@ -175,7 +175,7 @@ exception**
   under a **spike-scoped `[[licenses.exceptions]]` block per Slint crate name** in `deny.toml` (not
   a global allow), so `cargo deny check licenses` passes for this research pass without opening
   the allowlist to any other GPL-only crate. **This is not a shipping decision**: if Slint wins on
-  the measured gates, shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0018
+  the measured gates, shipping it in `nicti-tapetum`/a future `nicti-ui` needs its own ADR-0018
   amendment and your explicit sign-off — the same standard already applied to LGPL-as-Cargo-
   dependency crates (rawler/lensfun-rs) in that ADR.
 
@@ -218,14 +218,14 @@ table.
 
 ## Consequences
 
-- **egui is selected**: `nicti-render`'s viewport integration is the
+- **egui is selected**: `nicti-tapetum`'s viewport integration is the
   `egui_wgpu::CallbackTrait` shape already proven in `spikes/pelt-egui/src/viewport.rs` — a
   `prepare`/`paint` split sharing eframe's device, `wgpu` pinned at exactly the version ADR-0016
   already chose, no version-compatibility tax.
 - **Slint was not selected**: it would have needed an ADR-0018 amendment (a GPL-3.0/dual-commercial
   dependency is a real outbound-license decision, feeding directly into #66) before it could ship
   beyond a research spike — not automatic, and not implied by passing it through the hard gates.
-- **Iced was not selected**: it would have meant `nicti-render` either targeting wgpu 27
+- **Iced was not selected**: it would have meant `nicti-tapetum` either targeting wgpu 27
   (revisiting ADR-0016's own wgpu-30-specific `SHADER_F16`/Vulkan findings against that older
   version) or blocking on an iced upgrade to wgpu 30 — a real, non-trivial dependency to carry
   forward, not a footnote.

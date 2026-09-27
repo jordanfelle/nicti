@@ -1,6 +1,6 @@
 ---
 paths:
-  - "crates/nicti-render/**"
+  - "crates/nicti-tapetum/**"
   - "crates/nicti-pawprint/**"
   - "bench/knead/**"
   - "docs/adr/0044-stage-cached-render-graph.md"
@@ -20,11 +20,11 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   fused live dispatch `WB → HueSatMap → exposure → tone → vibrance → mask compose/apply` → crop as
   an affine sample pass over the live suffix's own output only.
 - **Cache key**: `nicti_pawprint::chain` generalizes ADR-0021's flat one-upstream chain to a DAG;
-  `nicti_render::graph::RenderGraph::cache_key`/`invalidated_bakes`/`set_own_hash` are the tested,
+  `nicti_tapetum::graph::RenderGraph::cache_key`/`invalidated_bakes`/`set_own_hash` are the tested,
   structural proof that a live-slider change triggers zero bake dispatches — **landed in #45**
   (promoted from `spikes/loaf/src/graph.rs`, now deleted; `set_own_hash` is the "update a node in
   place" API the spike's own tests lacked).
-- **Cache tiers**: `nicti_render::cache::Tier<V>` — byte-budgeted LRU, generic over `size_of`,
+- **Cache tiers**: `nicti_tapetum::cache::Tier<V>` — byte-budgeted LRU, generic over `size_of`,
   backs VRAM/RAM/disk. Full-res (8280×5520) frame ≈349MB, screen-res (3840 long edge) ≈75MB.
   **Landed in #45** (promoted from `spikes/loaf/src/cache.rs`, now deleted, with its self-
   documented `O(n)` `touch` replaced by an `O(log n)` generation-counter `BTreeMap`). The disk-tier
@@ -39,7 +39,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 - **Gotcha caught this pass**: rebuilding the wgpu pipeline+buffers inside a timed loop (instead of
   a persistent `*Kernel`) measured ~1000x too slow — same class of bug `spikes/glint::
   LiveChainKernel` already documents. Always benchmark against a persistent kernel
-  (`nicti_render::stages::{DecodeKernel,LiveSuffixKernel,CropKernel}` in production, `bench/knead`'s
+  (`nicti_tapetum::stages::{DecodeKernel,LiveSuffixKernel,CropKernel}` in production, `bench/knead`'s
   own subcommands are the real replacement for what this bullet used to warn against re: the now-
   deleted `spikes/loaf`'s own `run_live_suffix`/`run_present_sample`/`run_box_filter` helpers),
   never rebuilding one inside a timing loop.
@@ -56,7 +56,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   manual distortion/vignette/defringe sliders, so this rests on the same "not a live-drag slider"
   choice ADR-0050 made for heal/remove, for #39 to confirm once it designs that UX. #39's other
   scope (correction-data source, lens coverage) stays open too.
-- **Full-res tiling** (#45 PR4, landed): `nicti_render::tile::TilePlanner::plan` partitions an ROI
+- **Full-res tiling** (#45 PR4, landed): `nicti_tapetum::tile::TilePlanner::plan` partitions an ROI
   into non-overlapping core tiles (each padded by a chain-wide halo, clamped to the source
   extent), bounded by both a max-dimension and a max-staging-bytes budget; `calibrate_core_size`
   adjusts tile size between renders toward ADR-0054's per-chunk target. `TiledRender` re-runs only
@@ -93,7 +93,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 
 ## Package contents
 
-- **`crates/nicti-render`** (#45, landed) — `graph.rs` (the stage DAG, `RenderGraph`/`StageNode`/
+- **`crates/nicti-tapetum`** (#45, landed) — `graph.rs` (the stage DAG, `RenderGraph`/`StageNode`/
   `StageKind`, promoted from `spikes/loaf/src/graph.rs`, now deleted, with a persistent memoized
   cache key and the `set_own_hash` update API the spike lacked), `cache.rs` (`Tier<V>`, promoted
   from `spikes/loaf/src/cache.rs` with an `O(log n)` touch), `prefetch.rs` (`priority_order`,
@@ -148,14 +148,14 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 - **`crates/nicti-pawprint`** (#21/#44/#45, landed) — `EditDocument`/`StageEntry`/`history`
   (promoted from `spikes/pawprint`) plus `canonical::{hash_value, chain}` (merging pawprint's
   original one-upstream `hash_stage`/`cache_key` with `spikes/loaf/src/hash.rs`'s DAG-generalized
-  `chain` — `nicti_render::graph` is the DAG consumer of this hashing scheme).
+  `chain` — `nicti_tapetum::graph` is the DAG consumer of this hashing scheme).
 - **`bench/knead`** (#45 PR4, workspace member, not production, same caveat as `bench/whisker`) —
   real-NEF golden/perf harness; see this file's own "Real-NEF harness" bullet above for what it
   does. Depends on `nicti-cornea` with the `libraw` feature always on (a real decode is its whole
   point), so it's path-gated into the `decode` CI job alongside `nicti-cornea`/`retina`, not the
   always-on jobs.
 - `spikes/loaf` (#44/ADR-0044's stage-cached render-graph research) **is now deleted** (#45 PR4) --
-  its `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` were already promoted into `crates/nicti-render`
+  its `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` were already promoted into `crates/nicti-tapetum`
   /`crates/nicti-pawprint` above; its `geometry.rs`/`gpu.rs` (the three `wgpu` kernels this file's
   own "Real RTX 5080 numbers" bullet cites) were superseded by the real `stages.rs` kernels once
   those existed; `refine.rs` was always a copy of `spikes/siamese`'s own (which still exists

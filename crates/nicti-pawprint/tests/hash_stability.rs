@@ -2,7 +2,7 @@
 //! and serialize/deserialize round-trips, and an isolated stage change only changes that stage's
 //! hash, not an unrelated stage's. Promoted from `spikes/pawprint/tests/hash_stability.rs`; the
 //! DAG cache-key chaining this file's own `cache_key_changes_when_upstream_hash_changes_but_not_
-//! otherwise` test proved is now `nicti_render::graph::RenderGraph`'s job (its own tests cover the
+//! otherwise` test proved is now `nicti_tapetum::graph::RenderGraph`'s job (its own tests cover the
 //! same claim, generalized to more than one upstream), since `EditDocument`'s flat
 //! single-upstream `cache_key` doesn't generalize to Tapetum's DAG and was dropped rather than
 //! kept as a second, narrower cache-key implementation.

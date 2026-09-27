@@ -171,7 +171,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("nicti-render frame"),
+                label: Some("nicti-tapetum frame"),
             });
 
         let mut current: Option<Arc<FrameTexture>> = None;

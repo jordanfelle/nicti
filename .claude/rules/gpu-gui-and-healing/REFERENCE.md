@@ -7,7 +7,7 @@ paths:
   - "spikes/pelt-slint/**"
   - "spikes/groom/**"
   - "bench/pelt/**"
-  - "crates/nicti-render/**"
+  - "crates/nicti-tapetum/**"
 ---
 
 # GPU, GUI, and Healing — Quick Reference
@@ -19,10 +19,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   4K/45MP. **Always dispatch as a 2D grid** (`gpu.rs::workgroup_grid`) — naive 1D overflows wgpu's
   65535-per-dimension workgroup limit. **Never a full-frame host↔device round-trip in the hot
   path** (0.8–1.5s, confirmed expensive) — baked stage output stays GPU-resident.
-- **Production `GpuContext` landed in #45** (`crates/nicti-render::gpu`), adapted from
+- **Production `GpuContext` landed in #45** (`crates/nicti-tapetum::gpu`), adapted from
   `spikes/glint`'s: one shared `wgpu::Device`/`Queue` per ADR-0016, requesting `adapter.limits()`
   (not the 256MB default) and `TIMESTAMP_QUERY`/`SHADER_F16` when the adapter supports them. Frame
-  storage is `Rgba16Float` **textures** (`crates/nicti-render::frame::FrameTexture`), not the
+  storage is `Rgba16Float` **textures** (`crates/nicti-tapetum::frame::FrameTexture`), not the
   `array<vec4<f32>>` storage **buffers** `spikes/glint`/`spikes/loaf` use — a texture format needs
   no `SHADER_F16` feature at all, so it works identically on Vulkan, Dx12, WARP and lavapipe.
 - **GUI framework** — `docs/adr/0068`: **Accepted — egui** (2026-09-27, #90), on hard-gate evidence

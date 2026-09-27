@@ -13,7 +13,7 @@ use nicti_prowl::golden::{bless_requested, CompareOutcome, CompareRequest, Golde
 use nicti_prowl::manifest::{Manifest, Scope};
 use nicti_prowl::perf::Protocol;
 use nicti_prowl::refset;
-use nicti_render::frame::Extent;
+use nicti_tapetum::frame::Extent;
 
 #[derive(Parser)]
 #[command(
@@ -134,7 +134,7 @@ fn main() -> anyhow::Result<()> {
             let source_path = verified_source_path(&manifest, ref_root.as_deref(), &ref_id)?;
             let render = RealRender::decode(&source_path)?;
             let decoded = render.render_baked()?; // the live suffix's real predecessor
-            let output = nicti_render::frame::FrameTexture::new(&render.gpu, render.extent);
+            let output = nicti_tapetum::frame::FrameTexture::new(&render.gpu, render.extent);
             let protocol = Protocol::default();
             let stats = protocol.run(|| {
                 let mut encoder =
@@ -144,7 +144,7 @@ fn main() -> anyhow::Result<()> {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("bench live_suffix"),
                         });
-                nicti_render::renderer::LiveExec::encode(
+                nicti_tapetum::renderer::LiveExec::encode(
                     &render.live_kernel,
                     &render.gpu,
                     &mut encoder,
@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
             let source_path = verified_source_path(&manifest, ref_root.as_deref(), &ref_id)?;
             let render = RealRender::decode(&source_path)?;
             let decoded = render.render_live()?; // the crop/present's real predecessor
-            let output = nicti_render::frame::FrameTexture::new(&render.gpu, render.extent);
+            let output = nicti_tapetum::frame::FrameTexture::new(&render.gpu, render.extent);
             let protocol = Protocol::default();
             let stats = protocol.run(|| {
                 let mut encoder =
@@ -179,7 +179,7 @@ fn main() -> anyhow::Result<()> {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("bench present"),
                         });
-                nicti_render::renderer::GeometryExec::encode(
+                nicti_tapetum::renderer::GeometryExec::encode(
                     &render.crop_kernel,
                     &render.gpu,
                     &mut encoder,
@@ -206,18 +206,18 @@ fn main() -> anyhow::Result<()> {
             let render = RealRender::decode(&source_path)?;
             let decoded = render.render_live()?; // the crop/present's real predecessor
 
-            let roi = nicti_render::tile::Rect {
+            let roi = nicti_tapetum::tile::Rect {
                 x: 0,
                 y: 0,
                 width: render.extent.width,
                 height: render.extent.height,
             };
-            let budget = nicti_render::tile::TileBudget {
+            let budget = nicti_tapetum::tile::TileBudget {
                 max_dim: tile_dim,
                 max_staging_bytes: u64::MAX,
                 target_chunk_ms: 8.0,
             };
-            let tiles = nicti_render::tile::TilePlanner::plan(render.extent, roi, 1, budget);
+            let tiles = nicti_tapetum::tile::TilePlanner::plan(render.extent, roi, 1, budget);
             println!("planned {} tiles at dim={tile_dim}", tiles.len());
             // Times a single representative tile (the first one plan() produces, which always
             // starts at (0,0)) repeatedly, rather than cycling through every planned tile --
@@ -232,14 +232,14 @@ fn main() -> anyhow::Result<()> {
 
             let protocol = Protocol::default();
             let stats = protocol.run(|| {
-                let mut tiled = nicti_render::tile::TiledRender::new(
+                let mut tiled = nicti_tapetum::tile::TiledRender::new(
                     std::sync::Arc::clone(&render.gpu),
                     &decoded,
                     &render.crop_kernel,
-                    nicti_render::geometry::Affine2D::IDENTITY,
+                    nicti_tapetum::geometry::Affine2D::IDENTITY,
                     vec![first_tile],
                 );
-                let mut sink = nicti_render::tile::MemorySink::new(sink_extent);
+                let mut sink = nicti_tapetum::tile::MemorySink::new(sink_extent);
                 tiled.step(&mut sink);
             });
             println!("{}", serde_json::to_string_pretty(&stats)?);

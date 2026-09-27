@@ -30,7 +30,7 @@ into `requirements`/`research`/`build` children — `docs/adr/` is the design re
 
 - `crates/nicti-claw` — the module/plugin registry every other crate builds on.
 - `crates/nicti-prowl` — the benchmark + golden-image harness.
-- `crates/nicti-cornea`, `nicti-calico`, `nicti-iris`, `nicti-render`, `nicti-stalk`, `nicti-preen`,
+- `crates/nicti-cornea`, `nicti-calico`, `nicti-iris`, `nicti-tapetum`, `nicti-stalk`, `nicti-preen`,
   `nicti-lair` — one crate per extension point (RAW decode, color, lens correction, render
   pipeline, AI models, export, catalog store), currently trait definitions only.
 - `spikes/*` — throwaway research spikes backing specific ADRs; not production code, not a base

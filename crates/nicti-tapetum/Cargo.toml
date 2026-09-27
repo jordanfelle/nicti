@@ -1,5 +1,5 @@
 [package]
-name = "nicti-render"
+name = "nicti-tapetum"
 version = "0.0.0"
 edition = "2021"
 license.workspace = true
