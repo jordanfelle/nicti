@@ -408,12 +408,13 @@ struct PresentUniforms {
     d: f32,
     tx: f32,
     ty: f32,
-    _pad0: f32,
-    _pad1: f32,
+    out_width: u32,
+    out_height: u32,
 }
 
 pub struct CropKernel {
     pipeline: wgpu::ComputePipeline,
+    transform: std::sync::Mutex<Affine2D>,
     uniform_buf: wgpu::Buffer,
 }
 
@@ -432,23 +433,15 @@ impl CropKernel {
         });
         Self {
             pipeline,
+            transform: std::sync::Mutex::new(Affine2D::IDENTITY),
             uniform_buf,
         }
     }
 
-    pub fn set_transform(&self, gpu: &GpuContext, transform: Affine2D) {
-        let u = PresentUniforms {
-            a: transform.a,
-            b: transform.b,
-            c: transform.c,
-            d: transform.d,
-            tx: transform.tx,
-            ty: transform.ty,
-            _pad0: 0.0,
-            _pad1: 0.0,
-        };
-        gpu.queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+    /// Records this render's crop transform -- the actual uniform-buffer write is deferred to
+    /// `encode` (which also needs the output extent, only known once a `FrameTexture` exists).
+    pub fn set_transform(&self, transform: Affine2D) {
+        *self.transform.lock().unwrap() = transform;
     }
 }
 
@@ -460,6 +453,20 @@ impl GeometryExec for CropKernel {
         input: &FrameTexture,
         output: &FrameTexture,
     ) {
+        let transform = *self.transform.lock().unwrap();
+        let u = PresentUniforms {
+            a: transform.a,
+            b: transform.b,
+            c: transform.c,
+            d: transform.d,
+            tx: transform.tx,
+            ty: transform.ty,
+            out_width: output.extent.width,
+            out_height: output.extent.height,
+        };
+        gpu.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present_sample bind group"),
@@ -760,7 +767,7 @@ mod tests {
 
         let transform = Affine2D::crop(1.0, 1.0);
         let kernel = CropKernel::new(&gpu);
-        kernel.set_transform(&gpu, transform);
+        kernel.set_transform(transform);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -861,7 +868,7 @@ mod tests {
         live_kernel.set_params(&gpu, matrix, exposure_mult, contrast, vibrance);
 
         let crop_kernel = CropKernel::new(&gpu);
-        crop_kernel.set_transform(&gpu, Affine2D::IDENTITY);
+        crop_kernel.set_transform(Affine2D::IDENTITY);
 
         let mut renderer =
             crate::renderer::Renderer::new(std::sync::Arc::clone(&gpu), 1_000_000_000);

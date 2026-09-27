@@ -12,8 +12,13 @@ struct Uniforms {
     d: f32,
     tx: f32,
     ty: f32,
-    _pad0: f32,
-    _pad1: f32,
+    // The output extent, supplied by the caller (who already knows it from `FrameTexture::extent`)
+    // rather than queried via `textureDimensions(output_tex)` -- naga's HLSL backend (FXC) hits a
+    // "redefinition of NagaRWDimensions2D" codegen bug when a shader queries dimensions on both a
+    // `read` and a `write` storage texture (confirmed: `live_suffix.wgsl`, which only queries its
+    // one `read` texture, compiles fine on the same Dx12/FXC path).
+    out_width: u32,
+    out_height: u32,
 }
 
 @group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
@@ -22,8 +27,7 @@ struct Uniforms {
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let out_dims = textureDimensions(output_tex);
-    if (gid.x >= out_dims.x || gid.y >= out_dims.y) {
+    if (gid.x >= u.out_width || gid.y >= u.out_height) {
         return;
     }
     let in_dims = vec2<f32>(textureDimensions(input_tex));
