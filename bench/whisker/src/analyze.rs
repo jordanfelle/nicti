@@ -284,6 +284,26 @@ pub fn pool_results(
                 }
             }
             "mixed" => {
+                // Same check `analyze_switch` does internally for switch/zoom -- the mixed arm
+                // computes brightness/diffs directly instead of going through that helper, so it
+                // doesn't get this for free. Without it, a capture whose indicator/roi crops came
+                // from mismatched ffmpeg passes would silently produce edges that land past
+                // `roi_diffs`'s end (clamped to `None`/empty by event_latencies_bounded/
+                // distinct_change_frames, not a panic) instead of being skipped like every other
+                // malformed-input case here.
+                if indicator.frames.len() != roi.frames.len() {
+                    skipped.push(SkippedCapture {
+                        dir,
+                        reason: format!(
+                            "indicator ({} frames) and roi ({} frames) captures have different frame counts — \
+                             they must come from the same capture window",
+                            indicator.frames.len(),
+                            roi.frames.len()
+                        ),
+                    });
+                    continue;
+                }
+
                 let events_path = dir.join("events.csv");
                 let events = match read_events_csv(&events_path) {
                     Ok(e) => e,
@@ -305,6 +325,36 @@ pub fn pool_results(
                             "events.csv has {} row(s) but {} indicator edge(s) were detected — they must match 1:1",
                             events.len(),
                             all_edges.len()
+                        ),
+                    });
+                    continue;
+                }
+
+                // predecessor_steps assumes step_index is gapless, non-decreasing, and each
+                // step's flashes are contiguous -- true for well-formed hero.ahk output, but not
+                // enforced by the two checks above. A hand-edited/corrupted events.csv that
+                // violates it would otherwise get a silently wrong predecessor label (the
+                // exact bucket #100's regression comparison reads) instead of being rejected.
+                if events[0].step_index != 0 {
+                    skipped.push(SkippedCapture {
+                        dir,
+                        reason: format!(
+                            "events.csv row 0: step_index {} must be 0",
+                            events[0].step_index
+                        ),
+                    });
+                    continue;
+                }
+                if let Some((row, prev, cur)) = (1..events.len()).find_map(|i| {
+                    let prev = events[i - 1].step_index;
+                    let cur = events[i].step_index;
+                    (cur != prev && cur != prev + 1).then_some((i, prev, cur))
+                }) {
+                    skipped.push(SkippedCapture {
+                        dir,
+                        reason: format!(
+                            "events.csv row {row}: step_index {cur} is not {prev} (continuing the same step) or {} (the next step) — step_index must be gapless, non-decreasing, and each step's flashes contiguous",
+                            prev + 1
                         ),
                     });
                     continue;
@@ -950,6 +1000,112 @@ mod tests {
             .unwrap();
         assert!(first.settled_ms.is_empty());
         assert_eq!(first.unsettled, 1);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_skips_capture_when_indicator_and_roi_frame_counts_differ() {
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        // roi.raw has one fewer frame than indicator.raw -- simulates the two crop-extraction
+        // ffmpeg passes disagreeing, same failure mode `analyze_switch` already guards against.
+        let indicator = vec![0u8, 255, 0, 255, 0];
+        let roi = vec![10u8, 10, 90, 90];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n0,switch,switch,0\n1,switch,switch,1\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(buckets.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("different frame counts"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_skips_capture_when_step_index_is_not_gapless_or_contiguous() {
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        // step_index jumps from 0 straight to 2 -- a malformed/hand-edited events.csv that
+        // predecessor_steps must not silently misinterpret.
+        let indicator = vec![0u8, 255, 0, 255, 0];
+        let roi = vec![10u8, 10, 90, 90, 90];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n0,switch,switch,0\n1,switch,switch,2\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(buckets.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("gapless"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_skips_capture_when_first_step_index_is_not_zero() {
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        let indicator = vec![0u8, 255, 0];
+        let roi = vec![10u8, 10, 90];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n0,switch,switch,1\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(buckets.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("must be 0"));
 
         fs::remove_dir_all(&root).unwrap();
     }

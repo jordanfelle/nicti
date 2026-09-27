@@ -215,6 +215,7 @@ if interaction = "switch" {
                 committedHistorySteps += 1
             } else {
                 MsgBox "Unknown mixed sequence step: " step
+                eventsCsvHandle.Close() ; flush whatever rows were already written before exiting
                 ExitApp 1
             }
             stepIndex += 1

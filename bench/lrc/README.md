@@ -130,6 +130,11 @@ the first real run (and rechecked if the window moves/resizes):
    - The `auto-tone`/`straighten` steps' own history entries actually appear in LRC's History
      panel (not just the crop/switch ones) — a silently no-op `Ctrl+U` or a missed button click
      would under-count `committedHistorySteps` and leave a real, un-reverted edit behind.
+   - **The Auto-angle button click actually lands on the button**: `straighten` is the first step
+     here to click a fixed coordinate outside a drag (`Click(StraightenAutoX, StraightenAutoY)`,
+     unlike every other click in this file, which is a drag-down/drag-up pair) — confirm visually
+     in the recording that it lands on the button and the straighten history entry appears, not
+     just that *some* flash fired at roughly the right time.
 
 ## Never automate on a machine you're actively using for something else
 
