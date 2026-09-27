@@ -46,6 +46,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0044](0044-stage-cached-render-graph.md) | — | Stage-cached render graph (Tapetum) | Proposed |
 | [0048](0048-masking.md) | 0024 | Masking | Proposed |
 | [0050](0050-healing-and-removal.md) | 0007 | Healing and removal | Proposed |
+| [0053](0053-ai-auto-tone.md) | — | AI auto-tone (MLP, per-user edit history) | Proposed |
 | [0054](0054-job-scheduler-pounce.md) | — | Job scheduler design (Pounce) | Proposed |
 | [0056](0056-export-stack.md) | — | Export stack | Proposed |
 | [0059](0059-xmp-interop.md) | — | XMP interop with Lightroom Classic | Proposed |

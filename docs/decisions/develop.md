@@ -51,3 +51,36 @@ measurement pass is deferred.
   none — `bench/lrc/auto-tone.ahk` takes its source directory as a CLI argument (same convention
   as `bench/lrc/setup.ahk`) rather than reading a frozen file, so #202 supplies it once it can
   actually reach `ref-10k` on the reference machine.
+
+## AI auto-tone
+
+Covers #53's research (ADR-0053): an MLP predicting all eight PV2012 sliders from a downsampled
+embedded-JPEG preview, trained on the user's own real LRC edit history — a separate, v2-track model
+from #99's classic auto-tone, not built on its output.
+
+- **Real data this pass, no reference-machine deferral.** Unlike #99, the closed LRC catalog backup
+  and the RAW drives were both reachable from this sandbox, so #53 trains and measures against real
+  data directly instead of deferring to a follow-up ticket. See ADR-0053's Measured results.
+
+- **Input is the NEF's embedded JPEG, not a LibRaw linear render.** #53 isn't trying to reproduce
+  LRC's own algorithm the way #99 is — it only needs a reasonable visual summary of the photo, so
+  it uses the pure-Rust `nicti_cornea::embedded` extraction (no LibRaw FFI, no vendored submodule,
+  no per-file RAW decode cost) rather than `pupil::render`'s fixed linear-to-sRGB treatment.
+
+- **Training framework is `candle` (CPU only), per ADR-0218.** Training on a user's own library
+  must run locally and offline by default — no Python, no hosted training service. `candle` is the
+  first ML-training framework in this repo's dependency graph; `ort`'s existing masking/culling/
+  healing use is inference-only, a different case.
+
+- **Labels are picks/rated keepers with a real non-default edit**, not every edited image — a bulk
+  sync or import-time preset produces a large volume of near-identical, low-signal edits that would
+  dilute the training signal relative to the user's actual careful edits.
+
+- **Split by event (folder), not by image**, as the primary holdout — an image-level split would
+  leak synced batch edits (a whole folder selected and one setting applied to all of it) across
+  train and holdout, inflating apparent accuracy. A temporal split (oldest trains, newest holds out)
+  is measured as a secondary check, matching the realistic personal-model deployment shape.
+
+- **Decision rule is looser than #99's** — a user's own edits are noisier than LRC's own
+  algorithmic Auto Settings — and requires the best ML model to beat the ridge baseline by ≥15% on
+  mean range-normalized MAE, not just clear an absolute per-slider bound alone.
