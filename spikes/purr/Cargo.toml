@@ -1,0 +1,35 @@
+[package]
+name = "purr"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #53 (ADR-0053): an MLP predicting core PV2012 develop sliders from a downsampled embedded-JPEG preview, trained on the user's own real LRC edit history (picks/rated keepers). Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "purr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "purr"
+path = "src/bin/purr.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+agprefs = "0.3"
+zune-jpeg = "0.5"
+fast_image_resize = "6"
+nicti-cornea = { path = "../../crates/nicti-cornea" }
+candle-core = "0.11"
+candle-nn = "0.11"
+rand = "0.8"
+rayon = "1"
+bincode = "1"
+
+[dev-dependencies]
+tempfile = "3"

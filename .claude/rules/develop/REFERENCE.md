@@ -5,7 +5,7 @@ paths:
   - "docs/adr/0099-classic-auto-tone.md"
 ---
 
-# Classic Auto-Tone — Quick Reference
+# Develop (Auto-Tone) — Quick Reference
 
 Full reasoning/history: `docs/decisions/develop.md`.
 
@@ -13,6 +13,13 @@ Full reasoning/history: `docs/decisions/develop.md`.
   (reference-machine run — no LRC install and `spikes/retina` can't build in this sandbox).
   Candidate A (percentile heuristic) vs. candidate B (ridge-regression fit); decision rule
   (Exposure MAE ≤ 0.15 EV, other sliders MAE ≤ 8 / p95 ≤ 20) fixed before real data exists.
+- **AI auto-tone (#53)** — `docs/adr/0053-ai-auto-tone.md`: **finding is "ridge is enough," not an
+  ML model.** Trained B0 (mean)/B1 (ridge)/M1 (MLP, histogram)/M2 (MLP, histogram+thumbnail) on
+  5,000 real picked/rated keepers from the user's own catalog (no reference-machine deferral — the
+  catalog backup and RAW drives were reachable from this sandbox). B1 beat both MLPs on both the
+  event and temporal splits; M2 (the model using the actual downsampled image tensor) underperformed
+  the trivial mean baseline, likely data-starved at this sample size (3085-dim input, ~4000 training
+  rows) rather than a hard ceiling. A v2 build should use the ridge fit, not a neural model.
 - **Primary metric: per-slider value error, not a golden image** — nothing can render PV2012
   sliders to pixels yet (#46's job), so a rendered-image comparison would just add a second
   approximation-error source. #46 owns that comparison once it exists.
@@ -33,3 +40,13 @@ Full reasoning/history: `docs/decisions/develop.md`.
   (candidate B: hand-rolled ridge regression), `truth` (LRC ground truth from a `.lrcat`), `eval`
   (per-slider MAE/p95/bias). See `docs/research/pupil-auto-tone.md` for the module breakdown and
   the RapidRAW auto-adjust study.
+- **`spikes/purr`** (#53/ADR-0053's AI auto-tone research) — `catalog` (keeper-row query +
+  develop-settings parsing from a `.lrcat`, a small independent copy of `pupil::truth`'s
+  lock/WAL guard), `sample` (deterministic per-folder-capped sampling), `split` (event and
+  temporal train/holdout splits, generic over row type), `features` (embedded-JPEG extraction via
+  `nicti_cornea::embedded`, histogram feature vector, 32x32 thumbnail tensor), `dataset` (manifest/
+  feature-cache scratch-file formats + parallel extraction runner), `sliders` (the eight PV2012
+  targets, extending `pupil::sliders` with Saturation/Vibrance), `baseline` (B0: mean model), `fit`
+  (B1: ridge regression, an 8-slider generalization of `pupil::fit`), `mlp` (M1/M2: a CPU-only
+  `candle` MLP), `eval` (per-slider MAE/p95/bias + the aggregate normalized-MAE metric ADR-0053's
+  decision rule reads). See `docs/research/purr-ai-auto-tone.md` for the full module breakdown.

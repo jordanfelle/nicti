@@ -412,6 +412,28 @@ scope for this pass** (see the research doc) — same class of gap ADR-0059 alre
 DNG/TIFF: no crate in this workspace builds arbitrary TIFF tags, so embedding any of the three
 into a TIFF export needs a dedicated writer this spike didn't build.
 
+**Update (2026-09-27, [#53](https://github.com/jordanfelle/nicti/issues/53)'s `purr` spike,
+`docs/adr/0053-ai-auto-tone.md`):** `candle-core`/`candle-nn` v0.11.0 (`MIT OR Apache-2.0`), the
+CPU-only training/inference framework ADR-0053 chose over PyTorch+ONNX per ADR-0218's local-only
+training requirement, plus their transitive tree — all confirmed via `cargo metadata`'s own
+`license` field, all permissive: `gemm`/`gemm-common`/`gemm-f16`/`gemm-f32`/`gemm-f64`/`gemm-c32`/
+`gemm-c64` (`MIT`), `safetensors` (`Apache-2.0`), `half`/`float8` (`MIT OR Apache-2.0`/`MIT`),
+`rayon-cond` (`Apache-2.0/MIT`), `zip` (`MIT`, candle's own checkpoint-loading path), and
+`tokenizers` v0.22.2 (`Apache-2.0`, an unused transitive dependency of `candle-core` — this spike
+never tokenizes text) plus its own tree (`onig`/`onig_sys` `MIT` for the Rust binding crate; the
+vendored C library it wraps, Oniguruma, is BSD-2-Clause upstream — permissive, not tracked by
+`cargo-deny` since it's a native library, noted here per the Native libraries table's own
+convention below; `esaxx-rs`/`spm_precompiled` `Apache-2.0`, `derive_builder`/`darling`/`monostate`/
+`compact_str`/`castaway`/`typed-path` all `MIT` or `MIT OR Apache-2.0`). Also new: `rand`/
+`rand_chacha`/`rand_core`/`rand_distr` (`MIT OR Apache-2.0`, this spike's own synthetic-data test
+fixtures), `bincode` v1.3.3 (`MIT`, the feature-cache scratch-file format — already reviewed above
+for #67's `den` spike), and `zune-jpeg`/`fast_image_resize` (already reviewed for #28's `sniff`
+spike, this is their second real user). No new model weights: #53 trains its own model from
+scratch on the user's own catalog, so the ML model weights table below doesn't apply — see
+ADR-0053's own privacy note on why the trained weights and the manifest/feature-cache scratch files
+this spike produces are never committed. `cargo deny check licenses` passes clean, no new
+`deny.toml` entries needed.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

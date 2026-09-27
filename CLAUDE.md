@@ -23,7 +23,7 @@ Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only
 `gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071), `color` (0038),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033), `denoise` (0040),
-`xmp-interop` (0059), `render-graph` (0044), `develop` (0099), `jobs` (0054), `export` (0056). A new ADR adds a
+`xmp-interop` (0059), `render-graph` (0044), `develop` (0099, 0053), `jobs` (0054), `export` (0056). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -162,6 +162,7 @@ terse index: crate/spike → purpose → owning topic.
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
 - **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
 - **`spikes/pupil`** (#99/ADR-0099) → [`develop`](.claude/rules/develop/REFERENCE.md)
+- **`spikes/purr`** (#53/ADR-0053) → [`develop`](.claude/rules/develop/REFERENCE.md)
 - **`spikes/crouch`** (#54/ADR-0054) → [`jobs`](.claude/rules/jobs/REFERENCE.md)
 - **`spikes/prey`** (#56/ADR-0056) → [`export`](.claude/rules/export/REFERENCE.md)
 - **`bench/whisker`** (workspace member) — benchmark tooling for #43, not a production crate; same
