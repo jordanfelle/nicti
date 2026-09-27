@@ -5,3 +5,7 @@ bench-results/
 *.pdb
 .DS_Store
 __pycache__/
+# nicti-pelt's default catalog path (nicti_pelt::catalog::resolve_path) when run from a repo
+# checkout with no catalog-file argument -- a real user's catalog belongs outside the repo, this
+# is only what a plain `cargo run -p nicti` creates.
+/nicti.catalog.sqlite*

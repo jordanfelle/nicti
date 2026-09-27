@@ -105,6 +105,17 @@ allowlist covered:
 No action beyond the `deny.toml` changes above — `cargo deny --workspace --all-features check
 licenses` passes clean as of this update.
 
+**Update (2026-09-27, [#241](https://github.com/jordanfelle/nicti/issues/241), `crates/nicti-pelt`
+the production app shell):** landed on egui (per ADR-0068's Decision) — the license surface above
+under "egui/eframe" and "Shared transitive dependency (all three candidates)" carries over
+unchanged, now against a real shipping crate rather than the `pelt-egui` research spike. No new
+license expression appeared beyond what that update already added to `deny.toml`'s allowlist
+(`OFL-1.1`/`Ubuntu-font-1.0` for `epaint_default_fonts`, `NCSA` for the `ravif`/`rav1e`/
+`libfuzzer-sys` transitive chain, `BSL-1.0` for `arboard`'s `clipboard-win`/`error-code`) —
+`cargo deny --workspace --all-features check licenses` passes clean with `nicti-pelt` in the
+graph. The Slint exception two updates above stays unused (Slint wasn't the pick) and can be
+dropped once `spikes/pelt-slint` is deleted (#232).
+
 **Update (2026-09-24, [#28](https://github.com/jordanfelle/nicti/issues/28)'s `sniff` spike):**
 new dependencies for embedded-JPEG inventory/decode/benchmark tooling, all already covered by
 `deny.toml`'s existing allowlist with no changes needed: `zune-jpeg`/`zune-core` (decode) and

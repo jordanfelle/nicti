@@ -35,6 +35,12 @@
       "allowedVersions": "!/^3\\.0\\.0$/"
     },
     {
+      "description": "wgpu and eframe/egui/egui-wgpu must move together in crates/nicti-tapetum and crates/nicti-pelt -- eframe/egui-wgpu pin an exact wgpu version internally (ADR-0068's Hard gate 2, the same reason spikes/pelt-iced is blocked below), so a wgpu-only bump landing without a matching eframe/egui-wgpu bump (or vice versa) would silently split the workspace onto two incompatible wgpu type sets, same failure class as #232's now-superseded pelt-iced/wgpu-27 case.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["wgpu", "eframe", "egui", "egui-wgpu"],
+      "groupName": "wgpu + eframe/egui/egui-wgpu"
+    },
+    {
       "description": "spikes/* are throwaway research crates deleted on promotion (see CLAUDE.md's package map section) -- a bump PR against one is pure churn nobody will act on before the whole crate is deleted or promoted. A dependency shared with a real crates/* or root manifest still gets bumped normally via that manifest's own PR. (spikes/den, this rule's original motivating case with its five already-rejected catalog-engine candidates, was itself deleted in #123.)",
       "matchManagers": ["cargo"],
       "matchFileNames": ["spikes/**"],

@@ -8,6 +8,7 @@ paths:
   - "spikes/groom/**"
   - "bench/pelt/**"
   - "crates/nicti-tapetum/**"
+  - "crates/nicti-pelt/**"
 ---
 
 # GPU, GUI, and Healing — Quick Reference
@@ -33,6 +34,18 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   cleanest but its license (`GPL-3.0-only OR LicenseRef-Slint-*`) needs its own ADR-0018 amendment
   to ship. `spikes/pelt*`/`bench/pelt/` slated for deletion, tracked in #232; real perf validation
   against the actual UI crate tracked in #233.
+- **Production UI crate: `crates/nicti-pelt`** (#241, landed) — device sharing implemented as
+  `nicti_tapetum::gpu::device_descriptor_for` passed to eframe's `WgpuSetup::CreateNew` (so
+  eframe's own device gets Tapetum's own limits/features, not `wgpu::Limits::default()`'s
+  conservative 8192px/no-optional-features default), then `GpuContext::from_device(adapter,
+  device, queue)` wraps the resulting `cc.wgpu_render_state`'s device — one real device shared
+  between egui's render pass and every Tapetum compute dispatch, exactly ADR-0016's "one shared
+  device" rule. Displaying a `FrameTexture` (linear ProPhoto RGB, `Rgba16Float`) needs its own
+  small fragment shader (`nicti-pelt/shaders/display.wgsl`, `viewport.rs`'s `ViewportCallback`) —
+  the same `color::prophoto_to_srgb_linear_matrix()`/sRGB-OETF pair
+  `geometry::output_encode`'s CPU reference already uses, with the OETF skipped when the render
+  target itself is an `*Srgb` format (hardware already applies it on write then — applying it
+  twice double-gammas the image).
 - **Healing/removal** — `docs/adr/0050`: **Accepted** (2026-09-26, #97's reference-machine pass).
   Ships both classic clone/heal (CPU Poisson-Jacobi + `wgpu` compute-shader twin) and AI removal
   (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`.
@@ -64,6 +77,12 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   research. `pelt` is the toolkit-agnostic shared fixture/math crate; each `pelt-*` is one
   candidate's virtualized-grid + loupe + custom-wgpu-viewport spike. No `spikes/pelt-gpui` exists
   (ADR-0068's Hard-gate-1 early exit).
+- **`crates/nicti-pelt`** (#241, landed) — the production app shell: `lib.rs` (`run`, the
+  `WgpuSetup::CreateNew` device-descriptor wiring), `app.rs` (`PeltApp`, view routing), `render.rs`
+  (`DevelopView` — wires a synthetic gradient `LinearFrame` through the real Tapetum pipeline;
+  a real NEF is #31's job), `viewport.rs` (`ViewportResources`/`ViewportCallback`, the
+  `egui_wgpu::CallbackTrait` display pass) and `catalog.rs` (opens a `nicti-lair` `SqliteCatalog`).
+  Supersedes `spikes/pelt-egui` as the real, non-throwaway crate ADR-0068 points to.
 - **`spikes/groom`** (#50/ADR-0050) — healing/removal research: CPU clone-stamp/Poisson-heal +
   auto-source-pick reference, a `wgpu` compute-shader Poisson twin proven correct against it,
   `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox,

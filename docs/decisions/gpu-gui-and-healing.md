@@ -35,6 +35,23 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
   jobs are now dead weight, tracked for deletion in #232; real performance validation against
   this ADR's measured-gate targets moves to #233, against the actual UI crate via #43's
   hero-scenario tooling, once it exists.
+- **Production UI crate, `crates/nicti-pelt` (#241, landed)**: the app shell ADR-0068 points to.
+  Named `nicti-pelt`, not the ticket's own `nicti-ui` filing name, to match the feline naming
+  convention every other crate follows — reusing "pelt" from the now-superseded research spikes
+  above. Device sharing: `nicti-pelt::run` passes eframe's `WgpuSetup::CreateNew` a
+  `device_descriptor` closure set to the newly-factored-out
+  `nicti_tapetum::gpu::device_descriptor_for` (the same adapter-limits/optional-features
+  descriptor `GpuContext::new` itself requests, rather than eframe's own conservative
+  `wgpu::Limits::default()`), then `PeltApp::new` wraps `cc.wgpu_render_state`'s resulting
+  adapter/device/queue with a new `GpuContext::from_device` constructor — one real device shared
+  between egui's render pass and every Tapetum compute dispatch, exactly this section's own "one
+  shared device" rule. Displaying a `FrameTexture` (linear ProPhoto RGB, `Rgba16Float`) into an
+  8-bit surface needed its own small fragment shader (`nicti-pelt/shaders/display.wgsl`,
+  `viewport.rs`'s `ViewportCallback`), applying the same
+  `color::prophoto_to_srgb_linear_matrix()`/sRGB-OETF pair `geometry::output_encode`'s CPU
+  reference already uses — skipping the OETF when the render target itself is an `*Srgb` format,
+  since the hardware already applies it on write then (applying it twice would double-gamma the
+  image).
 - **Healing/removal**: `docs/adr/0050-healing-and-removal.md` — **Accepted** (2026-09-26, #97's
   reference-machine pass). Ships both classic clone/heal (CPU Poisson-Jacobi solve + a `wgpu`
   compute-shader twin, proven correct against each other in `spikes/groom/`) and AI removal

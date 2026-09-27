@@ -5534,6 +5534,9 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 [[package]]
 name = "nicti"
 version = "0.0.0"
+dependencies = [
+ "nicti-pelt",
+]
 
 [[package]]
 name = "nicti-calico"
@@ -5599,6 +5602,21 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "nicti-pelt"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "bytemuck",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "nicti-cornea",
+ "nicti-lair",
+ "nicti-tapetum",
+ "wgpu 30.0.1",
 ]
 
 [[package]]

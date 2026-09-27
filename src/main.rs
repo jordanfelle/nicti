@@ -1,3 +1,3 @@
-fn main() {
-    println!("nicti: scaffolding only, nothing built yet");
+fn main() -> nicti_pelt::Result {
+    nicti_pelt::run()
 }

@@ -14,3 +14,6 @@ license.workspace = true
 [[bin]]
 name = "nicti"
 path = "src/main.rs"
+
+[dependencies]
+nicti-pelt = { path = "crates/nicti-pelt" }
