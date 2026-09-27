@@ -197,11 +197,12 @@ fn hash_file(mut file: File) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         }
-        hasher.update(&buf[..n]);
     }
     Ok(hex_encode(&hasher.finalize()))
 }
@@ -244,6 +245,21 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(content);
         hex_encode(&hasher.finalize())
+    }
+
+    #[test]
+    fn hash_file_matches_known_sha256_test_vector() {
+        // Independently-known SHA-256 digest of the ASCII string "hello" (NIST/RFC test
+        // vector), not derived from this module's own hasher/hex_encode -- pins hash_file to
+        // ground truth instead of only round-tripping against itself.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        File::create(&path).unwrap().write_all(b"hello").unwrap();
+        let digest = hash_file(File::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            digest,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     #[test]
