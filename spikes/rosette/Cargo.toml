@@ -1,0 +1,30 @@
+[package]
+name = "rosette"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #35 (ADR-0035): face/subject grouping -- clusters a shoot's photos by subject using general image embeddings (DINOv2/OpenCLIP/DINOv3, not face recognition, since most subjects are fursuiters) plus DBSCAN, with a full-frame-vs-subject-crop ablation and a labelling/eval harness. Not a production crate."
+
+[lib]
+name = "rosette"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rosette"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+zune-jpeg = "0.5"
+fast_image_resize = "6"
+image = { version = "0.25", default-features = false }
+sha2 = "0.11"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+
+[dev-dependencies]
+tempfile = "3"

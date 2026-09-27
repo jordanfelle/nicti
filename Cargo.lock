@@ -7432,6 +7432,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosette"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fast_image_resize",
+ "image",
+ "ort",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zune-jpeg",
+]
+
+[[package]]
 name = "rowan"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

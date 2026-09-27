@@ -1,6 +1,7 @@
 ---
 paths:
   - "spikes/litter/**"
+  - "spikes/rosette/**"
 ---
 
 # Culling — Quick Reference
@@ -24,6 +25,11 @@ Full reasoning/history: `docs/decisions/culling.md`.
   density); `E:\cf\*.dd` is blank. Real measurement waits on the user's next con — see #180.
 - **`litter draft`'s `label.html` is local-only, never published** — real third-party photos +
   past artifact size limits at con scale.
+- **Subject grouping (#35) is NOT sequence-constrained** — reuses litter's DINOv2 embedder but
+  needs its own clustering (DBSCAN + silhouette-guided eps), since the same subject can reappear
+  anywhere in a shoot, not just nearby in capture order.
+- **DINOv3 license-gated + HF manual-download gate; no clean OpenCLIP ONNX export found** — both
+  real weights are TBD for #35, same as litter's own con-shoot ground truth.
 
 ## Package contents
 
@@ -32,3 +38,8 @@ Full reasoning/history: `docs/decisions/culling.md`.
   sequence-constrained grouping. Real, tested (35 unit/integration tests), not path-gated,
   pending the reference-labelling measurement pass ADR-0033 describes. See
   `docs/research/litter-burst-grouping.md`.
+- **`spikes/rosette`** (#35/ADR-0035's subject-grouping research) — DINOv2/OpenCLIP/DINOv3
+  embedding backbones (DINOv2 adapted from litter), DBSCAN + silhouette-guided eps clustering,
+  full-frame-vs-crop ablation, burst-collapse helper, and a labelling/eval harness. Real, tested
+  (48 unit tests), not path-gated, pending both a real labelled shoot and DINOv3/OpenCLIP model
+  files. See `docs/research/rosette-subject-grouping.md`.
