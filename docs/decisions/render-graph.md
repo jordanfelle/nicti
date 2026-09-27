@@ -45,9 +45,9 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   reserved** in this pass's shader, unlike this section's own stage-order sketch above — that's
   #42's DCP-profile scope, and wiring in unused texture bindings with no real content to sample
   would be exactly the half-finished scaffolding this repo's conventions ask to avoid. Every
-  kernel is proven against a CPU reference via a real GPU-vs-CPU parity test (not just
-  correctness-by-construction), plus one end-to-end test wiring the whole chain through
-  `Renderer` and checking both dispatch counts and actual output pixel values.
+  kernel has a GPU-vs-CPU parity test against a CPU reference, plus one end-to-end test wiring
+  the whole chain through `Renderer` and checking both dispatch counts and actual output pixel
+  values. These tests skip when no `wgpu` adapter is available.
 - **Cache tiers**: `spikes/loaf/src/cache.rs::Tier<V>`, a byte-budgeted LRU generic over a
   `size_of` closure, backs VRAM/RAM/disk with different budgets from the same eviction logic. A
   full-res (8280×5520) RGBA16F frame is ~349MB, a screen-res (3840-long-edge) frame is ~75MB — a

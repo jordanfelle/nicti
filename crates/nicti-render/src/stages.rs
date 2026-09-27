@@ -195,10 +195,20 @@ impl BakedExec for DecodeExec<'_> {
         output: &FrameTexture,
     ) {
         let frame = self.frame;
-        // WGSL has no native u16 storage-buffer element type -- widen to u32 (doubles upload
-        // size versus packing two u16 per u32; real-photo bandwidth is a follow-up, not a
-        // correctness concern here).
-        let pixels_u32: Vec<u32> = frame.pixels.iter().map(|&v| u32::from(v)).collect();
+        // WGSL has no native u16 storage-buffer element type -- pack two u16 samples per u32
+        // (little-endian: sample 2n in the low 16 bits, sample 2n+1 in the high 16 bits), halving
+        // upload size versus one u32 per sample. `normalize.wgsl`'s `unpack_sample` does the
+        // matching unpack. A full-res 8280x5520 frame is still ~274MB packed -- comfortably under
+        // real-hardware storage-binding limits (`GpuContext` already requests `adapter.limits()`),
+        // but can still exceed a software adapter's (e.g. lavapipe's 128MB) at full resolution;
+        // splitting the upload into row-strips to stay under an arbitrary adapter's limit is left
+        // to #45's tiling slice, which needs this same row-strip mechanism for real-photo export
+        // regardless of decode's own upload size.
+        let pixels_u32: Vec<u32> = frame
+            .pixels
+            .chunks(2)
+            .map(|pair| u32::from(pair[0]) | (u32::from(*pair.get(1).unwrap_or(&0)) << 16))
+            .collect();
         let pixel_buf = gpu
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -695,6 +705,53 @@ mod tests {
                     e[c]
                 );
             }
+        }
+    }
+
+    /// Regression test for the u16-pair packing: a 1x1 frame has exactly 3 samples (odd), so the
+    /// last `u32` pair is padded with an unused zero -- proves that padding is never read (it
+    /// would corrupt the B channel if it were).
+    #[test]
+    fn decode_gpu_matches_cpu_reference_with_an_odd_total_sample_count() {
+        let Some(gpu) = test_gpu() else { return };
+        let frame = LinearFrame {
+            make: "Test".to_string(),
+            model: "Synthetic".to_string(),
+            width: 1,
+            height: 1,
+            black: 10,
+            maximum: 500,
+            cam_mul: [1.0, 1.0, 1.0, 1.0],
+            pre_mul: [1.0, 1.0, 1.0, 1.0],
+            cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            cblack: [0, 0, 0, 0],
+            pixels: vec![100, 200, 300], // R, G, B -- 3 samples, odd total.
+        };
+        let kernel = DecodeKernel::new(&gpu);
+        let exec = DecodeExec {
+            kernel: &kernel,
+            frame: &frame,
+        };
+        let extent = crate::frame::Extent {
+            width: frame.width,
+            height: frame.height,
+        };
+        let output = FrameTexture::new(&gpu, extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        exec.encode(&gpu, &mut encoder, None, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let actual = crate::test_util::read_frame(&gpu, &output);
+        let expected = normalize_cpu_reference(&frame);
+        for c in 0..4 {
+            assert!(
+                (actual[0][c] - expected[0][c]).abs() < 0.01,
+                "channel {c}: gpu={} cpu={}",
+                actual[0][c],
+                expected[0][c]
+            );
         }
     }
 

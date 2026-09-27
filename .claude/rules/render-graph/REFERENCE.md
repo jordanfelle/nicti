@@ -89,9 +89,9 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
     vs. the original design sketch**: no `HueSatMap`/`LookTable` bindings are reserved (#42's
     DCP-profile scope) -- unused texture bindings with no real content would be exactly the
     half-finished scaffolding this repo's conventions ask to avoid; `color.rs`'s own doc comment
-    covers the tradeoff. Every kernel is proven against a CPU reference via a real GPU-vs-CPU
-    parity test (not just correctness-by-construction), plus one end-to-end test wiring the whole
-    chain through `Renderer` and checking both dispatch counts and actual output pixels.
+    covers the tradeoff. Every kernel has a GPU-vs-CPU parity test against a CPU reference, plus
+    one end-to-end test wiring the whole chain through `Renderer` and checking both dispatch
+    counts and actual output pixels. These tests skip when no `wgpu` adapter is available.
 - **`crates/nicti-pawprint`** (#21/#44/#45, landed) — `EditDocument`/`StageEntry`/`history`
   (promoted from `spikes/pawprint`) plus `canonical::{hash_value, chain}` (merging pawprint's
   original one-upstream `hash_stage`/`cache_key` with `spikes/loaf/src/hash.rs`'s DAG-generalized
