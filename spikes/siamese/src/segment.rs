@@ -1,12 +1,12 @@
 //! AI segmentation scaffolding: `ort`/`load-dynamic` wrappers for BiRefNet (subject/background,
-//! single-pass) and MobileSAM (interactive, two-stage encoder+decoder), per ADR-0004 §3's
+//! single-pass) and MobileSAM (interactive, two-stage encoder+decoder), per ADR-0019 §3's
 //! already-decided pattern (`ort::init_from(path)`), following `spikes/groom/src/ai.rs`'s
 //! established shape for this repo (this spike doesn't depend on groom).
 //!
 //! **No real ONNX weights are committed or downloaded here.** A full BiRefNet ONNX export exists
 //! publicly (~970MB, huggingface.co/onnx-community/BiRefNet-ONNX) but downloading and running it
 //! is out of this pass's time budget -- same "obtaining actual checkpoints is out of scope for
-//! this spike" call ADR-0007 made for LaMa/MobileSAM. Both wrappers below therefore prove only
+//! this spike" call ADR-0050 made for LaMa/MobileSAM. Both wrappers below therefore prove only
 //! the loading/error-handling shape (`ModelNotFound` on a missing file, a real `ort` session-load
 //! attempt when a file *is* present), exactly as `spikes/groom/src/ai.rs` does -- see this
 //! module's tests.

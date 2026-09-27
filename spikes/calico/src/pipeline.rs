@@ -1,5 +1,5 @@
 //! CPU reference pipeline: linear camera RGB (from `retina dump-linear`) -> a display-referred
-//! image in a chosen working space, following ADR-0021's stage order.
+//! image in a chosen working space, following ADR-0038's stage order.
 //!
 //! HueSatMap/LookTable application (DNG spec 6.3.7) is defined over the representation each
 //! table's own `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` tag specifies (`Linear` when
@@ -92,7 +92,7 @@ pub struct RenderOptions<'a> {
 }
 
 /// Renders `input` to an 8-bit sRGB image (for `calico compare`'s side of the ΔE measurement --
-/// LRC's own exports are sRGB TIFFs) via the pipeline stage order from ADR-0021: linearize -> WB
+/// LRC's own exports are sRGB TIFFs) via the pipeline stage order from ADR-0038: linearize -> WB
 /// -> camera->XYZ(D50) -> working space -> HueSatMap -> baseline exposure -> LookTable -> tone
 /// curve -> sRGB.
 pub fn render(input: &LinearInput, opts: &RenderOptions) -> RgbImage {

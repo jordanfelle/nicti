@@ -1,16 +1,10 @@
-# ADR-0024: Masking
+# ADR-0048: Masking
 
 - **Status:** Proposed — pending a reference-machine pass (real BiRefNet/MobileSAM weights, real
   photos including fursuiters, and #44's own gating)
 - **Date:** 2026-09-26
 - **Ticket:** [#48](https://github.com/jordanfelle/nicti/issues/48) Research: masking
-
-> **Numbering note:** PR #167 (`#40`, demosaic/denoise) also claims `0023` on its own branch,
-> colliding with `0023-lrc-catalog-import-mapping.md` (already merged to `main`). Whichever of the
-> two PRs merges second needs to renumber to the next free slot — if #167 merges first, this ADR
-> becomes `0025`, not `0024`. Same situation ADR-0018/0019 already document as "intentional, not a
-> numbering error" once resolved; this one is a genuine merge-order race, not intentional, and
-> needs an actual rename.
+- **Formerly:** ADR-0024 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -24,15 +18,15 @@ Subject" and "Mask 2: Select Subject, Invert", synced across all 50 images.
 
 Constraints already fixed elsewhere, that this ADR has to fit inside rather than re-decide:
 
-- **ADR-0002** (`docs/adr/0002-non-destructive-edit-model.md:117-123`): "A mask stage stores
+- **ADR-0021** (`docs/adr/0021-non-destructive-edit-model.md:117-123`): "A mask stage stores
   `{model_id, model_version, params, seed?}` for AI-generated masks ... and vector geometry for
   brush/gradient masks — never the derived pixel mask itself, which is Tapetum's job to compute and
   cache."
-- **ADR-0004 §3 / ADR-0005**: AI inference loads via `ort`'s `load-dynamic` feature
+- **ADR-0019 §3 / ADR-0016**: AI inference loads via `ort`'s `load-dynamic` feature
   (`ort::init_from(path)`), CUDA/TensorRT execution providers with CPU fallback; `wgpu`/WGSL for
   GPU compute, with a bake-time-only host↔device round-trip (never per-frame) and a 2D dispatch
   grid to avoid wgpu's 65535-per-dimension workgroup limit.
-- **ADR-0003**/`docs/licensing.md`: a model needs a licensing.md row (code/weights/provenance) in
+- **ADR-0018**/`docs/licensing.md`: a model needs a licensing.md row (code/weights/provenance) in
   the same PR; bundle only if both the weights license and training-data provenance allow it,
   otherwise it ships as an on-demand download.
 - **#44's own body** already expects, of whatever this ADR proposes: AI masks baked and cached
@@ -42,13 +36,13 @@ Constraints already fixed elsewhere, that this ADR has to fit inside rather than
 - **`docs/benchmarks.md:17-18`**: slider→preview ≤16.7ms (60fps at screen resolution);
   switch-between-images <100ms when warm (warm = the AI-mask/denoise stage cache is populated).
   **No mask-specific latency target exists anywhere in the repo before this ADR** — the Decision
-  rule below states one, matching ADR-0007's own precedent of stating hypotheses before measuring.
+  rule below states one, matching ADR-0050's own precedent of stating hypotheses before measuring.
 
 **Two conflicts this research pass found between existing spike data, that this ADR resolves
 rather than leaves for a later ticket to trip over:**
 
 1. **`model_version`'s type.** `spikes/pawprint/tests/sizing.rs`'s synthetic mask stage uses a
-   string (`"0.4.1"`); `spikes/groom/src/spot.rs::MaskRecipe` (ADR-0007, Accepted) uses a `u32`.
+   string (`"0.4.1"`); `spikes/groom/src/spot.rs::MaskRecipe` (ADR-0050, Accepted) uses a `u32`.
    This ADR picks **`String`** — a segmentation-model release is a semver-ish string upstream
    (BiRefNet/MobileSAM/SAM2 tags aren't sequential integers) — and groom/#51 should align to this
    on their own next touch, not the reverse.
@@ -93,7 +87,7 @@ confirmed) or MobileSAM-with-a-sky-prompt as open follow-ups.
 ### The mask-group model: `spikes/siamese/src/compose.rs`
 
 Named `MaskGroup`/`MaskComponent` to match Lightroom Classic's own `MaskGroupBasedCorrections`
-shape (`spikes/shed/src/develop.rs`; `docs/adr/0023-lrc-catalog-import-mapping.md:93`), so #49/#62's
+shape (`spikes/shed/src/develop.rs`; `docs/adr/0061-lrc-catalog-import-mapping.md:93`), so #49/#62's
 importer maps onto it directly rather than a differently-shaped Nicti-only structure:
 
 ```rust
@@ -160,13 +154,13 @@ adjustment itself needs no bake step at all, only the AI alpha feeding it does).
 
 ### AI inference scaffolding: `spikes/siamese/src/segment.rs`
 
-Same `ort`/`load-dynamic` pattern as `spikes/groom/src/ai.rs` (ADR-0007): a process-global
+Same `ort`/`load-dynamic` pattern as `spikes/groom/src/ai.rs` (ADR-0050): a process-global
 `OnceLock`-guarded `ort::init_from(dylib_path)`, `ModelNotFound` returned cleanly (never a panic)
 when the model file is absent — proven by tests that run in CI with no model file present.
 **No real ONNX weights are committed or downloaded in this sandbox.** A full BiRefNet ONNX export
 exists publicly (~970MB, `huggingface.co/onnx-community/BiRefNet-ONNX`) but downloading and
 running it was out of this pass's time budget, the same "obtaining actual checkpoints is out of
-scope for this spike" call ADR-0007 made for LaMa/MobileSAM. `BiRefNet` is genuinely
+scope for this spike" call ADR-0050 made for LaMa/MobileSAM. `BiRefNet` is genuinely
 single-input/single-output (no simplification needed there, unlike groom's healing case).
 `MobileSam`, unlike groom's single-tensor collapse, is split into **`encode()`/`decode()`** methods
 matching MobileSAM's real two-session contract (an expensive image encoder run once per image,
@@ -176,7 +170,7 @@ or third click after the first only re-runs the cheap decoder, not the whole mod
 input/output tensor names and shapes are still unverified against real weights, same caveat class
 as groom's `outputs[0]` risk.
 
-## Decision rule (stated before measuring, per ADR-0007's precedent)
+## Decision rule (stated before measuring, per ADR-0050's precedent)
 
 - **Quality**: judged against a hand-labeled set once real weights and a reference-machine pass
   exist — real photos, **must include fursuiters**, not just human faces or COCO-style object
@@ -189,10 +183,10 @@ as groom's `outputs[0]` risk.
   resolution on a CUDA execution provider (so the hero scenario's 50-image bulk-mask bake stays
   under a minute); a MobileSAM click-refine ≤100ms once the embedding is already cached; the
   gradient/brush/compose/masked-adjust-apply GPU kernels stay within the 16.7ms frame budget
-  (`docs/benchmarks.md:17`) — plausible given ADR-0007's own GPU Poisson-solve result (0.386ms p50
+  (`docs/benchmarks.md:17`) — plausible given ADR-0050's own GPU Poisson-solve result (0.386ms p50
   on the reference RTX 5080) for a comparably simple per-pixel kernel, but unmeasured here; a
-  CPU-execution-provider bake is reported, not gated, matching ADR-0007's own CPU-fallback stance.
-- **License**: gate on bundling only (ADR-0003) — an unbundleable model still ships as an
+  CPU-execution-provider bake is reported, not gated, matching ADR-0050's own CPU-fallback stance.
+- **License**: gate on bundling only (ADR-0018) — an unbundleable model still ships as an
   on-demand download, a materially different question from redistributing it inside Nicti's own
   installer.
 
@@ -203,13 +197,13 @@ GPU-backed Vulkan/Dx12 adapter (WSL without a real Vulkan ICD, same as every pri
 in this repo).** Every CPU-reference correctness/parity claim above is real, proven by the 32
 passing tests in `spikes/siamese` (23 unit + 9 GPU-parity, the latter against lavapipe). Every
 quality/GPU-hardware-speed/AI-inference-latency number is **TBD — reference machine**, matching
-ADR-0005/0006/0007/0021's own established convention for exactly this gap.
+ADR-0016/0068/0050/0038's own established convention for exactly this gap.
 
 `MaskGroup`/`MaskComponent` serialized size (canonical `serde_json`, one `Ai` component): informal
-comparison against ADR-0002's own 563-byte/5-stage reference document — a single mask component
+comparison against ADR-0021's own 563-byte/5-stage reference document — a single mask component
 carrying one AI recipe is a comparable order of magnitude to one stage entry's share of that
-document, consistent with ADR-0002's "single-digit-GB across the whole 2M-asset catalog" sizing
-conclusion; not a hard byte-count assertion, same caveat ADR-0007's own sizing table states.
+document, consistent with ADR-0021's "single-digit-GB across the whole 2M-asset catalog" sizing
+conclusion; not a hard byte-count assertion, same caveat ADR-0050's own sizing table states.
 
 ## Options considered
 
@@ -226,19 +220,19 @@ conclusion; not a hard byte-count assertion, same caveat ADR-0007's own sizing t
 `docs/research/stalk-prior-art.md:69-89` already surveyed RapidRAW's real, shipping masking stack
 (SAM-ViT-B split into separate encoder/decoder ONNX sessions — the same two-session shape this
 ADR's `MobileSam::encode`/`decode` mirrors — plus a U-2-Net `skyseg` variant, both downloaded
-on-demand from a HuggingFace model repo at runtime) and ADR-0018 already recommends reading that
+on-demand from a HuggingFace model repo at runtime) and ADR-0069 already recommends reading that
 code as a reference, not for adoption (RapidRAW's own edit storage is an untyped JSON blob, no
-catalog DB, incompatible with ADR-0002's typed stage model). This ADR's own contribution is the
-model-recipe/inverse-sharing/bake-key design ADR-0002 left open, and the geometry+compose model
+catalog DB, incompatible with ADR-0021's typed stage model). This ADR's own contribution is the
+model-recipe/inverse-sharing/bake-key design ADR-0021 left open, and the geometry+compose model
 LRC's own `MaskGroupBasedCorrections` shape informs but doesn't fully specify (LRC's exact
-structure is third-party reverse-engineered, per ADR-0002's own `crs:` caveat).
+structure is third-party reverse-engineered, per ADR-0021's own `crs:` caveat).
 
 ## Consequences
 
 - **Unblocks #44** (Tapetum): this ADR's proposed stage placement is "AI masks bake as a distinct
   stage after color/tone, before any masked local adjustment reads them" — flagged as a proposal
   for #44 to adopt or revise, not a binding decision this ADR is scoped to make (same posture
-  ADR-0007 took for its own heal/remove stage-order proposal).
+  ADR-0050 took for its own heal/remove stage-order proposal).
 - **Unblocks #49** (the real masking build ticket) and **#51** (healing/removal's own AI
   scaffolding) — both can build on `compose.rs`'s `MaskGroup` shape and `segment.rs`'s
   `encode`/`decode` split rather than re-deriving them; **#51/groom's own `MaskRecipe.model_version`
@@ -248,10 +242,10 @@ structure is third-party reverse-engineered, per ADR-0002's own `crs:` caveat).
   literally "the brush & gradient local-adjustment mask model" — `MaskSource::Geometry` only has
   `LinearGradient`/`RadialGradient`/`Brush` variants, no luminance-range or color-range selection.
   LRC's `RangeMaskMapInfo` develop key is already classified under the `Masks` owner category by
-  `spikes/shed/src/develop.rs::classify_key` (ADR-0023), which maps to **#49** — so this isn't an
+  `spikes/shed/src/develop.rs::classify_key` (ADR-0061), which maps to **#49** — so this isn't an
   orphaned gap needing a new ticket, but #49 needs to add a `RangeMask` (or similar) `Geometry`
   variant of its own alongside the three this ADR ships, not assume the enum is already complete.
-- **`docs/licensing.md` updated in this PR** per ADR-0003's same-PR rule: SAM2's SA-V flag
+- **`docs/licensing.md` updated in this PR** per ADR-0018's same-PR rule: SAM2's SA-V flag
   resolved (CC-BY-4.0, confirmed directly), a new U-2-Net row added (the sky-model candidate
   RapidRAW itself uses), BiRefNet/MobileSAM rows left as-is (already clean, already tagged #48).
 - **Reference-machine pass still needed** before this ADR can move to Accepted — filed as a

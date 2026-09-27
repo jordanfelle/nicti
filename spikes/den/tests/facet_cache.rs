@@ -154,7 +154,7 @@ fn duckdb_cache_matches_naive_after_refresh_and_is_stale_before_it() {
     engine.write_rating(demo_id, 5).unwrap();
     // The whole point of this design: writing to SQLite does NOT keep the cache honest. This is
     // the risk #103 requires to be measured, not glossed over — asserting it's actually stale
-    // here (not merely claimed in a doc comment) is exactly the discipline ADR-0009's Turso
+    // here (not merely claimed in a doc comment) is exactly the discipline ADR-0102's Turso
     // walk-back was missing.
     assert!(
         !engine

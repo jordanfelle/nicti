@@ -1,5 +1,5 @@
 //! #71's volume-identity candidates. `VolumeInfo` collects every field a candidate identity key
-//! could be built from; `identity_key()` implements the ADR-0020 decision (NTFS 64-bit serial +
+//! could be built from; `identity_key()` implements the ADR-0071 decision (NTFS 64-bit serial +
 //! GPT partition GUID, when both are present) so the rest of the crate doesn't need to know the
 //! Windows plumbing.
 //!
@@ -39,12 +39,12 @@ pub struct VolumeInfo {
     pub total_bytes: Option<u64>,
     pub removable: bool,
     /// Content of a `.nicti-volume` marker file at the volume root, if one exists -- the
-    /// candidate portable tie-breaker from ADR-0020's Decision section. `None` means either no
+    /// candidate portable tie-breaker from ADR-0071's Decision section. `None` means either no
     /// marker file or (on a read-only volume) one couldn't be written.
     pub marker_uuid: Option<String>,
 }
 
-/// The identity key ADR-0020 selects: NTFS 64-bit serial + GPT partition GUID when both are
+/// The identity key ADR-0071 selects: NTFS 64-bit serial + GPT partition GUID when both are
 /// present, falling back to the 32-bit serial + MBR signature/offset on non-GPT disks. Returns
 /// `None` when neither pairing is available (e.g. no partition info could be read at all) --
 /// callers must treat that volume as unidentifiable, not silently skip it.
@@ -432,7 +432,7 @@ pub mod windows_impl {
     use super::VolumeInfo;
     use anyhow::{bail, Result};
 
-    /// Stub for non-Windows builds -- #71/ADR-0020 is Windows-only research (v1's actual target,
+    /// Stub for non-Windows builds -- #71/ADR-0071 is Windows-only research (v1's actual target,
     /// per #4/E0's PRD sign-off); non-Windows volume identity is deferred to #73.
     pub fn enumerate() -> Result<Vec<VolumeInfo>> {
         bail!("volume enumeration is Windows-only (see #73 for non-Windows deferral)")

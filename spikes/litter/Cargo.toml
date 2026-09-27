@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #33 (ADR-0025): burst/duplicate grouping -- candidate similarity signals (capture-time+shutter-count, dHash/pHash, SSIM, DINOv2 embedding), sequence-constrained two-level (tight/set) segmentation, and a labelling/eval harness for measuring grouping accuracy against human-corrected ground truth. Not a production crate."
+description = "Throwaway spike for #33 (ADR-0033): burst/duplicate grouping -- candidate similarity signals (capture-time+shutter-count, dHash/pHash, SSIM, DINOv2 embedding), sequence-constrained two-level (tight/set) segmentation, and a labelling/eval harness for measuring grouping accuracy against human-corrected ground truth. Not a production crate."
 
 [lib]
 name = "litter"

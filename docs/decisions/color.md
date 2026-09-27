@@ -3,8 +3,8 @@
 Covers #38's camera-color-profile parsing, working-space choice, and the CPU + GPU render
 pipeline from linear camera RGB to a display-referred image.
 
-- **Decision (#38)**: `docs/adr/0021-color-pipeline.md` — parse the user's own installed Adobe
-  `.dcp`/`.xmp` camera profiles at runtime (never bundle one, per ADR-0003's "never bundle
+- **Decision (#38)**: `docs/adr/0038-color-pipeline.md` — parse the user's own installed Adobe
+  `.dcp`/`.xmp` camera profiles at runtime (never bundle one, per ADR-0018's "never bundle
   proprietary Adobe data" policy), falling back to LibRaw's built-in camera matrix when no profile
   is installed. A from-scratch DNG-spec Camera Profile tag reader (`spikes/calico/src/dcp.rs`)
   over a minimal hand-rolled TIFF/IFD parser reads `ColorMatrix1/2`, `ForwardMatrix1/2`,
@@ -34,7 +34,7 @@ pipeline from linear camera RGB to a display-referred image.
   display/comparison output.
 - **Working-space candidates, not yet decided**: linear ProPhoto/ROMM (ACR's own internal space),
   linear Rec.2020, and ACEScg (AP1 primaries) are all implemented and measured the same way; the
-  decision rule (ADR-0021) picks whichever scores the lowest mean CIEDE2000 against LRC-exported
+  decision rule (ADR-0038) picks whichever scores the lowest mean CIEDE2000 against LRC-exported
   references once that reference-machine pass runs. HueSatMap/LookTable still apply in
   ProPhoto-referenced HSV regardless of which working space wins, since that's how the DCP tables
   themselves are defined.
@@ -49,7 +49,7 @@ pipeline from linear camera RGB to a display-referred image.
   and fingerprint-match. Settings calico doesn't apply from a Look profile (`Clarity2012`,
   `ToneCurvePV2012`, `RGBTable`-based looks) are surfaced via `unsupported_settings` rather than
   silently dropped.
-- **GPU 3D-texture kernel is a real first for this repo**: `spikes/glint`'s ADR-0005 kernels are
+- **GPU 3D-texture kernel is a real first for this repo**: `spikes/glint`'s ADR-0016 kernels are
   storage-buffer-only by design (texture-specific concerns were explicitly left to whichever
   ticket needed them first — see `glint/src/gpu.rs`'s own scoping note). `spikes/calico/src/gpu.rs`
   is that ticket: a wgpu compute kernel applying a single `HueSatMap` via a real `Rgba16Float` 3D
@@ -83,9 +83,9 @@ pipeline from linear camera RGB to a display-referred image.
   sidecar (`black`/`maximum`/`cam_mul`/`pre_mul`/`cam_xyz`/`cblack`) that calico reads directly —
   no shared Rust type between the two crates, just a documented JSON shape both sides keep in
   sync. LibRaw's demosaic here is explicitly a stand-in for this hand-off only; the real demosaic
-  algorithm choice stays #40's decision, and could shift ADR-0021's measured ΔE numbers once
+  algorithm choice stays #40's decision, and could shift ADR-0038's measured ΔE numbers once
   decided.
-- **Deferred, filed as follow-up issues** (see ADR-0021's Consequences): the reference-machine ΔE
+- **Deferred, filed as follow-up issues** (see ADR-0038's Consequences): the reference-machine ΔE
   measurement run itself (this ADR's whole Measured-results section); the Adobe Vivid `.xmp`
   look-table decode, if the reference-machine pass confirms it doesn't parse as a DCP-style IFD;
   per-pixel black-level shading beyond the four per-channel `cblack` scalars retina already

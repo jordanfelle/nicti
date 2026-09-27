@@ -57,7 +57,7 @@ fn apply_vibrance(rgb: [f32; 3], vibrance: f32) -> [f32; 3] {
 
 /// Feathered linear blend of two overlapping tiles along their shared seam, `t` in `[0, 1]`
 /// where 0 is fully tile `a` and 1 is fully tile `b`. Stand-in for the render-side half of tiled
-/// AI inference (the AI model itself runs in ONNX Runtime, per ADR-0004 §3; this is the seam
+/// AI inference (the AI model itself runs in ONNX Runtime, per ADR-0019 §3; this is the seam
 /// reconstruction that happens back on the render side).
 pub fn tile_blend_pixel(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     let t = t.clamp(0.0, 1.0);

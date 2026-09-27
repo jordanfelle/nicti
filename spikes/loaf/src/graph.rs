@@ -5,7 +5,7 @@
 //! nodes, never a `Baked` one, because in this graph `Baked` nodes are always upstream of `Live`
 //! ones -- a live slider drag must trigger zero bake dispatches.
 //!
-//! Node identity is a plain `String` id (ADR-0002's `vendor.stage_name` convention), not a typed
+//! Node identity is a plain `String` id (ADR-0021's `vendor.stage_name` convention), not a typed
 //! enum -- the render-stage extension point (`crates/nicti-render::RenderStage`, #45) is exactly
 //! this: an open set of stage ids a plugin can add to, so the graph can't be closed over a fixed
 //! enum of "the" stages.

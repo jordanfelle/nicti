@@ -1,10 +1,11 @@
-# ADR-0006: GUI framework
+# ADR-0068: GUI framework
 
 - **Status:** Proposed — hard-gate findings below are final (static, code/dependency-graph
   evidence, not hardware-dependent); the measured-gate tables and final Decision are pending a
   baseline run on the reference machine (see Measured results)
 - **Date:** 2026-09-23
 - **Ticket:** [#68](https://github.com/jordanfelle/nicti/issues/68) Research: GUI framework (GPUI vs Iced vs egui vs Slint)
+- **Formerly:** ADR-0006 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -16,17 +17,17 @@ merged in from an archived duplicate ticket (#13).
 
 Constraints already fixed by earlier ADRs/docs:
 
-- **ADR-0001** named all four as the viable Rust GUI candidates and already flagged GPUI's
+- **ADR-0015** named all four as the viable Rust GUI candidates and already flagged GPUI's
   cross-platform maturity, egui's virtualization story (`ScrollArea::show_rows`/
   `egui_virtual_list`), and iced's async-offload fit as open questions for this ticket to resolve.
-- **ADR-0005** decided `wgpu` 30 (Vulkan backend on Windows, `SHADER_F16` required for Tapetum's
+- **ADR-0016** decided `wgpu` 30 (Vulkan backend on Windows, `SHADER_F16` required for Tapetum's
   compressed-half-float cache tiers) as the render/compute API, with **one shared `wgpu::Device`**
   intended for both compute and display. Its Consequences section already flagged, without
   measuring it, that "GPUI's Windows backend is D3D11-based and would need shared-handle interop
   with wgpu's Dx12/Vulkan device" — this ADR is where that flag gets checked against real evidence
   (see Hard gate 1 below; the D3D11 claim holds, though the *reason* GPUI can't share a device
   turns out to be broader than just that).
-- **ADR-0003**: license policy. #68 was explicitly carved out of that audit's scope, flagged as
+- **ADR-0018**: license policy. #68 was explicitly carved out of that audit's scope, flagged as
   a live concern specifically for Slint's GPL-3.0/dual-commercial terms. This ADR's own
   license-gate finding (below) resolves that flag for the research-spike stage; shipping any
   candidate in a production crate is a separate sign-off (see `docs/licensing.md`'s #68 update).
@@ -42,22 +43,22 @@ Constraints already fixed by earlier ADRs/docs:
   `docs/benchmarks/hero-scenario.md`'s own "filled in after the baseline runs" precedent. **The
   final Decision below is provisional** on those measurements.
 
-## Decision rule (stated before measuring, per ADR-0005's own methodology)
+## Decision rule (stated before measuring, per ADR-0016's own methodology)
 
 ### Hard gates (static evidence — resolved in this pass)
 
 1. **Custom GPU viewport on the shared `wgpu::Device`.** The candidate must let Nicti render a
-   `wgpu` compute/render pass (glint's `live_chain` kernel, reused unchanged from ADR-0005) into
+   `wgpu` compute/render pass (glint's `live_chain` kernel, reused unchanged from ADR-0016) into
    the same scene, using the *same* `wgpu::Device`/`Queue` the candidate itself renders with — not
    a second, independent GPU context requiring cross-API interop.
 2. **wgpu version compatibility.** The toolkit's own `wgpu` dependency must be able to coexist
-   with ADR-0005's wgpu 30 / Vulkan / `SHADER_F16` choice, in the same binary.
+   with ADR-0016's wgpu 30 / Vulkan / `SHADER_F16` choice, in the same binary.
 3. **Native Windows 11 support**, not an experimental/community backend.
-4. **License** passes ADR-0003's Rust-crate allowlist, or is explicitly flagged for sign-off.
+4. **License** passes ADR-0018's Rust-crate allowlist, or is explicitly flagged for sign-off.
 
 ### Measured gates (pending reference-machine run)
 
-p95 on the reference machine (RTX 5080, Windows, ADR-0005's own reference hardware), against
+p95 on the reference machine (RTX 5080, Windows, ADR-0016's own reference hardware), against
 `docs/benchmarks.md`'s targets:
 
 | Interaction | Metric | Target |
@@ -84,7 +85,7 @@ only one of the four that clears every hard gate with no caveat.** Final selecti
 Iced, and Slint waits on the reference-machine numbers. GPUI is eliminated by Hard gate 1, with
 concrete evidence, not a measurement — see below.
 
-### Hard gate 1 — GPUI: **fails**, confirmed with more precision than ADR-0005's own flag
+### Hard gate 1 — GPUI: **fails**, confirmed with more precision than ADR-0016's own flag
 
 `gpui` v0.2.2's own published `Cargo.toml`[^g1] shows its GPU backend is **platform-conditional**,
 not `wgpu` on any platform:
@@ -97,7 +98,7 @@ not `wgpu` on any platform:
   `Win32_Graphics_DirectComposition` via `windows-rs`[^g1] — a bespoke Direct3D 11 renderer, wired
   directly to Win32 APIs, entirely independent of both `blade-graphics` and `wgpu`.
 
-This confirms ADR-0005's flag precisely: GPUI's Windows backend is D3D11, and there is no `wgpu`
+This confirms ADR-0016's flag precisely: GPUI's Windows backend is D3D11, and there is no `wgpu`
 (or even Vulkan) code path on Windows at all in GPUI's own dependency graph — not a version
 mismatch or an interop inconvenience, but no shared-device mechanism to reach for. GPUI exposes no
 public API (as of 0.2.2) for importing an externally-created texture or device into its scene the
@@ -134,7 +135,7 @@ disproving nothing.
 
 ### Hard gate 2 — wgpu version compatibility: **egui and Slint pass cleanly; Iced does not**
 
-| Candidate | Its own resolved `wgpu` version | vs. ADR-0005's `wgpu` 30 |
+| Candidate | Its own resolved `wgpu` version | vs. ADR-0016's `wgpu` 30 |
 |---|---|---|
 | egui / eframe (`egui-wgpu` 0.36.2) | **30.0.0**[^e2] | Matches exactly |
 | Slint (`i-slint-renderer-femtovg`'s `wgpu-30` feature) | **30.0.1**, confirmed directly against this PR's own `Cargo.lock` (`i-slint-renderer-femtovg` 1.18.1's `wgpu` dependency entry) | Matches exactly |
@@ -145,7 +146,7 @@ requires the exact same `wgpu` crate version to unify `wgpu::Device`/`wgpu::Rend
 between a candidate's internals and any code Nicti writes against them (confirmed directly —
 `spikes/pelt-iced` had to depend on `wgpu = "27"`, not `"30"`, or it fails to compile against
 `iced_wgpu`'s own types). Shipping Iced today means either `nicti-render` targets wgpu 27 instead
-of ADR-0005's wgpu 30 (losing whatever wgpu 30 brought — `Rgba32Float`/dispatch behavior wasn't
+of ADR-0016's wgpu 30 (losing whatever wgpu 30 brought — `Rgba32Float`/dispatch behavior wasn't
 re-audited against 27 this pass), or waiting on/forcing an iced upgrade. Not disqualifying by
 itself, but a real cost egui and Slint don't carry.
 
@@ -167,19 +168,19 @@ exception**
 - **Slint**: confirmed via `cargo deny` directly (not assumed from the plan) —
   `GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0` on every
   Slint-published crate (`slint`, `slint-build`, `slint-macros`, and every `i-slint-*` crate)[^s3].
-  None of the three arms are on ADR-0003's allowlist, and the `LicenseRef-*` arms are Slint's own
+  None of the three arms are on ADR-0018's allowlist, and the `LicenseRef-*` arms are Slint's own
   non-SPDX-registered dual-commercial license texts. Per your instruction, this was spiked anyway
   under a **spike-scoped `[[licenses.exceptions]]` block per Slint crate name** in `deny.toml` (not
   a global allow), so `cargo deny check licenses` passes for this research pass without opening
   the allowlist to any other GPL-only crate. **This is not a shipping decision**: if Slint wins on
-  the measured gates, shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0003
+  the measured gates, shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0018
   amendment and your explicit sign-off — the same standard already applied to LGPL-as-Cargo-
   dependency crates (rawler/lensfun-rs) in that ADR.
 
 ## Measured results
 
 _Pending a baseline run on the reference machine (RTX 5080, Windows, native — not WSL, same
-caveat as ADR-0005's own hardware-identity rule). `spikes/pelt-egui`, `spikes/pelt-iced`, and
+caveat as ADR-0016's own hardware-identity rule). `spikes/pelt-egui`, `spikes/pelt-iced`, and
 `spikes/pelt-slint` each build and compile-check clean (`cargo check`/`cargo build`/`cargo test`/
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`/`cargo fmt --check` all
 pass in this sandbox), but none has been run against a real display or driven by
@@ -198,8 +199,8 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 |---|---|---|---|---|
 | **GPUI** | **Fails** — Windows backend is D3D11 via `windows-rs`, no `wgpu`/Vulkan path in its own dependency graph at all, no public texture-import API | N/A | Apache-2.0[^g3] (not the blocker) | **Eliminated** — Hard gate 1, no spike built |
 | **Iced** | Passes — `Primitive`/`Pipeline` on iced's own device | **27.0.1**, not 30 | MIT | Passes gates, real wgpu-version cost |
-| **egui / eframe** | Passes — `egui_wgpu::CallbackTrait` on eframe's own device | **30.0.0**, matches ADR-0005 exactly | MIT/Apache-2.0 (+ OFL-1.1/Ubuntu-font-1.0 for bundled default fonts) | Passes every hard gate cleanly |
-| **Slint** | Passes — cleanest mechanism, GPU-resident `Image::try_from`, first-class `require_wgpu_30` API | **30.0.1**, matches ADR-0005 exactly | GPL-3.0/dual-commercial — spike-scoped exception only | Passes gates under a scoped exception; shipping needs ADR-0003 amendment |
+| **egui / eframe** | Passes — `egui_wgpu::CallbackTrait` on eframe's own device | **30.0.0**, matches ADR-0016 exactly | MIT/Apache-2.0 (+ OFL-1.1/Ubuntu-font-1.0 for bundled default fonts) | Passes every hard gate cleanly |
+| **Slint** | Passes — cleanest mechanism, GPU-resident `Image::try_from`, first-class `require_wgpu_30` API | **30.0.1**, matches ADR-0016 exactly | GPL-3.0/dual-commercial — spike-scoped exception only | Passes gates under a scoped exception; shipping needs ADR-0018 amendment |
 
 ## Prior art
 
@@ -218,18 +219,18 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 
 - **If egui wins** (current lead per the hard gates): `nicti-render`'s viewport integration is the
   `egui_wgpu::CallbackTrait` shape already proven in `spikes/pelt-egui/src/viewport.rs` — a
-  `prepare`/`paint` split sharing eframe's device, `wgpu` pinned at exactly the version ADR-0005
+  `prepare`/`paint` split sharing eframe's device, `wgpu` pinned at exactly the version ADR-0016
   already chose, no version-compatibility tax.
-- **If Slint wins**: needs an ADR-0003 amendment (a GPL-3.0/dual-commercial dependency is a real
+- **If Slint wins**: needs an ADR-0018 amendment (a GPL-3.0/dual-commercial dependency is a real
   outbound-license decision, feeding directly into #66) before it ships beyond this research spike
   — not automatic, and not implied by this ADR passing it through the hard gates.
-- **If Iced wins**: `nicti-render` either targets wgpu 27 (revisiting ADR-0005's own wgpu-30-
+- **If Iced wins**: `nicti-render` either targets wgpu 27 (revisiting ADR-0016's own wgpu-30-
   specific `SHADER_F16`/Vulkan findings against that older version) or blocks on an iced upgrade to
   wgpu 30 — a real, non-trivial dependency to carry forward, not a footnote.
 - **GPUI is closed out for Nicti's v1 (Windows) target** on hard evidence, not a hunch — this can
   be revisited only if GPUI ships an official Windows Vulkan/wgpu-interop backend in the future
   (its own crate features show no sign of one as of v0.2.2, 2026-09-23).
-- **Grid virtualization**: egui (`ScrollArea::show_rows`) and (per ADR-0001's own note) GPUI
+- **Grid virtualization**: egui (`ScrollArea::show_rows`) and (per ADR-0015's own note) GPUI
   (`uniform_list`, now moot) both ship a built-in virtualized-list primitive; Iced and Slint do
   not, as confirmed directly by having to hand-roll the identical windowing math
   (`spikes/pelt/src/virtualize.rs`, shared and unit-tested once, driving both `pelt-iced` and
@@ -329,6 +330,6 @@ calibration keys, same shape as `bench/lrc/hero-config.ini.example`.
     reasoning egui's lead is actually based on (wgpu-30 match, license, `CallbackTrait` maturity —
     all independently verified against egui's own crate, unaffected by this correction).
 [^pa2]: vkdt's Vulkan-native UI (no third-party Rust GUI toolkit involved at all) — already cited
-    in `docs/adr/0004-module-plugin-architecture.md` footnote `[^p4]` and
-    `docs/adr/0005-gpu-compute-api.md`'s own Prior art section — https://github.com/hanatos/vkdt
+    in `docs/adr/0019-module-plugin-architecture.md` footnote `[^p4]` and
+    `docs/adr/0016-gpu-compute-api.md`'s own Prior art section — https://github.com/hanatos/vkdt
     — verified 2026-09-23

@@ -2,7 +2,7 @@
 paths:
   - "spikes/shed/**"
   - "crates/nicti-catalog/**"
-  - "docs/adr/0023*"
+  - "docs/adr/0061*"
 ---
 
 # LRC Migration — Quick Reference
@@ -10,7 +10,7 @@ paths:
 Full reasoning/history: `docs/decisions/lrc-migration.md`.
 
 - **Folder model**: LRC's `AgLibraryRootFolder`→`AgLibraryFolder`→`AgLibraryFile`+`Adobe_images`
-  maps directly onto ADR-0020's `volume`/`root`/`asset`. All real roots use a drive-letter absolute
+  maps directly onto ADR-0071's `volume`/`root`/`asset`. All real roots use a drive-letter absolute
   path; some also carry a relative-path fallback, not universal — #62 handles both.
 - **`pick`/`rating` are SQLite `REAL`, not `INTEGER`** — don't assume integer semantics from the
   column name; a naive numeric op on `hasRetouch` (a bitmask-string column) silently produces a
@@ -40,7 +40,7 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
 
 ## Package contents
 
-- **`spikes/shed`** (#61/ADR-0023's `.lrcat` schema-mapping research) — schema/inventory/
+- **`spikes/shed`** (#61/ADR-0061's `.lrcat` schema-mapping research) — schema/inventory/
   develop-settings reading plus a pre-commit privacy check against the real catalog's own
   keyword/path strings, plus #157's `develop-usage` subcommand (`analyze_unowned_keys`) which
   measured real presence/active-use counts for the 6 keys `classify_key` originally left unowned

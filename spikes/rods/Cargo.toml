@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #40 (ADR-0023): alignment + full-reference quality metrics (PSNR/SSIM/LPIPS) and wall-clock timing harness comparing LibRaw classic demosaic+NR, AI denoise candidates (Path A/B), and LRC's own AI Denoise. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+description = "Throwaway spike for #40 (ADR-0040): alignment + full-reference quality metrics (PSNR/SSIM/LPIPS) and wall-clock timing harness comparing LibRaw classic demosaic+NR, AI denoise candidates (Path A/B), and LRC's own AI Denoise. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
 
 [lib]
 name = "rods"

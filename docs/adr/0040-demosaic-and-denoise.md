@@ -27,17 +27,17 @@ a Z6, not yet candidate-vs-LRC on a Z8** — the decision below is provisional o
 
 Constraints already fixed by earlier ADRs/docs:
 
-- **ADR-0004 §3** already decided AI inference loads via `ort`'s `load-dynamic` feature — this
+- **ADR-0019 §3** already decided AI inference loads via `ort`'s `load-dynamic` feature — this
   ADR's Path B scaffolding reuses that pattern (`spikes/groom/src/ai.rs`'s shape) rather than
   deciding it fresh.
-- **ADR-0019** already picked the vendored PR#826 LibRaw fork as the decoder — this ADR's classic
+- **ADR-0037** already picked the vendored PR#826 LibRaw fork as the decoder — this ADR's classic
   pipeline builds directly on that fork via `retina`'s new `dump-classic` subcommand.
-- **ADR-0021** (color pipeline, still Proposed) is deliberately **not** reused here — this ADR
-  needed a fixed, uniform color treatment usable *before* ADR-0021's own reference-machine pass
+- **ADR-0038** (color pipeline, still Proposed) is deliberately **not** reused here — this ADR
+  needed a fixed, uniform color treatment usable *before* ADR-0038's own reference-machine pass
   lands, so it uses LibRaw's plain no-profile fallback matrix instead (see Decision).
-- **ADR-0003**/`docs/licensing.md` set the bundling-vs-evaluate criterion for ML models — both
+- **ADR-0018**/`docs/licensing.md` set the bundling-vs-evaluate criterion for ML models — both
   Path B candidates below are evaluate-only in this pass, never bundled.
-- Unlike ADR-0005/0006/0007/0020's own sandbox notes, **this pass ran on a real GPU/CUDA/TensorRT
+- Unlike ADR-0016/0068/0050/0071's own sandbox notes, **this pass ran on a real GPU/CUDA/TensorRT
   reference environment** (installed during this pass — see the research doc) — most numbers
   below are real measurements, not "TBD — reference machine."
 
@@ -52,7 +52,7 @@ Constraints already fixed by earlier ADRs/docs:
 - **Speed**: warm per-image p95 (NEF on NVMe → denoised buffer) ≤ LRC's own per-image p50,
   Windows-native. Real full-resolution numbers exist this pass (see Measured results) but not yet
   compared against a real LRC export's own timing (also pending the user's export batch).
-- **License**: evaluate-only is always fine; bundling needs ADR-0003's weights+training-data
+- **License**: evaluate-only is always fine; bundling needs ADR-0018's weights+training-data
   criteria cleared per model.
 
 ## Decision
@@ -101,7 +101,7 @@ LRC-relative bar.
 
 Every candidate (classic baseline, NAFNet, SCUNet) is scored through the same fixed pipeline:
 camera RGB → XYZ(D50) via LibRaw's own no-profile camera matrix → linear sRGB (a hardcoded,
-published Bradford-adapted matrix, not project data) → sRGB OETF. Deliberately **not** ADR-0021's
+published Bradford-adapted matrix, not project data) → sRGB OETF. Deliberately **not** ADR-0038's
 real DCP/HueSatMap/LookTable pipeline, which is still its own open research pass — this ADR
 doesn't want to block on or duplicate that work, and a uniform-but-simplified treatment is
 sufficient for comparing demosaic/denoise candidates against each other and (eventually) LRC on
@@ -167,5 +167,5 @@ Real LRC comparison numbers: **not yet measured** — pending the user's own LRC
 
 See `docs/research/rods-demosaic-denoise.md`'s own Spike section for the full module breakdown.
 Name: rods, as in rod cells, the retina's low-light receptors — pairs with `retina` (#37/
-ADR-0019), whose own `dump-classic`/`dump-cfa` subcommands (also new this pass) supply `rods`'s
+ADR-0037), whose own `dump-classic`/`dump-cfa` subcommands (also new this pass) supply `rods`'s
 inputs.

@@ -1,10 +1,11 @@
-# ADR-0021: Color pipeline
+# ADR-0038: Color pipeline
 
 - **Status:** Proposed — pipeline design, DCP parser, and GPU-feasibility spike are done and
   measured against synthetic data; the actual LRC-match numbers are pending a reference-machine
   run (see Measured results)
 - **Date:** 2026-09-26
 - **Ticket:** [#38](https://github.com/jordanfelle/nicti/issues/38) Research: color pipeline
+- **Formerly:** ADR-0021 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -18,16 +19,16 @@ the real target, not just a generic "close to Adobe Standard" approximation.
 
 Constraints already fixed elsewhere:
 
-- **ADR-0003** (`docs/adr/0003-third-party-license-policy.md`) and `docs/licensing.md` rule out
+- **ADR-0018** (`docs/adr/0018-third-party-license-policy.md`) and `docs/licensing.md` rule out
   ever bundling a real Adobe `.dcp`/`.xmp` camera profile in this repo — no redistribution grant
   was found. This ADR's parser reads profiles already installed on the user's own machine (from
   their existing Adobe Camera Raw / Lightroom Classic install), at runtime; nothing is vendored.
-- **ADR-0005** picked `wgpu` for GPU compute, with `RGBA16F` intermediates and no full-frame
+- **ADR-0016** picked `wgpu` for GPU compute, with `RGBA16F` intermediates and no full-frame
   host↔device round-trips as design goals. `spikes/glint`'s own kernels are storage-buffer-only
   (see its `gpu.rs` module doc) — no 3D-texture pattern existed anywhere in this repo before this
   ADR, and DNG's `HueSatMap`/`ProfileLookTableData` tables are exactly the kind of 3D LUT a texture
   unit's hardware trilinear filtering is built for, so that gap needed closing here.
-- **ADR-0017** already flags a real, unsolved gap this ADR doesn't fix: the difference between a
+- **ADR-0029** already flags a real, unsolved gap this ADR doesn't fix: the difference between a
   camera's own Picture Control JPEG rendering and Nicti's Adobe-profile-based rendering for the
   camera-JPEG-derived preview tiers (T0-T2). That mismatch is inherent to using a different
   rendering intent than the camera, not something a color-pipeline bug — noted again here so it
@@ -36,13 +37,13 @@ Constraints already fixed elsewhere:
   the demosaiced linear image as its input and produces a working-space linear image as its output.
   Stage *order* within the render graph is #44's decision, not this one's; this ADR only fixes the
   internal order of the color-specific sub-stages relative to each other.
-- **Sandbox note**, matching ADR-0006/0007/0020's own precedent: there is no LRC install, no real
+- **Sandbox note**, matching ADR-0068/0050/0071's own precedent: there is no LRC install, no real
   Adobe DCP/XMP profile, and no LRC-rendered reference image anywhere in this sandbox (confirmed —
   `docs/ref-10k-manifest.csv` lists NEFs only, no JPEG/TIFF references, and `docs/licensing.md`
   forbids adding one). Every piece of this ADR that doesn't need a real profile or a real ΔE
   number against LRC is real, tested, measured evidence: 26 unit tests plus 3 integration tests
   (a full synthetic render-pipeline sanity check and a real wgpu compute-shader run against
-  lavapipe, this sandbox's software Vulkan fallback — see ADR-0005's own hardware-identity caveat).
+  lavapipe, this sandbox's software Vulkan fallback — see ADR-0016's own hardware-identity caveat).
   What's pending: the actual DCP/XMP profile files, the actual ΔE-against-LRC numbers, and real
   GPU hardware timing. See Measured results.
 
@@ -61,7 +62,7 @@ accepted.
 ## Decision
 
 **Profile source: parse the user's own installed Adobe DCP/XMP profiles at runtime, falling back
-to LibRaw's built-in camera matrices when none is installed.** This keeps ADR-0003's "never
+to LibRaw's built-in camera matrices when none is installed.** This keeps ADR-0018's "never
 bundle" intact (nothing Adobe's is redistributed) while still hitting the actual target — matching
 a profile the user already owns and uses. `docs/licensing.md`'s footnote `[^dcp1]` (a conservative,
 not-primary-sourced inference that DCPs can't be redistributed) is amended below to record this
@@ -76,7 +77,7 @@ normal `clippy`/`test` jobs.
   library wasn't needed). Reads `ColorMatrix1/2`, `ForwardMatrix1/2`, `CalibrationIlluminant1/2`,
   `ProfileHueSatMapDims/Data1/Data2`, `ProfileLookTableDims/Data`, `ProfileToneCurve`,
   `BaselineExposureOffset`, `ProfileName`. Tested only against synthetic DCPs built byte-for-byte
-  in test code — never a real Adobe file, per ADR-0003.
+  in test code — never a real Adobe file, per ADR-0018.
 - **`xmp_profile.rs`** — Adobe Raw "Look" `.xmp` profile parsing (e.g. the user's installed Adobe
   Vivid preset). **Resolved in #150**, once the user's real installed profiles (reachable from this
   WSL sandbox via the Windows side, `/mnt/c/...`) turned out to make the sample-file blocker moot.
@@ -146,7 +147,7 @@ normal `clippy`/`test` jobs.
 **Not adopted / considered and rejected:**
 
 - **`dssim-core`** for the ΔE comparison — not needed; `deltae.rs`'s from-scratch CIEDE2000 is a
-  small, well-specified formula, and (per `nicti-prowl`'s own precedent, ADR-0017/#17) an SSIM- or
+  small, well-specified formula, and (per `nicti-prowl`'s own precedent, ADR-0029/#17) an SSIM- or
   ΔE-style perceptual library isn't worth a new dependency for a formula this size. Also, unlike
   `nicti-prowl`, the comparison here needs Lab-space CIEDE2000 specifically (the ADR's own decision
   rule), not a generic image-similarity score.
@@ -215,7 +216,7 @@ known to visibly affect. See `dcp.rs`'s `hue_sat_map` closure for the full note.
 - **Demosaic quality** — `retina dump-linear` uses LibRaw's demosaic as a stand-in for this
   hand-off only; the real demosaic algorithm choice belongs to #40, and could shift the ΔE numbers
   once decided.
-- **ADR-0017's Picture-Control-vs-Nicti-default mismatch** (camera JPEG vs. Adobe-profile
-  rendering for T0-T2 preview tiers) stays exactly as unsolved as ADR-0017 left it — not this
+- **ADR-0029's Picture-Control-vs-Nicti-default mismatch** (camera JPEG vs. Adobe-profile
+  rendering for T0-T2 preview tiers) stays exactly as unsolved as ADR-0029 left it — not this
   ADR's problem to fix, restated here only so it isn't mistaken for a regression this ADR
   introduced.

@@ -134,7 +134,7 @@ pub fn move_root_to_volume(conn: &Connection, root_id: i64, new_volume_id: i64) 
 pub enum ResolveOutcome {
     /// Resolved via the volume/root/rel_path chain -- the fast path, no fingerprinting needed.
     Direct(String),
-    /// The registered volume is offline; the asset is filtered out per ADR-0020.
+    /// The registered volume is offline; the asset is filtered out per ADR-0071.
     Offline,
     /// Resolved by matching a fingerprint against an unrecognized volume's freshly-scanned files.
     RelinkedByFingerprint(String),

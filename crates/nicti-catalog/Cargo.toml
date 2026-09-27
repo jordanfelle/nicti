@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Catalog schema + import/ingest pipeline (#22, ADR-0004 §8): SQLite catalog store (ADR-0008/0011), volume/root/asset identity (ADR-0020), and the Scruff import pipeline that extracts T0 grid previews at import time (ADR-0017) without a RAW decode."
+description = "Catalog schema + import/ingest pipeline (#22, ADR-0019 §8): SQLite catalog store (ADR-0067/0103), volume/root/asset identity (ADR-0071), and the Scruff import pipeline that extracts T0 grid previews at import time (ADR-0029) without a RAW decode."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }

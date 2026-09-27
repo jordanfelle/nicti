@@ -1,7 +1,7 @@
 //! Scores a predicted grouping against human-corrected ground truth. B-cubed precision/recall/F1
 //! (Bagga & Baldwin 1998) and the Adjusted Rand Index (Hubert & Arabie 1985) are both standard,
 //! well-specified clustering-comparison metrics -- chosen over a bespoke formula so the numbers in
-//! ADR-0025 mean something to a reader who already knows either one. The over-merge/under-merge
+//! ADR-0033 mean something to a reader who already knows either one. The over-merge/under-merge
 //! pair counts are this project's own addition, named for what a culling UI actually cares about:
 //! an over-merge hides a distinct keeper inside someone else's group (costly -- a keeper gets
 //! silently skipped), an under-merge just means one extra group the user reviews (annoying, not

@@ -3,7 +3,7 @@
 Covers burst/duplicate grouping (#33). Face/subject grouping (#35) and blur/misfocus detection
 (#34) are separate research tickets, not yet covered here — this file grows as they land.
 
-- **Burst/duplicate grouping (#33)**: `docs/adr/0025-burst-duplicate-grouping.md` — con-day
+- **Burst/duplicate grouping (#33)**: `docs/adr/0033-burst-duplicate-grouping.md` — con-day
   duplicates are pose sets 2-30s apart, not sub-second bursts (measured on a real con day: most
   gaps land at 2-10s, only 152/1,368 are <=1s), so a pure timestamp threshold misses most real
   duplicates. `spikes/litter` implements sequence-constrained two-level (tight/set) grouping,

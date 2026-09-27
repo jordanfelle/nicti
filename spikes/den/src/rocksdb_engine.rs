@@ -1,5 +1,5 @@
 //! RocksDB (via the `rocksdb` crate, `rust-rocksdb/rust-rocksdb`) backend, added for #115/
-//! ADR-0008's follow-up. Like LMDB (`lmdb.rs`) and redb (`redb_engine.rs`), RocksDB has no query
+//! ADR-0067's follow-up. Like LMDB (`lmdb.rs`) and redb (`redb_engine.rs`), RocksDB has no query
 //! planner — every query pattern needs its own hand-maintained secondary index, kept in sync on
 //! every write. This backend follows `lmdb.rs`'s exact indexing shape (one column family per
 //! indexed dimension, byte-encoded composite keys `prefix || 0x00 || big-endian id`, most-selective
@@ -207,7 +207,7 @@ impl Workload for RocksDbEngine {
         // DB directory and holds it for the handle's lifetime; `mem::forget` skips the `Drop` that
         // would release it, so the caller's later reopen of this *same* path fails with "lock hold
         // by current process." Confirmed path-scoped, not a process-wide guard like LMDB's
-        // (ADR-0008's hard-gate-3 finding): opening a **different**, never-before-touched path in
+        // (ADR-0067's hard-gate-3 finding): opening a **different**, never-before-touched path in
         // the same process, after forgetting this one, succeeds cleanly.
         let half = assets.len() / 2;
         for a in &assets[..half] {

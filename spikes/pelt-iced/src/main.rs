@@ -1,4 +1,4 @@
-//! `pelt-iced`: iced GUI-framework candidate spike for #68 (ADR-0006). A hand-rolled virtualized
+//! `pelt-iced`: iced GUI-framework candidate spike for #68 (ADR-0068). A hand-rolled virtualized
 //! 2M-cell grid (iced 0.14 has no `ScrollArea::show_rows` equivalent, unlike egui/GPUI), a
 //! 50-frame loupe with next/prev, and a custom wgpu viewport via `iced::widget::shader`. Not a
 //! production crate -- see `CLAUDE.md`'s package-map note on `spikes/*`.

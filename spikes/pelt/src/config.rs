@@ -1,7 +1,7 @@
 //! Shared spike parameters every `pelt-*` binary drives its UI from, so the four candidates are
 //! measured against the identical workload rather than four subtly different ones.
 
-/// Cell count for the virtualized grid interaction. 2,000,000 matches ADR-0006/#68's catalog-scale
+/// Cell count for the virtualized grid interaction. 2,000,000 matches ADR-0068/#68's catalog-scale
 /// gate (600k assets today, 2M design headroom per #4/E0's requirements) rather than the current
 /// real catalog size, since the grid must not regress as the catalog grows.
 pub const GRID_CELL_COUNT: usize = 2_000_000;

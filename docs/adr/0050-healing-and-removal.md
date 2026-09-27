@@ -1,8 +1,9 @@
-# ADR-0007: Healing and removal
+# ADR-0050: Healing and removal
 
 - **Status:** Accepted
 - **Date:** 2026-09-24 (reference-machine pass: 2026-09-26, [#97](https://github.com/jordanfelle/nicti/issues/97))
 - **Ticket:** [#50](https://github.com/jordanfelle/nicti/issues/50) Research: healing/removal
+- **Formerly:** ADR-0007 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -19,20 +20,20 @@ different techniques answer "get rid of this thing in the photo":
 
 Constraints already fixed by earlier ADRs/docs:
 
-- **ADR-0002** already commits the edit-model shape this ticket's `HealStage`/`Spot` type has to
+- **ADR-0021** already commits the edit-model shape this ticket's `HealStage`/`Spot` type has to
   fit into: a `StageEntry { schema_version, params }` entry per pipeline stage, canonical
   `serde_json` + `blake3` hashing for Tapetum's cache key, and "the recipe, not the pixels" for any
   AI mask (`{model_id, model_version, params, seed?}`).
-- **ADR-0004 §3** already decided AI inference loads via the `ort` crate's `load-dynamic` feature
+- **ADR-0019 §3** already decided AI inference loads via the `ort` crate's `load-dynamic` feature
   (`ort::init_from(path)`), not linked at build/startup time — this ADR's AI-removal scaffolding
   reuses that exact pattern rather than deciding it fresh.
-- **ADR-0005** already decided `wgpu`/WGSL as the render/compute API — this ADR's GPU Poisson
+- **ADR-0016** already decided `wgpu`/WGSL as the render/compute API — this ADR's GPU Poisson
   solver is a `wgpu` compute shader, following `spikes/glint`'s device/dispatch pattern.
-- **ADR-0003**/`docs/licensing.md` set the bundling-vs-on-demand-download criterion for ML models
+- **ADR-0018**/`docs/licensing.md` set the bundling-vs-on-demand-download criterion for ML models
   and already flagged LaMa's `big-lama` checkpoint over its Places2 training-data provenance —
   this ADR's own research (below, and `docs/research/groom-healing-removal.md`) is the follow-up
   that flag asked for.
-- **Sandbox note**, matching ADR-0005/0006's own precedent: this research pass initially ran in a
+- **Sandbox note**, matching ADR-0016/0068's own precedent: this research pass initially ran in a
   Linux/WSL sandbox with no GPU-backed Vulkan/Dx12 adapter and no real ONNX model weights
   (obtaining actual LaMa/MobileSAM checkpoints is out of scope for this spike — a large download,
   and in LaMa's case gated on the licensing question this ADR is itself researching). The classic
@@ -50,11 +51,11 @@ Constraints already fixed by earlier ADRs/docs:
   real photos with known-good ground truth nor real inpainting weights, so no quality number is
   claimed here — this rule is stated for #51 to apply, not satisfied by this ADR.
 - **Speed — interactive spot-heal**: **< 16ms/update on GPU** (a hypothesis carried over from
-  ADR-0005's 60fps budget). **GPU kernel proxy measured by #97**: 0.386ms p50 on the reference
+  ADR-0016's 60fps budget). **GPU kernel proxy measured by #97**: 0.386ms p50 on the reference
   RTX 5080 (Vulkan backend) — well within the kernel-budget proxy, with ~40x headroom. The
   `TIMESTAMP_QUERY` interval spans only the Jacobi dispatches, not host-side setup, buffer upload,
   or readback — this is not an end-to-end interactive-update measurement.
-- **Speed — AI removal**: a **bake-time** operation (per ADR-0002's stage model, baked once and
+- **Speed — AI removal**: a **bake-time** operation (per ADR-0021's stage model, baked once and
   cached, not recomputed per frame), with a stated latency budget of **< 2s/removal on a CUDA
   execution provider** — still *to be validated*, gated on #51 obtaining real MobileSAM/LaMa
   weights, not on reference-machine access (#97 confirmed the reference machine itself is
@@ -74,7 +75,7 @@ sensor-dust spot" or "clone out a stray hair" where a local gradient solve is ge
 AI-driven removal is the right tool for "remove this whole object from a complex background," but
 needs real weights this sandbox doesn't have, so **this ADR proves the scaffolding
 (`ort`/`load-dynamic` loading, error handling, crop/resize/feather compositing) rather than the
-model itself** — the same "prove the mechanism, not the specific instance" shape ADR-0004 already
+model itself** — the same "prove the mechanism, not the specific instance" shape ADR-0019 already
 used for its dylib-ABI handshake before any real third-party plugin existed.
 
 ### Classic clone/heal
@@ -99,7 +100,7 @@ used for its dylib-ABI handshake before any real third-party plugin existed.
 ### AI removal scaffolding
 
 - `MobileSamSelector`/`LamaInpainter` (`spikes/groom/src/ai.rs`) wrap `ort::init_from(dylib_path)`
-  + `Session::builder()?.commit_from_file(model_path)?`, per ADR-0004 §3's already-decided
+  + `Session::builder()?.commit_from_file(model_path)?`, per ADR-0019 §3's already-decided
   pattern. Both return a clean `Err(GroomAiError::ModelNotFound)` — never panic — when the `.onnx`
   file doesn't exist, proven by tests that run in CI with no model file present. When a model file
   *is* present, the code attempts a real session load and a real (simplified, single-input/
@@ -112,13 +113,13 @@ used for its dylib-ABI handshake before any real third-party plugin existed.
 
 ### Edit-model representation
 
-`HealStage { spots: Vec<Spot> }` is the `params` payload a `"heal"` `StageEntry` (ADR-0002) would
+`HealStage { spots: Vec<Spot> }` is the `params` payload a `"heal"` `StageEntry` (ADR-0021) would
 carry. Each `Spot` has `kind: SpotKind` (`Clone`/`Heal`/`Remove`), a **destination circle**
 (`center` + `radius` — chosen over a freehand brush path for this ticket's scope; see
 `spikes/groom/src/spot.rs`'s doc comment for the reasoning and the compatible extension path if
 #51 needs strokes), an optional `source_offset` (Clone/Heal), `feather`, `opacity`, and an optional
 `mask_recipe` (`{model_id, model_version, params, seed?}`, Remove only) — "the recipe, not the
-pixels" per ADR-0002. `cache_key()` follows `spikes/pawprint`'s canonical-JSON + `blake3` chaining
+pixels" per ADR-0021. `cache_key()` follows `spikes/pawprint`'s canonical-JSON + `blake3` chaining
 pattern exactly (this stage's hash chained onto a caller-supplied upstream hash).
 
 **Stage-order proposal for #44** (proposed input, not a final decision): heal/remove runs **after
@@ -158,7 +159,7 @@ this section's footnote for what that number looked like before the Windows run)
 
 | Backend | Adapter | p50 | p95 | max |
 |---|---|---|---|---|
-| **Vulkan** (ADR-0005's chosen backend) | **NVIDIA GeForce RTX 5080** | **0.386 ms** | **0.400 ms** | **0.400 ms** |
+| **Vulkan** (ADR-0016's chosen backend) | **NVIDIA GeForce RTX 5080** | **0.386 ms** | **0.400 ms** | **0.400 ms** |
 | Dx12 | NVIDIA GeForce RTX 5080 | 0.305 ms | 0.311 ms | 0.311 ms |
 | Vulkan | AMD Radeon(TM) Graphics (iGPU) | 9.185 ms | 9.194 ms | 9.194 ms |
 | Dx12 | AMD Radeon(TM) Graphics (iGPU) | 9.083 ms | 9.251 ms | 9.251 ms |
@@ -171,7 +172,7 @@ measurement (host-side setup/upload/readback aren't included; see the Decision r
 above). Even the AMD iGPU stays under budget; only the software fallback misses it, and Nicti's
 v1 target assumes a real GPU is present. `wgpu::Backends::PRIMARY` enumerated both Vulkan and Dx12
 adapters on Windows (unlike this WSL sandbox, which only ever sees Vulkan); Dx12 is marginally
-faster here but ADR-0005 already ruled it out for lacking `SHADER_F16`, which Tapetum's (#44)
+faster here but ADR-0016 already ruled it out for lacking `SHADER_F16`, which Tapetum's (#44)
 cache tiers need — a constraint this kernel doesn't itself exercise, so the two backends being
 close doesn't reopen that decision.
 
@@ -202,12 +203,12 @@ Vulkan/Dx12 drivers directly.</sup>
 | 10 | **1,511 bytes** |
 | 50 | **7,531 bytes** |
 
-Informally against ADR-0002's own reference point (a 5-stage `EditDocument` at 563 bytes total):
+Informally against ADR-0021's own reference point (a 5-stage `EditDocument` at 563 bytes total):
 a single heal spot (120 bytes) is a comparable order of magnitude to one stage entry's share of
 that 563-byte document, and even 50 spots (7.5KB) stays small in absolute terms — consistent with
-ADR-0002's "single-digit-GB across the whole 2M-asset catalog" sizing conclusion, though a
+ADR-0021's "single-digit-GB across the whole 2M-asset catalog" sizing conclusion, though a
 realistic heal edit is far more likely to carry a handful of spots than fifty. These are
-throwaway-spike numbers for order-of-magnitude planning, exactly the caveat ADR-0002 states for its
+throwaway-spike numbers for order-of-magnitude planning, exactly the caveat ADR-0021 states for its
 own sizing numbers, not a commitment to `Spot`'s exact byte layout.
 
 ## Options considered
@@ -225,7 +226,7 @@ own sizing numbers, not a commitment to `Spot`'s exact byte layout.
 
 ## Prior art
 
-Desk research only (no code run) for this section, consistent with ADR-0006's own precedent for
+Desk research only (no code run) for this section, consistent with ADR-0068's own precedent for
 research this sandbox can't execute directly:
 
 - **Adobe Photoshop's Content-Aware Fill / GIMP's Resynthesizer** are the best-known examples of
@@ -238,7 +239,7 @@ research this sandbox can't execute directly:
   geometry + optional source offset), though darktable's masks are freehand rather than
   circle-only — the same brush-path extension this ADR's `spot.rs` doc comment already names as a
   compatible future addition.
-- **LaMa** (Suvorov et al., WACV 2022) is the specific model ADR-0003/`docs/licensing.md` already
+- **LaMa** (Suvorov et al., WACV 2022) is the specific model ADR-0018/`docs/licensing.md` already
   flagged; this ADR's own contribution is attempting (and only partially succeeding — see the
   research doc) to resolve that flag, plus researching one alternative with different provenance.
 
@@ -257,7 +258,7 @@ research this sandbox can't execute directly:
   researched-but-worse alternative) rather than newly cleared. #51 still needs to either get an
   explicit sign-off on LaMa as an on-demand download (not bundled), find/train a
   non-Places2-provenance checkpoint, or accept the residual risk explicitly before shipping.
-- **`docs/licensing.md` updated in this PR** per ADR-0003's same-PR rule: the LaMa row's provenance
+- **`docs/licensing.md` updated in this PR** per ADR-0018's same-PR rule: the LaMa row's provenance
   note refreshed, a new MI-GAN row added, and MobileSAM's row tagged to this ticket (#50) alongside
   its existing #48 tag.
 
@@ -272,7 +273,7 @@ keeping.
 - **`src/cpu_reference.rs`**: `Image`, `clone_stamp`, `poisson_jacobi_step`/`poisson_jacobi_cpu`,
   `spot_heal`, `auto_source_pick` — the plain-`f32` reference every other implementation is
   checked against, plus a determinism test (`spot_heal_and_clone_stamp_are_deterministic`) proving
-  bit-identical output across repeated runs, supporting ADR-0002's "derived, cached, never
+  bit-identical output across repeated runs, supporting ADR-0021's "derived, cached, never
   persisted" design.
 - **`src/gpu.rs`** + **`shaders/poisson_jacobi.wgsl`**: the `wgpu` compute-shader twin of the CPU
   Jacobi solver, following `spikes/glint`'s adapter-enumeration/dispatch pattern (including its 2D

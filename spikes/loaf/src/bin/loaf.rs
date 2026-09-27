@@ -60,7 +60,7 @@ fn build_hero_graph() -> graph::RenderGraph {
         prev = Some(id);
     }
     // The neutral-tone branch the AI mask bake reads from -- decoupled from live sliders per
-    // ADR-0024's "AI model input is decoupled from tone sliders" decision.
+    // ADR-0048's "AI model input is decoupled from tone sliders" decision.
     g.add_node(graph::StageNode {
         id: "neutral_render".to_string(),
         kind: graph::StageKind::Baked,
@@ -171,7 +171,7 @@ fn run_bench(out_dir: PathBuf, long_edge: u32) -> anyhow::Result<()> {
     // 1-warmup+5-measured loop -- rebuilding the pipeline (and re-uploading the workload) inside
     // the timed loop measures pipeline/shader setup cost, not steady per-frame dispatch cost. This
     // was a real bug caught on the first real-hardware run of this bench (~400ms p50 for
-    // live_suffix, ~1000x ADR-0005's own comparable figure) before this fix.
+    // live_suffix, ~1000x ADR-0016's own comparable figure) before this fix.
     let live_kernel = gpu::LiveSuffixKernel::new(&ctx, pixel_count);
     let live_params = gpu::LiveSuffixParams {
         wb_r: 1.05,

@@ -4,7 +4,7 @@ Covers #59's XMP-interop research — full reasoning and every measured number i
 `docs/adr/0059-xmp-interop.md`. This file is the per-topic summary; that ADR is the full research
 trail.
 
-- **Handoff from ADR-0002**: the non-destructive edit model ADR set three XMP responsibilities
+- **Handoff from ADR-0021**: the non-destructive edit model ADR set three XMP responsibilities
   (LRC-convention metadata, a lossless `nicti:` recovery namespace, a best-effort write-only `crs:`
   projection) and left this ticket the field-level mapping, the write library, and the `crs:`
   write-gating policy.

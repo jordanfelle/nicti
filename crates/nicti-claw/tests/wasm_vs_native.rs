@@ -1,5 +1,5 @@
 //! Measures a WASM (wasmtime) guest pixel kernel against the identical kernel in native
-//! Rust, including the host<->guest buffer-copy cost — the concrete number behind ADR-0004's
+//! Rust, including the host<->guest buffer-copy cost — the concrete number behind ADR-0019's
 //! claim that WASM is viable for non-hot-path extension points but not for a third-party
 //! render-stage's per-pixel loop under the 16.7ms/frame hero-scenario budget (#43/#44).
 //!

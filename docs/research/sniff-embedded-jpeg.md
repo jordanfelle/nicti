@@ -8,7 +8,7 @@ design. This is a findings doc, not an ADR; the tier decision itself belongs to 
 
 `sniff` implements its own minimal TIFF/EXIF/Nikon-MakerNote IFD walker (`spikes/sniff/src/ifd.rs`)
 rather than depending on LibRaw or `rawler`, for two reasons: it avoids deciding #37's RAW-decoder
-question early, and it avoids the LGPL-as-Cargo-dependency review `rawler` needs under ADR-0003.
+question early, and it avoids the LGPL-as-Cargo-dependency review `rawler` needs under ADR-0018.
 It walks IFD0, the classic "next IFD" thumbnail chain, every SubIFD (including DNG-style
 `NewSubfileType=1` reduced-resolution previews), and — the one genuinely nonstandard piece of the
 walk — the Nikon MakerNote's PreviewIFD, whose internal offsets (including its own

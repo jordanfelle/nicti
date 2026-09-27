@@ -1,5 +1,5 @@
 //! `retina dump-linear`: hands demosaiced-but-uncorrected linear camera RGB (plus the metadata
-//! needed to color-correct it) to `spikes/calico` (#38/ADR-0021), so calico's color pipeline can
+//! needed to color-correct it) to `spikes/calico` (#38/ADR-0038), so calico's color pipeline can
 //! be developed and tested without depending on retina's LibRaw FFI or vendored submodule
 //! directly. LibRaw's demosaic is a stand-in for this hand-off only -- the demosaic algorithm
 //! itself is #40's decision, not this ticket's.

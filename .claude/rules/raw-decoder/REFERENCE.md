@@ -8,7 +8,7 @@ paths:
 
 Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
-- **RAW decoder (#37)** — `docs/adr/0019`: **Accepted** — build #41 on the unoptimized PR #826
+- **RAW decoder (#37)** — `docs/adr/0037`: **Accepted** — build #41 on the unoptimized PR #826
   as-is; optimize later. `retina.exe peek` measured ~1-2.4s/file end-to-end, including launch,
   read, decode, and output, rather than gating on profiling/vectorization first
   (the LGPL question is resolved — LGPL-2.1 §§5-6 permit combining `rawler`/LibRaw into Nicti's
@@ -39,12 +39,12 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
 ## Package contents
 
-- **`spikes/retina`** (#37/ADR-0019's RAW decoder comparison) — vendors LibRaw's HE/HE\*-capable
+- **`spikes/retina`** (#37/ADR-0037's RAW decoder comparison) — vendors LibRaw's HE/HE\*-capable
   fork as a git submodule at `spikes/retina/vendor/LibRaw` (needs
   `git submodule update --init spikes/retina/vendor/LibRaw` before it builds), compiled via the
   `cc` crate through a hand-written shim, no bindgen. Subcommands: `sweep`/`compare`/`diff` against
   rawler 0.8.0, `scan` for a manifest-free directory walk, `watch` for #24's `notify` research,
-  `dump-linear` (#38/ADR-0021: demosaics one NEF with white balance/color-matrix/gamma all disabled
+  `dump-linear` (#38/ADR-0038: demosaics one NEF with white balance/color-matrix/gamma all disabled
   via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
   `spikes/calico` to consume, without calico depending on retina's FFI/submodule), and
   `dump-classic`/`dump-cfa` (#40/ADR-0040's classic-pipeline and Bayer-plane dumps for

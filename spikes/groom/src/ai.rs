@@ -1,5 +1,5 @@
 //! AI-removal scaffolding: thin `ort`/`load-dynamic` wrapper structs for a future MobileSAM
-//! selector and LaMa inpainter, per ADR-0004 §3's already-decided pattern
+//! selector and LaMa inpainter, per ADR-0019 §3's already-decided pattern
 //! (`ort::init_from(path)`, deferring the native ONNX Runtime library's own load rather than
 //! linking it at build/startup time).
 //!
@@ -53,13 +53,13 @@ fn ort_err(e: impl std::fmt::Display) -> GroomAiError {
     GroomAiError::Ort(e.to_string())
 }
 
-/// Initializes the global `ort` environment exactly once, per ADR-0004 §3's `ort::init_from`
+/// Initializes the global `ort` environment exactly once, per ADR-0019 §3's `ort::init_from`
 /// pattern -- `load-dynamic` means this must run before any other `ort` API call, and must not
 /// re-run per session (the environment is process-global). `dylib_path` points at the ONNX
 /// Runtime shared library itself (`libonnxruntime.so`/`.dylib`/`onnxruntime.dll`), which is a
 /// *different* file from either wrapper's own `model_path` (the `.onnx` model file) -- this is
 /// the same "native runtime loads on demand, distinct from the Rust wrapper's own laziness"
-/// distinction ADR-0004 §3 draws.
+/// distinction ADR-0019 §3 draws.
 fn ensure_ort_environment(dylib_path: &Path) -> Result<(), GroomAiError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     let result = INIT.get_or_init(|| {

@@ -1,4 +1,4 @@
-//! `redb` (pure-Rust embedded KV store) backend, added for #106/ADR-0010. Like LMDB (`lmdb.rs`),
+//! `redb` (pure-Rust embedded KV store) backend, added for #106/ADR-0106. Like LMDB (`lmdb.rs`),
 //! redb has no query planner — every query pattern needs its own hand-maintained secondary index,
 //! kept in sync on every write. This backend reuses `lmdb.rs`'s design pattern almost exactly:
 //! byte-encoded composite keys (`prefix || 0x00 || big-endian id`) in dedicated tables, one per
@@ -28,15 +28,15 @@
 //!   guarantee as the other three engines' dedicated backup APIs against a *concurrent* writer,
 //!   because a bare `fs::copy` isn't coordinated with `redb`'s own commit boundary the way a
 //!   purpose-built backup routine would be. This spike never exercises a concurrent writer for any
-//!   engine (see ADR-0008's own "two honest scope limits" note), so this gap doesn't affect the
+//!   engine (see ADR-0067's own "two honest scope limits" note), so this gap doesn't affect the
 //!   numbers measured here, but it is a real, additional gap specific to `redb` and is called out
-//!   in ADR-0010 rather than left to look like a like-for-like backup call.
+//!   in ADR-0106 rather than left to look like a like-for-like backup call.
 //!
 //! `integrity_check()` here is a manual full-table deserialize scan (identical in spirit to
 //! `lmdb.rs`'s own), not a call to `redb`'s own `Database::check_integrity` — that method takes
 //! `&mut self` and attempts a repair, which doesn't fit this trait's `&self` signature without
 //! wrapping `Database` in interior mutability (`RefCell`/`Mutex`) purely for this one call, not
-//! attempted in this pass. This means, like DuckDB's shallow `integrity_check` (see ADR-0008), the
+//! attempted in this pass. This means, like DuckDB's shallow `integrity_check` (see ADR-0067), the
 //! ✅ this backend earns on the crash-safety hard gate is *this* check (real per-row deserialize
 //! validation, stronger than DuckDB's `SELECT COUNT(*)` probe but weaker than redb's own available
 //! page-level repair scan) — called out explicitly rather than left implicit, per this spike's

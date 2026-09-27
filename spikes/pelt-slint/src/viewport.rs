@@ -9,8 +9,8 @@
 //! reads that buffer's copied-out texture and writes tonemapped Rgba8Unorm, which is the texture
 //! actually handed to Slint. Built once against the exact `wgpu::Device`/`Queue` Slint itself
 //! renders with, obtained via `slint::Window::set_rendering_notifier`'s `RenderingSetup` state --
-//! see `main.rs`. Uses `wgpu = "30"`, matching ADR-0005 exactly (Slint's own `femtovg-wgpu`
-//! feature is literally named `wgpu-30`, see `docs/adr/0006-gui-framework.md`).
+//! see `main.rs`. Uses `wgpu = "30"`, matching ADR-0016 exactly (Slint's own `femtovg-wgpu`
+//! feature is literally named `wgpu-30`, see `docs/adr/0068-gui-framework.md`).
 
 use pelt::live_chain::{LiveChainParams, LIVE_CHAIN_WGSL};
 

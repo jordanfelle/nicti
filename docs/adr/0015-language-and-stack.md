@@ -1,8 +1,9 @@
-# ADR-0001: Implementation language and native stack
+# ADR-0015: Implementation language and native stack
 
 - **Status:** Accepted (see Context update, 2026-09)
 - **Date:** 2026-09-23
 - **Ticket:** #15 Research: language/stack choice
+- **Formerly:** ADR-0001 (sequential numbering, pre-#183)
 
 ## Context
 

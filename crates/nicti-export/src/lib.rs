@@ -1,4 +1,4 @@
-//! Exporter extension point (ADR-0004 §7/§8). `Exporter` settles identity and versioning only,
+//! Exporter extension point (ADR-0019 §7/§8). `Exporter` settles identity and versioning only,
 //! via `Module` — resize/encode/metadata-write/watermark execution and export presets/routing
 //! are owned by #56 (export stack research) and #57 (export pipeline).
 

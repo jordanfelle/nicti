@@ -1,4 +1,4 @@
-//! Render stage extension point (ADR-0004 §7/§8). `RenderStage` settles identity and versioning
+//! Render stage extension point (ADR-0019 §7/§8). `RenderStage` settles identity and versioning
 //! only, via `Module` — the real per-frame execution signature (GPU buffer bindings, cache-key
 //! interaction with Tapetum's stage cache) is deliberately left open here, owned by #16 (GPU
 //! compute API) and #44/#45 (Tapetum, the stage-cached render graph).
@@ -9,7 +9,7 @@ use nicti_claw::{Module, Registry};
 /// execution method is defined here yet — that signature belongs to #16/#44/#45.
 pub trait RenderStage: Module {}
 
-/// Registry of render stage modules, keyed by namespaced id (ADR-0002's `vendor.stage_name`
+/// Registry of render stage modules, keyed by namespaced id (ADR-0021's `vendor.stage_name`
 /// convention).
 pub type StageRegistry = Registry<dyn RenderStage>;
 

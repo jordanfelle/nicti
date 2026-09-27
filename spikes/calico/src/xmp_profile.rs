@@ -1,7 +1,7 @@
 //! Adobe Camera Raw "Look" `.xmp` profiles (e.g. the user's own installed "Adobe Vivid" preset
 //! under `...\CameraRaw\Settings\Adobe\Profiles\`).
 //!
-//! **How the container actually works** (confirmed against the real installed profiles, ADR-0021):
+//! **How the container actually works** (confirmed against the real installed profiles, ADR-0038):
 //! `crs:LookTable="<32-hex-digit ID>"` is *not* the table data -- it's the table's own MD5
 //! fingerprint. The actual payload is a second attribute on the same `rdf:Description`,
 //! `crs:Table_<ID>="<encoded>"`. That encoded string is the DNG SDK's `dng_big_table` wire format
@@ -23,7 +23,7 @@
 //! right hash, which is the strongest proof of correctness available without an LRC render.
 //! Verified against all six real Adobe Raw profiles (Color/Landscape/Monochrome/Neutral/Portrait/
 //! Vivid) during this research pass -- all six decode and fingerprint-match; no real file or
-//! decoded table content is committed here (ADR-0003).
+//! decoded table content is committed here (ADR-0018).
 //!
 //! What calico still doesn't apply from a Look profile: `crs:Clarity2012`, the
 //! `crs:ToneCurvePV2012` point sequence, and any `crs:RGBTable`-based look (a separate
@@ -995,7 +995,7 @@ mod tests {
     }
 
     /// Local-only proof against the user's own real, installed Adobe Raw "Look" profiles -- never
-    /// runs in CI (ADR-0003: no real Adobe `.xmp` is ever committed here). Set
+    /// runs in CI (ADR-0018: no real Adobe `.xmp` is ever committed here). Set
     /// `NICTI_LOOK_XMP_DIR` to a directory of `.xmp` Look profiles (e.g. the Windows
     /// `...\CameraRaw\Settings\Adobe\Profiles\Adobe Raw` folder, reachable from WSL under
     /// `/mnt/c/...`) and run with `cargo test -p calico -- --ignored`. Verified during this

@@ -15,7 +15,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   heal/remove` → neutral branch `neutral_render → mask_bake` (decoupled from live sliders) → one
   fused live dispatch `WB → HueSatMap → exposure → tone → vibrance → mask compose/apply` → crop as
   an affine sample pass over the live suffix's own output only.
-- **Cache key**: `spikes/loaf/src/hash.rs::chain` generalizes ADR-0002's flat one-upstream chain to
+- **Cache key**: `spikes/loaf/src/hash.rs::chain` generalizes ADR-0021's flat one-upstream chain to
   a DAG; `graph.rs::RenderGraph::cache_key`/`invalidated_bakes` are the tested, structural proof
   that a live-slider change triggers zero bake dispatches.
 - **Cache tiers**: `cache.rs::Tier<V>` — byte-budgeted LRU, generic over `size_of`, backs
@@ -25,7 +25,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 - **Mask refine**: `refine.rs::guided_upsample` — ported from `spikes/siamese/src/refine.rs`
   (spikes don't depend on each other, this is a copy). `box_filter` also has a GPU twin.
 - **Real RTX 5080 numbers** (GPU-timestamp only): live-suffix 0.375ms p50/0.392ms p95 (screen res),
-  1.767ms p50/3.924ms p95 (full res, matches ADR-0005's own comparable figure within a few
+  1.767ms p50/3.924ms p95 (full res, matches ADR-0016's own comparable figure within a few
   percent). Present/sample (crop): ≤1.611ms p95 even at full res.
 - **Gotcha caught this pass**: rebuilding the wgpu pipeline+buffers inside a timed loop (instead of
   a persistent `*Kernel`, see `gpu::LiveSuffixKernel`) measured ~1000x too slow — same class of bug

@@ -1,10 +1,11 @@
-# ADR-0025: Burst/duplicate grouping
+# ADR-0033: Burst/duplicate grouping
 
 - **Status:** Proposed — spike, decision rule, and every signal candidate are built and unit-
   tested; the real con-scale measurement pass is pending real ground truth (see Measured results)
 - **Date:** 2026-09-26
 - **Ticket:** [#33](https://github.com/jordanfelle/nicti/issues/33) Research: burst/duplicate
   grouping
+- **Formerly:** ADR-0025 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -88,7 +89,7 @@ direction `sniff` already took) but not on any other spike crate.
 - **`signals.rs`** — four candidate similarity signals, each a pure function over a pair of
   frames, all measured under the identical grouping algorithm so only the signal changes:
   - `time+dhash` / `time+phash` — via `image_hasher` (the crate RapidRAW's own dependency graph
-    already uses, per ADR-0018's audit; MIT OR Apache-2.0, already on `deny.toml`'s allowlist, no
+    already uses, per ADR-0069's audit; MIT OR Apache-2.0, already on `deny.toml`'s allowlist, no
     new entry needed).
   - `time+ssim` — reuses `nicti_prowl::golden::ssim` (no new dependency).
   - `time+dino` — DINOv2 ViT-S/14 global embedding (CLS token, per DINOv2's own `x_norm_clstoken`
@@ -134,7 +135,7 @@ direction `sniff` already took) but not on any other spike crate.
   own; most real duplicates are seconds apart, indistinguishable by gap alone from two genuinely
   different but consecutive shots of the same subject.
 - CLIP/OpenCLIP as the embedding candidate — DINOv2 was picked directly per
-  `docs/adr/0003-third-party-license-policy.md`'s own flag steering #35 (face/subject grouping)
+  `docs/adr/0018-third-party-license-policy.md`'s own flag steering #35 (face/subject grouping)
   toward DINOv2/OpenCLIP over face-recognition models; since #33 and #35 need the same kind of
   general-image embedding and DINOv2 has no OpenAI model-card deployment caveat (unlike CLIP),
   it's the natural shared default. OpenCLIP stays a live alternative for #35 to reconsider, not
@@ -163,7 +164,7 @@ neither can exist in this sandbox, see Context). Not fabricated here.
   1. `litter draft <card-dir> --work <scratch-dir>` — extracts previews, runs the default
      candidate, opens `label.html`.
   2. The user corrects tight/set groups by hand in the browser, exports `labels.json`.
-  3. Commit `labels.json` (frame identity + group ids only — never image content, per ADR-0003 and
+  3. Commit `labels.json` (frame identity + group ids only — never image content, per ADR-0018 and
      plain privacy) to a location the eval command can read.
   4. `litter eval --nef-dir <card-dir> --labels labels.json --candidate all --sweep` on the
      Windows reference machine (WSL cross-compile + interop, same pattern `sniff`/`retina` already

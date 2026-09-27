@@ -1,7 +1,7 @@
 //! The one fixed color treatment #40 applies identically to every candidate (classic demosaic,
 //! Path A/B AI denoise, and a from-scratch camera-RGB reconstruction of LRC's export) so quality
 //! metrics measure demosaic/denoise differences, not a second, candidate-specific color pipeline.
-//! Deliberately *not* calico's real DCP/HueSatMap/LookTable pipeline (ADR-0021) -- that's still
+//! Deliberately *not* calico's real DCP/HueSatMap/LookTable pipeline (ADR-0038) -- that's still
 //! its own open research pass (pending a reference-machine ΔE run), and #40 shouldn't block on or
 //! duplicate it. This is camera-XYZ(D50) -> linear sRGB -> sRGB OETF, the same fallback path
 //! LibRaw's own built-in camera matrix takes when no DCP/ForwardMatrix profile is installed (see

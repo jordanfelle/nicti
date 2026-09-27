@@ -4,7 +4,7 @@
 //! (for completeness/hygiene, even though this benchmark never calls it) keyword-deleted.
 //! `faceted_filter` then reads that small aggregate table instead of scanning the matching set of
 //! `assets` rows from scratch — see `sqlite.rs`'s own module doc, which names this exact
-//! trigger-maintained approach as the "tiebreaker-stage follow-up" ADR-0008 left unattempted.
+//! trigger-maintained approach as the "tiebreaker-stage follow-up" ADR-0067 left unattempted.
 //!
 //! Schema is otherwise identical to `sqlite.rs` (same tables/indexes/pragmas) so this is an
 //! apples-to-apples comparison, not a differently-tuned SQLite. Every op other than
@@ -112,7 +112,7 @@ END;
 -- Maintenance trigger 3: a rating change (write_rating, rate_burst). Moves every keyword this
 -- asset already has from its old (model, old_rating) bucket to the new one. Bounded by the
 -- asset's own keyword count (0-4 in this generator), not by catalog size — this is the per-write
--- cost that must clear the <=5ms/<=16ms point-update gates from ADR-0008.
+-- cost that must clear the <=5ms/<=16ms point-update gates from ADR-0067.
 CREATE TRIGGER IF NOT EXISTS trg_facet_rating_update AFTER UPDATE OF rating ON assets
 WHEN OLD.rating IS NOT NEW.rating
 BEGIN

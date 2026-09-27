@@ -1,8 +1,9 @@
-# ADR-0019: RAW decoder
+# ADR-0037: RAW decoder
 
 - **Status:** Accepted
 - **Date:** 2026-09-25
 - **Ticket:** [#37](https://github.com/jordanfelle/nicti/issues/37) Research: RAW decoder
+- **Formerly:** ADR-0019 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -12,7 +13,7 @@ real photo library. That library is overwhelmingly Nikon Z8 **High Efficiency (H
 Huffman-coded Lossless/Uncompressed NEF every mainstream open-source decoder already supports. No
 released version of LibRaw (0.22.2), rawler/dnglab (0.8.0), or rawspeed decodes HE/HE\* as of this
 research; LibRaw's own maintainer has said only that a public HE decoder is planned "along with the
-next public snapshot this fall" (2026), no firm date (ADR-0001's Context section has the full
+next public snapshot this fall" (2026), no firm date (ADR-0015's Context section has the full
 citation trail). A decoder that can't read the majority of the real library isn't a candidate.
 
 **RapidRAW was checked as prior art (#69) and doesn't actually solve this either.** It depends on
@@ -106,7 +107,7 @@ Deferred item 8). **The Lossless bucket's per-pixel diff below covers 2 represen
 exact match, consistent with the pattern below), but the per-pixel histogram characterization
 itself wasn't re-run file-by-file across the whole bucket. rawler correctly and safely rejects
 every HE/HE\* file — it never crashes or returns garbage, it just can't decode them,
-confirming ADR-0001's finding under real files, not just the PR's own synthetic test set.
+confirming ADR-0015's finding under real files, not just the PR's own synthetic test set.
 
 **Correctness — cross-decoder agreement (Lossless only, the only mode both decoders speak)**: an
 earlier draft of this research assumed bit-exact CFA-hash agreement between LibRaw and rawler was
@@ -224,7 +225,7 @@ findings correct/extend prior work — the middle one supersedes an earlier draf
 
 `deny.toml` gained a `rawler`-specific exception (not a global `LGPL-2.1` allow entry, since
 cargo-deny can verify license compatibility but not whether a shipped build actually satisfies
-§6's packaging condition) — same pattern as Slint's ADR-0006 exception.
+§6's packaging condition) — same pattern as Slint's ADR-0068 exception.
 
 ## Decision
 
@@ -250,7 +251,7 @@ prerequisite for starting #41.
 ## Deferred / follow-ups (not built in this pass)
 
 1. **Swap PR #826 for LibRaw's own official HE snapshot once it ships** ("this fall," no firm
-   date per ADR-0001) — re-run `retina scan`/`diff` against it when it lands; likely faster, and
+   date per ADR-0015) — re-run `retina scan`/`diff` against it when it lands; likely faster, and
    also makes the vendored fork's own out-of-bounds-read patch (see the Spike section above) moot.
 2. **Verify §6(d) and give §6's prominent notice + LGPL license text before `nicti-decode`
    ships** — confirm the actual release mechanism keeps the binary and complete corresponding

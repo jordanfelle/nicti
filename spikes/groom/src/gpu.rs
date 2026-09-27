@@ -14,7 +14,7 @@ pub const POISSON_JACOBI_WGSL: &str = include_str!("../shaders/poisson_jacobi.wg
 pub const WORKGROUP_SIZE: u32 = 64;
 
 /// wgpu's per-dimension dispatch limit -- see `spikes/glint`'s identical constant/comment and
-/// ADR-0005's dispatch-dimensioning finding. Mirrored here rather than imported since spikes
+/// ADR-0016's dispatch-dimensioning finding. Mirrored here rather than imported since spikes
 /// don't depend on each other (see `CLAUDE.md`'s "don't build on top of a spike crate" rule).
 const MAX_WORKGROUPS_PER_DIM: u32 = 65535;
 

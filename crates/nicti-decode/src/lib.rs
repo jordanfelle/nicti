@@ -1,4 +1,4 @@
-//! RAW decoder extension point (ADR-0004 §7/§8). `RawDecoder` settles identity and versioning
+//! RAW decoder extension point (ADR-0019 §7/§8). `RawDecoder` settles identity and versioning
 //! only, via `Module` — real decode execution (LibRaw vs. `rawler` vs. others, Nikon NEF
 //! including HE/HE* TicoRAW) is owned by #37, and the demosaic/NR and GPU pipeline stages that
 //! consume a decoded frame are owned by #40 and #41.

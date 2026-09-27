@@ -1,5 +1,5 @@
 //! wgpu device/adapter setup and kernel dispatch, adapted (copied, not depended-on -- spikes don't
-//! depend on each other) from `spikes/glint/src/gpu.rs` (#16/ADR-0005): the same `GpuContext`
+//! depend on each other) from `spikes/glint/src/gpu.rs` (#16/ADR-0016): the same `GpuContext`
 //! enumeration, `workgroup_grid` 2D-dispatch-limit fix, and GPU-timestamp dispatch/readback
 //! machinery, extended with three kernels specific to Tapetum's design: `live_suffix` (the fused
 //! live-stage chain, decision rule #2), `present_sample` (the crop/geometry sample pass, decision
@@ -307,7 +307,7 @@ pub fn run_live_suffix(
 /// dispatch rather than at module-creation time) and fresh buffers on every call, which is fine
 /// for a one-shot correctness check but wrong for a repeated-call timing loop -- `bin/loaf.rs`'s
 /// first `bench` pass called `run_live_suffix` inside `Protocol::run`'s 1-warmup+5-measured loop
-/// and measured ~400ms p50 on the reference RTX 5080, roughly 1000x ADR-0005's own 0.326ms p95
+/// and measured ~400ms p50 on the reference RTX 5080, roughly 1000x ADR-0016's own 0.326ms p95
 /// live-chain figure at a comparable resolution -- caught by comparing against that ADR's number
 /// rather than trusting the first result at face value. This type is what makes "warm, steady-
 /// state per-frame cost" (what decision rule #2 actually asks for) the thing actually measured.

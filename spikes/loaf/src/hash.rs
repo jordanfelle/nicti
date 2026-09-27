@@ -7,10 +7,10 @@
 //!
 //! `-0.0` is normalized to `0.0` and `serde_json`'s `preserve_order`/`arbitrary_precision`
 //! features stay off (object keys sort) -- the exact citation trail for that part is in
-//! ADR-0002; this module doesn't re-derive it, just reuses the same rule.
+//! ADR-0021; this module doesn't re-derive it, just reuses the same rule.
 //!
 //! **NaN/Infinity do NOT refuse to serialize** -- an earlier version of this doc comment claimed
-//! they did (citing ADR-0002's own claim for pawprint's one-upstream case, taken at face value
+//! they did (citing ADR-0021's own claim for pawprint's one-upstream case, taken at face value
 //! rather than re-verified here); a CodeRabbit review of this PR found the opposite is true:
 //! `serde_json::to_value`/`to_string`/`to_vec` all silently convert a non-finite `f32`/`f64` to
 //! JSON `null` and return `Ok`, never `Err` -- confirmed empirically, not assumed. Left unhandled,

@@ -60,6 +60,6 @@ canonical guide).
 ## License
 
 [AGPL-3.0-or-later](LICENSE) — see
-[`docs/adr/0013-outbound-license-agpl.md`](docs/adr/0013-outbound-license-agpl.md) for the
+[`docs/adr/0066-outbound-license-agpl.md`](docs/adr/0066-outbound-license-agpl.md) for the
 rationale and [`docs/licensing.md`](docs/licensing.md) for the third-party dependency and
 ML-model license audit backing it.

@@ -1,9 +1,10 @@
-# ADR-0004: Module/plugin architecture (Claw)
+# ADR-0019: Module/plugin architecture (Claw)
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
 - **Ticket:** [#19](https://github.com/jordanfelle/nicti/issues/19) Research: module/plugin
   architecture (Claw)
+- **Formerly:** ADR-0004 (sequential numbering, pre-#183)
 
 ## Context
 
@@ -18,21 +19,21 @@ research ticket in the backlog.
 
 Three prior ADRs already constrain this decision:
 
-- **ADR-0001** named `libloading` (C-ABI dylib) and `wasmtime` (WASM host) as the concrete
+- **ADR-0015** named `libloading` (C-ABI dylib) and `wasmtime` (WASM host) as the concrete
   mechanism candidates within Rust, and flagged that `wasmtime`'s plugin story was one of the four
   criteria where Rust rated strictly stronger than C++.
-- **ADR-0002** already committed the *data* shape a plugin render stage uses: a namespaced
+- **ADR-0021** already committed the *data* shape a plugin render stage uses: a namespaced
   `vendor.stage_name` id with opaque `params: serde_json::Value`, `schema_version`-tagged, so a
   build without a given plugin installed round-trips its entry byte-for-byte rather than dropping
   or guessing at it (proven in `spikes/pawprint/tests/unknown_stage_roundtrip.rs`). This ADR
   extends that shape to a *registry* that resolves an id to a real implementation, and to the
   other six extension points beyond render stages.
-- **ADR-0003** requires that an LGPL-as-Cargo-dependency case (a future `rawler`/`lensfun-rs`-style
+- **ADR-0018** requires that an LGPL-as-Cargo-dependency case (a future `rawler`/`lensfun-rs`-style
   crate) be isolated behind a `cdylib`/out-of-process boundary "via Claw" if it's ever going to
   ship — Rust's static-link compilation model doesn't cleanly satisfy LGPL's dynamic-linking safe
   harbor otherwise. This ADR is where that promise gets a concrete mechanism.
 
-Exit criterion for #19 is this ADR. Following the ADR-0002/#21 precedent (PR #75), it's
+Exit criterion for #19 is this ADR. Following the ADR-0021/#21 precedent (PR #75), it's
 accompanied by a throwaway spike (`spikes/sheath` + fixture `spikes/dewclaw`) proving every
 load-bearing claim below with a runnable test, plus a measured (not assumed) comparison of a WASM
 guest kernel against native Rust for the specific question of whether WASM is viable for
@@ -75,9 +76,9 @@ runtime library's own load, not just Nicti's own wrapper construction.
 
 ### 4. A checked C-ABI `cdylib` boundary, for LGPL isolation
 
-For ADR-0003's LGPL-as-Cargo-dependency case, a stage can instead be compiled as a `cdylib`
+For ADR-0018's LGPL-as-Cargo-dependency case, a stage can instead be compiled as a `cdylib`
 exporting a single `#[repr(C)]` vtable, loaded via `libloading` (ISC license[^c1], added to
-`deny.toml`'s allowlist in this PR — see ADR-0003's Amendments section). Rust's own struct/vtable
+`deny.toml`'s allowlist in this PR — see ADR-0018's Amendments section). Rust's own struct/vtable
 layout is not guaranteed stable across separate compilations — the Rust Reference is explicit that
 "type layout can be changed with each compilation... we only document what is guaranteed today,"
 and the default representation does not guarantee field order[^c4] — so the vtable's **first
@@ -111,7 +112,7 @@ third-party native-plugin ecosystem building against a different Rust version th
 ### 5. Registry-level fallback for an unrecognized module id
 
 Looking up a stage id with no installed module returns cleanly (`Option::None`), mirroring
-ADR-0002's "a version this build doesn't recognize stays read-only rather than being dropped or
+ADR-0021's "a version this build doesn't recognize stays read-only rather than being dropped or
 guessed at." Proven in `spikes/sheath/tests/unknown_module.rs`.
 
 ### 6. v2 third-party plugins: WASM is the right *direction*, not a v1 commitment
@@ -166,10 +167,10 @@ stage, AI model provider, exporter, catalog store) share the same minimal trait 
 ```rust
 pub trait Module: Send + Sync {
     /// Namespaced id (e.g. "nicti.decoder.libraw", or "vendor.stage_name" for a v2 plugin —
-    /// ADR-0002's stage-id convention, generalized to every extension point).
+    /// ADR-0021's stage-id convention, generalized to every extension point).
     fn id(&self) -> &str;
     fn schema_version(&self) -> u32;
-    /// Migrates an older params blob forward (ADR-0002's `legacy_params()`-style pattern).
+    /// Migrates an older params blob forward (ADR-0021's `legacy_params()`-style pattern).
     /// `None` means this build doesn't recognize the version at all — the caller must treat
     /// the data as read-only rather than dropping or guessing at it.
     fn migrate_params(&self, from_version: u32, params: serde_json::Value)
@@ -223,7 +224,7 @@ third-party plugins actually get built.
 
 - **Unblocks #20**: the crate layout in §8, and `nicti-claw`'s traits/registry (§2, §7) plus its
   dylib loader (§4), are ready to generalize from `spikes/sheath` into real crates.
-- **Feeds #37/#39**: if `rawler`/`lensfun-rs` end up used, ADR-0003's LGPL-isolation requirement is
+- **Feeds #37/#39**: if `rawler`/`lensfun-rs` end up used, ADR-0018's LGPL-isolation requirement is
   satisfied via §4's `cdylib` boundary — a concrete mechanism now exists, not just a promise to
   find one later.
 - **Feeds #16/#44**: §7 deliberately leaves the render-stage execution signature open for those
@@ -234,7 +235,7 @@ third-party plugins actually get built.
   recommendation for whoever picks up that work in v2, not a decision this ADR is authorized to
   make final given v1 ships no plugin-hosting code at all.
 - **`deny.toml` amended**: `ISC` added to the Rust-crate license allowlist for `libloading` (see
-  ADR-0003's Amendments section and `docs/licensing.md`).
+  ADR-0018's Amendments section and `docs/licensing.md`).
 - **A pre-existing CI gap was found and fixed in the same PR, unrelated to this ADR's content but
   discovered while verifying it**: `.github/workflows/ci.yml`'s `clippy`/`test` jobs ran `cargo
   clippy`/`cargo test` without `-p`/`--workspace`. Because `nicti`'s root manifest is both the
@@ -263,7 +264,7 @@ as historical references to what was proven when this ADR was written, not live 
 
 All claims fetched/verified 2026-09-23 by three parallel research passes (Rust dylib/ABI
 mechanisms; WASM hosting; prior-art plugin architectures), each citing a primary source with a
-verification date where one exists, matching the citation discipline of ADR-0001/0002.
+verification date where one exists, matching the citation discipline of ADR-0015/0021.
 
 ### Rust dylib/ABI mechanisms
 

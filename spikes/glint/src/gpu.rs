@@ -2,7 +2,7 @@
 //! test and the `glint` benchmark binary.
 //!
 //! Scoping note: kernels here operate on `array<vec4<f32>>` storage **buffers**, not storage
-//! **textures**. The ADR-0005 decision rule cares about compute throughput and dispatch
+//! **textures**. The ADR-0016 decision rule cares about compute throughput and dispatch
 //! overhead, which a buffer kernel exercises identically to a texture kernel; texture-specific
 //! concerns (sampling, mipmaps, format-feature negotiation) are Tapetum's (#44) problem, not
 //! this ticket's. `SHADER_F16` is still probed directly (see `tests/features_and_limits.rs`),
@@ -61,7 +61,7 @@ fn workgroup_grid(total_workgroups: u32) -> (u32, u32) {
 }
 
 /// Which wgpu backend a `GpuContext` was created against — used to label results and to run the
-/// same kernel across every backend the adapter enumeration finds, per the ADR-0005 decision
+/// same kernel across every backend the adapter enumeration finds, per the ADR-0016 decision
 /// rule's "works on both D3D12 and Vulkan backends" requirement.
 pub struct GpuContext {
     pub adapter: wgpu::Adapter,
@@ -76,7 +76,7 @@ impl GpuContext {
     /// Enumerates every adapter wgpu can see across all compiled-in backends. On Windows this is
     /// (at least) Vulkan and Dx12 against the same physical GPU; in WSL without a GPU-backed
     /// Vulkan ICD, this falls back to lavapipe (software) — fine for correctness, not for
-    /// throughput numbers (see `docs/adr/0005-gpu-compute-api.md`'s hardware-identity caveat).
+    /// throughput numbers (see `docs/adr/0016-gpu-compute-api.md`'s hardware-identity caveat).
     pub fn enumerate() -> Vec<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,

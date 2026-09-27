@@ -9,7 +9,7 @@ paths:
 Full reasoning/history: `docs/decisions/xmp-interop.md`.
 
 - **XMP interop with LRC (#59)** — `docs/adr/0059`: **Proposed**, pending a hands-on LRC session
-  (no real LRC-written file exists in this Linux/WSL sandbox — same constraint ADR-0020's `homing`
+  (no real LRC-written file exists in this Linux/WSL sandbox — same constraint ADR-0071's `homing`
   spike already documents).
 - **Field mapping**: `xmp:Rating` (`-1..=5`, `-1`=reject, absent=unrated — kept `None`, never
   defaulted to `0`, matching `shed-lrcat-schema.md`'s nullable `rating` finding), `xmp:Label`
@@ -25,7 +25,7 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
   read/write, DNG embedded read-only (writes go to a `.xmp` sidecar instead).
 - **`crs:` write gate (layer c)**: write only if the sidecar's current hash still matches what
   Nicti last wrote there (`conflict::should_write_crs`) — never on an explicit-export-only basis.
-- **Conflict rule**: ADR-0002's hash-then-mtime-then-ambiguity-window rule, reimplemented against
+- **Conflict rule**: ADR-0021's hash-then-mtime-then-ambiguity-window rule, reimplemented against
   real file mtimes/hashes (not depended on from `spikes/pawprint` — spikes don't depend on other
   spikes in this repo, only on real `crates/*`).
 
@@ -35,7 +35,7 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
   rating/label/keyword field mapping, a `quick-xml`-based event-copy-and-patch packet
   reader/writer that preserves every property it doesn't own, `.xmp` sidecar naming + atomic
   write, JPEG-embedded APP1 XMP read/write (DNG/TIFF tag-700 write deferred, see the ADR), and the
-  ADR-0002 conflict rule + `crs:` write-gate wired to real file mtimes/hashes. Real, tested (36
+  ADR-0021 conflict rule + `crs:` write-gate wired to real file mtimes/hashes. Real, tested (36
   unit + 2 env-gated real-file integration tests, all passing — the real-file tests skip cleanly
   in this sandbox, same constraint `homing` already documents), not path-gated, pending the
   follow-up hands-on LRC session the ADR describes before it can move to Accepted. See

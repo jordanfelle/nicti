@@ -1,5 +1,5 @@
 //! Raw CUDA (via NVRTC) implementation of the `live_chain` kernel, compiled and run through
-//! `cudarc`'s driver + NVRTC bindings. This is the comparison point for the ADR-0005 decision
+//! `cudarc`'s driver + NVRTC bindings. This is the comparison point for the ADR-0016 decision
 //! rule's "within 2x of the equivalent CUDA kernel" clause. `cudarc`'s `fallback-dynamic-loading`
 //! feature means this compiles even without the CUDA toolkit installed; `CudaContext::new`
 //! returns an error at runtime instead if the driver/NVRTC libraries aren't present, which every

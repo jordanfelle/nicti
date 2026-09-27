@@ -2,7 +2,7 @@
 //! sampled per-channel. Adobe's own spline construction is undisclosed; this uses the
 //! Fritsch-Carlson monotonic cubic Hermite spline (a standard, published method that guarantees
 //! no ringing/overshoot between control points, which is the property a tone curve actually
-//! needs) as a documented stand-in -- see ADR-0021's Candidates section.
+//! needs) as a documented stand-in -- see ADR-0038's Candidates section.
 
 #[derive(Debug, Clone)]
 pub struct ToneCurve {
@@ -69,7 +69,7 @@ impl ToneCurve {
     /// Adobe's commonly-reproduced "medium contrast" default curve (used by ACR/LRC's Adobe
     /// Standard-family profiles when a DCP has no `ProfileToneCurve` of its own) -- these exact
     /// control points are widely cited in open-source raw-processing discussions, not sourced
-    /// from an Adobe primary document; treat as an approximation, per ADR-0021.
+    /// from an Adobe primary document; treat as an approximation, per ADR-0038.
     pub fn acr_default() -> Self {
         ToneCurve::new(&[
             (0.0, 0.0),

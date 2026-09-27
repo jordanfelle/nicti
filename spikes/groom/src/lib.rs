@@ -1,4 +1,4 @@
-//! Throwaway spike for #50 / `docs/adr/0007-healing-and-removal.md`.
+//! Throwaway spike for #50 / `docs/adr/0050-healing-and-removal.md`.
 //!
 //! Covers two independent research threads gated on the same ADR:
 //!
@@ -11,7 +11,7 @@
 //!   sandbox, so these prove the loading/error-handling shape only — plus pure, model-independent
 //!   crop/resize/feather-blend compositing math for LaMa-style inpainting.
 //!
-//! `spot` defines the `HealStage`/`Spot` edit-model representation per ADR-0002's
+//! `spot` defines the `HealStage`/`Spot` edit-model representation per ADR-0021's
 //! `StageEntry { schema_version, params }` pattern, with a pawprint-style `cache_key()`.
 //!
 //! Not a production crate — see `CLAUDE.md`'s package-map note on `spikes/*`.

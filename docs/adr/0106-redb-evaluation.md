@@ -1,24 +1,25 @@
-# ADR-0010: `redb` (pure-Rust embedded KV store), evaluated for the catalog store — not adopted
+# ADR-0106: `redb` (pure-Rust embedded KV store), evaluated for the catalog store — not adopted
 
 - **Status:** Rejected (not a rejection of the pure-Rust angle itself — see Consequences, same
-  caveat ADR-0009 made for Turso)
+  caveat ADR-0102 made for Turso)
 - **Date:** 2026-09-24
 - **Ticket:** [#106](https://github.com/jordanfelle/nicti/issues/106) Research: redb (pure-Rust
   embedded KV store) as a catalog engine candidate
+- **Formerly:** ADR-0010 (sequential numbering, pre-#183)
 
 ## Context
 
-ADR-0009 evaluated Turso (a pure-Rust SQL engine) and found it not production-ready pre-1.0. #106
+ADR-0102 evaluated Turso (a pure-Rust SQL engine) and found it not production-ready pre-1.0. #106
 asks a related but distinct question: `redb` (`cberner/redb`) is a pure-Rust embedded **KV store**,
-not a SQL engine — architecturally the closest thing in this comparison to LMDB (ADR-0008: no query
+not a SQL engine — architecturally the closest thing in this comparison to LMDB (ADR-0067: no query
 planner, ordered byte-keyed B-tree, hand-maintained secondary indexes) but without LMDB's C core or
 its own hard-gate-3 blocker. Worth its own hard-gate + measured pass for the same reason Turso
-earned one: it's the only other candidate matching ADR-0001's stated preference (memory safety, no
+earned one: it's the only other candidate matching ADR-0015's stated preference (memory safety, no
 C/C++ core) that hadn't been measured yet.
 
 ## Decision rule
 
-Same hard-gate + measured-gate rule as ADR-0008/0009, against the same `spikes/den/` `Workload`
+Same hard-gate + measured-gate rule as ADR-0067/0102, against the same `spikes/den/` `Workload`
 trait, generator, and 600k/2M synthetic scale.
 
 ## Decision
@@ -30,7 +31,7 @@ inconclusive cases (LMDB, Turso) — see below. The decision rests on the **meas
 query shapes miss the 2M budget outright, one badly (filename search at ~5x the budget), both
 root-caused to a real, documented architectural cost (redb's per-page checksum verification) rather
 than a fixable indexing gap. Combined with `redb_engine.rs`'s own hand-maintained-secondary-index
-engineering cost (the same real cost ADR-0008 charged against LMDB) and no native online-backup API
+engineering cost (the same real cost ADR-0067 charged against LMDB) and no native online-backup API
 at all (a gap neither LMDB nor Turso nor the two SQL engines have), `redb` is not a better fit for
 #22 than SQLite today.
 
@@ -40,11 +41,11 @@ at all (a gap neither LMDB nor Turso nor the two SQL engines have), `redb` is no
 
 | Gate | Result |
 |---|---|
-| 1. Windows build | ✅ Confirmed via `cberner/redb`'s own `.github/workflows/ci.yml`: a real `windows-latest` job in its OS matrix (alongside `ubuntu-latest`, `macos-latest`, `ubuntu-24.04-arm`), running `cargo fmt --all -- --check`, `cargo clippy --all --all-targets -- -Dwarnings`, and `just test_all_no_sandbox` (its own real test suite) on that runner — not just a doc claim, matching the strength of evidence ADR-0009 found for Turso. |
+| 1. Windows build | ✅ Confirmed via `cberner/redb`'s own `.github/workflows/ci.yml`: a real `windows-latest` job in its OS matrix (alongside `ubuntu-latest`, `macos-latest`, `ubuntu-24.04-arm`), running `cargo fmt --all -- --check`, `cargo clippy --all --all-targets -- -Dwarnings`, and `just test_all_no_sandbox` (its own real test suite) on that runner — not just a doc claim, matching the strength of evidence ADR-0102 found for Turso. |
 | 2. License | ✅ `MIT OR Apache-2.0`, confirmed from crates.io's version-level API response for `redb` 4.3.0 (the crate's own `Cargo.toml` sets `license.workspace = true`, resolving to this dual license) — already on `deny.toml`'s allowlist, no edit needed. |
-| 3. Crash-safety | ⚠️ **Inconclusive — but for a different, better-understood reason than LMDB or Turso.** `den crash --engine redb --iterations 20` reported 20/20 reopen failures: `Error: Database already open. Cannot acquire lock.` Traced this to source (`src/tree_store/page_store/file_backend/range_lock.rs`), not left as a guess: redb's `Database::create`/`open` take an OS-level advisory byte-range lock (`libc::flock`/fcntl-style range locks on Linux/macOS, the Windows equivalent on that platform) on specific byte offsets of the database file itself — a real, standard mechanism, the same *category* as the POSIX `fcntl` lock ADR-0009 found in `turso_core`, and **not** a process-wide static registry the way `heed`/`liblmdb`'s guard is (ADR-0008's hard-gate-3 finding). Confirmed the distinction directly with a follow-up experiment (mirroring ADR-0009's own methodology): opening path A, `mem::forget`ing the handle, then opening a **different**, never-before-touched path B in the same process succeeds cleanly — only reopening path A itself (the one whose fd was leaked) fails. This proves the lock is scoped to the specific leaked file descriptor, not global. Since `mem::forget` (unlike a real `SIGKILL`) never closes that fd, the OS-level lock is held for the rest of this harness process's life — this in-process crash-simulation technique structurally cannot get past the reopen step to actually exercise redb's own transactional recovery, for the same class of reason ADR-0008/0009 already flagged for the fd-scoped locks SQLite/DuckDB/Turso all use. **This should be read as "harness limitation, mechanism now understood," not as a failing or passing result** — a real fork+exec+SIGKILL harness remains the only way to actually settle it, per ADR-0008/0009's own open follow-up. |
-| 4. Online backup | ⚠️ `redb` has **no** dedicated online-backup API at all — unlike SQLite's `VACUUM INTO`, DuckDB's `EXPORT DATABASE`, or LMDB's `env.copy_to_path`, there is nothing to call. `redb_engine.rs::backup()` does a plain `std::fs::copy` of the single database file with a read transaction held open across the copy (so redb's own MVCC page allocator can't reclaim the snapshot's pages mid-copy), which is a real but partial safety property — it gives no coordination with a concurrent writer the way a purpose-built backup call would. Not measured under a concurrent writer here, same scope limit as every other engine in this spike (see ADR-0008's own two-honest-scope-limits note), but this is a real, additional gap specific to `redb`, not just an unmeasured edge of an existing API. |
-| 5. Maintained | ✅ Actively maintained, more clearly than any prior candidate: `v4.3.0` (well past 1.0, unlike Turso's `0.8.0-pre.12`), last repository push the same day as this evaluation, regular tagged releases (`v4.0.0`→`v4.3.0` across 2026), 4,805 GitHub stars, only 7 open issues, not archived. **Zero dependencies** (confirmed via `cargo tree -i redb`) — the smallest, simplest dependency footprint of any candidate across ADR-0008/0009/0010, and no async runtime of any kind (no `tokio`/etc. anywhere in its graph), so `Workload::prepare_for_forget` stays a correct no-op for this engine — confirmed, not assumed. |
+| 3. Crash-safety | ⚠️ **Inconclusive — but for a different, better-understood reason than LMDB or Turso.** `den crash --engine redb --iterations 20` reported 20/20 reopen failures: `Error: Database already open. Cannot acquire lock.` Traced this to source (`src/tree_store/page_store/file_backend/range_lock.rs`), not left as a guess: redb's `Database::create`/`open` take an OS-level advisory byte-range lock (`libc::flock`/fcntl-style range locks on Linux/macOS, the Windows equivalent on that platform) on specific byte offsets of the database file itself — a real, standard mechanism, the same *category* as the POSIX `fcntl` lock ADR-0102 found in `turso_core`, and **not** a process-wide static registry the way `heed`/`liblmdb`'s guard is (ADR-0067's hard-gate-3 finding). Confirmed the distinction directly with a follow-up experiment (mirroring ADR-0102's own methodology): opening path A, `mem::forget`ing the handle, then opening a **different**, never-before-touched path B in the same process succeeds cleanly — only reopening path A itself (the one whose fd was leaked) fails. This proves the lock is scoped to the specific leaked file descriptor, not global. Since `mem::forget` (unlike a real `SIGKILL`) never closes that fd, the OS-level lock is held for the rest of this harness process's life — this in-process crash-simulation technique structurally cannot get past the reopen step to actually exercise redb's own transactional recovery, for the same class of reason ADR-0067/0102 already flagged for the fd-scoped locks SQLite/DuckDB/Turso all use. **This should be read as "harness limitation, mechanism now understood," not as a failing or passing result** — a real fork+exec+SIGKILL harness remains the only way to actually settle it, per ADR-0067/0102's own open follow-up. |
+| 4. Online backup | ⚠️ `redb` has **no** dedicated online-backup API at all — unlike SQLite's `VACUUM INTO`, DuckDB's `EXPORT DATABASE`, or LMDB's `env.copy_to_path`, there is nothing to call. `redb_engine.rs::backup()` does a plain `std::fs::copy` of the single database file with a read transaction held open across the copy (so redb's own MVCC page allocator can't reclaim the snapshot's pages mid-copy), which is a real but partial safety property — it gives no coordination with a concurrent writer the way a purpose-built backup call would. Not measured under a concurrent writer here, same scope limit as every other engine in this spike (see ADR-0067's own two-honest-scope-limits note), but this is a real, additional gap specific to `redb`, not just an unmeasured edge of an existing API. |
+| 5. Maintained | ✅ Actively maintained, more clearly than any prior candidate: `v4.3.0` (well past 1.0, unlike Turso's `0.8.0-pre.12`), last repository push the same day as this evaluation, regular tagged releases (`v4.0.0`→`v4.3.0` across 2026), 4,805 GitHub stars, only 7 open issues, not archived. **Zero dependencies** (confirmed via `cargo tree -i redb`) — the smallest, simplest dependency footprint of any candidate across ADR-0067/0102/0106, and no async runtime of any kind (no `tokio`/etc. anywhere in its graph), so `Workload::prepare_for_forget` stays a correct no-op for this engine — confirmed, not assumed. |
 
 **Measured gates, 600k assets:**
 
@@ -62,7 +63,7 @@ at all (a gap neither LMDB nor Turso nor the two SQL engines have), `redb` is no
 | Bulk ingest, 600k rows (informative) | — | 8.13 s |
 | Online backup (informative, not gated; see gate-4 caveat above) | — | 0.299 / 0.322 s |
 
-Unlike every prior candidate in ADR-0008/0009 ("all three clear every gate at 600k"), `redb` already
+Unlike every prior candidate in ADR-0067/0102 ("all three clear every gate at 600k"), `redb` already
 misses one gate at 600k scale — filename search — worth stating plainly rather than only reporting
 the 2M table below.
 
@@ -88,13 +89,13 @@ touch the *most* pages per call — `range_query` walks a `by_rating` index rang
 `assets` lookup per candidate row to post-filter iso/date (same honest shape as `lmdb.rs`'s own
 version, see that module's doc comment); `filename_search` is an unavoidable full-table scan (a
 leading-wildcard substring match, unindexable in any of the five engines evaluated across
-ADR-0008/0009/0010). Both are page-read-heavy, not index-shaped. Checked redb's own design
+ADR-0067/0102/0106). Both are page-read-heavy, not index-shaped. Checked redb's own design
 documentation rather than assuming: `docs/design.md` states plainly that "all data is checksumed
 when written, using a non-cryptographic Merkle tree with XXH3_128" — every B-tree page carries a
 `child page checksum` entry, verified as part of reading it, as the load-bearing mechanism behind
 redb's own 1-phase-plus-checksum (1PC+C) durable-commit design. LMDB and the two SQL engines don't
 pay this specific per-page-read cost (LMDB doesn't checksum backing pages at all; SQLite/DuckDB pay
-their own different overheads and did not show this specific pattern in ADR-0008). This isn't just
+their own different overheads and did not show this specific pattern in ADR-0067). This isn't just
 inferred from one benchmark run here: `redb`'s own upstream README publishes a benchmark table
 (`cberner/redb`, "Benchmarks" section, its own hardware) showing **redb is consistently ~1.5–2x
 slower than LMDB specifically on random-read and random-range-read workloads** (e.g. "random range
@@ -102,7 +103,7 @@ reads": redb 1174ms vs LMDB 565ms; "random reads": redb 1138ms vs LMDB 637ms) wh
 than LMDB on `len()` and individual writes — a pattern consistent with per-page checksum
 verification cost being paid specifically when pages are actually read, not on metadata-only or
 write-path operations. This spike's own numbers (redb's `filename_search` at 2M running ~2.5x
-slower than LMDB's equivalent full-scan implementation, 508ms vs LMDB's 201ms in ADR-0008) land in
+slower than LMDB's equivalent full-scan implementation, 508ms vs LMDB's 201ms in ADR-0067) land in
 the same direction and rough magnitude as that independent, upstream comparison — two lines of
 evidence agreeing, not one guess standing alone. A "missing index" explanation was considered and
 rejected: both queries already use the same indexing strategy as `lmdb.rs` (rating-range index +
@@ -124,31 +125,31 @@ consistent with the range-query/filename-search findings above, not in tension w
 
 | Option | Verdict |
 |---|---|
-| `redb` (pure-Rust embedded KV store) | **Rejected.** Strongest Windows-build/license/maintenance evidence of any candidate evaluated so far, and a genuinely well-understood (not murky) crash-safety inconclusive result. Two measured query shapes miss the 2M budget — one by ~1.5x, one by ~5x — root-caused to a real, documented per-page-checksum cost verified against redb's own design docs and its own upstream LMDB-comparison benchmarks, not a fixable indexing gap. No native online-backup API, and the same hand-maintained-secondary-index engineering cost ADR-0008 already charged against LMDB. |
-| `LMDB` (`heed`) | Unchanged from ADR-0008: best raw numbers of any KV-shaped candidate, rejected on the same unmeasurable crash-safety hard gate — still the pending "revisit if a real fork+exec+SIGKILL harness exists" candidate. |
+| `redb` (pure-Rust embedded KV store) | **Rejected.** Strongest Windows-build/license/maintenance evidence of any candidate evaluated so far, and a genuinely well-understood (not murky) crash-safety inconclusive result. Two measured query shapes miss the 2M budget — one by ~1.5x, one by ~5x — root-caused to a real, documented per-page-checksum cost verified against redb's own design docs and its own upstream LMDB-comparison benchmarks, not a fixable indexing gap. No native online-backup API, and the same hand-maintained-secondary-index engineering cost ADR-0067 already charged against LMDB. |
+| `LMDB` (`heed`) | Unchanged from ADR-0067: best raw numbers of any KV-shaped candidate, rejected on the same unmeasurable crash-safety hard gate — still the pending "revisit if a real fork+exec+SIGKILL harness exists" candidate. |
 
-ADR-0008's decision is unchanged: **SQLite remains chosen, DuckDB remains the proven fallback.**
+ADR-0067's decision is unchanged: **SQLite remains chosen, DuckDB remains the proven fallback.**
 
 ## Consequences
 
-- **The pure-Rust angle keeps not being the deciding factor, twice now** (Turso in ADR-0009, `redb`
+- **The pure-Rust angle keeps not being the deciding factor, twice now** (Turso in ADR-0102, `redb`
   here) — worth naming as a pattern, not just two unrelated misses: both times, a genuine
   architectural property specific to the pure-Rust candidate (Turso's WAL-checkpoint behavior;
   redb's per-page checksum cost) is what actually decided the outcome, not maturity alone.
   `redb` is by far the more production-ready of the two (1.0-plus, zero dependencies, real Windows
   CI) — this is a much closer call than Turso was, and worth remembering as the strongest
-  pure-Rust catalog candidate on record if SQLite's own facet-query ceiling (ADR-0008) ever forces
+  pure-Rust catalog candidate on record if SQLite's own facet-query ceiling (ADR-0067) ever forces
   a real re-decision. Revisit if redb ever ships an optional checksum-verification-off read mode,
   or if a real fork+exec+SIGKILL harness resolves its crash-safety question favorably.
 - **#22 should not spend further design effort accommodating `redb`.** Proceed on SQLite per
-  ADR-0008.
-- **The fork+exec+SIGKILL harness gap, first flagged in ADR-0008 and reiterated in ADR-0009, is now
+  ADR-0067.
+- **The fork+exec+SIGKILL harness gap, first flagged in ADR-0067 and reiterated in ADR-0102, is now
   a three-for-three pattern** (LMDB, Turso, redb all left this pass's crash-safety gate
   unresolved, for three different underlying mechanisms). Building it is looking less like an
   optional nicety with each new KV-shaped or pure-Rust candidate evaluated this way, and more like
   standing infrastructure this project's database research should just have. Still out of scope
   for this pass; worth its own ticket if a sixth candidate ever needs evaluating.
-- **`tests/cross_engine.rs` now covers five engines**, unchanged in scope from ADR-0009's own
+- **`tests/cross_engine.rs` now covers five engines**, unchanged in scope from ADR-0102's own
   caveat about what it doesn't exercise (`crash_mid_ingest`, `rate_burst`, `backup()` still aren't
   asserted there for any engine) — still worth widening in a future pass, still not specific to
   this ADR's own conclusion.
@@ -181,7 +182,7 @@ ever checked), but it's a real, worth-noting difference in what this harness cou
 `lmdb.rs`'s own), not a call to redb's own `Database::check_integrity` — that method takes
 `&mut self` and attempts a repair, which doesn't fit this trait's `&self` signature without
 wrapping `Database` in interior mutability purely for this one call, not attempted in this pass.
-Same honest-scope-limit pattern as DuckDB's shallow check in ADR-0008: the ✅ this backend earns on
+Same honest-scope-limit pattern as DuckDB's shallow check in ADR-0067: the ✅ this backend earns on
 the crash-safety hard gate's *check* half is real per-row deserialize validation (stronger than
 DuckDB's `SELECT COUNT(*)` probe, weaker than redb's own available page-level repair scan) — called
 out explicitly rather than left implicit.

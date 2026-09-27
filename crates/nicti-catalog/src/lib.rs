@@ -1,7 +1,7 @@
-//! Catalog store extension point (ADR-0004 §7/§8) and its real implementation (#22): the schema
-//! ADR-0008/0011/0020/0002 settled (see `schema.rs`), a `rusqlite`-backed `CatalogStore`
+//! Catalog store extension point (ADR-0019 §7/§8) and its real implementation (#22): the schema
+//! ADR-0067/0103/0071/0021 settled (see `schema.rs`), a `rusqlite`-backed `CatalogStore`
 //! (`sqlite.rs`), and the Scruff import/ingest pipeline (`scruff.rs`) that scans a folder, fingerprints
-//! and upserts each asset, and extracts its T0 grid preview at import time (ADR-0017) — carrying a
+//! and upserts each asset, and extracts its T0 grid preview at import time (ADR-0029) — carrying a
 //! kitten by the scruff of its neck is how it gets moved into the catalog.
 
 use nicti_claw::{Module, Registry};
@@ -22,7 +22,7 @@ pub enum CatalogError {
     /// A filesystem-level failure (stat/read) hit during ingest, before any SQL was involved.
     #[error("I/O error: {0}")]
     Io(String),
-    /// ADR-0020's flagged "two volumes, same identity -> never auto-merge" gap, partially closed:
+    /// ADR-0071's flagged "two volumes, same identity -> never auto-merge" gap, partially closed:
     /// a volume upsert whose `marker_uuid` disagrees with an already-registered volume under the
     /// same `identity_key` is refused rather than silently merged into that row.
     #[error(
@@ -35,7 +35,7 @@ pub enum CatalogError {
     },
 }
 
-/// A catalog store backend. `Module` settles identity/versioning only (ADR-0004 §7); the
+/// A catalog store backend. `Module` settles identity/versioning only (ADR-0019 §7); the
 /// query/write methods below are this ticket's (#22) contribution, once #67's database-engine
 /// choice (SQLite) landed.
 pub trait CatalogStore: Module {
@@ -119,7 +119,7 @@ pub trait CatalogStore: Module {
     /// suspected.
     fn clear_preview(&self, asset_id: i64, tier: PreviewTier) -> Result<(), CatalogError>;
 
-    /// Reads the trigger-maintained `(model, rating)` facet count (ADR-0011) — used by ingest's
+    /// Reads the trigger-maintained `(model, rating)` facet count (ADR-0103) — used by ingest's
     /// tests to check the triggers stay consistent, and by any future facet-filtered browse view.
     fn facet_count(&self, model: Option<&str>, rating: i64) -> Result<u64, CatalogError>;
 }

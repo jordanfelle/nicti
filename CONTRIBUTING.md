@@ -85,8 +85,9 @@ membrane (a cat's third eyelid), and that theme continues throughout. Examples: 
 
 ## Architecture Decision Records (ADRs)
 
-Significant technical decisions get an ADR in `docs/adr/`, numbered sequentially
-(`NNNN-title.md`). See `docs/adr/README.md` for the index and template. A per-topic summary (the
+Significant technical decisions get an ADR in `docs/adr/`, numbered by the GitHub issue that
+prompted it (`NNNN-title.md`, `NNNN` = the ticket's issue number). See `docs/adr/README.md` for
+the numbering convention, index, and template. A per-topic summary (the
 actionable conclusion without the full research trail) lives in `docs/decisions/<topic>.md`; see
 `CLAUDE.md`'s Architecture decisions section for the topic map.
 
@@ -97,7 +98,7 @@ non-obvious tradeoff — write an ADR. Small implementation choices don't need o
 
 Update [`docs/licensing.md`](docs/licensing.md) in the same PR as any new dependency, native
 library, or ML model — it's the third-party license audit backing Nicti's AGPL-3.0-or-later
-outbound license (see `docs/adr/0003-third-party-license-policy.md`). `cargo deny check licenses`
+outbound license (see `docs/adr/0018-third-party-license-policy.md`). `cargo deny check licenses`
 runs in CI against `deny.toml`'s allowlist, but that only covers Cargo dependencies, not native
 libraries or data files — those need `docs/licensing.md` updated by hand.
 

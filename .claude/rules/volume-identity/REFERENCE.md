@@ -9,7 +9,7 @@ paths:
 Full reasoning/history: `docs/decisions/volume-identity.md`.
 
 - **Identity key: NTFS 64-bit serial + GPT partition GUID** (fallback: MBR signature+offset+32-bit
-  serial) — `docs/adr/0020`. Not `\\?\Volume{GUID}` (per-machine, mount-manager-assigned) or plain
+  serial) — `docs/adr/0071`. Not `\\?\Volume{GUID}` (per-machine, mount-manager-assigned) or plain
   `sysinfo` fields (no stable cross-mount ID). `.nicti-volume` marker file: secondary signal only,
   not the primary key (read-only volumes can't hold one; clones copy it).
 - **Two volumes, same identity → never auto-merge.** `spikes/homing/schema::upsert_volume`'s
@@ -18,7 +18,7 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   disagreement under the same `identity_key` now returns `CatalogError::VolumeIdentityConflict`
   instead of merging. Still not a full solution — a genuine `identity_key` *collision* between two
   physically distinct volumes that also agree on `marker_uuid` (or where neither side has one yet)
-  remains unresolved, same as ADR-0020 itself leaves it (Proposed, not Accepted).
+  remains unresolved, same as ADR-0071 itself leaves it (Proposed, not Accepted).
 - **Schema: `volume` / `root` / `asset`**, three levels — `root` (a registered folder) is what #72
   moves between SSD/archive, one row, not a per-asset rewrite. `crates/nicti-catalog::schema`
   implements this shape for real (#22, landed), promoted from `spikes/homing/src/schema.rs`.
@@ -31,14 +31,14 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   + SubSecTimeOriginal, all-or-nothing).
 - **Mount detection**: `sysinfo` polling implemented; `CM_Register_Notification` push backend
   stubbed, not implemented — flagged follow-up, not a silent gap.
-- **ADR-0020 is Proposed, not Accepted** — this sandbox has no Windows/mountable NTFS volume, so
+- **ADR-0071 is Proposed, not Accepted** — this sandbox has no Windows/mountable NTFS volume, so
   `volume::windows_impl`/`mount_events::windows_impl` are unverified. Everything cross-platform
   (schema/fingerprint/path) is real: 29 tests pass, workspace clippy/test/fmt/cargo-deny clean.
-  Reference-machine run required before Accepted — see ADR-0020's Measured results (all TBD).
+  Reference-machine run required before Accepted — see ADR-0071's Measured results (all TBD).
 
 ## Package contents
 
-- **`spikes/homing`** (#71/ADR-0020's volume-identity research) — candidate identity keys measured
+- **`spikes/homing`** (#71/ADR-0071's volume-identity research) — candidate identity keys measured
   against a drive-letter change/detach-reattach/reformat survival table, a `volume`/`root`/`asset`
   SQLite schema, size+name/partial-BLAKE3/full-BLAKE3/EXIF-natural-key relink tiers, and a
   `sysinfo`-poll-vs-`CM_Register_Notification` mount-detection comparison — lib+bin split so its

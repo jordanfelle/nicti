@@ -1,14 +1,14 @@
 //! Vector local-adjustment mask geometry: linear gradient, radial gradient, and brush -- the
-//! "design the brush & gradient local-adjustment mask model" half of #48. Per ADR-0002
-//! (`docs/adr/0002-non-destructive-edit-model.md:117-123`), a geometry mask stores **vector
+//! "design the brush & gradient local-adjustment mask model" half of #48. Per ADR-0021
+//! (`docs/adr/0021-non-destructive-edit-model.md:117-123`), a geometry mask stores **vector
 //! parameters**, never a derived pixel mask -- these types are exactly that parameter set, and
 //! `rasterize()` is the (Tapetum-owned, at render time) function that turns them into a `Field`.
 //! darktable's retouch module uses a similar destination-geometry-plus-feather shape (see
-//! `docs/adr/0007-healing-and-removal.md`'s Prior art section) but freehand-only; this module
+//! `docs/adr/0050-healing-and-removal.md`'s Prior art section) but freehand-only; this module
 //! covers gradient + brush, matching LRC's own local-adjustment tool set.
 //!
 //! **Not covered here:** luminance/color-range masks (LRC's `RangeMaskMapInfo`) -- out of #48's
-//! literal scope ("brush & gradient"), owned by #49 (see `docs/adr/0024-masking.md`'s
+//! literal scope ("brush & gradient"), owned by #49 (see `docs/adr/0048-masking.md`'s
 //! Consequences section for why this isn't an orphaned gap).
 
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ impl LinearGradient {
 /// A radial (elliptical) gradient: full weight inside the ellipse defined by `center`/`radii`
 /// (rotated by `angle` radians), feathered outward over `feather` (in the same units as `radii`)
 /// -- matches LRC's Radial Gradient tool. `invert` matches LRC's "Invert Mask" checkbox and, per
-/// `docs/adr/0002`/`compose.rs`'s design, is how the hero scenario's "Select Subject, Invert" case
+/// `docs/adr/0021`/`compose.rs`'s design, is how the hero scenario's "Select Subject, Invert" case
 /// is expressed for a geometry mask too (an AI mask's own inverse instead reuses its bake key --
 /// see `compose.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -132,7 +132,7 @@ pub struct Stroke {
 /// One piece of vector geometry a `compose::MaskComponent` can carry. `Brush` is a `Vec<Stroke>`
 /// (not a single stroke) so a whole brush mask -- built from many add/erase strokes over an
 /// editing session -- is one geometry value, matching how `compose::MaskComponent` treats "AI
-/// recipe" and "geometry" as the two source kinds (ADR-0002's rule), not one component per stroke.
+/// recipe" and "geometry" as the two source kinds (ADR-0021's rule), not one component per stroke.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Geometry {

@@ -3,7 +3,7 @@
 Tracks GitHub issue [#18](https://github.com/jordanfelle/nicti/issues/18). Feeds the outbound
 license decision in [#66](https://github.com/jordanfelle/nicti/issues/66) — this document does not
 choose Nicti's own license, it audits what Nicti would be allowed to redistribute *under* either
-candidate outbound family. See [ADR-0003](adr/0003-third-party-license-policy.md) for the policy
+candidate outbound family. See [ADR-0018](adr/0018-third-party-license-policy.md) for the policy
 this audit supports.
 
 **Columns:** Compatible-permissive = can this dependency's terms coexist with Nicti shipping under
@@ -37,7 +37,7 @@ the `ISC` addition above** — this section exists so a future `cargo deny check
 has a "last known clean" baseline to diff against.
 
 **Update (2026-09-23, [#16](https://github.com/jordanfelle/nicti/issues/16)'s `glint` spike,**
-`docs/adr/0005-gpu-compute-api.md`): `wgpu` v30.0.1 and its own dependency tree (`wgpu-core`,
+`docs/adr/0016-gpu-compute-api.md`): `wgpu` v30.0.1 and its own dependency tree (`wgpu-core`,
 `wgpu-hal`, `wgpu-types`, `wgpu-naga-bridge`, `naga`, `naga-types`, `gpu-allocator`,
 `range-alloc`, `profiling`, `renderdoc-sys`, `static_assertions`, `khronos-egl`, `glow`,
 `raw-window-handle`, `ordered-float`) are all **MIT OR Apache-2.0** (a few carry a third `Zlib` OR
@@ -57,7 +57,7 @@ never selects that backend directly — `[graph] all-features = true` in `deny.t
 full feature-enabled graph regardless) carries **Zlib as its sole license**, no MIT/Apache-2.0
 OR-arm the way `glow` itself has. Same for `foldhash` (pulled in via `hashbrown`, itself pulled in
 by the `wasmtime`/`cranelift` toolchain already in the tree for the `nicti-claw` crate's
-WASM-vs-native dev-dependency test, ADR-0004 — `--workspace` is what surfaces this, since it
+WASM-vs-native dev-dependency test, ADR-0019 — `--workspace` is what surfaces this, since it
 unifies the whole workspace's dependency graph, not just this one crate's). Both added `Zlib` to `deny.toml`'s `allow` list, same category
 as the existing `ISC` precedent: OSI-approved, FSF Free/Libre, no copyleft terms[^s3].
 
@@ -68,7 +68,7 @@ The one native/runtime component this spike touches, NVRTC, is already covered b
 driver.
 
 **Update (2026-09-23, [#68](https://github.com/jordanfelle/nicti/issues/68)'s `pelt-egui`/
-`pelt-iced`/`pelt-slint` spikes, `docs/adr/0006-gui-framework.md`):** each GUI-framework
+`pelt-iced`/`pelt-slint` spikes, `docs/adr/0068-gui-framework.md`):** each GUI-framework
 candidate's own dependency tree pulled in real new licenses beyond what `deny.toml`'s existing
 allowlist covered:
 
@@ -80,8 +80,8 @@ allowlist covered:
   to permit redistribution/bundling. Added to `deny.toml`'s allowlist[^s4].
 - **iced** (`pelt-iced`): `iced`/`iced_wgpu`/`iced_widget`/`iced_core`/`iced_runtime`/
   `iced_graphics`/`iced_winit`/`iced_tiny_skia`/`iced_program`/`iced_renderer`/`iced_futures`/
-  `iced_debug` are all MIT, already covered. Pulls in `wgpu` **27.0.1** (not 30 — see ADR-0006's
-  gate-2 finding), itself MIT OR Apache-2.0 like ADR-0005's own `wgpu` 30 audit already covered.
+  `iced_debug` are all MIT, already covered. Pulls in `wgpu` **27.0.1** (not 30 — see ADR-0068's
+  gate-2 finding), itself MIT OR Apache-2.0 like ADR-0016's own `wgpu` 30 audit already covered.
 - **Slint** (`pelt-slint`): `slint`, `slint-build`, `slint-macros`, and every `i-slint-*` crate
   (`i-slint-core`, `i-slint-core-macros`, `i-slint-common`, `i-slint-compiler`,
   `i-slint-backend-selector`, `i-slint-backend-winit`, `i-slint-renderer-femtovg`,
@@ -90,8 +90,8 @@ allowlist covered:
   `deny.toml`'s existing allow-list entries, and the `LicenseRef-*` arms are Slint's own
   non-SPDX-registered dual-commercial license texts, not something `cargo-deny` evaluates
   generically[^s5]. Scoped `[[licenses.exceptions]]` blocks were added per Slint-published crate
-  name (not a global allow) since this is research-spike-only — **if Slint is ADR-0006's winner,
-  shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0003 amendment and explicit
+  name (not a global allow) since this is research-spike-only — **if Slint is ADR-0068's winner,
+  shipping it in `nicti-render`/a future `nicti-ui` needs its own ADR-0018 amendment and explicit
   sign-off**, the same standard already applied to LGPL-as-Cargo-dependency crates
   (rawler/lensfun-rs) above; this update does not grant that sign-off.
 - **Shared transitive dependency (all three candidates):** each toolkit's `image`-crate-based
@@ -122,15 +122,15 @@ choice and rawler's LGPL-as-Cargo-dependency review this early. `cargo deny --wo
 **Update (2026-09-24, [#50](https://github.com/jordanfelle/nicti/issues/50)'s `groom` spike):**
 new dependencies for the AI-removal scaffolding, all already covered by `deny.toml`'s existing
 allowlist with no changes needed: `ort`/`ort-sys` v2.0.0-rc.13 (the ONNX Runtime binding, per
-ADR-0004 §3's `load-dynamic` pattern) are MIT OR Apache-2.0; `ndarray`/`matrixmultiply`/
+ADR-0019 §3's `load-dynamic` pattern) are MIT OR Apache-2.0; `ndarray`/`matrixmultiply`/
 `rawpointer` (pulled in transitively by `ort`'s tensor-value helpers) are MIT OR Apache-2.0 (or
 the equivalent pre-SPDX `MIT/Apache-2.0` slash-form). `wgpu` 30 and its own dependency tree (for
-the Poisson-Jacobi compute shader) are already covered by ADR-0005's 2026-09-23 update above — no
+the Poisson-Jacobi compute shader) are already covered by ADR-0016's 2026-09-23 update above — no
 new licenses there. `cargo deny --workspace --all-features check licenses` passes clean as of
 this update, no `deny.toml` edits required.
 
 **Update (2026-09-24, [#67](https://github.com/jordanfelle/nicti/issues/67)'s `den` spike,
-`docs/adr/0008-catalog-database-engine.md`):** new dependencies for the catalog-database-engine
+`docs/adr/0067-catalog-database-engine.md`):** new dependencies for the catalog-database-engine
 comparison. `rusqlite`, `duckdb`, `heed`/`heed-types`/`heed-traits`, and `bincode` (the Rust
 binding crates) are all MIT, already covered by the existing allowlist. One new `deny.toml` entry
 was needed: `webpki-roots` v1.0.9 carries **CDLA-Permissive-2.0**, pulled in as a *build-time-only*
@@ -149,7 +149,7 @@ same as its Rust binding), and LMDB (OpenLDAP Public License 2.8 — note this d
 "native code license isn't what `cargo deny` sees" gap this section exists to catch)[^s8].
 
 **Update (2026-09-24, [#102](https://github.com/jordanfelle/nicti/issues/102)'s Turso Database
-evaluation, `docs/adr/0009-turso-database-evaluation.md`):** the `turso` crate (v0.8.0-pre.12,
+evaluation, `docs/adr/0102-turso-database-evaluation.md`):** the `turso` crate (v0.8.0-pre.12,
 default-off feature, kept for reference after evaluating-not-adopting per the ADR) is MIT,
 confirmed from crates.io's version-level API response. Its own dependency tree is large (`tantivy`
 full-text search, `roaring` bitmaps, `prost`/protobuf, `aristo`, `bon`, `miette`, its own
@@ -162,7 +162,7 @@ confirms Apache-2.0[^den4], already an allowed license, so no action needed beyo
 per this file's own "cargo-deny only sees what a crate declares" pattern.
 
 **Update (2026-09-24, [#106](https://github.com/jordanfelle/nicti/issues/106)'s `redb` evaluation,
-`docs/adr/0010-redb-evaluation.md`):** the `redb` crate (v4.3.0, default-off feature, kept for
+`docs/adr/0106-redb-evaluation.md`):** the `redb` crate (v4.3.0, default-off feature, kept for
 reference after evaluating-not-adopting per the ADR) is `MIT OR Apache-2.0`, confirmed from
 crates.io's version-level API response — already on `deny.toml`'s allowlist, no edit needed.
 `redb` has **zero dependencies of its own** (confirmed via `cargo tree -i redb`), so this update
@@ -171,7 +171,7 @@ adds nothing new to the resolved dependency graph beyond the crate itself — `c
 (Turso-only) warning as before, nothing new from `redb`.
 
 **Update (2026-09-24, [#115](https://github.com/jordanfelle/nicti/issues/115)'s RocksDB
-evaluation, `docs/adr/0015-rocksdb-evaluation.md`):** the `rocksdb` crate (v0.25.0, default-off
+evaluation, `docs/adr/0115-rocksdb-evaluation.md`):** the `rocksdb` crate (v0.25.0, default-off
 feature) is **`Apache-2.0` only**, confirmed from its own `Cargo.toml`'s `license` field and its
 repository's top-level `LICENSE` file (`rust-rocksdb/rust-rocksdb`) — already on `deny.toml`'s
 allowlist, no edit needed. Its `librocksdb-sys` companion crate (the FFI/build-script layer, not
@@ -192,13 +192,13 @@ new from `rocksdb` (its own dependency tree — `libc`, `bindgen`, `cc`, the opt
 codec `-sys` crates — resolves entirely within the existing allowlist).
 
 **Update (2026-09-24, [#66](https://github.com/jordanfelle/nicti/issues/66)/
-[ADR-0013](adr/0013-outbound-license-agpl.md)): Nicti's outbound license is decided — AGPL-3.0-
+[ADR-0066](adr/0066-outbound-license-agpl.md)): Nicti's outbound license is decided — AGPL-3.0-
 or-later.** This is the biggest change to this file since it was created, since most of the
 copyleft-related exclusions below existed *because* the outbound license was undecided. Concretely,
 this update:
 
 - Adds `GPL-3.0-only`, `GPL-3.0-or-later`, `AGPL-3.0-only`, `AGPL-3.0-or-later`, and
-  `GPL-2.0-or-later` to `deny.toml`'s allowlist (see ADR-0003's 2026-09-24 amendment for the full
+  `GPL-2.0-or-later` to `deny.toml`'s allowlist (see ADR-0018's 2026-09-24 amendment for the full
   reasoning). **`GPL-2.0-only` deliberately stays denied** — no "or later" arm means no combining
   into Nicti's own GPL-3.0-family license; this is a real per-crate license-text check, not a
   blanket "any GPL now passes" change.
@@ -217,7 +217,7 @@ this update:
   stated position, not a license restriction).
 
 **Update (2026-09-24, [#113](https://github.com/jordanfelle/nicti/issues/113)'s `libSQL`
-evaluation, `docs/adr/0014-libsql-evaluation.md`):** the `libsql` crate (v0.9.30, default-off
+evaluation, `docs/adr/0113-libsql-evaluation.md`):** the `libsql` crate (v0.9.30, default-off
 feature, kept for reference after evaluating-not-adopting-for-v1 per the ADR) is MIT, confirmed
 independently from both crates.io's version-level API response (every version checked, including
 the newest `0.10.0-pre.4`) and the `tursodatabase/libsql` GitHub repo's own `license` API field —
@@ -232,7 +232,7 @@ needed — the entire subtree resolves within the existing allowlist, same pre-e
 (Turso-only) warning as every prior ADR in this series, nothing new from `libsql`.
 
 **Update (2026-09-24, [#116](https://github.com/jordanfelle/nicti/issues/116)'s `fjall` evaluation,
-`docs/adr/0016-fjall-evaluation.md`):** the `fjall` crate (v3.1.10, default-off feature, kept for
+`docs/adr/0116-fjall-evaluation.md`):** the `fjall` crate (v3.1.10, default-off feature, kept for
 reference after evaluating-not-adopting per the ADR) is `MIT OR Apache-2.0`, confirmed directly
 from crates.io's version-level API response and cross-checked against the bundled `LICENSE-MIT`/
 `LICENSE-APACHE` files in the downloaded crate source. Its own dependency (`lsm-tree`, the
@@ -247,7 +247,7 @@ permissive than MIT/Apache-2.0, no attribution requirement) rather than assumed 
 `cfg_block` (Turso-only) warning as before, nothing else new from `fjall`.
 
 **Update (2026-09-25, [#29](https://github.com/jordanfelle/nicti/issues/29)'s preview-tier-strategy
-spike, `docs/adr/0017-preview-tier-strategy.md`):** new dependencies for `spikes/sniff`'s cache-
+spike, `docs/adr/0029-preview-tier-strategy.md`):** new dependencies for `spikes/sniff`'s cache-
 format and tier-payload-format (JPEG vs AVIF, added at the user's request rather than decided from
 priors) comparison. `rusqlite` v0.40.2 (`bundled` feature) and `libsqlite3-sys` v0.38.2 are both
 MIT — same crate/license `spikes/den`'s 2026-09-24 update already covers, reused here for the
@@ -279,7 +279,7 @@ path-gated job of its own like `den`/`pelt-*`). `cargo deny --workspace --all-fe
 licenses` passes clean with the two new `deny.toml` entries (`MPL-2.0`, `IJG`) above.
 
 **Update (2026-09-26, [#71](https://github.com/jordanfelle/nicti/issues/71)'s `homing` spike,
-`docs/adr/0020-volume-identity-and-remapping.md`):** new dependencies for volume-identity
+`docs/adr/0071-volume-identity-and-remapping.md`):** new dependencies for volume-identity
 enumeration, the candidate SQLite volume/root/asset schema, and file-fingerprint relinking.
 `rusqlite` v0.40.2 (`bundled`) and `blake3` v1.8.7 are already-reviewed crates (`spikes/den`'s
 2026-09-24 update, `crates/nicti-claw`'s pawprint-style hashing respectively), reused here with no
@@ -294,12 +294,12 @@ enumeration/`DeviceIoControl` FFI) is the same crate/license `spikes/sniff`'s
 `FILE_FLAG_NO_BUFFERING` work already covers (see CLAUDE.md's package-map note on `sniff`).
 
 **Update (2026-09-26, [#38](https://github.com/jordanfelle/nicti/issues/38)'s `calico` spike,
-`docs/adr/0021-color-pipeline.md`):** the "never bundle" Adobe DCP/LCP row above (and [^dcp1]'s
+`docs/adr/0038-color-pipeline.md`):** the "never bundle" Adobe DCP/LCP row above (and [^dcp1]'s
 own caveat) is about **redistributing** a real Adobe camera profile inside this repo or a shipped
 build — that's unaffected and stays forbidden. What's new here is **runtime parsing** of a DCP/XMP
 profile file already present on the *user's own machine* (installed there by their own separate,
 licensed Adobe Camera Raw/Lightroom Classic install) — reading a file the user already has a legal
-copy of, at runtime, on their own system, is not a redistribution act at all, so ADR-0003's
+copy of, at runtime, on their own system, is not a redistribution act at all, so ADR-0018's
 "never bundle" concern doesn't reach it; nothing Adobe's is ever copied into this repo, a build
 artifact, or distributed to any other user. `spikes/calico`'s `dcp.rs`/`xmp_profile.rs` parsers
 are tested exclusively against synthetic fixtures built byte-for-byte in test code for exactly
@@ -311,8 +311,8 @@ reads) is also permissive and needs no new entry. `cargo deny --workspace --all-
 licenses` passes clean.
 
 **Update (2026-09-26, [#143](https://github.com/jordanfelle/nicti/issues/143)'s preview-codec
-follow-up, `docs/adr/0022-preview-codec-followup.md`):** one new dependency for `spikes/sniff`'s
-real lossy-WebP measurement, deliberately deferred from the 2026-09-25 update above (ADR-0017's
+follow-up, `docs/adr/0143-preview-codec-followup.md`):** one new dependency for `spikes/sniff`'s
+real lossy-WebP measurement, deliberately deferred from the 2026-09-25 update above (ADR-0029's
 own spike-stage comparison avoided a native C dependency). `webp` v0.3.1 is `MIT OR Apache-2.0`;
 its own dependency `libwebp-sys` v0.9.6 is `MIT` — both already covered by the existing
 MIT/Apache-2.0 allowlist entries, no `deny.toml` edit needed (`cargo deny` only sees Cargo-declared
@@ -326,7 +326,7 @@ build) cross-compiles cleanly to `x86_64-pc-windows-gnu`, the CI-required target
 committing to this dependency.
 
 **Update (2026-09-26, [#61](https://github.com/jordanfelle/nicti/issues/61)'s `shed` spike,
-`docs/adr/0023-lrc-catalog-import-mapping.md`):** new dependency `agprefs` v0.3.3 (MIT — already on
+`docs/adr/0061-lrc-catalog-import-mapping.md`):** new dependency `agprefs` v0.3.3 (MIT — already on
 `deny.toml`'s allowlist, no new entry needed) parses Lightroom Classic's `.lrcat` develop-settings
 Lua-literal text (`s = { Key = Value, ... }`); its own transitive tree (`nom`, `nom-supreme`,
 `cookie-factory`, `brownstone`, `indent_write`, `joinery`, `arrayvec`) is entirely
@@ -335,13 +335,13 @@ MIT/Apache-2.0/BSD-permissive, no new `deny.toml` entry needed. **`lrcat-extract
 `rusqlite = "0.38"` pin cannot coexist with `spikes/den`'s unconditional `rusqlite = "^0.40"` in
 this workspace's single `Cargo.lock` — Cargo's `links = "sqlite3"` uniqueness is enforced across
 the whole workspace, not per binary, and this held even behind an optional, default-off Cargo
-feature (see ADR-0023 Q8 for the full reproduction). Evaluated standalone, outside this workspace,
+feature (see ADR-0061 Q8 for the full reproduction). Evaluated standalone, outside this workspace,
 against the real catalog instead — no license action needed since it was never added as a
 dependency here. `cargo deny --workspace --all-features check licenses` passes clean (`agprefs`
 included).
 
 **Update (2026-09-26, [#33](https://github.com/jordanfelle/nicti/issues/33)'s `litter` spike,
-`docs/adr/0025-burst-duplicate-grouping.md`):** one new crate, `image_hasher` v3.1.1 — `MIT OR
+`docs/adr/0033-burst-duplicate-grouping.md`):** one new crate, `image_hasher` v3.1.1 — `MIT OR
 Apache-2.0` (confirmed directly from its own `Cargo.toml` and bundled `LICENSE-MIT`/
 `LICENSE-APACHE` files, not assumed), already on `deny.toml`'s allowlist, no new entry needed. Its
 own dependency tree (`rustdct`, `rustfft`, `transpose`, `strength_reduce`, `primal-check`) is
@@ -350,7 +350,7 @@ sniff`'s 2026-09-24 update) is reused here for per-frame content identity in `la
 review needed. `ort`/`ort-sys` v2.0.0-rc.13 (already-reviewed, `spikes/groom`'s 2026-09-24 update)
 is reused for a real DINOv2 ViT-S/14 embedding — unlike groom's still-untested MobileSAM/LaMa
 wrappers, this pass actually obtained a real ONNX Runtime 1.19.2 shared library and ran real
-inference against it (see ADR-0025's Measured results); worth noting here since it's the first
+inference against it (see ADR-0033's Measured results); worth noting here since it's the first
 `ort load-dynamic` integration in this repo verified against a real model end-to-end, surfacing a
 real (if narrow) finding: the test process segfaults during exit/teardown after its own assertions
 already pass, a known `ort`/`load-dynamic` static-destructor-ordering issue, not a licensing or
@@ -361,7 +361,7 @@ entries needed.
 `docs/adr/0059-xmp-interop.md`):** one new crate, `quick-xml` v0.41.0 — `MIT` (confirmed directly
 from its own `Cargo.toml`'s `license` field, not assumed), already on `deny.toml`'s allowlist, no
 new entry needed. Chosen over the candidates in the Native libraries table's XMP row below
-(exiv2/rexiv2, usable since ADR-0013 but a heavier C dependency for no real gain here; the Adobe
+(exiv2/rexiv2, usable since ADR-0066 but a heavier C dependency for no real gain here; the Adobe
 XMP Toolkit SDK, BSD-3-Clause and already cleared, but its own C++ build isn't worth adding when a
 pure-Rust event-based reader/writer does the job) specifically for its **event-based
 Reader/Writer API**, which is what `packet.rs`'s "copy every event through unchanged except the
@@ -387,15 +387,15 @@ clean, no new `deny.toml` entries needed.
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
 |---|---|---|---|---|---|---|---|
 | [LibRaw](https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL) | RAW decode ([#37](https://github.com/jordanfelle/nicti/issues/37)) | Dual LGPL-2.1 **or** CDDL-1.0 (licensee's choice)[^lr1] | — | Static (spike; `cc`-compiled into `spikes/retina`, see #37) | ✅ **resolved 2026-09-25** — LGPL-2.1 §§5–6 permit combining an LGPL-2.1 library into a differently-licensed larger work (here, AGPL-3.0-or-later) without any relicensing; §6(a)'s full requirement (source for the *whole combined executable*, not just the library, so a user can relink) is satisfied structurally by Nicti already being AGPL-3.0-or-later open source, not by vendoring alone — see Flags §2 | ✅ | ✅ give §6's prominent notice + include the LGPL license text for LibRaw in the shipped product (a real checklist item, not a legal question) before shipping in `nicti-decode` |
-| [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826) (Nikon HE/HE* PR, vendored as `yogthos/LibRaw@nikon-he-decoder` in `spikes/retina/vendor/LibRaw`) | RAW decode research + spike | **Corrected 2026-09-25** (superseding the "no license grant" line below -- checked the actual submodule source this time, not just the PR thread): every new `nikon_he/*`/`nikon_he_decoder.cpp` file carries LibRaw's own standard dual LGPL-2.1/CDDL-1.0 header, copyright Dmitri Sotnikov[^lr3] -- it inherits LibRaw's own license, not an unlicensed contribution. ~~No license grant of its own; maintainers state it won't be merged, will be replaced by their own decoder~~ (the "won't be merged" part is still true and is why this is pinned to a fork, not upstream) | — | Static (spike) | ✅ same resolution as the LibRaw row above | ✅ | ⚠️ spike-only pending LibRaw's own official HE snapshot (ADR-0001) — separately: a hostile PR review found and this project patched at build time a real out-of-bounds read in this pinned commit's tone-curve table builder (`nikon_he_iqx_iqp_lut_data.h`), see `spikes/retina/build.rs`'s own `PATCHES` constant |
+| [LibRaw/LibRaw#826](https://github.com/LibRaw/LibRaw/pull/826) (Nikon HE/HE* PR, vendored as `yogthos/LibRaw@nikon-he-decoder` in `spikes/retina/vendor/LibRaw`) | RAW decode research + spike | **Corrected 2026-09-25** (superseding the "no license grant" line below -- checked the actual submodule source this time, not just the PR thread): every new `nikon_he/*`/`nikon_he_decoder.cpp` file carries LibRaw's own standard dual LGPL-2.1/CDDL-1.0 header, copyright Dmitri Sotnikov[^lr3] -- it inherits LibRaw's own license, not an unlicensed contribution. ~~No license grant of its own; maintainers state it won't be merged, will be replaced by their own decoder~~ (the "won't be merged" part is still true and is why this is pinned to a fork, not upstream) | — | Static (spike) | ✅ same resolution as the LibRaw row above | ✅ | ⚠️ spike-only pending LibRaw's own official HE snapshot (ADR-0015) — separately: a hostile PR review found and this project patched at build time a real out-of-bounds read in this pinned commit's tone-curve table builder (`nikon_he_iqx_iqp_lut_data.h`), see `spikes/retina/build.rs`'s own `PATCHES` constant |
 | [rawler](https://crates.io/crates/rawler) | RAW decode alt. ([#37](https://github.com/jordanfelle/nicti/issues/37)) | LGPL-2.1[^raw1] | — | Static (Cargo dep — the LGPL/Rust gray area) | ✅ **resolved 2026-09-25**, same LGPL-2.1 §§5–6 reasoning as the LibRaw row above | ✅ | ✅ same §6 notice/license-text checklist item as the LibRaw row before shipping in `nicti-decode`; the `deny.toml` exception (named for `rawler`, not path-scoped — see its own comment) stays a per-crate exception rather than a global `LGPL-2.1` allow entry, since cargo-deny can verify license compatibility but not §6's administrative notice requirement |
 | [lensfun](https://github.com/lensfun/lensfun) — `libs/` | Lens correction ([#39](https://github.com/jordanfelle/nicti/issues/39)) | LGPL-3.0[^lf1] | — | Dynamic (DLL) | ✅ if dynamically linked | ✅ | ✅ dynamic link only; never link `apps/` (GPL-3.0) |
 | lensfun **database** (calibration data) | Lens correction | — | CC BY-SA 3.0[^lf1] | Data file, unmodified | ✅ (data obligation, not code) | ✅ | ✅ — share-alike only bites if Nicti *modifies* and redistributes the database |
-| [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), and this arm's confirmed "or later" grant combines cleanly | ✅ | ✅ no isolation/sign-off needed — same conclusion `rawler`/LibRaw reached too, **corrected 2026-09-25 by #37** (see Flags §2): LGPL-2.1 §§5-6 permit this regardless of an "-or-later" grant |
+| [lensfun-rs](https://github.com/vdavid/lensfun-rs) | Rust binding for lensfun | Dual LGPL-3.0-or-later **or** GPL-3.0[^lf2] | — | Static (Cargo dep) | ✅ **resolved 2026-09-24** — pick the LGPL-3.0-or-later arm; Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0066), and this arm's confirmed "or later" grant combines cleanly | ✅ | ✅ no isolation/sign-off needed — same conclusion `rawler`/LibRaw reached too, **corrected 2026-09-25 by #37** (see Flags §2): LGPL-2.1 §§5-6 permit this regardless of an "-or-later" grant |
 | [Little CMS 2](https://github.com/mm2/Little-CMS) | Color management ([#42](https://github.com/jordanfelle/nicti/issues/42)) | MIT[^lcms1] | — | Static or dynamic | ✅ | ✅ | ✅ bundle OK |
 | [kamadak-exif](https://crates.io/crates/kamadak-exif) | EXIF read | BSD-2-Clause[^kx1] | — | Static | ✅ | ✅ | ✅ bundle OK (read-only — see #47 below) |
 | [little_exif](https://crates.io/crates/little_exif) | EXIF/XMP write | MIT OR Apache-2.0[^le1] | — | Static | ✅ | ✅ | ✅ bundle OK |
-| [exiv2](https://github.com/Exiv2/exiv2/blob/main/src/exif.cpp) | EXIF/XMP/IPTC (candidate) | **GPL-2.0-or-later** (precise grant confirmed 2026-09-24 via project-specific evidence — `SPDX-License-Identifier: GPL-2.0-or-later` headers in its own source files, e.g. `src/exif.cpp`/`src/image.cpp`, and its README's License section; note the bundled `COPYING` file is just the generic FSF LGPL/GPL template distributed unedited and isn't project-specific evidence on its own, don't cite it as the source for this)[^ex1] | — | n/a | ⛔ | ✅ (the "-or-later" arm combines into Nicti's own AGPL-3.0-or-later) | ✅ **usable as of 2026-09-24** — Nicti's outbound license is now AGPL-3.0-or-later (#66/ADR-0013); kamadak-exif + little_exif remain the current choice (nothing wrong with them, no forced switch), but exiv2 is no longer license-excluded if a real reason to prefer it comes up |
+| [exiv2](https://github.com/Exiv2/exiv2/blob/main/src/exif.cpp) | EXIF/XMP/IPTC (candidate) | **GPL-2.0-or-later** (precise grant confirmed 2026-09-24 via project-specific evidence — `SPDX-License-Identifier: GPL-2.0-or-later` headers in its own source files, e.g. `src/exif.cpp`/`src/image.cpp`, and its README's License section; note the bundled `COPYING` file is just the generic FSF LGPL/GPL template distributed unedited and isn't project-specific evidence on its own, don't cite it as the source for this)[^ex1] | — | n/a | ⛔ | ✅ (the "-or-later" arm combines into Nicti's own AGPL-3.0-or-later) | ✅ **usable as of 2026-09-24** — Nicti's outbound license is now AGPL-3.0-or-later (#66/ADR-0066); kamadak-exif + little_exif remain the current choice (nothing wrong with them, no forced switch), but exiv2 is no longer license-excluded if a real reason to prefer it comes up |
 | [rexiv2](https://github.com/felixc/rexiv2) | Rust binding to exiv2/gexiv2 (candidate) | GPL-3.0-or-later — the crate's own README carries `SPDX-License-Identifier: GPL-3.0-or-later`, an explicit statement that linking against GPL exiv2/gexiv2 makes the binding itself GPL[^rx1] | — | n/a | ⛔ | ✅ (same license) | ✅ **usable as of 2026-09-24**, same reasoning as exiv2 above |
 | [Adobe XMP Toolkit SDK](https://github.com/adobe/XMP-Toolkit-SDK) | XMP (candidate) | BSD-3-Clause[^xmp1] | XMP *specification* separately covered by Adobe's XMP Specification Public Patent License (patent grant, not copyright) | Static or dynamic | ✅ | ✅ | ✅ bundle OK |
 | Adobe DNG SDK (code, not DCP/LCP data) | DNG format handling (candidate) | Adobe's own DNG SDK EULA — permits reproduction/redistribution/sublicensing but is a custom EULA, not OSI-approved[^dng1] | — | Static or dynamic | ⚠️ not SPDX-clean; must attribute as a separately-EULA'd third-party component, can't claim MIT/Apache for it | ⚠️ same | ⚠️ usable, but list under its own EULA in third-party notices, not folded into the project's own license |
@@ -408,7 +408,7 @@ clean, no new `deny.toml` entries needed.
 | [LMDB](https://www.openldap.org/software/release/license.html) (bundled via `lmdb-master-sys`) | Catalog DB candidate ([#67](https://github.com/jordanfelle/nicti/issues/67)) | OpenLDAP Public License 2.8[^den3] | — | Static | ✅ (attribution-only, no copyleft) | ✅ | ✅ bundle OK — retain the license text per its own §3 condition |
 | [libSQL](https://github.com/tursodatabase/libsql) core, a SQLite C-source fork (bundled via `libsql-ffi`) | Catalog DB candidate ([#113](https://github.com/jordanfelle/nicti/issues/113)) | Public domain[^den6] — the bundled `bundled/src/sqlite3.c` retains SQLite's own standard "blessing" (public-domain dedication) notice throughout, confirmed by reading the actual bundled file, not assumed from the crate's own `license = "MIT"` Cargo.toml field (which describes the Rust binding, not the underlying forked C source — same "cargo-deny only sees what a crate declares" gap this file's LMDB row and `cfg_block` note already establish) | — | Static (`bundled` feature) | ✅ | ✅ | ✅ bundle OK |
 | [RocksDB](https://github.com/facebook/rocksdb) core (vendored git submodule via `librocksdb-sys`) | Catalog DB candidate ([#115](https://github.com/jordanfelle/nicti/issues/115)) | Dual `Apache-2.0` **or** `GPL-2.0-only` (licensee's choice)[^den5] | — | Static | ✅ if the Apache-2.0 arm is elected (confirmed selectable — see the 2026-09-24 update above) | ✅ | ✅ bundle OK — elect the Apache-2.0 arm; the Rust binding crate itself (`rocksdb`) is Apache-2.0 only regardless |
-| [libwebp](https://github.com/webmproject/libwebp) core (bundled via `libwebp-sys`, the `webp` crate's own dependency) | Lossy-WebP tier-payload-format candidate ([#143](https://github.com/jordanfelle/nicti/issues/143)/ADR-0022), `spikes/sniff` only | BSD-3-Clause[^wp1], plus a separate perpetual royalty-free WebM patent grant (no copyleft obligation, standard for Google's WebM-family releases) | — | Static (`libwebp-sys` compiles the vendored C source via `cc`, same build model as `rusqlite`'s `bundled` feature) | ✅ | ✅ | ✅ bundle OK — attribution-only; the `webp`/`libwebp-sys` Rust crates are `MIT OR Apache-2.0`/`MIT` respectively, already covered by `deny.toml`'s existing allowlist, no new entry needed |
+| [libwebp](https://github.com/webmproject/libwebp) core (bundled via `libwebp-sys`, the `webp` crate's own dependency) | Lossy-WebP tier-payload-format candidate ([#143](https://github.com/jordanfelle/nicti/issues/143)/ADR-0143), `spikes/sniff` only | BSD-3-Clause[^wp1], plus a separate perpetual royalty-free WebM patent grant (no copyleft obligation, standard for Google's WebM-family releases) | — | Static (`libwebp-sys` compiles the vendored C source via `cc`, same build model as `rusqlite`'s `bundled` feature) | ✅ | ✅ | ✅ bundle OK — attribution-only; the `webp`/`libwebp-sys` Rust crates are `MIT OR Apache-2.0`/`MIT` respectively, already covered by `deny.toml`'s existing allowlist, no new entry needed |
 
 ## ML runtime (ONNX / CUDA / TensorRT)
 
@@ -443,12 +443,12 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 | [CLIP (OpenAI)](https://github.com/openai/CLIP/blob/main/LICENSE) | Subject/burst grouping candidate ([#33](https://github.com/jordanfelle/nicti/issues/33)/[#35](https://github.com/jordanfelle/nicti/issues/35)) | MIT[^m7] | MIT (no separate weight license file) | OpenAI's own model card explicitly discourages *any* deployed use case, commercial or not — not a legal restriction, but a stated rights-holder position | ⚠️ flag — legally bundle-OK, but document the risk acknowledgment if shipped in a real feature |
 | [OpenCLIP](https://github.com/mlfoundations/open_clip/blob/main/LICENSE) | Subject/burst grouping candidate | MIT[^m8] | Not separately stated, presumed MIT-equivalent | Varies by checkpoint (LAION-400M/2B, DataComp-1B, etc.) — no license restriction, but LAION checkpoints carry reputational/takedown history | ✅ bundle OK — prefer a non-LAION-5B/2B checkpoint if provenance matters |
 | [InsightFace / RetinaFace](https://github.com/deepinsight/insightface/blob/master/README.md) | Face detection candidate | MIT (source code)[^m9] | **Non-commercial research only**, per the maintainers' own README, explicitly covering "models trained with this data" | Training data itself restricted; maintainers state the restriction carries to weights | ⛔ **do not bundle** — negotiate a commercial license or use a different embedding model (DINOv2/OpenCLIP) |
-| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics/blob/main/LICENSE) | Culling/detection candidate | **AGPL-3.0**[^m10] | Same AGPL-3.0 (weights bundled under the same terms; commercial license sold separately) | COCO/Ultralytics-curated — not the issue | ✅ **bundle OK as of 2026-09-24** — Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013), so this combines cleanly; no need for Ultralytics' paid commercial license or a non-AGPL swap. See ADR-0003's 2026-09-24 amendment. |
+| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics/blob/main/LICENSE) | Culling/detection candidate | **AGPL-3.0**[^m10] | Same AGPL-3.0 (weights bundled under the same terms; commercial license sold separately) | COCO/Ultralytics-curated — not the issue | ✅ **bundle OK as of 2026-09-24** — Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0066), so this combines cleanly; no need for Ultralytics' paid commercial license or a non-AGPL swap. See ADR-0018's 2026-09-24 amendment. |
 
 ## Flags requiring a decision before shipping a real feature
 
 1. ~~**exiv2 / rexiv2 (GPL)** — excluded outright~~ — **resolved 2026-09-24**: no longer excluded.
-   Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0013); both crates' precise
+   Nicti's own outbound license is now AGPL-3.0-or-later (#66/ADR-0066); both crates' precise
    grants (GPL-2.0-or-later, GPL-3.0-or-later) combine cleanly into it. kamadak-exif + little_exif
    remain the current dependency — nothing wrong with them, this isn't a forced switch — but a
    real reason to prefer exiv2 (IPTC support, maturity) is no longer blocked on license grounds.
@@ -495,7 +495,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      authoritative, complete source for anyone who receives a copy (§13 further extends the same
      source-offer obligation to remote network users specifically for a *modified* version run as
      a network service — closing the "hosted-service loophole" plain GPL leaves open, per
-     ADR-0013 — not a claim that §13 covers every deployment). **This is not "already
+     ADR-0066 — not a claim that §13 covers every deployment). **This is not "already
      unconditionally satisfied, zero action needed"** — it depends on the actual release mechanism
      genuinely keeping the binary and complete source at the same place (which GitHub Releases
      does naturally, but a different distribution channel later — a standalone installer, a
@@ -512,7 +512,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
      interchangeable as a whole-program relicense — the same cross-linking shape as LGPL's own §6.
    - **Net: no isolation/sign-off requirement is actually needed for `rawler`, `LibRaw`, or
      `lensfun-rs` on LGPL-vs-AGPL *compatibility* grounds** — the earlier `cdylib`-isolation
-     requirement (ADR-0004 §3) was written to satisfy a stricter reading than LGPL-2.1 actually
+     requirement (ADR-0019 §3) was written to satisfy a stricter reading than LGPL-2.1 actually
      demands. LibRaw's CDDL-1.0 arm is a moot alternative either way (GPL-incompatible, and
      unneeded now that the LGPL arm is confirmed usable directly). What's left before shipping
      isn't a compatibility question, but it *is* a real distribution-mechanics checklist (see
@@ -532,7 +532,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
    copyleft-vs-permissive compatibility.
 5. ~~**Ultralytics YOLO (AGPL-3.0)** — excluded from a permissive release~~ — **resolved
    2026-09-24**: no longer excluded. Nicti's own outbound license is now AGPL-3.0-or-later
-   (#66/ADR-0013), so this combines cleanly — no non-Ultralytics swap or paid commercial license
+   (#66/ADR-0066), so this combines cleanly — no non-Ultralytics swap or paid commercial license
    needed if a YOLO-family detector is wanted for culling.
 6. **LaMa (Places2 provenance)** — the least clear-cut case, still unresolved after a second
    direct-fetch attempt in [#50](https://github.com/jordanfelle/nicti/issues/50)'s spike
@@ -565,7 +565,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^rx1]: rexiv2 GPL-3.0-or-later — `SPDX-License-Identifier: GPL-3.0-or-later` header at the top of https://github.com/felixc/rexiv2/blob/main/README.md — verified 2026-09-23
 [^xmp1]: Adobe XMP Toolkit SDK BSD-3-Clause — GitHub license API for https://github.com/adobe/XMP-Toolkit-SDK — verified 2026-09-23
 [^dng1]: Adobe DNG SDK EULA — https://scancode-licensedb.aboutcode.org/adobe-dng-sdk.html (quotes the EULA text) — verified 2026-09-23
-[^dcp1]: No Adobe DCP redistribution grant found — absence of a redistribution grant in Adobe's DNG SDK EULA and general Adobe product-EULA norms; **not a single definitive primary-source sentence naming DCP files specifically** — treated conservatively, re-verify if this becomes a real dependency. **Became a real dependency 2026-09-26** ([#38](https://github.com/jordanfelle/nicti/issues/38)/`docs/adr/0021-color-pipeline.md`): re-verified as still applying only to redistribution, not to `spikes/calico` parsing a profile file already installed on the user's own machine at runtime — see this file's 2026-09-26 update above for the full reasoning.
+[^dcp1]: No Adobe DCP redistribution grant found — absence of a redistribution grant in Adobe's DNG SDK EULA and general Adobe product-EULA norms; **not a single definitive primary-source sentence naming DCP files specifically** — treated conservatively, re-verify if this becomes a real dependency. **Became a real dependency 2026-09-26** ([#38](https://github.com/jordanfelle/nicti/issues/38)/`docs/adr/0038-color-pipeline.md`): re-verified as still applying only to redistribution, not to `spikes/calico` parsing a profile file already installed on the user's own machine at runtime — see this file's 2026-09-26 update above for the full reasoning.
 [^lcp1]: No Adobe LCP redistribution grant found — same caveat as [^dcp1], weakest-sourced claim in this audit; third-party (Sigma) LCP manual copyright language referenced but not an Adobe primary source
 [^dc1]: dcamprof GPL-3.0 — GitHub license API for https://github.com/Beep6581/dcamprof — verified 2026-09-23
 [^ort1]: ONNX Runtime MIT — https://github.com/microsoft/onnxruntime/blob/main/LICENSE and ThirdPartyNotices.txt — verified 2026-09-23

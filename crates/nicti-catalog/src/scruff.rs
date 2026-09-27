@@ -1,6 +1,6 @@
 //! Scruff: the import/ingest pipeline (#22). Named the way a mother cat carries a kitten by the
 //! scruff of its neck -- this is what actually moves a file into the catalog. Scans a folder for
-//! RAW files, fingerprints and upserts each one, and extracts its T0 grid preview (ADR-0017) via
+//! RAW files, fingerprints and upserts each one, and extracts its T0 grid preview (ADR-0029) via
 //! `nicti_decode::embedded`'s IFD walker -- no RAW decode needed for that.
 //!
 //! Runs serially in v1; wiring this into Pounce (the job scheduler) is a follow-up, not part of
@@ -18,7 +18,7 @@ use nicti_decode::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 
 use crate::{CatalogError, CatalogStore, NewAsset, Preview};
 
-/// v1 targets Nikon NEF only (ADR-0002's language-and-architecture topic) -- NRW is Nikon's
+/// v1 targets Nikon NEF only (ADR-0015's language-and-stack topic) -- NRW is Nikon's
 /// compact-body variant of the same format. Widening this list is a future-camera-support
 /// concern, not this ticket's.
 const RAW_EXTENSIONS: &[&str] = &["nef", "nrw"];
@@ -46,7 +46,7 @@ pub struct IngestReport {
 
 /// Normalizes an absolute path's tail (relative to `root_path`) into the canonical form stored in
 /// `asset.rel_path`: forward slashes, NFC-composed, no leading/trailing slash. Same rule
-/// `spikes/homing/src/path.rs` uses for ADR-0020's identity scheme.
+/// `spikes/homing/src/path.rs` uses for ADR-0071's identity scheme.
 fn normalize_rel_path(path: &Path) -> String {
     let raw = path.to_string_lossy().replace('\\', "/");
     let composed: String = raw.nfc().collect();
@@ -60,7 +60,7 @@ fn fold(rel_path: &str) -> String {
     rel_path.to_lowercase()
 }
 
-/// Tier (b) from ADR-0020's relink-tier list: BLAKE3 over the first and last 64KB (or the whole
+/// Tier (b) from ADR-0071's relink-tier list: BLAKE3 over the first and last 64KB (or the whole
 /// file, if smaller), with the size folded into the hash input. Cheap enough to run on every file
 /// at import time, and the tier `spikes/homing` and this pipeline both use as the default identity
 /// proxy for move detection.
@@ -135,7 +135,7 @@ fn read_exif_fields(path: &Path) -> ExifFields {
     }
 }
 
-/// Finds this file's T0 grid preview (ADR-0017: the Nikon PreviewIFD JPEG, copied verbatim), or
+/// Finds this file's T0 grid preview (ADR-0029: the Nikon PreviewIFD JPEG, copied verbatim), or
 /// the largest embedded JPEG found if no Nikon PreviewIFD is present (a non-Nikon RAW, or a
 /// PreviewIFD-less file). Returns `None` rather than an error when a file has no embedded JPEG at
 /// all, or isn't a recognizable TIFF-based RAW -- ingest still catalogs the asset, just without a

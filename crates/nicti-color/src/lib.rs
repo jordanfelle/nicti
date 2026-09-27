@@ -1,4 +1,4 @@
-//! Camera color profile extension point (ADR-0004 §7/§8). `ColorProfile` settles identity and
+//! Camera color profile extension point (ADR-0019 §7/§8). `ColorProfile` settles identity and
 //! versioning only, via `Module` — DCP parsing (color-matrix, HueSatMap 3D LUT, tone curve) is
 //! owned by #38, and the display/output color-management path (ICC, sRGB/P3/AdobeRGB,
 //! soft-proofing) is owned by #42.

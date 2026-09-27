@@ -1,6 +1,6 @@
 # #71: Volume identity + drive remapping (`spikes/homing`)
 
-See `docs/adr/0020-volume-identity-and-remapping.md` for the decision and its rationale. This
+See `docs/adr/0071-volume-identity-and-remapping.md` for the decision and its rationale. This
 document is the write-up: what was built, what was measured, and what's still pending.
 
 ## Sandbox constraint
@@ -35,7 +35,7 @@ drive was ever attached/detached/reformatted. The type/shape-correctness gap (do
 compile against the real windows-sys API) is now closed; the runtime-behavior gap (does
 `FindFirstVolumeW` actually enumerate what's expected, does the survival table hold, does the new
 two-IOCTL `mbr_disk_signature` chain actually return the right disk's signature) is not, and stays
-exactly the "spec + tooling merged, baseline measurement deferred" shape ADR-0006/0007/#90
+exactly the "spec + tooling merged, baseline measurement deferred" shape ADR-0068/0050/#90
 describe — flagged explicitly here rather than glossed over.
 
 **This gap turned out real, not just theoretical**: `cargo test (windows)` failed on real GitHub
@@ -75,7 +75,7 @@ What *is* real, from this sandbox:
 mount point(s), the 32-bit `GetVolumeInformationW` serial, the 64-bit NTFS serial
 (`FSCTL_GET_NTFS_VOLUME_DATA`), the GPT partition GUID or MBR signature+offset
 (`IOCTL_DISK_GET_PARTITION_INFO_EX`), label, size, removable flag, and an optional
-`.nicti-volume` marker-file UUID. `identity_key()` implements ADR-0020's chosen key (NTFS
+`.nicti-volume` marker-file UUID. `identity_key()` implements ADR-0071's chosen key (NTFS
 serial + GPT GUID, falling back to MBR signature+offset+32-bit serial) — this selection logic
 itself is pure and fully unit-tested (see `volume::tests`), independent of whether the Windows FFI
 that populates `VolumeInfo` has been validated.
@@ -84,7 +84,7 @@ that populates `VolumeInfo` has been validated.
 
 `poll_for` wraps `sysinfo::Disks` at a configurable interval, diffing the mount-point set between
 polls. `watch_push` (the `CM_Register_Notification` path) is an explicit unimplemented stub, not a
-silent gap — see ADR-0020's Consequences for why this wasn't finished in this pass (a message pump
+silent gap — see ADR-0071's Consequences for why this wasn't finished in this pass (a message pump
 or careful callback-lifetime handling is needed, deferred to the reference-machine pass rather
 than blocking the schema/fingerprint work this ticket also covers).
 
@@ -98,7 +98,7 @@ unplugged), and `resolve()` correctly following a remapped mount point.
 
 ### Fingerprint tiers (`fingerprint.rs`)
 
-Four tiers as designed in ADR-0020. Tested: partial-hash determinism, the *expected* partial-hash
+Four tiers as designed in ADR-0071. Tested: partial-hash determinism, the *expected* partial-hash
 blind spot (two files with identical 64KB edges but a differing middle above the window size are
 indistinguishable by partial hash alone — asserted as a documented limitation, not a false
 guarantee), full-hash determinism and sensitivity to that same differing middle, and
@@ -116,7 +116,7 @@ tested for both the successful-match and no-match-found (`Lost`) cases.
 
 ## Pending: the reference-machine pass
 
-Everything below needs the RTX 5080/Windows box — see ADR-0020's Measured-results section for the
+Everything below needs the RTX 5080/Windows box — see ADR-0071's Measured-results section for the
 exact tables to fill in:
 
 1. **Volume-identity survival table** — run `spikes/homing/scripts/remap-test.ps1` (VHDX-only, per
@@ -132,7 +132,7 @@ exact tables to fill in:
    on both the NVMe and HDD, plus a check of whether a real LRC-edited DNG's full-file hash
    actually goes unstable across a metadata rewrite as hypothesized.
 
-Once those are filled in, move ADR-0020 from Proposed to Accepted (or revise the Decision if a
+Once those are filled in, move ADR-0071 from Proposed to Accepted (or revise the Decision if a
 measurement contradicts it — same discipline as every reference-machine-pending ADR in this repo).
 
 ## Adversarial review
@@ -244,4 +244,4 @@ adversarial-review round). None of CodeRabbit's 9 findings were dismissed as inv
   clone, or two attached copies of the same VHDX) — `schema::upsert_volume`'s current
   `ON CONFLICT DO UPDATE` collapses them by construction today.
 - `CM_Register_Notification` push-based mount detection (stubbed, not implemented).
-- ADR-0011's facet-count cache excluding offline volumes — flagged for #22/#23 to pick up.
+- ADR-0103's facet-count cache excluding offline volumes — flagged for #22/#23 to pick up.

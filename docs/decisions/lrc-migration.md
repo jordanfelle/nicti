@@ -1,18 +1,18 @@
 ## Lightroom Classic catalog import mapping
 
 Covers #61's `.lrcat` schema mapping — full reasoning and every measured number in
-`docs/adr/0023-lrc-catalog-import-mapping.md` and `docs/research/shed-lrcat-schema.md`. This file
+`docs/adr/0061-lrc-catalog-import-mapping.md` and `docs/research/shed-lrcat-schema.md`. This file
 is the per-topic summary; those two are the full research trail.
 
 - **Real data, real numbers**: this ADR is grounded against the user's own 380,300-asset catalog
-  (matching ADR-0017's own count from the same library), not secondary-source guesses. Never a
+  (matching ADR-0029's own count from the same library), not secondary-source guesses. Never a
   keyword, collection name, or path — every number is a count.
 - **Folder model (#22/#71)**: LRC's `AgLibraryRootFolder`→`AgLibraryFolder`→`AgLibraryFile`+
-  `Adobe_images` maps directly onto ADR-0020's `volume`/`root`/`asset` shape. All 13 real root
-  folders use a drive-letter-prefixed absolute path (confirms ADR-0020's assumption); 2 of 13 also
+  `Adobe_images` maps directly onto ADR-0071's `volume`/`root`/`asset` shape. All 13 real root
+  folders use a drive-letter-prefixed absolute path (confirms ADR-0071's assumption); 2 of 13 also
   carry LRC's own portable-catalog relative-path fallback, which isn't universal.
 - **Library metadata**: ratings/picks/color labels follow LRC conventions directly (already
-  ADR-0002's rule). Real gotcha: `pick`/`rating` are SQLite `REAL`, not `INTEGER` — a naive numeric
+  ADR-0021's rule). Real gotcha: `pick`/`rating` are SQLite `REAL`, not `INTEGER` — a naive numeric
   op on a *different* bitmask-string column (`hasRetouch`) silently coerces to a wrong number
   rather than erroring, so #62 must respect each column's real declared type.
 - **Collections**: `AgLibraryCollection.creationId` separates real user collections
@@ -20,7 +20,7 @@ is the per-topic summary; those two are the full research trail.
   the real catalog had 1 real collection and 4 scratch rows. No smart collections existed to
   measure against; their rule-criteria mapping onto #23's filter bar stays a flagged follow-up.
 - **Develop settings (#46/#47/#49/#39/#42/#51/#40/#52)**: the `s = { Key = Value, ... }`
-  Lua-literal format ADR-0002 predicted, parsed by the `agprefs` crate (MIT) with **zero failures
+  Lua-literal format ADR-0021 predicted, parsed by the `agprefs` crate (MIT) with **zero failures
   across 380,307 real rows** — settles adopt-vs-hand-roll in `agprefs`'s favor. 197 distinct real
   keys, all classified into an owner ticket by an exact-match table (grouped by real Develop-module
   panel, not guessed from naming conventions — a first prefix-only draft missed 83/197 keys, mostly

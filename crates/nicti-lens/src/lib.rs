@@ -1,4 +1,4 @@
-//! Lens-correction data extension point (ADR-0004 §7/§8). `LensCorrection` settles identity and
+//! Lens-correction data extension point (ADR-0019 §7/§8). `LensCorrection` settles identity and
 //! versioning only, via `Module` — the correction data source (lensfun Rust binding vs.
 //! embedded in-NEF data) and its application are owned by #39.
 

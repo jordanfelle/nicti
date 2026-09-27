@@ -26,7 +26,7 @@ struct Params {
 
 @compute @workgroup_size(64)
 fn poisson_jacobi(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) num_wg: vec3<u32>) {
-    // 2D dispatch grid, flat index recovered here -- see gpu.rs::workgroup_grid / ADR-0005's
+    // 2D dispatch grid, flat index recovered here -- see gpu.rs::workgroup_grid / ADR-0016's
     // dispatch-dimensioning note (glint's tile_blend.wgsl carries the identical comment).
     let i = gid.x + gid.y * (num_wg.x * 64u);
     let total = params.width * params.height;

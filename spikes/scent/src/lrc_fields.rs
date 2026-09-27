@@ -1,4 +1,4 @@
-//! Layer (a): the LRC-convention metadata mapping ADR-0002 leaves to #59 --
+//! Layer (a): the LRC-convention metadata mapping ADR-0021 leaves to #59 --
 //! rating, color label, and keywords, read in whatever field/form Lightroom
 //! Classic itself writes them in.
 //!

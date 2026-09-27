@@ -1,6 +1,6 @@
 //! Embedded-preview extraction (#22): finds and reads out the embedded JPEG previews a NEF/DNG
 //! already carries (PreviewIFD/thumbnail/SubIFD), so import doesn't need a RAW decode at all to
-//! produce the T0 grid preview ADR-0017 specifies.
+//! produce the T0 grid preview ADR-0029 specifies.
 //!
 //! Adapted from `spikes/sniff`'s IFD walker (#28/#29), which was cross-checked byte-for-byte
 //! against `exiftool` on real Z8/D7500 files — see `docs/decisions/preview-tiers.md`. This is a

@@ -17,7 +17,7 @@ use litter::source::FileSource;
 #[derive(Parser)]
 #[command(
     name = "litter",
-    about = "burst/duplicate grouping spike (#33/ADR-0025)"
+    about = "burst/duplicate grouping spike (#33/ADR-0033)"
 )]
 struct Cli {
     #[command(subcommand)]

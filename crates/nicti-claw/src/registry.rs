@@ -1,4 +1,4 @@
-//! A lazy, explicit-registration module registry (ADR-0004 §2, §5, §7) — generalized from
+//! A lazy, explicit-registration module registry (ADR-0019 §2, §5, §7) — generalized from
 //! `spikes/sheath/src/registry.rs`. Every module registers a cheap, always-available
 //! `Descriptor` at startup; building the actual instance is deferred to a `OnceLock`-backed
 //! factory that runs on first use, at most once even under a concurrent race to be the first
@@ -56,8 +56,8 @@ impl<T: ?Sized + Module> LazyModule<T> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegisterError {
-    /// The id doesn't follow the `namespace.name` convention (ADR-0002's `vendor.stage_name`
-    /// shape, generalized in ADR-0004 §7): at least two dot-separated segments, each segment
+    /// The id doesn't follow the `namespace.name` convention (ADR-0021's `vendor.stage_name`
+    /// shape, generalized in ADR-0019 §7): at least two dot-separated segments, each segment
     /// non-empty and restricted to `[a-z0-9_]`.
     InvalidId(&'static str),
     /// A descriptor with this id is already registered.
@@ -89,7 +89,7 @@ fn is_valid_id(id: &str) -> bool {
 }
 
 /// A registry of lazily-built modules for one extension point (e.g. RAW decoders). Looking up
-/// an id with no registered module returns `None` (ADR-0004 §5) — a build that doesn't
+/// an id with no registered module returns `None` (ADR-0019 §5) — a build that doesn't
 /// recognize a module id treats it as read-only rather than dropping or guessing at it.
 pub struct Registry<T: ?Sized + Module> {
     modules: Vec<LazyModule<T>>,

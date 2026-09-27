@@ -7,7 +7,7 @@
 //! stack does. WebP is the one exception: the `webp` crate wraps the real C `libwebp`, compiled
 //! via `cc` (see `Cargo.toml`'s comment on why that's acceptable here).
 //!
-//! Scope note (also in `docs/adr/0017-preview-tier-strategy.md`): this only measures AVIF/WebP vs
+//! Scope note (also in `docs/adr/0029-preview-tier-strategy.md`): this only measures AVIF/WebP vs
 //! JPEG as static tier-payload formats. Per-user format choice with hardware-accel-aware
 //! auto-selection (e.g. preferring AVIF only where the OS/GPU actually offers hardware AV1
 //! decode, falling back otherwise) is a real feature for the eventual non-spike preview

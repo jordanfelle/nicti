@@ -7,7 +7,7 @@
 //! pass** -- see the research doc's "What wasn't reachable" section. A DNG
 //! rewrite is a full TIFF-IFD-rewrite problem (unlike JPEG's flat segment
 //! list, TIFF's IFD offsets are absolute file positions that a naive splice
-//! would corrupt), and ADR-0020 already treats any DNG content change as an
+//! would corrupt), and ADR-0071 already treats any DNG content change as an
 //! identity change regardless of how it's produced. Reading tag 700 could
 //! reuse `spikes/sniff`'s TIFF/IFD walker; writing needs a dedicated TIFF
 //! writer this spike didn't build.

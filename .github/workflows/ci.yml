@@ -102,6 +102,15 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  adr-refs:
+    name: ADR reference check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/adr_refs_check.py
+
   clippy:
     name: cargo clippy (linux)
     runs-on: ubuntu-latest
@@ -135,10 +144,10 @@ jobs:
       # `den (windows)` jobs below, so this job (which runs on every PR regardless of what it
       # touches) no longer pays for compiling eight bundled native catalog-engine libraries.
       #
-      # --exclude pelt-egui/-iced/-slint (#127): these #68/ADR-0006 GUI-framework spikes alone
+      # --exclude pelt-egui/-iced/-slint (#127): these #68/ADR-0068 GUI-framework spikes alone
       # account for 311 of the 543 unique crates in a full Windows build (measured via
       # `cargo tree`) -- egui/iced/Slint each pull in their own windowing/renderer stack
-      # (winit, wgpu-adjacent crates, Skia/FemtoVG for Slint). ADR-0006 is still Proposed,
+      # (winit, wgpu-adjacent crates, Skia/FemtoVG for Slint). ADR-0068 is still Proposed,
       # pending #90's reference-machine run, so this isn't shipping code yet. Moved to the
       # path-gated `pelt (linux)`/`pelt (windows)` jobs below, same pattern as den. This also
       # drops the apt-get GUI-headers step from this job -- it only existed for these three
@@ -165,7 +174,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17: Windows is v1's actual target platform (see README's Scope section and
-      # docs/adr/0001), so it -- not Linux -- is the platform whose clippy/test results should
+      # docs/adr/0015), so it -- not Linux -- is the platform whose clippy/test results should
       # gate merges. --workspace --exclude den --exclude pelt-* mirrors the Linux job exactly
       # (see its own comment above for why each flag is required).
       - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
@@ -252,7 +261,7 @@ jobs:
           # with `gh cache list` if new caches get added later. `pelt-linux`/`retina-linux`
           # stay at `save-if: false`: their cold cost (4min/2.5min) isn't worth caching.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # den (#67/ADR-0008 and follow-ups, see CLAUDE.md's package map) is a throwaway research
+      # den (#67/ADR-0067 and follow-ups, see CLAUDE.md's package map) is a throwaway research
       # spike, not part of the shipping v1 target -- see the #117 issue this job was split out
       # to address: every catalog-engine candidate it bundles (SQLite, DuckDB, LMDB, Turso, redb,
       # libSQL, RocksDB, fjall) was compiling from source on every single PR, most of which never
@@ -287,7 +296,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
-      # #115/ADR-0015's RocksDB candidate: `librocksdb-sys` generates its FFI bindings with
+      # #115/ADR-0115's RocksDB candidate: `librocksdb-sys` generates its FFI bindings with
       # `bindgen`, which needs libclang on the build machine. GitHub's `windows-latest` runner
       # ships an msys64 install whose own `libclang.dll` conflicts with the one bindgen needs
       # (confirmed against `rust-rocksdb/rust-rocksdb`'s own upstream CI, which carries this exact
@@ -297,13 +306,13 @@ jobs:
         run: Remove-Item -LiteralPath "C:\msys64\" -Force -Recurse -ErrorAction SilentlyContinue
       - name: Install LLVM (bindgen/libclang, RocksDB build)
         run: choco install llvm -y
-      # #67/ADR-0008's Windows hard gate (plus #102/ADR-0009's Turso, #106/ADR-0010's redb,
-      # #115/ADR-0015's RocksDB, and #116/ADR-0016's fjall follow-ups): each catalog-database-engine
+      # #67/ADR-0067's Windows hard gate (plus #102/ADR-0102's Turso, #106/ADR-0106's redb,
+      # #115/ADR-0115's RocksDB, and #116/ADR-0116's fjall follow-ups): each catalog-database-engine
       # candidate must build and pass its cross-engine correctness test on the actual v1 target, not
       # just Linux -- this is exactly the gate that eliminated pglite-rs (its build.rs passes a
       # Unix-only linker flag, confirmed unrunnable here) before a Windows CI job ever had to prove
       # it. `-p den` only (not `--workspace`): den is a spike, same reasoning as the `-p nicti`
-      # build in the main Windows job. `redb` was missing from this list even after ADR-0010
+      # build in the main Windows job. `redb` was missing from this list even after ADR-0106
       # merged (a real gap, fixed while resolving an earlier merge, not by either side's own diff)
       # -- it, `rocksdb`, and `fjall` all combine fine with `sqlite` (none bundles a competing
       # SQLite C fork), so all three join the main command below; mirrors the Linux job's
@@ -337,7 +346,7 @@ jobs:
           # check, rarely touched, and its own cache entry would otherwise ride along on every
           # main push regardless of whether these spikes changed.
           save-if: false
-      # #68/ADR-0006's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
+      # #68/ADR-0068's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
       # (X11/Wayland) plus Slint's Skia/FemtoVG renderers. Precautionary, NOT independently
       # confirmed as required -- see #126's original version of this comment (moved here
       # verbatim from the main clippy/test jobs when #127 split these crates out): a local
@@ -430,7 +439,7 @@ jobs:
           # full from-scratch LibRaw C++ compile (~95 source files) would otherwise ride along on
           # every main push regardless of whether spikes/retina changed.
           save-if: false
-      # #37/ADR-0018: retina bundles LibRaw's real C++ source (compiled via the `cc` crate, see
+      # #37/ADR-0069: retina bundles LibRaw's real C++ source (compiled via the `cc` crate, see
       # build.rs) to research the RAW decoder question -- a throwaway spike, not part of the
       # shipping v1 target, same reasoning as den/pelt above for why this is path-gated out of
       # the always-on jobs.
@@ -454,7 +463,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # required check, see clippy job's comment above
       # #17/#37: required (blocking) check, matching den (windows)/pelt (windows)'s own
-      # reasoning -- Windows is v1's actual target, and this is where ADR-0018's real numbers
+      # reasoning -- Windows is v1's actual target, and this is where ADR-0069's real numbers
       # came from (native Windows .exe via WSL interop, not this Linux build). Uses MSVC (the
       # runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
       # covers this path; the MinGW-specific static-linking branch is exercised locally, not

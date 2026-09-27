@@ -29,7 +29,7 @@ pub struct GpuContext {
 impl GpuContext {
     /// Enumerates every adapter wgpu can see. In WSL without a GPU-backed Vulkan ICD this falls
     /// back to lavapipe (software) -- fine for correctness parity, not for performance numbers
-    /// (same caveat as glint/calico's own `enumerate`, ADR-0005).
+    /// (same caveat as glint/calico's own `enumerate`, ADR-0016).
     pub fn enumerate() -> Vec<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,

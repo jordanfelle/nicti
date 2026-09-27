@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Module/plugin architecture (ADR-0004): the Module trait, a lazy OnceLock-backed registry, and a checked C-ABI dylib boundary with an ABI-version handshake. The load-bearing crate every nicti-* domain crate builds on."
+description = "Module/plugin architecture (ADR-0019): the Module trait, a lazy OnceLock-backed registry, and a checked C-ABI dylib boundary with an ABI-version handshake. The load-bearing crate every nicti-* domain crate builds on."
 
 [dependencies]
 serde_json = "1"

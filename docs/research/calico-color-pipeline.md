@@ -1,13 +1,13 @@
 # #38: Color pipeline (`spikes/calico`)
 
-See `docs/adr/0021-color-pipeline.md` for the decision and its rationale. This document is the
+See `docs/adr/0038-color-pipeline.md` for the decision and its rationale. This document is the
 write-up: what was built, how to run it, and what's still pending.
 
 ## Sandbox constraint
 
 This research pass ran in a Linux/WSL sandbox with no Lightroom Classic install, no real Adobe
 `.dcp`/`.xmp` camera profile file, and no LRC-rendered reference image — none of these can exist
-here (ADR-0003's licensing policy forbids adding a real Adobe profile to this repo, and
+here (ADR-0018's licensing policy forbids adding a real Adobe profile to this repo, and
 `docs/ref-10k-manifest.csv` only ever listed NEFs, never JPEG/TIFF references). What's real: the
 DCP/DNG-tag parser, the CCT/matrix math, the HueSatMap/tone-curve implementations, the CIEDE2000
 metric, and — the one part of this research that specifically needed real hardware feedback, not
@@ -22,7 +22,7 @@ installed Adobe Raw profiles are reachable from this WSL environment via the Win
 decodes the real `dng_big_table` container (base85 + zlib around a `dng_look_table` tagged
 record) and self-checks by recomputing the profile's own MD5 fingerprint, verified against all
 six real profiles (Color/Landscape/Monochrome/Neutral/Portrait/Vivid). See
-`docs/adr/0021-color-pipeline.md`'s `xmp_profile.rs` bullet for the format details. Steps 4/6/87-90
+`docs/adr/0038-color-pipeline.md`'s `xmp_profile.rs` bullet for the format details. Steps 4/6/87-90
 below (the `UnrecognizedTableFormat` contingency) are now historical — Vivid is in scope for the
 reference-machine pass like Standard/Color always was.
 
@@ -91,7 +91,7 @@ the ADR) additionally confirmed the texture *upload* itself (data layout,
 6. `cargo run -p calico --bin calico -- compare <render>.png <lrc-export>.tiff --heatmap
    <heatmap>.png` against the matching LRC export, for each working space and each profile
    (Standard/Color and, if step 4's `--look` decodes successfully, Vivid).
-7. Fill in ADR-0021's Measured results table with the mean/p95/max ΔE00 per candidate, and move
+7. Fill in ADR-0038's Measured results table with the mean/p95/max ΔE00 per candidate, and move
    its Status to Accepted if the decision rule's bar is met (mean ≤ 2.0, p95 ≤ 5.0, every
    reference image, every profile actually measured).
 

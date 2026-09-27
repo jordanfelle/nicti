@@ -6,10 +6,9 @@ is the canonical human contributor guide** — read that first if you're new her
 
 ## Architecture decisions
 
-ADRs live in `docs/adr/` (see `docs/adr/README.md` for the index, template, and numbering
-convention — a new ADR takes its GitHub issue's number, not the next sequential count; `0001`-`0025`
-predate this and keep their original sequential numbers). Per-ADR decisions, measured results, and
-gotchas live in
+ADRs live in `docs/adr/` (see `docs/adr/README.md` for the numbering convention, index, and
+template) -- numbered by the GitHub issue that prompted it, not sequentially. Per-ADR decisions,
+measured results, and gotchas live in
 `.claude/rules/<topic>/REFERENCE.md` + `docs/decisions/<topic>.md`, not inline here, to keep this
 file under the line-count gate. Each topic has:
 
@@ -20,10 +19,10 @@ file under the line-count gate. Each topic has:
 - `docs/decisions/<topic>.md` — the full original prose, verbatim, with every issue ref and piece
   of reasoning. Not auto-loaded by Claude Code, but a normal repo doc any contributor can read.
 
-Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
-`gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
-`preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`lrc-migration` (0023), `masking` (0024), `culling` (0025), `denoise` (0040),
+Topics: `language-and-architecture` (0015/0021/0019, v1 target), `licensing` (0018/0066, 0069),
+`gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
+`preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071), `color` (0038),
+`lrc-migration` (0061), `masking` (0048), `culling` (0033), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044). A new ADR adds a bullet to both files of its topic (or
 a new topic) and to this list — not inline here.
 
@@ -73,7 +72,7 @@ moved into the catalog).
 ## Package map
 
 `crates/*` (a Cargo workspace member glob, landed in #20) holds the real production crate layout
-from ADR-0004 §8. `spikes/*` holds throwaway research spikes not yet promoted — don't build on top
+from ADR-0019 §8. `spikes/*` holds throwaway research spikes not yet promoted — don't build on top
 of one; each is deleted once its own ticket promotes it (as #20 already did for
 `spikes/sheath`/`spikes/dewclaw`). Full per-spike/per-crate module breakdown moved out to each
 topic's own `.claude/rules/<topic>/REFERENCE.md` "Package contents" section (#173) — this stays a
@@ -93,28 +92,28 @@ terse index: crate/spike → purpose → owning topic.
   grid preview without a RAW decode. Trimmed vs. `sniff`'s own copy: no cold/warm
   `FILE_FLAG_NO_BUFFERING` benchmarking distinction, which stays `sniff`-only
 - **`crates/nicti-catalog`** — `CatalogStore` extension point plus its real implementation (#22,
-  landed): `schema.rs` (SQLite migrations — `volume`/`root`/`asset`, ADR-0020; `preview`, ADR-0017;
-  `edit_variant`/`edit_history`, ADR-0002; trigger-maintained `facet_counts`, ADR-0011),
+  landed): `schema.rs` (SQLite migrations — `volume`/`root`/`asset`, ADR-0071; `preview`, ADR-0029;
+  `edit_variant`/`edit_history`, ADR-0021; trigger-maintained `facet_counts`, ADR-0103),
   `sqlite.rs` (`SqliteCatalog`), and `scruff.rs` (the Scruff import/ingest pipeline: scan → stat →
   partial-BLAKE3 fingerprint → EXIF → T0 preview extraction → upsert, one bad file recorded in
   `IngestReport::failed` rather than aborting the run). Runs serially; Pounce integration is a
   follow-up. See `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this
   promotes.
-- **`spikes/pawprint`** (#21/ADR-0002) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
-- **`spikes/glint`** (#16/ADR-0005) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
-- **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0006) →
+- **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
+- **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0068) →
   [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
-- **`spikes/groom`** (#50/ADR-0007) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
-- **`spikes/sniff`** (#28/#29/ADR-0017) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
-- **`spikes/den`** (#67+/ADR-0008–0016, slated for deletion once #22 lands, see #123) →
+- **`spikes/groom`** (#50/ADR-0050) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
+- **`spikes/den`** (#67+/ADR-0067/0102/0106/0103/0107/0066/0113/0115/0116, slated for deletion once #22 lands, see #123) →
   [`catalog-engine`](.claude/rules/catalog-engine/REFERENCE.md)
-- **`spikes/retina`** (#37/ADR-0019) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
-- **`spikes/homing`** (#71/ADR-0020, Windows-only, unverified in this sandbox) →
+- **`spikes/retina`** (#37/ADR-0037) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
+- **`spikes/homing`** (#71/ADR-0071, Windows-only, unverified in this sandbox) →
   [`volume-identity`](.claude/rules/volume-identity/REFERENCE.md)
-- **`spikes/calico`** (#38/ADR-0021) → [`color`](.claude/rules/color/REFERENCE.md)
-- **`spikes/shed`** (#61/ADR-0023) → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
-- **`spikes/siamese`** (#48/ADR-0024) → [`masking`](.claude/rules/masking/REFERENCE.md)
-- **`spikes/litter`** (#33/ADR-0025) → [`culling`](.claude/rules/culling/REFERENCE.md)
+- **`spikes/calico`** (#38/ADR-0038) → [`color`](.claude/rules/color/REFERENCE.md)
+- **`spikes/shed`** (#61/ADR-0061) → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
+- **`spikes/siamese`** (#48/ADR-0048) → [`masking`](.claude/rules/masking/REFERENCE.md)
+- **`spikes/litter`** (#33/ADR-0033) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
 - **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
 - **`spikes/loaf`** (#44/ADR-0044) → [`render-graph`](.claude/rules/render-graph/REFERENCE.md)
@@ -194,14 +193,14 @@ root `Cargo.toml` is both the workspace root and a real package (`nicti`), not a
 so a bare `cargo test`/`cargo clippy` (no `-p`/`--workspace`) or a bare `cargo fmt --check` (no
 `--all`) silently only checks the root crate and skips `spikes/*`/`bench/whisker` entirely — this
 exact gap produced a false-negative "clean" local result once on a real PR whose CI then failed
-`cargo fmt` on six files in `spikes/den` (fixed alongside #19/ADR-0004).
+`cargo fmt` on six files in `spikes/den` (fixed alongside #19/ADR-0019).
 
 ## CI
 
 GitHub Actions, GitHub-hosted runners (`ubuntu-latest`/`windows-latest`) — this project has no
 self-hosted runner infrastructure of its own; don't add a `runs-on: [self-hosted, ...]` job here.
 See `.github/workflows/ci.yml`. A `cargo-deny` job checks Rust crate
-licenses against `deny.toml` (the allowlist from `docs/adr/0003-third-party-license-policy.md`) —
+licenses against `deny.toml` (the allowlist from `docs/adr/0018-third-party-license-policy.md`) —
 it only covers Cargo dependencies, not native libraries, ML models, or data files, which still
 rely on `docs/licensing.md` being updated at review time.
 
@@ -251,10 +250,10 @@ false` was reverted in #154** (2026-09-26): it caused a measured 2-3min -> 25-33
 cache-budget saving -- it now saves on push to main like every other job here. `pelt-linux`/
 `retina-linux` still use `save-if: false` (cold cost is only 4min/2.5min). `spikes/**` is also excluded from
 Renovate (`renovate.json`) for the same reason — den bundles five already-rejected engine
-candidates (ADR-0009/0010/0014/0015/0016) that generate bump-PR churn nobody will act on.
-**`spikes/den` itself is slated for deletion once #22 lands, and `spikes/pelt-*` once ADR-0006
+candidates (ADR-0102/0106/0113/0115/0116) that generate bump-PR churn nobody will act on.
+**`spikes/den` itself is slated for deletion once #22 lands, and `spikes/pelt-*` once ADR-0068
 resolves** — see #123 for the den follow-up cleanup (CI jobs, the Renovate rule, `deny.toml`
-exceptions, this section); the pelt-* cleanup isn't filed as its own issue yet since ADR-0006 is
+exceptions, this section); the pelt-* cleanup isn't filed as its own issue yet since ADR-0068 is
 still Proposed pending #90's reference-machine run.
 
 **CodeQL's `rust` analysis (`.github/workflows/codeql.yml`) is scoped to the shipping crates

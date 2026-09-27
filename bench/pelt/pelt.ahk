@@ -1,5 +1,5 @@
 #Requires AutoHotkey v2.0
-; pelt.ahk - #68 (ADR-0006) GUI-framework candidate input driver.
+; pelt.ahk - #68 (ADR-0068) GUI-framework candidate input driver.
 ;
 ; Drives one timed pass (grid scroll, loupe next/prev, slider drag, or viewport pan) against a
 ; running pelt-egui/pelt-iced/pelt-slint window. Same keypress-indicator-square technique as

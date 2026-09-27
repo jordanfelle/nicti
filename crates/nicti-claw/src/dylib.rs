@@ -1,5 +1,5 @@
 //! C-ABI dylib loading with an explicit ABI-version handshake, checked before any other call
-//! crosses the boundary (ADR-0004 §4). This is the isolation mechanism ADR-0003 requires for an
+//! crosses the boundary (ADR-0019 §4). This is the isolation mechanism ADR-0018 requires for an
 //! LGPL native dependency (e.g. a future `rawler`/`lensfun-rs`-style crate) that can't cleanly
 //! satisfy LGPL's dynamic-linking safe harbor when statically linked in.
 //!

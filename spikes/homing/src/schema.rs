@@ -1,9 +1,9 @@
-//! #71's candidate volume/root/asset schema (rusqlite, matching ADR-0008's SQLite choice). Three
+//! #71's candidate volume/root/asset schema (rusqlite, matching ADR-0067's SQLite choice). Three
 //! levels rather than a flat `asset(absolute_path)` table: a folder registered for tracking
 //! (`root`) can move from the active SSD to the archive drive (#72) as a single `root` row
 //! update, without touching every `asset` row underneath it.
 //!
-//! Not #22's real catalog schema -- this is the identity/volume-resolution slice ADR-0020 hands
+//! Not #22's real catalog schema -- this is the identity/volume-resolution slice ADR-0071 hands
 //! to #22, exercised here in isolation so the spike's scenario tests don't need the rest of the
 //! catalog.
 
@@ -109,7 +109,7 @@ pub fn upsert_volume(
 /// since `upsert_volume` (called only from `cmd_build`) was the sole path that set it back to 1.
 /// `cmd_resolve` calls this on every run without rebuilding, so it must be able to bring a volume
 /// back online on its own. Their `root`/`asset` rows are untouched either way -- catalog data
-/// (ratings, keywords, edits) is never deleted just because a drive is unplugged, per ADR-0020's
+/// (ratings, keywords, edits) is never deleted just because a drive is unplugged, per ADR-0071's
 /// offline-UX decision.
 pub fn mark_offline_except(conn: &Connection, seen_identity_keys: &[String]) -> Result<usize> {
     if seen_identity_keys.is_empty() {
@@ -206,7 +206,7 @@ pub fn relink_asset(
 /// Resolves `(volume_identity_key, root_rel_path, asset_rel_path)` to a live absolute path, given
 /// the currently-mounted volumes' identity->mount_point map. Returns `None` when the owning
 /// volume is offline -- callers (search/facet counts/the folder panel) filter these out rather
-/// than showing a stale path, per ADR-0020's offline-UX decision.
+/// than showing a stale path, per ADR-0071's offline-UX decision.
 pub fn resolve(
     conn: &Connection,
     asset_id: i64,
@@ -331,7 +331,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             count, 1,
-            "offline volumes keep their catalog rows, per ADR-0020's offline-UX decision"
+            "offline volumes keep their catalog rows, per ADR-0071's offline-UX decision"
         );
     }
 

@@ -51,7 +51,7 @@ pub trait Workload {
     /// fix was applied, but the same fix applied to the real, full-schema `crash_mid_ingest`
     /// workload still failed identically. Neither explanation — leaked runtime thread, or fd-level
     /// lock independent of the runtime — fully accounts for both results. See
-    /// `docs/adr/0009-turso-database-evaluation.md`'s crash-safety row for the complete account;
+    /// `docs/adr/0102-turso-database-evaluation.md`'s crash-safety row for the complete account;
     /// short version: this in-process technique could not produce a trustworthy verdict on
     /// Turso's real crash-safety either way, and a real fork+exec+SIGKILL harness is the only way
     /// to actually resolve it. This method is kept because it's still the right hygiene for *any*

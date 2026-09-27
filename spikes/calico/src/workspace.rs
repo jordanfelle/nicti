@@ -1,4 +1,4 @@
-//! Linear working-space definitions calico's `pipeline.rs` measures against (ADR-0021's
+//! Linear working-space definitions calico's `pipeline.rs` measures against (ADR-0038's
 //! Candidates). All matrices convert to/from XYZ relative to **D50** (the DNG profile connection
 //! space calico's camera->XYZ matrices, from `cct.rs`, already use) -- each space's own native
 //! white is Bradford-adapted to D50 once, at construction, rather than carried around separately.

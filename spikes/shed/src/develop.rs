@@ -391,7 +391,7 @@ pub fn analyze(conn: &Connection) -> Result<DevelopReport> {
 }
 
 /// The 6 keys #61 found with no owner ticket (see this module's doc comment). Order matches the
-/// report table in `docs/adr/0023-lrc-catalog-import-mapping.md`.
+/// report table in `docs/adr/0061-lrc-catalog-import-mapping.md`.
 pub const UNOWNED_KEYS: &[&str] = &[
     "FilterList",
     "AllowFilters",
@@ -469,7 +469,7 @@ fn canonicalize_filter_title(title: &str) -> String {
 /// Aggregate presence/active counts for `UNOWNED_KEYS` only, across every row of
 /// `Adobe_imageDevelopSettings` -- the measurement #157 needs before deciding each key's owner.
 /// Reports counts only, no value contents: `Preset`/`ToggleStyleDigest` can carry
-/// user-created-preset identifiers, which ADR-0023's privacy policy keeps out of anything
+/// user-created-preset identifiers, which ADR-0061's privacy policy keeps out of anything
 /// committed to this repo.
 pub fn analyze_unowned_keys(conn: &Connection) -> Result<Vec<UnownedKeyUsage>> {
     let mut stmt = conn.prepare("SELECT text FROM Adobe_imageDevelopSettings")?;
@@ -784,7 +784,7 @@ mod tests {
         );
         // Per-owner counts, not just "not Unowned" -- a match-arm-ordering slip that silently
         // routes a key to the wrong (but still real) Owner would pass an is_empty()-only check;
-        // these totals must match ADR-0023's own owner table exactly. #157 added AiDenoise(2),
+        // these totals must match ADR-0061's own owner table exactly. #157 added AiDenoise(2),
         // Presets(3), ProvenanceOnly(1); the rest predate it.
         let expected: BTreeMap<Owner, i64> = [
             (Owner::Color, 69),
@@ -801,7 +801,7 @@ mod tests {
         .collect();
         assert_eq!(
             counts, expected,
-            "per-owner key counts drifted from ADR-0023's table -- a key was reclassified to a \
+            "per-owner key counts drifted from ADR-0061's table -- a key was reclassified to a \
              different (but still real) owner than the one this pass measured"
         );
     }
