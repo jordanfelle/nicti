@@ -140,10 +140,10 @@ not a baked one).
 color pipeline, is confirmed on the channel-space argument (reason 1) — the strongest and only
 truly independent constraint found this pass.** The linear-light argument (reason 2) is consistent
 with, but doesn't independently require, that same placement. This resolves the placement question
-#191 was scoped to answer; it does not resolve #39's own broader scope (picking `lensfun-rs` vs.
-embedded-NEF data as the correction-data source, verifying NIKKOR Z lens coverage, or designing the
-manual distortion/vignette/defringe slider UX this pass surfaced as a real open question), which
-stays open and unblocked.
+this ticket (#191) was scoped to answer; it does not resolve #39's own broader scope (picking
+`lensfun-rs` vs. embedded-NEF data as the correction-data source, verifying NIKKOR Z lens coverage,
+or designing the manual distortion/vignette/defringe slider UX this pass surfaced as a real open
+question), which stays open and unblocked.
 
 ### Cache key
 
@@ -291,8 +291,9 @@ tiering rather than treating "baked" as a single all-or-nothing state per image.
 - **Resolved: lens-correction placement.** [#191](https://github.com/jordanfelle/nicti/issues/191)
   confirmed this ADR's baked-prefix placement (see "Lens-correction placement, confirmed" under
   Decision) — CA correction's channel-space requirement pins it before ADR-0038's camera→XYZ
-  matrix, and it's bakeable regardless. #39's broader scope (picking a correction-data source,
-  verifying lens coverage) stays open.
+  matrix. Bakeability itself stays conditional on #39's manual-slider UX design (LRC's own Lens
+  Corrections panel has manual distortion/vignette/defringe sliders), not a given regardless of it.
+  #39's broader scope (correction-data source, lens coverage, that UX question) stays open.
 - **`docs/licensing.md` updated in this PR**: two new crates (`zstd`, `lz4_flex`), both permissive,
   already covered by `deny.toml`'s existing allowlist.
 - **New topic `render-graph`** added to `CLAUDE.md`'s topic list and `.claude/rules/`/
