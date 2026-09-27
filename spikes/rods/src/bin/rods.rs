@@ -209,8 +209,21 @@ fn compare(
     // precision at that magnitude); only skipping this for an exact zero shift would be a
     // meaningless special case.
     let (mut cand_srgb, resample_valid) = align::resample_rgb(&cand_srgb_raw, width, height, shift);
+    // A rectangle guaranteed entirely valid given the measured shift -- computed once, reused
+    // both to clamp-fill the invalid border before denoising below and to crop before scoring
+    // PSNR/SSIM further down.
+    let valid_rect = align::valid_rect(width, height, shift);
     if let Some(model_path) = denoise_model {
         let ort_dylib = ort_dylib.expect("clap requires ort_dylib alongside denoise_model");
+        // Replace the resample-invalid border with a clamp-to-edge extension before it reaches
+        // the denoiser -- a real, hostile-review-confirmed finding: an AI denoiser's receptive
+        // field can reach past `valid_rect`'s own margin, so a sharp `0.0` edge left in place
+        // risks smearing a visible artifact inward into the region `valid_rect` otherwise
+        // guarantees is safe to score. `resample_valid` itself is left untouched for the gain-fit
+        // mask below, which still needs the original, pre-fill validity per pixel.
+        if let Some(rect) = valid_rect {
+            align::fill_invalid_border(&mut cand_srgb, width, height, &resample_valid, rect);
+        }
         println!(
             "running Path B AI denoise: {} (tile={}, overlap={}, ep={ep:?})",
             model_path.display(),
@@ -275,9 +288,7 @@ fn compare(
     // numbers. A real image at a real shift always has one (see align::valid_rect's own doc); a
     // shift approaching the image's own half-width/height is a degenerate case worth a loud
     // warning, not a silent fallback that could plausibly look like a real number.
-    let (ref_scored, gained_scored, rect_width, rect_height) = match align::valid_rect(
-        width, height, shift,
-    ) {
+    let (ref_scored, gained_scored, rect_width, rect_height) = match valid_rect {
         Some(rect) => {
             let (_, _, rect_width, rect_height) = rect;
             (

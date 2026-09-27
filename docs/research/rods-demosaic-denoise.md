@@ -50,14 +50,17 @@ tested against a real Z6 NEF, all 7 demosaic qualities (linear/VNG/PPG/AHD/DCB/D
 0/1/2 produce correct output.
 
 **Found, not fixed: the vendored PR#826 LibRaw fork's wavelet denoise is broken.** Any nonzero
-`threshold` corrupts `imgdata.image` to a single-channel-sized buffer, at every magnitude tested
-(1.0, 100.0, 400.0) — caught cleanly by `retina_classic_image`'s own length check, not a crash.
-Root cause, from reading `postprocessing_aux.cpp`: `wavelet_denoise()` operates on still-mosaiced
-Bayer data via a `BAYER(row,col)` macro (dcraw-legacy, pre-demosaic), not post-demosaic as the
-original ADR-0024 plan assumed — something in this fork's control flow around that stage leaves
-the image buffer mis-sized whenever wavelet denoise is requested at all. Classic-NR baseline for
-this pass uses FBDD only (0/1/2, all working); wavelet stays a known, scoped limitation, not
-root-caused further (see Consequences).
+`threshold` corrupts `imgdata.image`'s real contents in some way, at every magnitude tested
+(1.0, 100.0, 400.0) — not root-caused to a specific confirmed mechanism this pass, so
+`retina_libraw_process_classic` now rejects any nonzero `threshold` outright rather than trusting a
+caller to detect the corruption after the fact. `postprocessing_aux.cpp` shows `wavelet_denoise()`
+operating on still-mosaiced Bayer data via a `BAYER(row,col)` macro (dcraw-legacy, pre-demosaic),
+not post-demosaic as the original ADR-0024 plan assumed — an observed processing path, not a
+confirmed root cause: `retina_classic_image` always reports a fixed `iwidth*iheight*4` length
+regardless of what LibRaw's own internals actually allocated, so this evidence doesn't by itself
+establish a single-channel allocation or that any length check actually caught one. Classic-NR
+baseline for this pass uses FBDD only (0/1/2, all working); wavelet stays a known, scoped
+limitation, not root-caused further (see Consequences).
 
 `AHD`, `FBDD=0` was used for every result below (the plan's stated baseline quality setting; a
 demosaic-quality sweep with real timing per setting is unbuilt, flagged as a follow-up).

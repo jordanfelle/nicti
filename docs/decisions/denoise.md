@@ -46,15 +46,18 @@ candidates measured, the alignment bugs found and fixed, and the real Windows-na
   conflict.
 
 - **LibRaw's wavelet denoise is broken in the vendored PR#826 fork, not fixed.** Any nonzero
-  `threshold` corrupts `imgdata.image`'s reported buffer size to a single-channel size, at every
-  magnitude tested (1.0, 100.0, 400.0) — caught cleanly by `retina`'s own output-length check
-  rather than passing corrupt data through. Root cause, from reading
-  `spikes/retina/vendor/LibRaw/src/postprocessing/postprocessing_aux.cpp`: `wavelet_denoise()`
-  operates on still-mosaiced Bayer data via a `BAYER(row,col)` macro (dcraw-legacy, pre-demosaic),
-  not post-demosaic as the ticket's original design assumed — something in this fork's control
-  flow around that stage leaves the buffer mis-sized whenever wavelet denoise is requested at all.
-  The classic-NR baseline for this pass uses FBDD only (0/1/2, all confirmed working); wavelet
-  denoise is a scoped, documented limitation, not root-caused further.
+  `threshold` corrupts `imgdata.image`'s real contents in some way at every magnitude tested (1.0,
+  100.0, 400.0) — not root-caused to a specific confirmed mechanism this pass (see below), so
+  `retina_libraw_process_classic` now rejects any nonzero `threshold` outright rather than trusting
+  a caller to detect the corruption after the fact. `spikes/retina/vendor/LibRaw/src/postprocessing/
+  postprocessing_aux.cpp` shows `wavelet_denoise()` operating on still-mosaiced Bayer data via a
+  `BAYER(row,col)` macro (dcraw-legacy, pre-demosaic), not post-demosaic as the ticket's original
+  design assumed — an observed processing path, not a confirmed root cause: `retina_classic_image`
+  always reports a fixed `iwidth*iheight*4` length regardless of what LibRaw's own internals
+  actually allocated, so this evidence doesn't by itself establish a single-channel allocation or
+  that any length check actually caught one. The classic-NR baseline for this pass uses FBDD only
+  (0/1/2, all confirmed working); wavelet denoise is a scoped, documented limitation, not
+  root-caused further.
 
 - **Real Windows-native CUDA numbers, not sandbox scaffolding.** This is the first Nicti research
   pass on a genuine GPU/CUDA/TensorRT reference environment (installed during this pass: CUDA

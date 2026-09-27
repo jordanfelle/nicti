@@ -267,6 +267,43 @@ pub fn crop_rgb(rgb_hwc: &[f32], width: u32, rect: (u32, u32, u32, u32)) -> Vec<
     out
 }
 
+/// Replaces every pixel `valid` marks `false` with the color of its nearest neighbor inside
+/// `rect` (clamping its own coordinate into `rect`'s bounds) -- the same clamp-to-edge idea
+/// `ai::build_padded_tile` already uses for tile-boundary padding. Meant to run on a
+/// [`resample_rgb`] output **before** it reaches an AI denoiser: a denoiser's receptive field can
+/// reach past `valid_rect`'s own margin, so a sharp, unnatural `0.0` edge at the resample-invalid
+/// border risks propagating a visible artifact inward into the region `valid_rect` otherwise
+/// guarantees is safe to score. A smooth clamp-to-edge extension is a much weaker signal for a
+/// convolutional receptive field to pick up on than a hard black edge, though (like the tile
+/// padding it mirrors) it's a mitigation, not a proof the denoiser's receptive field can never
+/// reach past it -- `rect` should still be sized generously enough to outgrow any receptive field
+/// worth worrying about for the models this project actually uses.
+pub fn fill_invalid_border(
+    rgb_hwc: &mut [f32],
+    width: u32,
+    height: u32,
+    valid: &[bool],
+    rect: (u32, u32, u32, u32),
+) {
+    let (x0, y0, rect_width, rect_height) = rect;
+    let x_max = x0 + rect_width - 1;
+    let y_max = y0 + rect_height - 1;
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            if valid[idx] {
+                continue;
+            }
+            let cx = x.clamp(x0, x_max);
+            let cy = y.clamp(y0, y_max);
+            let src = (cy * width + cx) as usize;
+            for c in 0..3 {
+                rgb_hwc[idx * 3 + c] = rgb_hwc[src * 3 + c];
+            }
+        }
+    }
+}
+
 /// A mask excluding samples near the clipped extremes of either image (highlights or deep
 /// blacks) -- these bias both the shift estimate's gradients and the gain fit, since a clipped
 /// region carries no real signal past the clip point in either image.
@@ -393,6 +430,51 @@ mod tests {
             !valid[0],
             "expected (0,0) to be marked invalid after a shift that pushes it out of bounds"
         );
+    }
+
+    #[test]
+    fn fill_invalid_border_clamps_to_nearest_rect_edge() {
+        // A tiny 4x4 image, rect = (1,1,2,2) valid (the center 2x2), everything outside invalid.
+        // Every invalid pixel should end up with the color of its nearest rect-edge neighbor, not
+        // a smoothed average or anything more clever -- a hard clamp-to-edge, mirroring
+        // ai::build_padded_tile's own tile-boundary padding.
+        let width = 4u32;
+        let height = 4u32;
+        let rect = (1u32, 1u32, 2u32, 2u32);
+        let mut rgb = vec![0.0f32; (width * height * 3) as usize];
+        // Distinct colors per rect cell so we can tell which one got copied.
+        let set = |rgb: &mut [f32], x: u32, y: u32, v: f32| {
+            let idx = ((y * width + x) * 3) as usize;
+            rgb[idx] = v;
+            rgb[idx + 1] = v;
+            rgb[idx + 2] = v;
+        };
+        set(&mut rgb, 1, 1, 10.0);
+        set(&mut rgb, 2, 1, 20.0);
+        set(&mut rgb, 1, 2, 30.0);
+        set(&mut rgb, 2, 2, 40.0);
+
+        let mut valid = vec![false; (width * height) as usize];
+        for y in 1..3u32 {
+            for x in 1..3u32 {
+                valid[(y * width + x) as usize] = true;
+            }
+        }
+
+        fill_invalid_border(&mut rgb, width, height, &valid, rect);
+
+        let px = |rgb: &[f32], x: u32, y: u32| rgb[((y * width + x) * 3) as usize];
+        // Top-left corner (0,0) clamps to rect's (1,1) = 10.0.
+        assert_eq!(px(&rgb, 0, 0), 10.0);
+        // Top-right corner (3,0) clamps to rect's (2,1) = 20.0.
+        assert_eq!(px(&rgb, 3, 0), 20.0);
+        // Bottom-left corner (0,3) clamps to rect's (1,2) = 30.0.
+        assert_eq!(px(&rgb, 0, 3), 30.0);
+        // Bottom-right corner (3,3) clamps to rect's (2,2) = 40.0.
+        assert_eq!(px(&rgb, 3, 3), 40.0);
+        // The rect's own interior must be untouched.
+        assert_eq!(px(&rgb, 1, 1), 10.0);
+        assert_eq!(px(&rgb, 2, 2), 40.0);
     }
 
     #[test]

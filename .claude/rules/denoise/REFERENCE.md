@@ -23,8 +23,10 @@ Full reasoning/history: `docs/decisions/denoise.md`.
   PyTorch conversion needed.
 - **LibRaw's wavelet denoise is broken in the vendored PR#826 fork** — any nonzero `threshold`
   corrupts `imgdata.image`'s buffer size, at every magnitude tested. Not fixed; classic-NR baseline
-  uses FBDD only. Root cause: `wavelet_denoise()` operates on pre-demosaic Bayer data via a
-  `BAYER()` macro, not post-demosaic.
+  uses FBDD only. `wavelet_denoise()` operates on pre-demosaic Bayer data via a `BAYER()` macro,
+  not post-demosaic -- an observed processing path, not the confirmed root cause of the reported
+  buffer-size failure (retina_classic_image() always reports iwidth*iheight*4 regardless, so the
+  evidence doesn't establish a single-channel allocation or that this length check detected one).
 - **Real CUDA speedup confirmed, Windows-native**: ~36x over CPU on a 256px crop, quality matched
   to 4 decimals (confirms genuine EP use, not silent CPU fallback — `ort` 2.0.0-rc.13's `Session`
   doesn't expose which EP served a call). Full 6064×4040 frame: NAFNet 30.7s, SCUNet 50.9s
