@@ -136,6 +136,31 @@ the first real run (and rechecked if the window moves/resizes):
      in the recording that it lands on the button and the straighten history entry appears, not
      just that *some* flash fired at roughly the right time.
 
+## Classic auto-tone capture (#99/#202)
+
+`auto-tone.ahk` is unrelated to the hero-scenario timing above — it's ADR-0099's deferred
+reference-machine capture, run once #202 has a sample set copied out of `ref-10k` (its own
+`nicti-prowl::refset::select` pick, not this repo's frozen `hero-set.txt`):
+
+```
+AutoHotkey64.exe auto-tone.ahk <BENCH_ROOT>\lrc-bench\auto-tone-set <BENCH_ROOT>
+```
+
+Same throwaway-catalog and manual-import-dialog conventions as `setup.ahk` above, but with no
+edit-stack sync step: after selecting all in Library Grid, it prompts you to apply Auto Tone
+**manually via Quick Develop's "Auto" button** — not a scripted Ctrl+U. A reported, current (2026)
+LRC regression (Adobe Community: "Batch editing in Library module (presets, AI updates, auto tone)
+only applies to the first selected photo in Lightroom Classic 15.3") means batch Ctrl+U over a
+multi-photo selection can silently apply to only the first photo, which would corrupt ground truth
+with no visible error — not independently reproduced here (no LRC install in this sandbox), but
+worth avoiding given multiple consistent real user reports. Quick Develop's Auto button is the
+documented reliable path, and the script prompts you to spot-check a few non-first photos before
+continuing. It then prompts you to fully quit Lightroom (not just close the window) before running
+`pupil` — the catalog must be checkpointed and released, since `pupil::truth::open_readonly`
+refuses one with a live lock file or pending WAL frames. `spikes/pupil`'s `truth` module then reads
+the result straight out of `<BENCH_ROOT>\lrc-bench\auto-tone.lrcat` — no Ctrl+S/XMP write, no
+preview build needed.
+
 ## Never automate on a machine you're actively using for something else
 
 `hero.ahk`, `setup.ahk`, and `navigate.ahk` take over the mouse and keyboard and can run for tens
