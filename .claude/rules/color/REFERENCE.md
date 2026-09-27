@@ -45,6 +45,13 @@ Full reasoning/history: `docs/decisions/color.md`.
   LibRaw's own `user_mul={1,1,1,1}`/`output_color=0`/`gamm={1,1}` params) — hands linear camera RGB
   + metadata (black/max/cam_mul/pre_mul/cam_xyz/cblack) to calico without calico depending on
   retina's LibRaw FFI/submodule.
+- **Scope split with #46** (added 2026-09-27): #42 (this topic) owns the DCP-profile machinery
+  above — camera-profile HueSatMap/LookTable, the working-space pick, display/export color
+  management. #46 (not this ticket) owns the *user-facing* WB temp/tint, tone curve, and HSL
+  sliders as `crates/nicti-tapetum`'s own render stages (`coat.rs`/`color.rs`), using a single-
+  matrix WB approximation (`color::wb_gains_for_temp_tint`) rather than this crate's dual-
+  illuminant DNG solve until a DCP profile is actually loaded. See
+  [`render-graph`](../render-graph/REFERENCE.md)'s own package-contents entry for #46's stages.
 
 ## Package contents
 

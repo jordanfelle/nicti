@@ -18,6 +18,7 @@ use nicti_cornea::LinearFrame;
 use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
+use crate::coat::{self, ExposureParams, ToneParams, VibranceParams, WbParams};
 use crate::color;
 use crate::frame::FrameTexture;
 use crate::geometry::Affine2D;
@@ -107,14 +108,14 @@ pub fn wb_stage() -> BasicStage {
     BasicStage {
         id: WB,
         kind: StageKind::Live,
-        default_params: || json!({"r_mult": 1.0, "b_mult": 1.0}),
+        default_params: || coat::default_value::<WbParams>(),
     }
 }
 pub fn exposure_stage() -> BasicStage {
     BasicStage {
         id: EXPOSURE,
         kind: StageKind::Live,
-        default_params: || json!({"stops": 0.0}),
+        default_params: || coat::default_value::<ExposureParams>(),
     }
 }
 /// Fixed to linear ProPhoto RGB for now -- no adjustable params yet. Kept as its own graph node
@@ -131,14 +132,14 @@ pub fn tone_stage() -> BasicStage {
     BasicStage {
         id: TONE,
         kind: StageKind::Live,
-        default_params: || json!({"contrast": 0.0}),
+        default_params: || coat::default_value::<ToneParams>(),
     }
 }
 pub fn vibrance_stage() -> BasicStage {
     BasicStage {
         id: VIBRANCE,
         kind: StageKind::Live,
-        default_params: || json!({"amount": 0.0}),
+        default_params: || coat::default_value::<VibranceParams>(),
     }
 }
 pub fn crop_stage() -> BasicStage {
@@ -367,10 +368,21 @@ struct LiveUniforms {
     col0: [f32; 4],
     col1: [f32; 4],
     col2: [f32; 4],
-    exposure_mult: f32,
-    contrast: f32,
-    vibrance: f32,
-    _pad: f32,
+    /// exposure_mult, contrast, highlights, shadows.
+    tone0: [f32; 4],
+    /// whites, blacks, vibrance, _pad.
+    tone1: [f32; 4],
+}
+
+/// The live suffix's full per-render parameter set -- everything [`LiveSuffixKernel::set_params`]
+/// needs to write its uniform buffer. Grouped into one struct (rather than a growing list of
+/// positional args) now that #46 adds several more fields beyond the original exposure/contrast/
+/// vibrance trio.
+pub struct LiveParams {
+    pub working_space_matrix: color::Mat3,
+    pub exposure: ExposureParams,
+    pub tone: ToneParams,
+    pub vibrance: VibranceParams,
 }
 
 pub struct LiveSuffixKernel {
@@ -399,23 +411,25 @@ impl LiveSuffixKernel {
 
     /// Uploads this render's params -- call before `Renderer::render` whenever any of them
     /// changed (a no-op `write_buffer`, not a pipeline rebuild, if nothing did).
-    pub fn set_params(
-        &self,
-        gpu: &GpuContext,
-        working_space_matrix: color::Mat3,
-        exposure_mult: f32,
-        contrast: f32,
-        vibrance: f32,
-    ) {
-        let m = working_space_matrix;
+    pub fn set_params(&self, gpu: &GpuContext, params: &LiveParams) {
+        let m = params.working_space_matrix;
+        let exposure_mult = color::exposure_multiplier(params.exposure.stops);
         let u = LiveUniforms {
             col0: [m[0][0], m[1][0], m[2][0], 0.0],
             col1: [m[0][1], m[1][1], m[2][1], 0.0],
             col2: [m[0][2], m[1][2], m[2][2], 0.0],
-            exposure_mult,
-            contrast,
-            vibrance,
-            _pad: 0.0,
+            tone0: [
+                exposure_mult,
+                params.tone.contrast,
+                params.tone.highlights,
+                params.tone.shadows,
+            ],
+            tone1: [
+                params.tone.whites,
+                params.tone.blacks,
+                params.vibrance.amount,
+                0.0,
+            ],
         };
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -878,13 +892,28 @@ mod tests {
         let cam_xyz = [
             0.55, 0.2, 0.1, 0.2, 0.7, 0.15, 0.05, 0.1, 0.85, 0.0, 0.0, 0.0,
         ];
-        let matrix = color::camera_to_working_space_matrix(cam_mul, &cam_xyz);
-        let exposure_mult = color::exposure_multiplier(0.7);
-        let contrast = 0.3;
-        let vibrance = 0.4;
+        let matrix = color::camera_to_working_space_matrix(cam_mul, &cam_xyz, &WbParams::default());
+        let exposure = ExposureParams { stops: 0.7 };
+        let tone = ToneParams {
+            contrast: 0.3,
+            highlights: -0.2,
+            shadows: 0.15,
+            whites: 0.1,
+            blacks: -0.05,
+        };
+        let vibrance = VibranceParams { amount: 0.4 };
+        let exposure_mult = color::exposure_multiplier(exposure.stops);
 
         let kernel = LiveSuffixKernel::new(&gpu);
-        kernel.set_params(&gpu, matrix, exposure_mult, contrast, vibrance);
+        kernel.set_params(
+            &gpu,
+            &LiveParams {
+                working_space_matrix: matrix,
+                exposure,
+                tone,
+                vibrance,
+            },
+        );
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -895,8 +924,8 @@ mod tests {
         for (i, px) in input_data.iter().enumerate() {
             let mut rgb = color::mat3_apply(matrix, [px[0], px[1], px[2]]);
             rgb = rgb.map(|c| c * exposure_mult);
-            rgb = color::apply_tone(rgb, contrast);
-            rgb = color::apply_vibrance(rgb, vibrance);
+            rgb = color::apply_tone(rgb, &tone);
+            rgb = color::apply_vibrance(rgb, vibrance.amount);
             for c in 0..3 {
                 assert!(
                     (actual[i][c] - rgb[c]).abs() < 0.01,
@@ -1020,11 +1049,27 @@ mod tests {
         ];
 
         let live_kernel = LiveSuffixKernel::new(&gpu);
-        let matrix = color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz);
-        let exposure_mult = color::exposure_multiplier(0.5);
-        let contrast = 0.2;
-        let vibrance = 0.3;
-        live_kernel.set_params(&gpu, matrix, exposure_mult, contrast, vibrance);
+        let matrix = color::camera_to_working_space_matrix(
+            frame.cam_mul,
+            &frame.cam_xyz,
+            &WbParams::default(),
+        );
+        let exposure = ExposureParams { stops: 0.5 };
+        let tone = ToneParams {
+            contrast: 0.2,
+            ..Default::default()
+        };
+        let vibrance = VibranceParams { amount: 0.3 };
+        let exposure_mult = color::exposure_multiplier(exposure.stops);
+        live_kernel.set_params(
+            &gpu,
+            &LiveParams {
+                working_space_matrix: matrix,
+                exposure,
+                tone,
+                vibrance,
+            },
+        );
 
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(Affine2D::IDENTITY);
@@ -1050,8 +1095,8 @@ mod tests {
         for (i, d) in decoded.iter().enumerate() {
             let mut rgb = color::mat3_apply(matrix, [d[0], d[1], d[2]]);
             rgb = rgb.map(|c| c * exposure_mult);
-            rgb = color::apply_tone(rgb, contrast);
-            rgb = color::apply_vibrance(rgb, vibrance);
+            rgb = color::apply_tone(rgb, &tone);
+            rgb = color::apply_vibrance(rgb, vibrance.amount);
             for c in 0..3 {
                 assert!(
                     (actual[i][c] - rgb[c]).abs() < 0.02,

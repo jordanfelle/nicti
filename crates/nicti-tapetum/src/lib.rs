@@ -7,6 +7,7 @@
 //! (#45's third slice) -- denoise/lens/heal stay passthrough slots for their own tickets.
 
 pub mod cache;
+pub mod coat;
 pub mod color;
 pub mod frame;
 pub mod geometry;

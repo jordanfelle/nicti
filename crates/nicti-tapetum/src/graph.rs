@@ -18,7 +18,10 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+use nicti_pawprint::{CanonicalError, EditDocument, StageEntry};
 use serde::{Deserialize, Serialize};
+
+use crate::StageRegistry;
 
 /// Whether a node's output is baked (cached, invalidated only when it or an upstream node
 /// changes) or live (recomputed every frame, never itself cached) or geometry (a per-frame
@@ -66,6 +69,16 @@ pub enum GraphError {
     UnknownStage(String),
     #[error("graph has a cycle involving stage {0:?}")]
     Cycle(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyDocumentError {
+    #[error(transparent)]
+    Graph(#[from] GraphError),
+    #[error("stage {0:?} is a graph node but has no registered RenderStage")]
+    UnregisteredStage(String),
+    #[error("stage {0:?}'s params failed to canonicalize: {1}")]
+    Canonical(String, CanonicalError),
 }
 
 /// The result of [`RenderGraph::set_own_hash`]: `all` is every node whose cache key changed
@@ -244,11 +257,46 @@ impl RenderGraph {
             .collect();
         Ok(Invalidation { all, bakes })
     }
+
+    /// Applies an `EditDocument`'s params to every node currently in the graph, setting each
+    /// node's `own_hash` from `RenderStage::cache_contribution` -- without this, a node's
+    /// `own_hash` stays whatever it was set to at `add_node` time (typically a placeholder like
+    /// `blake3::hash(id.as_bytes())`), so a slider change never actually changes the live
+    /// composite key and nothing re-renders. A node with no entry in `document` uses its
+    /// registered stage's `default_params()`. Node ids not present in `registry` are an error --
+    /// every node in a real graph is backed by a real stage, unlike `document`, which may
+    /// legitimately be missing an entry for a stage still at its defaults.
+    pub fn apply_document(
+        &mut self,
+        document: &EditDocument,
+        registry: &StageRegistry,
+    ) -> Result<(), ApplyDocumentError> {
+        let ids: Vec<String> = self.nodes.keys().cloned().collect();
+        for id in ids {
+            let stage = registry
+                .get(&id)
+                .ok_or_else(|| ApplyDocumentError::UnregisteredStage(id.clone()))?;
+            let entry = document
+                .stages
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| StageEntry {
+                    schema_version: stage.schema_version(),
+                    params: stage.default_params(),
+                });
+            let hash = stage
+                .cache_contribution(&entry)
+                .map_err(|e| ApplyDocumentError::Canonical(id.clone(), e))?;
+            self.set_own_hash(&id, hash)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RenderStage;
 
     /// Builds the graph this ADR proposes: decode -> demosaic -> denoise -> lens -> heal (all
     /// Baked), then wb -> huesat -> tone -> vibrance (all Live), then crop (Geometry).
@@ -456,6 +504,153 @@ mod tests {
         assert_eq!(
             err,
             GraphError::UnknownUpstream("a".to_string(), "nonexistent".to_string())
+        );
+    }
+
+    fn make_tone_stage() -> std::sync::Arc<dyn RenderStage> {
+        std::sync::Arc::new(crate::stages::tone_stage())
+    }
+    fn make_wb_stage() -> std::sync::Arc<dyn RenderStage> {
+        std::sync::Arc::new(crate::stages::wb_stage())
+    }
+
+    /// A registry with just `nicti.tone` and `nicti.wb` registered, matching the real stages in
+    /// `crate::stages` -- enough to exercise `apply_document` without depending on that module's
+    /// full stage set.
+    fn tone_and_wb_registry() -> StageRegistry {
+        let mut registry: StageRegistry = StageRegistry::new();
+        registry
+            .register(
+                nicti_claw::Descriptor {
+                    id: crate::stages::TONE,
+                    schema_version: 1,
+                },
+                make_tone_stage,
+            )
+            .unwrap();
+        registry
+            .register(
+                nicti_claw::Descriptor {
+                    id: crate::stages::WB,
+                    schema_version: 1,
+                },
+                make_wb_stage,
+            )
+            .unwrap();
+        registry
+    }
+
+    fn tone_and_wb_graph() -> RenderGraph {
+        let mut g = RenderGraph::new();
+        g.add_node(StageNode {
+            id: crate::stages::WB.to_string(),
+            kind: StageKind::Live,
+            upstream: vec![],
+            own_hash: blake3::hash(b"placeholder"),
+        })
+        .unwrap();
+        g.add_node(StageNode {
+            id: crate::stages::TONE.to_string(),
+            kind: StageKind::Live,
+            upstream: vec![crate::stages::WB.to_string()],
+            own_hash: blake3::hash(b"placeholder"),
+        })
+        .unwrap();
+        g
+    }
+
+    #[test]
+    fn apply_document_with_no_entries_uses_each_stage_own_default_params() {
+        let registry = tone_and_wb_registry();
+        let mut g = tone_and_wb_graph();
+        let document = EditDocument::default();
+        g.apply_document(&document, &registry).unwrap();
+
+        let expected = crate::stages::tone_stage()
+            .cache_contribution(&StageEntry {
+                schema_version: 1,
+                params: crate::stages::tone_stage().default_params(),
+            })
+            .unwrap();
+        assert_eq!(g.node(crate::stages::TONE).unwrap().own_hash, expected);
+    }
+
+    #[test]
+    fn apply_document_sets_own_hash_from_the_documents_entry() {
+        let registry = tone_and_wb_registry();
+        let mut g = tone_and_wb_graph();
+        let mut document = EditDocument::default();
+        document.stages.insert(
+            crate::stages::TONE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({"contrast": 0.5}),
+            },
+        );
+        g.apply_document(&document, &registry).unwrap();
+
+        let expected = crate::stages::tone_stage()
+            .cache_contribution(&StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({"contrast": 0.5}),
+            })
+            .unwrap();
+        assert_eq!(g.node(crate::stages::TONE).unwrap().own_hash, expected);
+    }
+
+    #[test]
+    fn apply_document_changing_only_tone_leaves_wbs_own_hash_unchanged_but_invalidates_the_key() {
+        let registry = tone_and_wb_registry();
+        let mut g = tone_and_wb_graph();
+        g.apply_document(&EditDocument::default(), &registry)
+            .unwrap();
+        let wb_hash_before = g.node(crate::stages::WB).unwrap().own_hash;
+        let wb_key_before = g.cache_key(crate::stages::WB).unwrap();
+        let tone_key_before = g.cache_key(crate::stages::TONE).unwrap();
+
+        let mut document = EditDocument::default();
+        document.stages.insert(
+            crate::stages::TONE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({"contrast": 0.9}),
+            },
+        );
+        g.apply_document(&document, &registry).unwrap();
+
+        assert_eq!(
+            g.node(crate::stages::WB).unwrap().own_hash,
+            wb_hash_before,
+            "changing only tone's document entry must not touch wb's own_hash"
+        );
+        assert_eq!(
+            g.cache_key(crate::stages::WB).unwrap(),
+            wb_key_before,
+            "wb's cache key must not change either -- it's upstream of tone, not downstream"
+        );
+        assert_ne!(
+            g.cache_key(crate::stages::TONE).unwrap(),
+            tone_key_before,
+            "tone's own cache key must change when its document entry changes"
+        );
+    }
+
+    #[test]
+    fn apply_document_errs_on_a_graph_node_with_no_registered_stage() {
+        let registry: StageRegistry = StageRegistry::new(); // nothing registered
+        let mut g = RenderGraph::new();
+        g.add_node(StageNode {
+            id: "nicti.unregistered".to_string(),
+            kind: StageKind::Live,
+            upstream: vec![],
+            own_hash: blake3::hash(b"placeholder"),
+        })
+        .unwrap();
+        let err = g
+            .apply_document(&EditDocument::default(), &registry)
+            .unwrap_err();
+        assert!(
+            matches!(err, ApplyDocumentError::UnregisteredStage(id) if id == "nicti.unregistered")
         );
     }
 }
