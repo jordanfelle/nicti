@@ -18,7 +18,7 @@ use nicti_decode::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 
 use crate::{CatalogError, CatalogStore, NewAsset, Preview};
 
-/// v1 targets Nikon NEF only (ADR-0021's language-and-architecture topic) -- NRW is Nikon's
+/// v1 targets Nikon NEF only (ADR-0015's language-and-stack topic) -- NRW is Nikon's
 /// compact-body variant of the same format. Widening this list is a future-camera-support
 /// concern, not this ticket's.
 const RAW_EXTENSIONS: &[&str] = &["nef", "nrw"];
