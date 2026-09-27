@@ -103,3 +103,34 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   stays open too.
 - **Open**: real-photo (not synthetic) disk-tier compression ratio: follow-up #190, blocked on #45
   producing real baked output to measure against.
+
+## Addendum (2026-09-27, #45 PR4): real-hardware findings from the first real NEF this pipeline
+ever decoded
+
+This sandbox gained real `ref-10k` NEF access partway through #45's build (previously every test
+above ran against small synthetic `LinearFrame` fixtures only). Two real findings came directly
+out of that, neither of which any synthetic-fixture test could have caught:
+
+- **Decode needs row-strip splitting.** A real Nikon Z8 frame (8280×5520) packs to a ~261.5MB
+  buffer for `normalize.wgsl`'s decode dispatch. This sandbox's lavapipe (software) adapter's real
+  `max_storage_buffer_binding_size` measured exactly 128MiB — a small synthetic fixture (2×2, 3×2)
+  never approached that limit, so the ceiling was invisible until a real full-res file was
+  decoded. `DecodeExec::encode` now loops over row-strips sized by `stages::rows_per_strip(width,
+  height, max_storage_buffer_binding_size)`, each strip a separate upload buffer + dispatch,
+  writing to the correct absolute row offset of the one shared full-frame output texture.
+- **`cam_xyz`'s direction was backwards.** `color::cam_xyz_to_mat3` treated LibRaw's `cam_xyz`
+  field as camera→XYZ; `camera_to_working_space_matrix` composed it directly with no inversion.
+  Every existing test used a synthetic `cam_xyz` matrix chosen for numerical convenience, so this
+  never surfaced. Run against the real file, the rendered image had a uniform, unmistakably wrong
+  green color cast. Checking LibRaw's own `cam_xyz_coeff` (`utils_dcraw.cpp`, not just the header
+  comment) confirmed `cam_xyz` is actually **XYZ→camera**: `cam_rgb[i][j] = cam_xyz[i][k] *
+  xyz_rgb[k][j]`, composing with an XYZ input, never a camera one. Fixed by inverting
+  (`color::mat3_invert`, Cramer's rule) before use. Re-rendering the same file afterward produced a
+  recognizable photo with correct rough hue relationships (reddish brick, white/grey fur, black
+  clothing, green foliage) instead of the uniform green cast.
+
+Neither finding changes this ADR's Decision section — both are implementation bugs in code that
+already claimed to follow it, not a design reconsideration. Included here because "real hardware
+access surfaced a bug no synthetic fixture could" is exactly the kind of finding this document
+exists to record, matching this file's own established practice of noting "a real timing bug this
+pass caught" above.
