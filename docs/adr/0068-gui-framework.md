@@ -218,16 +218,17 @@ table.
 
 ## Consequences
 
-- **If egui wins** (current lead per the hard gates): `nicti-render`'s viewport integration is the
+- **egui is selected**: `nicti-render`'s viewport integration is the
   `egui_wgpu::CallbackTrait` shape already proven in `spikes/pelt-egui/src/viewport.rs` — a
   `prepare`/`paint` split sharing eframe's device, `wgpu` pinned at exactly the version ADR-0016
   already chose, no version-compatibility tax.
-- **If Slint wins**: needs an ADR-0018 amendment (a GPL-3.0/dual-commercial dependency is a real
-  outbound-license decision, feeding directly into #66) before it ships beyond this research spike
-  — not automatic, and not implied by this ADR passing it through the hard gates.
-- **If Iced wins**: `nicti-render` either targets wgpu 27 (revisiting ADR-0016's own wgpu-30-
-  specific `SHADER_F16`/Vulkan findings against that older version) or blocks on an iced upgrade to
-  wgpu 30 — a real, non-trivial dependency to carry forward, not a footnote.
+- **Slint was not selected**: it would have needed an ADR-0018 amendment (a GPL-3.0/dual-commercial
+  dependency is a real outbound-license decision, feeding directly into #66) before it could ship
+  beyond a research spike — not automatic, and not implied by passing it through the hard gates.
+- **Iced was not selected**: it would have meant `nicti-render` either targeting wgpu 27
+  (revisiting ADR-0016's own wgpu-30-specific `SHADER_F16`/Vulkan findings against that older
+  version) or blocking on an iced upgrade to wgpu 30 — a real, non-trivial dependency to carry
+  forward, not a footnote.
 - **GPUI is closed out for Nicti's v1 (Windows) target** on hard evidence, not a hunch — this can
   be revisited only if GPUI ships an official Windows Vulkan/wgpu-interop backend in the future
   (its own crate features show no sign of one as of v0.2.2, 2026-09-23).
