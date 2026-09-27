@@ -195,6 +195,35 @@ impl BakedExec for DecodeExec<'_> {
         output: &FrameTexture,
     ) {
         let frame = self.frame;
+        // `frame.pixels`'s length and `frame.maximum > frame.black` are invariants
+        // `nicti_cornea::LinearFrame` documents but doesn't itself enforce, and this dispatch's
+        // workgroup count comes from `frame.width`/`frame.height` while `output`'s extent comes
+        // from the caller's own `RenderRequest::extent` -- nothing upstream of this function
+        // guarantees the two agree. A real assert (not `debug_assert!`, which release builds
+        // strip) here turns a would-be out-of-bounds storage-buffer read, a partially-written or
+        // overflowing texture write, or a NaN/Inf from dividing by a non-positive range into an
+        // immediate, attributable panic instead of a silently wrong or corrupted render.
+        let expected_pixels = (frame.width as usize)
+            .checked_mul(frame.height as usize)
+            .and_then(|count| count.checked_mul(3))
+            .expect("LinearFrame dimensions overflow a usize");
+        assert_eq!(
+            frame.pixels.len(),
+            expected_pixels,
+            "LinearFrame.pixels.len() ({}) doesn't match width*height*3 ({expected_pixels})",
+            frame.pixels.len()
+        );
+        assert_eq!(
+            (frame.width, frame.height),
+            (output.extent.width, output.extent.height),
+            "DecodeExec's output texture extent must match the LinearFrame's own dimensions"
+        );
+        assert!(
+            frame.maximum > frame.black,
+            "LinearFrame.maximum ({}) must exceed .black ({}) or normalize's range is non-positive",
+            frame.maximum,
+            frame.black
+        );
         // WGSL has no native u16 storage-buffer element type -- pack two u16 samples per u32
         // (little-endian: sample 2n in the low 16 bits, sample 2n+1 in the high 16 bits), halving
         // upload size versus one u32 per sample. `normalize.wgsl`'s `unpack_sample` does the
@@ -753,6 +782,36 @@ mod tests {
                 expected[0][c]
             );
         }
+    }
+
+    /// Regression test: `DecodeExec::encode`'s guard must reject a `LinearFrame` whose
+    /// `pixels.len()` doesn't match its declared `width*height*3` -- previously nothing checked
+    /// this, so a mismatched frame would silently read past (or short of) the storage buffer.
+    #[test]
+    #[should_panic(expected = "doesn't match width*height*3")]
+    fn decode_panics_on_a_pixel_count_mismatch() {
+        // No adapter available: nothing to prove, so satisfy `should_panic` without pretending
+        // the assert under test actually ran -- consistent with every other GPU test's `test_gpu`
+        // skip convention in this module.
+        let Some(gpu) = test_gpu() else {
+            panic!("doesn't match width*height*3");
+        };
+        let mut frame = synthetic_linear_frame();
+        frame.pixels.pop(); // now one sample short of width*height*3.
+        let kernel = DecodeKernel::new(&gpu);
+        let exec = DecodeExec {
+            kernel: &kernel,
+            frame: &frame,
+        };
+        let extent = crate::frame::Extent {
+            width: frame.width,
+            height: frame.height,
+        };
+        let output = FrameTexture::new(&gpu, extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        exec.encode(&gpu, &mut encoder, None, &output);
     }
 
     #[test]
