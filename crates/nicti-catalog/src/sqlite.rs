@@ -164,7 +164,10 @@ impl CatalogStore for SqliteCatalog {
         let conn = self.conn.lock().unwrap();
         Ok(conn
             .query_row(
-                &format!("SELECT {ASSET_COLUMNS} FROM asset WHERE fingerprint = ?1 LIMIT 1"),
+                &format!(
+                    "SELECT {ASSET_COLUMNS} FROM asset WHERE fingerprint = ?1 \
+                     ORDER BY id ASC LIMIT 1"
+                ),
                 [fingerprint],
                 Self::row_to_asset,
             )
@@ -233,11 +236,21 @@ impl CatalogStore for SqliteCatalog {
         new_root_id: i64,
         new_rel_path: &str,
         new_rel_path_fold: &str,
+        size_bytes: u64,
+        mtime_unix: i64,
     ) -> Result<(), CatalogError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3 WHERE id = ?4",
-            params![new_root_id, new_rel_path, new_rel_path_fold, asset_id],
+            "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3, \
+                size_bytes = ?4, mtime_unix = ?5 WHERE id = ?6",
+            params![
+                new_root_id,
+                new_rel_path,
+                new_rel_path_fold,
+                size_bytes as i64,
+                mtime_unix,
+                asset_id
+            ],
         )?;
         Ok(())
     }

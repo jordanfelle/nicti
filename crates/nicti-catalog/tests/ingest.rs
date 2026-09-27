@@ -216,6 +216,54 @@ fn renamed_file_is_relinked_not_duplicated() {
     );
 }
 
+/// Two files sharing identical content (a literal duplicate, or a fingerprint collision) must
+/// both keep their own catalog row -- move detection is only supposed to fire when the matched
+/// row's *old* path is actually gone. Regression test for a bug an adversarial review found: the
+/// original implementation had no such check, so scanning a second file with the same fingerprint
+/// as an already-cataloged, still-present file silently relinked the existing row onto the new
+/// path, permanently losing the first file's own catalog entry.
+#[test]
+fn duplicate_content_files_both_still_present_get_separate_asset_rows() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let original = write_synthetic_nef(dir.path(), "IMG_0001.NEF");
+    // A literal byte-for-byte copy under a different name -- same fingerprint, both files remain
+    // on disk.
+    std::fs::copy(&original, dir.path().join("IMG_0001_copy.NEF")).unwrap();
+
+    let volume_id = store
+        .upsert_volume("test-volume", None, None, 1000)
+        .unwrap();
+    let root_id = store.ensure_root(volume_id, "").unwrap();
+
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.added, 2, "both files get their own asset row");
+    assert_eq!(report.moved, 0);
+
+    let original_asset = store
+        .find_asset_by_path(root_id, "IMG_0001.NEF")
+        .unwrap()
+        .expect("original file's row must still exist");
+    let copy_asset = store
+        .find_asset_by_path(root_id, "IMG_0001_copy.NEF")
+        .unwrap()
+        .expect("copy's own row must exist");
+    assert_ne!(original_asset.id, copy_asset.id);
+
+    // A subsequent rescan must not start shuffling the two rows back and forth either.
+    let second = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(second.skipped_unchanged, 2);
+    assert_eq!(second.moved, 0);
+    assert!(store
+        .find_asset_by_path(root_id, "IMG_0001.NEF")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .find_asset_by_path(root_id, "IMG_0001_copy.NEF")
+        .unwrap()
+        .is_some());
+}
+
 #[test]
 fn a_corrupt_file_is_reported_as_failed_without_aborting_the_run() {
     let store = SqliteCatalog::open_in_memory().unwrap();

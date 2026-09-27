@@ -69,12 +69,18 @@ pub trait CatalogStore: Module {
 
     /// Re-points an existing asset at a new `(root_id, rel_path)` — the persistence step a
     /// fingerprint match under a different path needs (a file moved rather than newly imported).
+    /// Also refreshes `size_bytes`/`mtime_unix` to the moved file's own stat, so a move that
+    /// changed mtime (a cross-filesystem move, some backup tools) doesn't leave the row stuck
+    /// with stale stat fields that would make every future scan misdetect it as changed and
+    /// needlessly reprocess it.
     fn relink_asset(
         &self,
         asset_id: i64,
         new_root_id: i64,
         new_rel_path: &str,
         new_rel_path_fold: &str,
+        size_bytes: u64,
+        mtime_unix: i64,
     ) -> Result<(), CatalogError>;
 
     fn put_preview(

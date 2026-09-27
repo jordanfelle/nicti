@@ -218,9 +218,30 @@ fn ingest_one(
     if existing.is_none() {
         if let Some(matched) = store.find_by_fingerprint(&fingerprint)? {
             if matched.root_id != root_id || matched.rel_path != rel_path {
-                store.relink_asset(matched.id, root_id, &rel_path, &rel_path_fold)?;
-                report.moved += 1;
-                return Ok(());
+                // A fingerprint match under a different path is only a genuine *move* if the
+                // matched row's old path is actually gone -- otherwise this is a second, distinct
+                // file that just happens to share content (a literal duplicate, or a fingerprint
+                // collision), and relinking would silently steal the existing asset's row out
+                // from under its still-present file, permanently losing that file's own catalog
+                // entry on every future rescan (found by adversarial review). Only checkable when
+                // the match is under the root currently being scanned -- a cross-root/cross-volume
+                // match can't be verified without resolving that other root's mount path, which
+                // this trait has no way to do yet, so it's treated conservatively as "can't prove
+                // it's gone" and falls through to a fresh insert rather than risking a bad merge.
+                let old_path_confirmed_gone =
+                    matched.root_id == root_id && !root_path.join(&matched.rel_path).exists();
+                if old_path_confirmed_gone {
+                    store.relink_asset(
+                        matched.id,
+                        root_id,
+                        &rel_path,
+                        &rel_path_fold,
+                        size_bytes,
+                        mtime_unix,
+                    )?;
+                    report.moved += 1;
+                    return Ok(());
+                }
             }
         }
     }
