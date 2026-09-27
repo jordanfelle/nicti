@@ -3,10 +3,12 @@
 ; set, and applies LRC's own "Auto Settings" to every image in it.
 ;
 ; Unlike hero.ahk/setup.ahk, this needs no manual edit-stack application and no Ctrl+S/XMP write:
-; Auto Settings is a single deterministic action (Ctrl+U over the whole selection), and #202 reads
-; the result straight out of this throwaway .lrcat via `pupil`'s `truth` module -- see ADR-0099's
-; Decision section. This still follows setup.ahk's "don't automate the file-picker" caution: the
-; import step itself is manual (see below), same reasoning as setup.ahk's own comment on why the
+; #202 reads the result straight out of this throwaway .lrcat via `pupil`'s `truth` module -- see
+; ADR-0099's Decision section. Applying Auto Tone itself IS manual (Quick Develop's "Auto" button,
+; not a scripted Ctrl+U) -- a real, current (2026) Lightroom Classic regression makes batch Ctrl+U
+; over a multi-photo selection apply to only the first photo, which would silently corrupt ground
+; truth. This still follows setup.ahk's "don't automate the file-picker" caution: the import step
+; itself is also manual (see below), same reasoning as setup.ahk's own comment on why the
 ; edit-stack step isn't scripted there.
 ;
 ; Usage: AutoHotkey64.exe auto-tone.ahk <source-dir> [bench-root]
