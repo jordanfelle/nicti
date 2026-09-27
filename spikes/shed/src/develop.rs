@@ -15,8 +15,10 @@
 //! place -- #157 resolved the 6 keys that had no owner ticket after this pass's first sweep by
 //! measuring their real presence/active usage (`analyze_unowned_keys`, `UNOWNED_KEYS`) rather than
 //! guessing: `FilterList`/`AllowFilters` turned out to gate 4 distinct LRC AI filters, not one,
-//! with real but very unevenly distributed usage (20,303 Denoise / 47 People Removal / 6 Super
-//! Resolution / 1 Reflection Removal, of 380,307 rows) -- Denoise -> `AiDenoise` (#40), People/
+//! with real but very unevenly distributed usage across `FilterList.Filters[].Title` entries:
+//! 20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal, summing to
+//! 20,357 *entries* across 20,356 *active rows* (one row has 2 `Filters[]` entries -- entry count
+//! and row count are different things, both real) -- Denoise -> `AiDenoise` (#40), People/
 //! Reflection Removal -> `Heal` (#51, already scoped for "AI distraction removal"), Super
 //! Resolution has no existing owner and got a new ticket (#174). `LensBlur` is present in nearly
 //! every row (380,300/380,307) but always as an empty bookkeeping table -- 0 rows had real
@@ -263,8 +265,9 @@ fn exact_owner(key: &str) -> Option<Owner> {
         // -- Masks + local adjustments (brush/gradient/AI local correction groups, range masks)
         "MaskGroupBasedCorrections" | "RangeMaskMapInfo" => Masks,
         // -- AI filter-panel container (#157): key-level classification only -- `FilterList`
-        // holds several distinct filter types (Denoise dominant at 20,303/20,356 real active
-        // rows; People Removal/Reflection Removal -> Heal; Super Resolution -> #174), but
+        // holds several distinct filter types (Denoise dominant at 20,303 of 20,357 real filter
+        // entries across 20,356 active rows -- one row has 2 entries, see this module's doc
+        // comment; People Removal/Reflection Removal -> Heal; Super Resolution -> #174), but
         // `classify_key` operates per-key, not per-filter-entry. `AiDenoise` here is the
         // majority-case default; #62's importer must still inspect `FilterList.Filters[].Title`
         // to route People/Reflection Removal entries to #51 and Super Resolution entries to
@@ -735,15 +738,40 @@ mod tests {
             "the pinned ground-truth key list itself drifted"
         );
         let mut unowned = Vec::new();
+        let mut counts: BTreeMap<Owner, i64> = BTreeMap::new();
         for key in REAL_KEYS {
-            if classify_key(key) == Owner::Unowned {
+            let owner = classify_key(key);
+            if owner == Owner::Unowned {
                 unowned.push(*key);
             }
+            *counts.entry(owner).or_insert(0) += 1;
         }
         assert!(
             unowned.is_empty(),
             "#157 assigned an owner (or ProvenanceOnly) to every previously-unowned key -- a new \
              Unowned hit here ({unowned:?}) means a real key stopped being classified"
+        );
+        // Per-owner counts, not just "not Unowned" -- a match-arm-ordering slip that silently
+        // routes a key to the wrong (but still real) Owner would pass an is_empty()-only check;
+        // these totals must match ADR-0023's own owner table exactly. #157 added AiDenoise(2),
+        // Presets(3), ProvenanceOnly(1); the rest predate it.
+        let expected: BTreeMap<Owner, i64> = [
+            (Owner::Color, 69),
+            (Owner::Global, 56),
+            (Owner::CropGeometry, 33),
+            (Owner::Lens, 24),
+            (Owner::Heal, 7),
+            (Owner::AiDenoise, 2),
+            (Owner::Masks, 2),
+            (Owner::Presets, 3),
+            (Owner::ProvenanceOnly, 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            counts, expected,
+            "per-owner key counts drifted from ADR-0023's table -- a key was reclassified to a \
+             different (but still real) owner than the one this pass measured"
         );
     }
 

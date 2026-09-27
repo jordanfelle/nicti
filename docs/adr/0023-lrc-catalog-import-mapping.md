@@ -101,12 +101,13 @@ unowned — see below):
 this same catalog, rather than guessing from the key names alone:
 
 - **`FilterList`/`AllowFilters`** turned out to gate 4 distinct LRC AI filters, not one, with very
-  uneven real usage across the 380,307 rows: **20,303 Denoise, 47 People Removal, 6 Super
-  Resolution, 1 Reflection Removal** (`FilterList.Filters[].Title`). `classify_key` operates
-  per-key, not per-filter-entry, so it defaults `FilterList`/`AllowFilters` to `#40` (the dominant
-  case) — but #62's importer must inspect each `Filters[]` entry's `Title` and route People/
-  Reflection Removal to **#51** and Super Resolution to the new **#174** instead of assuming every
-  entry is Denoise.
+  uneven real usage across `FilterList.Filters[].Title` entries: **20,303 Denoise, 47 People
+  Removal, 6 Super Resolution, 1 Reflection Removal** — summing to 20,357 *entries* across 20,356
+  *active rows* of 380,307 (one row has 2 `Filters[]` entries; entry count and row count are
+  different things, both real, not a typo). `classify_key` operates per-key, not per-filter-entry,
+  so it defaults `FilterList`/`AllowFilters` to `#40` (the dominant case) — but #62's importer must
+  inspect each `Filters[]` entry's `Title` and route People/Reflection Removal to **#51** and Super
+  Resolution to the new **#174** instead of assuming every entry is Denoise.
 - **`LensBlur`** is present in nearly every row (380,300/380,307) but *always* as an empty
   bookkeeping table (`{  }`) — **0 rows had real content**, i.e. the feature has never actually
   been used in this catalog. Not worth a render-owning ticket for zero real usage; #62 keeps it

@@ -24,8 +24,9 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   and per-channel HSL keys) sorting all real keys to owner tickets #42/#46/#47/#39/#51/#49/#40/#52.
   Keep raw LRC text verbatim in a provenance blob on import; translate only what's needed.
 - **`FilterList`/`AllowFilters` gate 4 distinct AI filters (#157)**, not just Denoise: real usage
-  is 20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal (of 380,307
-  rows), read from `FilterList.Filters[].Title`. `classify_key` defaults the raw key to `#40`
+  is 20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal entries
+  (summing to 20,357 across 20,356 active rows of 380,307 — one row holds 2 entries), read from
+  `FilterList.Filters[].Title`. `classify_key` defaults the raw key to `#40`
   (dominant case) — #62's importer must inspect each `Filters[]` entry and route People/Reflection
   Removal to `#51`, Super Resolution to `#174`. `LensBlur` is present almost everywhere but always
   empty (0/380,307 rows with real content) — provenance-only, no owner ticket needed.

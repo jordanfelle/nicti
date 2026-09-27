@@ -100,8 +100,9 @@ unowned keys (`FilterList`, `AllowFilters`, `LensBlur`, `Preset`, `ToggleStyleAm
 `ToggleStyleDigest`) by counting real presence and active usage against this same catalog:
 
 - `FilterList`/`AllowFilters` gate 4 distinct AI filters, with real but very uneven usage:
-  **20,303 Denoise, 47 People Removal, 6 Super Resolution, 1 Reflection Removal** rows (of
-  380,307), read from `FilterList.Filters[].Title`. `classify_key` is per-key, so it defaults both
+  **20,303 Denoise, 47 People Removal, 6 Super Resolution, 1 Reflection Removal** entries (of
+  380,307 rows), read from `FilterList.Filters[].Title` -- summing to 20,357 entries across 20,356
+  active rows (one row holds 2 `Filters[]` entries). `classify_key` is per-key, so it defaults both
   to `#40` (the dominant case) -- `#62`'s importer must still inspect each `Filters[]` entry's
   `Title` to route People/Reflection Removal to `#51` and Super Resolution to the new `#174`.
 - `LensBlur` is present in 380,300/380,307 rows but **always as an empty bookkeeping table**

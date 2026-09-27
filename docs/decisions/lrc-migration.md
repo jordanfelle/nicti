@@ -27,8 +27,9 @@ is the per-topic summary; those two are the full research trail.
   `Enable*` panel toggles and per-channel HSL keys with no shared prefix). **#157 resolved the 6
   keys this pass originally left unowned** by measuring real presence/active usage rather than
   guessing: `FilterList`/`AllowFilters` gate 4 distinct AI filters with very uneven real usage
-  (20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal, of 380,307
-  rows) — `classify_key` defaults both to `#40` (dominant case), but #62's importer must inspect
+  (20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal entries, summing
+  to 20,357 across 20,356 active rows of 380,307 — one row holds 2 entries) — `classify_key`
+  defaults both to `#40` (dominant case), but #62's importer must inspect
   each `FilterList.Filters[].Title` and route People/Reflection Removal to `#51` and Super
   Resolution to the new `#174`. `LensBlur` is present in 380,300/380,307 rows but always as an
   empty bookkeeping table (0 rows with real content, i.e. never actually used) — kept
