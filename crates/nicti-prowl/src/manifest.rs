@@ -6,7 +6,7 @@
 //! any future research ticket's own harness) shares it instead of re-implementing it.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 use rand::rngs::StdRng;
@@ -195,8 +195,24 @@ fn check_one(root: &Path, entry: &Entry) -> CheckResult {
 
 fn hash_file(mut file: File) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s
 }
 
 #[cfg(test)]
@@ -227,7 +243,7 @@ mod tests {
         File::create(&path).unwrap().write_all(content).unwrap();
         let mut hasher = Sha256::new();
         hasher.update(content);
-        format!("{:x}", hasher.finalize())
+        hex_encode(&hasher.finalize())
     }
 
     #[test]
