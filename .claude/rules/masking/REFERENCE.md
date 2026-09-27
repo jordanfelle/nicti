@@ -26,7 +26,7 @@ Full reasoning/history: `docs/decisions/masking.md`.
   add/erase, dabs blend via `max` within a stroke).
 - **Refine** (`refine.rs`): guided filter (He/Sun/Tang), preview-res alpha → full-res, edge-aware
   via the photo's own luminance — not a plain bilinear alpha upsample.
-- **GPU**: 4 WGSL kernels (`gradient_linear`/`gradient_radial`/`brush`/`compose`/`masked_adjust` —
+- **GPU**: 5 WGSL kernels (`gradient_linear`/`gradient_radial`/`brush`/`compose`/`masked_adjust` —
   5 files, `compose` called once per component), each its own file (this repo's convention: one
   entry point per `.wgsl` file, since WGSL requires unique `@group`/`@binding` pairs module-wide,
   not just per entry point — a single multi-kernel file fails to compile). Parity-tested within
@@ -41,5 +41,5 @@ Full reasoning/history: `docs/decisions/masking.md`.
   scaffolding over `ort`/`load-dynamic` (no real weights, same posture as `groom/ai.rs`), the
   brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` AI+geometry
   compose model with a shared bake key for a mask and its inverse, a guided-filter
-  preview-to-full-res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe. Real,
+  preview-to-full-res refine, and 5 WGSL kernels (5 files) parity-tested against lavapipe. Real,
   tested (23 unit + 9 GPU-parity tests), not path-gated. See `docs/research/siamese-masking.md`.

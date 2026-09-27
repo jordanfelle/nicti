@@ -31,7 +31,7 @@ the mask-group compose model that ties them together.
 - **Refinement**: `spikes/siamese/src/refine.rs` — a guided filter (He, Sun & Tang), not a plain
   bilinear alpha upsample, so a preview-resolution AI mask's boundary snaps back to the full-res
   photo's own edges rather than staying a soft blur across the subject boundary.
-- **GPU**: four WGSL kernels (gradient rasterize x2, brush rasterize, compose step, masked-adjust
+- **GPU**: five WGSL kernels (gradient rasterize x2, brush rasterize, compose step, masked-adjust
   apply), each checked against its CPU reference within `1e-4` in `spikes/siamese/tests/gpu_parity.rs`
   (9 tests, passing against lavapipe in this sandbox).
 - **No real ONNX weights obtained this pass** — a full BiRefNet export exists publicly (~970MB)
