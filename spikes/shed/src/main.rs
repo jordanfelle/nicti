@@ -21,6 +21,10 @@ enum Command {
     Inventory { catalog: PathBuf },
     /// Develop-settings key-frequency histogram, classified by owner ticket, as JSON.
     Develop { catalog: PathBuf },
+    /// #157: presence/active-usage counts for the 6 develop-setting keys #61's first pass left
+    /// unowned, before `Develop`'s classifier was updated to assign each one an owner (counts
+    /// only -- no value contents, some can carry user preset identifiers).
+    DevelopUsage { catalog: PathBuf },
     /// Fail if any of `files` contains a keyword/collection/path string pulled from `catalog`.
     PrivacyCheck {
         catalog: PathBuf,
@@ -38,6 +42,7 @@ fn main() -> Result<()> {
         Command::Schema { catalog } => cmd_schema(&catalog),
         Command::Inventory { catalog } => cmd_inventory(&catalog),
         Command::Develop { catalog } => cmd_develop(&catalog),
+        Command::DevelopUsage { catalog } => cmd_develop_usage(&catalog),
         Command::PrivacyCheck { catalog, files } => cmd_privacy_check(&catalog, &files),
     }
 }
@@ -86,6 +91,13 @@ fn cmd_develop(catalog: &std::path::Path) -> Result<()> {
     let conn = open::open_backup(catalog)?;
     let report = develop::analyze(&conn)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn cmd_develop_usage(catalog: &std::path::Path) -> Result<()> {
+    let conn = open::open_backup(catalog)?;
+    let usage = develop::analyze_unowned_keys(&conn)?;
+    println!("{}", serde_json::to_string_pretty(&usage)?);
     Ok(())
 }
 
