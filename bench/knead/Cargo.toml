@@ -1,0 +1,22 @@
+[package]
+name = "knead"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Real-NEF golden/perf harness for #45's render pipeline (feline; not production, like bench/whisker): implements nicti_prowl::golden::Render against a real LibRaw decode + Tapetum render, and CLI subcommands (live-suffix/present/tile perf) that replace spikes/loaf's own bench subcommand now that the real pipeline exists."
+
+[dependencies]
+nicti-cornea = { path = "../../crates/nicti-cornea", features = ["libraw"] }
+nicti-render = { path = "../../crates/nicti-render" }
+nicti-prowl = { path = "../../crates/nicti-prowl" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+blake3 = "1"
+wgpu = "30"
+serde_json = "1"
+
+[[bin]]
+name = "knead"
+path = "src/bin/knead.rs"

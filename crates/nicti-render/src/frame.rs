@@ -60,6 +60,89 @@ impl FrameTexture {
     }
 }
 
+const BYTES_PER_PIXEL: u32 = 8; // Rgba16Float: 4 channels x 2 bytes
+
+/// WebGPU requires a buffer<->texture copy's row stride to be a multiple of
+/// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256). `pub(crate)` so `tile.rs`'s own staging-byte
+/// budget math can account for the real, padded readback allocation size rather than an
+/// unpadded estimate (CodeRabbit, #45 PR4).
+pub(crate) fn padded_bytes_per_row(width: u32) -> u32 {
+    let unpadded = width * BYTES_PER_PIXEL;
+    unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+}
+
+/// Reads a `FrameTexture` back to row-major RGBA f32 (converting from the texture's native f16)
+/// -- the shared production readback path for anything that needs a `FrameTexture`'s actual
+/// pixels on the CPU (a golden-image comparison, an export encoder, `tile::TiledRender`'s own
+/// per-tile readback).
+pub fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
+    use half::f16;
+
+    let extent = frame.extent;
+    let unpadded_bpr = extent.width * BYTES_PER_PIXEL;
+    let padded_bpr = padded_bytes_per_row(extent.width);
+    let buffer_size = u64::from(padded_bpr) * u64::from(extent.height);
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frame readback"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame readback encoder"),
+        });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &frame.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bpr),
+                rows_per_image: Some(extent.height),
+            },
+        },
+        wgpu::Extent3d {
+            width: extent.width,
+            height: extent.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit(Some(encoder.finish()));
+
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    let raw = slice.get_mapped_range().expect("output buffer not mapped");
+
+    let mut out = Vec::with_capacity((extent.width * extent.height) as usize);
+    for y in 0..extent.height {
+        let row_start = (y * padded_bpr) as usize;
+        let row = &raw[row_start..row_start + unpadded_bpr as usize];
+        let u16s: &[u16] = bytemuck::cast_slice(row);
+        for px in u16s.as_chunks::<4>().0 {
+            out.push([
+                f16::from_bits(px[0]).to_f32(),
+                f16::from_bits(px[1]).to_f32(),
+                f16::from_bits(px[2]).to_f32(),
+                f16::from_bits(px[3]).to_f32(),
+            ]);
+        }
+    }
+    drop(raw);
+    staging.unmap();
+    out
+}
+
 /// Recycles `FrameTexture`s by extent so a stage that needs a fresh output texture doesn't pay a
 /// full GPU allocation on every single dispatch -- the same shape gets reused once its previous
 /// occupant is dropped and returned here. A free-list per extent, not a byte budget: unlike
@@ -99,17 +182,7 @@ impl FramePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::GpuPreference;
-
-    fn test_gpu() -> Option<GpuContext> {
-        match GpuContext::new(GpuPreference::Auto) {
-            Ok(ctx) => Some(ctx),
-            Err(_) => {
-                eprintln!("no wgpu adapter available in this environment, skipping");
-                None
-            }
-        }
-    }
+    use crate::test_util::shared_test_gpu as test_gpu;
 
     #[test]
     fn byte_size_matches_the_documented_full_res_estimate() {

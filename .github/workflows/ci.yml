@@ -81,9 +81,13 @@ jobs:
               # #40) depends on nicti-cornea and needs the same path-gated job. .gitmodules is
               # included since a submodule URL/branch/path change there affects this job's
               # checkout step without necessarily touching any file under crates/nicti-cornea/**
-              # itself (CodeRabbit, PR #203).
+              # itself (CodeRabbit, PR #203). bench/knead (#45 PR4) depends on nicti-cornea with
+              # the libraw feature always on (its whole point is a real decode), so it pays the
+              # same C++ compile cost on every build -- same path-gated job, not the always-on
+              # jobs, for the same reason.
               - 'crates/nicti-cornea/**'
               - 'spikes/retina/**'
+              - 'bench/knead/**'
               - '.gitmodules'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -149,7 +153,7 @@ jobs:
       # windowing backends (X11/Wayland/GL), confirmed unneeded for the rest of the workspace
       # by the pelt-linux job passing without it once it's the only Linux job left compiling
       # them; if that job's build ever fails to link, that's the first place to look.
-      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead --all-targets --all-features -- -D warnings
 
   clippy-windows:
     name: cargo clippy (windows)
@@ -171,7 +175,7 @@ jobs:
       # docs/adr/0015), so it -- not Linux -- is the platform whose clippy/test results should
       # gate merges. --workspace --exclude pelt-* mirrors the Linux job exactly (see its own
       # comment above for why each flag is required).
-      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test (linux)
@@ -191,7 +195,7 @@ jobs:
       #
       # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
       # the path-gated `pelt (linux)` job below.
-      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea
+      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead
 
   test-windows:
     name: cargo test (windows)
@@ -215,7 +219,7 @@ jobs:
       # the path-gated `pelt (windows)` job below. This is the single biggest driver of this
       # job's own compile time: cold, these three crates alone pull in 311 of the 543 unique
       # crates otherwise compiled here.
-      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea
+      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead
 
   pelt-linux:
     name: pelt (linux)
@@ -336,9 +340,11 @@ jobs:
       # the `cc` crate, see build.rs) to decode the real photo library's Nikon HE/HE* files --
       # path-gated out of the always-on jobs, same reasoning as pelt above (a full C++
       # recompile on every unrelated PR). retina is checked in the same job since it depends on
-      # nicti-cornea and is touched by the same filter.
-      - run: cargo clippy -p nicti-cornea -p retina --all-targets --all-features -- -D warnings
-      - run: cargo test -p nicti-cornea -p retina --all-targets --all-features
+      # nicti-cornea and is touched by the same filter. knead (#45 PR4's real-NEF golden/perf
+      # harness, bench/knead) too -- its nicti-cornea dependency always enables the libraw
+      # feature (a real decode is its whole point), so it pays the same C++ compile cost.
+      - run: cargo clippy -p nicti-cornea -p retina -p knead --all-targets --all-features -- -D warnings
+      - run: cargo test -p nicti-cornea -p retina -p knead --all-targets --all-features
 
   decode-windows:
     name: decode (windows)
@@ -367,8 +373,8 @@ jobs:
       # Uses MSVC (the runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
       # covers this path; the MinGW-specific static-linking branch is exercised locally, not
       # by this job.
-      - run: cargo clippy -p nicti-cornea -p retina --all-targets --all-features -- -D warnings
-      - run: cargo test -p nicti-cornea -p retina --all-targets --all-features
+      - run: cargo clippy -p nicti-cornea -p retina -p knead --all-targets --all-features -- -D warnings
+      - run: cargo test -p nicti-cornea -p retina -p knead --all-targets --all-features
 
   cargo-deny:
     name: cargo deny (licenses)

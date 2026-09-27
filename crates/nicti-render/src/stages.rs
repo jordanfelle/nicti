@@ -153,14 +153,17 @@ pub fn crop_stage() -> BasicStage {
 // Decode (Baked): uploads a LinearFrame's pixel data and runs normalize.wgsl.
 // ---------------------------------------------------------------------------------------------
 
+/// Matches `normalize.wgsl`'s `Params`: two `vec4<u32>`s, chosen so the layout is unambiguous
+/// between Rust and WGSL (a 5th scalar field would leave WGSL's uniform-buffer alignment rules
+/// to insert padding before a trailing `vec4`, which this side would then have to reproduce
+/// exactly by hand -- two clean vec4s sidesteps that entirely).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct NormalizeParams {
-    width: u32,
-    height: u32,
-    black: u32,
-    maximum: u32,
-    cblack: [u32; 4],
+    /// width, strip_rows, row_offset, black
+    dims: [u32; 4],
+    /// maximum, cblack.r, cblack.g, cblack.b
+    limits: [u32; 4],
 }
 
 pub struct DecodeKernel {
@@ -177,6 +180,15 @@ impl DecodeKernel {
             ),
         }
     }
+}
+
+/// How many rows of a `width`-wide, packed-two-u16-per-u32 pixel buffer fit in `max_bytes` (an
+/// adapter's `max_storage_buffer_binding_size`) -- always at least 1 (a single row must always
+/// fit; a caller with a genuinely un-bindable single row has a bigger problem than this function
+/// can solve) and never more than `height` (no point splitting into more rows than the frame has).
+fn rows_per_strip(width: u32, height: u32, max_bytes: u64) -> u32 {
+    let bytes_per_row = (u64::from(width) * 3).div_ceil(2) * 4;
+    (max_bytes / bytes_per_row).clamp(1, u64::from(height)) as u32
 }
 
 /// Per-render decode executor -- holds the specific photo's `LinearFrame` (real per-image data,
@@ -229,64 +241,81 @@ impl BakedExec for DecodeExec<'_> {
         // upload size versus one u32 per sample. `normalize.wgsl`'s `unpack_sample` does the
         // matching unpack. A full-res 8280x5520 frame is still ~274MB packed -- comfortably under
         // real-hardware storage-binding limits (`GpuContext` already requests `adapter.limits()`),
-        // but can still exceed a software adapter's (e.g. lavapipe's 128MB) at full resolution;
-        // splitting the upload into row-strips to stay under an arbitrary adapter's limit is left
-        // to #45's tiling slice, which needs this same row-strip mechanism for real-photo export
-        // regardless of decode's own upload size.
-        let pixels_u32: Vec<u32> = frame
-            .pixels
-            .chunks(2)
-            .map(|pair| u32::from(pair[0]) | (u32::from(*pair.get(1).unwrap_or(&0)) << 16))
-            .collect();
-        let pixel_buf = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("decode pixels"),
-                contents: bytemuck::cast_slice(&pixels_u32),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-        let params = NormalizeParams {
-            width: frame.width,
-            height: frame.height,
-            black: frame.black,
-            maximum: frame.maximum,
-            cblack: frame.cblack,
-        };
-        let params_buf = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("decode params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        // but exceeds a software adapter's (e.g. lavapipe's 128MB) at full resolution -- confirmed
+        // in practice, not just in theory, against a real ref-10k Nikon Z8 file. The upload is
+        // therefore split into row-strips, each sized to fit under
+        // `gpu.limits.max_storage_buffer_binding_size`, dispatched as separate compute passes
+        // within this same encoder; `normalize.wgsl`'s `row_offset` param is what lets each
+        // strip's dispatch write to the correct absolute row of the one full-frame output texture.
+        let max_rows_per_strip = rows_per_strip(
+            frame.width,
+            frame.height,
+            gpu.limits.max_storage_buffer_binding_size,
+        );
 
         let bind_group_layout = self.kernel.pipeline.get_bind_group_layout(0);
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("decode bind group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: pixel_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&output.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
-        });
+        let mut row_offset = 0u32;
+        while row_offset < frame.height {
+            let strip_rows = max_rows_per_strip.min(frame.height - row_offset);
+            let start = row_offset as usize * frame.width as usize * 3;
+            let end = (row_offset + strip_rows) as usize * frame.width as usize * 3;
+            let pixels_u32: Vec<u32> = frame.pixels[start..end]
+                .chunks(2)
+                .map(|pair| u32::from(pair[0]) | (u32::from(*pair.get(1).unwrap_or(&0)) << 16))
+                .collect();
+            let pixel_buf = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("decode pixels (strip)"),
+                    contents: bytemuck::cast_slice(&pixels_u32),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+            let params = NormalizeParams {
+                dims: [frame.width, strip_rows, row_offset, frame.black],
+                limits: [
+                    frame.maximum,
+                    frame.cblack[0],
+                    frame.cblack[1],
+                    frame.cblack[2],
+                ],
+            };
+            let params_buf = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("decode params (strip)"),
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("decode bind group (strip)"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: pixel_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&output.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: params_buf.as_entire_binding(),
+                    },
+                ],
+            });
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("decode"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.kernel.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(frame.width.div_ceil(8), frame.height.div_ceil(8), 1);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("decode strip"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.kernel.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(frame.width.div_ceil(8), strip_rows.div_ceil(8), 1);
+            drop(pass);
+
+            row_offset += strip_rows;
+        }
     }
 }
 
@@ -544,6 +573,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rows_per_strip_fits_the_whole_frame_when_it_fits_under_the_limit() {
+        assert_eq!(rows_per_strip(100, 100, u64::MAX), 100);
+    }
+
+    #[test]
+    fn rows_per_strip_splits_when_the_full_frame_exceeds_the_limit() {
+        // width=8280 (real Z8 width), 128MiB (lavapipe's own max_storage_buffer_binding_size).
+        let strip = rows_per_strip(8280, 5520, 128 * 1024 * 1024);
+        assert_eq!(strip, 2701);
+        assert!(strip < 5520, "a real full-res frame must actually be split");
+    }
+
+    #[test]
+    fn rows_per_strip_never_returns_zero_even_if_a_single_row_would_not_fit() {
+        assert_eq!(rows_per_strip(8280, 5520, 1), 1);
+    }
+
+    #[test]
+    fn rows_per_strip_never_exceeds_the_frame_height() {
+        assert_eq!(rows_per_strip(10, 5, u64::MAX), 5);
+    }
+
+    #[test]
     fn every_stage_id_is_namespaced() {
         for id in [
             DECODE,
@@ -585,15 +637,7 @@ mod tests {
         assert_eq!(crop_stage().kind(), StageKind::Geometry);
     }
 
-    fn test_gpu() -> Option<GpuContext> {
-        match GpuContext::new(crate::gpu::GpuPreference::Auto) {
-            Ok(ctx) => Some(ctx),
-            Err(_) => {
-                eprintln!("no wgpu adapter available in this environment, skipping");
-                None
-            }
-        }
-    }
+    use crate::test_util::shared_test_gpu as test_gpu;
 
     /// A tiny synthetic 2x2 "RAW" frame with distinct per-pixel, per-channel values, non-zero
     /// black level and per-channel `cblack`, and a `maximum` that doesn't evenly divide -- picked
@@ -920,7 +964,6 @@ mod tests {
     #[test]
     fn full_pipeline_end_to_end_produces_correctly_colored_output() {
         let Some(gpu) = test_gpu() else { return };
-        let gpu = std::sync::Arc::new(gpu);
         let frame = synthetic_linear_frame();
         let extent = crate::frame::Extent {
             width: frame.width,

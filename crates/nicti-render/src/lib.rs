@@ -15,6 +15,7 @@ pub mod graph;
 pub mod prefetch;
 pub mod renderer;
 pub mod stages;
+pub mod tile;
 
 #[cfg(test)]
 pub(crate) mod test_util;

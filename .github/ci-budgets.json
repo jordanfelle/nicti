@@ -12,8 +12,8 @@
     "pelt (linux)": 6,
     "pelt (windows)": 6,
     "pelt windows (required check gate)": 1,
-    "retina (linux)": 4,
-    "retina (windows)": 8
+    "decode (linux)": 6,
+    "decode (windows)": 10
   },
   "CodeQL Advanced": {
     "Analyze (rust)": 10,

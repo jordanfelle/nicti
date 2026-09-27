@@ -103,7 +103,10 @@ terse index: crate/spike → purpose → owning topic.
   -space color + exposure + tone + vibrance, `color.rs`, `live_suffix.wgsl`), and crop
   (`geometry.rs`, `present_sample.wgsl`) — every kernel has a GPU-vs-CPU parity test against a
   CPU reference, plus one end-to-end test wiring the whole chain through `Renderer`. These tests
-  skip when no `wgpu` adapter is available. Promoted from `spikes/loaf`/`spikes/glint`. See
+  skip when no `wgpu` adapter is available. Decode splits a full-res upload into row-strips
+  (`stages::rows_per_strip`) to stay under a real adapter's `max_storage_buffer_binding_size`, and
+  `tile.rs` (`TilePlanner`/`TiledRender`) tiles the output-side geometry pass for a full-res render
+  (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`. See
   [`render-graph`](.claude/rules/render-graph/REFERENCE.md). **Not yet renamed to `nicti-tapetum`**
   — deferred to whoever lands the rest of the #45 stack, to avoid rebasing onto a moving target;
   see the naming-convention section above.
@@ -158,12 +161,16 @@ terse index: crate/spike → purpose → owning topic.
 - **`spikes/litter`** (#33/ADR-0033) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
 - **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
-- **`spikes/loaf`** (#44/ADR-0044) → [`render-graph`](.claude/rules/render-graph/REFERENCE.md)
 - **`spikes/pupil`** (#99/ADR-0099) → [`develop`](.claude/rules/develop/REFERENCE.md)
 - **`spikes/crouch`** (#54/ADR-0054) → [`jobs`](.claude/rules/jobs/REFERENCE.md)
 - **`spikes/prey`** (#56/ADR-0056) → [`export`](.claude/rules/export/REFERENCE.md)
 - **`bench/whisker`** (workspace member) — benchmark tooling for #43, not a production crate; same
   "don't build on top of it" caveat as a spike
+- **`bench/knead`** (#45 PR4, workspace member) — real-NEF golden/perf harness for Tapetum, not a
+  production crate; see [`render-graph`](.claude/rules/render-graph/REFERENCE.md). `spikes/loaf`
+  (#44/ADR-0044), which this replaces the `bench` subcommand of, is deleted — its
+  `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` were already promoted into `crates/nicti-render`/
+  `crates/nicti-pawprint`, see that same REFERENCE.md.
 
 The root placeholder binary crate (`src/main.rs`) still exists only so CI/lint tooling has
 something real to run against; it is not the shipping v1 target's home yet.

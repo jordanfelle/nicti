@@ -43,10 +43,44 @@ fn mat3_diag(d: [f32; 3]) -> Mat3 {
     [[d[0], 0.0, 0.0], [0.0, d[1], 0.0], [0.0, 0.0, d[2]]]
 }
 
-/// The first three rows/cols of `nicti_cornea::LinearFrame::cam_xyz` (row-major 4x3, camera RGB
-/// -> XYZ per this crate's own citation of LibRaw's `imgdata.color.cam_xyz` field) as a 3x3 --
+/// Cramer's-rule 3x3 inverse. Panics on a singular matrix -- `cam_xyz` (the only matrix this
+/// module inverts) is always invertible in practice: LibRaw derives it from a real sensor's
+/// spectral-sensitivity calibration, never a degenerate/rank-deficient one.
+fn mat3_invert(m: &Mat3) -> Mat3 {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    assert!(det.abs() > 1e-12, "cannot invert a singular matrix");
+    let inv_det = 1.0 / det;
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
+        ],
+    ]
+}
+
+/// The first three rows/cols of `nicti_cornea::LinearFrame::cam_xyz` (row-major 4x3) as a 3x3 --
 /// the 4th row/col (LibRaw's G2 channel) is never populated by `LinearFrame`, which already drops
 /// G2 during decode.
+///
+/// **Direction**: per LibRaw's own `cam_xyz_coeff` (`utils_dcraw.cpp`, confirmed against the
+/// vendored source, not just its header comment), `cam_xyz` maps **XYZ -> camera** RGB, the
+/// opposite of what its name suggests read as "camera to XYZ" -- `cam_rgb[i][j] = cam_xyz[i][k] *
+/// xyz_rgb[k][j]`, i.e. `cam_xyz` composes with an XYZ input, never a camera one. Callers that
+/// need camera -> XYZ (every caller in this crate) must invert the 3x3 this function returns; see
+/// [`camera_to_working_space_matrix`].
 pub fn cam_xyz_to_mat3(cam_xyz: &[f32; 12]) -> Mat3 {
     [
         [cam_xyz[0], cam_xyz[1], cam_xyz[2]],
@@ -109,7 +143,8 @@ pub fn prophoto_to_srgb_linear_matrix() -> Mat3 {
 /// every pixel on the GPU.
 pub fn camera_to_working_space_matrix(cam_mul: [f32; 4], cam_xyz: &[f32; 12]) -> Mat3 {
     let wb = mat3_diag(wb_gains(cam_mul));
-    let cam_to_xyz = cam_xyz_to_mat3(cam_xyz);
+    // cam_xyz_to_mat3 returns XYZ->camera (see its own doc comment); invert to get camera->XYZ.
+    let cam_to_xyz = mat3_invert(&cam_xyz_to_mat3(cam_xyz));
     mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_mul(cam_to_xyz, wb))
 }
 
@@ -158,6 +193,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mat3_invert_of_identity_is_identity() {
+        assert_eq!(mat3_invert(&mat3_identity()), mat3_identity());
+    }
+
+    #[test]
+    fn mat3_invert_round_trips() {
+        let m = XYZ_D50_TO_PROPHOTO;
+        let round_tripped = mat3_mul(mat3_invert(&m), m);
+        for (r, row) in round_tripped.iter().enumerate() {
+            for (c, &actual) in row.iter().enumerate() {
+                let expected = if r == c { 1.0 } else { 0.0 };
+                assert!(
+                    (actual - expected).abs() < 1e-4,
+                    "[{r}][{c}]: {actual} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn camera_to_working_space_matrix_inverts_cam_xyz_direction() {
+        // cam_xyz is XYZ->camera (see cam_xyz_to_mat3's doc comment); a non-identity, invertible
+        // cam_xyz must be inverted, not used as-is, to reach camera->XYZ. This is a regression
+        // test for a real bug: using cam_xyz un-inverted produced badly wrong colors (a strong
+        // green cast) against a real NEF, caught in #45 PR4's real-hardware verification pass.
+        let cam_mul = [1.0, 1.0, 1.0, 1.0];
+        let cam_xyz = [
+            0.5, 0.1, 0.0, // XYZ->camera R row
+            0.0, 0.6, 0.1, // XYZ->camera G row
+            0.1, 0.0, 0.7, // XYZ->camera B row
+            0.0, 0.0, 0.0, // unused G2 row
+        ];
+        let m = camera_to_working_space_matrix(cam_mul, &cam_xyz);
+        let expected = mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_invert(&cam_xyz_to_mat3(&cam_xyz)));
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!((m[r][c] - expected[r][c]).abs() < 1e-6, "[{r}][{c}]");
+            }
+        }
+    }
+
+    #[test]
     fn mat3_mul_is_associative_with_identity() {
         let m = XYZ_D50_TO_PROPHOTO;
         assert_eq!(mat3_mul(m, mat3_identity()), m);
@@ -178,12 +255,9 @@ mod tests {
 
     #[test]
     fn camera_to_working_space_matrix_is_identity_when_wb_and_cam_xyz_are_both_identity() {
-        // A synthetic cam_xyz equal to XYZ_D50_TO_PROPHOTO's own inverse-ish identity stand-in:
-        // use the actual inverse relationship by checking round-trip through a neutral gray
-        // instead of requiring a literal matrix inverse (avoids needing a general 3x3 inverse
-        // just for this test). A neutral WB (gains all 1.0) must leave a value's hue/gray axis
-        // structurally determined only by cam_xyz + XYZ_D50_TO_PROPHOTO, i.e. this test instead
-        // checks the composition order directly.
+        // An identity cam_xyz inverts to itself, so this doesn't exercise the inversion direction
+        // (see camera_to_working_space_matrix_inverts_cam_xyz_direction for that) -- it only
+        // pins the outer XYZ_D50_TO_PROPHOTO composition when WB and cam_xyz are both no-ops.
         let cam_mul = [1.0, 1.0, 1.0, 1.0];
         let identity_cam_xyz = [
             1.0, 0.0, 0.0, // R row
