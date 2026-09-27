@@ -27,6 +27,12 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   handshake) still required for `rawler` (LGPL, no confirmed "or-later") but no longer for
   `lensfun-rs` (see licensing topic, ADR-0066 amendment). v2 third-party plugins are WASM
   (`wasmtime`) for non-hot-path extension points only, never a per-pixel render stage.
+- **Claw v2 plugin manifest/kill switch (Collar/Hiss)** — `docs/adr/0214`: third-party module
+  manifest declares capabilities (kind + scope + required justification); undeclared = denied via
+  unlinked WASI import, not just policy. Network capability is action-scoped per ADR-0218
+  (`weight-download`/`cloud-feature`). Kill switch = wasmtime epoch interruption (works mid-loop,
+  no host-call boundary needed) + persisted safe-mode flag as UI-broken fallback. Docs-only —
+  no sandbox implementation yet.
 
 ## Package contents
 
