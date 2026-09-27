@@ -300,13 +300,23 @@ pub fn dabs_from_strokes(strokes: &[crate::geometry::Stroke]) -> Vec<GpuDab> {
 }
 
 /// `dabs` must already be sorted by `stroke_id` ascending -- see `shaders/brush.wgsl`'s header
-/// comment for why the kernel relies on that ordering rather than re-sorting on GPU.
+/// comment for why the kernel relies on that ordering rather than re-sorting on GPU. Violating
+/// this (e.g. two strokes' dabs interleaved rather than consecutive) makes the shader's
+/// stroke-boundary fold treat a `stroke_id` that reappears later in the array as a brand-new
+/// group, finalizing that stroke's dabs into the composite twice from disjoint subsets instead of
+/// once from its full set -- a real divergence from `Geometry::Brush`'s CPU semantics. The only
+/// production caller, `dabs_from_strokes`, guarantees this by construction; the `debug_assert`
+/// below catches a future caller that doesn't.
 pub fn run_rasterize_brush(
     ctx: &GpuContext,
     width: usize,
     height: usize,
     dabs: &[GpuDab],
 ) -> Vec<f32> {
+    debug_assert!(
+        dabs.windows(2).all(|w| w[0].stroke_id <= w[1].stroke_id),
+        "dabs must be sorted by stroke_id ascending (see this function's own doc comment)"
+    );
     let device = &ctx.device;
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("rasterize_brush"),

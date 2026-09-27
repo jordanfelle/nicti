@@ -11,7 +11,7 @@
 //!    `spikes/groom/src/spot.rs::MaskRecipe` uses a `u32`. This module's `AiRecipe` uses `String`
 //!    -- a segmentation-model release is a semver-ish string upstream (BiRefNet/MobileSAM/SAM2
 //!    tags aren't sequential integers), and groom/#51 should align to this, not the other way
-//!    around (noted as a follow-up in `docs/adr/0025-masking.md`).
+//!    around (noted as a follow-up in `docs/adr/0024-masking.md`).
 //! 2. **The inverse-mask double-recipe problem**: `spikes/pawprint/tests/sizing.rs`'s
 //!    `mask.inverse_subject_0` stores a *second, separate* `{model_id, model_version, ...}` recipe
 //!    rather than referencing the subject mask it inverts -- which would bake the same model
@@ -101,7 +101,7 @@ fn canonical_bytes<T: Serialize>(value: &T) -> Vec<u8> {
 
 /// The bake key for one `Ai` recipe: canonical hash of `{model_id, model_version, params, seed}`
 /// **plus** the caller-supplied upstream-model-input hash (the fixed neutral render the model
-/// actually ran against -- see `docs/adr/0025-masking.md`'s "AI model input is decoupled from tone
+/// actually ran against -- see `docs/adr/0024-masking.md`'s "AI model input is decoupled from tone
 /// sliders" proposal). Deliberately **independent of `invert`/`opacity`**: those are applied live
 /// after the bake, so two components sharing the same recipe (a mask and its inverse) get the same
 /// bake key and the model runs once. Returns `None` for a `Geometry` source, which has no bake

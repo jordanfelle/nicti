@@ -1,5 +1,5 @@
 // Masked-adjust apply: a local-adjustment exposure delta scaled by mask weight, in linear light --
-// proves docs/adr/0025-masking.md's "local adjustments stay live in the shader, only AI alpha is
+// proves docs/adr/0024-masking.md's "local adjustments stay live in the shader, only AI alpha is
 // baked" proposal. GpuPixel mirrors calico's own `rgb: vec3<f32>, _pad: f32` shape (see
 // `spikes/calico/src/gpu.rs`'s `GpuPixel`) so both spikes' Rust-side struct stays the same
 // bytemuck-friendly layout. Checked against the CPU reference in tests/gpu_parity.rs within 1e-4

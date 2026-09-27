@@ -1,4 +1,4 @@
-//! Throwaway spike for #48 (`docs/adr/0025-masking.md`): AI subject/sky segmentation, the
+//! Throwaway spike for #48 (`docs/adr/0024-masking.md`): AI subject/sky segmentation, the
 //! brush+gradient local-adjustment geometry model, the AI+geometry mask-group compose model, a
 //! preview-to-full-res guided-filter upsample, and CPU/GPU parity for the parts #44 (Tapetum)
 //! needs to run per-frame (gradient eval, brush rasterize, group compose, masked-adjust apply).
