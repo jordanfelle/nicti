@@ -46,6 +46,17 @@ pub fn group_tight(
                 break;
             }
             if similarity(j, i) >= params.min_similarity {
+                // `back > 1` means one or more intervening frames (already assigned their own
+                // group id, since they didn't link backward within budget) sit between `j` and
+                // `i` -- retroactively fold them into `j`'s group too, so this group stays a
+                // contiguous run of frames rather than sandwiching an orphaned single-frame group
+                // between two occurrences of the same id (a real bug an adversarial review
+                // caught: a non-contiguous group corrupted `group_sets`'s span-based boundary
+                // comparison, since it violated this function's own "monotonically
+                // non-decreasing" doc claim).
+                for k in (j + 1)..i {
+                    group_id[k] = group_id[j];
+                }
                 group_id[i] = group_id[j];
                 linked = true;
                 break;
@@ -159,7 +170,11 @@ mod tests {
     #[test]
     fn tolerates_one_interleaved_frame_via_lookahead() {
         // Frame 1 is dissimilar to both neighbors (a second shooter's interleaved frame), but
-        // frame 0 and frame 2 are similar to each other and within budget via max_lookahead=2.
+        // frame 0 and frame 2 are similar to each other and within budget via max_lookahead=2 --
+        // the interleaved frame folds into the same group as its neighbors (not left as its own
+        // one-frame group sandwiched between two occurrences of the same id, which would make
+        // group ids non-contiguous -- a real bug an adversarial review caught, since a
+        // non-contiguous group corrupted `group_sets`'s span-based boundary comparison).
         let times = [0.0, 0.5, 1.0];
         let sim = |i: usize, j: usize| if i == 1 || j == 1 { 0.0 } else { 1.0 };
         let params = LevelParams {
@@ -170,7 +185,7 @@ mod tests {
         let groups = group_tight(times.len(), |i, j| secs(&times, i, j), sim, params);
         assert_eq!(
             groups,
-            vec![0, 1, 0],
+            vec![0, 0, 0],
             "frame 2 should link back to frame 0, skipping 1"
         );
     }

@@ -42,6 +42,8 @@ pub enum EmbedError {
     Ort(String),
     #[error("unexpected output shape: {0:?}")]
     UnexpectedOutputShape(Vec<i64>),
+    #[error("image has a zero dimension: {0}x{1}")]
+    InvalidImageDimensions(u32, u32),
 }
 
 fn ort_err(e: impl std::fmt::Display) -> EmbedError {
@@ -77,10 +79,18 @@ fn load_session(model_path: &Path, ort_dylib_path: &Path) -> Result<Session, Emb
 
 /// Resizes (shorter edge to `IMAGE_SIZE`) + center-crops + normalizes an RGB image into
 /// `pixel_values`' expected NCHW `f32` layout: `[1, 3, 224, 224]`.
-fn preprocess(img: &image::RgbImage) -> Vec<f32> {
+fn preprocess(img: &image::RgbImage) -> Result<Vec<f32>, EmbedError> {
     use fast_image_resize as fr;
 
     let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        // A zero dimension would otherwise divide-by-zero into an infinite `scale`, which
+        // `as u32` then saturates to `u32::MAX` -- `fr::images::Image::new` would try to
+        // allocate a many-gigabyte buffer and abort the process instead of returning a clean
+        // `Err`. Caught by an adversarial review; not reachable from a real Nikon PreviewIFD in
+        // practice, but a malformed/truncated file could plausibly decode to a degenerate size.
+        return Err(EmbedError::InvalidImageDimensions(w, h));
+    }
     let scale = IMAGE_SIZE as f64 / w.min(h) as f64;
     let (rw, rh) = (
         (w as f64 * scale).round().max(1.0) as u32,
@@ -111,7 +121,7 @@ fn preprocess(img: &image::RgbImage) -> Vec<f32> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub struct Dinov2Embedder {
@@ -130,7 +140,7 @@ impl Dinov2Embedder {
     /// Returns the CLS-token global embedding (384-dim for ViT-S/14) for `img`.
     pub fn embed(&self, img: &image::RgbImage) -> Result<Vec<f32>, EmbedError> {
         let mut session = load_session(&self.model_path, &self.ort_dylib_path)?;
-        let pixels = preprocess(img);
+        let pixels = preprocess(img)?;
         let tensor =
             Tensor::from_array(([1usize, 3, IMAGE_SIZE, IMAGE_SIZE], pixels)).map_err(ort_err)?;
         let outputs = session
@@ -190,8 +200,21 @@ mod tests {
     #[test]
     fn preprocess_produces_expected_length() {
         let img = image::RgbImage::from_pixel(300, 200, image::Rgb([10, 20, 30]));
-        let out = preprocess(&img);
+        let out = preprocess(&img).expect("preprocess");
         assert_eq!(out.len(), 3 * IMAGE_SIZE * IMAGE_SIZE);
+    }
+
+    #[test]
+    fn preprocess_rejects_zero_dimension_image_cleanly() {
+        // Regression test for a review-caught bug: a zero width/height divided into `scale`
+        // produced an infinite/NaN result that `as u32` silently saturated to `u32::MAX`, which
+        // `fr::images::Image::new` then tried to allocate -- aborting the process instead of
+        // returning a clean `Err`.
+        let img = image::RgbImage::new(1, 0);
+        assert!(matches!(
+            preprocess(&img),
+            Err(EmbedError::InvalidImageDimensions(1, 0))
+        ));
     }
 
     /// Requires a real ONNX Runtime shared library (`NICTI_TEST_ORT_DYLIB`) and a real DINOv2

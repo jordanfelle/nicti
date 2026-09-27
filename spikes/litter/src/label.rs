@@ -42,7 +42,12 @@ pub fn write_draft(work_dir: &Path, frames: &[DraftFrame]) -> anyhow::Result<()>
     let draft_path = work_dir.join("draft.json");
     fs::write(&draft_path, serde_json::to_string_pretty(frames)?)?;
 
-    let data_json = serde_json::to_string(frames)?;
+    // `<` is JSON-escaped to `<` before splicing into the `<script>` block below: a
+    // filename or serial number containing `</script>` would otherwise terminate the script tag
+    // early and let arbitrary HTML/JS run when `label.html` is opened -- caught by an adversarial
+    // review. Low severity (a local, self-generated single-user file, no real trust boundary),
+    // but a real defect in output this repo generates and the user opens in a browser.
+    let data_json = serde_json::to_string(frames)?.replace('<', "\\u003c");
     let html = LABEL_HTML_TEMPLATE.replace("__DRAFT_JSON__", &data_json);
     fs::write(work_dir.join("label.html"), html)?;
     Ok(())
@@ -199,6 +204,24 @@ mod tests {
             !html.contains("__DRAFT_JSON__"),
             "placeholder must be substituted"
         );
+    }
+
+    #[test]
+    fn write_draft_escapes_a_filename_that_would_close_the_script_tag() {
+        // Regression test for a review-caught bug: a filename containing a literal `</script>`
+        // used to terminate the embedded JSON's script tag early, letting arbitrary HTML/JS in
+        // the filename execute when label.html is opened.
+        let dir = tempfile::tempdir().unwrap();
+        let mut evil = frame(0, 0, 0);
+        evil.filename = "</script><img src=x onerror=alert(1)>".to_string();
+        write_draft(dir.path(), &[evil]).unwrap();
+
+        let html = fs::read_to_string(dir.path().join("label.html")).unwrap();
+        assert!(
+            !html.contains("</script><img"),
+            "a raw </script> must not appear inside the embedded JSON"
+        );
+        assert!(html.contains("\\u003c/script>"));
     }
 
     #[test]
