@@ -36,8 +36,11 @@ research) are the enforcement mechanism for that half of the requirement.
 4. **Applies to every `ModelProvider` implementation, first- or third-party.** A first-party
    module (masking, healing, auto-tone, culling) follows this by construction, reviewed the same
    as any other PR. A third-party module loaded through Claw needs an enforcement mechanism, since
-   its code isn't first-party-reviewed — that's #214's manifest/consent/kill-switch scope: the
-   manifest must declare network access, and a module that doesn't declare it must not get it.
+   its code isn't first-party-reviewed — that's #214's manifest/consent/kill-switch scope: network
+   access must be an action-scoped capability the manifest declares (granted only for an explicit,
+   user-initiated weight download or a separately opted-in cloud feature per points 2-3 above),
+   denied by default during local inference/training, and a module that doesn't declare it must
+   not get it at all.
 
 ## Consequences
 
