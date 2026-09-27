@@ -121,7 +121,20 @@ function render() {
     const f = DATA[i];
     const div = document.createElement('div');
     div.className = 'frame ' + (tight[i] % 2 === 0 ? 'even' : 'odd');
-    div.innerHTML = `<img src="${f.thumb}" loading="lazy"><div class="cap">${f.filename}</div><div class="cap">+${f.gap_before_secs.toFixed(1)}s</div>`;
+    // Built with DOM APIs, not innerHTML template interpolation: f.filename is a real camera
+    // filename (attacker-uncontrolled in practice, but not a trust boundary this code should
+    // lean on) -- a name like "<img src=x onerror=alert(1)>.NEF" would otherwise execute as HTML
+    // when this locally-generated page opens. Flagged by CodeRabbit on this PR.
+    const img = document.createElement('img');
+    img.src = f.thumb;
+    img.loading = 'lazy';
+    const nameCap = document.createElement('div');
+    nameCap.className = 'cap';
+    nameCap.textContent = f.filename;
+    const gapCap = document.createElement('div');
+    gapCap.className = 'cap';
+    gapCap.textContent = `+${f.gap_before_secs.toFixed(1)}s`;
+    div.append(img, nameCap, gapCap);
     strip.appendChild(div);
 
     if (i < DATA.length - 1) {

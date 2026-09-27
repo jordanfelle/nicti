@@ -145,6 +145,14 @@ pub fn group_sets(
                 break;
             }
             if similarity(prev_last, this_first) >= params.min_similarity {
+                // Same fold as `group_tight`'s `back > 1` case, and the same reason: without it,
+                // a skip-link over one or more intervening tight groups leaves those groups'
+                // *sets* non-contiguous (splitting a set into two separate runs, which breaks
+                // this module's own nesting invariant at the set level) -- caught by CodeRabbit
+                // on this PR, the same bug class `compact_ids` already exists to clean up after.
+                for k in (prev + 1)..g {
+                    set_of_tight[k] = set_of_tight[prev];
+                }
                 set_of_tight[g] = set_of_tight[prev];
                 linked = true;
                 break;
@@ -155,6 +163,10 @@ pub fn group_sets(
             set_of_tight[g] = next_set;
         }
     }
+
+    // Same non-dense-id gap as `group_tight` left behind before its own `compact_ids` pass: a
+    // fold above can allocate a `next_set` value that a later fold then overwrites away.
+    let set_of_tight = compact_ids(&set_of_tight);
 
     tight_group_id
         .iter()
@@ -216,6 +228,31 @@ mod tests {
             groups,
             vec![0, 0, 0],
             "frame 2 should link back to frame 0, skipping 1"
+        );
+    }
+
+    #[test]
+    fn set_level_lookahead_fold_keeps_sets_contiguous_and_dense() {
+        // Same bug class as `lookahead_fold_followed_by_a_new_group_leaves_no_gap_in_ids`, one
+        // level up: tight group 2 skip-links to tight group 0 at the set level (max_lookahead:
+        // 2), so set-level similarity must fold tight group 1 into set 0 too -- not leave it as
+        // an orphaned set sandwiched inside set 0's span (splitting the set into two runs) with
+        // a set id that never reappears. Caught by CodeRabbit on this PR: `group_sets` had the
+        // exact fold-then-compact gap `group_tight` was already fixed for.
+        let tight = vec![0usize, 1, 2]; // three singleton tight groups
+        let gap = |_i: usize, _j: usize| 0.0;
+        let set_sim = |i: usize, j: usize| if (i, j) == (0, 2) { 1.0 } else { 0.0 };
+        let params = LevelParams {
+            max_gap_secs: 100.0,
+            min_similarity: 0.5,
+            max_lookahead: 2,
+        };
+        let sets = group_sets(&tight, gap, set_sim, params);
+        assert_eq!(
+            sets,
+            vec![0, 0, 0],
+            "tight group 1 must fold into the same set as 0 and 2, not sit as its own set \
+             sandwiched between two occurrences of set 0"
         );
     }
 

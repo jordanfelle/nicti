@@ -25,7 +25,7 @@
 //! documented convention for a global descriptor (`x_norm_clstoken`), not a stand-in.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ort::session::Session;
 use ort::value::Tensor;
@@ -127,6 +127,13 @@ fn preprocess(img: &image::RgbImage) -> Result<Vec<f32>, EmbedError> {
 pub struct Dinov2Embedder {
     model_path: PathBuf,
     ort_dylib_path: PathBuf,
+    // Built lazily on first `embed()` call, then reused -- `load_session` parses the model and
+    // builds a fresh ORT session, which is expensive enough (per CodeRabbit, flagged on this PR)
+    // that doing it once per frame made the `time+dino` candidate's own ms/frame measurement
+    // meaningless at con scale (1,000+ frames). `Mutex`, not `RefCell`, since `Session::run` needs
+    // `&mut self` and `embed` only takes `&self` (matching every other signal's shared-reference
+    // shape in `signals.rs`).
+    session: OnceLock<Mutex<Session>>,
 }
 
 impl Dinov2Embedder {
@@ -134,15 +141,36 @@ impl Dinov2Embedder {
         Self {
             model_path: model_path.into(),
             ort_dylib_path: ort_dylib_path.into(),
+            session: OnceLock::new(),
         }
+    }
+
+    fn session(&self) -> Result<&Mutex<Session>, EmbedError> {
+        if let Some(session) = self.session.get() {
+            return Ok(session);
+        }
+        // Built outside `get_or_init` since that closure can't be fallible on stable Rust; a
+        // concurrent-call race just means the loser's freshly-built session is dropped unused,
+        // never observable incorrectness.
+        let built = load_session(&self.model_path, &self.ort_dylib_path)?;
+        Ok(self.session.get_or_init(|| Mutex::new(built)))
     }
 
     /// Returns the CLS-token global embedding (384-dim for ViT-S/14) for `img`.
     pub fn embed(&self, img: &image::RgbImage) -> Result<Vec<f32>, EmbedError> {
-        let mut session = load_session(&self.model_path, &self.ort_dylib_path)?;
+        // `self.session()?` (and the `load_session`/`ensure_ort_environment` it calls on first
+        // use) must run before `Tensor::from_array`: `ort`'s tensor construction implicitly
+        // touches its global environment, and without an explicit `init_from(...).commit()`
+        // already done, it falls back to dlopen-ing a bare default dylib name and *panics*
+        // instead of returning a clean error -- which previously masked this function's own
+        // `ModelNotFound` case (a nonexistent model path never even needs a tensor built).
+        let session_lock = self.session()?;
         let pixels = preprocess(img)?;
         let tensor =
             Tensor::from_array(([1usize, 3, IMAGE_SIZE, IMAGE_SIZE], pixels)).map_err(ort_err)?;
+        let mut session = session_lock
+            .lock()
+            .map_err(|_| EmbedError::Ort("ONNX session lock poisoned".to_string()))?;
         let outputs = session
             .run(ort::inputs!["pixel_values" => tensor])
             .map_err(ort_err)?;
