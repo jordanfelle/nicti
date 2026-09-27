@@ -71,12 +71,14 @@ impl SqliteCatalog {
             width: row.get::<_, Option<i64>>(12)?.map(|w| w as u32),
             height: row.get::<_, Option<i64>>(13)?.map(|h| h as u32),
             imported_at: row.get(14)?,
+            missing_since: row.get(15)?,
         })
     }
 }
 
 const ASSET_COLUMNS: &str = "id, root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
-    fingerprint, natural_key, make, model, captured_at, rating, width, height, imported_at";
+    fingerprint, natural_key, make, model, captured_at, rating, width, height, imported_at, \
+    missing_since";
 
 impl Module for SqliteCatalog {
     fn id(&self) -> &str {
@@ -273,7 +275,7 @@ impl CatalogStore for SqliteCatalog {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3, \
-                size_bytes = ?4, mtime_unix = ?5 WHERE id = ?6",
+                size_bytes = ?4, mtime_unix = ?5, missing_since = NULL WHERE id = ?6",
             params![
                 new_root_id,
                 new_rel_path,
@@ -348,6 +350,50 @@ impl CatalogStore for SqliteCatalog {
             )
             .optional()?;
         Ok(cnt.unwrap_or(0) as u64)
+    }
+
+    fn list_assets_by_root(&self, root_id: i64) -> Result<Vec<Asset>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS} FROM asset WHERE root_id = ?1 ORDER BY id ASC"
+        ))?;
+        let rows = stmt
+            .query_map([root_id], Self::row_to_asset)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn set_asset_missing(
+        &self,
+        asset_id: i64,
+        missing_since: Option<i64>,
+    ) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE asset SET missing_since = ?1 WHERE id = ?2",
+            params![missing_since, asset_id],
+        )?;
+        Ok(())
+    }
+
+    fn remove_asset(&self, asset_id: i64) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // No `ON DELETE CASCADE` on any of these foreign keys (schema.rs's `asset`/`edit_variant`
+        // references are plain `REFERENCES`, and `PRAGMA foreign_keys = ON` only *enforces*
+        // referential integrity -- it never cascades a delete on its own) -- every child row is
+        // deleted explicitly, in dependency order, or the asset delete itself would fail its own
+        // foreign-key check with orphaned children left behind.
+        tx.execute(
+            "DELETE FROM edit_history WHERE variant_id IN \
+                (SELECT id FROM edit_variant WHERE asset_id = ?1)",
+            [asset_id],
+        )?;
+        tx.execute("DELETE FROM edit_variant WHERE asset_id = ?1", [asset_id])?;
+        tx.execute("DELETE FROM preview WHERE asset_id = ?1", [asset_id])?;
+        tx.execute("DELETE FROM asset WHERE id = ?1", [asset_id])?;
+        tx.commit()?;
+        Ok(())
     }
 }
 

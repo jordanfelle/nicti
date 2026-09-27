@@ -153,11 +153,21 @@ BEGIN
 END;
 "#;
 
+/// #24: adds the `missing_since` column `patrol::sync_root` uses to flag an asset whose file
+/// disappeared from disk since the last sync, without ever deleting the row (ADR-0071's "never
+/// delete, only flag offline" stance for a volume applies the same way here at the asset grain
+/// for a *file* gone from a still-connected volume). `NULL` means present; this is also the
+/// default for every pre-existing row, so a catalog upgrading from V1 treats everything already
+/// cataloged as present until the next sync says otherwise.
+const MIGRATION_V2: &str = r#"
+ALTER TABLE asset ADD COLUMN missing_since INTEGER;
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
 /// shipped a v1 to begin with.
-const MIGRATIONS: &[&str] = &[MIGRATION_V1];
+const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call
 /// on every open: a database already at the latest version runs nothing.
@@ -198,5 +208,39 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
+    }
+
+    /// A catalog created under V1 alone (before #24), then migrated forward, must end up with
+    /// every pre-existing asset row reading `missing_since = NULL` (present) rather than the
+    /// column simply not existing or defaulting to something that would misreport an
+    /// already-cataloged file as missing the moment #24's sync runs against it.
+    #[test]
+    fn upgrading_from_v1_gives_existing_assets_a_null_missing_since() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1").unwrap();
+
+        conn.execute(
+            "INSERT INTO volume (identity_key, online, last_seen_at) VALUES ('v', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO root (volume_id, rel_path) VALUES (1, 'x')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO asset (root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
+                imported_at) VALUES (1, 'a.nef', 'a.nef', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let missing_since: Option<i64> = conn
+            .query_row("SELECT missing_since FROM asset WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(missing_since, None);
     }
 }

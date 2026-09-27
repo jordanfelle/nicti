@@ -1,8 +1,12 @@
 //! Catalog store extension point (ADR-0019 §7/§8) and its real implementation (#22): the schema
 //! ADR-0067/0103/0071/0021 settled (see `schema.rs`), a `rusqlite`-backed `CatalogStore`
-//! (`sqlite.rs`), and the Scruff import/ingest pipeline (`scruff.rs`) that scans a folder, fingerprints
+//! (`sqlite.rs`), the Scruff import/ingest pipeline (`scruff.rs`) that scans a folder, fingerprints
 //! and upserts each asset, and extracts its T0 grid preview at import time (ADR-0029) — carrying a
-//! kitten by the scruff of its neck is how it gets moved into the catalog.
+//! kitten by the scruff of its neck is how it gets moved into the catalog — and Patrol
+//! (`patrol.rs`, #24), the manual "Synchronize Folder"-style sync layered on top of Scruff: after
+//! Scruff's disk-side pass, Patrol walks the catalog side, flags any asset whose file has
+//! disappeared, and optionally removes it, the way a cat patrols the same territory it already
+//! knows.
 
 use nicti_claw::{Module, Registry};
 
@@ -10,6 +14,7 @@ mod model;
 pub mod schema;
 mod sqlite;
 
+pub mod patrol;
 pub mod scruff;
 
 pub use model::{Asset, NewAsset, Preview, PreviewTier};
@@ -122,6 +127,27 @@ pub trait CatalogStore: Module {
     /// Reads the trigger-maintained `(model, rating)` facet count (ADR-0103) — used by ingest's
     /// tests to check the triggers stay consistent, and by any future facet-filtered browse view.
     fn facet_count(&self, model: Option<&str>, rating: i64) -> Result<u64, CatalogError>;
+
+    /// Every asset registered under this root, in `id` order. `patrol::sync_root` (#24) uses this
+    /// to find rows whose file it needs to check for, since ingest only ever walks the disk and
+    /// has no way to notice a path that used to be there and now isn't.
+    fn list_assets_by_root(&self, root_id: i64) -> Result<Vec<Asset>, CatalogError>;
+
+    /// Sets or clears an asset's `missing_since` (#24). `Some(now_unix)` flags it as missing as of
+    /// that time; `None` marks it present again (a file that reappeared at its cataloged path).
+    /// Does not touch any other column — a `relink_asset` call clears this independently, since a
+    /// relink means the row's path changed, not just that the old path is present again.
+    fn set_asset_missing(
+        &self,
+        asset_id: i64,
+        missing_since: Option<i64>,
+    ) -> Result<(), CatalogError>;
+
+    /// Deletes an asset row entirely, cascading to its previews and edit history. Only called by
+    /// `patrol::sync_root` (#24) when a sync runs with `remove_missing: true` against a file
+    /// that's still gone — never by ingest, and never for an asset under a root that failed to
+    /// resolve on disk (ADR-0071's offline-volume case is a separate path from this).
+    fn remove_asset(&self, asset_id: i64) -> Result<(), CatalogError>;
 }
 
 /// Registry of catalog store modules, keyed by namespaced id.
