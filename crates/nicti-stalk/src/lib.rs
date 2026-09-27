@@ -6,6 +6,11 @@
 //! model choice (BiRefNet + MobileSAM), the mask-group compose model, and the AI-recipe bake-key
 //! shape #49 builds this crate's real `ModelProvider` implementations on top of — not the trait
 //! signature itself, which stays #49's decision.
+//!
+//! Every `ModelProvider` implementation, first- or third-party, must follow
+//! `docs/adr/0218-local-only-ai.md`: offline inference/training by default, no telemetry, no
+//! hosted API; weight fetches are explicit, user-initiated, and checksum-verified, never a silent
+//! auto-fetch; cloud AI is a separate opt-in feature, not a buried toggle.
 
 use nicti_claw::{Module, Registry};
 

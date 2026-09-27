@@ -66,6 +66,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0143](0143-preview-codec-followup.md) | 0022 | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
 | [0156](0156-lrcat-data-rocksdb-blob-linkage.md) | — | `.lrcat-data` blob linkage and #62 import policy | Accepted |
 | [0158](0158-lrc-hash-relink-seeding.md) | — | LRC `md5`/`importHash` vs homing's relink fingerprints | Accepted |
+| [0218](0218-local-only-ai.md) | — | Local-only default for AI culling/suggestion features | Accepted |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.

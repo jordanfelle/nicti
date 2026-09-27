@@ -36,7 +36,10 @@ Covers the GPU compute API choice, the (proposed) GUI framework decision, and th
   reference-machine pass). Ships both classic clone/heal (CPU Poisson-Jacobi solve + a `wgpu`
   compute-shader twin, proven correct against each other in `spikes/groom/`) and AI removal
   (MobileSAM+LaMa via `ort`/`load-dynamic`, per ADR-0019 §3's already-decided pattern) as two
-  `SpotKind` variants of one `HealStage`, not competing alternatives. No real ONNX weights exist
+  `SpotKind` variants of one `HealStage`, not competing alternatives. Its model loading must
+  follow `docs/adr/0218-local-only-ai.md`: offline inference/training by default, no telemetry, no
+  hosted API; weight downloads are explicit, user-initiated, and checksum-verified, never a silent
+  auto-fetch. No real ONNX weights exist
   yet — the AI-removal wrappers prove the loading/error-handling shape only, latency/quality still
   TBD pending #51's real checkpoints. Re-verified LaMa's Places2 training-data flag (still
   unresolved — the primary source stays unreachable, a mirror confirms Places2's own
