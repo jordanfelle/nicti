@@ -39,7 +39,7 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
 ## Package contents
 
-- **`spikes/retina`** (#37/ADR-0019's RAW decoder comparison) — vendors LibRaw's HE/HE*-capable
+- **`spikes/retina`** (#37/ADR-0019's RAW decoder comparison) — vendors LibRaw's HE/HE\*-capable
   fork as a git submodule at `spikes/retina/vendor/LibRaw` (needs
   `git submodule update --init spikes/retina/vendor/LibRaw` before it builds), compiled via the
   `cc` crate through a hand-written shim, no bindgen. Subcommands: `sweep`/`compare`/`diff` against

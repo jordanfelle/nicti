@@ -54,8 +54,8 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   two facet-cache modules require `sqlite`, `facet_cache_duckdb` additionally requires `duckdb`),
   plus `schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape,
   gated on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's genuinely concurrent
-  multi-writer-thread comparison between RocksDB and SQLite, gated on both, not part of the shared
-  `Workload` trait since only these two engines are compared this way). `gen.rs`'s
+  multi-writer-thread comparison between RocksDB and SQLite, gated on both `rocksdb` and `sqlite`,
+  not part of the shared `Workload` trait since only these two engines are compared this way). `gen.rs`'s
   synthetic-catalog generator is reusable for future Library-scale benchmarks (see
   `docs/benchmarks.md`). Not production code — don't build on top of a spike crate; **slated for
   deletion once #22 lands**, see #123 for the follow-up cleanup (CI jobs, the Renovate rule,
