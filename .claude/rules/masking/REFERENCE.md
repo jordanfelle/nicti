@@ -16,10 +16,11 @@ Full reasoning/history: `docs/decisions/masking.md`.
   re-checked (SA-V dataset now confirmed CC-BY-4.0) but not adopted. Sky: no clean model adopted,
   ships as a top-row-flood-filled luminance/blue-dominance heuristic in `sky.rs`.
 - **`MaskGroup`/`MaskComponent`** (`spikes/siamese/src/compose.rs`) — named to match LRC's
-  `MaskGroupBasedCorrections` for #49/#62. `AiRecipe.model_version: String` (not `u32` — differs
-  from `spikes/groom/src/spot.rs::MaskRecipe`, groom/#51 should align to this). A mask's inverse is
-  `invert: bool` on a component sharing the same recipe, never a second recipe — `ai_bake_key()` is
-  independent of `invert`/`opacity`, so the model runs once for a mask + its inverse pair.
+  `MaskGroupBasedCorrections` for #49/#62. `AiRecipe.model_version: String`, matching
+  `spikes/groom/src/spot.rs::MaskRecipe.model_version` (aligned from `u32` in #172). A mask's
+  inverse is `invert: bool` on a component sharing the same recipe, never a second recipe —
+  `ai_bake_key()` is independent of `invert`/`opacity`, so the model runs once for a mask + its
+  inverse pair.
 - **Cache key**: AI masks infer against a fixed neutral render (post-lens-correction, default
   tone), never the live edit stack — a tone slider must not invalidate an AI mask's bake.
 - **Geometry** (`geometry.rs`): linear/radial gradient + brush (ordered strokes, per-stroke

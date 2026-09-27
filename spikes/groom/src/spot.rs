@@ -40,7 +40,7 @@ pub enum SpotKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaskRecipe {
     pub model_id: String,
-    pub model_version: u32,
+    pub model_version: String,
     pub params: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
@@ -182,7 +182,7 @@ mod tests {
             3.0,
             MaskRecipe {
                 model_id: "nicti.ai.lama".to_string(),
-                model_version: 1,
+                model_version: "1.0.0".to_string(),
                 params: serde_json::json!({ "prompt": "object", "index": i }),
                 seed: Some(42),
             },
