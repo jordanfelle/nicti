@@ -151,7 +151,10 @@ fn run_mlp(
     let val_features: Vec<Vec<f32>> = val_rows.iter().map(&input_fn).collect();
     let val_targets: Vec<[f64; SLIDER_COUNT]> = val_rows.iter().map(|r| r.targets).collect();
 
-    let input_dim = fit_features[0].len();
+    let input_dim = fit_features
+        .first()
+        .map(Vec::len)
+        .ok_or_else(|| anyhow::anyhow!("cannot train an MLP on zero fit rows"))?;
     let mut model = mlp::Mlp::new(input_dim, hidden_dim)?;
     model.train(
         &fit_features,

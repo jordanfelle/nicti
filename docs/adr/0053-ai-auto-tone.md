@@ -187,7 +187,7 @@ orders the newest rows into holdout.
   only when the user asks for it), and should account for Highlights2012's temporal-split p95
   residual noted above.
 - **This finding could change with more training data.** M2 (the model using the actual downsampled
-  image tensor the issue asked about) underperformed even the trivial mean baseline with ~4,000
+  image tensor the issue asked about) underperformed even the trivial mean baseline with ~3,400 fit
   training rows against a 3,085-dimensional input — a data-starved regime, not necessarily a ceiling
   on what a neural approach could do with `ref-10k`-scale data. If a future pass revisits the ML
   track, raising `--target-total` well past 5,000 (at the cost of a much longer extraction pass,

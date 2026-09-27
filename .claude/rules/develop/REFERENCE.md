@@ -18,7 +18,7 @@ Full reasoning/history: `docs/decisions/develop.md`.
   5,000 real picked/rated keepers from the user's own catalog (no reference-machine deferral — the
   catalog backup and RAW drives were reachable from this sandbox). B1 beat both MLPs on both the
   event and temporal splits; M2 (the model using the actual downsampled image tensor) underperformed
-  the trivial mean baseline, likely data-starved at this sample size (3085-dim input, ~4000 training
+  the trivial mean baseline, likely data-starved at this sample size (3085-dim input, ~3,400 fit
   rows) rather than a hard ceiling. A v2 build should use the ridge fit, not a neural model.
 - **Primary metric: per-slider value error, not a golden image** — nothing can render PV2012
   sliders to pixels yet (#46's job), so a rendered-image comparison would just add a second
