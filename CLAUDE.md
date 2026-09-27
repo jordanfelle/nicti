@@ -6,8 +6,10 @@ is the canonical human contributor guide** — read that first if you're new her
 
 ## Architecture decisions
 
-ADRs live in `docs/adr/` (see `docs/adr/README.md` for the index and template), numbered
-sequentially. Per-ADR decisions, measured results, and gotchas live in
+ADRs live in `docs/adr/` (see `docs/adr/README.md` for the index, template, and numbering
+convention — a new ADR takes its GitHub issue's number, not the next sequential count; `0001`-`0025`
+predate this and keep their original sequential numbers). Per-ADR decisions, measured results, and
+gotchas live in
 `.claude/rules/<topic>/REFERENCE.md` + `docs/decisions/<topic>.md`, not inline here, to keep this
 file under the line-count gate. Each topic has:
 

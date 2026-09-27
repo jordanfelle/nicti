@@ -6,12 +6,27 @@
 //! stage and its own recipe params).
 //!
 //! `-0.0` is normalized to `0.0` and `serde_json`'s `preserve_order`/`arbitrary_precision`
-//! features stay off (object keys sort, NaN/Infinity refuse to serialize) -- the exact citation
-//! trail is in ADR-0002; this module doesn't re-derive it, just reuses the same rule. "Refuse to
-//! serialize" means `hash_value` below panics via its own `.expect()` on a NaN/Infinity field --
-//! fail-fast, not a silently-wrong hash, but a real panic, not a graceful `Err` -- since a stage's
-//! params shouldn't legitimately contain either, this is treated as a caller bug, not a case worth
-//! a `Result`-returning API for.
+//! features stay off (object keys sort) -- the exact citation trail for that part is in
+//! ADR-0002; this module doesn't re-derive it, just reuses the same rule.
+//!
+//! **NaN/Infinity do NOT refuse to serialize** -- an earlier version of this doc comment claimed
+//! they did (citing ADR-0002's own claim for pawprint's one-upstream case, taken at face value
+//! rather than re-verified here); a CodeRabbit review of this PR found the opposite is true:
+//! `serde_json::to_value`/`to_string`/`to_vec` all silently convert a non-finite `f32`/`f64` to
+//! JSON `null` and return `Ok`, never `Err` -- confirmed empirically, not assumed. Left unhandled,
+//! this means two stages with *different* non-finite params (or one non-finite param vs. a
+//! genuinely absent/`None` field) could hash identically, defeating the whole point of a cache
+//! key. Since this codebase's own convention never emits an explicit JSON `null` for a real field
+//! (`Option` fields use `#[serde(skip_serializing_if = "Option::is_none")]` instead, omitting the
+//! key entirely rather than writing `null`; see `spikes/siamese/src/compose.rs::AiRecipe.seed` for
+//! the pattern this module's own callers are expected to follow), any `null` appearing anywhere in
+//! a canonicalized value is itself already anomalous -- `hash_value` treats one as a hard error
+//! rather than trying to reconstruct which field's non-finite float produced it (the information
+//! needed to do that is already gone by the time `serde_json` has converted it to `null`; a fully
+//! correct fix would intercept `serialize_f32`/`serialize_f64` before that conversion via a custom
+//! `serde::Serializer` wrapper, which is real additional machinery a throwaway spike doesn't need
+//! given how directly this codebase's params are already constructed as `serde_json::Value`s built
+//! from finite float literals in practice).
 
 use serde::Serialize;
 
@@ -30,10 +45,33 @@ fn canonicalize(value: &mut serde_json::Value) {
     }
 }
 
+/// True if `value` contains a JSON `null` anywhere (top-level or nested in an array/object) --
+/// what `hash_value` uses to detect a non-finite float `serde_json` silently converted, since a
+/// legitimate `null` shouldn't otherwise reach this point (see this module's doc comment).
+fn contains_null(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Array(items) => items.iter().any(contains_null),
+        serde_json::Value::Object(map) => map.values().any(contains_null),
+        _ => false,
+    }
+}
+
 /// Canonical hash of any serializable value -- the "this stage's own params" half of a cache key.
+///
+/// Panics if the value contains (or, via a non-finite `f32`/`f64` field, silently becomes) a JSON
+/// `null` anywhere -- see this module's doc comment for why that's treated as a hard error rather
+/// than silently hashing it.
 pub fn hash_value<T: Serialize>(value: &T) -> blake3::Hash {
     let mut v = serde_json::to_value(value).expect("value always serializes to JSON");
     canonicalize(&mut v);
+    assert!(
+        !contains_null(&v),
+        "hash_value: canonicalized params contain a JSON null -- either a genuine null (this \
+         codebase's params never emit one; use #[serde(skip_serializing_if = \"Option::is_none\")] \
+         instead) or a NaN/Infinity float serde_json silently converted to null. Refusing to hash \
+         rather than risk two different params colliding on the same cache key."
+    );
     let bytes = serde_json::to_vec(&v).expect("canonicalized JSON value always serializes");
     blake3::hash(&bytes)
 }
@@ -69,6 +107,44 @@ mod tests {
         let a = serde_json::json!({ "wb": -0.0 });
         let b = serde_json::json!({ "wb": 0.0 });
         assert_eq!(hash_value(&a), hash_value(&b));
+    }
+
+    /// Regression test for a CodeRabbit-found bug: `serde_json::to_value` silently converts a
+    /// non-finite `f64` field to JSON `null` and returns `Ok`, contradicting an earlier version of
+    /// this module's own doc comment (which claimed NaN/Infinity "refuse to serialize" -- verified
+    /// empirically to be false, see the corrected doc comment above). `hash_value` must not
+    /// silently hash a NaN-clobbered value as if it were an ordinary `null`/absent field.
+    #[test]
+    #[should_panic(expected = "canonicalized params contain a JSON null")]
+    fn hash_value_panics_on_a_field_that_would_silently_become_null() {
+        #[derive(Serialize)]
+        struct Params {
+            exposure_stops: f64,
+        }
+        let params = Params {
+            exposure_stops: f64::NAN,
+        };
+        hash_value(&params);
+    }
+
+    #[test]
+    #[should_panic(expected = "canonicalized params contain a JSON null")]
+    fn hash_value_panics_on_infinity_too() {
+        #[derive(Serialize)]
+        struct Params {
+            exposure_stops: f64,
+        }
+        let params = Params {
+            exposure_stops: f64::INFINITY,
+        };
+        hash_value(&params);
+    }
+
+    #[test]
+    fn hash_value_does_not_panic_on_ordinary_finite_params() {
+        let value = serde_json::json!({ "exposure_stops": 0.5, "wb": [1.0, 1.0, 0.9] });
+        // Must not panic.
+        let _ = hash_value(&value);
     }
 
     #[test]

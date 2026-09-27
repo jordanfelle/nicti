@@ -270,6 +270,10 @@ fn run_sim(
     walk_pace_ms: u64,
     out_dir: PathBuf,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cursor_start <= n_images,
+        "cursor_start ({cursor_start}) must be <= n_images ({n_images})"
+    );
     let cost = sim::BakeCost::default();
     let result = sim::simulate_hero_bake(
         n_images,
