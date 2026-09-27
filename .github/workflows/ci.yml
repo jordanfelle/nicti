@@ -87,9 +87,13 @@ jobs:
               # every touching PR -- same rationale as den/pelt above, moved out of the always-on
               # jobs so an unrelated PR doesn't pay for a C++ recompile. spikes/retina is included
               # too: its own research tooling (compare/sweep/scan/watch/dump-classic/dump-cfa for
-              # #40) depends on nicti-decode and needs the same path-gated job.
+              # #40) depends on nicti-decode and needs the same path-gated job. .gitmodules is
+              # included since a submodule URL/branch/path change there affects this job's
+              # checkout step without necessarily touching any file under crates/nicti-decode/**
+              # itself (CodeRabbit, PR #203).
               - 'crates/nicti-decode/**'
               - 'spikes/retina/**'
+              - '.gitmodules'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
