@@ -1,0 +1,35 @@
+[package]
+name = "litter"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #33 (ADR-0025): burst/duplicate grouping -- candidate similarity signals (capture-time+shutter-count, dHash/pHash, SSIM, DINOv2 embedding), sequence-constrained two-level (tight/set) segmentation, and a labelling/eval harness for measuring grouping accuracy against human-corrected ground truth. Not a production crate."
+
+[lib]
+name = "litter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "litter"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+zune-jpeg = "0.5"
+fast_image_resize = "6"
+image = { version = "0.25", default-features = false }
+image_hasher = "3"
+sha2 = "0.11"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+# `nicti-prowl::golden::ssim`/`perf::Protocol` reused rather than duplicated -- same
+# spike-depends-on-crate direction `spikes/sniff` already took for the same reason.
+nicti-prowl = { path = "../../crates/nicti-prowl" }
+
+[dev-dependencies]
+tempfile = "3"
