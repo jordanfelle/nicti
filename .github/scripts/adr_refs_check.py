@@ -145,12 +145,11 @@ def main():
             exempt_first = formerly_marker and len(checks) == 1 and checks[0][0] == "num"
 
             for i, (kind, m) in enumerate(checks):
-                if i == 0 and exempt_first:
-                    continue  # this one IS the retired-number pointer itself, see #183
+                is_exempt_pointer = i == 0 and exempt_first
                 abs_pos = run.start() + m.start()
                 line_no = content.count("\n", 0, abs_pos) + 1
                 if kind == "file":
-                    if m.group(0) not in filenames:
+                    if not is_exempt_pointer and m.group(0) not in filenames:
                         bad.append(
                             f"{path}:{line_no}: reference to a nonexistent ADR file "
                             f"{m.group(0)!r} (in {run_text!r})"
@@ -158,11 +157,15 @@ def main():
                 else:
                     num = m.group(0)
                     if len(num) != 4:
+                        # Even the exempt retired-number pointer must be well-formed -- the
+                        # exemption only ever meant "don't require this to resolve to a
+                        # currently-known number," never "skip basic shape validation too"
+                        # (#195's review).
                         bad.append(
                             f"{path}:{line_no}: malformed ADR reference {num!r} "
                             f"(not 4 digits, in {run_text!r})"
                         )
-                    elif num not in known:
+                    elif not is_exempt_pointer and num not in known:
                         bad.append(
                             f"{path}:{line_no}: unresolved reference to ADR-{num} "
                             f"(in {run_text!r})"
