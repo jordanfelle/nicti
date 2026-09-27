@@ -204,6 +204,57 @@ fn a_directory_whose_every_asset_is_missing_is_reported() {
 /// missing file *and* has a subdirectory with a still-present file must not be reported as "every
 /// asset missing" -- the subdirectory's presence has to roll up to every ancestor above it, not
 /// just its own immediate parent.
+/// Regression test for a finding from CodeRabbit's review: `IngestReport::failed` carries the
+/// literal (possibly NFD-decomposed) filesystem path a directory walk returned, while a cataloged
+/// asset's own `rel_path` is always NFC-composed (`scruff::normalize_rel_path`). Comparing the two
+/// without normalizing both to the same form first could fail to recognize an asset as living under
+/// an unreadable directory whose on-disk name uses decomposed Unicode.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_subdirectory_with_an_nfd_name_still_protects_its_asset() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (store, root_id) = setup();
+    // "café" spelled with a combining acute accent (NFD) -- the literal bytes this directory is
+    // created with, and therefore what `WalkDir` returns in `IngestReport::failed` once blocked.
+    let nfd_name = "cafe\u{0301}";
+    let blocked = dir.path().join(nfd_name);
+    std::fs::create_dir(&blocked).unwrap();
+    write_fake_raw(&blocked, "hidden.NEF", 1);
+
+    sync_root(&store, root_id, dir.path(), &SyncOptions::default()).unwrap();
+    // `normalize_rel_path` NFC-composes the stored path -- "café" with a single precomposed
+    // character, not the two-codepoint NFD form the directory itself was created with.
+    let nfc_rel_path = "caf\u{e9}/hidden.NEF";
+    let hidden = store
+        .find_asset_by_path(root_id, nfc_rel_path)
+        .unwrap()
+        .expect("cataloged under its NFC-composed rel_path while readable");
+
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = sync_root(
+        &store,
+        root_id,
+        dir.path(),
+        &SyncOptions {
+            remove_missing: true,
+        },
+    )
+    .unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!report.ingest.failed.is_empty());
+    let hidden_after = store
+        .find_asset_by_path(root_id, nfc_rel_path)
+        .unwrap()
+        .expect("asset row must survive -- it lives under an unreadable directory, not a genuinely missing one");
+    assert_eq!(
+        hidden.missing_since, hidden_after.missing_since,
+        "an asset under an NFD-named unreadable directory must be left alone, not flagged or removed"
+    );
+}
+
 #[test]
 fn a_directory_with_a_missing_direct_file_but_a_present_nested_file_is_not_reported() {
     let dir = tempfile::tempdir().unwrap();

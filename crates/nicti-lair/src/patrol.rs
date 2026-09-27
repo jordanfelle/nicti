@@ -5,7 +5,9 @@
 //! it has no way to notice a path it already knows about that's no longer there. Patrol adds that
 //! second, catalog-side pass.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::scruff::{ingest_root, IngestReport};
 use crate::{CatalogError, CatalogStore};
@@ -87,11 +89,22 @@ pub fn sync_root(
     // report an accurate "gone from disk" either way -- an asset under it is left alone rather than
     // risk flagging it missing (or, worse under `remove_missing`, deleting it) based on a read
     // failure rather than a genuine absence.
-    let unreadable_dirs: Vec<&Path> = report
+    //
+    // NFC-normalized for comparison (found by CodeRabbit's review): `IngestReport::failed` carries
+    // the literal filesystem path Scruff's `WalkDir` returned, which is whatever normalization form
+    // the underlying directory entries actually use, while `asset.rel_path` is always NFC-composed
+    // (`scruff::normalize_rel_path`). On a filesystem that preserves decomposed (NFD) names as-given
+    // rather than normalizing them (ext4, unlike NTFS/HFS+/APFS), comparing the two forms directly
+    // via `Path::starts_with` -- a byte/component comparison with no Unicode awareness -- could
+    // silently fail to recognize an asset as living under an unreadable directory. Normalizing both
+    // sides the same way before comparing closes that gap; it's a pure in-memory string operation,
+    // unrelated to whether the underlying `try_exists()` calls below can actually resolve such a
+    // path (see that match arm's own comment for why that's a separate, unresolved concern).
+    let unreadable_dirs: Vec<PathBuf> = report
         .ingest
         .failed
         .iter()
-        .map(|(path, _)| path.as_path())
+        .map(|(path, _)| normalize_path_for_compare(path))
         .collect();
 
     let now = now_unix();
@@ -111,11 +124,27 @@ pub fn sync_root(
     for asset in &assets {
         let dir = dir_prefix(&asset.rel_path);
         let asset_path = root_path.join(&asset.rel_path);
+        let comparable_asset_path = normalize_path_for_compare(&asset_path);
 
-        if unreadable_dirs.iter().any(|d| asset_path.starts_with(d)) {
+        if unreadable_dirs
+            .iter()
+            .any(|d| comparable_asset_path.starts_with(d))
+        {
             continue;
         }
 
+        // NOT fixed here (flagged by CodeRabbit's review, deferred): `asset_path` itself is built
+        // from the NFC-composed `rel_path` the catalog stores, so on the same kind of normalization-
+        // preserving filesystem described above, `try_exists()` below could return `false` for a
+        // file that is genuinely present under an NFD-spelled directory entry -- the OS resolves a
+        // path by exact bytes, so no amount of in-memory Rust-side normalization changes what the
+        // syscall actually finds. A real fix needs the catalog to retain each asset's original
+        // filesystem-spelling path (not just its normalized `rel_path`) and resolve against that --
+        // a schema/API change, not a contained fix, and one `scruff::ingest_one`'s own re-scan
+        // lookup (`find_asset_by_path`, keyed on the same NFC `rel_path`) already has the identical
+        // exposure to, independent of this PR. Tracked as a follow-up rather than expanding this
+        // PR's scope; low real-world risk for v1's actual target (Windows/NTFS doesn't split
+        // precomposed characters into decomposed form on its own).
         match asset_path.try_exists() {
             Ok(true) => {
                 present_dirs.extend(ancestor_prefixes(&dir));
@@ -148,6 +177,15 @@ pub fn sync_root(
     report.missing_folders.sort();
 
     Ok(report)
+}
+
+/// NFC-composes `path`'s string form for comparison purposes only -- this never touches disk or
+/// changes what bytes a later `try_exists()`/`starts_with()` call actually resolves against, it
+/// only makes two in-memory `PathBuf`s built from differently-normalized source strings compare
+/// equal the way `scruff::normalize_rel_path`'s own NFC convention already assumes. Found by
+/// CodeRabbit's review.
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().nfc().collect::<String>())
 }
 
 /// The directory portion of a normalized `rel_path` (forward-slash separated, no leading slash --
