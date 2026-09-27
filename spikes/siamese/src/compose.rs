@@ -8,10 +8,10 @@
 //! and `spikes/groom`'s `MaskRecipe`:**
 //!
 //! 1. **`model_version` type**: `spikes/pawprint/tests/sizing.rs` uses a `String` (`"0.4.1"`),
-//!    `spikes/groom/src/spot.rs::MaskRecipe` uses a `u32`. This module's `AiRecipe` uses `String`
+//!    and `spikes/groom/src/spot.rs::MaskRecipe` (originally a `u32`) was aligned to match in #172
 //!    -- a segmentation-model release is a semver-ish string upstream (BiRefNet/MobileSAM/SAM2
-//!    tags aren't sequential integers), and groom/#51 should align to this, not the other way
-//!    around (noted as a follow-up in `docs/adr/0024-masking.md`).
+//!    tags aren't sequential integers), so this module's `AiRecipe` and groom's `MaskRecipe` both
+//!    use `String` now.
 //! 2. **The inverse-mask double-recipe problem**: `spikes/pawprint/tests/sizing.rs`'s
 //!    `mask.inverse_subject_0` stores a *second, separate* `{model_id, model_version, ...}` recipe
 //!    rather than referencing the subject mask it inverts -- which would bake the same model
@@ -29,8 +29,8 @@ use crate::geometry::Geometry;
 use crate::image::Field;
 
 /// `{model_id, model_version, params, seed?}` -- never the derived pixels, per ADR-0002. Matches
-/// `spikes/groom/src/spot.rs::MaskRecipe`'s shape except `model_version: String` (see conflict 1
-/// above).
+/// `spikes/groom/src/spot.rs::MaskRecipe`'s shape exactly, including `model_version: String`
+/// (see conflict 1 above).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiRecipe {
     pub model_id: String,
