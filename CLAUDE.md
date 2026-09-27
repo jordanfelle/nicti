@@ -22,8 +22,8 @@ Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (00
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
 `preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
 `lrc-migration` (0023), `masking` (0024), `culling` (0025), `denoise` (0040),
-`xmp-interop` (0059). A new ADR adds a bullet to both files of its topic (or a new topic) and to
-this list — not inline here.
+`xmp-interop` (0059), `render-graph` (0044). A new ADR adds a bullet to both files of its topic (or
+a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
 
@@ -101,12 +101,12 @@ terse index: crate/spike → purpose → owning topic.
 - **`spikes/litter`** (#33/ADR-0025) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
 - **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
+- **`spikes/loaf`** (#44/ADR-0044) → [`render-graph`](.claude/rules/render-graph/REFERENCE.md)
 - **`bench/whisker`** (workspace member) — benchmark tooling for #43, not a production crate; same
   "don't build on top of it" caveat as a spike
 
 The root placeholder binary crate (`src/main.rs`) still exists only so CI/lint tooling has
 something real to run against; it is not the shipping v1 target's home yet.
-
 
 ## Development workflow
 
