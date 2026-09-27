@@ -48,15 +48,19 @@ Covers the implementation-language decision, v1 platform/camera scope, the non-d
 - **Claw v2 plugin manifest, disclosure UX, and kill switch (Collar/Hiss)** —
   `docs/adr/0214-claw-plugin-manifest-and-kill-switch.md`: a third-party module manifest
   (`collar.toml`) declares every capability (network/filesystem/gpu/extension-point) with a scope
-  and a required plain-language justification, shown at install; an update widening a capability
-  disables the module until re-consented. Network access is action-scoped
-  (`weight-download`/`cloud-feature` only, per ADR-0218) and enforced by not linking the
-  corresponding WASI import (`wasi:http`'s `outgoing-handler`) unless granted — an undeclared
-  capability is structurally unreachable, not just policy-denied. A kill switch (menu item +
-  candidate `Ctrl+Shift+Escape` shortcut, pending a manual LRC-collision check) uses wasmtime
-  epoch interruption to stop an in-flight call immediately, including a tight compute loop with no
-  host-call boundary, and quarantines the module; a persisted pre-launch safe-mode flag (Obsidian
-  Restricted Mode precedent) is the fallback if the UI itself is compromised. Distinguishes a soft
+  and a required plain-language justification, shown at install; an update widening a capability,
+  down to individual fields like an added `allowed_hosts` entry, disables the module until
+  re-consented. Network access is action-scoped (`weight-download`/`cloud-feature` only, per
+  ADR-0218), HTTPS-only, and enforced by not linking the corresponding WASI import (`wasi:http`'s
+  `outgoing-handler`) unless granted — an undeclared capability is structurally unreachable, not
+  just policy-denied. A kill switch (menu item + candidate `Ctrl+Shift+Escape` shortcut, pending a
+  manual LRC-collision check) uses wasmtime epoch interruption to stop an in-flight call, including
+  a tight compute loop with no host-call boundary, once the target module's own epoch deadline is
+  crossed (`increment_epoch()` itself advances a counter shared by the whole `Engine` — isolating
+  one module needs a separate `Engine` or carefully spaced per-`Store` deadlines), and quarantines
+  the module; a persisted pre-launch safe-mode flag (Obsidian Restricted Mode precedent) is the
+  fallback if the UI itself is compromised. Not yet solved: epoch interruption doesn't stop GPU
+  work already submitted to the device. Distinguishes a soft
   "bug" (auto-disable + notice, one-click re-enable) from a hard "violation" (attempted undeclared
   capability use — immediate quarantine, explicit re-enable required). Documentary only — no
   sandbox implementation; a follow-up `build`/v2 ticket implements it. Feeds ADR-0218 §4's

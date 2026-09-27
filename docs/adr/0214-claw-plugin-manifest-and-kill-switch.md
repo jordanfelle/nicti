@@ -103,10 +103,11 @@ host at install time; the other six extension points in ADR-0019 §7 remain thir
 - **`network`**: only `wasi:http`'s `outgoing-handler` import is linked into a module's world when
   `network` is granted — `wasi:sockets` (raw TCP/UDP) is never linked at all for a third-party
   module[^6]. The host's own `outgoing-handler` implementation checks the request's authority
-  against `allowed_hosts` and the currently-active action scope before issuing it; WASI's own
-  primitive is only the binary link-time switch, the hostname/scope filtering is Claw's
-  responsibility layered on top — matching how Zed's `download_file` capability is host-scoped to
-  specific hosts, not merely present/absent[^7].
+  against `allowed_hosts` and the currently-active action scope, and requires HTTPS with
+  certificate validation (a plain-HTTP request is rejected the same as an unlisted host), before
+  issuing it; WASI's own primitive is only the binary link-time switch, the hostname/scope/
+  transport filtering is Claw's responsibility layered on top — matching how Zed's `download_file`
+  capability is host-scoped to specific hosts, not merely present/absent[^7].
 - **`filesystem`**: WASI preopened directories only, never ambient path access[^8] — but a preopen
   is directory-granular, coarser than Nicti needs by itself (a known, acknowledged WASI gap[^8]),
   so `user-selected` grants preopen exactly the one directory the user's file-picker returned, not
@@ -122,12 +123,18 @@ host at install time; the other six extension points in ADR-0019 §7 remain thir
   low-collision, but Adobe's own shortcut reference blocked direct fetch (HTTP 403); **this
   specific binding needs a manual cross-check against Adobe's live page or in-app Help before
   it's locked**, not treated as ADR-final.
-- **Immediate, no restart required, for the module's own WASM call stack**: the host calls
-  `Engine::increment_epoch()` targeting the killed module's `Store`. wasmtime's own worked example
-  confirms this interrupts code already mid-execution, not just blocks new calls — including a
-  tight compute loop with no host-call boundary, since the compiler inserts epoch checks at both
-  function entries *and loop back-edges*[^9]. The module's registry entry flips to quarantined
-  (persisted) so it isn't reinstantiated until explicitly re-enabled.
+- **Immediate, no restart required, for the module's own WASM call stack**: `Engine::increment_epoch()`
+  advances a single counter shared by every `Store` on that `Engine`, not a per-module switch by
+  itself — each `Store` traps independently once its own `set_epoch_deadline()` value is crossed
+  by that shared counter. Isolating a kill to one module therefore needs either a separate
+  `Engine` per third-party module (simplest, at the cost of one `Engine`'s worth of overhead per
+  module) or per-`Store` deadlines on a shared `Engine` spaced so only the targeted module's
+  deadline is crossed by a given increment — an implementation detail for whoever builds this, not
+  resolved further here. Once the target module's deadline is crossed, wasmtime's own worked
+  example confirms this interrupts code already mid-execution, not just blocks new calls —
+  including a tight compute loop with no host-call boundary, since the compiler inserts epoch
+  checks at both function entries *and loop back-edges*[^9]. The module's registry entry flips to
+  quarantined (persisted) so it isn't reinstantiated until explicitly re-enabled.
 - **`gpu` constraint — epoch interruption does not stop already-submitted GPU work**: if a killed
   module already called a host import that submitted a GPU command buffer (a compute-shader
   dispatch, per ADR-0019 §6's direction for any future third-party render-adjacent work),
