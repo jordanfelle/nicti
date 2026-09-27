@@ -209,8 +209,11 @@ if interaction = "switch" {
                 EmitEdge("crop-enter", step, stepIndex)
                 Send("r")
                 Sleep(300)
-                Click(straightenAutoX, straightenAutoY) ; crop overlay's Auto-angle button
+                ; Flash before the click (not after) -- same convention every other event in this
+                ; file follows (EmitEdge/Flash immediately precedes the input it marks the t0 for),
+                ; so the settled-latency window starts at the click, not after it already happened.
                 EmitEdge("straighten", step, stepIndex)
+                Click(straightenAutoX, straightenAutoY) ; crop overlay's Auto-angle button
                 Send("{Enter}")
                 committedHistorySteps += 1
             } else {

@@ -267,6 +267,17 @@ if (-not $ahkProc.WaitForExit($DurationSeconds * 1000)) {
     if (-not $ffmpegProc.HasExited) { Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue }
     throw "hero.ahk did not exit within $DurationSeconds s (a blocking dialog? LRC window not found? a hung drag?) -- aborting. See $outDir for whatever capture exists."
 }
+if ($ahkProc.ExitCode -ne 0) {
+    # hero.ahk exits promptly (well inside DurationSeconds) on several real error paths -- a
+    # missing events-csv arg for -Interaction mixed, an unrecognized mixed sequence step, LRC's
+    # window not found. Without this check, WaitForExit above returns true immediately for those
+    # too, and the run would fall through to "stop capture" and be treated as complete.
+    $ffmpegProc.StandardInput.Write("q")
+    $ffmpegProc.StandardInput.Flush()
+    $ffmpegProc.WaitForExit(5000) | Out-Null
+    if (-not $ffmpegProc.HasExited) { Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue }
+    throw "hero.ahk exited with code $($ahkProc.ExitCode) -- aborting. See $outDir for whatever capture exists."
+}
 
 Start-Sleep -Seconds 1 # trailing settle buffer beyond hero.ahk's own trailing sleep
 

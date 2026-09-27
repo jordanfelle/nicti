@@ -330,6 +330,17 @@ pub fn pool_results(
                     continue;
                 }
 
+                // An events.csv with zero rows passes the edge-count check above (0 == 0
+                // detected edges) but has no first row for the step_index check below to
+                // examine -- must be its own skip, not an events[0] panic.
+                if events.is_empty() {
+                    skipped.push(SkippedCapture {
+                        dir,
+                        reason: "events.csv has no rows -- nothing to analyze".to_string(),
+                    });
+                    continue;
+                }
+
                 // predecessor_steps assumes step_index is gapless, non-decreasing, and each
                 // step's flashes are contiguous -- true for well-formed hero.ahk output, but not
                 // enforced by the two checks above. A hand-edited/corrupted events.csv that
@@ -1072,6 +1083,38 @@ mod tests {
         assert!(buckets.is_empty());
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].reason.contains("gapless"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_skips_capture_with_zero_events_instead_of_panicking() {
+        // Zero indicator edges and an events.csv with only a header (or truly empty) both pass
+        // the edge-count check (0 == 0) -- must be skipped, not panic on events[0].
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        let indicator = vec![0u8, 0, 0];
+        let roi = vec![10u8, 10, 10];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(dir.join("events.csv"), "edge,kind,step,step_index\n").unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(buckets.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("no rows"));
 
         fs::remove_dir_all(&root).unwrap();
     }
