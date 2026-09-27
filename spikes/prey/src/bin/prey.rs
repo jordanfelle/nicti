@@ -1,7 +1,7 @@
 //! CLI for the `prey` spike (#56/ADR-0056). Subcommands measure each export-stack candidate on a
 //! synthetic image at a chosen size (no real NEF/render exists yet, see the module docs' "what
-//! wasn't reachable" notes), and `pipeline` runs the full resize -> encode -> metadata ->
-//! watermark chain end to end.
+//! wasn't reachable" notes), and `pipeline` runs the full resize -> watermark -> encode ->
+//! metadata chain end to end.
 
 use std::path::PathBuf;
 
@@ -118,6 +118,37 @@ fn report(name: &str, protocol: Protocol, stats: nicti_prowl::perf::Stats, out_d
         Ok(path) => println!("  -> {}", path.display()),
         Err(e) => eprintln!("  (failed to write report: {e})"),
     }
+}
+
+/// The full resize -> watermark -> encode -> metadata chain, shared by `Pipeline`'s timed loop
+/// and its real-output-file write below so the two can never drift apart (CodeRabbit review on
+/// PR #221 caught the two paths having drifted: the timed loop composited a watermark but threw
+/// the result away before re-encoding, and the real output file never watermarked at all --
+/// fixed by making this the single source of truth for the chain both callers exercise).
+/// Watermarking happens on the resized RGB frame directly, before encoding -- not by decoding a
+/// JPEG back out and re-encoding it, which wastes a decode/encode round trip for no reason.
+fn build_pipeline_jpeg(
+    src: &RgbImage,
+    dst_width: u32,
+    dst_height: u32,
+    quality: u8,
+) -> anyhow::Result<Vec<u8>> {
+    let resized = prey::resize::resize_fast_linear(src, dst_width, dst_height)?;
+
+    let mut rgba: image::RgbaImage = image::DynamicImage::ImageRgb8(resized).to_rgba8();
+    let logo_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+        <rect width="200" height="60" rx="8" fill="#000000" opacity="0.5"/>
+        <text x="10" y="40" font-size="28" fill="#ffffff">Nicti</text>
+    </svg>"##;
+    let logo = prey::watermark::rasterize_svg(logo_svg, 200, 60)?;
+    prey::watermark::composite_parallel(&mut rgba, &logo, 20, (dst_height as i64) - 80);
+    let watermarked = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+
+    let icc = prey::icc::srgb_icc_profile()?;
+    let jpeg = prey::encode::encode_jpeg_encoder(&watermarked, quality, Some(&icc))?;
+    let jpeg = prey::metadata::write_exif_jpeg(&jpeg, &sample_metadata(dst_width, dst_height))?;
+    let xmp = prey::metadata::wrap_xpacket("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>");
+    prey::metadata::embed_xmp_jpeg(&jpeg, &xmp)
 }
 
 fn sample_metadata(width: u32, height: u32) -> ExportMetadata {
@@ -287,42 +318,87 @@ fn main() -> anyhow::Result<()> {
             println!("pipeline {src_width}x{src_height} -> {dw}x{dh} @ q{quality}");
 
             let stats = protocol.run(|| {
-                let resized = prey::resize::resize_fast_linear(&src, dw, dh).unwrap();
-                let icc = prey::icc::srgb_icc_profile().unwrap();
-                let jpeg =
-                    prey::encode::encode_jpeg_encoder(&resized, quality, Some(&icc)).unwrap();
-                let jpeg =
-                    prey::metadata::write_exif_jpeg(&jpeg, &sample_metadata(dw, dh)).unwrap();
-                let xmp = prey::metadata::wrap_xpacket("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>");
-                let jpeg = prey::metadata::embed_xmp_jpeg(&jpeg, &xmp).unwrap();
-                let logo_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
-                    <rect width="200" height="60" rx="8" fill="#000000" opacity="0.5"/>
-                    <text x="10" y="40" font-size="28" fill="#ffffff">Nicti</text>
-                </svg>"##;
-                let logo = prey::watermark::rasterize_svg(logo_svg, 200, 60).unwrap();
-                let mut rgba: image::RgbaImage = image::DynamicImage::ImageRgb8(
-                    image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
-                        .unwrap()
-                        .to_rgb8(),
-                )
-                .to_rgba8();
-                prey::watermark::composite_parallel(&mut rgba, &logo, 20, (dh as i64) - 80);
-                let _ = rgba;
+                build_pipeline_jpeg(&src, dw, dh, quality).unwrap();
             });
             report("pipeline-end-to-end", protocol, stats, &out_dir);
 
             // Write one real output file for manual inspection (exiftool etc.), outside the
-            // timed loop above.
-            let resized = prey::resize::resize_fast_linear(&src, dw, dh)?;
-            let icc = prey::icc::srgb_icc_profile()?;
-            let jpeg = prey::encode::encode_jpeg_encoder(&resized, quality, Some(&icc))?;
-            let jpeg = prey::metadata::write_exif_jpeg(&jpeg, &sample_metadata(dw, dh))?;
-            let xmp = prey::metadata::wrap_xpacket("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>");
-            let jpeg = prey::metadata::embed_xmp_jpeg(&jpeg, &xmp)?;
+            // timed loop above -- the exact same chain the timing measures, not a separate copy
+            // that can drift from it (see build_pipeline_jpeg's own doc comment).
+            let jpeg = build_pipeline_jpeg(&src, dw, dh, quality)?;
             std::fs::write(&out_file, &jpeg)?;
             println!("wrote {} ({} bytes)", out_file.display(), jpeg.len());
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgb;
+    use nicti_prowl::golden::ssim;
+
+    #[test]
+    fn build_pipeline_jpeg_actually_applies_the_watermark() {
+        // Regression test for a real CodeRabbit finding on PR #221: the pipeline's real output
+        // used to never watermark at all (the timed loop composited one but discarded the result
+        // before re-encoding). Prove the shared chain's output differs from an unwatermarked
+        // encode of the same resize -- not just that it doesn't crash.
+        let src = synthetic_frame(256, 256);
+        let watermarked = build_pipeline_jpeg(&src, 128, 128, 90).unwrap();
+        let watermarked_img =
+            image::load_from_memory_with_format(&watermarked, image::ImageFormat::Jpeg)
+                .unwrap()
+                .to_rgb8();
+
+        let resized = prey::resize::resize_fast_linear(&src, 128, 128).unwrap();
+        let plain = prey::encode::encode_jpeg_encoder(&resized, 90, None).unwrap();
+        let plain_img = image::load_from_memory_with_format(&plain, image::ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgb8();
+
+        assert_eq!(watermarked_img.dimensions(), plain_img.dimensions());
+        let score = ssim(&watermarked_img, &plain_img);
+        assert!(
+            score < 0.98,
+            "watermarked output should visibly differ from an unwatermarked encode, got ssim={score}"
+        );
+
+        // The watermark logo is a semi-transparent black rectangle over the bottom-left corner
+        // (see build_pipeline_jpeg's own logo_svg) -- that region must be darker than the same
+        // pixel in the unwatermarked image.
+        let (x, y) = (25u32, 100u32);
+        let watermarked_luma = watermarked_img
+            .get_pixel(x, y)
+            .0
+            .iter()
+            .map(|&c| c as u32)
+            .sum::<u32>();
+        let plain_luma = plain_img
+            .get_pixel(x, y)
+            .0
+            .iter()
+            .map(|&c| c as u32)
+            .sum::<u32>();
+        assert!(
+            watermarked_luma < plain_luma,
+            "expected the watermark region to be darkened, got watermarked={watermarked_luma} plain={plain_luma}"
+        );
+    }
+
+    #[test]
+    fn synthetic_frame_is_not_a_flat_color() {
+        // Sanity check the test fixture itself isn't degenerate (a flat image would make the
+        // watermark-darkening assertion above trivially true regardless of whether watermarking
+        // actually ran). Picks two points landing in different 64px bands -- synthetic_frame's
+        // banding only varies across multiple 64px blocks, so a frame smaller than 128px in
+        // either dimension is entirely one (possibly overridden-flat) band.
+        let frame = synthetic_frame(256, 256);
+        let corner = frame.get_pixel(0, 0); // band (0+0)%7=0 -> forced white
+        let other = frame.get_pixel(200, 200); // band (3+3)%7=6 -> real gradient value
+        assert_ne!(corner, other);
+        let _: &Rgb<u8> = corner;
+    }
 }

@@ -20,6 +20,15 @@ pub fn encode_jpeg_encoder(
     icc: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
     let (width, height) = img.dimensions();
+    // jpeg-encoder's own `encode` takes u16 dimensions -- a silent `as u16` truncation on an
+    // oversized image would pass the wrong (wrapped-around) width/height while `img.as_raw()`
+    // still holds the full-size buffer, producing a corrupted encode rather than a clean error
+    // (caught by CodeRabbit review on PR #221). JPEG's own format ceiling is 65535px per side
+    // anyway, so a real caller past that limit needs a different container format regardless.
+    let width_u16 = u16::try_from(width)
+        .map_err(|_| anyhow::anyhow!("image width {width} exceeds JPEG's 65535px limit"))?;
+    let height_u16 = u16::try_from(height)
+        .map_err(|_| anyhow::anyhow!("image height {height} exceeds JPEG's 65535px limit"))?;
     let mut buf = Vec::new();
     let mut encoder = jpeg_encoder::Encoder::new(&mut buf, quality);
     if let Some(icc) = icc {
@@ -30,8 +39,8 @@ pub fn encode_jpeg_encoder(
     encoder
         .encode(
             img.as_raw(),
-            width as u16,
-            height as u16,
+            width_u16,
+            height_u16,
             jpeg_encoder::ColorType::Rgb,
         )
         .map_err(|e| anyhow::anyhow!("jpeg-encoder encode: {e}"))?;
@@ -137,6 +146,20 @@ mod tests {
         let decoded = decode_jpeg(&bytes);
         assert_eq!(decoded.dimensions(), src.dimensions());
         assert!(ssim(&src, &decoded) > 0.95);
+    }
+
+    #[test]
+    fn jpeg_encoder_rejects_dimension_past_u16_range_instead_of_corrupting() {
+        // Regression test for a real CodeRabbit finding on PR #221: an unchecked `as u16` cast
+        // on an oversized dimension used to silently wrap around and pass the wrong width to the
+        // encoder while img.as_raw() still held the full-size buffer -- a corrupted encode, not
+        // a clean error. A 1-pixel-tall image keeps the test's own memory footprint small.
+        let oversized = RgbImage::new(u16::MAX as u32 + 1, 1);
+        let result = encode_jpeg_encoder(&oversized, 90, None);
+        assert!(
+            result.is_err(),
+            "a width past u16::MAX must error, not silently truncate"
+        );
     }
 
     #[test]

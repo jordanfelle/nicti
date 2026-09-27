@@ -151,10 +151,12 @@ exceeds the blend work for a 200x60 (12,000-pixel) overlay. Sequential is the ri
 typical logo-sized watermark; parallelizing would only pay off for a much larger overlay (e.g. a
 full-frame tiled watermark), not measured this pass.
 
-**Pipeline end-to-end** (resize -> encode -> EXIF -> XMP -> watermark, 3840x2160 -> 1024x576 @
-q90): 228.85ms p50 / 264.15ms p95. The real output JPEG passes `exiftool -validate -warning -a`
-clean (`Validate: OK`) after fixing two real findings caught by that same command on the first
-real pipeline output (see below).
+**Pipeline end-to-end** (resize -> watermark -> encode -> EXIF -> XMP, 3840x2160 -> 1024x576 @
+q90): 228.85ms p50 / 264.15ms p95 (measured before the CodeRabbit-caught pipeline-ordering fix
+below; re-measurement wasn't repeated for that fix alone since it changes correctness, not the
+cost of any individual step). The real output JPEG passes `exiftool -validate -warning -a` clean
+(`Validate: OK`) after fixing two real findings caught by that same command on the first real
+pipeline output (see below).
 
 ## Real findings from building this, not just measuring it
 
@@ -195,6 +197,19 @@ real pipeline output (see below).
      (`brotli`/`crc`/`crc-catalog`/`dunce`/a second `quick-xml` version) landed in `Cargo.lock` via
      `resvg`/`usvg`/`moxcms` without being individually disclosed. All five confirmed permissively
      licensed and added to the paragraph.
+- **CodeRabbit's review on PR #221 caught two more real issues, both fixed**:
+  1. `bin/prey.rs`'s `Pipeline` command had two copies of the same chain that had drifted apart:
+     the timed loop decoded the JPEG back out, composited a watermark onto it, and then discarded
+     the result without re-encoding (`let _ = rgba;`) -- so the recorded timing didn't include a
+     real re-encode step -- while the real-output-file write path never watermarked at all,
+     despite this doc's own "resize -> encode -> EXIF -> XMP -> watermark" claim. Fixed by
+     factoring both into one `build_pipeline_jpeg` function (resize -> watermark the resized RGB
+     frame directly -> encode -> EXIF -> XMP), used by both the timed loop and the real write, so
+     the two can't drift again.
+  2. `encode.rs::encode_jpeg_encoder` cast `width`/`height` to `u16` with a bare `as` -- a
+     dimension past 65535px would silently wrap around and pass the wrong size to the encoder
+     while the pixel buffer stayed full-size, producing a corrupted encode rather than a clean
+     error. Fixed with `u16::try_from`, regression-tested.
 
 ## What wasn't reachable this pass
 
