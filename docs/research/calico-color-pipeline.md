@@ -65,7 +65,7 @@ the ADR) additionally confirmed the texture *upload* itself (data layout,
 - `spikes/retina`'s new `dump-linear` subcommand (extends the existing LibRaw shim with a
   demosaic-only decode path — no WB/color-matrix/gamma applied). **Not compiled or tested in this
   sandbox**: retina's own `vendor/LibRaw` git submodule isn't checked out here (same constraint
-  every other retina session hits — `git submodule update --init spikes/retina/vendor/LibRaw`
+  every other retina session hits — `git submodule update --init crates/nicti-decode/vendor/LibRaw`
   first), and retina is excluded from the workspace's normal `clippy`/`test` jobs for exactly this
   reason (see CLAUDE.md's CI path-gating note). The Rust/C++ additions were written and reviewed
   by hand against the existing shim's own conventions, and are syntax-checked via `cargo fmt
@@ -77,7 +77,7 @@ the ADR) additionally confirmed the texture *upload* itself (data layout,
    (or Adobe Color) applied, once with **Adobe Vivid** — all develop sliders zeroed, As Shot white
    balance, no lens corrections/sharpening/noise reduction/crop. Save both sets to the user's
    local export folder.
-3. `git submodule update --init spikes/retina/vendor/LibRaw`, then for each NEF:
+3. `git submodule update --init crates/nicti-decode/vendor/LibRaw`, then for each NEF:
    `cargo run -p retina --bin retina -- dump-linear <nef> --out <dir>`.
 4. Locate the installed DCP file(s) for the camera model(s) used (typically under
    `%LOCALAPPDATA%\Adobe\CameraRaw\CameraProfiles\` or similar) and, separately, the installed

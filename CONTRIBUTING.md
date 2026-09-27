@@ -12,14 +12,14 @@ and this doc is the canonical guide for making one.
   `apt-get install nasm` (Debian/Ubuntu).
 - **A C/C++ toolchain** — MSVC on Windows (the Visual Studio Build Tools), a standard
   gcc/clang setup elsewhere. Needed for `den`'s bundled native catalog-engine libraries and for
-  `retina`'s vendored LibRaw build.
+  `nicti-decode`'s vendored LibRaw build.
 - **libclang/LLVM** — only if you're touching `den`'s RocksDB feature (`bindgen` needs it).
 - **Linux GUI headers** (`libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, `libxi-dev`,
   `libxrandr-dev`, `libgl1-mesa-dev`, `libfontconfig1-dev`) — only if you're touching
   `spikes/pelt-egui`/`pelt-iced`/`pelt-slint` on Linux.
-- **The `retina` submodule** — only if you're touching `spikes/retina`:
+- **The LibRaw submodule** — only if you're touching `crates/nicti-decode` or `spikes/retina`:
   ```bash
-  git submodule update --init spikes/retina/vendor/LibRaw
+  git submodule update --init crates/nicti-decode/vendor/LibRaw
   ```
 - **[pre-commit](https://pre-commit.com/)**:
   ```bash

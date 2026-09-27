@@ -90,6 +90,16 @@ pub struct LinearFrame {
 /// The production `RawDecoder`: LibRaw (vendored `yogthos/LibRaw#nikon-he-decoder`, see
 /// `vendor/LibRaw` and `build.rs`), the only candidate #37/ADR-0019 found that decodes the real
 /// library's Nikon HE/HE* files.
+///
+/// **UNVERIFIED against a real file in this sandbox** (no NEF/DNG fixture exists anywhere in this
+/// repo, and this promotion's own review pass had none to test against either): `decode_linear`'s
+/// logic is carried over unchanged from `spikes/retina`'s own `dump_linear` (#37/#38's own
+/// research already exercised that exact code path against real HE/HE*/Lossless files pulled from
+/// the live library, see `docs/decisions/raw-decoder.md`), but this promotion itself only checked
+/// that the moved code compiles, lints clean, and passes unit tests that don't reach the real FFI
+/// decode path (the missing-file I/O-error case is the only `decode_linear` test that exists).
+/// Treat the decode/demosaic/channel-drop path as re-verified-by-inspection, not re-tested, until
+/// it's actually run against a real file.
 pub struct LibRawDecoder;
 
 impl Module for LibRawDecoder {
