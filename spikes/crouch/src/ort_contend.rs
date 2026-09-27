@@ -216,68 +216,19 @@ mod tiles_for_frame_tests {
 
     #[test]
     fn real_full_resolution_frame_128px() {
-        // 6064x4040 @ 128px tile / 32px overlap (stride 96): matches manual count from the same
-        // stride/edge-clamp loop as `rods::ai::TiledDenoiser::denoise`.
-        let tiles_x = {
-            let mut x = 0u32;
-            let mut n = 0u32;
-            loop {
-                let tile_w = 128u32.min(6064 - x);
-                n += 1;
-                if x + tile_w >= 6064 {
-                    break;
-                }
-                x += 96;
-            }
-            n
-        };
-        let tiles_y = {
-            let mut y = 0u32;
-            let mut n = 0u32;
-            loop {
-                let tile_h = 128u32.min(4040 - y);
-                n += 1;
-                if y + tile_h >= 4040 {
-                    break;
-                }
-                y += 96;
-            }
-            n
-        };
-        assert_eq!(tiles_for_frame(6064, 4040, 128, 32), tiles_x * tiles_y);
+        // 6064x4040 @ 128px tile / 32px overlap (stride 96). Expected count (2646) computed
+        // independently in Python against the same stride/edge-clamp rule, not by re-running this
+        // function's own loop -- a bug shared between this function and a hand-inlined copy of
+        // its loop would otherwise sail through undetected. Also the figure #205's own ADR/
+        // research-doc writeup cites, so this doubles as a regression check on that number.
+        assert_eq!(tiles_for_frame(6064, 4040, 128, 32), 2646);
     }
 
     #[test]
     fn real_full_resolution_frame_256px() {
-        // Same independent per-axis loop as the 128px test above, at 256px tile / 32px overlap
-        // (stride 224).
-        let tiles_x = {
-            let mut x = 0u32;
-            let mut n = 0u32;
-            loop {
-                let tile_w = 256u32.min(6064 - x);
-                n += 1;
-                if x + tile_w >= 6064 {
-                    break;
-                }
-                x += 224;
-            }
-            n
-        };
-        let tiles_y = {
-            let mut y = 0u32;
-            let mut n = 0u32;
-            loop {
-                let tile_h = 256u32.min(4040 - y);
-                n += 1;
-                if y + tile_h >= 4040 {
-                    break;
-                }
-                y += 224;
-            }
-            n
-        };
-        assert_eq!(tiles_for_frame(6064, 4040, 256, 32), tiles_x * tiles_y);
+        // Same independent-oracle reasoning as the 128px test above; 486 is #205's own cited
+        // figure for this tile/overlap combination.
+        assert_eq!(tiles_for_frame(6064, 4040, 256, 32), 486);
         // Cross-check: a larger tile with the same overlap must need no more tiles than the
         // smaller one over the same frame (coarser stride, fewer steps per axis).
         assert!(tiles_for_frame(6064, 4040, 256, 32) <= tiles_for_frame(6064, 4040, 128, 32));
