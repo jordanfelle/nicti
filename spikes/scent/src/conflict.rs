@@ -8,8 +8,9 @@
 //! since a spike-depending-on-another-spike isn't this repo's convention
 //! (only real `crates/*` are shared across spikes, e.g. `nicti-prowl`).
 
-use std::fs;
+use std::fs::File;
 use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -49,14 +50,25 @@ pub fn resolve_conflict(catalog: &Side, sidecar: &Side, ambiguity_window_ms: u12
 /// Reads a file's real modification time in milliseconds since the Unix
 /// epoch, and its BLAKE3 content hash.
 ///
+/// Both come from **one opened file handle**, not `fs::read` followed by a
+/// separate path-based `fs::metadata` call -- two separate path lookups have
+/// a real TOCTOU window (LRC replacing the sidecar in between would pair the
+/// old content's hash with the new file's mtime, which could make
+/// `resolve_conflict` report `NoConflict` for a sidecar that actually
+/// changed, or silently prefer a stale version). Reading content then
+/// querying the same handle's metadata ties both to the same underlying
+/// file, closing that specific window.
+///
 /// A pre-1970 or otherwise invalid mtime is a real `io::Error`, not silently
 /// treated as epoch 0 -- silently defaulting would bias `resolve_conflict`'s
 /// newer-wins comparison against a file with a corrupted timestamp instead
 /// of surfacing the problem.
 pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
-    let contents = fs::read(path)?;
+    let mut file = File::open(path)?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
     let hash = blake3::hash(&contents);
-    let metadata = fs::metadata(path)?;
+    let metadata = file.metadata()?;
     let mtime_ms = metadata
         .modified()?
         .duration_since(UNIX_EPOCH)
@@ -69,8 +81,18 @@ pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
 /// `crs:` only if the sidecar's current hash still matches what Nicti last
 /// wrote there** -- i.e. LRC hasn't independently touched the file since.
 /// Otherwise, skip the write and flag the asset, rather than clobbering
-/// whatever LRC just did. `last_written_hash: None` means Nicti has never
-/// written `crs:` to this sidecar before, which is always safe to write.
+/// whatever LRC just did.
+///
+/// `last_written_hash: None` means Nicti has never written `crs:` to this
+/// sidecar before -- but that alone does **not** mean it's safe to write:
+/// the sidecar might already carry real `crs:` content LRC itself wrote,
+/// independent of Nicti (a user's own Camera Raw settings predating any
+/// Nicti involvement with this file). `sidecar_already_has_crs_content`
+/// (from `packet::has_crs_content`) is what actually decides the `None`
+/// case: a genuinely virgin sidecar (no `crs:` properties at all yet) is
+/// safe for a first write; one that already has `crs:` content from an
+/// unknown origin is not, and this gate refuses it rather than guessing
+/// whether it's safe to overwrite.
 ///
 /// **This function is a pure comparison, not an atomicity guarantee.** The
 /// "never clobbers a concurrent LRC edit" property this gate exists for
@@ -93,9 +115,10 @@ pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
 pub fn should_write_crs(
     last_written_hash: Option<blake3::Hash>,
     current_sidecar_hash: blake3::Hash,
+    sidecar_already_has_crs_content: bool,
 ) -> bool {
     match last_written_hash {
-        None => true,
+        None => !sidecar_already_has_crs_content,
         Some(last) => last == current_sidecar_hash,
     }
 }
@@ -145,21 +168,29 @@ mod tests {
     }
 
     #[test]
-    fn crs_write_gate_allows_first_write() {
-        assert!(should_write_crs(None, blake3::hash(b"anything")));
+    fn crs_write_gate_allows_first_write_on_a_virgin_sidecar() {
+        assert!(should_write_crs(None, blake3::hash(b"anything"), false));
+    }
+
+    #[test]
+    fn crs_write_gate_blocks_first_write_over_unknown_existing_crs_content() {
+        // No prior Nicti write recorded, but the sidecar already has *some*
+        // crs: content -- possibly the user's own real LRC edits. Absence
+        // of a Nicti write history must not be read as "safe to overwrite."
+        assert!(!should_write_crs(None, blake3::hash(b"anything"), true));
     }
 
     #[test]
     fn crs_write_gate_blocks_when_lrc_touched_the_sidecar_since() {
         let last = blake3::hash(b"what nicti wrote");
         let current = blake3::hash(b"what lrc wrote after that");
-        assert!(!should_write_crs(Some(last), current));
+        assert!(!should_write_crs(Some(last), current, false));
     }
 
     #[test]
     fn crs_write_gate_allows_when_sidecar_is_unchanged_since() {
         let hash = blake3::hash(b"what nicti wrote");
-        assert!(should_write_crs(Some(hash), hash));
+        assert!(should_write_crs(Some(hash), hash, true));
     }
 
     #[test]
@@ -173,13 +204,13 @@ mod tests {
 
         // First write: always allowed (no prior write).
         let first_bytes = b"sidecar v1 with crs projection A";
-        assert!(should_write_crs(None, blake3::hash(first_bytes)));
+        assert!(should_write_crs(None, blake3::hash(first_bytes), false));
         std::fs::write(&path, first_bytes).unwrap();
         let mut last_written_hash = Some(blake3::hash(first_bytes));
 
         // Second write: sidecar is unchanged since -> allowed.
         let (current, _) = hash_and_mtime(&path).unwrap();
-        assert!(should_write_crs(last_written_hash, current));
+        assert!(should_write_crs(last_written_hash, current, true));
         let second_bytes = b"sidecar v2 with crs projection B";
         std::fs::write(&path, second_bytes).unwrap();
         last_written_hash = Some(blake3::hash(second_bytes));
@@ -191,7 +222,7 @@ mod tests {
         // Third write attempt: gate must block, since the sidecar no
         // longer matches what Nicti itself last wrote.
         let (current, _) = hash_and_mtime(&path).unwrap();
-        assert!(!should_write_crs(last_written_hash, current));
+        assert!(!should_write_crs(last_written_hash, current, true));
     }
 
     #[test]

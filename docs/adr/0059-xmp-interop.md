@@ -164,7 +164,7 @@ ADR-0002 asked for.
 
 ## Measured results
 
-- **35 tests pass** in `spikes/scent` (33 unit, 2 env-gated real-file integration tests that skip
+- **37 tests pass** in `spikes/scent` (35 unit, 2 env-gated real-file integration tests that skip
   cleanly here — no real LRC-written files exist in this Linux/WSL sandbox, same constraint
   ADR-0020's `homing` spike already documents). `cargo clippy -p scent --all-targets -D warnings`
   and `cargo fmt -p scent -- --check` both pass clean.
@@ -215,6 +215,35 @@ regression test each), the 2 SPECULATIVE findings were also fixed since they wer
 - **SPECULATIVE, fixed anyway**: patching keywords to `Some(vec![])` (explicit clear) inserted a
   needless empty `<dc:subject><rdf:Bag/></dc:subject>` instead of removing the container entirely.
   See `clearing_keywords_to_empty_removes_the_container_entirely`.
+
+**A second review pass (CodeRabbit, on the pushed PR) found 6 more issues, all real, all fixed:**
+
+- Element-form `Rating`/`Label` children weren't removed when a patch touched those fields, so a
+  packet carrying both an attribute *and* a child element for the same property would have the old
+  child value silently win back on the next read (`lrc_fields::read` processes the Description's
+  attributes first, then any child element). Fixed the same way the `subject`/`hierarchicalSubject`
+  blocks already were. See `patching_rating_removes_a_stale_element_form_child_that_would_otherwise_win_on_read`.
+- `main.rs`'s `Command::Write` collapsed every `load_xmp` error (a sidecar that exists but fails to
+  read — non-UTF-8, permissions — or a JPEG's read error) into the same "nothing here yet" case as
+  a genuinely missing file, silently replacing real existing `crs:`/`exif:`/other content with a
+  blank packet. Fixed: `load_xmp` now returns a typed `LoadedXmp::Existing`/`Missing`, and only
+  `Missing` (confirmed `io::ErrorKind::NotFound`) falls back to a blank packet; every other error
+  propagates.
+- `hash_and_mtime` read a file's content (`fs::read`) and its metadata (`fs::metadata`) via two
+  separate path-based calls — a real TOCTOU window if LRC replaces the sidecar in between, pairing
+  the old content's hash with the new file's mtime. Fixed: both now come from one opened `File`
+  handle.
+- `should_write_crs`'s `None` (no prior Nicti write) case assumed "never written before" meant
+  "safe to write" — but the sidecar could already carry real `crs:` content LRC itself wrote,
+  unrelated to Nicti. Fixed: added `packet::has_crs_content` and a new
+  `sidecar_already_has_crs_content` parameter — `None` is only safe when the sidecar is genuinely
+  virgin (no `crs:` properties of any kind yet), not merely "Nicti hasn't written here."
+- The `crs:` write gate's decision-summary doc (`docs/decisions/xmp-interop.md`) stated the gate
+  "keeps... without risking clobbering an LRC edit," without qualifying that the hash comparison
+  alone can't close the race between reading the hash and writing — `conflict.rs`'s own docs
+  already specified the lock/single-writer discipline this requires; the summary now says so too.
+- The research doc's own claims had drifted from the ADR's corrected wording (still said
+  "byte-preserving packet patcher" and a stale "28" test count). Both brought back in sync.
 
 Not flagged as bugs (already-acknowledged design assumptions): the single-`rdf:Description`
 assumption, local-name-only namespace matching, and the DNG/TIFF write scope decision above.

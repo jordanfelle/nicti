@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -40,35 +41,68 @@ enum Command {
     Survey { dir: PathBuf },
 }
 
-fn load_xmp(path: &Path) -> Result<(String, bool)> {
+/// Either the XMP a file already has, or confirmation that it genuinely has
+/// none yet -- kept distinct from a real I/O/parse error, which always
+/// propagates instead. Losing this distinction (a blanket "any error means
+/// no XMP yet") is exactly what let `Command::Write` silently replace an
+/// unreadable *existing* sidecar/JPEG with a blank packet, discarding
+/// whatever `crs:`/`exif:`/other data was actually there.
+enum LoadedXmp {
+    Existing { xmp: String, is_embedded: bool },
+    Missing { is_embedded: bool },
+}
+
+fn load_xmp(path: &Path) -> Result<LoadedXmp> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ext == "xmp" {
-        return Ok((fs::read_to_string(path)?, false));
+        return match fs::read_to_string(path) {
+            Ok(xmp) => Ok(LoadedXmp::Existing {
+                xmp,
+                is_embedded: false,
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Ok(LoadedXmp::Missing { is_embedded: false })
+            }
+            Err(e) => Err(e).with_context(|| format!("reading sidecar {}", path.display())),
+        };
     }
     if ext == "jpg" || ext == "jpeg" {
-        let data = fs::read(path)?;
-        let xmp = embedded::read_xmp(&data)?
-            .with_context(|| format!("no embedded XMP found in {}", path.display()))?;
-        return Ok((xmp, true));
+        let data = fs::read(path).with_context(|| format!("reading JPEG {}", path.display()))?;
+        let xmp = embedded::read_xmp(&data)
+            .with_context(|| format!("reading embedded XMP in {}", path.display()))?;
+        return Ok(match xmp {
+            Some(xmp) => LoadedXmp::Existing {
+                xmp,
+                is_embedded: true,
+            },
+            None => LoadedXmp::Missing { is_embedded: true },
+        });
     }
     // RAW file: read its sidecar.
     let sidecar_path = sidecar::sidecar_path(path);
-    Ok((
-        fs::read_to_string(&sidecar_path)
-            .with_context(|| format!("no sidecar at {}", sidecar_path.display()))?,
-        false,
-    ))
+    match fs::read_to_string(&sidecar_path) {
+        Ok(xmp) => Ok(LoadedXmp::Existing {
+            xmp,
+            is_embedded: false,
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Ok(LoadedXmp::Missing { is_embedded: false })
+        }
+        Err(e) => Err(e).with_context(|| format!("reading sidecar {}", sidecar_path.display())),
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Dump { path } => {
-            let (xmp, _) = load_xmp(&path)?;
+            let LoadedXmp::Existing { xmp, .. } = load_xmp(&path)? else {
+                anyhow::bail!("no XMP found for {}", path.display());
+            };
             let meta = lrc_fields::read(&xmp)?;
             println!("{meta:#?}");
         }
@@ -77,11 +111,16 @@ fn main() -> Result<()> {
             rating,
             label,
         } => {
-            let (xmp, is_embedded) = load_xmp(&path).unwrap_or_else(|_| (String::new(), false));
-            let xmp = if xmp.is_empty() {
-                r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/"/></rdf:RDF></x:xmpmeta>"#.to_string()
-            } else {
-                xmp
+            const BLANK_PACKET: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/"/></rdf:RDF></x:xmpmeta>"#;
+            let (xmp, is_embedded) = match load_xmp(&path)? {
+                LoadedXmp::Existing { xmp, is_embedded } => (xmp, is_embedded),
+                // Genuinely missing (no sidecar / no embedded XMP yet) --
+                // safe to start from a blank packet. Any other error (a
+                // sidecar that exists but fails to read, non-UTF-8 content,
+                // permissions) already propagated via `?` above, rather
+                // than silently being treated as "nothing here yet" and
+                // replacing real existing content.
+                LoadedXmp::Missing { is_embedded } => (BLANK_PACKET.to_string(), is_embedded),
             };
             let patched = packet::apply(
                 &xmp,
@@ -102,7 +141,9 @@ fn main() -> Result<()> {
             }
         }
         Command::Roundtrip { path } => {
-            let (xmp, _) = load_xmp(&path)?;
+            let LoadedXmp::Existing { xmp, .. } = load_xmp(&path)? else {
+                anyhow::bail!("no XMP found for {}", path.display());
+            };
             let before = lrc_fields::read(&xmp)?;
             let patched = packet::apply(&xmp, &packet::Patch::default())?;
             let after = lrc_fields::read(&patched)?;

@@ -75,6 +75,37 @@ fn is_local(qname: QName, target: &str) -> bool {
     local_name(qname) == target.as_bytes()
 }
 
+fn has_crs_prefix(qname: QName) -> bool {
+    qname.as_ref().starts_with(b"crs:")
+}
+
+/// Whether this packet already carries any `crs:`-namespaced property --
+/// element or attribute -- regardless of who wrote it. Used by the `crs:`
+/// write gate's first-write case: a sidecar with no prior Nicti write
+/// recorded (`last_written_hash: None`) might still already hold real
+/// `crs:` data LRC itself wrote, which `should_write_crs` must not treat as
+/// "safe to overwrite" just because Nicti has never touched it before.
+pub fn has_crs_content(xmp: &str) -> Result<bool, PatchError> {
+    let mut reader = Reader::from_str(xmp);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event()? {
+            Event::Eof => return Ok(false),
+            Event::Start(e) | Event::Empty(e) => {
+                if has_crs_prefix(e.name()) {
+                    return Ok(true);
+                }
+                for attr in e.attributes() {
+                    if has_crs_prefix(attr?.key) {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Finds the index of the matching `Event::End` for the `Event::Start` at
 /// `start_idx`, by tracking nesting depth over every intervening
 /// Start/End event regardless of element name. Returns `start_idx` itself
@@ -171,17 +202,28 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         (was_start, new_tag)
     };
 
-    // 2. Find and drop any existing dc:subject / lr:hierarchicalSubject
-    //    child blocks, if this write touches that list.
+    // 2. Find and drop any existing dc:subject / lr:hierarchicalSubject /
+    //    element-form Rating / Label child blocks, for whichever fields
+    //    this write actually touches. Without this, a packet carrying a
+    //    *child-element* Rating/Label (lrc_fields::read accepts both forms
+    //    -- see that module's docs) would have its patched attribute value
+    //    silently overridden right back by the untouched old child element
+    //    on the next read, since `read()` processes the child element after
+    //    the Description's own attributes.
     let mut skip: Vec<bool> = vec![false; events.len()];
     let touches_keywords = patch.keywords.is_some() || patch.hierarchical_keywords.is_some();
-    if touches_keywords && new_desc_start.0 {
+    let touches_children = touches_keywords || patch.rating.is_some() || patch.label.is_some();
+    if touches_children && new_desc_start.0 {
         let mut i = desc_idx + 1;
         while i < desc_end_idx {
             let is_subject = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "subject"));
             let is_hier = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "hierarchicalSubject"));
+            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Rating"));
+            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Label"));
             if (is_subject && patch.keywords.is_some())
                 || (is_hier && patch.hierarchical_keywords.is_some())
+                || (is_rating && patch.rating.is_some())
+                || (is_label && patch.label.is_some())
             {
                 let block_end = matching_end(&events, i)?;
                 for s in skip.iter_mut().take(block_end + 1).skip(i) {
@@ -372,6 +414,33 @@ mod tests {
         .unwrap();
         let meta = lrc_fields::read(&patched).unwrap();
         assert_eq!(meta.label, None);
+    }
+
+    #[test]
+    fn patching_rating_removes_a_stale_element_form_child_that_would_otherwise_win_on_read() {
+        // lrc_fields::read processes the Description's own attributes first,
+        // then any child Rating/Label element -- so a leftover element-form
+        // child would silently override the just-patched attribute value on
+        // the next read, unless apply() also removes it.
+        let xmp = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="4"><xmp:Rating>4</xmp:Rating></rdf:Description>"#;
+        let patched = apply(
+            xmp,
+            &Patch {
+                rating: Some(Some(5)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let meta = lrc_fields::read(&patched).unwrap();
+        assert_eq!(
+            meta.rating,
+            Some(5),
+            "a stale element-form Rating child overrode the patched attribute value: {patched}"
+        );
+        assert!(
+            !patched.contains("<xmp:Rating>"),
+            "stale element-form Rating child was not removed: {patched}"
+        );
     }
 
     #[test]

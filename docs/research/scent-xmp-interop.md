@@ -68,7 +68,9 @@ different concepts, though not what XMP field, if any, carries Pick), and the re
 
 **Reachable, and done:**
 - The field mapping's shape (which XMP property, in which form) for rating/label/keywords.
-- A real, tested, byte-preserving packet patcher.
+- A real, tested packet patcher proving unrelated *attribute values* survive a patch exactly
+  (not full byte-identical tag serialization — see the ADR's Measured results for that
+  distinction).
 - JPEG-embedded XMP read/write, proven not to touch unrelated bytes.
 - The `crs:` write-gate policy (not its field-level content — that's masking's own ADR-0024).
 - The conflict rule wired to real file I/O.
@@ -90,7 +92,7 @@ different concepts, though not what XMP field, if any, carries Pick), and the re
 ## Reproducing
 
 ```bash
-# Unit tests (28) + the two env-gated real-file tests (skip cleanly without the env vars):
+# Unit tests (35) + the two env-gated real-file tests (skip cleanly without the env vars):
 cargo test -p scent
 
 # Lint/format:

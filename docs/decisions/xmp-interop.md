@@ -24,9 +24,12 @@ trail.
   for embedded XMP and writes a `.xmp` sidecar for DNG assets instead.
 - **`crs:` write gate**: write only if the sidecar's hash still matches what Nicti itself last
   wrote there, otherwise skip and flag — keeps the projection live during normal editing without
-  risking clobbering an LRC edit made to the same file in between.
+  risking clobbering an LRC edit made to the same file in between. **The hash comparison alone
+  cannot close the race**: an LRC save landing between Nicti's hash read and its write is still
+  possible; `conflict.rs`'s own docs specify the lock/single-writer discipline a real caller needs
+  to close that window, which this gate function doesn't itself enforce.
 - **No hands-on LRC session was run this pass** — real evidence came from `shed-lrcat-schema.md`,
-  the public XMP/`crs:`/`lr:` specs, and this spike's own real-code test suite (35 tests, all
+  the public XMP/`crs:`/`lr:` specs, and this spike's own real-code test suite (37 tests, all
   passing), not from a live Lightroom install. The ADR merges as Proposed; a follow-up issue (part
   of #11) runs a scripted LRC session (rating/reject/pick/custom label set/hierarchical keywords on
   throwaway copies) to settle several open questions (does Reject/Pick reach XMP at all? does a
