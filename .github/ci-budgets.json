@@ -9,9 +9,6 @@
     "cargo clippy (windows)": 6,
     "cargo test (windows)": 7,
     "cargo build (windows, v1 target)": 4,
-    "pelt (linux)": 6,
-    "pelt (windows)": 6,
-    "pelt windows (required check gate)": 1,
     "decode (linux)": 6,
     "decode (windows)": 10
   },

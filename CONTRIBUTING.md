@@ -12,12 +12,6 @@ and this doc is the canonical guide for making one.
   `apt-get install nasm` (Debian/Ubuntu).
 - **A C/C++ toolchain** — MSVC on Windows (the Visual Studio Build Tools), a standard
   gcc/clang setup elsewhere. Needed for `nicti-cornea`'s vendored LibRaw build.
-- **Linux GUI headers** (`libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, `libxi-dev`,
-  `libxrandr-dev`, `libgl1-mesa-dev`, `libfontconfig1-dev`) — only if you're touching
-  `spikes/pelt-egui`/`pelt-iced`/`pelt-slint` on Linux.
-- **libclang/LLVM** — only if you're touching `spikes/pelt-slint` (its `i-slint-renderer-skia`
-  dependency's `skia-bindings` crate needs `bindgen`, same requirement as any other bindgen-based
-  build). Not needed on Windows CI (the runner ships LLVM by default).
 - **The LibRaw submodule** — only if you're touching `crates/nicti-cornea` or `spikes/retina`:
   ```bash
   git submodule update --init crates/nicti-cornea/vendor/LibRaw
@@ -53,16 +47,15 @@ it.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
+cargo clippy --workspace --exclude retina --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features --exclude retina
 ```
 
-The `pelt-*`/`retina` excludes above mirror `.github/workflows/ci.yml` exactly — those crates are
-path-gated into their own CI jobs since they pull in heavy native builds (three GUI-framework
-stacks, a full LibRaw C++ compile) that most PRs don't touch. If your change does touch
-`spikes/pelt-*/**` or `spikes/retina/**`, also run that crate's own commands — see `ci.yml`'s
-`pelt-linux`/`decode-linux` jobs for the exact feature-flag combinations (some engines can't be
-enabled together in the same binary; the workflow file's comments explain why).
+The `retina` exclude above mirrors `.github/workflows/ci.yml` exactly — that crate is path-gated
+into its own CI job since it pulls in a full LibRaw C++ compile that most PRs don't touch. If your
+change does touch `spikes/retina/**`, also run that crate's own commands — see `ci.yml`'s
+`decode-linux` job for the exact feature-flag combinations (some engines can't be enabled together
+in the same binary; the workflow file's comments explain why).
 
 `pre-commit`'s hooks (fmt, clippy, secret detection, YAML lint on every commit; `cargo test` on
 push) mirror the same exclude list, so a clean local commit should mean clean CI for these jobs.

@@ -1,12 +1,7 @@
 ---
 paths:
   - "spikes/glint/**"
-  - "spikes/pelt/**"
-  - "spikes/pelt-egui/**"
-  - "spikes/pelt-iced/**"
-  - "spikes/pelt-slint/**"
   - "spikes/groom/**"
-  - "bench/pelt/**"
   - "crates/nicti-tapetum/**"
   - "crates/nicti-pelt/**"
 ---
@@ -32,8 +27,8 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   doesn't change the Decision. GPUI eliminated (Windows backend has no wgpu/Vulkan path). egui wins
   (wgpu 30.0.0 match, MIT/Apache-2.0). Iced pins wgpu 27 (compat cost). Slint's GPU integration is
   cleanest but its license (`GPL-3.0-only OR LicenseRef-Slint-*`) needs its own ADR-0018 amendment
-  to ship. `spikes/pelt*`/`bench/pelt/` slated for deletion, tracked in #232; real perf validation
-  against the actual UI crate tracked in #233.
+  to ship. `spikes/pelt*`/`bench/pelt/` deleted in #232; real perf validation against the actual UI
+  crate tracked in #233.
 - **Production UI crate: `crates/nicti-pelt`** (#241, landed) — device sharing implemented as
   `nicti_tapetum::gpu::device_descriptor_for` passed to eframe's `WgpuSetup::CreateNew` (so
   eframe's own device gets Tapetum's own limits/features, not `wgpu::Limits::default()`'s
@@ -73,10 +68,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit
   availability, throughput, dispatch overhead, host↔device interop cost.
-- **`spikes/pelt` + `spikes/pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0068) — GUI-framework
-  research. `pelt` is the toolkit-agnostic shared fixture/math crate; each `pelt-*` is one
-  candidate's virtualized-grid + loupe + custom-wgpu-viewport spike. No `spikes/pelt-gpui` exists
-  (ADR-0068's Hard-gate-1 early exit).
+- **`spikes/pelt` + `spikes/pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0068, deleted in #232) —
+  GUI-framework research. `pelt` was the toolkit-agnostic shared fixture/math crate; each `pelt-*`
+  was one candidate's virtualized-grid + loupe + custom-wgpu-viewport spike. No `spikes/pelt-gpui`
+  ever existed (ADR-0068's Hard-gate-1 early exit).
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell: `lib.rs` (`run`, the
   `WgpuSetup::CreateNew` device-descriptor wiring), `app.rs` (`PeltApp`, view routing), `render.rs`
   (`DevelopView` — wires a synthetic gradient `LinearFrame` through the real Tapetum pipeline;

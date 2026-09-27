@@ -17,56 +17,24 @@ it only covers Cargo dependencies, not native libraries, ML models, or data file
 rely on `docs/licensing.md` being updated at review time.
 
 **Windows is the required (blocking) platform (#17)**, not Linux: `cargo fmt`, `cargo clippy
-(windows)`, `cargo test (windows)`, `cargo build (windows, v1 target)`, and `pelt windows
-(required check gate)` are the branch-protection-required checks, matching the actual v1 target
-(README's Scope section). `cargo clippy (linux)`/`cargo test (linux)`/`pelt (linux)` still run on
-every PR (Linux stays CI-only, catches platform-specific bugs early) but aren't required to merge.
+(windows)`, `cargo test (windows)`, and `cargo build (windows, v1 target)` are the
+branch-protection-required checks, matching the actual v1 target (README's Scope section).
+`cargo clippy (linux)`/`cargo test (linux)` still run on every PR (Linux stays CI-only, catches
+platform-specific bugs early) but aren't required to merge.
 
-**`pelt (windows)` is itself NOT in the required-checks list (#166)** -- despite being the job
-that actually does the Windows pelt work, listing it directly caused classic branch protection to
-block merge on every PR that path-gates it out to `skipped` (GitHub treats a required check
-reporting `skipped` as not satisfying the requirement, contrary to what this file used to claim
--- confirmed on #162, which needed `gh pr merge --admin` twice). `pelt windows (required check
-gate)` is the actual required check instead: it has no path-gated `if:` of its own (so it's never
-itself skipped), and only fails when `pelt-windows` genuinely failed or was cancelled -- a
-skipped upstream result still passes the gate. If a new path-gated Windows-required job is ever
-added, route it through this same gate rather than listing it directly in branch protection.
-Trade-off: the gate trusts `skipped` unconditionally, so it can't tell "correctly path-gated"
-apart from "`dorny/paths-filter` patterns drifted and should have matched but didn't" -- before
-#166 that case was accidentally fail-closed (blocked merge, forcing a human to look), after it's
-fail-open (merges silently). Same failure class the `changes` job's own comment above already
-worries about; worth remembering if pelt's path-filter patterns are ever restructured. (This gate
-originally also covered `spikes/den`'s own Windows job, `den (windows)`, until #123 deleted
-`spikes/den`.)
-
-**`spikes/pelt-egui`/`pelt-iced`/`pelt-slint`'s GUI-framework spikes are path-gated (#127)**, not
-part of the `clippy`/`test`/`build-windows` jobs every PR pays for: a `changes` job
-(`dorny/paths-filter`) only routes into `pelt (linux)`/`pelt (windows)` when
-`spikes/pelt-egui|iced|slint/**` changed, or `Cargo.{toml,lock}`/the workflow file itself changed,
-plus a weekly Monday schedule and `workflow_dispatch` so a non-touching dependency bump can't
-silently break pelt forever between pelt-touching PRs. This matters because `pelt-egui`/
-`pelt-iced`/`pelt-slint` alone account for 311 of the 543 unique crates in a full Windows build
-(measured via `cargo tree --workspace`) — the largest single driver of #126's cold-build Windows
-clippy/test times (5m47s/8m35s of actual compile, confirmed via CI logs to be cold builds, not
-slow warm ones: `rust-cache` had "No cache found" on both, since these were brand-new jobs).
-`Swatinem/rust-cache` only saves (`save-if`) from a push to `main`, for every job except
-`pelt (linux)` which never saves at all (`save-if: false`, #127) — not a required check. PRs
-restore main's cache and skip the save step, which used to be a 20-30 minute cost on the Windows
-job by itself and was pushing this repo's cache usage over GitHub's 10GB/repo limit.
-`CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level env) additionally strips debuginfo from Rust and
-native build scripts (e.g. nicti-cornea's bundled LibRaw), which was most of that cache size.
-`retina-linux` also uses `save-if: false` (cold cost is only 2.5min). `spikes/**` is also excluded
-from Renovate (`renovate.json`) since every spike is throwaway and generates bump-PR churn nobody
-will act on before it's deleted or promoted.
-
-**`spikes/pelt-*` is slated for deletion now that ADR-0068 is Accepted (#90)** — tracked in #232.
-(`spikes/den` went through
-the same lifecycle: slated for deletion once #22 landed, and #123 did that cleanup — deleting the
-spike itself plus its CI jobs, the Renovate rule's original motivating case, and two `deny.toml`
-exceptions. #154, since superseded by that deletion, is a real historical incident worth knowing
-about if a future spike's own `save-if: false` cache setting is ever reconsidered: it caused a
-measured 2-3min -> 25-33min regression, every run recompiling all eight of `den`'s bundled native
-engines from scratch, which outweighed the ~1.5GiB cache-budget saving.)
+**`spikes/pelt`/`pelt-egui`/`pelt-iced`/`pelt-slint` (#68/ADR-0068's GUI-framework research
+spikes) were deleted in #232** once ADR-0068 was Accepted (#90) — along with their path-gated
+`pelt (linux)`/`pelt (windows)` CI jobs, the `pelt windows (required check gate)` job and its
+branch-protection required-check entry (#166), the Renovate rule pinning `wgpu = "27"` in
+`spikes/pelt-iced/Cargo.toml`, and the Slint-specific `deny.toml` license exceptions. `spikes/den`
+went through the same lifecycle before it: slated for deletion once #22 landed, and #123 did that
+cleanup — deleting the spike itself plus its CI jobs, the Renovate rule's original motivating
+case, and two `deny.toml` exceptions. #154, since superseded by that deletion, is a real
+historical incident worth knowing about if a future spike's own `save-if: false` cache setting is
+ever reconsidered: it caused a measured 2-3min -> 25-33min regression, every run recompiling all
+eight of `den`'s bundled native engines from scratch, which outweighed the ~1.5GiB cache-budget
+saving. `spikes/**` is excluded from Renovate (`renovate.json`) since every spike is throwaway and
+generates bump-PR churn nobody will act on before it's deleted or promoted.
 
 **CodeQL's `rust` analysis (`.github/workflows/codeql.yml`) is scoped to the shipping crates
 only (#127)**: before `codeql-action/init` runs, a CI-only step rewrites the checked-out
