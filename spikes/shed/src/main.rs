@@ -21,8 +21,9 @@ enum Command {
     Inventory { catalog: PathBuf },
     /// Develop-settings key-frequency histogram, classified by owner ticket, as JSON.
     Develop { catalog: PathBuf },
-    /// #157: presence/active-usage counts for the 6 develop-setting keys `Develop` classifies as
-    /// unowned (counts only -- no value contents, some can carry user preset identifiers).
+    /// #157: presence/active-usage counts for the 6 develop-setting keys #61's first pass left
+    /// unowned, before `Develop`'s classifier was updated to assign each one an owner (counts
+    /// only -- no value contents, some can carry user preset identifiers).
     DevelopUsage { catalog: PathBuf },
     /// Fail if any of `files` contains a keyword/collection/path string pulled from `catalog`.
     PrivacyCheck {

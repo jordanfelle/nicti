@@ -152,7 +152,8 @@ against `shed`'s own reading wasn't completed this pass.
 ## What's real vs. deferred
 
 Real, measured this pass: table/column shapes (137 tables), all aggregate counts above, the
-`agprefs` parse-failure rate (0/380,307), the develop-key classification (191/197), the collection
+`agprefs` parse-failure rate (0/380,307), the develop-key classification (191/197 initially,
+197/197 after #157), the collection
 kind split, the root-folder drive-letter/relative-path split, and the `pick`/`rating` type gotcha.
 
 Deferred, not resolved here: `.lrcat-data` blob linkage, smart-collection rule-criteria mapping (no
