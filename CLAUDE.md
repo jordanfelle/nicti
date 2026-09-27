@@ -19,7 +19,7 @@ file under the line-count gate. Each topic has:
 - `docs/decisions/<topic>.md` — the full original prose, verbatim, with every issue ref and piece
   of reasoning. Not auto-loaded by Claude Code, but a normal repo doc any contributor can read.
 
-Topics: `language-and-architecture` (0015/0021/0019/0218, v1 target), `licensing` (0018/0066, 0069),
+Topics: `language-and-architecture` (0015/0021/0019/0218/0214, v1 target), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071), `color` (0038),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033), `denoise` (0040),
