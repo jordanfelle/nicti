@@ -44,6 +44,16 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   rows non-NULL in the real catalog, across every extension. `importHash` is 99.97% present and
   100% distinct among non-NULL values (no duplicate groups) — shaped like a per-file identifier,
   but its derivation is unconfirmed, so #62 keeps it provenance-only, not a relink/dedupe input.
+- **`.lrcat-data` is RocksDB + BlobDB, keys are `MaskDigest`/`OriginalInstanceDigest`, not any
+  catalog column (#156/ADR-0156)**: `<id>.blob` = RocksDB's own file-number naming
+  (`blob_file_size=256MiB` explains the ~270MB size). Keys are 32-char hex content-addressed
+  digests embedded in the develop-settings Lua text — `MaskDigest` (AI mask rasters) and
+  `OriginalInstanceDigest` (AI Denoise/Enhance output, inside `ImageGroup`), TIFF-wrapped, 97.8% of
+  keys measured. **#62's importer does not need to read `.lrcat-data`** — these are LRC's own
+  cached AI outputs, re-derive natively (masking/denoise's existing stance) rather than migrate.
+  Reproduce via `spikes/shed/tools/lrcat_data_linkage.py` + `rocksdb_sst_dump`
+  (`brew install rocksdb`) — no `rocksdb` Cargo dependency, same `links = "sqlite3"`-style
+  workspace-uniqueness risk `lrcat-extractor` already hit.
 
 ## Package contents
 

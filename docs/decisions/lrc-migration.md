@@ -36,8 +36,13 @@ is the per-topic summary; those two are the full research trail.
   provenance-only, no render-owning ticket. `Preset`/`ToggleStyleAmount`/`ToggleStyleDigest` are
   style-preset bookkeeping → `#52`. Import policy: keep every row's raw LRC text verbatim in a
   provenance blob, translate only what's needed at import time.
-- **`.lrcat-data` blobs**: ~590 files, ~270MB each, referenced by `hasBigData` (26,195 of 380,307
-  develop-settings rows) — exact linkage unconfirmed, flagged as a follow-up, not resolved.
+- **`.lrcat-data` blobs (#156/ADR-0156)**: it's a RocksDB database with integrated BlobDB (`<id>.blob`
+  is RocksDB's own file naming; 256MiB blob-file-size setting explains the ~270MB size). Keys are
+  `MaskDigest`/`OriginalInstanceDigest` content-addressed digests embedded in the develop-settings
+  Lua text (not any catalog column) — AI mask rasters and AI Denoise/Enhance output rasters,
+  TIFF-wrapped, accounting for 97.8% of real blob keys measured. These are LRC's own cached AI
+  outputs, not develop parameters: **#62's importer doesn't need to read `.lrcat-data` at all**,
+  consistent with masking/denoise's existing re-derive-don't-migrate stance.
 - **`md5`/`importHash` cross-check against homing's relink tiers (#158/ADR-0158)**: `md5` is NULL
   on all 380,298 rows in this catalog — not a partial gap, nothing is there at all, so #62 must not
   plan on it as a relink or dedupe input in any role. `importHash` is 99.97% present with every

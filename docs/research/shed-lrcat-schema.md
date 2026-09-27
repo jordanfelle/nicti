@@ -126,11 +126,30 @@ still handle both.
 
 ## `.lrcat-data` blobs
 
-The backup zip's `.lrcat-data` directory lists ~590 `<id>.blob` files, ~270MB each (from the zip's
-own directory listing — never extracted; ADR-0018 forbids committing real Adobe data, and 590
-files at ~270MB each was out of this pass's storage budget). `hasBigData`'s 26,195-row count is the
-only in-catalog signal this pass found referencing them; the exact blob-to-asset linkage is
-unconfirmed — flagged as a follow-up for whoever picks up the filed issue.
+**Resolved by #156/ADR-0156** (originally flagged here as a follow-up): `.lrcat-data` is a
+**RocksDB 10.6.2 database with integrated BlobDB**, not a bespoke format — `<id>.blob` is RocksDB's
+own `<file_number>.blob` naming, and `blob_file_size=268435456` (256MiB) in its `OPTIONS` file
+explains the ~270MB size ADR-0061 measured from the zip listing alone.
+
+`rocksdb_sst_dump --command=scan --output_hex` (`brew install rocksdb`) against the extracted
+`.sst` lists every key (32-char uppercase-hex ASCII, one `rocksdbIntegrityId` bookkeeping key
+excluded) and value (a standard blob-index record: type byte + varint `file_number`/`offset`/
+`size`). None of the catalog's own digest-shaped columns match this key set (`digest`,
+`historySettingsID`, `AgLibraryFileDigest.digest`, `AgRemotePhoto.*Digest`, etc. — all zero
+overlap). The real linkage is inside the develop-settings Lua text ADR-0061 Q4 already parses:
+**`MaskDigest`** (21,124 distinct values, 100% overlap — AI local-adjustment mask rasters, e.g.
+Select Subject) and **`OriginalInstanceDigest`** (20,607 distinct, 100% overlap — inside an
+`ImageGroup` structure with the image's full `SizeX`/`SizeY`, the AI Denoise/Enhance output
+raster) together with three smaller `pm_patch*` Photo Merge fields account for 45,985 of 47,015
+real blob keys (97.8%) in the measured catalog. Peeking the first ~4KB of a few `.blob` files
+(streamed from the zip, never fully extracted) shows each record's value begins `II*\x00` — TIFF.
+
+**Import policy**: these are LRC's own cached AI-feature outputs, not develop parameters — #62's
+importer doesn't need to read `.lrcat-data` at all; the provenance blob (raw develop text, already
+Q4's policy) is enough. Reproducible via
+`spikes/shed/tools/lrcat_data_linkage.py --lrcat <extracted .lrcat> --lrcat-data-dir <extracted
+.lrcat-data>` (stdlib-only, not a Cargo subcommand — see ADR-0156 for why `rocksdb` isn't a
+workspace dependency). See ADR-0156 for the full reasoning.
 
 ## #53 (AI auto-tone) feasibility
 
@@ -155,8 +174,9 @@ Real, measured this pass: table/column shapes (137 tables), all aggregate counts
 `agprefs` parse-failure rate (0/380,307), the develop-key classification (191/197 initially,
 197/197 after #157), the collection
 kind split, the root-folder drive-letter/relative-path split, and the `pick`/`rating` type gotcha.
+`.lrcat-data` blob linkage — resolved by #156/ADR-0156 (see above).
 
-Deferred, not resolved here: `.lrcat-data` blob linkage, smart-collection rule-criteria mapping (no
+Deferred, not resolved here: smart-collection rule-criteria mapping (no
 real example to measure against), and the exact per-parameter develop-setting conversion math
 (each owner ticket's own scope, not #61's).
 

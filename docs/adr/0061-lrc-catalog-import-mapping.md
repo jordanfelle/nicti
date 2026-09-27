@@ -148,6 +148,12 @@ data, and extracting 590 files at ~270MB each was out of scope for this pass's s
 pass found referencing them; the exact blob-to-asset linkage (whether it's `historySettingsID`,
 `digest`, or a separate id) is unconfirmed. Flagged as a follow-up, not resolved here.
 
+**Resolved by #156/ADR-0156**: `.lrcat-data` is a RocksDB database with integrated BlobDB, not a
+bespoke format; its keys are `MaskDigest`/`OriginalInstanceDigest` content-addressed digests
+embedded in the develop-settings Lua text (not `historySettingsID` or the catalog's `digest`
+column — neither matched). #62's importer does not need to read it: see ADR-0156 for the full
+linkage and the re-derive-don't-migrate policy.
+
 ### Q6: #53 (AI auto-tone training dataset) feasibility
 
 380,300 assets, only 2 with no develop settings row at all (`Adobe_imageDevelopSettings` has
@@ -207,7 +213,8 @@ constraint above (either the workspace's `den` spike is gone by then per its own
 - **New follow-up issues** (filed alongside this ADR, `**Part of:** #11`):
   - Smart-collection rule-criteria mapping onto #23's filter bar — unverified, no smart collections
     existed in the real catalog to measure against (Q3).
-  - `.lrcat-data` blob linkage and whether #62 needs to import them (Q5).
+  - ~~`.lrcat-data` blob linkage and whether #62 needs to import them (Q5)~~ **Resolved by
+    #156/ADR-0156.**
   - ~~The 6 unowned develop-setting keys~~ **Resolved by #157** (Q4): `FilterList`/`AllowFilters`
     default to #40 with a real per-filter-type split #62 must apply (#51 for People/Reflection
     Removal, the new #174 for Super Resolution); `LensBlur` is provenance-only (zero real usage
