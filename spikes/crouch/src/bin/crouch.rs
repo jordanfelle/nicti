@@ -135,20 +135,17 @@ fn main() -> anyhow::Result<()> {
             mask_bake_ms,
             foreground_interval_ms,
             foreground_cost_ms,
-        } => {
-            run_sim(
-                n_images,
-                cursor_start,
-                walk_pace_ms,
-                decode_ms,
-                denoise_total_ms,
-                denoise_chunk_ms,
-                mask_bake_ms,
-                foreground_interval_ms,
-                foreground_cost_ms,
-            );
-            Ok(())
-        }
+        } => run_sim(
+            n_images,
+            cursor_start,
+            walk_pace_ms,
+            decode_ms,
+            denoise_total_ms,
+            denoise_chunk_ms,
+            mask_bake_ms,
+            foreground_interval_ms,
+            foreground_cost_ms,
+        ),
     }
 }
 
@@ -270,7 +267,14 @@ fn run_sim(
     mask_bake_ms: u64,
     foreground_interval_ms: u64,
     foreground_cost_ms: u64,
-) {
+) -> anyhow::Result<()> {
+    if foreground_interval_ms != 0 && foreground_cost_ms >= foreground_interval_ms {
+        anyhow::bail!(
+            "--foreground-cost-ms ({foreground_cost_ms}) must be strictly less than \
+             --foreground-interval-ms ({foreground_interval_ms}), or the sim's due-time backlog \
+             never clears and it never terminates"
+        );
+    }
     let cost = ChunkedBakeCost {
         decode: Duration::from_millis(decode_ms),
         denoise_total: Duration::from_millis(denoise_total_ms),
@@ -295,4 +299,5 @@ fn run_sim(
         result.foreground_worst_latency(),
         result.foreground_latencies.len()
     );
+    Ok(())
 }

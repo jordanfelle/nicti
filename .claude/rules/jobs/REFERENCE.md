@@ -21,11 +21,14 @@ Full reasoning/history: `docs/decisions/jobs.md`.
 - **Throttling**: hand-rolled counting-semaphore (`throttle::Throttle`) for CPU/disk-bound
   background work (Scruff's import scan is the first real client) — `governor` evaluated and
   rejected, it's rate-per-time shaped, not concurrency-limit shaped.
-- **VRAM admission** (`admission.rs`): a background job over the remaining budget is skipped for
-  the current pick (not dropped — re-tried once budget frees up), never run; foreground is never
-  refused on VRAM grounds. Wired into `queue::Scheduler::run_next` itself (an adversarial review
-  caught this only being enforced in `admission.rs`'s own isolated tests, not through the
-  scheduler — fixed, with a regression test through `run_next` directly).
+- **VRAM admission** (`admission.rs`): a background job over the *total* budget (`Admission::
+  budget()`) is dropped outright — it could never become admittable, since `admit`/`release`
+  bracket one synchronous `step()` call, so `remaining()` is always the full budget when checked.
+  A job over only the currently-*remaining* budget is skipped for the current pick and stays
+  queued. Foreground is never refused on VRAM grounds. Wired into `queue::Scheduler::run_next`
+  itself (an adversarial review caught this only being enforced in `admission.rs`'s own isolated
+  tests; a follow-up CodeRabbit review then caught the wired-in version itself leaking an
+  over-total-budget job forever — both fixed, see `docs/adr/0054`'s Review findings).
 - **Telemetry** (`telemetry.rs`): `sysinfo` for CPU/RAM, DXGI (`IDXGIAdapter3::
   QueryVideoMemoryInfo`) for VRAM behind a `VramSource` trait — picked over `nvml-wrapper` for
   vendor neutrality (v1 target is Windows-only anyway). Windows-only code, unverified in this
@@ -71,6 +74,6 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `busy.wgsl` kernel + throttled/unthrottled `BackgroundLoad`, the wgpu-vs-wgpu contention
   harness), `ort_contend.rs` (`TileLoad`, trimmed from `spikes/rods::ai::TiledDenoiser`, the
   CUDA-vs-wgpu contention harness), `sim.rs` (tile-granular hero-scenario re-sim). `src/bin/
-  crouch.rs` exposes `bench-wgpu`/`bench-ort`/`sim` subcommands. 33 unit tests, real reference-
+  crouch.rs` exposes `bench-wgpu`/`bench-ort`/`sim` subcommands. 37 unit tests, real reference-
   hardware numbers for both contention cases (not just lavapipe correctness). See
   `docs/research/crouch-scheduler.md`.

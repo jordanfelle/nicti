@@ -1,9 +1,11 @@
 # ADR-0054: Job scheduler design (Pounce)
 
-- **Status:** Proposed — decision rules #1-#4 measured clean on the real reference RTX 5080
-  (Windows-native, wgpu-vs-wgpu and ort/CUDA-vs-wgpu contention both real, not simulated); the
-  full scheduler's wiring into a real bake pipeline and into Scruff's import scan are #55's build,
-  not measured here.
+- **Status:** Proposed — decision rules #1-#2 measured clean on the real reference RTX 5080
+  (Windows-native, wgpu-vs-wgpu and ort/CUDA-vs-wgpu contention both real, not simulated); rule #3
+  is both structurally unit-tested and confirmed on real hardware (the unthrottled stress test);
+  rule #4 (`IS_EDITING`/priority correctness) is structural and unit-tested only, not itself a
+  hardware measurement. The full scheduler's wiring into a real bake pipeline and into Scruff's
+  import scan are #55's build, not measured here.
 - **Date:** 2026-09-27
 - **Ticket:** [#54](https://github.com/jordanfelle/nicti/issues/54) Research: scheduler design
   (Pounce)
@@ -253,7 +255,9 @@ Consequences).
 | Fire-and-forget background submission (no backpressure) | No | Confirmed on real hardware to crash the GPU device (Windows TDR) at moderate chunk sizes — kept only as an explicitly-flagged stress test, never the scheduler's real behavior |
 | Chunk decode/mask-bake to bound their own worst-case latency too | Not built this pass | Real engineering work (#37/#48 don't expose a streaming interface); flagged as a follow-up rather than solved speculatively here |
 
-## Adversarial review findings, fixed before merge
+## Review findings, fixed before merge
+
+### Hostile adversarial review (before pushing)
 
 A hostile review of this pass's own diff (per this repo's standing review convention) found three
 real issues, all fixed and covered by a regression test before this ADR's numbers were finalized:
@@ -276,9 +280,45 @@ real issues, all fixed and covered by a regression test before this ADR's number
    `admission::Admission` before a background job's next chunk is allowed to start," but
    `queue::Scheduler` never actually held or consulted an `Admission` anywhere — decision rule #5
    was validated only in `admission.rs`'s own isolated unit tests, never through the scheduler
-   itself. Fixed by wiring `Admission` into `Scheduler` (an over-budget background job is now
-   skipped for the current pick, not dropped, and re-tried once another job's reservation is
-   released), with a new test exercising this through `Scheduler::run_next` directly.
+   itself. Fixed by wiring `Admission` into `Scheduler`, with a new test exercising this through
+   `Scheduler::run_next` directly. (This fix itself had a real bug — see CodeRabbit finding #2
+   below, found on the very same code this fix introduced.)
+
+### CodeRabbit review (on the open PR)
+
+CodeRabbit's own pass over the pushed diff found four more real issues (three in code the
+adversarial review above had itself just touched, one docs-only), all fixed:
+
+1. **Docs-only, Minor**: the ADR's own Status line originally claimed rules #1-#4 were all
+   "measured clean on the real reference RTX 5080," but rule #4 (`IS_EDITING`/priority
+   correctness) is explicitly structural/unit-tested only, per that rule's own description —
+   never itself a hardware measurement. Fixed by separating which rules are hardware-measured
+   from which are structural-only in the Status line above.
+2. **A real VRAM-admission leak, Minor-rated but load-bearing**: the adversarial-review fix above
+   wired `Admission` into `Scheduler::run_next`, but `admit`/`release` bracket exactly one
+   `step()` call on one thread — so `reserved_bytes` is always `0`, and `remaining()` always
+   equals the *full* budget, at the moment `run_next` checks it. A background job whose own
+   `vram_bytes` exceeds the *total* budget therefore fails that check on every single call,
+   forever — `background_len()` never reaches zero, contradicting both `admission.rs`'s and this
+   ADR's own "refused, not queued to wait" framing (the wired-in version had actually made it
+   "queued to wait forever," the opposite of the decision rule). Fixed by dropping such a job
+   outright (checked against `Admission::budget()`, the *total*, not `remaining()`, the
+   *instantaneous* value) rather than leaving it to retry a check it can never pass; a job over
+   only the currently-remaining budget (but under the total) is still skipped-and-requeued, since
+   that case can legitimately become admittable later.
+3. **A real priority-order regression, Major**: the same fix's `run_next` pushed a yielded
+   background job to the *end* of the vec instead of back into the sorted slot
+   `reprioritize_background` had put it in — silently degrading nearest-to-cursor-first
+   (ADR-0044's own scheduling contract) into round-robin for any job needing more than one chunk
+   to finish (an N-image pending set would finish the nearest image roughly N times later than
+   necessary). Fixed by reinserting a yielded entry at its removed index instead of appending.
+4. **Another real infinite loop, Major**: `sim::simulate_hero_bake_chunked`'s own foreground-due
+   loop never terminates when `foreground_cost >= foreground_interval` (the due-time gap never
+   shrinks, and `foreground_latencies` grows without bound) — directly reachable from
+   `bin/crouch.rs`'s `sim --foreground-interval-ms 5 --foreground-cost-ms 5`, the same class of
+   bug as adversarial-review finding #1 above, in a different loop. Fixed with an assertion
+   guarding the precondition, plus a CLI-level check in `run_sim` that returns a clean error
+   instead of a panic.
 
 ## Consequences
 
@@ -312,7 +352,7 @@ real issues, all fixed and covered by a regression test before this ADR's number
 ## Spike: `spikes/crouch`
 
 Name: the motionless crouch before a pounce — the scheduler's idle/ready state, matching the
-Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 33 unit tests
+Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 37 unit tests
 (structural: priority ordering, cancellation, `IS_EDITING`, VRAM admission, throttling, sim chunk
 math), all passing in this sandbox (lavapipe/software GPU where GPU-dependent, real everywhere
 else). Modules: `job.rs` (`ChunkedJob`/`JobSpec`/`Step`), `queue.rs` (`Scheduler`, the two-class

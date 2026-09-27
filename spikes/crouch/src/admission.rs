@@ -38,6 +38,14 @@ impl Admission {
         self.budget_bytes.saturating_sub(self.reserved_bytes)
     }
 
+    /// The total budget this instance enforces against -- used by callers (e.g.
+    /// `queue::Scheduler`) that need to tell "temporarily over the *remaining* budget, may become
+    /// admittable later" apart from "over the *total* budget, can never be admitted no matter
+    /// what else releases."
+    pub fn budget(&self) -> u64 {
+        self.budget_bytes
+    }
+
     /// Attempts to reserve `vram_bytes` for `job`. A [`Priority::Foreground`] job is always
     /// admitted (see this module's own doc comment); a [`Priority::Background`] job over the
     /// remaining budget is refused, not queued.

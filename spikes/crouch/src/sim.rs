@@ -124,6 +124,14 @@ fn cursor_at(cursor_start: usize, n_images: usize, walk_pace: Duration, clock: D
 /// (zero disables foreground demand entirely, reducing to `loaf`'s own unchunked-cost behavior
 /// modulo the chunk split); `foreground_cost` is how long the worker spends servicing one before
 /// resuming the background job it interrupted.
+///
+/// # Panics
+///
+/// Panics if `foreground_cost >= foreground_interval` (and `foreground_interval` is nonzero):
+/// servicing one request would then take at least as long as the gap until the next one becomes
+/// due, so the due-time backlog (`next_foreground_due <= clock`) never clears and the loop below
+/// would otherwise never terminate -- the same class of bug as `ChunkedBakeCost::chunks()`'s own
+/// zero-`denoise_chunk` case, caught by CodeRabbit review rather than by running it.
 pub fn simulate_hero_bake_chunked(
     n_images: usize,
     cursor_start: usize,
@@ -132,6 +140,12 @@ pub fn simulate_hero_bake_chunked(
     foreground_interval: Duration,
     foreground_cost: Duration,
 ) -> ChunkedSimResult {
+    assert!(
+        foreground_interval.is_zero() || foreground_cost < foreground_interval,
+        "foreground_cost ({foreground_cost:?}) must be strictly less than foreground_interval \
+         ({foreground_interval:?}), or the due-time backlog never clears"
+    );
+
     let mut pending: BTreeSet<usize> = (0..n_images).collect();
     let mut bake_finish = vec![Duration::ZERO; n_images];
     let mut clock = Duration::ZERO;
@@ -269,6 +283,38 @@ mod tests {
         );
         assert!(with_fg.total_wall_time > without_fg.total_wall_time);
         assert!(!with_fg.foreground_latencies.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "must be strictly less than")]
+    fn rejects_foreground_cost_equal_to_interval_instead_of_hanging_forever() {
+        // Regression test for a real CodeRabbit finding: if foreground_cost >= foreground_interval,
+        // the due-time backlog (`next_foreground_due <= clock`) never clears, so the inner while
+        // loop in `simulate_hero_bake_chunked` never terminates and `foreground_latencies` grows
+        // without bound -- directly reachable from `crouch sim --foreground-interval-ms 5
+        // --foreground-cost-ms 5`. Caught by inspection, not by running it (it doesn't
+        // self-terminate) -- same class of bug as `chunks_treats_a_zero_denoise_chunk_...` above.
+        simulate_hero_bake_chunked(
+            5,
+            0,
+            Duration::from_millis(1),
+            tiny_cost(),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must be strictly less than")]
+    fn rejects_foreground_cost_greater_than_interval() {
+        simulate_hero_bake_chunked(
+            5,
+            0,
+            Duration::from_millis(1),
+            tiny_cost(),
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+        );
     }
 
     #[test]

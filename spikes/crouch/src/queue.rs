@@ -80,10 +80,16 @@ impl Scheduler {
     /// dropped (without running a chunk) rather than stepped -- checked at the chunk boundary,
     /// per `job.rs`'s own cooperative-cancellation contract. Background work is also withheld
     /// while [`EditingGate::is_editing`] is set (decision rule #4) -- an already-admitted
-    /// in-flight chunk isn't affected, since this method is only ever called between chunks. A
-    /// background job whose declared VRAM exceeds the remaining budget is skipped for this pick
-    /// (not dropped -- it stays queued and may become admittable once another job releases its
-    /// own reservation), per `admission::Admission`'s own decision rule #5.
+    /// in-flight chunk isn't affected, since this method is only ever called between chunks.
+    ///
+    /// A background job whose declared VRAM exceeds the *total* budget is dropped outright (it
+    /// could never become admittable -- `admit`/`release` bracket one `step()` call on this same
+    /// synchronous thread, so no reservation ever actually outlives a single `run_next` call for
+    /// another job to contend with; found by CodeRabbit review, which correctly noted the
+    /// original code would otherwise leak such a job in `background` forever). A job whose VRAM
+    /// exceeds only the currently-*remaining* budget (i.e. fits the total budget but not
+    /// alongside whatever this same call already skipped) is instead skipped for this pick and
+    /// stays queued, per `admission::Admission`'s own decision rule #5.
     pub fn run_next(&mut self) -> Option<(JobId, Step)> {
         while let Some(entry) = self.foreground.front() {
             if entry.cancel.is_cancelled() {
@@ -105,7 +111,9 @@ impl Scheduler {
             return None;
         }
 
-        self.background.retain(|entry| !entry.cancel.is_cancelled());
+        let budget = self.admission.budget();
+        self.background
+            .retain(|entry| !entry.cancel.is_cancelled() && entry.job.spec().vram_bytes <= budget);
 
         let remaining = self.admission.remaining();
         let pick = self
@@ -123,7 +131,12 @@ impl Scheduler {
         self.admission.release(id);
 
         if step == Step::Yield {
-            self.background.push(entry);
+            // Keep the priority order `reprioritize_background` established: this job keeps its
+            // sorted slot until the next cursor move re-sorts the queue, rather than cycling to
+            // the back of the vec -- found by CodeRabbit review, which correctly noted that
+            // appending here degrades nearest-to-cursor-first (ADR-0044's own scheduling
+            // contract) into round-robin for every job that takes more than one chunk to finish.
+            self.background.insert(pick, entry);
         }
         Some((id, step))
     }
@@ -279,16 +292,18 @@ mod tests {
     }
 
     #[test]
-    fn background_job_over_vram_budget_is_skipped_not_dropped() {
-        // Regression test for a real adversarial-review finding: `admission::Admission` was
-        // never wired into `Scheduler` at all, so decision rule #5 (a background job over budget
-        // is refused, not run) was only ever exercised in isolation by `admission.rs`'s own unit
-        // tests -- never through `run_next` itself.
+    fn background_job_over_total_budget_is_dropped_not_leaked_forever() {
+        // Regression test for a real CodeRabbit finding: `admit`/`release` bracket one `step()`
+        // call on this same synchronous thread, so `remaining()` is always the *full* budget at
+        // the point `run_next` checks it -- a job whose own `vram_bytes` exceeds the *total*
+        // budget can never pass that check, no matter what else does or doesn't run. The
+        // original code kept such a job in `background` forever (background_len() never reached
+        // 0); this must drop it instead.
         let mut scheduler = Scheduler::new(EditingGate::new(), 100);
         let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         scheduler.submit(Box::new(CountingJob {
-            spec: spec_with_vram(Priority::Background, 0, 1000), // over the 100-byte budget
+            spec: spec_with_vram(Priority::Background, 0, 1000), // over the 100-byte total budget
             remaining: 1,
             ticks: ticks.clone(),
             label: "too-big",
@@ -296,23 +311,68 @@ mod tests {
         assert_eq!(
             scheduler.run_next(),
             None,
-            "an over-budget background job must not run, but must stay queued"
+            "a job over the total budget must not run"
         );
         assert!(ticks.lock().unwrap().is_empty());
         assert_eq!(
             scheduler.background_len(),
-            1,
-            "skipped for VRAM, not dropped -- still queued for a future pick"
+            0,
+            "dropped outright -- it could never become admittable"
         );
+    }
 
-        // A second, smaller job that fits the budget is picked ahead of the still-too-big one.
+    #[test]
+    fn background_job_fitting_the_budget_runs_normally() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         scheduler.submit(Box::new(CountingJob {
-            spec: spec_with_vram(Priority::Background, 1, 50),
+            spec: spec_with_vram(Priority::Background, 0, 50),
             remaining: 1,
             ticks: ticks.clone(),
             label: "fits",
         }));
         assert!(scheduler.run_next().is_some());
         assert_eq!(*ticks.lock().unwrap(), vec!["fits"]);
+    }
+
+    #[test]
+    fn yielded_background_job_keeps_its_sorted_position_not_round_robin() {
+        // Regression test for a real CodeRabbit finding (Major): pushing a yielded background job
+        // to the *end* of the vec, instead of back into its sorted slot, silently degrades
+        // nearest-to-cursor-first (ADR-0044's own scheduling contract, enforced here by
+        // `reprioritize_background`) into round-robin for any job that takes more than one chunk
+        // to finish. With two multi-chunk jobs, the near one must finish entirely before the far
+        // one starts, not alternate with it chunk-for-chunk.
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        scheduler.submit(Box::new(CountingJob {
+            spec: spec(Priority::Background, 10),
+            remaining: 3,
+            ticks: ticks.clone(),
+            label: "far",
+        }));
+        scheduler.submit(Box::new(CountingJob {
+            spec: spec(Priority::Background, 0),
+            remaining: 3,
+            ticks: ticks.clone(),
+            label: "near",
+        }));
+        scheduler.reprioritize_background(|spec| spec.image_index.unwrap_or(usize::MAX));
+
+        for _ in 0..3 {
+            scheduler.run_next();
+        }
+        assert_eq!(
+            *ticks.lock().unwrap(),
+            vec!["near", "near", "near"],
+            "the near job must run all its chunks before the far job starts"
+        );
+        scheduler.run_next();
+        assert_eq!(
+            ticks.lock().unwrap().last(),
+            Some(&"far"),
+            "far only starts once near is fully done"
+        );
     }
 }

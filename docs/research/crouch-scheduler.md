@@ -159,6 +159,6 @@ run directly via WSL interop (the built `.exe` invoked by its own path from WSL 
 `.bat` wrapper to prepend the pip-installed CUDA/cuDNN DLL directories to `PATH` before invoking
 the same `.exe`, since those DLLs live under the Windows user's pip venv, not a system directory).
 Picked up the real `NVIDIA GeForce RTX 5080 (Vulkan)` adapter, not lavapipe. `cargo test -p crouch`
-(33 tests, all passing) ran against lavapipe/llvmpipe software rendering in this sandbox's own
+(37 tests, all passing) ran against lavapipe/llvmpipe software rendering in this sandbox's own
 Linux side — correctness only, not timing, same as every other spike's own sandbox/reference-
 machine split.

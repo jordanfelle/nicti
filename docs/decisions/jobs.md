@@ -99,9 +99,16 @@ shaped its design.
   `SubmissionIndex` and polling on exactly that. (3) `job::JobSpec`'s own doc comment claimed VRAM
   admission was enforced before every background chunk, but `queue::Scheduler` never actually held
   or consulted an `Admission` — decision rule #5 was only ever validated by `admission.rs`'s own
-  isolated unit tests. Fixed by wiring `Admission` into `Scheduler` for real (an over-budget
-  background job is skipped for the current pick, not dropped, and re-tried once budget frees up),
-  with a new test exercising this through `Scheduler::run_next` itself.
+  isolated unit tests. Fixed by wiring `Admission` into `Scheduler` for real, with a new test
+  exercising this through `Scheduler::run_next` itself. **This fix itself had two real bugs**,
+  found by a subsequent CodeRabbit review: `admit`/`release` bracket one `step()` call on one
+  thread, so `remaining()` is always the full budget when checked — a job over the *total* budget
+  was left retrying a check it could never pass, forever, rather than being refused (fixed by
+  dropping such a job outright, checked against `Admission::budget()` rather than `remaining()`);
+  and a yielded background job was pushed to the end of the vec instead of back into its sorted
+  slot, silently degrading nearest-to-cursor-first into round-robin for any multi-chunk job (fixed
+  by reinserting at the removed index). See `docs/adr/0054`'s own "Review findings" section for
+  the full account of both review passes.
 - **Tile-granular hero-scenario re-sim** (`sim.rs`, extends `spikes/loaf::sim` — copied, not
   depended-on): splits each image's bake into real chunks (atomic decode, N denoise tiles, atomic
   mask bake) and adds a periodic foreground demand serviceable only at a chunk boundary. With no
