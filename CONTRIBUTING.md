@@ -113,6 +113,11 @@ libraries or data files — those need `docs/licensing.md` updated by hand.
   #N closes.
 - Issues carry `epic`/`requirements`/`research`/`build` labels where relevant. An epic is a
   container, not a pickable unit of work.
+- **`needs-physical-testing`** marks an issue that can only really be verified hands-on — shooting
+  real bursts with a camera, running a live Lightroom Classic session, or driving the hero-scenario
+  benchmark on the Windows reference machine — not just code review or synthetic tests. Apply it
+  whenever an issue's exit criteria depends on real camera output or real hardware/software that
+  isn't reachable from a normal dev sandbox.
 
 ## Benchmarks
 
