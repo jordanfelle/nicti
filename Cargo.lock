@@ -1483,10 +1483,10 @@ name = "calico"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "bytemuck",
  "byteorder",
  "clap",
+ "flate2",
  "half",
  "image",
  "pollster",

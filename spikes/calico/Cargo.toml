@@ -23,7 +23,7 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["tiff", "png"] }
 byteorder = "1"
 roxmltree = "0.20"
-base64 = "0.22"
+flate2 = "1"
 wgpu = "30"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }

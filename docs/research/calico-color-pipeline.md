@@ -12,8 +12,19 @@ here (ADR-0003's licensing policy forbids adding a real Adobe profile to this re
 DCP/DNG-tag parser, the CCT/matrix math, the HueSatMap/tone-curve implementations, the CIEDE2000
 metric, and — the one part of this research that specifically needed real hardware feedback, not
 just type-checking — a wgpu compute-shader 3D-texture kernel, tested for CPU/GPU parity against
-this sandbox's lavapipe (software Vulkan) fallback. All of that is backed by 26 unit tests and 3
-integration tests (`cargo test -p calico`), not just written-and-hoped-correct.
+this sandbox's lavapipe (software Vulkan) fallback. All of that is backed by unit and integration
+tests (`cargo test -p calico`), not just written-and-hoped-correct.
+
+**Update (#150)**: the Adobe Raw "Look" `.xmp` decode below (originally timeboxed as
+`UnrecognizedTableFormat`) turned out to be solvable in-sandbox after all — the user's real,
+installed Adobe Raw profiles are reachable from this WSL environment via the Windows side
+(`/mnt/c/ProgramData/Adobe/CameraRaw/Settings/Adobe/Profiles/Adobe Raw/`). `xmp_profile.rs` now
+decodes the real `dng_big_table` container (base85 + zlib around a `dng_look_table` tagged
+record) and self-checks by recomputing the profile's own MD5 fingerprint, verified against all
+six real profiles (Color/Landscape/Monochrome/Neutral/Portrait/Vivid). See
+`docs/adr/0021-color-pipeline.md`'s `xmp_profile.rs` bullet for the format details. Steps 4/6/87-90
+below (the `UnrecognizedTableFormat` contingency) are now historical — Vivid is in scope for the
+reference-machine pass like Standard/Color always was.
 
 **Two real bugs were found and fixed via that GPU test and its own review process**, not just
 written and assumed right:
@@ -84,7 +95,8 @@ the ADR) additionally confirmed the texture *upload* itself (data layout,
    its Status to Accepted if the decision rule's bar is met (mean ≤ 2.0, p95 ≤ 5.0, every
    reference image, every profile actually measured).
 
-If step 4/6's `--look` fails with `UnrecognizedTableFormat`: that confirms the Adobe Vivid `.xmp`
-research risk flagged in the ADR. File the "decode Adobe Raw `.xmp` Look profiles" follow-up issue
-(if not already filed) with the actual file attached for future reference (locally, not committed
-to this repo — see ADR-0003), and proceed with just the Standard/Color measurement.
+(Historical: step 4/6's `--look` used to be expected to fail with `UnrecognizedTableFormat`,
+falling back to a Standard/Color-only measurement. #150 resolved that decode against all six real
+Adobe Raw profiles, so `--look <path-to-vivid-xmp>` should now succeed during the
+reference-machine pass; if it still fails, that's a new, distinct bug worth its own issue rather
+than the original research-risk case.)
