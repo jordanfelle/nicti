@@ -4399,6 +4399,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "knead"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clap",
+ "image",
+ "nicti-cornea",
+ "nicti-prowl",
+ "nicti-render",
+ "serde_json",
+ "wgpu 30.0.1",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
