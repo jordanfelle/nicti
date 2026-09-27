@@ -259,12 +259,20 @@ mod tests {
 
     /// Regression test for `nicti-pelt`'s device-sharing path: a device requested via
     /// `device_descriptor_for` and wrapped with `from_device` must report the same
-    /// features/limits `GpuContext::new` itself would have gotten -- if these diverged, a host
-    /// (eframe) building its own device this way could silently hand Tapetum an undersized
-    /// device (missing `SHADER_F16`, or wgpu's conservative default limits instead of the
-    /// adapter's own), passing every test here but failing only on a real full-res frame.
+    /// features/limits `from_adapter` itself would have gotten from the *same* adapter -- if
+    /// these diverged, a host (eframe) building its own device this way could silently hand
+    /// Tapetum an undersized device (missing `SHADER_F16`, or wgpu's conservative default limits
+    /// instead of the adapter's own), passing every test here but failing only on a real
+    /// full-res frame.
+    ///
+    /// Deliberately compares against `from_adapter` on the *same* enumerated adapter instance,
+    /// not `GpuContext::new(GpuPreference::Auto)` -- on a multi-adapter machine, `new`'s own
+    /// backend-preference selection isn't guaranteed to land on the same physical adapter this
+    /// test enumerates first, which would make a mismatch mean nothing (two different adapters
+    /// legitimately have different limits) rather than proving `from_device` itself is correct
+    /// (caught in CodeRabbit's review of this PR).
     #[test]
-    fn from_device_reports_the_same_features_and_limits_as_new() {
+    fn from_device_reports_the_same_features_and_limits_as_from_adapter() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -280,17 +288,17 @@ mod tests {
             .expect("requesting a device with device_descriptor_for's own descriptor must succeed");
         let via_from_device = GpuContext::from_device(&adapter, device, queue);
 
-        let via_new =
-            GpuContext::new(GpuPreference::Auto).expect("an adapter was just found above");
+        let via_from_adapter =
+            GpuContext::from_adapter(adapter).expect("requesting a second device must succeed");
 
-        assert_eq!(via_from_device.features, via_new.features);
+        assert_eq!(via_from_device.features, via_from_adapter.features);
         assert_eq!(
             via_from_device.limits.max_storage_buffer_binding_size,
-            via_new.limits.max_storage_buffer_binding_size
+            via_from_adapter.limits.max_storage_buffer_binding_size
         );
         assert_eq!(
             via_from_device.limits.max_texture_dimension_2d,
-            via_new.limits.max_texture_dimension_2d
+            via_from_adapter.limits.max_texture_dimension_2d
         );
     }
 
