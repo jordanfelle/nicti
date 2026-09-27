@@ -84,6 +84,13 @@ fn cmd_render(
             let look = calico::xmp_profile::parse(&text)
                 .map_err(|e| anyhow::anyhow!("parsing look profile {}: {e}", p.display()))?;
             eprintln!("using look profile '{}'", look.name);
+            if !look.unsupported_settings.is_empty() {
+                eprintln!(
+                    "warning: look profile '{}' has settings calico doesn't apply: {}",
+                    look.name,
+                    look.unsupported_settings.join(", ")
+                );
+            }
             Some((look.look_table, look.encoding))
         }
         None => None,

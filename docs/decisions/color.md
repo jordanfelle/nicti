@@ -38,14 +38,17 @@ pipeline from linear camera RGB to a display-referred image.
   references once that reference-machine pass runs. HueSatMap/LookTable still apply in
   ProPhoto-referenced HSV regardless of which working space wins, since that's how the DCP tables
   themselves are defined.
-- **Adobe Raw "Look" `.xmp` profiles are a real gap, not silently faked**: `xmp_profile.rs`
-  attempts to decode an embedded look table (e.g. from an installed Adobe Vivid preset) as a
-  DCP-style TIFF IFD, since Adobe is known to reuse DNG tag semantics for these — but with no real
-  sample file available under this project's licensing constraints (ADR-0003 forbids adding one,
-  and guessing at an undocumented binary format from zero samples risks silently wrong colors), it
-  returns a clear `UnrecognizedTableFormat` error rather than a guess when the embedded data
-  doesn't parse as expected. Whether the installed Adobe Vivid `.xmp` actually decodes this way is
-  one of the open questions the reference-machine pass answers.
+- **Adobe Raw "Look" `.xmp` profiles: resolved (#150), not a guess**: `crs:LookTable` turned out
+  to be the table's own MD5 fingerprint rather than the data itself — the payload lives in a
+  second attribute, `crs:Table_<id>`, in the DNG SDK's `dng_big_table` wire format (a Z85-like
+  base85 variant + zlib around `dng_look_table::GetStream`'s tagged record; read as a spec
+  reference only, never vendored). `xmp_profile.rs` decodes this and recomputes the same canonical
+  re-serialization the SDK MD5-hashes for `crs:LookTable`, comparing it against the file's own ID
+  as a correctness self-check — a wrong decode can't produce the right hash. Verified against all
+  six real Adobe Raw profiles (Color/Landscape/Monochrome/Neutral/Portrait/Vivid): all six decode
+  and fingerprint-match. Settings calico doesn't apply from a Look profile (`Clarity2012`,
+  `ToneCurvePV2012`, `RGBTable`-based looks) are surfaced via `unsupported_settings` rather than
+  silently dropped.
 - **GPU 3D-texture kernel is a real first for this repo**: `spikes/glint`'s ADR-0005 kernels are
   storage-buffer-only by design (texture-specific concerns were explicitly left to whichever
   ticket needed them first — see `glint/src/gpu.rs`'s own scoping note). `spikes/calico/src/gpu.rs`
