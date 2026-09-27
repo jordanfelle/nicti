@@ -43,6 +43,10 @@ pub enum PatchError {
     Io(#[from] std::io::Error),
     #[error("no rdf:Description element found in this packet")]
     NoDescription,
+    #[error(
+        "malformed or truncated xmp: no matching closing tag found (e.g. a half-written sidecar)"
+    )]
+    Unbalanced,
 }
 
 /// What to change on the next write. Each field is "leave untouched" (`None`)
@@ -75,9 +79,16 @@ fn is_local(qname: QName, target: &str) -> bool {
 /// `start_idx`, by tracking nesting depth over every intervening
 /// Start/End event regardless of element name. Returns `start_idx` itself
 /// if that event is `Event::Empty` (self-closing -- no matching End exists).
-fn matching_end(events: &[Event<'static>], start_idx: usize) -> usize {
+///
+/// Returns `Err(PatchError::Unbalanced)`, never panics, if no matching End
+/// is found before EOF -- `quick_xml`'s reader doesn't require balanced
+/// nesting and will happily run to `Event::Eof` on a half-written sidecar
+/// (a real possibility: an LRC crash or a disk-full mid-save, not just an
+/// adversarial input), so this is a real, reachable error path, not just a
+/// defensive check.
+fn matching_end(events: &[Event<'static>], start_idx: usize) -> Result<usize, PatchError> {
     if matches!(events[start_idx], Event::Empty(_)) {
-        return start_idx;
+        return Ok(start_idx);
     }
     let mut depth = 1i32;
     for (i, ev) in events.iter().enumerate().skip(start_idx + 1) {
@@ -86,13 +97,13 @@ fn matching_end(events: &[Event<'static>], start_idx: usize) -> usize {
             Event::End(_) => {
                 depth -= 1;
                 if depth == 0 {
-                    return i;
+                    return Ok(i);
                 }
             }
             _ => {}
         }
     }
-    panic!("malformed XMP: no matching End found for Start at index {start_idx}");
+    Err(PatchError::Unbalanced)
 }
 
 /// Applies `patch` to `xmp`, returning the full patched packet text.
@@ -116,7 +127,7 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             |e| matches!(e, Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Description")),
         )
         .ok_or(PatchError::NoDescription)?;
-    let desc_end_idx = matching_end(&events, desc_idx);
+    let desc_end_idx = matching_end(&events, desc_idx)?;
 
     // 1. Rewrite the Description tag's own attributes (Rating/Label/nicti:editDocument).
     let new_desc_start = {
@@ -172,7 +183,7 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             if (is_subject && patch.keywords.is_some())
                 || (is_hier && patch.hierarchical_keywords.is_some())
             {
-                let block_end = matching_end(&events, i);
+                let block_end = matching_end(&events, i)?;
                 for s in skip.iter_mut().take(block_end + 1).skip(i) {
                     *s = true;
                 }
@@ -209,10 +220,18 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 }
             }
         }
-        if let Some(kws) = &patch.keywords {
+        // Skip writing a container at all when the patch clears a list to
+        // empty (`Some(vec![])`) -- inserting `<dc:subject><rdf:Bag/></dc:subject>`
+        // for "no keywords" would be a needless empty container never asked
+        // for, not a faithful "leave nothing here" clear.
+        if let Some(kws) = patch.keywords.as_deref().filter(|k| !k.is_empty()) {
             write_bag(&mut writer, "dc:subject", kws)?;
         }
-        if let Some(paths) = &patch.hierarchical_keywords {
+        if let Some(paths) = patch
+            .hierarchical_keywords
+            .as_deref()
+            .filter(|p| !p.is_empty())
+        {
             let joined: Vec<String> = paths.iter().map(|p| p.join("|")).collect();
             write_bag(&mut writer, "lr:hierarchicalSubject", &joined)?;
         }
@@ -266,6 +285,79 @@ mod tests {
         assert!(patched.contains("xmp:Rating=\"5\""), "{patched}");
         let meta = lrc_fields::read(&patched).unwrap();
         assert_eq!(meta.rating, Some(5));
+    }
+
+    #[test]
+    fn patching_one_attribute_preserves_every_other_attributes_exact_value() {
+        // Stronger than the substring check above: the Description tag is
+        // rebuilt attribute-by-attribute (not byte-spliced), so this proves
+        // every *value* this patch doesn't own survives exactly, including
+        // one containing characters (`&`, `"`) that a careless rebuild could
+        // re-escape differently. It does not assert byte-identical XML
+        // serialization of the tag as a whole (quoting/attribute order can
+        // still be normalized by the writer) -- see the module's `apply`
+        // docs and ADR-0059 for that distinction.
+        let xmp = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmp:Rating="3" xmlns:xmp="http://ns.adobe.com/xap/1.0/" crs:Note="Tom &amp; Jerry said &quot;hi&quot;"/>"#;
+        let patched = apply(
+            xmp,
+            &Patch {
+                rating: Some(Some(5)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            patched.contains("Tom &amp; Jerry said &quot;hi&quot;")
+                || patched.contains("Tom &amp; Jerry said &#34;hi&#34;"),
+            "unrelated attribute value was not preserved exactly: {patched}"
+        );
+    }
+
+    #[test]
+    fn malformed_truncated_xmp_returns_an_error_not_a_panic() {
+        // A half-written sidecar (LRC crash, disk full mid-save) can leave
+        // an unbalanced document -- quick_xml's reader doesn't require
+        // balanced nesting and just runs to Eof. This must surface as
+        // `PatchError::Unbalanced`, never panic.
+        let truncated = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><xmp:Rating>4</xmp:Rating>"#;
+        let err = apply(
+            truncated,
+            &Patch {
+                rating: Some(Some(5)),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, PatchError::Unbalanced), "{err:?}");
+    }
+
+    #[test]
+    fn clearing_keywords_to_empty_removes_the_container_entirely() {
+        // Some(vec![]) means "no keywords", not "an empty rdf:Bag" -- the
+        // container should disappear, not be replaced with a needless
+        // empty one.
+        let with_kw = apply(
+            SAMPLE,
+            &Patch {
+                keywords: Some(vec!["Old".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let cleared = apply(
+            &with_kw,
+            &Patch {
+                keywords: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !cleared.contains("dc:subject"),
+            "clearing to empty should remove the container, not insert an empty one: {cleared}"
+        );
+        let meta = lrc_fields::read(&cleared).unwrap();
+        assert!(meta.keywords.is_empty());
     }
 
     #[test]

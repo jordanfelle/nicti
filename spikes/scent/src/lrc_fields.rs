@@ -108,7 +108,33 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
     loop {
         match reader.read_event()? {
             Event::Eof => break,
-            Event::Start(e) | Event::Empty(e) => {
+            Event::Empty(e) => {
+                // A self-closing list container (`<dc:subject/>`, no `rdf:Bag`
+                // at all) has no matching `Event::End` -- quick_xml never
+                // fires one for `Empty`. Entering `in_list` here the same way
+                // `Start` does would leave it stuck forever (nothing ever
+                // clears it), silently corrupting every later scalar this
+                // reader sees as "inside a list". An empty container has no
+                // keywords to collect either way, so this is just a no-op:
+                // scalar attributes on it (rare, but XMP allows them on any
+                // element) are still read below like any other tag.
+                for attr in e.attributes() {
+                    let attr = attr?;
+                    let key = attr.key.as_ref();
+                    if local_eq(key, "Rating") {
+                        if let Ok(val) = std::str::from_utf8(&attr.value) {
+                            meta.rating = val.trim().parse::<i8>().ok();
+                        }
+                    } else if local_eq(key, "Label") {
+                        if let Ok(val) = std::str::from_utf8(&attr.value) {
+                            if !val.is_empty() {
+                                meta.label = Some(val.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Event::Start(e) => {
                 let name = e.name();
                 let name = name.as_ref();
                 if local_eq(name, "subject") {
@@ -281,5 +307,22 @@ mod tests {
         let meta = read(xmp).unwrap();
         assert_eq!(meta.rating, None);
         assert_eq!(meta.keywords, vec!["5"]);
+    }
+
+    #[test]
+    fn self_closing_empty_list_container_does_not_leak_list_state() {
+        // A self-closing `<dc:subject/>` (no `rdf:Bag`, e.g. an empty
+        // keyword list some tool wrote out explicitly) fires `Event::Empty`,
+        // which has no matching `Event::End` -- `in_list` must never be left
+        // set afterwards, or every later scalar in the document would be
+        // silently misread as "inside a list" and dropped.
+        let xmp = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><dc:subject/><xmp:Rating>4</xmp:Rating></rdf:Description>"#;
+        let meta = read(xmp).unwrap();
+        assert_eq!(
+            meta.rating,
+            Some(4),
+            "Rating after an empty list container must still be read"
+        );
+        assert!(meta.keywords.is_empty());
     }
 }

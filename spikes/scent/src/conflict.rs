@@ -48,6 +48,11 @@ pub fn resolve_conflict(catalog: &Side, sidecar: &Side, ambiguity_window_ms: u12
 
 /// Reads a file's real modification time in milliseconds since the Unix
 /// epoch, and its BLAKE3 content hash.
+///
+/// A pre-1970 or otherwise invalid mtime is a real `io::Error`, not silently
+/// treated as epoch 0 -- silently defaulting would bias `resolve_conflict`'s
+/// newer-wins comparison against a file with a corrupted timestamp instead
+/// of surfacing the problem.
 pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
     let contents = fs::read(path)?;
     let hash = blake3::hash(&contents);
@@ -55,7 +60,7 @@ pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
     let mtime_ms = metadata
         .modified()?
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         .as_millis();
     Ok((hash, mtime_ms))
 }
@@ -66,6 +71,25 @@ pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
 /// Otherwise, skip the write and flag the asset, rather than clobbering
 /// whatever LRC just did. `last_written_hash: None` means Nicti has never
 /// written `crs:` to this sidecar before, which is always safe to write.
+///
+/// **This function is a pure comparison, not an atomicity guarantee.** The
+/// "never clobbers a concurrent LRC edit" property this gate exists for
+/// only holds if the *caller* follows this sequence without a gap a
+/// concurrent LRC save could land inside:
+/// 1. Read the sidecar's current hash (`hash_and_mtime`) immediately before
+///    the write this call is gating.
+/// 2. Call `should_write_crs` with that hash and only proceed if it returns
+///    `true`.
+/// 3. On a successful write, record the hash of the **bytes just written**
+///    (not a fresh re-read of the file) as the new `last_written_hash` --
+///    re-reading introduces its own TOCTOU window between the write and the
+///    re-read.
+///
+/// A real production caller (not this research spike) additionally needs a
+/// filesystem lock or single-writer discipline across steps 1-3 to fully
+/// close the race; this spike proves the comparison logic and the intended
+/// call sequence (see the `crs_write_gate_sequential_usage_pattern` test),
+/// not cross-process atomicity.
 pub fn should_write_crs(
     last_written_hash: Option<blake3::Hash>,
     current_sidecar_hash: blake3::Hash,
@@ -136,6 +160,38 @@ mod tests {
     fn crs_write_gate_allows_when_sidecar_is_unchanged_since() {
         let hash = blake3::hash(b"what nicti wrote");
         assert!(should_write_crs(Some(hash), hash));
+    }
+
+    #[test]
+    fn crs_write_gate_sequential_usage_pattern() {
+        // Demonstrates the calling contract `should_write_crs`'s docs
+        // require: record the hash of the bytes just *written*, not a
+        // fresh re-read, so a third write's gate check isn't racing its
+        // own second write's re-read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.xmp");
+
+        // First write: always allowed (no prior write).
+        let first_bytes = b"sidecar v1 with crs projection A";
+        assert!(should_write_crs(None, blake3::hash(first_bytes)));
+        std::fs::write(&path, first_bytes).unwrap();
+        let mut last_written_hash = Some(blake3::hash(first_bytes));
+
+        // Second write: sidecar is unchanged since -> allowed.
+        let (current, _) = hash_and_mtime(&path).unwrap();
+        assert!(should_write_crs(last_written_hash, current));
+        let second_bytes = b"sidecar v2 with crs projection B";
+        std::fs::write(&path, second_bytes).unwrap();
+        last_written_hash = Some(blake3::hash(second_bytes));
+
+        // LRC edits the sidecar independently in between.
+        let lrc_bytes = b"sidecar v3, LRC's own edit, not nicti's";
+        std::fs::write(&path, lrc_bytes).unwrap();
+
+        // Third write attempt: gate must block, since the sidecar no
+        // longer matches what Nicti itself last wrote.
+        let (current, _) = hash_and_mtime(&path).unwrap();
+        assert!(!should_write_crs(last_written_hash, current));
     }
 
     #[test]

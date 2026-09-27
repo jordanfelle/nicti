@@ -58,7 +58,7 @@ crate is preferred over one that pulls in a new C/C++ build, all else equal.
 
 ### Spike: `spikes/scent`
 
-Real, tested code (33 tests: 28 unit + 2 env-gated real-file integration tests that skip cleanly
+Real, tested code (35 tests: 33 unit + 2 env-gated real-file integration tests that skip cleanly
 without the env vars set, plus CLI smoke-tested end-to-end on a synthetic sidecar — see the
 research doc). Four modules, matching the scope handed off by ADR-0002:
 
@@ -164,14 +164,21 @@ ADR-0002 asked for.
 
 ## Measured results
 
-- **33 tests pass** in `spikes/scent` (28 unit, 2 env-gated real-file integration tests that skip
+- **35 tests pass** in `spikes/scent` (33 unit, 2 env-gated real-file integration tests that skip
   cleanly here — no real LRC-written files exist in this Linux/WSL sandbox, same constraint
   ADR-0020's `homing` spike already documents). `cargo clippy -p scent --all-targets -D warnings`
   and `cargo fmt -p scent -- --check` both pass clean.
-- **Byte-preservation is proven, not assumed**: `packet::tests::patching_rating_preserves_unrelated_namespaces`
-  and `embedded::tests::write_preserves_bytes_outside_the_segment` both construct a packet/file
-  carrying an unrelated `crs:` property or unrelated JPEG bytes, patch an owned field, and assert
-  the unrelated content survived unchanged.
+- **Content-preservation is proven for both formats, at different precision levels.**
+  `embedded::tests::write_preserves_bytes_outside_the_segment` proves true byte-identity outside
+  the touched JPEG APP1 segment (the splice never touches a single byte elsewhere). For the XMP
+  packet itself, `packet.rs` rebuilds the whole `rdf:Description` tag attribute-by-attribute
+  (rather than a byte-level splice), so what's proven there is that every *value* this patch
+  doesn't own survives exactly — `packet::tests::patching_one_attribute_preserves_every_other_attributes_exact_value`
+  covers a value containing `&`/`"` specifically, since those are the characters a careless rebuild
+  could re-escape differently — **not** that the tag's serialized bytes are identical (attribute
+  quoting/order can be normalized by `quick-xml`'s writer). This distinction was underspecified in
+  an earlier draft of this ADR and caught by adversarial review before merge — see the "Adversarial
+  review" note below.
 - **NULL-vs-zero is proven**: `lrc_fields::tests::absent_rating_is_none_not_zero` and
   `explicit_zero_rating_is_some_zero` both pass, matching `shed-lrcat-schema.md`'s real finding
   that `rating` is nullable.
@@ -182,6 +189,35 @@ ADR-0002 asked for.
   `NICTI_TEST_REAL_NEF_DIR`/a new `NICTI_TEST_REAL_EMBEDDED_DIR`, but this sandbox has neither the
   files nor a mountable path to them (same constraint as ADR-0020). Running them for real, plus the
   hands-on LRC session below, is what promotes this ADR to Accepted.
+
+## Adversarial review
+
+A hostile review pass before merge found 6 issues; all 4 CONFIRMED findings were fixed (with a new
+regression test each), the 2 SPECULATIVE findings were also fixed since they were cheap and real:
+
+- **CONFIRMED**: a self-closing `<dc:subject/>`/`<lr:hierarchicalSubject/>` (no `rdf:Bag` at all)
+  has no matching `Event::End`, so `lrc_fields.rs`'s `in_list` state was left stuck permanently on,
+  silently dropping every later scalar in the document. Fixed by only entering list-tracking state
+  on `Event::Start`, never `Event::Empty` — an empty container has no keywords to collect either
+  way. See `self_closing_empty_list_container_does_not_leak_list_state`.
+- **CONFIRMED**: `packet.rs`'s `matching_end` panicked on a truncated/unbalanced document (a real
+  possibility — an LRC crash or disk-full mid-save, not just an adversarial input; `quick_xml`
+  doesn't require balanced nesting and just runs to EOF). Fixed: returns `PatchError::Unbalanced`
+  instead. See `malformed_truncated_xmp_returns_an_error_not_a_panic`.
+- **CONFIRMED**: the ADR's "byte-preservation is proven" claim overstated what the code/tests
+  actually established for the XMP-packet path (see the Measured results section above for the
+  corrected, precise claim).
+- **CONFIRMED**: the `crs:` write gate's calling contract (when `last_written_hash` updates, why it
+  must come from the just-written bytes rather than a re-read) was undocumented. Fixed: documented
+  on `should_write_crs` and demonstrated in `crs_write_gate_sequential_usage_pattern`.
+- **SPECULATIVE, fixed anyway**: `hash_and_mtime` silently mapped a pre-1970/invalid mtime to `0`
+  rather than erroring, which could bias the conflict rule. Now a real `io::Error`.
+- **SPECULATIVE, fixed anyway**: patching keywords to `Some(vec![])` (explicit clear) inserted a
+  needless empty `<dc:subject><rdf:Bag/></dc:subject>` instead of removing the container entirely.
+  See `clearing_keywords_to_empty_removes_the_container_entirely`.
+
+Not flagged as bugs (already-acknowledged design assumptions): the single-`rdf:Description`
+assumption, local-name-only namespace matching, and the DNG/TIFF write scope decision above.
 
 ## Options considered
 
