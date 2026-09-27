@@ -50,3 +50,18 @@ Covers burst/duplicate grouping (#33), blur/misfocus/eye detection (#34), and su
   against a documented self-export recipe, untested against a real model this pass. **Proposed,
   measurement pending** — same "no real unculled/labelled shoot exists yet" constraint as #33,
   plus no DINOv3/OpenCLIP model file obtained in this pass.
+- **Subject grouping (#35)**: `docs/adr/0035-subject-grouping.md` — clusters a shoot's photos by
+  subject/person for review-per-subject. Human face-recognition models don't apply: most subjects
+  are fursuiters, and InsightFace/RetinaFace are license-excluded anyway (non-commercial only).
+  `spikes/rosette` uses general image embeddings instead (DINOv2, reused from litter's own
+  embedder; OpenCLIP; DINOv3), clustered with DBSCAN over cosine distance and a
+  silhouette-coefficient-guided `eps` sweep — not litter's own sequence-constrained grouping,
+  which only links nearby frames in capture order and would miss a subject reappearing elsewhere
+  in the shoot. A full-frame-vs-subject-crop ablation is included (crop source: a precomputed
+  mask, same shape as `spikes/siamese`'s BiRefNet output). **DINOv3 is license-gated** (Meta's
+  DINOv3 License requires a "Built with DINOv3" attribution if adopted) and its ONNX export sits
+  behind a Hugging Face manual-accept gate; **no clean-license OpenCLIP ONNX export was found**
+  (the one community export, Apple's MobileCLIP2, is research-only) — its embedder is implemented
+  against a documented self-export recipe, untested against a real model this pass. **Proposed,
+  measurement pending** — same "no real unculled/labelled shoot exists yet" constraint as #33,
+  plus no DINOv3/OpenCLIP model file obtained in this pass.

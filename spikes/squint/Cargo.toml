@@ -22,7 +22,7 @@ thiserror = "2"
 anyhow = "1"
 zune-jpeg = "0.5"
 fast_image_resize = "6"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rand = "0.8"
 rand_chacha = "0.3"
 rustfft = "6"

@@ -138,11 +138,12 @@ pub enum Degradation {
     Defocus { radius: u32 },
     /// Linear motion blur at the given length/angle.
     Motion { length: u32, angle_degrees: i32 },
-    /// Defocus confined to one region (a synthetic back/front-focus), rest of the frame untouched.
-    Misfocus {
-        radius: u32,
-        region: (u32, u32, u32, u32),
-    },
+    /// Defocus confined to a centered subject-sized region (a synthetic back/front-focus), rest of
+    /// the frame untouched. The region is derived from the image's own dimensions at apply time
+    /// (not a hardcoded absolute rectangle, which would only make sense for one fixed image size)
+    /// -- a ~47% (120/256) relative size, matching this ADR's own synthetic keeper images'
+    /// textured "subject" region.
+    Misfocus { radius: u32 },
 }
 
 impl Degradation {
@@ -153,7 +154,16 @@ impl Degradation {
                 length,
                 angle_degrees,
             } => convolve(img, &Kernel::motion(length, angle_degrees as f32)),
-            Degradation::Misfocus { radius, region } => {
+            Degradation::Misfocus { radius } => {
+                let (width, height) = img.dimensions();
+                let region_w = ((width as u64 * 120 / 256) as u32).clamp(1, width);
+                let region_h = ((height as u64 * 120 / 256) as u32).clamp(1, height);
+                let region = (
+                    (width - region_w) / 2,
+                    (height - region_h) / 2,
+                    region_w,
+                    region_h,
+                );
                 convolve_region(img, &Kernel::disk(radius), region)
             }
         }
@@ -166,7 +176,7 @@ impl Degradation {
                 length,
                 angle_degrees,
             } => format!("motion_l{length}_a{angle_degrees}"),
-            Degradation::Misfocus { radius, .. } => format!("misfocus_r{radius}"),
+            Degradation::Misfocus { radius } => format!("misfocus_r{radius}"),
         }
     }
 }
@@ -179,6 +189,7 @@ pub fn default_sweep() -> Vec<Degradation> {
         Degradation::Defocus { radius: 3 },
         Degradation::Defocus { radius: 6 },
         Degradation::Defocus { radius: 10 },
+        Degradation::Misfocus { radius: 6 },
     ];
     for &length in &[3, 8, 16] {
         for &angle in &[0, 45, 90] {

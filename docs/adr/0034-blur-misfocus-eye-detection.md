@@ -22,11 +22,14 @@ label either — a real photographer's own kept files are, almost by definition,
 
 **User decisions (2026-09-27):**
 
-- **Ground truth this pass**: synthetic degradation of real keepers, plus a real, non-synthetic
-  measurement this enables directly — the **keeper false-flag rate**: how often a candidate wrongly
-  flags an undegraded, actually-kept photo. Real-reject accuracy (the #33/#180-style pass) is
-  deferred to a follow-up issue against the user's next unculled con card, sharing that labelling
-  session with #180.
+- **Ground truth this pass**: synthetic degradation of a stand-in keeper image set, plus a
+  measurement this enables directly without waiting on real photos — the **keeper false-flag
+  rate**: how often a candidate wrongly flags an undegraded image from that set. This pass's own
+  keeper set is 8 generated synthetic images (see Measured results), not real photographs; the
+  false-flag *methodology* is real (a genuine measurement, not asserted prose), but its numbers are
+  a synthetic-set result, not yet a real-photo one. Real-reject accuracy on actual photos (the
+  #33/#180-style pass) is deferred to a follow-up issue against the user's next unculled con card,
+  sharing that labelling session with #180.
 - **Eye scope**: human closed-eye detection **and** fursuit "eyes obscured" detection (head turned
   away, eyes hidden by hair/hand/prop) — not fursuit "closed eyes," since fixed/painted fursuit-head
   eyes can't blink. The fursuit check is "can the eyes be seen," not "are they open."
@@ -81,7 +84,7 @@ split (matching `spikes/litter`'s shape), not path-gated, depends on `nicti-prow
     AF rectangle divided by the frame's own sharpest-tile score. Near 1.0 means properly focused;
     well below 1.0 means something else in the frame is sharper than where the camera focused —
     back-/front-focus.
-- **`synth.rs`** — synthetic degradation of real keeper images: a disk (pillbox) kernel for
+- **`synth.rs`** — synthetic degradation of a keeper image set: a disk (pillbox) kernel for
   uniform defocus at several radii, a linear-PSF kernel for motion blur at several lengths/angles,
   and region-confined defocus (`convolve_region`) for synthetic misfocus (blur only a subject/AF
   region, background stays sharp). `default_sweep()` is the severity grid ADR-0034's Measured
@@ -91,12 +94,14 @@ split (matching `spikes/litter`'s shape), not path-gated, depends on `nicti-prow
   median score across every keeper degraded at one concrete reference severity (`defocus_r6` —
   chosen to look unambiguously out-of-focus in a manual spot-check), then report (a) the
   **detection rate** at every other severity in the sweep against that same threshold, and (b) the
-  **keeper false-flag rate**: the fraction of real, undegraded keepers whose score falls below that
-  same threshold. Tying the threshold to one inspectable severity (rather than an arbitrary
-  percentile) means a reader can sanity-check "is this threshold reasonable" against an image they
-  can look at.
-- **`label.rs` + CLI `squint draft`** — extracts every NEF's preview, computes every candidate's
-  score, and writes a **local, not published** contact-sheet page (`label.html`, same reasoning as
+  **keeper false-flag rate**: the fraction of undegraded images in this pass's keeper set whose
+  score falls below that same threshold (this pass's own set is 8 generated synthetic images, not
+  real photographs — see Measured results). Tying the threshold to one inspectable severity (rather
+  than an arbitrary percentile) means a reader can sanity-check "is this threshold reasonable"
+  against an image they can look at.
+- **`label.rs` + CLI `squint draft`** — extracts every NEF's preview, computes every *global*
+  candidate's score (not the AF-region-aware one, since `af::AfArea` is unverified against a real
+  file), and writes a **local, not published** contact-sheet page (`label.html`, same reasoning as
   `spikes/litter`'s own: real third-party photos, past a published Artifact's size limit). The user
   tags each frame (sharp/motion_blur/defocus/misfocus/eyes_closed/eyes_obscured/not_applicable) and
   exports `labels.json`.
@@ -133,14 +138,14 @@ synthetic "keeper" images (textured 120x120 center region simulating in-focus su
 against a smooth background gradient, not real photographs — real-photo numbers are the follow-up
 con-card pass's job, see Consequences):
 
-| Candidate | Keeper false-flag rate | Detection @ defocus r1 | @ r3 | @ r6 (= threshold ref) | @ r10 | @ any motion blur (l3-16, 0/45/90°) | ms/frame (p50) |
-|---|---|---|---|---|---|---|---|
-| `laplacian_variance` | 0.0% | 0% | 0% | 50% | 100% | 0% | 0.15 |
-| `tenengrad` | 0.0% | 0% | 0% | 50% | 100% | 0% | 0.19 |
-| `fft_high_freq_ratio` | 0.0% | 0% | 0% | 50% | 100% | 0% | 0.18 |
+| Candidate | Keeper false-flag rate | Detection @ defocus r1 | @ r3 | @ r6 (= threshold ref) | @ r10 | @ localized misfocus r6 | @ any motion blur (l3-16, 0/45/90°) | ms/frame (p50) |
+|---|---|---|---|---|---|---|---|---|
+| `laplacian_variance` | 0.0% | 0% | 0% | 50% | 100% | 0% | 0% | 0.15 |
+| `tenengrad` | 0.0% | 0% | 0% | 50% | 100% | 0% | 0% | 0.18 |
+| `fft_high_freq_ratio` | 0.0% | 0% | 0% | 50% | 100% | 0% | 0% | 0.17 |
 
 **A real methodological finding, not a bug**: every candidate's `mean_score_ratio` (degraded score
-÷ original score) drops sharply under every motion-blur variant tested — as low as 0.4% of baseline
+÷ original score) drops sharply under every motion-blur variant tested — as low as 0.3% of baseline
 at the most severe length/angle — yet `detection_rate` (whether that drop crosses the *absolute*
 threshold calibrated from `defocus_r6`) stays at 0% for every motion-blur case, on this synthetic
 image set. A defocus-calibrated absolute threshold does not automatically transfer to motion blur,
@@ -149,6 +154,17 @@ happens to sit well above the defocus-derived threshold, so a large relative dro
 it. **Consequence for the real pass**: don't assume one threshold serves every degradation type;
 the real con-card labelling pass should calibrate per degradation class (or use a multi-class
 classifier) rather than reusing a single defocus-derived cutoff.
+
+**A second real finding, from adding `Misfocus` to the sweep**: localized misfocus (blurring only
+the centered ~22%-of-area subject region, background untouched) is detected 0% of the time by
+every *global* candidate here, even though its score ratio drops as sharply as `defocus_r6`/`r10`
+(0.1-0.5% of baseline). This isn't a threshold-calibration gap like the motion-blur finding above —
+it's structural: `max_over_tiles` reports the frame's *sharpest* tile, and a small localized
+misfocus region leaves most of the frame's tiles fully sharp, so the frame-level score never drops
+regardless of how out-of-focus the subject itself is. **This is exactly why `af_region_misfocus_ratio`
+exists as its own candidate** (AF-region sharpness relative to the frame's own max, not the frame's
+max alone) rather than being redundant with the global candidates above — a whole-frame max-tile
+score structurally cannot detect this failure mode at all, at any threshold.
 
 The 50%/100% split at r6/r10 is a sanity check on the methodology itself, not a finding: the
 threshold *is* the median r6 score by construction, so ~50% of r6-degraded images are always

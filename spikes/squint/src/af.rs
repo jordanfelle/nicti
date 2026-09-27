@@ -13,13 +13,17 @@
 //! **`AFInfo2` layout is reconstructed from published third-party documentation of Nikon's format
 //! (the tag's structure has been reverse-engineered and written up by the EXIF tooling community
 //! for two decades; no code or text is copied from any specific tool here, only the documented
-//! field layout), not from a Nikon-issued spec.** **Unverified in this sandbox**: no real Z8 NEF is
-//! available here to cross-check against (same gap `spikes/litter` flagged for its own MakerNote
-//! fields) -- `tests/real_nef_af_cross_check.rs` is gated on `NICTI_TEST_REAL_NEF_DIR` and compares
-//! this reader's `AfArea` against `exiftool -AFAreaXPosition -AFAreaYPosition -AFAreaWidth
-//! -AFAreaHeight -j` on the same 37 real Z8 NEFs `spikes/litter` used, but has never actually run
-//! against real bytes. Treat `AfArea` as a research candidate, not a trusted value, until that test
-//! has actually passed on real files.
+//! field layout), not from a Nikon-issued spec.** `parse_af_info2` only implements version
+//! `"0400"` (Z8/Z9, Expeed 7) -- an adversarial review + a primary-source lookup (ExifTool's own
+//! `Nikon.pm` tag tables) caught an earlier version of this code reading `"0100"`/`"0101"` against
+//! the wrong (and, for those versions, only partially documented) offsets; see
+//! `parse_af_info2`/`parse_af_info2_v0400`'s own doc comments for the full offset table and the
+//! still-open center-vs-top-left question. **Unverified in this sandbox against a real file**: no
+//! real Z8 NEF is available here to cross-check against (same gap `spikes/litter` flagged for its
+//! own MakerNote fields). #238 tracks that real-file cross-check (comparing this reader's
+//! `AfArea` against `exiftool -AFAreaXPosition -AFAreaYPosition -AFAreaWidth -AFAreaHeight -j` on
+//! a real Z8 NEF, the same method `spikes/litter`'s `nef.rs` used) -- no such test exists in this
+//! repo yet. Treat `AfArea` as a research candidate, not a trusted value, until that pass lands.
 
 use crate::source::ByteSource;
 use std::collections::HashSet;
@@ -142,8 +146,10 @@ pub struct EmbeddedJpeg {
 /// Nikon `AFInfo2` (tag 0x00B7): the AF area the camera itself selected, in the coordinate space
 /// of `AFImageWidth`/`AFImageHeight` (this is the *live-view/AF-sensor* frame, not the final
 /// full-resolution image -- a caller must rescale by `full_width / af_image_width` before mapping
-/// onto a decoded/preview frame). Only the version `"0100"`/`"0101"` fixed layout is implemented;
-/// other versions (older/newer bodies) return `None` from `parse` rather than guessing.
+/// onto a decoded/preview frame). Only the version `"0400"` layout (Z8/Z9, Expeed 7 -- this
+/// project's actual target camera) is implemented; other versions (`"0100"`/`"0101"`, older
+/// bodies) return `None` from `parse_af_info2` rather than guessing at an incomplete field table
+/// -- see that function's own doc comment for why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AfArea {
     pub af_image_width: u16,
@@ -180,57 +186,54 @@ impl AfArea {
 }
 
 /// Parses a raw `AFInfo2` tag payload (the bytes at the tag's own offset, `undefined`-typed).
-/// Layout (version `"0100"`/`"0101"`, big-endian fields -- confirmed against multiple independent
-/// third-party EXIF-tool writeups, not a single source): 4-byte ASCII version, 1-byte
-/// ContrastDetectAF, 1-byte AFAreaMode, 1-byte PhaseDetectAF, 1-byte PrimaryAFPoint, 1-byte
-/// AFPointsUsed (bitmask, ignored here), 2-byte AFImageWidth, 2-byte AFImageHeight, 2-byte
-/// AFAreaXPosition, 2-byte AFAreaYPosition, 2-byte AFAreaWidth, 2-byte AFAreaHeight, then (only
-/// when ContrastDetectAF != 0) 1-byte ContrastDetectAFInFocus.
+///
+/// **Version-dispatched, not one shared layout** -- an earlier version of this function read
+/// `AFImageWidth` at a single fixed offset for both `"0100"` and `"0101"`, which an adversarial
+/// review + primary-source lookup (ExifTool's own documented `Nikon.pm` tag tables) confirmed
+/// wrong: `AFInfo2V0100` places it at offset 16, `AFInfo2V0101` at offset 70 -- neither matches
+/// what this code used to read, and neither is what this rewrite parses either (see below). Only
+/// `"0400"` (Z8/Z9, Expeed 7 -- the camera this whole project targets) is implemented now, with a
+/// *complete* documented offset table; `"0100"`/`"0101"` return `None` rather than parse against
+/// an *incomplete* one (the lookup that caught the original bug didn't turn up every field's
+/// offset for those versions either, so guessing here would just be a different wrong-looking-
+/// right layout instead of an honest gap).
 pub fn parse_af_info2(data: &[u8]) -> Option<AfArea> {
     if data.len() < 4 {
         return None;
     }
-    let version = &data[0..4];
-    if version != b"0100" && version != b"0101" {
+    match &data[0..4] {
+        b"0400" => parse_af_info2_v0400(data),
+        _ => None,
+    }
+}
+
+/// `AFInfo2V0400` (Z8/Z9): `AFImageWidth`@62, `AFImageHeight`@64, `AFAreaXPosition`@66,
+/// `AFAreaYPosition`@68, `AFAreaWidth`@70, `AFAreaHeight`@72 (all `int16u`, big-endian -- matching
+/// every other MakerNote binary-data table's own convention), `FocusResult`@74 (`int8u`, not
+/// captured here). Bytes 4-61 (`AFPointsUsed` and other per-point/mode fields) aren't parsed --
+/// this signal only needs the AF-area rectangle. **Center-vs-top-left semantics for
+/// `AFAreaXPosition`/`AFAreaYPosition` are not confirmed for this version** (unlike the older
+/// `AFInfo2V0101` table, which explicitly documents its own position fields as an AF-area
+/// *center*) -- treated as top-left here, matching `AfArea::rescale_to`'s existing contract, until
+/// a real-file cross-check (#238) confirms which it actually is. `ContrastDetectAF`/
+/// `ContrastDetectAFInFocus` have no confirmed byte offset in this version's table either, so
+/// `AfArea`'s corresponding fields are always `false`/`None` from this parser -- not silently
+/// wrong, just not populated.
+fn parse_af_info2_v0400(data: &[u8]) -> Option<AfArea> {
+    const NEED: usize = 74;
+    if data.len() < NEED {
         return None;
     }
-    // Fields from offset 4 on are fixed-size big-endian, per every documented layout.
-    const HEADER: usize = 4;
-    let need = HEADER + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 2 + 2 + 2;
-    if data.len() < need {
-        return None;
-    }
-    let contrast_detect_af = data[HEADER] != 0;
-    let mut off = HEADER + 5; // skip ContrastDetectAF, AFAreaMode, PhaseDetectAF, PrimaryAFPoint, AFPointsUsed
-    let be_u16 = |b: &[u8]| u16::from_be_bytes([b[0], b[1]]);
-    let af_image_width = be_u16(&data[off..off + 2]);
-    off += 2;
-    let af_image_height = be_u16(&data[off..off + 2]);
-    off += 2;
-    let x = be_u16(&data[off..off + 2]);
-    off += 2;
-    let y = be_u16(&data[off..off + 2]);
-    off += 2;
-    let width = be_u16(&data[off..off + 2]);
-    off += 2;
-    let height = be_u16(&data[off..off + 2]);
-    off += 2;
-
-    let contrast_detect_af_in_focus = if contrast_detect_af {
-        data.get(off).map(|b| *b != 0)
-    } else {
-        None
-    };
-
+    let be_u16 = |offset: usize| u16::from_be_bytes([data[offset], data[offset + 1]]);
     Some(AfArea {
-        af_image_width,
-        af_image_height,
-        x,
-        y,
-        width,
-        height,
-        contrast_detect_af,
-        contrast_detect_af_in_focus,
+        af_image_width: be_u16(62),
+        af_image_height: be_u16(64),
+        x: be_u16(66),
+        y: be_u16(68),
+        width: be_u16(70),
+        height: be_u16(72),
+        contrast_detect_af: false,
+        contrast_detect_af_in_focus: None,
     })
 }
 
@@ -510,22 +513,32 @@ mod tests {
     use super::*;
     use crate::source::SliceSource;
 
+    /// Builds an `AFInfo2V0400` payload: 4-byte version, then `AFImageWidth`@62/`AFImageHeight`@64/
+    /// `AFAreaXPosition`@66/`AFAreaYPosition`@68/`AFAreaWidth`@70/`AFAreaHeight`@72, all `int16u`
+    /// big-endian, padded to those exact offsets (bytes 4-61 are `AFPointsUsed`/mode fields this
+    /// parser doesn't read, left zeroed).
+    fn v0400_payload(
+        af_image_width: u16,
+        af_image_height: u16,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+    ) -> Vec<u8> {
+        let mut data = vec![0u8; 74];
+        data[0..4].copy_from_slice(b"0400");
+        data[62..64].copy_from_slice(&af_image_width.to_be_bytes());
+        data[64..66].copy_from_slice(&af_image_height.to_be_bytes());
+        data[66..68].copy_from_slice(&x.to_be_bytes());
+        data[68..70].copy_from_slice(&y.to_be_bytes());
+        data[70..72].copy_from_slice(&w.to_be_bytes());
+        data[72..74].copy_from_slice(&h.to_be_bytes());
+        data
+    }
+
     #[test]
-    fn parses_af_info2_v0100_fixed_layout() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"0100");
-        data.push(1); // ContrastDetectAF
-        data.push(0); // AFAreaMode
-        data.push(0); // PhaseDetectAF
-        data.push(0); // PrimaryAFPoint
-        data.push(0); // AFPointsUsed
-        data.extend_from_slice(&8256u16.to_be_bytes()); // AFImageWidth
-        data.extend_from_slice(&5504u16.to_be_bytes()); // AFImageHeight
-        data.extend_from_slice(&4000u16.to_be_bytes()); // AFAreaXPosition
-        data.extend_from_slice(&2500u16.to_be_bytes()); // AFAreaYPosition
-        data.extend_from_slice(&300u16.to_be_bytes()); // AFAreaWidth
-        data.extend_from_slice(&300u16.to_be_bytes()); // AFAreaHeight
-        data.push(1); // ContrastDetectAFInFocus
+    fn parses_af_info2_v0400_z8_layout() {
+        let data = v0400_payload(8256, 5504, 4000, 2500, 300, 300);
 
         let area = parse_af_info2(&data).expect("parses");
         assert_eq!(area.af_image_width, 8256);
@@ -534,16 +547,32 @@ mod tests {
         assert_eq!(area.y, 2500);
         assert_eq!(area.width, 300);
         assert_eq!(area.height, 300);
-        assert!(area.contrast_detect_af);
-        assert_eq!(area.contrast_detect_af_in_focus, Some(true));
+        // Not confirmed for V0400's byte layout this pass -- see parse_af_info2_v0400's doc.
+        assert!(!area.contrast_detect_af);
+        assert_eq!(area.contrast_detect_af_in_focus, None);
     }
 
     #[test]
-    fn rejects_unknown_af_info2_version() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"9999");
-        data.extend_from_slice(&[0u8; 16]);
+    fn rejects_a_payload_shorter_than_v0400_needs() {
+        let mut data = v0400_payload(8256, 5504, 4000, 2500, 300, 300);
+        data.truncate(73); // one byte short of AFAreaHeight's full field
         assert!(parse_af_info2(&data).is_none());
+    }
+
+    #[test]
+    fn rejects_unsupported_af_info2_versions() {
+        // "9999": genuinely unknown. "0100"/"0101": real Nikon versions, but with a different,
+        // incomplete-to-this-parser layout (see parse_af_info2's own doc comment) -- both must
+        // stay rejected, not silently parsed against the wrong (0400) offsets.
+        for version in [b"9999", b"0100", b"0101"] {
+            let mut data = Vec::new();
+            data.extend_from_slice(version);
+            data.extend_from_slice(&[0u8; 74]);
+            assert!(
+                parse_af_info2(&data).is_none(),
+                "{version:?} should be rejected"
+            );
+        }
     }
 
     #[test]
@@ -627,19 +656,7 @@ mod tests {
     fn reads_full_real_shaped_fixture() {
         let mut b = FileBuilder::new();
 
-        let mut af_info2 = Vec::new();
-        af_info2.extend_from_slice(b"0100");
-        af_info2.push(0); // ContrastDetectAF off (phase-detect AF path)
-        af_info2.push(0);
-        af_info2.push(1);
-        af_info2.push(0);
-        af_info2.push(0);
-        af_info2.extend_from_slice(&8256u16.to_be_bytes());
-        af_info2.extend_from_slice(&5504u16.to_be_bytes());
-        af_info2.extend_from_slice(&4100u16.to_be_bytes());
-        af_info2.extend_from_slice(&2600u16.to_be_bytes());
-        af_info2.extend_from_slice(&280u16.to_be_bytes());
-        af_info2.extend_from_slice(&280u16.to_be_bytes());
+        let af_info2 = v0400_payload(8256, 5504, 4100, 2600, 280, 280);
 
         let mn_off = b.offset();
         b.buf.extend_from_slice(b"Nikon\0");

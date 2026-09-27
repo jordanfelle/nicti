@@ -2,8 +2,11 @@
 //! - `synthetic`: runs the synthetic-degradation + keeper-false-flag measurement pass
 //!   (`eval::run`) against a directory of already-decoded keeper images (JPEG/PNG/TIFF -- anything
 //!   `image` opens), reporting per-candidate detection rates and ms/frame.
-//! - `draft`: extracts each NEF's mid-size preview and AF area, computes every sharpness
-//!   candidate's score, and writes a local `label.html` contact sheet for real human labelling.
+//! - `draft`: extracts each NEF's mid-size preview, computes every *global* sharpness candidate's
+//!   score (the AF-region-aware candidate is deliberately not included here -- `af::AfArea`'s
+//!   `AFInfo2` parsing is unverified against a real file, see `af.rs`'s own doc comment, so its
+//!   score doesn't belong in a labelling page presented as trustworthy), and writes a local
+//!   `label.html` contact sheet for real human labelling.
 //! - `labels`: reads a `draft.json`/`labels.json` pair back and reports each candidate's score
 //!   distribution grouped by real human tag -- a diagnostic, not a hard precision/recall verdict,
 //!   since a real labelled con card (this pass's actual gap, see ADR-0034's Context) is what would
