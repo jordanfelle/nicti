@@ -273,7 +273,7 @@ mod tests {
             }
         });
         assert_eq!(result.unwrap_err(), "boom");
-        // Warmup (1) + 2 successful measured calls before the 3rd (n==2) call fails.
+        // Warmup (1, n==0) + 1 successful measured call (n==1) before the failing call (n==2).
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
