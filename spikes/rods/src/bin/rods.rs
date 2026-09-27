@@ -209,6 +209,13 @@ fn compare(
     // precision at that magnitude); only skipping this for an exact zero shift would be a
     // meaningless special case.
     let (mut cand_srgb, resample_valid) = align::resample_rgb(&cand_srgb_raw, width, height, shift);
+    anyhow::ensure!(
+        resample_valid.iter().any(|&valid| valid),
+        "cannot score: the estimated shift ({:.4}, {:.4}) leaves no valid resampled pixels -- \
+         every sampled coordinate fell outside the candidate's bounds",
+        shift.dx,
+        shift.dy
+    );
     // A rectangle guaranteed entirely valid given the measured shift -- computed once, reused
     // both to clamp-fill the invalid border before denoising below and to crop before scoring
     // PSNR/SSIM further down.

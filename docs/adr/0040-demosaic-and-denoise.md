@@ -69,8 +69,11 @@ ticket's 2-day cap. See `docs/research/rods-demosaic-denoise.md` for the full ac
 **Path B, provisionally: classic AHD demosaic (FBDD 0) + SCUNet-PSNR as the AI denoise stage.**
 Two real, ONNX-ready candidates were measured — NAFNet-SIDD-width64 and SCUNet-PSNR, both public
 MIT/Apache-2.0 licensed re-exports, no PyTorch conversion needed. Both candidates beat the
-classic-demosaic-only baseline in **every** scene measured (3 real Nikon Z6 scenes, crop-level and
-full-resolution). **SCUNet is the stronger candidate overall** — wins PSNR and SSIM cleanly on 2
+classic-demosaic-only baseline in **every** scene measured **at the crop level** (3 real Nikon Z6
+scenes) — a full-resolution no-denoise baseline wasn't measured this pass (the full-resolution rows
+below compare NAFNet against SCUNet against each other and against ground truth, not against an
+undenoised baseline; see Consequences). **SCUNet is the stronger candidate overall** — wins PSNR and
+SSIM cleanly on 2
 of 3 scenes at full resolution, and has the cleanest training-data provenance of any candidate
 considered (purely synthetic degradations, no real-photo dataset provenance question at all).
 NAFNet wins **both** PSNR and SSIM on the third scene (sewingmachine) at full resolution — a clean
@@ -154,6 +157,11 @@ Real LRC comparison numbers: **not yet measured** — pending the user's own LRC
   divisibility constraint.
 - **LPIPS not wired this pass** — a follow-up if PSNR/SSIM alone prove insufficient to resolve the
   sewingmachine PSNR-vs-SSIM disagreement noted in the research doc.
+- **A full-resolution no-denoise baseline was never measured this pass** — only the 256px crop
+  baseline was. The full-resolution table above compares NAFNet against SCUNet and against ground
+  truth, not against an undenoised classic-pipeline reference; "beats the baseline" is confirmed at
+  the crop level only. A follow-up (folded into #163's real LRC comparison batch, not its own
+  separate issue) should add a full-resolution baseline measurement alongside it.
 
 ## Spike: `spikes/rods`
 

@@ -30,9 +30,15 @@ CC-BY-SA-4.0, dataverse.uclouvain.be) instead — a public dataset of real paire
 photos across several camera brands. Picked over ELD (the other real candidate found, Nikon D850
 only) because RawNIND includes real **Nikon Z6** files: same Z-mount mirrorless generation as the
 Z8, confirmed via `exiftool` (`NIKON Z 6`, `NEF Compression: Lossless` — no HE dependency risk).
-60 real NEFs across 5 static scenes (`bananapi`, `couch`, `sewingmachine`, `Iain01`, `Iain02`),
-each a base-ISO-50 ground truth plus a full climbing ISO ladder to 51200 — the same shape the
-tripod shoot would have had. All 60 files' SHA1s verified against the filename-embedded hash.
+60 real NEFs total across 5 static scenes (`bananapi`, `couch`, `sewingmachine`, `Iain01`,
+`Iain02`), all downloaded and SHA1-verified against the filename-embedded hash. **Only 3 of the 5
+were independently confirmed Z6 and actually used for measurement this pass**: `bananapi`,
+`couch`, and `sewingmachine`, each a base-ISO-50 ground truth plus a full climbing ISO ladder to
+51200 (confirmed via `exiftool` on real sample files, `NIKON Z 6`) — the same shape the tripod
+shoot would have had. `Iain01`/`Iain02` were downloaded as part of the same dataset but never
+independently verified or used this pass -- RawNIND's own published composition spans more than
+one camera body, so treat those two scene names as unconfirmed camera body/ISO range rather than
+assuming they match the other three's Z6/ISO-50-to-51200 shape.
 
 Every quality number below is therefore **provisional against a Z6, not a Z8** — the exact caveat
 ADR-0040 states up front. A real Z8 verification pass is filed as
@@ -157,15 +163,19 @@ the resample step demonstrably fixes the dominant component).
 | couch | 27.632 dB / 0.664 | **33.605 dB / 0.862** |
 | sewingmachine | **29.866 dB / 0.815** | 24.508 dB / 0.780 |
 
-**Both candidates beat the classic-demosaic-only baseline in every case measured.** At full
-resolution, **SCUNet is the stronger candidate overall** — wins PSNR *and* SSIM cleanly on 2 of 3
-scenes (bananapi, couch). NAFNet wins **both** PSNR and SSIM on the third (sewingmachine,
-29.87dB/0.815 vs 24.51dB/0.780) — a clean win, not a split, at full resolution. The 256px crop
-sample *did* show a PSNR/SSIM disagreement on that same scene (NAFNet ahead on PSNR, SCUNet ahead
-on SSIM, see the crop-level table above) that **doesn't hold at full resolution** — the crop was
-evidently an atypical patch for that scene, not representative of the whole frame. Treat the
-full-resolution numbers as the more reliable signal; a visual inspection of why the crop diverged
-wasn't done this pass, flagged as an open question if it matters later.
+**Both candidates beat the classic-demosaic-only baseline in every case measured at the crop
+level** (the "Baseline" column above) — **a full-resolution no-denoise baseline was never
+measured this pass**, so the full-resolution table below is NAFNet-vs-SCUNet-vs-ground-truth only,
+not vs. an undenoised baseline; "beats the baseline" is confirmed at the crop level, not yet at
+full resolution. At full resolution, **SCUNet is the stronger candidate overall** — wins PSNR *and*
+SSIM cleanly on 2 of 3 scenes (bananapi, couch). NAFNet wins **both** PSNR and SSIM on the third
+(sewingmachine, 29.87dB/0.815 vs 24.51dB/0.780) — a clean win, not a split, at full resolution. The
+256px crop sample *did* show a PSNR/SSIM disagreement on that same scene (NAFNet ahead on PSNR,
+SCUNet ahead on SSIM, see the crop-level table above) that **doesn't hold at full resolution** —
+the crop was evidently an atypical patch for that scene, not representative of the whole frame.
+Treat the full-resolution numbers as the more reliable signal for the NAFNet-vs-SCUNet comparison;
+a visual inspection of why the crop diverged wasn't done this pass, flagged as an open question if
+it matters later.
 
 ### Speed
 
@@ -206,7 +216,7 @@ cross-compiles cleanly, no C/C++ dependency to fight (unlike `retina`'s vendored
 | Path | Real candidate found? | Built/measured? | Verdict |
 |---|---|---|---|
 | A: Bayer-domain joint demosaic+denoise | Yes (BJDD) — real Bayer weights, but 3-channel non-raw input convention + Drive-hosted PyTorch | No | Moves to v2; revisit if Path B fails LRC bar |
-| B: classic demosaic + AI denoise, NAFNet-SIDD | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers | Real improvement over baseline everywhere measured; loses to SCUNet on PSNR+SSIM on 2/3 scenes, but wins both on sewingmachine |
+| B: classic demosaic + AI denoise, NAFNet-SIDD | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers | Real improvement over the crop-level baseline everywhere measured (no full-res baseline measured this pass); loses to SCUNet on PSNR+SSIM on 2/3 scenes, but wins both on sewingmachine |
 | B: classic demosaic + AI denoise, SCUNet-PSNR | Yes, ONNX-ready | Yes, full pipeline + full-resolution GPU numbers, edge-tile bug found+fixed | **Strongest candidate measured this pass** — best PSNR+SSIM on 2/3 scenes; cleanest training-data provenance (purely synthetic, no real-photo dataset question) |
 
 ## Consequences

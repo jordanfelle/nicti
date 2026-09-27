@@ -12,10 +12,13 @@ candidates measured, the alignment bugs found and fixed, and the real Windows-na
 
 - **RawNIND** (`doi:10.14428/DVN/DEQCIM`, CC-BY-SA-4.0) was picked over ELD (the other real public
   candidate, Nikon D850 only, a different-generation DSLR) specifically because it contains real
-  Z6 raw files. 60 real NEFs across 5 static scenes (bananapi, couch, sewingmachine, Iain01,
-  Iain02), each a base-ISO-50 ground truth plus a full climbing ISO ladder to 51200 — the same
-  shape the original tripod-shoot plan wanted. All 60 files' SHA1s verified against their
-  filename-embedded hash before use.
+  Z6 raw files. 60 real NEFs total across 5 static scenes (bananapi, couch, sewingmachine, Iain01,
+  Iain02), all SHA1-verified against their filename-embedded hash. **Only 3 of the 5 were
+  independently confirmed Z6 and actually used for measurement**: bananapi, couch, sewingmachine,
+  each a base-ISO-50 ground truth plus a full climbing ISO ladder to 51200 (confirmed via
+  `exiftool`) — the same shape the original tripod-shoot plan wanted. Iain01/Iain02 were downloaded
+  but never independently verified or used; RawNIND's own published composition spans more than
+  one camera body, so don't assume those two match the other three's Z6/ISO range.
 
 - **Path A (Bayer-domain joint demosaic+denoise) was investigated and moved to v2, not built.**
   Two real candidates were found — BJDD (CVPRW21, dedicated pretrained Bayer-CFA weights) and
@@ -38,7 +41,9 @@ candidates measured, the alignment bugs found and fixed, and the real Windows-na
   considered). Both sourced as ready ONNX exports from the public `deepghs/image_restoration` HF
   repo (MIT re-export license), sidestepping the PyTorch→ONNX conversion the plan originally
   expected to need. Both candidates beat the classic-demosaic-only baseline in every one of 3 real
-  scenes measured, at both a 256px-crop level and full 6064×4040 resolution. At full resolution,
+  scenes measured **at the 256px-crop level** — a full-resolution no-denoise baseline was never
+  measured this pass, so at full 6064×4040 resolution the comparison is NAFNet-vs-SCUNet-vs-ground-
+  truth only, not vs. an undenoised baseline. At full resolution,
   SCUNet won PSNR+SSIM cleanly on 2 of 3 scenes; NAFNet won **both** PSNR and SSIM on the third
   (sewingmachine) — a clean win there, not a split. The crop-level sample for that same scene had
   shown a PSNR-vs-SSIM disagreement between the two candidates that didn't hold once measured on
