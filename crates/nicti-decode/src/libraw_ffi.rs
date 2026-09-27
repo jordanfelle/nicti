@@ -103,6 +103,12 @@ pub struct LibRawHandle {
     ptr: *mut RetinaLibRawOpaque,
 }
 
+impl Default for LibRawHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LibRawHandle {
     pub fn new() -> Self {
         let ptr = unsafe { retina_libraw_new() };

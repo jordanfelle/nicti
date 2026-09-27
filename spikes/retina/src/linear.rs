@@ -1,8 +1,12 @@
-//! `retina dump-linear`: hands demosaiced-but-uncorrected linear camera RGB (plus the metadata
-//! needed to color-correct it) to `spikes/calico` (#38/ADR-0038), so calico's color pipeline can
-//! be developed and tested without depending on retina's LibRaw FFI or vendored submodule
-//! directly. LibRaw's demosaic is a stand-in for this hand-off only -- the demosaic algorithm
-//! itself is #40's decision, not this ticket's.
+//! `retina dump-linear`: writes `nicti-decode`'s [`LinearFrame`] (demosaiced-but-uncorrected
+//! linear camera RGB plus the metadata needed to color-correct it) to a TIFF + JSON sidecar pair,
+//! so `spikes/calico` (#38/ADR-0038) can develop/test its color pipeline without depending on
+//! `nicti-decode`'s LibRaw FFI/vendored submodule directly. LibRaw's demosaic is a stand-in for
+//! this hand-off only -- the demosaic algorithm itself is #40's decision, not this ticket's.
+//!
+//! The actual decode/demosaic step is `nicti-decode`'s `RawDecoder::decode_linear` (promoted out
+//! of this function in #41) -- this module is now just the TIFF/JSON serialization glue calico's
+//! file-based tooling still expects.
 //!
 //! Output per input file:
 //! - `<stem>.linear.tiff`: 16-bit RGB TIFF, values are LibRaw's black-subtracted, linearly
@@ -15,9 +19,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use image::{ImageBuffer, Rgb};
+use nicti_decode::{LibRawDecoder, LinearFrame, RawDecoder};
 use serde::Serialize;
-
-use crate::libraw_ffi::LibRawHandle;
 
 #[derive(Debug, Serialize)]
 pub struct LinearMeta {
@@ -38,47 +41,37 @@ pub struct LinearMeta {
     pub cblack: [u32; 4],
 }
 
-/// Decodes `path` with LibRaw, runs the WB/matrix/gamma-free demosaic, and writes the TIFF +
-/// JSON sidecar into `out_dir` (created if missing), named after `path`'s file stem.
+impl From<&LinearFrame> for LinearMeta {
+    fn from(frame: &LinearFrame) -> Self {
+        LinearMeta {
+            make: frame.make.clone(),
+            model: frame.model.clone(),
+            width: frame.width,
+            height: frame.height,
+            black: frame.black,
+            maximum: frame.maximum,
+            cam_mul: frame.cam_mul,
+            pre_mul: frame.pre_mul,
+            cam_xyz: frame.cam_xyz,
+            cblack: frame.cblack,
+        }
+    }
+}
+
+/// Decodes `path` via `nicti-decode`'s `LibRawDecoder`, and writes the TIFF + JSON sidecar into
+/// `out_dir` (created if missing), named after `path`'s file stem.
 pub fn dump_linear(path: &Path, out_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(out_dir)?;
-    let data = fs::read(path)?;
 
-    let mut handle = LibRawHandle::new();
-    handle
-        .decode(&data)
-        .map_err(|e| anyhow::anyhow!("decode {}: {e}", path.display()))?;
+    let frame = LibRawDecoder
+        .decode_linear(path)
+        .map_err(|e| anyhow::anyhow!("decode_linear {}: {e}", path.display()))?;
 
-    // Captured *before* `process_linear()`, not after: LibRaw's `scale_colors()` (run inside
-    // `dcraw_process()`) can mutate `imgdata.color.maximum` as part of applying the black-level
-    // correction, so a post-process read of `black`/`maximum` doesn't necessarily reflect the
-    // sensor-native values the sidecar's doc comment promises.
-    let meta = handle.metadata();
-
-    handle
-        .process_linear()
-        .map_err(|e| anyhow::anyhow!("process_linear {}: {e}", path.display()))?;
-
-    let linear = handle.linear_metadata();
-    let image = handle.linear_image()?;
-
-    let width = meta.iwidth as u32;
-    let height = meta.iheight as u32;
-    let expected_len = width as usize * height as usize * 4;
-    anyhow::ensure!(
-        image.len() == expected_len,
-        "linear_image length {} != iwidth*iheight*4 ({expected_len}) for {}",
-        image.len(),
-        path.display()
-    );
-
-    // Drop the 4th (G2) channel -- calico's pipeline works in 3-channel camera RGB, matching
-    // every DNG-spec matrix/HueSatMap operation downstream (all defined over R/G/B).
-    let mut buf: ImageBuffer<Rgb<u16>, Vec<u16>> = ImageBuffer::new(width, height);
-    for (i, px) in buf.pixels_mut().enumerate() {
-        let base = i * 4;
-        px.0 = [image[base], image[base + 1], image[base + 2]];
-    }
+    // frame.pixels is already 3 u16 samples/pixel (R,G,B), row-major -- matches ImageBuffer's own
+    // layout directly, no per-pixel channel selection needed here anymore.
+    let buf: ImageBuffer<Rgb<u16>, Vec<u16>> =
+        ImageBuffer::from_vec(frame.width, frame.height, frame.pixels.clone())
+            .ok_or_else(|| anyhow::anyhow!("frame pixel buffer doesn't match width*height*3"))?;
 
     let stem = path
         .file_stem()
@@ -90,23 +83,14 @@ pub fn dump_linear(path: &Path, out_dir: &Path) -> anyhow::Result<()> {
     buf.save(&tiff_path)
         .map_err(|e| anyhow::anyhow!("write {}: {e}", tiff_path.display()))?;
 
-    let sidecar = LinearMeta {
-        make: meta.make.clone(),
-        model: meta.model.clone(),
-        width,
-        height,
-        black: meta.black,
-        maximum: meta.maximum,
-        cam_mul: meta.cam_mul,
-        pre_mul: linear.pre_mul,
-        cam_xyz: linear.cam_xyz,
-        cblack: linear.cblack,
-    };
+    let sidecar = LinearMeta::from(&frame);
     fs::write(&json_path, serde_json::to_string_pretty(&sidecar)?)?;
 
     eprintln!(
-        "wrote {} ({width}x{height}) and {}",
+        "wrote {} ({}x{}) and {}",
         tiff_path.display(),
+        frame.width,
+        frame.height,
         json_path.display()
     );
     Ok(())

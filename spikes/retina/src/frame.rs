@@ -35,7 +35,7 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
-    pub fn from_libraw(meta: &crate::libraw_ffi::DecodedMetadata, cfa: &[u16]) -> Self {
+    pub fn from_libraw(meta: &nicti_decode::DecodedMetadata, cfa: &[u16]) -> Self {
         RawFrame {
             make: meta.make.clone(),
             model: meta.model.clone(),

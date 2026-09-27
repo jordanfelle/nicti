@@ -4,14 +4,14 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Throwaway spike for #37: RAW decoder research. Compares LibRaw (vendored yogthos/LibRaw#nikon-he-decoder, the still-open PR #826 branch with a real Nikon HE/HE* decoder) against rawler 0.8.0 across the full ref-10k set, plus a notify-based filesystem-watch spike for ingest (#24). Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
-build = "build.rs"
+description = "Throwaway spike for #37/#40: RAW decoder + demosaic/NR research. Compares LibRaw against rawler 0.8.0 across the full ref-10k set, a notify-based filesystem-watch spike for ingest (#24), and #40's classic-pipeline/Bayer-plane comparison tooling for spikes/rods. The LibRaw FFI/vendor submodule/build.rs itself was promoted to crates/nicti-decode in #41 -- this crate now depends on that one for its decode step instead of vendoring its own copy. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
 
 [[bin]]
 name = "retina"
 path = "src/main.rs"
 
 [dependencies]
+nicti-decode = { path = "../../crates/nicti-decode", features = ["libraw"] }
 nicti-prowl = { path = "../../crates/nicti-prowl" }
 rawler = "0.8"
 clap = { version = "4", features = ["derive"] }
@@ -25,9 +25,6 @@ notify = "8"
 csv = "1"
 # #38/calico hand-off: writes the linear demosaiced TIFF `dump-linear` produces.
 image = { version = "0.25", default-features = false, features = ["tiff"] }
-
-[build-dependencies]
-cc = "1"
 
 [dev-dependencies]
 tempfile = "3"

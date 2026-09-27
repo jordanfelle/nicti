@@ -39,7 +39,7 @@ jobs:
     outputs:
       den: ${{ steps.filter.outputs.den }}
       pelt: ${{ steps.filter.outputs.pelt }}
-      retina: ${{ steps.filter.outputs.retina }}
+      decode: ${{ steps.filter.outputs.decode }}
     # dorny/paths-filter fetches the PR's changed-file list via the GitHub REST API on
     # `pull_request` events by default, which needs `pull-requests: read` -- the workflow-level
     # `permissions: contents: read` block above sets every OTHER unlisted scope to `none` for the
@@ -81,11 +81,19 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
-            retina:
-              # #37: retina bundles LibRaw's full C++ source (via a git submodule) and compiles it
-              # from scratch on every touching PR -- same rationale as den/pelt above, moved out
-              # of the always-on jobs so an unrelated PR doesn't pay for a C++ recompile.
+            decode:
+              # #37/#41: crates/nicti-decode bundles LibRaw's full C++ source (via a git
+              # submodule, promoted out of spikes/retina in #41) and compiles it from scratch on
+              # every touching PR -- same rationale as den/pelt above, moved out of the always-on
+              # jobs so an unrelated PR doesn't pay for a C++ recompile. spikes/retina is included
+              # too: its own research tooling (compare/sweep/scan/watch/dump-classic/dump-cfa for
+              # #40) depends on nicti-decode and needs the same path-gated job. .gitmodules is
+              # included since a submodule URL/branch/path change there affects this job's
+              # checkout step without necessarily touching any file under crates/nicti-decode/**
+              # itself (CodeRabbit, PR #203).
+              - 'crates/nicti-decode/**'
               - 'spikes/retina/**'
+              - '.gitmodules'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -155,7 +163,7 @@ jobs:
       # the workspace by the pelt-linux job passing without it once it's the only Linux job
       # left compiling them; if that job's build ever fails to link, that's the first place to
       # look.
-      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode --all-targets --all-features -- -D warnings
 
   clippy-windows:
     name: cargo clippy (windows)
@@ -177,7 +185,7 @@ jobs:
       # docs/adr/0015), so it -- not Linux -- is the platform whose clippy/test results should
       # gate merges. --workspace --exclude den --exclude pelt-* mirrors the Linux job exactly
       # (see its own comment above for why each flag is required).
-      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test (linux)
@@ -202,7 +210,7 @@ jobs:
       #
       # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
       # the path-gated `pelt (linux)` job below, same reasoning as den.
-      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
+      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode
 
   test-windows:
     name: cargo test (windows)
@@ -226,7 +234,7 @@ jobs:
       # the path-gated `pelt (windows)` job below, same reasoning as den. This is the single
       # biggest driver of this job's own compile time: cold, these three crates alone pull in
       # 311 of the 543 unique crates otherwise compiled here.
-      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
+      - run: cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-decode
 
   den-linux:
     name: den (linux)
@@ -258,7 +266,7 @@ jobs:
           # ~7min). Restored to the same `save-if` every other job in this workflow uses.
           # Budget check at restore time (`gh cache list`): ~6.5GiB across the other entries,
           # +~1.5GiB for this one lands at ~8GiB, still under the 10GB/repo limit -- re-check
-          # with `gh cache list` if new caches get added later. `pelt-linux`/`retina-linux`
+          # with `gh cache list` if new caches get added later. `pelt-linux`/`decode-linux`
           # stay at `save-if: false`: their cold cost (4min/2.5min) isn't worth caching.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # den (#67/ADR-0067 and follow-ups, see CLAUDE.md's package map) is a throwaway research
@@ -415,20 +423,21 @@ jobs:
           fi
           echo "ok: both passed, or were correctly path-gate-skipped"
 
-  retina-linux:
-    name: retina (linux)
+  decode-linux:
+    name: decode (linux)
     needs: changes
     # See den-linux's comment above for why the changes-failure case runs rather than skips.
-    if: needs.changes.result == 'failure' || needs.changes.outputs.retina == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: needs.changes.result == 'failure' || needs.changes.outputs.decode == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          # #37: spikes/retina/vendor/LibRaw is a git submodule (yogthos/LibRaw's HE/HE* decoder
-          # fork, pinned to the exact commit this research verified) -- without this, build.rs's
-          # own check for libraw/libraw.h fails with a clear panic rather than a confusing
-          # compile error, but it still fails.
+          # #37/#41: crates/nicti-decode/vendor/LibRaw is a git submodule (yogthos/LibRaw's HE/HE*
+          # decoder fork, pinned to the exact commit this research verified; promoted here from
+          # spikes/retina/vendor/LibRaw in #41) -- without this, build.rs's own check for
+          # libraw/libraw.h fails with a clear panic rather than a confusing compile error, but it
+          # still fails.
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -437,19 +446,20 @@ jobs:
         with:
           # Same reasoning as den-linux's own save-if: false above: not a required check, and a
           # full from-scratch LibRaw C++ compile (~95 source files) would otherwise ride along on
-          # every main push regardless of whether spikes/retina changed.
+          # every main push regardless of whether crates/nicti-decode or spikes/retina changed.
           save-if: false
-      # #37/ADR-0069: retina bundles LibRaw's real C++ source (compiled via the `cc` crate, see
-      # build.rs) to research the RAW decoder question -- a throwaway spike, not part of the
-      # shipping v1 target, same reasoning as den/pelt above for why this is path-gated out of
-      # the always-on jobs.
-      - run: cargo clippy -p retina --all-targets --all-features -- -D warnings
-      - run: cargo test -p retina --all-targets --all-features
+      # #37/#41/ADR-0019/ADR-0069: nicti-decode bundles LibRaw's real C++ source (compiled via
+      # the `cc` crate, see build.rs) to decode the real photo library's Nikon HE/HE* files --
+      # path-gated out of the always-on jobs, same reasoning as den/pelt above (a full C++
+      # recompile on every unrelated PR). retina is checked in the same job since it depends on
+      # nicti-decode and is touched by the same filter.
+      - run: cargo clippy -p nicti-decode -p retina --all-targets --all-features -- -D warnings
+      - run: cargo test -p nicti-decode -p retina --all-targets --all-features
 
-  retina-windows:
-    name: retina (windows)
+  decode-windows:
+    name: decode (windows)
     needs: changes
-    if: needs.changes.result == 'failure' || needs.changes.outputs.retina == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see den-linux's comment above
+    if: needs.changes.result == 'failure' || needs.changes.outputs.decode == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see den-linux's comment above
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -461,15 +471,20 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }} # required check, see clippy job's comment above
-      # #17/#37: required (blocking) check, matching den (windows)/pelt (windows)'s own
-      # reasoning -- Windows is v1's actual target, and this is where ADR-0069's real numbers
-      # came from (native Windows .exe via WSL interop, not this Linux build). Uses MSVC (the
-      # runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
+          save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
+      # #17/#37/#41: NOT a branch-protection-required check (verified against the real
+      # `gh api repos/.../branches/main/protection` response, which lists only fmt/clippy
+      # (windows)/test (windows)/build (windows, v1 target)/den+pelt windows gate -- an earlier
+      # version of this comment claimed retina (windows) was required, which the API response
+      # doesn't support; corrected during #41's promotion rather than propagated). Still run on
+      # Windows because that's where ADR-0069's real numbers came from (native .exe via WSL
+      # interop, not the Linux build) and Windows is v1's actual target -- just not a merge gate,
+      # so no windows-required-gate-style indirection is needed here the way den/pelt need it.
+      # Uses MSVC (the runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
       # covers this path; the MinGW-specific static-linking branch is exercised locally, not
       # by this job.
-      - run: cargo clippy -p retina --all-targets --all-features -- -D warnings
-      - run: cargo test -p retina --all-targets --all-features
+      - run: cargo clippy -p nicti-decode -p retina --all-targets --all-features -- -D warnings
+      - run: cargo test -p nicti-decode -p retina --all-targets --all-features
 
   cargo-deny:
     name: cargo deny (licenses)

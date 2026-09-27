@@ -4,9 +4,12 @@
 // compiles against is a real fragility risk -- this shim is compiled against the exact same
 // headers LibRaw itself uses, so there is no second source of truth to drift).
 //
-// Only the fields retina's `RawFrame` (a Bayer CFA frame + the metadata needed to interpret it)
-// needs are exposed. Nothing here is a stable public API -- this is throwaway spike code, see
-// spikes/retina's Cargo.toml description.
+// Only the fields `nicti-decode`'s `LibRawHandle` (and, through it, retina's `RawFrame`/`RawFrame`-
+// adjacent research tooling) needs are exposed. Promoted out of the `spikes/retina` research spike
+// in #41 -- retina now depends on this crate for its decode step instead of vendoring its own copy
+// of the FFI/build.rs/submodule. The `retina_` symbol prefix is kept as-is (an ABI naming detail,
+// not a claim about which crate owns this file) to avoid churning the shim/build.rs for no
+// behavioral gain.
 #pragma once
 #include <cstddef>
 #include <cstdint>

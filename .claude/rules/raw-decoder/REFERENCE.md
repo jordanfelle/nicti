@@ -39,14 +39,31 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
 ## Package contents
 
-- **`spikes/retina`** (#37/ADR-0037's RAW decoder comparison) — vendors LibRaw's HE/HE\*-capable
-  fork as a git submodule at `spikes/retina/vendor/LibRaw` (needs
-  `git submodule update --init spikes/retina/vendor/LibRaw` before it builds), compiled via the
-  `cc` crate through a hand-written shim, no bindgen. Subcommands: `sweep`/`compare`/`diff` against
-  rawler 0.8.0, `scan` for a manifest-free directory walk, `watch` for #24's `notify` research,
-  `dump-linear` (#38/ADR-0038: demosaics one NEF with white balance/color-matrix/gamma all disabled
-  via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
-  `spikes/calico` to consume, without calico depending on retina's FFI/submodule), and
-  `dump-classic`/`dump-cfa` (#40/ADR-0040's classic-pipeline and Bayer-plane dumps for
-  `spikes/rods` — see the `denoise` topic's REFERENCE.md). See
-  `docs/research/retina-raw-decoder.md`.
+- **`crates/nicti-decode`** (#41, landed) — the real `RawDecoder` implementation: LibRaw's FFI
+  wrapper (`libraw_ffi.rs`, `LibRawHandle`), `shim.cpp`/`shim.h`, `build.rs` (compiles LibRaw's C++
+  via the `cc` crate, no bindgen), and the vendored `LibRaw` git submodule (needs
+  `git submodule update --init crates/nicti-decode/vendor/LibRaw` before it builds) all live here
+  now, promoted out of `spikes/retina`. `LibRawDecoder::decode_linear` demosaics one file with
+  white balance/color-matrix/gamma all disabled via LibRaw's own params, returning a `LinearFrame`
+  (linear camera RGB + the metadata `spikes/calico`'s color pipeline needs) directly, no TIFF/JSON
+  round-trip required for a production caller.
+  - **All of the above is gated behind a non-default `libraw` Cargo feature** (`LibRawDecoder`,
+    `LibRawHandle`, `DemosaicQuality`, and `build.rs`'s entire C++ compile step are `#[cfg]`-gated
+    on it, `cc`/`clap` are optional deps activated by it). `embedded` (below) is pure Rust and
+    always built — `nicti-catalog` depends on this crate for `embedded` alone with the feature
+    off, so it never needs `vendor/LibRaw` checked out or a C++ compiler. Discovered the hard way
+    on #41's own PR: a workspace `--exclude nicti-decode` on the always-on CI jobs doesn't actually
+    keep the C++ build out of them, since `nicti-catalog` (unexcluded) still pulls `nicti-decode`
+    in as a dependency and its `build.rs` used to run unconditionally — the feature gate is the
+    real fix; the CI `--exclude` is redundant belt-and-suspenders on top of it, not sufficient on
+    its own. `spikes/retina` and CI's own `decode-linux`/`decode-windows` job both request the
+    feature explicitly (`features = ["libraw"]` / `--all-features`).
+- **`spikes/retina`** (#37/ADR-0037's RAW decoder comparison, plus #40's own comparison tooling) —
+  now a thin CLI depending on `crates/nicti-decode` for its decode step. Subcommands:
+  `sweep`/`compare`/`diff` against rawler 0.8.0, `scan` for a manifest-free directory walk, `watch`
+  for #24's `notify` research, `dump-linear` (writes `nicti-decode`'s `LinearFrame` to a
+  linear-camera-RGB TIFF + metadata JSON sidecar, kept for `spikes/calico`'s own file-based
+  tooling — see `linear_input.rs`, which still reads that pair without depending on
+  `nicti-decode`'s FFI/submodule directly), and `dump-classic`/`dump-cfa` (#40/ADR-0040's
+  classic-pipeline and Bayer-plane dumps for `spikes/rods` — see the `denoise` topic's
+  REFERENCE.md). See `docs/research/retina-raw-decoder.md`.
