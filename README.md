@@ -5,7 +5,9 @@
 A fast, non-destructive RAW photo editor and digital asset manager, aiming to be a viable
 open-source replacement for Adobe Lightroom Classic — built around a stage-cached render pipeline
 so editing a heavy stack of AI masks and denoise doesn't mean waiting on every navigation and crop.
-Named after the nictitating membrane, a cat's third eyelid; see `CONTRIBUTING.md` for the
+Named after the nictitating membrane, a cat's third eyelid that sweeps across the eye to clear
+debris without losing vision — the namesake for an editor built to be non-destructive: it clears
+and reprocesses without ever losing the original image data. See `CONTRIBUTING.md` for the
 feline-naming convention that continues throughout the project.
 
 ## Status

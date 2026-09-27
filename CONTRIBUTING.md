@@ -79,7 +79,9 @@ push) mirror the same exclude list, so a clean local commit should mean clean CI
 
 Name new crates, modules, internal tools, and subsystems with a feline-anatomy/behavior angle
 rather than a purely descriptive name — the project itself is named after the nictitating
-membrane (a cat's third eyelid), and that theme continues throughout. Examples: `Tapetum`
+membrane, a cat's third eyelid that sweeps across the eye to clear debris without losing vision,
+mirroring an editor that's non-destructive: it clears and reprocesses without ever losing the
+original image data. That theme continues throughout. Examples: `Tapetum`
 (stage-cached render graph), `Claw` (module/plugin registry), `Pounce` (job scheduler), `Sniff`
 (embedded-JPEG fast preview path).
 

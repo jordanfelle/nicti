@@ -64,7 +64,9 @@ bullet to both files of its topic (or a new topic) and to this list — not inli
 
 Name new crates, modules, internal tools, and subsystems with a feline-anatomy/behavior angle
 rather than a purely descriptive name — the project itself is named after the nictitating
-membrane (a cat's third eyelid), and that theme continues throughout. Examples already assigned
+membrane, a cat's third eyelid that sweeps across the eye to clear debris without losing vision,
+mirroring an editor that's non-destructive: it clears and reprocesses without ever losing the
+original image data. That theme continues throughout. Examples already assigned
 for planned subsystems: `Tapetum` (stage-cached render graph — the tapetum lucidum bounces light
 back through the retina for reuse, mapping to reusing baked stage output), `Claw` (on-demand
 module/plugin registry — claws stay sheathed until needed), `Pounce` (job scheduler with priority
