@@ -24,11 +24,21 @@ observation, since a blob log file rolls once it crosses this threshold), `min_b
 `blob_compression_type=kNoCompression`, and `enable_blob_garbage_collection=true`. `<id>.blob` is
 therefore RocksDB's own blob-file naming (`<file_number>.blob`), not an LRC-specific id.
 
-`rocksdb_sst_dump --command=scan --output_hex` (from `brew install rocksdb`) lists every key/value
-in the `.sst`. Real keys are **32-character uppercase-hex ASCII strings** (one internal bookkeeping
-key, `rocksdbIntegrityId`, is excluded). Each value decodes as a standard RocksDB blob-index record
-(type byte `0x01` = `kBlobType`, then varint `file_number`, `offset`, `size`) pointing directly at
-`<file_number>.blob` — no other structure to reverse-engineer.
+`rocksdb_sst_dump --command=scan --output_hex` (from `brew install rocksdb`) lists every record
+physically present in the `.sst` — not just live ones: it also dumps tombstones and, for a key
+written more than once before compaction removed the old version, more than one entry per key.
+Restricting to sst_dump's own `type:17` (`kTypeBlobIndex`) marker excludes tombstones outright,
+and keeping only the first (newest, since RocksDB orders same-key records by descending sequence
+within a file) type-17 entry per key resolves the rest. In the real catalog measured here every
+record was `seq:0` — a fully-compacted file with no multiple live versions to resolve — so this
+matters for correctness in general, not for this specific measurement's numbers.
+
+Real keys are **32-character uppercase-hex ASCII strings** (one internal bookkeeping key,
+`rocksdbIntegrityId`, is excluded — it isn't `type:17`). Each surviving value decodes as a standard
+RocksDB blob-index record (its own leading type byte `0x01`/`0x02` = `kBlob`/`kBlobTTL`, then
+varint `file_number`, `offset`, `size`) pointing directly at `<file_number>.blob`; a value below
+`min_blob_size` is stored inline instead (no such value existed in this catalog) — no other
+structure to reverse-engineer.
 
 ### The keys are content-addressed digests embedded in develop-settings text, not any catalog column
 

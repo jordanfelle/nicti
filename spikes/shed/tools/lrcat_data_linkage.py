@@ -46,19 +46,34 @@ def read_varint(b: bytes, i: int) -> tuple[int, int]:
     return result, i
 
 
-# RocksDB BlobIndex::Type (blob_index.h): kInlinedTypeForSmallValues below min_blob_size
-# store the value directly in the SST rather than a blob-index record, so only kBlobType (and its
-# TTL variant) actually decode as (file_number, offset, size) -- treating every value as a blob
-# index regardless of this byte, as an earlier draft of this script did, quietly parses a small
-# inlined value's own payload bytes as bogus file/offset/size varints instead of skipping it.
-BLOB_INDEX_TYPES = {1, 3}  # kBlobType, kBlobTTLType
+# RocksDB BlobIndex::Type (db/blob/blob_index.h): the *value's* own leading type byte, distinct
+# from the SST record type below. kInlinedTTL=0 and a value smaller than min_blob_size store the
+# payload directly in the SST rather than a blob-index record, so only kBlob(=1)/kBlobTTL(=2)
+# actually decode as (file_number, offset, size) -- treating every value as a blob index
+# regardless of this byte, as an earlier draft of this script did, quietly parses a small inlined
+# value's own payload bytes as bogus file/offset/size varints instead of skipping it.
+BLOB_INDEX_VALUE_TYPES = {1, 2}  # kBlob, kBlobTTL (kUnknown=3 is invalid/rejected by RocksDB itself)
+
+# RocksDB's own internal per-record type (db/dbformat.h ValueType), printed by sst_dump as
+# `type:N` -- NOT the same byte as BLOB_INDEX_VALUE_TYPES above, which is *inside* the value.
+# `sst_dump --command=scan` dumps every record physically present in the file, including
+# tombstones (kTypeDeletion=0, kTypeSingleDeletion=7) and, for a key updated more than once before
+# compaction removed the old version, more than one entry for the same key at different sequence
+# numbers -- it does not resolve "what does this DB currently return for this key" the way an
+# actual RocksDB read would. Requiring the record type to be kTypeBlobIndex excludes tombstones
+# outright; requiring first-occurrence-per-key (RocksDB orders same-key records by descending
+# sequence number within a file) keeps only the newest surviving version instead of whichever one
+# happened to be scanned last. This is still an approximation, not a full leveled-compaction
+# resolution across files -- adequate for a closed, already-compacted catalog backup (every entry
+# this ADR measured was `seq:0`, i.e. no multiple live versions existed to resolve), not a
+# guarantee against a DB with in-flight compactions.
+SST_RECORD_TYPE_BLOB_INDEX = "17"  # kTypeBlobIndex (0x11)
 
 
 def scan_sst_files(sst_dump_bin: str, lrcat_data_dir: str):
     """Returns (num_keys, distinct_file_numbers, blob_index_by_key, real_keys_set), where
-    blob_index_by_key maps each real key to its (file_number, size) -- deduplicated per key, since
-    the same key can appear in more than one on-disk .sst across compaction levels and would
-    otherwise be double-counted in an aggregate size total."""
+    blob_index_by_key maps each *live* (non-tombstoned, newest-seen) key to its (file_number,
+    size) -- see SST_RECORD_TYPE_BLOB_INDEX's docstring above for what "live" means here."""
     real_keys = set()
     blob_index_by_key: dict[str, tuple[int, int]] = {}
     num_keys = 0
@@ -72,8 +87,10 @@ def scan_sst_files(sst_dump_bin: str, lrcat_data_dir: str):
             m = LINE_RE.match(line)
             if not m:
                 continue
-            key_hex, _seq, _typ, val_hex = m.groups()
+            key_hex, _seq, typ, val_hex = m.groups()
             num_keys += 1
+            if typ != SST_RECORD_TYPE_BLOB_INDEX:
+                continue  # a tombstone or any other non-blob-index record type -- not a live blob key
             key_bytes = bytes.fromhex(key_hex)
             try:
                 key_str = key_bytes.decode("ascii")
@@ -83,11 +100,13 @@ def scan_sst_files(sst_dump_bin: str, lrcat_data_dir: str):
                 continue  # e.g. the internal "rocksdbIntegrityId" bookkeeping key
             real_keys.add(key_str)
 
+            if key_str in blob_index_by_key:
+                continue  # already resolved this key's newest version -- see module docstring above
             if not val_hex:
                 continue
             try:
                 val = bytes.fromhex(val_hex)
-                if not val or val[0] not in BLOB_INDEX_TYPES:
+                if not val or val[0] not in BLOB_INDEX_VALUE_TYPES:
                     continue  # inlined small value (below min_blob_size) -- no blob file to point at
                 i = 1
                 fn, i = read_varint(val, i)
