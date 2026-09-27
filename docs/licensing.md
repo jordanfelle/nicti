@@ -357,6 +357,22 @@ already pass, a known `ort`/`load-dynamic` static-destructor-ordering issue, not
 code defect. `cargo deny --workspace --all-features check licenses` passes clean, no new `deny.toml`
 entries needed.
 
+**Update (2026-09-26, [#59](https://github.com/jordanfelle/nicti/issues/59)'s `scent` spike,
+`docs/adr/0059-xmp-interop.md`):** one new crate, `quick-xml` v0.41.0 — `MIT` (confirmed directly
+from its own `Cargo.toml`'s `license` field, not assumed), already on `deny.toml`'s allowlist, no
+new entry needed. Chosen over the candidates in the Native libraries table's XMP row below
+(exiv2/rexiv2, usable since ADR-0013 but a heavier C dependency for no real gain here; the Adobe
+XMP Toolkit SDK, BSD-3-Clause and already cleared, but its own C++ build isn't worth adding when a
+pure-Rust event-based reader/writer does the job) specifically for its **event-based
+Reader/Writer API**, which is what `packet.rs`'s "copy every event through unchanged except the
+ones this spike owns" design needs — quick-xml's own `memchr`-only dependency tree is already
+permissive and small. `roxmltree` v0.20 (already reviewed above, #38/`calico`'s update) is reused
+read-only for comparison during development; the shipped reader/writer path uses `quick-xml` only.
+`blake3` (already reviewed, #71/`homing`'s update) and `base64` (already reviewed, #38/`calico`'s
+update) are both reused, no new review needed. `cargo deny check licenses` passes clean, no new
+`deny.toml` entries needed. **DNG/TIFF tag-700 embedded-XMP write is out of scope for this pass**
+(see the research doc) — no TIFF-writer crate was evaluated or added.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |
