@@ -76,7 +76,7 @@ topic's own `.claude/rules/<topic>/REFERENCE.md` "Package contents" section (#17
 terse index: crate/spike → purpose → owning topic.
 
 - **`crates/nicti-claw`**, **`crates/dewclaw`** — Claw registry + its dylib test fixture →
-  `language-and-architecture`
+  [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
 - **`crates/nicti-decode`/`nicti-color`/`nicti-lens`/`nicti-render`/`nicti-ai`/`nicti-export`/`nicti-catalog`**
@@ -84,19 +84,21 @@ terse index: crate/spike → purpose → owning topic.
   `RawDecoder` (#37/#40/#41), `ColorProfile` (#38/#42), `LensCorrection` (#39), `RenderStage`
   (Tapetum's future home, #44/#45), `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57),
   `CatalogStore` (#22's future home)
-- **`spikes/pawprint`** (#21/ADR-0002) → `language-and-architecture`
-- **`spikes/glint`** (#16/ADR-0005) → `gpu-gui-and-healing`
-- **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0006) → `gpu-gui-and-healing`
-- **`spikes/groom`** (#50/ADR-0007) → `gpu-gui-and-healing`
-- **`spikes/sniff`** (#28/#29/ADR-0017) → `preview-tiers`
+- **`spikes/pawprint`** (#21/ADR-0002) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
+- **`spikes/glint`** (#16/ADR-0005) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0006) →
+  [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/groom`** (#50/ADR-0007) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/sniff`** (#28/#29/ADR-0017) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
 - **`spikes/den`** (#67+/ADR-0008–0016, slated for deletion once #22 lands, see #123) →
-  `catalog-engine`
-- **`spikes/retina`** (#37/ADR-0019) → `raw-decoder`
-- **`spikes/homing`** (#71/ADR-0020, Windows-only, unverified in this sandbox) → `volume-identity`
-- **`spikes/calico`** (#38/ADR-0021) → `color`
-- **`spikes/shed`** (#61/ADR-0023) → `lrc-migration`
-- **`spikes/siamese`** (#48/ADR-0024) → `masking`
-- **`spikes/litter`** (#33/ADR-0025) → `culling`
+  [`catalog-engine`](.claude/rules/catalog-engine/REFERENCE.md)
+- **`spikes/retina`** (#37/ADR-0019) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
+- **`spikes/homing`** (#71/ADR-0020, Windows-only, unverified in this sandbox) →
+  [`volume-identity`](.claude/rules/volume-identity/REFERENCE.md)
+- **`spikes/calico`** (#38/ADR-0021) → [`color`](.claude/rules/color/REFERENCE.md)
+- **`spikes/shed`** (#61/ADR-0023) → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
+- **`spikes/siamese`** (#48/ADR-0024) → [`masking`](.claude/rules/masking/REFERENCE.md)
+- **`spikes/litter`** (#33/ADR-0025) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
 - **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
 - **`bench/whisker`** (workspace member) — benchmark tooling for #43, not a production crate; same
