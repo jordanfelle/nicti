@@ -515,6 +515,15 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
                 "Clarity2012" if attr.value() != "0" => {
                     unsupported_settings.push(format!("Clarity2012={}", attr.value()));
                 }
+                // `crs:RGBTable` is a `dng_big_table` subclass exactly like `crs:LookTable` --
+                // written as `crs:RGBTable="<id>"` + a matching `crs:Table_<id>` payload
+                // attribute (`dng_big_table::WriteToXMP`/`ReadFromXMP` are generic over the
+                // property name), never as an XML element. The `"RGBTable"` element-tag match
+                // below is kept as a defensive fallback in case some producer writes it that way
+                // instead, but this attribute case is the one that actually matches the SDK.
+                "RGBTable" => {
+                    unsupported_settings.push(format!("RGBTable={}", attr.value()));
+                }
                 _ => {}
             }
         }
@@ -946,6 +955,43 @@ mod tests {
             .unsupported_settings
             .iter()
             .any(|s| s == "ToneCurvePV2012"));
+    }
+
+    #[test]
+    fn rgbtable_attribute_is_surfaced_as_unsupported() {
+        // crs:RGBTable is a dng_big_table subclass exactly like crs:LookTable -- written as an
+        // attribute (`crs:RGBTable="<id>"` + a matching `crs:Table_<id>` payload attribute), not
+        // as an XML element. This exercises that real-world representation, not the element-tag
+        // fallback.
+        let hue = 2;
+        let sat = 2;
+        let val = 2;
+        let data = synthetic_hue_sat_map(hue, sat, val);
+        let stream = encode_look_table_stream(hue, sat, val, &data, 0, None, None);
+        let encoded = big_table_encode(&stream);
+
+        let fake = DecodedLookTable {
+            look_table: HueSatMap {
+                hue_divisions: hue as usize,
+                sat_divisions: sat as usize,
+                val_divisions: val as usize,
+                data,
+            },
+            encoding: TableEncoding::Linear,
+            min_amount: 1.0,
+            max_amount: 1.0,
+            flags: 0,
+        };
+        let id = recompute_fingerprint(&fake);
+
+        let xmp = format!(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:LookTable="{id}" crs:Table_{id}="{encoded}" crs:RGBTable="SOMEOTHERID"/></rdf:RDF></x:xmpmeta>"#
+        );
+        let look = parse(&xmp).expect("should decode despite an unsupported RGBTable attribute");
+        assert!(look
+            .unsupported_settings
+            .iter()
+            .any(|s| s == "RGBTable=SOMEOTHERID"));
     }
 
     /// Local-only proof against the user's own real, installed Adobe Raw "Look" profiles -- never
