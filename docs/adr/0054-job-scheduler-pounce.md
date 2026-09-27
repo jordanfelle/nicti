@@ -239,18 +239,23 @@ n=5 elsewhere, since a ~30-40ms measurement needs more than 5 samples to trust a
 | 256px | 37.044ms | 51.534ms | 63.003ms | 486 | ~18.0s | **DOES NOT CLEAR** |
 | 128px, CPU EP (sanity) | 186.852ms | 198.314ms | 198.314ms | 2646 | ~494.4s | (fallback check only) |
 
-**Finding: 128px does not clear the budget either, and is worse per-frame than 256px.** The
-128px/256px CUDA p50s (33.3ms vs. 37.0ms) are close, not the ~4x gap a naive per-pixel
-extrapolation from 256px's 44.8ms would suggest (this ADR's own re-baseline of 256px, 37.0ms, is
-also in the same range as ADR-0040's original 44.8ms — same order of magnitude on the same
-hardware, small variance expected between passes). **Fixed per-call overhead (kernel launch,
-H2D/D2H transfer, ONNX Runtime session dispatch) dominates at 128px**, not the tile's own
-window-attention compute — cutting tile side length in half doesn't cut wall time anywhere near
-in half. Because 128px also needs 5.4x more tiles to cover the same frame (2646 vs. 486, at a
-fixed 32px overlap), its *estimated whole-frame* cost is actually **~4.9x worse** than 256px
-(~88.1s vs. ~18.0s) — a smaller tile is strictly worse here on every axis this pass measured,
-not a tradeoff. Neither size clears even the loose 16.7ms slider-drag budget on its own, let
-alone this ticket's own tighter ≤12ms "with headroom" bar — so this remains moot for now per the
+**Finding: 128px does not clear the budget either, despite being the faster tile.** 128px is
+genuinely faster per call than 256px on both metrics that matter for the same-API budget check
+(p50 33.3ms vs. 37.0ms, p95 45.1ms vs. 51.5ms) — real evidence per-call overhead (kernel launch,
+H2D/D2H transfer, ONNX Runtime session dispatch) dominates at this scale, not the tile's own
+window-attention compute (cutting tile side length in half doesn't come close to halving wall
+time: 33.3ms is ~90% of 37.0ms, not ~25%). This ADR's own re-baseline of 256px (37.0ms) is also in
+the same range as ADR-0040's original 44.8ms — same order of magnitude on the same hardware, small
+variance expected between passes. **But 128px still doesn't clear the budget on its own terms**
+(p95 45.1ms is far past even the loose 16.7ms slider-drag budget, let alone this ticket's own
+tighter ≤12ms "with headroom" bar) — the per-call speedup over 256px isn't nearly large enough to
+matter for that question. And on the separate axis of estimated whole-frame cost, 128px is worse,
+not better: it needs 5.4x more tiles to cover the same frame (2646 vs. 486, at a fixed 32px
+overlap), so its estimated whole-frame cost is **~4.9x worse** than 256px (~88.1s vs. ~18.0s) even
+though each individual tile call is faster — the per-call win is outweighed by needing far more
+calls. Two separate measurements, two separate verdicts: 128px wins on per-tile latency, loses on
+both the same-API budget check and on whole-frame throughput. Neither tile size clears the budget
+this pass cared about, so this remains moot for now per the
 same reasoning as the original follow-up note (only relevant if a same-API `wgpu` background
 chunk of comparable duration is ever introduced; SCUNet itself runs over the cross-API CUDA path
 this ADR's own decision rule #2 already found has no contention cost). **Sanity check**: 128px
@@ -377,11 +382,13 @@ adversarial review above had itself just touched, one docs-only), all fixed:
   `HostTelemetrySource`/`VramSource`, not a second implementation.
 - **[#205](https://github.com/jordanfelle/nicti/issues/205) measured, resolved**: a smaller 128px
   SCUNet tile does *not* clear the same-API contention budget either (see the Follow-up
-  measurement section above) — 128px and 256px land within the same order of magnitude (33.3ms
-  vs. 37.0ms p50, fixed per-call overhead dominates at 128px), and 128px needs 5.4x more tiles per
-  frame, making it strictly worse overall. Neither tile size is a fix if a same-API `wgpu`
-  background chunk of comparable duration is ever introduced; moot for now since this ADR's own
-  cross-API finding already found SCUNet's actual CUDA path has no contention cost.
+  measurement section above), even though it's the genuinely faster tile per call (33.3ms vs.
+  37.0ms p50, 45.1ms vs. 51.5ms p95 — fixed per-call overhead dominates at 128px, not tile
+  compute). Its p95 still lands well past the ~16ms budget. Separately, 128px needs 5.4x more
+  tiles per frame, so its estimated whole-frame cost is worse despite the faster per-tile call.
+  Neither tile size is a fix if a same-API `wgpu` background chunk of comparable duration is ever
+  introduced; moot for now since this ADR's own cross-API finding already found SCUNet's actual
+  CUDA path has no contention cost.
 - **Real follow-up: decode/mask-bake chunking, or explicit cross-lane concurrency.** This ADR's
   own sim shows foreground latency is currently bounded by whichever atomic (non-chunked) stage is
   running, dominated by decode's ~1.7s. Not solved here — needs either a streaming decode interface

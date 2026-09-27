@@ -172,12 +172,15 @@ crouch-tile-128px-Cpu:  p50=186.852ms p95=198.314ms max=198.314ms
 Hardware: NVIDIA GeForce RTX 5080, driver 616.56 (recorded by hand — `HardwareIdentity` doesn't
 capture GPU/driver, same caveat this ADR's own tables already note).
 
-**Reading these numbers**: 128px and 256px land within the same order of magnitude (33.3ms vs.
-37.0ms p50) rather than 128px being roughly a quarter of 256px's cost, because per-call overhead
-(kernel launch, H2D/D2H, ONNX Runtime session dispatch) is largely fixed regardless of tile size,
-and dominates at this scale. Since 128px also needs 5.4x more tiles to cover the same 6064×4040
-frame at a fixed 32px overlap (2646 vs. 486), its estimated whole-frame cost is ~4.9x *worse*
-(~88.1s vs. ~18.0s) — smaller loses on both axes here, not a tradeoff. The 128px CPU-EP sanity run
+**Reading these numbers**: 128px is genuinely faster per call than 256px on both p50 and p95
+(33.3ms vs. 37.0ms, 45.1ms vs. 51.5ms) rather than roughly a quarter of 256px's cost, because
+per-call overhead (kernel launch, H2D/D2H, ONNX Runtime session dispatch) is largely fixed
+regardless of tile size, and dominates at this scale — but that per-tile win still isn't enough to
+clear the ~16ms same-API budget (128px's p95, 45.1ms, is still far past it). Separately, since
+128px also needs 5.4x more tiles to cover the same 6064×4040 frame at a fixed 32px overlap (2646
+vs. 486), its estimated whole-frame cost is ~4.9x *worse* (~88.1s vs. ~18.0s) — two different
+measurements pointing opposite ways: faster per call, but worse in total because it needs so many
+more calls. The 128px CPU-EP sanity run
 confirms CUDA was genuinely active (33.3ms vs. 186.9ms, ~5.6x — comfortably past
 `suspiciously_close_to_cpu_speed`'s ~2x fallback-detection floor), but that ~5.6x speedup is itself
 far below ADR-0040's own ~36x at 256px — the same fixed-overhead effect eating a

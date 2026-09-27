@@ -62,12 +62,13 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `onnxruntime-gpu==1.30.0`, `nvidia-cudnn-cu13==9.26.0.51` — matching #40's own cited versions,
   pip/winget only, no NVIDIA login) — check before assuming a prior pass's environment still holds.
 - **[#205](https://github.com/jordanfelle/nicti/issues/205), measured**: 128px SCUNet tile does
-  *not* clear the same-API contention budget either — 128px/256px land within the same order of
-  magnitude (33.3ms/37.0ms p50, isolated per-tile timing via the new `bench-tile` subcommand),
-  fixed per-call overhead dominates at 128px, and 128px needs 5.4x more tiles/frame so its
-  estimated whole-frame cost is ~4.9x *worse* (~88.1s vs. ~18.0s) — strictly worse, not a tradeoff.
-  Moot for now: SCUNet's real path is cross-API CUDA, already found contention-free above; only
-  matters for a hypothetical future same-API `wgpu` background chunk.
+  *not* clear the same-API contention budget either, despite being the faster tile per call
+  (p50=33.3ms/p95=45.1ms vs. 256px's 37.0ms/51.5ms, isolated per-tile timing via the new
+  `bench-tile` subcommand — fixed per-call overhead dominates at 128px) — its p95 is still far
+  past the ~16ms budget. Separately, 128px needs 5.4x more tiles/frame so its estimated
+  whole-frame cost is ~4.9x *worse* (~88.1s vs. ~18.0s) — faster per call, worse in total. Moot for
+  now: SCUNet's real path is cross-API CUDA, already found contention-free above; only matters for
+  a hypothetical future same-API `wgpu` background chunk.
 - **Open follow-up**: [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake
   chunking or explicit cross-lane concurrency, CPU decode vs. GPU work, to bound their own
   worst-case latency).

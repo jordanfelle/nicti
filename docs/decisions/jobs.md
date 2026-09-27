@@ -133,14 +133,16 @@ shaped its design.
   re-downloaded from `deepghs/image_restoration` (MIT, evaluate-only per `docs/licensing.md`'s
   existing row, not re-committed to the repo).
 - **[#205](https://github.com/jordanfelle/nicti/issues/205), measured**: a smaller 128px SCUNet
-  tile does *not* clear the same-API contention budget either. `bench-tile`'s isolated per-tile
-  timing (no wgpu contention, just the chunk's own cost): 128px p50=33.3ms/p95=45.1ms, 256px
-  p50=37.0ms/p95=51.5ms — within the same order of magnitude, not the ~4x gap a naive per-pixel
-  extrapolation would suggest, because fixed per-call overhead (kernel launch, H2D/D2H, ONNX
-  Runtime dispatch) dominates at 128px, not the tile's own compute. Since 128px also needs 5.4x
-  more tiles to cover a 6064×4040 frame at a fixed 32px overlap (2646 vs. 486), its *estimated*
-  whole-frame cost is actually ~4.9x worse (~88.1s vs. ~18.0s) — strictly worse on both axes, not a
-  tradeoff. CPU-EP sanity check at 128px (186.9ms, ~5.6x slower than CUDA) confirms CUDA was
+  tile does *not* clear the same-API contention budget either, despite being the genuinely faster
+  tile. `bench-tile`'s isolated per-tile timing (no wgpu contention, just the chunk's own cost):
+  128px p50=33.3ms/p95=45.1ms, 256px p50=37.0ms/p95=51.5ms — 128px wins on both metrics, not the
+  ~4x gap a naive per-pixel extrapolation would suggest, because fixed per-call overhead (kernel
+  launch, H2D/D2H, ONNX Runtime dispatch) dominates at 128px, not the tile's own compute — but its
+  p95 (45.1ms) is still far past the ~16ms budget, so the per-call win doesn't matter for this
+  question. Separately, since 128px also needs 5.4x more tiles to cover a 6064×4040 frame at a
+  fixed 32px overlap (2646 vs. 486), its *estimated* whole-frame cost is actually ~4.9x worse
+  (~88.1s vs. ~18.0s) — two different measurements, two different verdicts: faster per call, worse
+  in total. CPU-EP sanity check at 128px (186.9ms, ~5.6x slower than CUDA) confirms CUDA was
   genuinely active, though that speedup is itself far below ADR-0040's own ~36x at 256px — same
   fixed-overhead effect. Moot in practice either way, since this ADR's own cross-API finding
   already found SCUNet's real CUDA path has no contention cost — this only matters for a
