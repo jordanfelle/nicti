@@ -67,7 +67,36 @@ pub fn group_tight(
             group_id[i] = next_id;
         }
     }
-    group_id
+    compact_ids(&group_id)
+}
+
+/// Remaps raw ids to a dense `0..k` range, in first-appearance order.
+///
+/// The fold above (line `for k in (j + 1)..i`) keeps every materialized id's frames contiguous,
+/// but it does so by overwriting positions that already held a *different*, previously-assigned
+/// raw id -- that raw id was allocated (via `next_id += 1`) but never appears in the output again,
+/// leaving a gap in the numbering (e.g. raw ids `[0, 0, 0, 2, 3]`, where `1` was allocated then
+/// folded away). `group_sets` assumes ids are dense and increasing (`debug_assert_eq!(gid,
+/// spans.len())`), so a gap panics in debug builds and reads out of bounds in release -- a real
+/// bug an adversarial review caught, reachable under the shipped default `max_lookahead: 2` any
+/// time a lookahead fold is followed by a later, unrelated new group. First-appearance order is
+/// capture order here (each id's first frame is always its earliest frame), so this preserves the
+/// "monotonically non-decreasing" contract as well as the contiguity the fold already guarantees.
+fn compact_ids(ids: &[usize]) -> Vec<usize> {
+    let Some(&max_id) = ids.iter().max() else {
+        return Vec::new();
+    };
+    let mut remap = vec![None; max_id + 1];
+    let mut next = 0usize;
+    ids.iter()
+        .map(|&id| {
+            *remap[id].get_or_insert_with(|| {
+                let assigned = next;
+                next += 1;
+                assigned
+            })
+        })
+        .collect()
 }
 
 /// Merges whole tight groups into set groups, using each tight group's first and last frame as
@@ -221,6 +250,38 @@ mod tests {
                 assert_eq!(sets2[m], first_set, "tight group {tg} split across sets");
             }
         }
+    }
+
+    #[test]
+    fn lookahead_fold_followed_by_a_new_group_leaves_no_gap_in_ids() {
+        // Reproduces the exact scenario an adversarial review found under production defaults
+        // (max_lookahead: 2): frame 2 skip-links back to frame 0 over frame 1 (the "tolerate one
+        // interleaved frame" case), folding frame 1's already-allocated id away. Frames 3 and 4
+        // then start new, unrelated groups. Before the compaction fix, this produced raw ids
+        // [0, 0, 0, 2, 3] -- id 1 allocated then folded away and never appearing again -- which
+        // panicked `group_sets`'s dense-id assumption. Output ids must be contiguous 0..k with no
+        // gaps, and `group_sets` must run on the result without panicking.
+        let sim = |i: usize, j: usize| match (i, j) {
+            (0, 2) => 1.0, // frame 2 skip-links back to frame 0
+            _ => 0.0,      // every other adjacent pair is dissimilar (each starts its own group)
+        };
+        let gap = |_i: usize, _j: usize| 0.0; // always within budget
+        let params = LevelParams {
+            max_gap_secs: 100.0,
+            min_similarity: 0.5,
+            max_lookahead: 2,
+        };
+        let groups = group_tight(5, gap, sim, params);
+        assert_eq!(
+            groups,
+            vec![0, 0, 0, 1, 2],
+            "ids must be dense, no skipped values"
+        );
+
+        // Must not panic (debug_assert_eq! in group_sets would fire on a non-dense id).
+        let set_sim = |_i: usize, _j: usize| 0.0;
+        let sets = group_sets(&groups, gap, set_sim, params);
+        assert_eq!(sets.len(), 5);
     }
 
     #[test]
