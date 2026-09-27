@@ -57,6 +57,7 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   multi-writer-thread comparison between RocksDB and SQLite, gated on both `rocksdb` and `sqlite`,
   not part of the shared `Workload` trait since only these two engines are compared this way). `gen.rs`'s
   synthetic-catalog generator is reusable for future Library-scale benchmarks (see
-  `docs/benchmarks.md`). Not production code — don't build on top of a spike crate; **slated for
-  deletion once #22 lands**, see #123 for the follow-up cleanup (CI jobs, the Renovate rule,
-  `deny.toml` exceptions).
+  `docs/benchmarks.md`). Not production code — don't build on top of a spike crate; **#22 has now
+  landed** (`crates/nicti-catalog`: `schema.rs`/`sqlite.rs`/`scruff.rs`), so this spike is slated
+  for deletion — see #123 for the follow-up cleanup (CI jobs, the Renovate rule, `deny.toml`
+  exceptions), not done as part of #22 itself.

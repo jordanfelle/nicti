@@ -1,0 +1,68 @@
+//! Row types the `CatalogStore` trait's methods pass in and out — kept separate from `sqlite.rs`
+//! so a future non-SQLite backend (DuckDB, ADR-0008's named fallback) can implement the same
+//! trait against the same shapes.
+
+/// One asset row, as read back from the catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Asset {
+    pub id: i64,
+    pub root_id: i64,
+    pub rel_path: String,
+    pub rel_path_fold: String,
+    pub size_bytes: u64,
+    pub mtime_unix: i64,
+    pub fingerprint: Option<String>,
+    pub natural_key: Option<String>,
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub captured_at: Option<String>,
+    pub rating: i64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub imported_at: i64,
+}
+
+/// A new (or re-scanned) asset, as ingest builds it. Passed to
+/// [`crate::CatalogStore::insert_asset`], which upserts on `(root_id, rel_path)` — a re-scan of a
+/// path whose stat/fingerprint/EXIF changed updates the existing row in place rather than
+/// inserting a duplicate.
+#[derive(Debug, Clone)]
+pub struct NewAsset {
+    pub rel_path: String,
+    pub rel_path_fold: String,
+    pub size_bytes: u64,
+    pub mtime_unix: i64,
+    pub fingerprint: Option<String>,
+    pub natural_key: Option<String>,
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub captured_at: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub imported_at: i64,
+}
+
+/// Preview cache tiers a catalog store can hold. Only T0 (the grid preview, ADR-0017) is written
+/// at import time — T1-T3 are a render-pipeline concern, not catalog storage, but the column
+/// already carries a tier discriminator so a later ticket can add them without a schema change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewTier {
+    T0,
+}
+
+impl PreviewTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PreviewTier::T0 => "t0",
+        }
+    }
+}
+
+/// A stored preview's bytes plus the declared dimensions from the source IFD (not decoded from
+/// the JPEG itself).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preview {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub bytes: Vec<u8>,
+}

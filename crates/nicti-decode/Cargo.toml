@@ -8,6 +8,8 @@ description = "RAW decoder extension point (ADR-0004 ยง8). Crate boundary only โ
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
+thiserror = "2"
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"

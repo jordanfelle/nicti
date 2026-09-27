@@ -4,10 +4,19 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Catalog store extension point (ADR-0004 §8). Crate boundary only — this is #22's (catalog schema + import/ingest pipeline) future home; the embedded database engine (#67) and schema decisions land there."
+description = "Catalog schema + import/ingest pipeline (#22, ADR-0004 §8): SQLite catalog store (ADR-0008/0011), volume/root/asset identity (ADR-0020), and the Scruff import pipeline that extracts T0 grid previews at import time (ADR-0017) without a RAW decode."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
+nicti-decode = { path = "../nicti-decode" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+blake3 = "1"
+kamadak-exif = "0.6"
+walkdir = "2"
+unicode-normalization = "0.1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"
+tempfile = "3"
