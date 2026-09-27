@@ -4,10 +4,11 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Render stage extension point (ADR-0019 §8) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes with a blake3 cache key chained from upstream (graph.rs), byte-budgeted VRAM/RAM/disk cache tiers (cache.rs), nearest-to-cursor bake prioritization (prefetch.rs), a shared wgpu GpuContext (gpu.rs) and GPU-resident RGBA16F frame textures (frame.rs), and the real RenderStage execution trait + graph-driven Renderer (renderer.rs)."
+description = "Render stage extension point (ADR-0019 §8) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes with a blake3 cache key chained from upstream (graph.rs), byte-budgeted VRAM/RAM/disk cache tiers (cache.rs), nearest-to-cursor bake prioritization (prefetch.rs), a shared wgpu GpuContext (gpu.rs) and GPU-resident RGBA16F frame textures (frame.rs), the real RenderStage execution trait + graph-driven Renderer (renderer.rs), and the concrete decode/live-suffix/geometry stages wired to a real nicti-cornea LinearFrame (color.rs/geometry.rs/stages.rs)."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
+nicti-cornea = { path = "../nicti-cornea" }
 nicti-pawprint = { path = "../nicti-pawprint" }
 blake3 = "1"
 thiserror = "2"
@@ -18,3 +19,4 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+half = "2"

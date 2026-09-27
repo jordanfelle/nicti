@@ -32,6 +32,22 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   rebakes exactly its `invalidated_bakes` set. `gpu.rs` (the shared `GpuContext`, adapted from
   `spikes/glint`) and `frame.rs` (`FrameTexture`, always `Rgba16Float`) are the concrete GPU
   plumbing this runs against — real wgpu, exercised against the lavapipe software adapter in CI.
+
+  **Also landed in #45**: the concrete decode/live-suffix/geometry stages themselves
+  (`crates/nicti-render::{color,geometry,stages}`), wired to a real `nicti_cornea::LinearFrame`.
+  Decode uploads the frame's pixel data and runs a normalize pass (black/`cblack` subtraction,
+  scale to ~[0,1]); demosaic/denoise/lens/heal are plain texture-copy passthroughs (LibRaw already
+  demosaiced; denoise/lens/heal have no algorithm yet, #40/#39/#51); the live suffix fuses WB
+  (ratio over as-shot `cam_mul`), camera→XYZ(D50)→ProPhoto (one folded 3x3 matrix, computed on the
+  CPU), exposure, a simple contrast curve, and a luma-preserving vibrance boost into the single
+  dispatch this ADR's decision rule already requires, staying in linear ProPhoto RGB (the working
+  space) end to end; crop is a bilinear affine sample. **No `HueSatMap`/`LookTable` bindings are
+  reserved** in this pass's shader, unlike this section's own stage-order sketch above — that's
+  #42's DCP-profile scope, and wiring in unused texture bindings with no real content to sample
+  would be exactly the half-finished scaffolding this repo's conventions ask to avoid. Every
+  kernel is proven against a CPU reference via a real GPU-vs-CPU parity test (not just
+  correctness-by-construction), plus one end-to-end test wiring the whole chain through
+  `Renderer` and checking both dispatch counts and actual output pixel values.
 - **Cache tiers**: `spikes/loaf/src/cache.rs::Tier<V>`, a byte-budgeted LRU generic over a
   `size_of` closure, backs VRAM/RAM/disk with different budgets from the same eviction logic. A
   full-res (8280×5520) RGBA16F frame is ~349MB, a screen-res (3840-long-edge) frame is ~75MB — a

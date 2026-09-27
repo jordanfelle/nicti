@@ -2,16 +2,22 @@
 //! engine. `graph`/`cache`/`prefetch` are the CPU-only render graph, promoted from `spikes/loaf`
 //! (#45's first slice). `gpu`/`frame` are the shared wgpu device and GPU-resident RGBA16F frame
 //! textures; `renderer` is the real `RenderStage` execution signature and the graph-driven
-//! `Renderer` that dispatches against it (#45's second slice). The concrete stages themselves
-//! (decode, live suffix, geometry) are a later slice -- this crate only settles the shape every
-//! stage plugs into.
+//! `Renderer` that dispatches against it (#45's second slice). `color`/`geometry`/`stages` are the
+//! concrete decode/live-suffix/geometry pipeline wired to a real `nicti_cornea::LinearFrame`
+//! (#45's third slice) -- denoise/lens/heal stay passthrough slots for their own tickets.
 
 pub mod cache;
+pub mod color;
 pub mod frame;
+pub mod geometry;
 pub mod gpu;
 pub mod graph;
 pub mod prefetch;
 pub mod renderer;
+pub mod stages;
+
+#[cfg(test)]
+pub(crate) mod test_util;
 
 use nicti_claw::{Module, Registry};
 use nicti_pawprint::{CanonicalError, StageEntry};

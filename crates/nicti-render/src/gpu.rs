@@ -163,6 +163,29 @@ pub fn workgroup_grid(total_workgroups: u32) -> (u32, u32) {
     }
 }
 
+/// Builds a compute pipeline from inline WGSL, with an auto-derived bind group layout (`layout:
+/// None`). Callers build this once (in their own `*Kernel::new`) and reuse it across many
+/// `encode`/dispatch calls -- rebuilding a pipeline (which recompiles the shader) inside a hot
+/// path measured ~1000x too slow in this repo's own spike research (`spikes/loaf`/`spikes/glint`).
+pub fn make_compute_pipeline(
+    device: &wgpu::Device,
+    wgsl: &str,
+    entry_point: &str,
+) -> wgpu::ComputePipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(entry_point),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl)),
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(entry_point),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry_point),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
