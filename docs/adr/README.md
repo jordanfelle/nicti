@@ -52,7 +52,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0061](0061-lrc-catalog-import-mapping.md) | 0023 | Lightroom Classic catalog import mapping | Accepted |
 | [0066](0066-outbound-license-agpl.md) | 0013 | Nicti's outbound license — AGPL-3.0-or-later | Accepted |
 | [0067](0067-catalog-database-engine.md) | 0008 | Catalog database engine | Accepted |
-| [0068](0068-gui-framework.md) | 0006 | GUI framework | Proposed |
+| [0068](0068-gui-framework.md) | 0006 | GUI framework | Accepted |
 | [0069](0069-rapidraw-adopt-or-fork.md) | 0018 | RapidRAW as an adopt/fork candidate | Proposed (not adopted, study-only) |
 | [0071](0071-volume-identity-and-remapping.md) | 0020 | Volume identity and drive remapping | Proposed |
 | [0099](0099-classic-auto-tone.md) | — | Classic (non-AI) auto-tone algorithm | Proposed |

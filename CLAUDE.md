@@ -292,8 +292,8 @@ native build scripts (e.g. nicti-cornea's bundled LibRaw), which was most of tha
 from Renovate (`renovate.json`) since every spike is throwaway and generates bump-PR churn nobody
 will act on before it's deleted or promoted.
 
-**`spikes/pelt-*` is slated for deletion once ADR-0068 resolves** — not filed as its own issue yet
-since ADR-0068 is still Proposed pending #90's reference-machine run. (`spikes/den` went through
+**`spikes/pelt-*` is slated for deletion now that ADR-0068 is Accepted (#90)** — tracked in #232.
+(`spikes/den` went through
 the same lifecycle: slated for deletion once #22 landed, and #123 did that cleanup — deleting the
 spike itself plus its CI jobs, the Renovate rule's original motivating case, and two `deny.toml`
 exceptions. #154, since superseded by that deletion, is a real historical incident worth knowing

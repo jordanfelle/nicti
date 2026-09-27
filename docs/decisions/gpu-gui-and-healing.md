@@ -1,6 +1,6 @@
 ## GPU, GUI, and healing
 
-Covers the GPU compute API choice, the (proposed) GUI framework decision, and the (proposed) healing/removal design.
+Covers the GPU compute API choice, the GUI framework decision, and the healing/removal design.
 
 - **GPU compute API**: `docs/adr/0016-gpu-compute-api.md` — `wgpu` (WGSL), Vulkan backend on
   Windows (not Dx12 — Dx12 doesn't expose `SHADER_F16` on wgpu 30/current driver, Vulkan does, and
@@ -14,15 +14,16 @@ Covers the GPU compute API choice, the (proposed) GUI framework decision, and th
   round-trip in the hot path (confirmed expensive, 0.8–1.5s, by the spike's own harness) — baked
   stage output must stay GPU-resident, per ADR-0021/#44. Unblocks #20, #41, #45; feeds #68 (GUI
   framework)'s wgpu-interop question.
-- **GUI framework**: `docs/adr/0068-gui-framework.md` — **Proposed, pending a reference-machine
-  measurement pass**; the hard-gate findings are final. **Correction, 2026-09-26** (#69's prior-art
-  research): the Prior-art section had wrongly claimed RapidRAW uses egui/eframe — it's actually
-  Tauri + React (see the ADR's own Amendments section). Doesn't change this ADR's Decision, which
-  rests on egui's own wgpu-30 match, license, and `CallbackTrait` maturity, independent of that
-  citation. GPUI is eliminated outright: its Windows
+- **GUI framework**: `docs/adr/0068-gui-framework.md` — **Accepted: egui** (2026-09-27, #90), on
+  the hard-gate findings alone; the planned reference-machine measurement pass was waived rather
+  than run (see the ADR's Amendments section for the reasoning). **Correction, 2026-09-26** (#69's
+  prior-art research): the Prior-art section had wrongly claimed RapidRAW uses egui/eframe — it's
+  actually Tauri + React (see the ADR's own Amendments section). Doesn't change this ADR's
+  Decision, which rests on egui's own wgpu-30 match, license, and `CallbackTrait` maturity,
+  independent of that citation. GPUI is eliminated outright: its Windows
   backend is a bespoke Direct3D11 renderer (`windows-rs`), with no `wgpu`/Vulkan path in its own
   dependency graph on that platform at all (`blade-graphics` is Linux/macOS-only) — no
-  `spikes/pelt-gpui` was built. Of the other three, egui (via eframe) currently leads: the only
+  `spikes/pelt-gpui` was built. Of the other three, egui (via eframe) wins: the only
   candidate whose own `wgpu` dependency (30.0.0) matches ADR-0016's choice exactly, with a clean
   MIT/Apache-2.0 license and a mature `egui_wgpu::CallbackTrait` custom-viewport story. Iced works
   but pins `wgpu` 27, not 30 (a real version-compatibility cost). Slint's GPU-resident
@@ -30,8 +31,10 @@ Covers the GPU compute API choice, the (proposed) GUI framework decision, and th
   own license (`GPL-3.0-only OR LicenseRef-Slint-*`) only passes today under a spike-scoped
   `deny.toml` exception — shipping it needs its own ADR-0018 amendment. Neither Iced nor Slint has
   egui's/GPUI's built-in virtualized-list primitive, so both had to hand-roll grid-windowing math
-  (`spikes/pelt/src/virtualize.rs`) for #68's grid gate. Final selection waits on
-  `bench/pelt/pelt.ahk`+`run-pelt.ps1` numbers from the reference machine.
+  (`spikes/pelt/src/virtualize.rs`) for #68's grid gate. `spikes/pelt*`/`bench/pelt/` and their CI
+  jobs are now dead weight, tracked for deletion in #232; real performance validation against
+  this ADR's measured-gate targets moves to #233, against the actual UI crate via #43's
+  hero-scenario tooling, once it exists.
 - **Healing/removal**: `docs/adr/0050-healing-and-removal.md` — **Accepted** (2026-09-26, #97's
   reference-machine pass). Ships both classic clone/heal (CPU Poisson-Jacobi solve + a `wgpu`
   compute-shader twin, proven correct against each other in `spikes/groom/`) and AI removal
