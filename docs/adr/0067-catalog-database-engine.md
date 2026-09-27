@@ -313,6 +313,10 @@ that same well-trodden lane rather than an unusual choice for this problem shape
 
 ## Spike: `spikes/den/`
 
+**Deleted in #123** (2026-09-27), once #22 landed `crates/nicti-catalog` — see git history for
+the full spike source. The description below is left as-is as the historical record of what the
+spike contained and measured.
+
 Not production code. `den` (a cat's den — where it keeps its stash) holds:
 
 - `src/gen.rs` — a deterministic, seeded synthetic-catalog generator (`den gen --seed N --scale

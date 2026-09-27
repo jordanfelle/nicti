@@ -11,12 +11,13 @@ and this doc is the canonical guide for making one.
   by `spikes/sniff`). `brew install nasm` (macOS/Linuxbrew), `choco install nasm` (Windows),
   `apt-get install nasm` (Debian/Ubuntu).
 - **A C/C++ toolchain** — MSVC on Windows (the Visual Studio Build Tools), a standard
-  gcc/clang setup elsewhere. Needed for `den`'s bundled native catalog-engine libraries and for
-  `nicti-decode`'s vendored LibRaw build.
-- **libclang/LLVM** — only if you're touching `den`'s RocksDB feature (`bindgen` needs it).
+  gcc/clang setup elsewhere. Needed for `nicti-decode`'s vendored LibRaw build.
 - **Linux GUI headers** (`libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, `libxi-dev`,
   `libxrandr-dev`, `libgl1-mesa-dev`, `libfontconfig1-dev`) — only if you're touching
   `spikes/pelt-egui`/`pelt-iced`/`pelt-slint` on Linux.
+- **libclang/LLVM** — only if you're touching `spikes/pelt-slint` (its `i-slint-renderer-skia`
+  dependency's `skia-bindings` crate needs `bindgen`, same requirement as any other bindgen-based
+  build). Not needed on Windows CI (the runner ships LLVM by default).
 - **The LibRaw submodule** — only if you're touching `crates/nicti-decode` or `spikes/retina`:
   ```bash
   git submodule update --init crates/nicti-decode/vendor/LibRaw
@@ -52,17 +53,16 @@ it.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features --exclude den --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
+cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
 ```
 
-The `den`/`pelt-*`/`retina` excludes above mirror `.github/workflows/ci.yml` exactly — those
-crates are path-gated into their own CI jobs (`den (linux)`/`den (windows)`, etc.) since they pull
-in heavy native builds (eight bundled catalog engines, three GUI-framework stacks, a full LibRaw
-C++ compile) that most PRs don't touch. If your change does touch `spikes/den/**`,
-`spikes/pelt-*/**`, or `spikes/retina/**`, also run that crate's own commands — see `ci.yml`'s
-`den-linux`/`pelt-linux`/`retina-linux` jobs for the exact feature-flag combinations (some engines
-can't be enabled together in the same binary; the workflow file's comments explain why).
+The `pelt-*`/`retina` excludes above mirror `.github/workflows/ci.yml` exactly — those crates are
+path-gated into their own CI jobs since they pull in heavy native builds (three GUI-framework
+stacks, a full LibRaw C++ compile) that most PRs don't touch. If your change does touch
+`spikes/pelt-*/**` or `spikes/retina/**`, also run that crate's own commands — see `ci.yml`'s
+`pelt-linux`/`decode-linux` jobs for the exact feature-flag combinations (some engines can't be
+enabled together in the same binary; the workflow file's comments explain why).
 
 `pre-commit`'s hooks (fmt, clippy, secret detection, YAML lint on every commit; `cargo test` on
 push) mirror the same exclude list, so a clean local commit should mean clean CI for these jobs.
@@ -120,8 +120,6 @@ Classic installed, PowerShell 7+, and AutoHotkey v2 — see `docs/benchmarks.md`
 event photos) and isn't distributed with the repo; see issue #136 for its current storage-model
 status. What you *can* run without it:
 
-- `den gen --seed N --scale <n>` — a synthetic catalog generator for Library-scale benchmarks, no
-  real image content needed.
 - `spikes/glint`'s and `spikes/groom`'s throughput/correctness tests (`#[ignore]`d where they need
   real hardware or model weights — run with `-- --ignored` and the env var each test names).
 - `nicti-prowl`'s golden-image tests, which currently run against synthetic renders only (no real

@@ -5,7 +5,7 @@
 //!
 //! Windows-only: the real enumeration lives behind `#[cfg(windows)]`. The stub keeps
 //! `cargo clippy`/`cargo test` green on Linux CI (this repo's `clippy`/`test` jobs run
-//! `--workspace`, and `homing` isn't path-gated out the way `den`/`pelt-*`/`retina` are, since it
+//! `--workspace`, and `homing` isn't path-gated out the way `pelt-*`/`retina` are, since it
 //! doesn't compile a heavy native dependency -- see CLAUDE.md's package-map note).
 
 use serde::Serialize;

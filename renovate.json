@@ -35,7 +35,7 @@
       "allowedVersions": "!/^3\\.0\\.0$/"
     },
     {
-      "description": "spikes/* are throwaway research crates deleted on promotion (see CLAUDE.md's package map section) -- spikes/den in particular pulls in eight catalog-engine candidates, five of them already evaluated-and-rejected (turso/redb/libsql/rocksdb/fjall, see the ADR-0102/0106/0113/0115/0116 bullets), so a bump PR against one of those is pure churn nobody will act on before the whole crate is deleted (#123, blocked on #22). A dependency shared with a real crates/* or root manifest still gets bumped normally via that manifest's own PR.",
+      "description": "spikes/* are throwaway research crates deleted on promotion (see CLAUDE.md's package map section) -- a bump PR against one is pure churn nobody will act on before the whole crate is deleted or promoted. A dependency shared with a real crates/* or root manifest still gets bumped normally via that manifest's own PR. (spikes/den, this rule's original motivating case with its five already-rejected catalog-engine candidates, was itself deleted in #123.)",
       "matchManagers": ["cargo"],
       "matchFileNames": ["spikes/**"],
       "enabled": false
