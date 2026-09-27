@@ -116,6 +116,21 @@ the first real run (and rechecked if the window moves/resizes):
    `RevertCropAfter` undo). Do the same sanity pass once for `zoom` (also 3 edges: `Z` keypress +
    pan-start + pan-end).
 
+## Classic auto-tone capture (#99/#202)
+
+`auto-tone.ahk` is unrelated to the hero-scenario timing above — it's ADR-0099's deferred
+reference-machine capture, run once #202 has a sample set copied out of `ref-10k` (its own
+`nicti-prowl::refset::select` pick, not this repo's frozen `hero-set.txt`):
+
+```
+AutoHotkey64.exe auto-tone.ahk <BENCH_ROOT>\lrc-bench\auto-tone-set <BENCH_ROOT>
+```
+
+Same throwaway-catalog and manual-import-dialog conventions as `setup.ahk` above, but with no
+edit-stack sync step: it applies LRC's own Auto Settings (Ctrl+A → Ctrl+U) to the whole imported
+selection and stops. `spikes/pupil`'s `truth` module then reads the result straight out of the
+resulting `<BENCH_ROOT>\lrc-bench\auto-tone.lrcat` — no Ctrl+S/XMP write, no preview build needed.
+
 ## Never automate on a machine you're actively using for something else
 
 `hero.ahk`, `setup.ahk`, and `navigate.ahk` take over the mouse and keyboard and can run for tens

@@ -1,0 +1,28 @@
+[package]
+name = "pupil"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #99 (ADR-0099): a classic (non-AI) auto-tone algorithm matching LRC's \"Auto Settings\" -- a histogram-percentile heuristic (candidate A) and an empirical ridge-regression fit (candidate B) against real LRC Auto slider values read from a .lrcat, plus per-slider MAE/p95 evaluation tooling. Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "pupil"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pupil"
+path = "src/bin/pupil.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["tiff"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+agprefs = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
