@@ -44,12 +44,12 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for prerequisites (Rust, `nasm`, platfo
 toolchain requirements, and the LibRaw submodule) and the full command set. Quick start:
 
 ```bash
-cargo build --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
-cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina
+cargo build --workspace --exclude retina
+cargo test --workspace --all-targets --all-features --exclude retina
 ```
 
-(The excludes skip the GUI-framework spikes and `retina`'s vendored LibRaw compile — none of which
-a first build needs. See CONTRIBUTING.md if you're working on one of those.)
+(The exclude skips `retina`'s vendored LibRaw compile, which a first build doesn't need. See
+CONTRIBUTING.md if you're working on that.)
 
 ## Contributing
 

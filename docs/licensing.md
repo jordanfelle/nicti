@@ -113,8 +113,8 @@ license expression appeared beyond what that update already added to `deny.toml`
 (`OFL-1.1`/`Ubuntu-font-1.0` for `epaint_default_fonts`, `NCSA` for the `ravif`/`rav1e`/
 `libfuzzer-sys` transitive chain, `BSL-1.0` for `arboard`'s `clipboard-win`/`error-code`) —
 `cargo deny --workspace --all-features check licenses` passes clean with `nicti-pelt` in the
-graph. The Slint exception two updates above stays unused (Slint wasn't the pick) and can be
-dropped once `spikes/pelt-slint` is deleted (#232).
+graph. The Slint exception two updates above stayed unused (Slint wasn't the pick) and was
+dropped from `deny.toml` when `spikes/pelt-slint` was deleted (#232).
 
 **Update (2026-09-24, [#28](https://github.com/jordanfelle/nicti/issues/28)'s `sniff` spike):**
 new dependencies for embedded-JPEG inventory/decode/benchmark tooling, all already covered by

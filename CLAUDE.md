@@ -157,13 +157,11 @@ terse index: crate/spike → purpose → owning topic.
   `nicti-lair` `SqliteCatalog` (`catalog.rs`). `render.rs` wires a synthetic gradient frame through
   the real Tapetum pipeline for the Develop panel — loading a real NEF is #31's (loupe) scope, not
   this ticket's. Named "pelt" (not the issue's own `nicti-ui`) to match the feline naming
-  convention below, reusing the name from the now-superseded `spikes/pelt-*` research spikes (#232
-  deletes those). Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
+  convention below, reusing the name from the now-deleted `spikes/pelt-*` research spikes (#232).
+  Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
   `nicti_pelt::run()` shim). See [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
-- **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0068) →
-  [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/groom`** (#50/ADR-0050) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
 - **`spikes/retina`** (#37/ADR-0037; own decode step promoted to `crates/nicti-cornea` in #41,
@@ -258,7 +256,7 @@ ran, the CONFIRMED/SPECULATIVE split (or "no findings"), and how any real findin
 ## Testing
 
 See CONTRIBUTING.md's "Building, testing, linting" section for the exact commands (they mirror
-CI's exclude flags for `pelt-*`/`retina`) and why `--workspace`/`--all` are required — the
+CI's exclude flag for `retina`) and why `--workspace`/`--all` are required — the
 root `Cargo.toml` is both the workspace root and a real package (`nicti`), not a virtual manifest,
 so a bare `cargo test`/`cargo clippy` (no `-p`/`--workspace`) or a bare `cargo fmt --check` (no
 `--all`) silently only checks the root crate and skips `spikes/*`/`bench/whisker` entirely — this
@@ -268,7 +266,7 @@ exact gap produced a false-negative "clean" local result once on a real PR whose
 ## CI
 
 GitHub Actions, GitHub-hosted runners only (no self-hosted infra); Windows is the required
-(blocking) platform (#17), not Linux. Full gotchas (required-check-gate quirks #166, path-gated
-GUI-framework spikes #127, CodeQL scoping #127, the CI-duration watcher #160) moved to
-[`ci`](.claude/rules/ci/REFERENCE.md) (#34's own PR, to keep this file under its line-count gate)
-— read that before touching `.github/**` or a CI-adjacent spike.
+(blocking) platform (#17), not Linux. Full gotchas (required-check-gate history #166, the
+now-deleted GUI-framework spikes' path-gating #127/#232, CodeQL scoping #127, the CI-duration
+watcher #160) moved to [`ci`](.claude/rules/ci/REFERENCE.md) (#34's own PR, to keep this file under
+its line-count gate) — read that before touching `.github/**` or a CI-adjacent spike.

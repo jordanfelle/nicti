@@ -5,10 +5,9 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # pelt (#127): the pelt-egui/pelt-iced/pelt-slint GUI-framework spikes are path-gated out of
-    # per-PR CI below since none of it ships -- this weekly run is what catches it silently
-    # rotting (a toolchain/dependency update breaking a candidate nobody's touching) between
-    # pelt-touching PRs. decode (#37/#41) is path-gated the same way for the same reason.
+    # decode (#37/#41): crates/nicti-cornea's bundled LibRaw build is path-gated out of per-PR CI
+    # below since none of it ships as-is -- this weekly run is what catches it silently rotting (a
+    # toolchain/dependency update breaking it) between decode-touching PRs.
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
@@ -35,15 +34,14 @@ jobs:
     name: detect path changes
     runs-on: ubuntu-latest
     outputs:
-      pelt: ${{ steps.filter.outputs.pelt }}
       decode: ${{ steps.filter.outputs.decode }}
     # dorny/paths-filter fetches the PR's changed-file list via the GitHub REST API on
     # `pull_request` events by default, which needs `pull-requests: read` -- the workflow-level
     # `permissions: contents: read` block above sets every OTHER unlisted scope to `none` for the
     # whole run, so without this the API call 403s and this job fails on every real PR (the exact
-    # trigger it exists for), while `pelt-linux`/`pelt-windows`'s own `if:` (a custom condition,
-    # which replaces the implicit `needs: success()` gate entirely) still falls through to
-    # `needs.changes.outputs.pelt` == '' and silently skips instead of blocking on the failure.
+    # trigger it exists for), while `decode-linux`/`decode-windows`'s own `if:` (a custom
+    # condition, which replaces the implicit `needs: success()` gate entirely) still falls through
+    # to `needs.changes.outputs.decode` == '' and silently skips instead of blocking on the failure.
     permissions:
       contents: read
       pull-requests: read
@@ -59,27 +57,14 @@ jobs:
         id: filter
         with:
           filters: |
-            pelt:
-              # spikes/pelt (not just the three pelt-* candidate crates) is included: it's a
-              # shared fixture/math crate all three depend on via a path dependency (see
-              # CLAUDE.md's package-map note) -- a change scoped only to spikes/pelt/** would
-              # otherwise never trigger pelt-linux/pelt-windows and could merge a real breakage
-              # undetected until the weekly schedule.
-              - 'spikes/pelt/**'
-              - 'spikes/pelt-egui/**'
-              - 'spikes/pelt-iced/**'
-              - 'spikes/pelt-slint/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
             decode:
               # #37/#41: crates/nicti-cornea bundles LibRaw's full C++ source (via a git
               # submodule, promoted out of spikes/retina in #41) and compiles it from scratch on
-              # every touching PR -- same rationale as pelt above, moved out of the always-on
-              # jobs so an unrelated PR doesn't pay for a C++ recompile. spikes/retina is included
-              # too: its own research tooling (compare/sweep/scan/watch/dump-classic/dump-cfa for
-              # #40) depends on nicti-cornea and needs the same path-gated job. .gitmodules is
-              # included since a submodule URL/branch/path change there affects this job's
+              # every touching PR -- moved out of the always-on jobs so an unrelated PR doesn't
+              # pay for a C++ recompile. spikes/retina is included too: its own research tooling
+              # (compare/sweep/scan/watch/dump-classic/dump-cfa for #40) depends on nicti-cornea
+              # and needs the same path-gated job. .gitmodules is included since a submodule
+              # URL/branch/path change there affects this job's
               # checkout step without necessarily touching any file under crates/nicti-cornea/**
               # itself (CodeRabbit, PR #203). bench/knead (#45 PR4) depends on nicti-cornea with
               # the libraw feature always on (its whole point is a real decode), so it pays the
@@ -142,18 +127,7 @@ jobs:
       # entirely (verified locally: `cargo clippy --all-targets --all-features` alone
       # reports "Checking nicti" only, nothing else). Same fix cargo-deny's job already
       # needed for the same reason (see its own comment below).
-      #
-      # --exclude pelt-egui/-iced/-slint (#127): these #68/ADR-0068 GUI-framework spikes alone
-      # account for 311 of the 543 unique crates in a full Windows build (measured via
-      # `cargo tree`) -- egui/iced/Slint each pull in their own windowing/renderer stack
-      # (winit, wgpu-adjacent crates, Skia/FemtoVG for Slint). ADR-0068 is still Proposed,
-      # pending #90's reference-machine run, so this isn't shipping code yet. Moved to the
-      # path-gated `pelt (linux)`/`pelt (windows)` jobs below. This also drops the apt-get
-      # GUI-headers step from this job -- it only existed for these three crates' Linux
-      # windowing backends (X11/Wayland/GL), confirmed unneeded for the rest of the workspace
-      # by the pelt-linux job passing without it once it's the only Linux job left compiling
-      # them; if that job's build ever fails to link, that's the first place to look.
-      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude retina --exclude nicti-cornea --exclude knead --all-targets --all-features -- -D warnings
 
   clippy-windows:
     name: cargo clippy (windows)
@@ -173,9 +147,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17: Windows is v1's actual target platform (see README's Scope section and
       # docs/adr/0015), so it -- not Linux -- is the platform whose clippy/test results should
-      # gate merges. --workspace --exclude pelt-* mirrors the Linux job exactly (see its own
-      # comment above for why each flag is required).
-      - run: cargo clippy --workspace --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead --all-targets --all-features -- -D warnings
+      # gate merges. --workspace mirrors the Linux job exactly (see its own comment above for why
+      # each flag is required).
+      - run: cargo clippy --workspace --exclude retina --exclude nicti-cornea --exclude knead --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test (linux)
@@ -192,10 +166,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # --workspace: see the clippy job's comment above -- without it, pawprint's and
       # sheath's tests silently never ran in CI.
-      #
-      # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
-      # the path-gated `pelt (linux)` job below.
-      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead
+      - run: cargo test --workspace --all-targets --all-features --exclude retina --exclude nicti-cornea --exclude knead
 
   test-windows:
     name: cargo test (windows)
@@ -214,107 +185,16 @@ jobs:
       # covers nicti-claw's/dewclaw's dylib-loading tests (previously the only Windows test
       # coverage, via build-windows's own narrow `-p nicti-claw -p dewclaw` step, now redundant
       # and removed there).
-      #
-      # --exclude pelt-egui/-iced/-slint (#127): see the clippy job's comment above -- moved to
-      # the path-gated `pelt (windows)` job below. This is the single biggest driver of this
-      # job's own compile time: cold, these three crates alone pull in 311 of the 543 unique
-      # crates otherwise compiled here.
-      - run: cargo test --workspace --all-targets --all-features --exclude pelt-egui --exclude pelt-iced --exclude pelt-slint --exclude retina --exclude nicti-cornea --exclude knead
-
-  pelt-linux:
-    name: pelt (linux)
-    needs: changes
-    # needs.changes.result == 'failure' runs pelt rather than skipping it: a custom `if:` on a
-    # job with `needs:` replaces the implicit `needs: success()` gate entirely, so without this a
-    # `changes`-job failure (a transient API error, a future permissions regression, anything)
-    # would make pelt silently skip instead of blocking -- CodeRabbit caught this as a real
-    # structural gap even after the pull-requests:read fix (which only fixed one specific cause
-    # of `changes` failing, not the underlying "failure defaults to skip" shape). Running pelt on
-    # a `changes` failure is the safe default: worst case is an unnecessary pelt run, not a
-    # silently-unverified one.
-    if: needs.changes.result == 'failure' || needs.changes.outputs.pelt == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          # #127: not a required check, rarely touched, and its own cache entry would otherwise
-          # ride along on every main push regardless of whether these spikes changed.
-          save-if: false
-      # #68/ADR-0068's pelt-egui/pelt-iced/pelt-slint spikes pull in winit's Linux backends
-      # (X11/Wayland) plus Slint's Skia/FemtoVG renderers. Precautionary, NOT independently
-      # confirmed as required -- see #126's original version of this comment (moved here
-      # verbatim from the main clippy/test jobs when #127 split these crates out): a local
-      # sandbox build succeeded with none of these packages installed. If this job passes
-      # without it in a follow-up, remove it; if it fails to link, check the error for the
-      # missing .so and adjust the list to match.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
-      - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
-      - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
-
-  pelt-windows:
-    name: pelt (windows)
-    needs: changes
-    if: needs.changes.result == 'failure' || needs.changes.outputs.pelt == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see pelt-linux's comment above
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }} # required check, see clippy job's comment above
-      # #17/#127: this is a required (blocking) check -- Windows is v1's actual target, so a
-      # GUI-framework candidate must prove out on it, not just Linux.
-      - run: cargo clippy -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features -- -D warnings
-      - run: cargo test -p pelt-egui -p pelt-iced -p pelt-slint --all-targets --all-features
-
-  windows-required-gate:
-    name: pelt windows (required check gate)
-    # #166: pelt (windows) is a branch-protection-required check AND path-gated (see
-    # pelt-linux's own if: comment above) -- this repo's CLAUDE.md used to assume a
-    # path-gated-out "skipped" result still satisfies a required check, but classic branch
-    # protection actually treats `skipped` as NOT satisfying the requirement, which silently
-    # blocked merge on every PR that doesn't touch spikes/pelt-*/** or Cargo.{toml,lock}/this
-    # workflow file (confirmed on #162, which needed `gh pr merge --admin` twice to get past
-    # it). This job is what's actually registered as the required check instead: it has no
-    # path-gated `if:` of its own, so it's never itself skipped, and only fails when
-    # pelt-windows genuinely failed or was cancelled -- a skipped upstream result still passes
-    # the gate, which is the behavior that was actually intended. (Originally covered
-    # den-windows too, until #123 deleted spikes/den.)
-    needs: [pelt-windows]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check pelt (windows) didn't actually fail
-        env:
-          PELT_RESULT: ${{ needs.pelt-windows.result }}
-        run: |
-          echo "pelt (windows): $PELT_RESULT"
-          fail=0
-          if [ "$PELT_RESULT" = "failure" ] || [ "$PELT_RESULT" = "cancelled" ]; then
-            fail=1
-          fi
-          if [ "$fail" = "1" ]; then
-            echo "::error::pelt (windows) failed or was cancelled"
-            exit 1
-          fi
-          echo "ok: passed, or was correctly path-gate-skipped"
+      - run: cargo test --workspace --all-targets --all-features --exclude retina --exclude nicti-cornea --exclude knead
 
   decode-linux:
     name: decode (linux)
     needs: changes
-    # See pelt-linux's comment above for why the changes-failure case runs rather than skips.
+    # needs.changes.result == 'failure' runs decode rather than skipping it: a custom `if:` on a
+    # job with `needs:` replaces the implicit `needs: success()` gate entirely, so without this a
+    # `changes`-job failure (a transient API error, a future permissions regression, anything)
+    # would make decode silently skip instead of blocking. Running decode on a `changes` failure
+    # is the safe default: worst case is an unnecessary decode run, not a silently-unverified one.
     if: needs.changes.result == 'failure' || needs.changes.outputs.decode == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -338,8 +218,8 @@ jobs:
           save-if: false
       # #37/#41/ADR-0019/ADR-0069: nicti-cornea bundles LibRaw's real C++ source (compiled via
       # the `cc` crate, see build.rs) to decode the real photo library's Nikon HE/HE* files --
-      # path-gated out of the always-on jobs, same reasoning as pelt above (a full C++
-      # recompile on every unrelated PR). retina is checked in the same job since it depends on
+      # path-gated out of the always-on jobs to avoid a full C++ recompile on every unrelated PR.
+      # retina is checked in the same job since it depends on
       # nicti-cornea and is touched by the same filter. knead (#45 PR4's real-NEF golden/perf
       # harness, bench/knead) too -- its nicti-cornea dependency always enables the libraw
       # feature (a real decode is its whole point), so it pays the same C++ compile cost.
@@ -349,7 +229,7 @@ jobs:
   decode-windows:
     name: decode (windows)
     needs: changes
-    if: needs.changes.result == 'failure' || needs.changes.outputs.decode == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see pelt-linux's comment above
+    if: needs.changes.result == 'failure' || needs.changes.outputs.decode == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' # see decode-linux's comment above
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -364,13 +244,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17/#37/#41: NOT a branch-protection-required check (verified against the real
       # `gh api repos/.../branches/main/protection` response, which lists only fmt/clippy
-      # (windows)/test (windows)/build (windows, v1 target)/pelt windows gate -- an earlier
-      # version of this comment claimed retina (windows) was required, which the API response
-      # doesn't support; corrected during #41's promotion rather than propagated). Still run on
-      # Windows because that's where ADR-0069's real numbers came from (native .exe via WSL
-      # interop, not the Linux build) and Windows is v1's actual target -- just not a merge gate,
-      # so no windows-required-gate-style indirection is needed here the way pelt needs it.
-      # Uses MSVC (the runner's default toolchain), not MinGW -- build.rs's `_USE_MATH_DEFINES`/MSVC branch
+      # (windows)/test (windows)/build (windows, v1 target) -- an earlier version of this comment
+      # claimed retina (windows) was required, which the API response doesn't support; corrected
+      # during #41's promotion rather than propagated). Still run on Windows because that's where
+      # ADR-0069's real numbers came from (native .exe via WSL interop, not the Linux build) and
+      # Windows is v1's actual target -- just not a merge gate, so no required-check-gate-style
+      # indirection is needed here. Uses MSVC (the runner's default toolchain), not MinGW --
+      # build.rs's `_USE_MATH_DEFINES`/MSVC branch
       # covers this path; the MinGW-specific static-linking branch is exercised locally, not
       # by this job.
       - run: cargo clippy -p nicti-cornea -p retina -p knead --all-targets --all-features -- -D warnings
@@ -390,7 +270,7 @@ jobs:
           # spikes/* and bench/whisker too (verified locally: without it, only `nicti` itself
           # shows up in `cargo deny list`). --all-features is the action's own default -- keep it
           # explicit since setting `arguments` overrides rather than appends to that default.
-          # Deliberately NOT path-gated like the pelt/decode test/clippy jobs above: this only
+          # Deliberately NOT path-gated like the decode test/clippy jobs above: this only
           # resolves the dependency graph (no compilation), so it stays cheap (~1min), and
           # license drift is worth catching on every PR.
           arguments: --workspace --all-features
