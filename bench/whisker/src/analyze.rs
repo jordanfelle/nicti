@@ -8,10 +8,11 @@
 //! [`crate::stats::summarize`] — pooling raw samples, not averaging each capture's own p95,
 //! matches the spec's "pool all ... across those 5 images" wording.
 
-use crate::io::read_frames_gray8;
+use crate::io::{read_events_csv, read_frames_gray8, MixedEvent};
 use crate::stats::{summarize, Stats};
 use crate::{
-    analyze_switch, distinct_change_frames, drag_window_from_edges, frame_intervals, frames_to_ms,
+    analyze_switch, distinct_change_frames, drag_window_from_edges, event_latencies_bounded,
+    frame_intervals, frames_to_ms, rising_edges,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -64,6 +65,12 @@ pub struct MetricSamples {
     pub settled_ms: Vec<f64>,
     pub first_change_ms: Vec<f64>,
     pub interval_ms: Vec<f64>,
+    /// Count of interaction-D events whose settled latency was never found before the next
+    /// event's own flash (or the capture's end) cut off the search — see
+    /// `event_latencies_bounded`'s doc comment. Always 0 for switch/crop/zoom, which never bound
+    /// the settle search. A nonzero count here is itself the finding #100 is measuring for, not
+    /// noise to filter out — never dropped silently.
+    pub unsettled: usize,
 }
 
 /// A capture directory that couldn't be parsed or analyzed — surfaced to the caller rather than
@@ -100,6 +107,19 @@ pub type SampleBuckets = BTreeMap<(String, String), MetricSamples>;
 ///   from the edge-1..edge-2 window.
 /// - `zoom`: edge 0 is the `Z` keypress (the zoom-settled switch event, pools `settled_ms`);
 ///   edges 1/2 bracket the pan drag exactly like crop (pools `interval_ms`).
+/// - `mixed` (interaction D, #100): reads the capture's `events.csv` sidecar for per-flash
+///   `kind`/`step`/`step_index` attribution (positional edge conventions like crop/zoom's don't
+///   apply — a mixed sequence's flash layout varies run to run). Each `switch`/`crop-enter`/
+///   `auto-tone`/`straighten` kind pools `settled_ms`/`first_change_ms` via
+///   [`event_latencies_bounded`], bounded to the *next* event's own flash so one event's settle
+///   search never bleeds into the next; a `drag-start`/`drag-end` pair pools `interval_ms` the
+///   same way crop/zoom do. Every metric is pooled twice: once under `mixed/<kind>` (the
+///   aggregate) and once under `mixed/<kind>@after-<predecessor-step>`, where predecessor is the
+///   step name immediately before this event's own step occurrence (`"start"` for the first) —
+///   the per-predecessor buckets are what #100's cross-operation regression check compares.
+///   `events.csv`'s row count must equal the capture's detected indicator-edge count, or the
+///   whole capture is skipped (a mismatch means the sidecar and the capture disagree about what
+///   happened, not something safe to guess through).
 pub fn pool_results(
     root: &Path,
     opts: &AnalyzeOptions,
@@ -263,10 +283,153 @@ pub fn pool_results(
                     }
                 }
             }
+            "mixed" => {
+                let events_path = dir.join("events.csv");
+                let events = match read_events_csv(&events_path) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        skipped.push(SkippedCapture {
+                            dir,
+                            reason: format!("events.csv: {e}"),
+                        });
+                        continue;
+                    }
+                };
+
+                let brightness = indicator.mean_brightness();
+                let all_edges = rising_edges(&brightness, opts.indicator_threshold);
+                if all_edges.len() != events.len() {
+                    skipped.push(SkippedCapture {
+                        dir,
+                        reason: format!(
+                            "events.csv has {} row(s) but {} indicator edge(s) were detected — they must match 1:1",
+                            events.len(),
+                            all_edges.len()
+                        ),
+                    });
+                    continue;
+                }
+
+                let roi_diffs = roi.diff_series();
+                let predecessors = predecessor_steps(&events);
+                let config = meta.config.clone();
+                let interaction = meta.interaction.clone();
+
+                let push_settled = |kind: &str,
+                                         predecessor: &str,
+                                         first_change_ms: Option<f64>,
+                                         settled_ms: Option<f64>,
+                                         buckets: &mut SampleBuckets| {
+                    let unsettled = settled_ms.is_none();
+                    for key in [
+                        format!("{interaction}/{kind}"),
+                        format!("{interaction}/{kind}@after-{predecessor}"),
+                    ] {
+                        let bucket = buckets.entry((config.clone(), key)).or_default();
+                        if let Some(ms) = first_change_ms {
+                            bucket.first_change_ms.push(ms);
+                        }
+                        if let Some(ms) = settled_ms {
+                            bucket.settled_ms.push(ms);
+                        }
+                        if unsettled {
+                            bucket.unsettled += 1;
+                        }
+                    }
+                };
+                let push_interval = |kind: &str,
+                                          predecessor: &str,
+                                          interval_ms: &[f64],
+                                          buckets: &mut SampleBuckets| {
+                    for key in [
+                        format!("{interaction}/{kind}"),
+                        format!("{interaction}/{kind}@after-{predecessor}"),
+                    ] {
+                        buckets
+                            .entry((config.clone(), key))
+                            .or_default()
+                            .interval_ms
+                            .extend_from_slice(interval_ms);
+                    }
+                };
+
+                let mut i = 0;
+                while i < events.len() {
+                    let edge = all_edges[i];
+                    let end = all_edges.get(i + 1).copied().unwrap_or(roi_diffs.len());
+                    match events[i].kind.as_str() {
+                        "drag-start" => match events.get(i + 1) {
+                            Some(next) if next.kind == "drag-end" => {
+                                let drag_end_edge = all_edges[i + 1];
+                                let distinct = distinct_change_frames(
+                                    &roi_diffs,
+                                    edge,
+                                    drag_end_edge,
+                                    opts.change_threshold,
+                                );
+                                let intervals = frame_intervals(&distinct);
+                                let interval_ms: Vec<f64> = intervals
+                                    .iter()
+                                    .map(|&f| frames_to_ms(f, meta.capture_fps))
+                                    .collect();
+                                push_interval("drag", &predecessors[i], &interval_ms, &mut buckets);
+                                i += 2;
+                            }
+                            _ => {
+                                skipped.push(SkippedCapture {
+                                    dir: dir.clone(),
+                                    reason: format!(
+                                        "events.csv row {i}: 'drag-start' not immediately followed by 'drag-end'"
+                                    ),
+                                });
+                                i += 1;
+                            }
+                        },
+                        "drag-end" => {
+                            // Only reached if a 'drag-end' appears without a preceding
+                            // 'drag-start' -- already reported above; don't double-count it.
+                            i += 1;
+                        }
+                        "end" => {
+                            // Trailing bounding flash, no metric of its own.
+                            i += 1;
+                        }
+                        kind @ ("switch" | "crop-enter" | "auto-tone" | "straighten") => {
+                            let (first_change, settled) = event_latencies_bounded(
+                                &roi_diffs,
+                                edge,
+                                end,
+                                opts.change_threshold,
+                                opts.quiet_threshold,
+                                opts.min_quiet_frames,
+                            );
+                            let first_change_ms =
+                                first_change.map(|f| frames_to_ms(f - edge, meta.capture_fps));
+                            let settled_ms =
+                                settled.map(|f| frames_to_ms(f - edge, meta.capture_fps));
+                            push_settled(
+                                kind,
+                                &predecessors[i],
+                                first_change_ms,
+                                settled_ms,
+                                &mut buckets,
+                            );
+                            i += 1;
+                        }
+                        other => {
+                            skipped.push(SkippedCapture {
+                                dir: dir.clone(),
+                                reason: format!("events.csv row {i}: unknown event kind '{other}'"),
+                            });
+                            i += 1;
+                        }
+                    }
+                }
+            }
             other => skipped.push(SkippedCapture {
                 dir,
                 reason: format!(
-                    "unknown interaction '{other}' (base of '{}', expected switch, crop, or zoom, each optionally suffixed '-cold')",
+                    "unknown interaction '{other}' (base of '{}', expected switch, crop, zoom, or mixed, each optionally suffixed '-cold')",
                     meta.interaction
                 ),
             }),
@@ -274,6 +437,33 @@ pub fn pool_results(
     }
 
     Ok((buckets, skipped))
+}
+
+/// For each event, the step name of the step occurrence immediately before it — used to bucket
+/// interaction D's per-(kind, predecessor) regression comparison (#100). All events sharing one
+/// `step_index` (e.g. a crop step's `crop-enter` + `drag-start` + `drag-end` flashes) share the
+/// same predecessor: the step name of `step_index - 1`, or `"start"` for the sequence's first
+/// step.
+fn predecessor_steps(events: &[MixedEvent]) -> Vec<String> {
+    let mut step_names: BTreeMap<usize, String> = BTreeMap::new();
+    for e in events {
+        step_names
+            .entry(e.step_index)
+            .or_insert_with(|| e.step.clone());
+    }
+    events
+        .iter()
+        .map(|e| {
+            if e.step_index == 0 {
+                "start".to_string()
+            } else {
+                step_names
+                    .get(&(e.step_index - 1))
+                    .cloned()
+                    .unwrap_or_else(|| "start".to_string())
+            }
+        })
+        .collect()
 }
 
 /// Summarized stats for one pooled (config, interaction) bucket. Fields are `None` when that
@@ -285,6 +475,8 @@ pub struct MetricStats {
     pub interval_ms: Option<Stats>,
     /// `1000 / interval_ms.p95`, matching hero-scenario.md's "effective fps (p95 interval)".
     pub effective_fps_p95: Option<f64>,
+    /// See [`MetricSamples::unsettled`]. Always 0 outside interaction `mixed`.
+    pub unsettled: usize,
 }
 
 pub fn summarize_buckets(
@@ -299,6 +491,7 @@ pub fn summarize_buckets(
             first_change_ms: summarize(&samples.first_change_ms),
             interval_ms: interval_stats,
             effective_fps_p95,
+            unsettled: samples.unsettled,
         };
         out.entry(config.clone())
             .or_default()
@@ -579,6 +772,257 @@ mod tests {
             buckets.is_empty(),
             "an unrecognized interaction must not create an empty bucket in the summary"
         );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Writes a synthetic interaction-D capture (#100): switch -> crop (crop-enter + drag) ->
+    /// auto-tone -> switch -> straighten (crop-enter + straighten) -> end, 9 flashes total. Each
+    /// non-drag event settles instantly on the frame after its own change (min_quiet_frames=2,
+    /// so a single repeated frame counts as settled) so the expected settled/predecessor buckets
+    /// are easy to hand-verify. ROI steps through 9 widely separated plateaus (30/255 apart, well
+    /// above the 0.05 change threshold) so every transition is unambiguous.
+    fn write_mixed_capture(dir: &Path, config: &str, run_label: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let levels: [u8; 9] = [10, 40, 70, 100, 130, 160, 190, 220, 250];
+        let mut indicator = Vec::new();
+        let mut roi = Vec::new();
+        let mut push = |ind: u8, r: u8| {
+            indicator.push(ind);
+            roi.push(r);
+        };
+        push(0, levels[0]); // pre-roll
+        push(255, levels[0]); // edge 0: switch flash
+        push(0, levels[1]); // switch change
+        push(0, levels[1]); // switch settles
+        push(255, levels[1]); // edge 1: crop-enter flash
+        push(0, levels[2]); // crop-enter change
+        push(0, levels[2]); // crop-enter settles
+        push(255, levels[2]); // edge 2: drag-start flash
+        push(0, levels[3]); // drag repaint 1
+        push(0, levels[3]); // (no new distinct change)
+        push(0, levels[4]); // drag repaint 2
+        push(255, levels[4]); // edge 3: drag-end flash
+        push(0, levels[4]); // indicator low again, no roi change yet
+        push(255, levels[4]); // edge 4: auto-tone flash
+        push(0, levels[5]); // auto-tone change
+        push(0, levels[5]); // auto-tone settles
+        push(255, levels[5]); // edge 5: switch (2nd) flash
+        push(0, levels[6]); // switch change
+        push(0, levels[6]); // switch settles
+        push(255, levels[6]); // edge 6: crop-enter (straighten) flash
+        push(0, levels[7]); // change
+        push(0, levels[7]); // settles
+        push(255, levels[7]); // edge 7: straighten flash
+        push(0, levels[8]); // change
+        push(0, levels[8]); // settles
+        push(255, levels[8]); // edge 8: end flash
+        push(0, levels[8]); // trailing
+
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n\
+             0,switch,switch,0\n\
+             1,crop-enter,crop,1\n\
+             2,drag-start,crop,1\n\
+             3,drag-end,crop,1\n\
+             4,auto-tone,auto-tone,2\n\
+             5,switch,switch,3\n\
+             6,crop-enter,straighten,4\n\
+             7,straighten,straighten,4\n\
+             8,end,end,5\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": config,
+            "run_label": run_label,
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+    }
+
+    fn mixed_opts() -> AnalyzeOptions {
+        AnalyzeOptions {
+            indicator_threshold: 0.5,
+            quiet_threshold: 0.02,
+            min_quiet_frames: 2,
+            change_threshold: 0.05,
+            warmup_label: "warmup".to_string(),
+        }
+    }
+
+    #[test]
+    fn pool_results_mixed_buckets_settled_events_by_kind_and_predecessor() {
+        let root = temp_dir();
+        write_mixed_capture(&root.join("originals/mixed/run-1"), "originals", "run-1");
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+
+        let get = |key: &str| {
+            buckets
+                .get(&("originals".to_string(), key.to_string()))
+                .unwrap_or_else(|| panic!("expected bucket '{key}'"))
+        };
+
+        // Aggregate bucket: crop-enter appears twice (once for `crop`, once for `straighten`).
+        assert_eq!(get("mixed/crop-enter").settled_ms.len(), 2);
+        // Per-predecessor split: both crop-enter occurrences happen to follow a `switch` step.
+        assert_eq!(get("mixed/crop-enter@after-switch").settled_ms.len(), 2);
+
+        // The two `switch` events have different predecessors ("start" for the first, "auto-tone"
+        // for the second) -- this is exactly the cross-operation comparison #100 is after.
+        assert_eq!(get("mixed/switch").settled_ms.len(), 2);
+        assert_eq!(get("mixed/switch@after-start").settled_ms.len(), 1);
+        assert_eq!(get("mixed/switch@after-auto-tone").settled_ms.len(), 1);
+
+        assert_eq!(get("mixed/auto-tone@after-crop").settled_ms.len(), 1);
+        assert_eq!(get("mixed/straighten@after-switch").settled_ms.len(), 1);
+
+        // The crop step's drag-start/drag-end pair pools an interval, not a settled latency.
+        assert_eq!(get("mixed/drag").interval_ms.len(), 1);
+        assert_eq!(get("mixed/drag@after-switch").interval_ms.len(), 1);
+
+        // Every settled event in this fixture actually settles before the next flash.
+        for key in [
+            "mixed/switch",
+            "mixed/crop-enter",
+            "mixed/auto-tone",
+            "mixed/straighten",
+        ] {
+            assert_eq!(
+                get(key).unsettled,
+                0,
+                "unexpected unsettled count for {key}"
+            );
+        }
+
+        // The trailing "end" bounding flash contributes no metric of its own.
+        assert!(!buckets.keys().any(|(_, k)| k.starts_with("mixed/end")));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_counts_unsettled_when_next_flash_cuts_off_the_search() {
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        // A 2-event capture: `switch` flashes, the ROI keeps changing every frame (never two
+        // consecutive equal values) until the very next `switch` flash fires -- must count as
+        // unsettled, not silently pass.
+        let indicator = vec![0u8, 255, 0, 0, 255, 0, 0];
+        let roi = vec![10u8, 10, 90, 170, 250, 250, 250];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n0,switch,switch,0\n1,switch,switch,1\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+
+        let first = buckets
+            .get(&(
+                "originals".to_string(),
+                "mixed/switch@after-start".to_string(),
+            ))
+            .unwrap();
+        assert!(first.settled_ms.is_empty());
+        assert_eq!(first.unsettled, 1);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_skips_capture_when_events_csv_edge_count_mismatches() {
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        // 2 indicator flashes in the capture, but events.csv only describes 1.
+        let indicator = vec![0u8, 255, 0, 255, 0];
+        let roi = vec![10u8, 10, 90, 90, 90];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n0,switch,switch,0\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert!(buckets.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("must match 1:1"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pool_results_mixed_reports_malformed_drag_pair_instead_of_dropping_silently() {
+        let root = temp_dir();
+        let dir = root.join("originals/mixed/run-1");
+        fs::create_dir_all(&dir).unwrap();
+        // "drag-start" immediately followed by another "switch" instead of "drag-end".
+        let indicator = vec![0u8, 255, 0, 255, 0];
+        let roi = vec![10u8, 10, 90, 90, 130];
+        fs::write(dir.join("indicator.raw"), &indicator).unwrap();
+        fs::write(dir.join("roi.raw"), &roi).unwrap();
+        fs::write(
+            dir.join("events.csv"),
+            "edge,kind,step,step_index\n0,drag-start,crop,0\n1,switch,switch,1\n",
+        )
+        .unwrap();
+        let meta = serde_json::json!({
+            "interaction": "mixed",
+            "config": "originals",
+            "run_label": "run-1",
+            "capture_fps": 60.0,
+            "indicator_w": 1,
+            "indicator_h": 1,
+            "roi_w": 1,
+            "roi_h": 1,
+        });
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (buckets, skipped) = pool_results(&root, &mixed_opts()).unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0]
+            .reason
+            .contains("not immediately followed by 'drag-end'"));
+        // The trailing "switch" is still processed even though the drag pair was malformed.
+        assert!(buckets.contains_key(&("originals".to_string(), "mixed/switch".to_string())));
 
         fs::remove_dir_all(&root).unwrap();
     }

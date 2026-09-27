@@ -25,7 +25,7 @@ image 1" (it doesn't mandate exact positions).
 #>
 param(
     [Parameter(Mandatory)] [ValidateSet("originals", "smart-previews")] [string]$Config,
-    [Parameter(Mandatory)] [ValidateSet("switch", "crop", "zoom")] [string]$Interaction,
+    [Parameter(Mandatory)] [ValidateSet("switch", "crop", "zoom", "mixed")] [string]$Interaction,
     [switch]$Cold,
     [double]$CaptureFps = 60,
     [Parameter(Mandatory)] [string]$IndicatorRect,
@@ -33,10 +33,16 @@ param(
     [int]$TotalImages = 50,
     [int[]]$TargetImages = @(1, 13, 25, 37, 49),
     [int]$NavigateDelayMs = 80,
+    # mixed (interaction D, #100) drives many more steps per capture than a single switch/crop/
+    # zoom pass -- bump the safety timeout well past its default StepGapMs*stepCount*Repeats.
     [int]$DurationSeconds = 60,
     [int]$DdagrabOutputIdx = -1,
     [string]$ResultsRoot = "$PSScriptRoot\..\bench-results\hero"
 )
+
+if ($Interaction -eq "mixed" -and -not $PSBoundParameters.ContainsKey("DurationSeconds")) {
+    $DurationSeconds = 240
+}
 
 $ErrorActionPreference = "Stop"
 $runHero = Join-Path $PSScriptRoot "run-hero.ps1"
@@ -70,9 +76,12 @@ function Invoke-Run {
     & $runHero @params
 }
 
-if ($Interaction -eq "switch") {
+if ($Interaction -eq "switch" -or $Interaction -eq "mixed") {
     foreach ($label in $runLabels) {
-        # Every switch run must start at image 1 -- rewind however far the set may have advanced.
+        # Every switch/mixed run must start at image 1 -- rewind however far the set may have
+        # advanced. Unlike crop/zoom, mixed has no per-image spread: one capture per run drives
+        # the whole interleaved sequence across however many images its own Sequence/Repeats
+        # touch (see hero-config.ini.example's [mixed] section).
         Invoke-Run -RunLabel $label -PreNavigate "Left:$TotalImages"
     }
 } else {

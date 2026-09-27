@@ -3,7 +3,7 @@
 ; actual LRC window layout and are NOT portable across machines/resolutions.
 
 [general]
-; switch | crop | zoom
+; switch | crop | zoom | mixed
 Interaction=switch
 LrcWindowTitle=ahk_exe Lightroom.exe
 PreStartDelayMs=500
@@ -54,3 +54,25 @@ Steps=60
 ; Time to let the 1:1 zoom settle before the pan drag starts, so the pan-frame-interval
 ; measurement isn't contaminated by the zoom-settle transition.
 SettleWaitMs=1000
+
+[mixed]
+; Interaction D (#100): an interleaved sequence of step tokens, run `Repeats` times, driving each
+; step's own events (see hero.ahk's mixed branch and hero-scenario.md's interaction D). Steps:
+; switch (Right arrow), crop (r + a scripted drag using [crop]'s own coordinates + Enter),
+; auto-tone (Ctrl+U), straighten (r + a click on the crop overlay's Auto-angle button + Enter).
+; Every image the sequence visits must return to the synced edit stack afterward -- see
+; RevertSettleMs below and README.md's mixed dry-run checklist.
+Sequence=switch,crop,auto-tone,switch,straighten,switch,auto-tone,crop,straighten
+Repeats=4
+; Fixed cadence between steps -- NOT wait-for-settle. Waiting for a full settle before the next
+; step would hide the very cross-operation regression #100 is measuring; an event that hasn't
+; settled by the time the next step's flash fires is counted as "unsettled" by whisker, not
+; silently dropped. Same rationale/default as [switch]'s InterKeyDelayMs.
+StepGapMs=700
+; Screen coordinates for the crop overlay's Auto-angle (auto-straighten) button, used by the
+; `straighten` step -- calibrate alongside [crop]'s own coordinates (see README.md's Calibration
+; section), with crop mode (`R`) already open.
+StraightenAutoX=0
+StraightenAutoY=0
+; Time to let the trailing "end" flash's own transition settle before the undo pass begins.
+RevertSettleMs=500
