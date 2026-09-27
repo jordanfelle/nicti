@@ -21,9 +21,11 @@
 use thiserror::Error;
 
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+const APP0: u8 = 0xE0;
 const APP1: u8 = 0xE1;
 const SOS: u8 = 0xDA;
 const SOI: u8 = 0xD8;
+const JFIF_SIGNATURE: &[u8] = b"JFIF\0";
 /// Segment length field is a u16 including itself -- max payload is
 /// 65535 - 2 = 65533 bytes.
 const MAX_SEGMENT_PAYLOAD: usize = 65533;
@@ -186,15 +188,32 @@ pub fn write_xmp(data: &[u8], new_xmp: &str) -> Result<Vec<u8>, JpegXmpError> {
             out.extend_from_slice(&data[end..]);
         }
         None => {
-            // No existing XMP -- insert right after SOI (the first 2 bytes),
-            // before any other segment. Valid regardless of what else is
-            // already there (APP0/JFIF, EXIF, ...).
+            // No existing XMP -- insert right after SOI, before any other
+            // segment, *unless* a JFIF APP0 segment is already there. JFIF
+            // requires its own APP0 to be the very first marker after SOI;
+            // inserting APP1 ahead of it would leave a reader that checks
+            // for JFIF's exact prescribed marker order failing to recognize
+            // the file as JFIF. Any other segment (EXIF APP1, etc.) has no
+            // such positional requirement, so SOI-adjacent insertion is
+            // still correct for every other case.
             if data.len() < 2 {
                 return Err(JpegXmpError::NotAJpeg);
             }
-            out.extend_from_slice(&data[..2]);
+            let segments = walk_segments(data)?;
+            let insert_at = match segments.get(1) {
+                Some(seg)
+                    if seg.marker == APP0
+                        && seg
+                            .payload
+                            .is_some_and(|(s, e)| data[s..e].starts_with(JFIF_SIGNATURE)) =>
+                {
+                    seg.end
+                }
+                _ => 2,
+            };
+            out.extend_from_slice(&data[..insert_at]);
             out.extend_from_slice(&new_segment);
-            out.extend_from_slice(&data[2..]);
+            out.extend_from_slice(&data[insert_at..]);
         }
     }
     Ok(out)
@@ -270,6 +289,38 @@ mod tests {
         );
         // Original bytes still present, just shifted.
         assert!(rewritten.ends_with(&data[2..]));
+    }
+
+    #[test]
+    fn insert_when_no_existing_xmp_goes_after_a_jfif_app0_segment() {
+        // JFIF requires its own APP0 to be the very first marker after SOI
+        // -- inserting a new APP1 ahead of it would break that requirement.
+        let mut data = vec![0xFF, SOI];
+        // APP0 "JFIF\0" + version/density placeholder bytes (9-byte payload
+        // is JFIF's real minimum; content beyond the signature doesn't
+        // matter for this test).
+        let jfif_payload = [b'J', b'F', b'I', b'F', 0, 1, 2, 0, 0, 0, 0, 0, 0];
+        data.push(0xFF);
+        data.push(APP0);
+        data.extend_from_slice(&((jfif_payload.len() + 2) as u16).to_be_bytes());
+        data.extend_from_slice(&jfif_payload);
+        data.extend_from_slice(&[0xFF, SOS, 0x00, 0x02, 0x00, 0x00]);
+        data.push(0xAB);
+        data.extend_from_slice(&[0xFF, 0xD9]);
+
+        let rewritten = write_xmp(&data, "<x:xmpmeta/>").unwrap();
+        assert_eq!(
+            read_xmp(&rewritten).unwrap().as_deref(),
+            Some("<x:xmpmeta/>")
+        );
+        // The APP0/JFIF segment must still be the very first marker after
+        // SOI -- not pushed behind the newly inserted APP1.
+        let segments = walk_segments(&rewritten).unwrap();
+        assert_eq!(
+            segments[1].marker, APP0,
+            "JFIF APP0 must stay immediately after SOI, found marker {:#x} instead",
+            segments[1].marker
+        );
     }
 
     #[test]

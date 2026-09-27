@@ -92,7 +92,7 @@ different concepts, though not what XMP field, if any, carries Pick), and the re
 ## Reproducing
 
 ```bash
-# Unit tests (35) + the two env-gated real-file tests (skip cleanly without the env vars):
+# Unit tests (36) + the two env-gated real-file tests (skip cleanly without the env vars):
 cargo test -p scent
 
 # Lint/format:

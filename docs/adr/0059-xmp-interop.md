@@ -164,7 +164,7 @@ ADR-0002 asked for.
 
 ## Measured results
 
-- **37 tests pass** in `spikes/scent` (35 unit, 2 env-gated real-file integration tests that skip
+- **38 tests pass** in `spikes/scent` (36 unit, 2 env-gated real-file integration tests that skip
   cleanly here — no real LRC-written files exist in this Linux/WSL sandbox, same constraint
   ADR-0020's `homing` spike already documents). `cargo clippy -p scent --all-targets -D warnings`
   and `cargo fmt -p scent -- --check` both pass clean.
@@ -244,6 +244,17 @@ regression test each), the 2 SPECULATIVE findings were also fixed since they wer
   already specified the lock/single-writer discipline this requires; the summary now says so too.
 - The research doc's own claims had drifted from the ADR's corrected wording (still said
   "byte-preserving packet patcher" and a stale "28" test count). Both brought back in sync.
+
+**A third pass (CodeRabbit's re-review after the fixes above) found one more, also real:**
+
+- `embedded.rs`'s "no existing XMP" insertion path always inserted the new APP1 segment
+  immediately after SOI — but JFIF requires its own APP0 segment to be the very first marker after
+  SOI. A JPEG with a JFIF APP0 segment and no existing XMP would have its APP1 inserted *ahead* of
+  APP0, breaking that requirement for any reader that checks JFIF's exact prescribed marker order.
+  Fixed: `write_xmp` now checks whether the second segment is a JFIF-signed APP0 and inserts after
+  it instead, falling back to right-after-SOI for every other case (EXIF APP1, no APP0 at all,
+  etc.), which has no such positional requirement. See
+  `insert_when_no_existing_xmp_goes_after_a_jfif_app0_segment`.
 
 Not flagged as bugs (already-acknowledged design assumptions): the single-`rdf:Description`
 assumption, local-name-only namespace matching, and the DNG/TIFF write scope decision above.

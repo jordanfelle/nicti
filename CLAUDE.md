@@ -200,7 +200,7 @@ reader/writer that preserves every property it doesn't own, `.xmp` sidecar namin
 JPEG-embedded APP1 XMP read/write (DNG/TIFF tag-700 write deferred, see the ADR), and the
 ADR-0002 conflict rule + `crs:` write-gate wired to real file mtimes/hashes; see
 `docs/research/scent-xmp-interop.md` and `.claude/rules/xmp-interop/REFERENCE.md`) is real, tested
-(35 unit + 2 env-gated real-file integration tests, all passing — the real-file tests skip cleanly
+(36 unit + 2 env-gated real-file integration tests, all passing — the real-file tests skip cleanly
 in this sandbox, same constraint `homing` already documents), not path-gated, pending the
 follow-up hands-on LRC session the ADR describes before it can move to Accepted.
 
