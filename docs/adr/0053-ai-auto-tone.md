@@ -106,22 +106,35 @@ rows) and extracted from the corresponding RAW files at their real `/mnt/<letter
   13) drove every output to a saturated `tanh` extreme within a few epochs (e.g. Contrast2012 MAE
   105 against a 200-wide range — a collapsed constant prediction, not noise). A learning-rate sweep
   (0.001/0.0005/0.0001) found 0.0005 trains without collapsing; `purr report` uses 0.0005 for M2
-  and 0.005 for M1 (see `bin/purr.rs`'s `m1_config`/`m2_config`). Reported below.
+  and 0.005 for M1 (see `bin/purr.rs`'s `m1_config`/`m2_config`).
+- **Corrected after adversarial review: every model now fits on the same rows.** The first working
+  version gave B0/B1 the *entire* `train` split while carving 15% off `train` as an M1/M2-only
+  early-stopping validation slice — an undisclosed ~15%-more-data advantage for the baselines that
+  confounded the B1-vs-M1 comparison below. `fit_val_split` (`bin/purr.rs`) now deterministically
+  shuffles `train` (fixed seed, so it reproduces) before carving the 85/15 fit/val slice — the
+  shuffle matters on its own: `train` arrives folder/id_local-ordered, so an unshuffled positional
+  cut would have concentrated `val` in whichever folder happened to sort last, not a representative
+  sample. All four models below now fit on the identical 85% `fit` slice; only M1/M2 additionally
+  see the 15% `val` slice, for early stopping only, never for computing a gradient. The finding is
+  unchanged by this fix (see below) — B1 was never relying on the extra data to win.
 
-**Per-split, per-model mean range-normalized MAE** (`purr report`, lower is better):
+**Per-split, per-model mean range-normalized MAE** (`purr report`, lower is better; `fit`/`val`/
+`holdout` counts shown once per split since every model shares the same three-way split):
 
-| Split | B0 (mean) | B1 (ridge) | M1 (MLP, hist) | M2 (MLP, hist+thumb) |
+| Split (fit/val/holdout) | B0 (mean) | B1 (ridge) | M1 (MLP, hist) | M2 (MLP, hist+thumb) |
 |---|---|---|---|---|
-| Event (3996/1004) | 0.0220 | **0.0169** | 0.0177 | 0.0236 |
-| Temporal (4000/1000) | 0.0303 | **0.0241** | 0.0256 | 0.0302 |
+| Event (3396/600/1004) | 0.0221 | **0.0169** | 0.0178 | 0.0275 |
+| Temporal (3400/600/1000) | 0.0303 | **0.0241** | 0.0246 | 0.0320 |
 
-B1 (ridge) is the best model on **both** splits. Neither MLP variant beats it — M1 comes within 5%
-of B1 on the event split but is still worse, and M2 (the model actually using the downsampled image
-tensor the issue asked about) is worse than the trivial mean baseline B0 on the event split and
-barely better than it on the temporal split, even after fixing the divergence. With only ~4,000
-training rows and a 3,085-dimensional input, M2 is data-starved relative to its capacity — a larger
-sample (raising `--target-total`, at the cost of a much longer extraction pass) is the most likely
-lever to change this finding, not further learning-rate tuning.
+B1 (ridge) is the best model on **both** splits, and its own numbers barely moved after the fairness
+fix (0.0169/0.0241, unchanged to 4 decimal places on the event split) — confirming B1 was never
+winning on a data-quantity advantage. Neither MLP variant beats it: M1 comes within 5% of B1 on the
+event split and within 2% on the temporal split, but is still worse on both; M2 (the model actually
+using the downsampled image tensor the issue asked about) is worse than the trivial mean baseline B0
+on the event split and close to it on the temporal split — *more* data-starved than before the
+fairness fix, since M2 now trains on 3,396 rows (down from 3,996) against its 3,085-dimensional
+input. A larger sample (raising `--target-total`, at the cost of a much longer extraction pass) is
+the most likely lever to change this finding, not further learning-rate tuning.
 
 Full per-slider MAE/p95/bias for every model x split combination is in this ADR's PR — see
 `purr report`'s output; not reproduced in full here since it's long and secondary to the aggregate
@@ -131,7 +144,7 @@ metric the decision rule reads.
 B1 by the required ≥15% on mean normalized MAE on the event split; B1 in fact beats both ML models
 outright. Rule (2) is checked for completeness on the actual winner (B1): Exposure2012 MAE 0.155
 (event)/0.205 (temporal), both ≤ 0.25 ✓; every other slider's MAE stays ≤ 10 on both splits, but
-**Highlights2012's p95 on the temporal split is 27.8, over the ≤ 25 bound** — a real, if modest,
+**Highlights2012's p95 on the temporal split is 27.6, over the ≤ 25 bound** — a real, if modest,
 miss even for the winning model. Per the decision rule's own fallback: **the finding is "ridge is
 enough."** A v2 auto-tone build should use a per-user ridge fit on `pupil`-style histogram features
 (`fit.rs`'s `RidgeModel`, generalized to eight sliders) rather than a neural model — and should

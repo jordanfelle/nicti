@@ -51,9 +51,12 @@ purr report   --features features.bin
 - **M1/M2 (`mlp.rs`)**: a small CPU-only MLP (`candle-core`/`candle-nn`), two hidden ReLU layers
   and a `tanh` output bounded to each slider's documented range. M1 trains on the 13-value
   histogram vector alone; M2 trains on the histogram vector plus the flattened 32x32 thumbnail
-  (3072 floats) — the issue's own "downsampled image tensor." Early-stopping validation is carved
-  from the training rows only (never the holdout set) so the reported holdout error is never seen
-  during training.
+  (3072 floats) — the issue's own "downsampled image tensor." `bin/purr.rs`'s `fit_val_split`
+  deterministically shuffles (fixed seed) and carves off a 15% early-stopping validation slice from
+  the training rows only — never the holdout set, so the reported holdout error is never seen during
+  training. **Every model (B0/B1/M1/M2) fits on the same 85% `fit` slice**, not just M1/M2, so a
+  baseline never wins the comparison purely from seeing more training rows (a real bug an earlier
+  version had — caught in adversarial review, see ADR-0053's Measured results).
 
 ## Splits
 

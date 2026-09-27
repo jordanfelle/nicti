@@ -68,6 +68,12 @@ pub struct ExtractReport {
     pub unreachable: usize,
     pub failed: usize,
     pub succeeded: usize,
+    /// Count of each concrete `FeatureError` variant among the `failed` rows, keyed by its variant
+    /// name (`Io`/`NoEmbeddedJpeg`/`Ifd`/`JpegDecode`/`Resize`) -- without this, `failed` alone
+    /// can't distinguish "this camera's preview format has no embedded JPEG" (a sample-composition
+    /// concern) from "a JPEG decode bug" (a real bug) from a transient I/O error (found in
+    /// adversarial review: the original version discarded the error entirely via `.ok()`).
+    pub failure_kinds: std::collections::HashMap<&'static str, usize>,
 }
 
 /// Extracts features for every manifest row in parallel (a 12-worker pool, matching the WSL 9p I/O
@@ -81,42 +87,55 @@ pub fn extract_all(rows: &[ManifestRow]) -> (Vec<FeatureRow>, ExtractReport) {
         .build()
         .expect("building a fixed-size thread pool");
 
-    let results: Vec<Option<FeatureRow>> = pool.install(|| {
-        rows.par_iter()
-            .map(|row| {
-                let path = crate::catalog::resolve_path(&row.lrc_path)?;
-                let ImageFeatures { hist, thumb } = crate::features::extract(&path).ok()?;
-                Some(FeatureRow {
-                    folder_id: row.folder_id,
-                    capture_time: row.capture_time.clone(),
-                    hist,
-                    thumb,
-                    iso: row.iso,
-                    shutter_speed: row.shutter_speed,
-                    aperture: row.aperture,
-                    targets: row.sliders.as_array(),
+    // `Ok(Some(_))` = extracted, `Ok(None)` = path unresolvable (never attempted extraction),
+    // `Err(_)` = extraction was attempted and failed -- kept as three distinct outcomes so the
+    // report below can route "unreachable" vs. "failed" without re-deriving resolvability a
+    // second time (found in adversarial review: an earlier version called `resolve_path` twice
+    // and, before that, discarded the failure reason entirely via `.ok()`).
+    let results: Vec<Result<Option<FeatureRow>, crate::features::FeatureError>> =
+        pool.install(|| {
+            rows.par_iter()
+                .map(|row| {
+                    let Some(path) = crate::catalog::resolve_path(&row.lrc_path) else {
+                        return Ok(None);
+                    };
+                    let ImageFeatures { hist, thumb } = crate::features::extract(&path)?;
+                    Ok(Some(FeatureRow {
+                        folder_id: row.folder_id,
+                        capture_time: row.capture_time.clone(),
+                        hist,
+                        thumb,
+                        iso: row.iso,
+                        shutter_speed: row.shutter_speed,
+                        aperture: row.aperture,
+                        targets: row.sliders.as_array(),
+                    }))
                 })
-            })
-            .collect()
-    });
+                .collect()
+        });
 
     let mut report = ExtractReport {
         attempted: rows.len(),
         ..Default::default()
     };
     let mut features = Vec::with_capacity(results.len());
-    for (row, result) in rows.iter().zip(results) {
+    for result in results {
         match result {
-            Some(f) => {
+            Ok(Some(f)) => {
                 report.succeeded += 1;
                 features.push(f);
             }
-            None => {
-                if crate::catalog::resolve_path(&row.lrc_path).is_none() {
-                    report.unreachable += 1;
-                } else {
-                    report.failed += 1;
-                }
+            Ok(None) => report.unreachable += 1,
+            Err(e) => {
+                report.failed += 1;
+                let kind = match e {
+                    crate::features::FeatureError::Io(..) => "io",
+                    crate::features::FeatureError::NoEmbeddedJpeg(..) => "no_embedded_jpeg",
+                    crate::features::FeatureError::Ifd(..) => "ifd",
+                    crate::features::FeatureError::JpegDecode(..) => "jpeg_decode",
+                    crate::features::FeatureError::Resize(..) => "resize",
+                };
+                *report.failure_kinds.entry(kind).or_insert(0) += 1;
             }
         }
     }

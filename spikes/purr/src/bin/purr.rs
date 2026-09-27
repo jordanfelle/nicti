@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use purr::dataset::{self, FeatureRow};
 use purr::sliders::{Sliders, SLIDER_COUNT};
 use purr::{baseline, catalog, eval, fit, mlp, sample, split};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 
 #[derive(Parser)]
 struct Cli {
@@ -100,14 +102,34 @@ fn targets_to_sliders(rows: &[FeatureRow]) -> Vec<Sliders> {
         .collect()
 }
 
-fn run_b0(train: &[FeatureRow], holdout: &[FeatureRow]) -> anyhow::Result<eval::EvalReport> {
-    let model = baseline::MeanModel::fit(&targets_to_sliders(train))?;
+/// Deterministically shuffles `train` (fixed seed, so a re-run reproduces the same split) and
+/// carves off a 15% validation slice for M1/M2's early stopping. **Every model (B0/B1/M1/M2) fits
+/// on the same `fit` rows** -- an earlier version of this pipeline gave B0/B1 the full `train` set
+/// while M1/M2 only saw the 85% `fit` slice, an undisclosed ~15%-more-data advantage for the
+/// baselines that confounded the ADR's "M1 comes within 5% of B1" comparison (caught in adversarial
+/// review). The shuffle itself also matters: `train` arrives folder/id_local-ordered (`catalog`'s
+/// `ORDER BY i.id_local`, preserved through `sample`/`split::by_folder`'s stable partition), so a
+/// positional tail-cut without shuffling would concentrate `val` in whichever folder(s) happen to
+/// sort last rather than drawing a representative sample of the training distribution.
+fn fit_val_split(train: &[FeatureRow]) -> (Vec<FeatureRow>, Vec<FeatureRow>) {
+    let mut shuffled = train.to_vec();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(53);
+    shuffled.shuffle(&mut rng);
+    let val_at = ((shuffled.len() as f64 * 0.85) as usize)
+        .max(1)
+        .min(shuffled.len());
+    let val = shuffled.split_off(val_at);
+    (shuffled, val)
+}
+
+fn run_b0(fit_rows: &[FeatureRow], holdout: &[FeatureRow]) -> anyhow::Result<eval::EvalReport> {
+    let model = baseline::MeanModel::fit(&targets_to_sliders(fit_rows))?;
     let predicted: Vec<_> = holdout.iter().map(|_| model.predict()).collect();
     eval::evaluate(&predicted, &targets_to_sliders(holdout))
 }
 
-fn run_b1(train: &[FeatureRow], holdout: &[FeatureRow]) -> anyhow::Result<eval::EvalReport> {
-    let train_pairs: Vec<_> = train
+fn run_b1(fit_rows: &[FeatureRow], holdout: &[FeatureRow]) -> anyhow::Result<eval::EvalReport> {
+    let train_pairs: Vec<_> = fit_rows
         .iter()
         .map(|r| (r.hist, Sliders::from_array(r.targets)))
         .collect();
@@ -117,25 +139,27 @@ fn run_b1(train: &[FeatureRow], holdout: &[FeatureRow]) -> anyhow::Result<eval::
 }
 
 fn run_mlp(
-    train: &[FeatureRow],
+    fit_rows: &[FeatureRow],
+    val_rows: &[FeatureRow],
     holdout: &[FeatureRow],
     input_fn: impl Fn(&FeatureRow) -> Vec<f32>,
     hidden_dim: usize,
     config: mlp::TrainConfig,
 ) -> anyhow::Result<eval::EvalReport> {
-    let train_features: Vec<Vec<f32>> = train.iter().map(&input_fn).collect();
-    let train_targets: Vec<[f64; SLIDER_COUNT]> = train.iter().map(|r| r.targets).collect();
-    // A validation slice carved from the training rows only -- the holdout set stays untouched
-    // until final evaluation, matching ADR-0053's decision rule (holdout error is the reported
-    // number, early-stopping must not see it).
-    let val_at = (train_features.len() as f64 * 0.85) as usize;
-    let (fit_features, val_features) =
-        train_features.split_at(val_at.max(1).min(train_features.len()));
-    let (fit_targets, val_targets) = train_targets.split_at(val_at.max(1).min(train_targets.len()));
+    let fit_features: Vec<Vec<f32>> = fit_rows.iter().map(&input_fn).collect();
+    let fit_targets: Vec<[f64; SLIDER_COUNT]> = fit_rows.iter().map(|r| r.targets).collect();
+    let val_features: Vec<Vec<f32>> = val_rows.iter().map(&input_fn).collect();
+    let val_targets: Vec<[f64; SLIDER_COUNT]> = val_rows.iter().map(|r| r.targets).collect();
 
-    let input_dim = train_features[0].len();
+    let input_dim = fit_features[0].len();
     let mut model = mlp::Mlp::new(input_dim, hidden_dim)?;
-    model.train(fit_features, fit_targets, val_features, val_targets, config)?;
+    model.train(
+        &fit_features,
+        &fit_targets,
+        &val_features,
+        &val_targets,
+        config,
+    )?;
 
     let predicted: Vec<_> = holdout
         .iter()
@@ -189,6 +213,13 @@ fn main() -> anyhow::Result<()> {
                 "attempted={} succeeded={} unreachable={} failed={}",
                 report.attempted, report.succeeded, report.unreachable, report.failed
             );
+            if !report.failure_kinds.is_empty() {
+                let mut kinds: Vec<_> = report.failure_kinds.iter().collect();
+                kinds.sort_by_key(|(name, _)| *name);
+                for (kind, count) in kinds {
+                    println!("  failed[{kind}]={count}");
+                }
+            }
             dataset::write_feature_cache(&out, &features)
                 .with_context(|| format!("writing feature cache to {}", out.display()))?;
         }
@@ -201,17 +232,24 @@ fn main() -> anyhow::Result<()> {
         } => {
             let rows = dataset::read_feature_cache(&features)?;
             let (train, holdout) = split_rows(&rows, split, holdout_fraction);
-            println!("train={} holdout={}", train.len(), holdout.len());
+            let (fit_rows, val_rows) = fit_val_split(&train);
+            println!(
+                "train={} (fit={} val={}) holdout={}",
+                train.len(),
+                fit_rows.len(),
+                val_rows.len(),
+                holdout.len()
+            );
             let config = mlp::TrainConfig {
                 epochs: 300,
                 patience: 30,
                 learning_rate,
             };
             let report = match model {
-                ModelKind::B0 => run_b0(&train, &holdout)?,
-                ModelKind::B1 => run_b1(&train, &holdout)?,
-                ModelKind::M1 => run_mlp(&train, &holdout, hist_input, 32, config)?,
-                ModelKind::M2 => run_mlp(&train, &holdout, thumb_input, 64, config)?,
+                ModelKind::B0 => run_b0(&fit_rows, &holdout)?,
+                ModelKind::B1 => run_b1(&fit_rows, &holdout)?,
+                ModelKind::M1 => run_mlp(&fit_rows, &val_rows, &holdout, hist_input, 32, config)?,
+                ModelKind::M2 => run_mlp(&fit_rows, &val_rows, &holdout, thumb_input, 64, config)?,
             };
             print_report("result", &report);
         }
@@ -222,17 +260,24 @@ fn main() -> anyhow::Result<()> {
             let rows = dataset::read_feature_cache(&features)?;
             for split_kind in [SplitKind::Event, SplitKind::Temporal] {
                 let (train, holdout) = split_rows(&rows, split_kind, holdout_fraction);
+                let (fit_rows, val_rows) = fit_val_split(&train);
                 let split_name = match split_kind {
                     SplitKind::Event => "event",
                     SplitKind::Temporal => "temporal",
                 };
                 println!(
-                    "\n=== split={split_name} train={} holdout={} ===",
+                    "\n=== split={split_name} train={} (fit={} val={}) holdout={} ===",
                     train.len(),
+                    fit_rows.len(),
+                    val_rows.len(),
                     holdout.len()
                 );
-                print_report("B0 (mean)", &run_b0(&train, &holdout)?);
-                print_report("B1 (ridge)", &run_b1(&train, &holdout)?);
+                // Every model fits on the same `fit_rows` -- B0/B1 don't need a validation slice
+                // for early stopping, but training them on `train` in full while M1/M2 only see
+                // the 85% `fit` slice would give the baselines an undisclosed ~15%-more-data edge,
+                // confounding the head-to-head comparison (see `fit_val_split`'s own doc comment).
+                print_report("B0 (mean)", &run_b0(&fit_rows, &holdout)?);
+                print_report("B1 (ridge)", &run_b1(&fit_rows, &holdout)?);
                 let m1_config = mlp::TrainConfig {
                     epochs: 300,
                     patience: 30,
@@ -250,11 +295,11 @@ fn main() -> anyhow::Result<()> {
                 };
                 print_report(
                     "M1 (MLP, histogram)",
-                    &run_mlp(&train, &holdout, hist_input, 32, m1_config)?,
+                    &run_mlp(&fit_rows, &val_rows, &holdout, hist_input, 32, m1_config)?,
                 );
                 print_report(
                     "M2 (MLP, histogram+thumbnail)",
-                    &run_mlp(&train, &holdout, thumb_input, 64, m2_config)?,
+                    &run_mlp(&fit_rows, &val_rows, &holdout, thumb_input, 64, m2_config)?,
                 );
             }
         }
