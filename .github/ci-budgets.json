@@ -13,6 +13,7 @@
     "den (windows)": 10,
     "pelt (linux)": 6,
     "pelt (windows)": 6,
+    "den/pelt windows (required check gate)": 1,
     "retina (linux)": 4,
     "retina (windows)": 8
   },
