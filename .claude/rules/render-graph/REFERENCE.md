@@ -57,7 +57,10 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   `cache_contribution`/`impl_version` — and the graph-driven `Renderer`: a `Baked` node dispatches
   its `BakedExec` only on a `cache::Tier` miss; every `Live`/`Geometry` node fuses into exactly one
   `LiveExec`/`GeometryExec` dispatch each, keyed by a composite hash of its constituent nodes'
-  cache keys, sorted before hashing so it doesn't depend on the caller's slice order the way
+  cache keys plus its own upstream stage's key (the baked chain's for live, the live composite's
+  for geometry — otherwise an empty `live_nodes`/`geometry_nodes` slice, a real reachable state
+  before a `Live`-kind stage exists at all, would hash the same regardless of what upstream
+  produced), sorted before hashing so it doesn't depend on the caller's slice order the way
   `graph::RenderGraph::cache_key` already doesn't for upstream ids). Proven against counting mock
   stages: a live-only change costs 0 bake dispatches, a crop-only change costs 0 bake *and* 0 live
   dispatches, an identical re-render costs 0 of anything, undoing back to a prior baked state is a

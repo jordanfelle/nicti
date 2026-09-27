@@ -99,9 +99,15 @@ fn keyed_by_extent(key: blake3::Hash, extent: Extent) -> blake3::Hash {
     hasher.finalize()
 }
 
-/// Chains every named node's cache key into one composite hash, then folds in `extent` --
-/// the fused live/geometry dispatch's own cache key, invalidated iff any one of its constituent
-/// nodes' keys changed, or the target extent did. Sorted by id first (matching
+/// Chains `input_key` (the previous stage's own output key -- the last baked node's cache key
+/// for the live composite, or the live composite's own key for the geometry composite) with
+/// every named node's cache key into one composite hash, then folds in `extent`. `input_key` is
+/// what makes this correct even when `ids` is empty: `live_nodes`/`geometry_nodes` being empty is
+/// a real, reachable state (no `Live`-kind stage exists in the graph yet, e.g. before #45's later
+/// slices add one) -- without folding in the upstream stage's own key, an empty `ids` would give
+/// the same composite key on every render regardless of what its input actually produced,
+/// treating every render as a cache hit and never re-dispatching even though the baked chain (or
+/// the live output, for geometry) changed underneath it. Sorted by id first (matching
 /// `RenderGraph::cache_key`'s own convention for upstream ids), so this doesn't silently depend
 /// on the caller's slice order -- `live_nodes`/`geometry_nodes` is only guaranteed stable across
 /// calls when it comes from a fixed literal or `RenderGraph`'s own `topological_order`; a caller
@@ -110,11 +116,13 @@ fn keyed_by_extent(key: blake3::Hash, extent: Extent) -> blake3::Hash {
 fn composite_key(
     graph: &RenderGraph,
     ids: &[&str],
+    input_key: blake3::Hash,
     extent: Extent,
 ) -> Result<blake3::Hash, GraphError> {
     let mut sorted: Vec<&str> = ids.to_vec();
     sorted.sort_unstable();
     let mut hasher = blake3::Hasher::new();
+    hasher.update(input_key.as_bytes());
     for id in sorted {
         hasher.update(graph.cache_key(id)?.as_bytes());
     }
@@ -167,8 +175,11 @@ impl Renderer {
             });
 
         let mut current: Option<Arc<FrameTexture>> = None;
+        let mut baked_output_key: Option<blake3::Hash> = None;
         for (id, exec) in req.baked_chain {
-            let key = keyed_by_extent(req.graph.cache_key(id)?, req.extent);
+            let raw_key = req.graph.cache_key(id)?;
+            baked_output_key = Some(raw_key);
+            let key = keyed_by_extent(raw_key, req.extent);
             if let Some(cached) = self.baked_cache.get(&key) {
                 current = Some(Arc::clone(cached));
                 continue;
@@ -180,8 +191,10 @@ impl Renderer {
             current = Some(output);
         }
         let baked_output = current.ok_or(RenderError::EmptyBakedChain)?;
+        // `baked_chain` is non-empty (checked above), so the loop ran at least once.
+        let baked_output_key = baked_output_key.expect("baked_chain is non-empty");
 
-        let live_key = composite_key(req.graph, req.live_nodes, req.extent)?;
+        let live_key = composite_key(req.graph, req.live_nodes, baked_output_key, req.extent)?;
         let live_output = if self.live_key == Some(live_key) {
             Arc::clone(
                 self.live_output
@@ -198,7 +211,7 @@ impl Renderer {
             output
         };
 
-        let geometry_key = composite_key(req.graph, req.geometry_nodes, req.extent)?;
+        let geometry_key = composite_key(req.graph, req.geometry_nodes, live_key, req.extent)?;
         let geometry_output = if self.geometry_key == Some(geometry_key) {
             Arc::clone(
                 self.geometry_output
@@ -354,6 +367,63 @@ mod tests {
             width: 4,
             height: 4,
         }
+    }
+
+    #[test]
+    fn a_baked_change_still_forces_a_live_dispatch_with_no_live_nodes() {
+        // Regression test: composite_key must not treat an empty live_nodes/geometry_nodes slice
+        // as a constant key regardless of what upstream produced -- a graph with zero Live-kind
+        // stages wired in yet (a real, reachable state -- e.g. before #45's later slices add one)
+        // must still re-run the live/geometry pass when the baked chain's own output changes,
+        // not silently reuse a stale cached output forever after the first render.
+        let Some(gpu) = test_gpu() else { return };
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 1_000_000_000);
+
+        let g1 = hero_graph(&[]);
+        let chain1 = baked_chain(&g1, &baked_exec);
+        renderer
+            .render(&RenderRequest {
+                graph: &g1,
+                baked_chain: &chain1,
+                live: &live_exec,
+                live_nodes: &[],
+                geometry: &geom_exec,
+                geometry_nodes: &[],
+                extent: extent(),
+            })
+            .unwrap();
+        assert_eq!(renderer.last_stats().live_dispatches, 1);
+        assert_eq!(renderer.last_stats().geometry_dispatches, 1);
+
+        let g2 = hero_graph(&[("demosaic", b"demosaic-changed")]);
+        let chain2 = baked_chain(&g2, &baked_exec);
+        renderer
+            .render(&RenderRequest {
+                graph: &g2,
+                baked_chain: &chain2,
+                live: &live_exec,
+                live_nodes: &[],
+                geometry: &geom_exec,
+                geometry_nodes: &[],
+                extent: extent(),
+            })
+            .unwrap();
+        let stats = renderer.last_stats();
+        assert_eq!(
+            stats.bake_dispatches, 4,
+            "demosaic/denoise/lens/heal must still rebake"
+        );
+        assert_eq!(
+            stats.live_dispatches, 1,
+            "an empty live_nodes slice must not hide a changed baked upstream"
+        );
+        assert_eq!(
+            stats.geometry_dispatches, 1,
+            "an empty geometry_nodes slice must not hide a changed live upstream"
+        );
     }
 
     #[test]
