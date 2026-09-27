@@ -19,16 +19,23 @@ is the per-topic summary; those two are the full research trail.
   (`com.adobe.ag.library.collection`) from LRC's own per-module scratch state (`*.unsaved` kinds) —
   the real catalog had 1 real collection and 4 scratch rows. No smart collections existed to
   measure against; their rule-criteria mapping onto #23's filter bar stays a flagged follow-up.
-- **Develop settings (#46/#47/#49/#39/#42/#51)**: the `s = { Key = Value, ... }` Lua-literal format
-  ADR-0002 predicted, parsed by the `agprefs` crate (MIT) with **zero failures across 380,307 real
-  rows** — settles adopt-vs-hand-roll in `agprefs`'s favor. 197 distinct real keys, 191 (97%)
-  classified into an owner ticket by an exact-match table (grouped by real Develop-module panel,
-  not guessed from naming conventions — a first prefix-only draft missed 83/197 keys, mostly
-  `Enable*` panel toggles and per-channel HSL keys with no shared prefix). 6 keys are a real,
-  current gap: `FilterList`/`AllowFilters` (AI filter stack), `LensBlur` (synthetic depth blur),
-  `Preset`/`ToggleStyleAmount`/`ToggleStyleDigest` (preset bookkeeping) — none has an owner ticket
-  yet. Import policy: keep every row's raw LRC text verbatim in a provenance blob, translate only
-  what's needed at import time.
+- **Develop settings (#46/#47/#49/#39/#42/#51/#40/#52)**: the `s = { Key = Value, ... }`
+  Lua-literal format ADR-0002 predicted, parsed by the `agprefs` crate (MIT) with **zero failures
+  across 380,307 real rows** — settles adopt-vs-hand-roll in `agprefs`'s favor. 197 distinct real
+  keys, all classified into an owner ticket by an exact-match table (grouped by real Develop-module
+  panel, not guessed from naming conventions — a first prefix-only draft missed 83/197 keys, mostly
+  `Enable*` panel toggles and per-channel HSL keys with no shared prefix). **#157 resolved the 6
+  keys this pass originally left unowned** by measuring real presence/active usage rather than
+  guessing: `FilterList`/`AllowFilters` gate 4 distinct AI filters with very uneven real usage
+  (20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal entries, summing
+  to 20,357 across 20,356 active rows of 380,307 — one row holds 2 entries) — `classify_key`
+  defaults both to `#40` (dominant case), but #62's importer must inspect
+  each `FilterList.Filters[].Title` and route People/Reflection Removal to `#51` and Super
+  Resolution to the new `#174`. `LensBlur` is present in 380,300/380,307 rows but always as an
+  empty bookkeeping table (0 rows with real content, i.e. never actually used) — kept
+  provenance-only, no render-owning ticket. `Preset`/`ToggleStyleAmount`/`ToggleStyleDigest` are
+  style-preset bookkeeping → `#52`. Import policy: keep every row's raw LRC text verbatim in a
+  provenance blob, translate only what's needed at import time.
 - **`.lrcat-data` blobs**: ~590 files, ~270MB each, referenced by `hasBigData` (26,195 of 380,307
   develop-settings rows) — exact linkage unconfirmed, flagged as a follow-up, not resolved.
 - **#53 feasibility**: 380,300 assets, ~1.77M develop-history-step rows (~4.7/image) give a real,

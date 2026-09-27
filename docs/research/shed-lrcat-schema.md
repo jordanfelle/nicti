@@ -80,7 +80,8 @@ keyword↔asset links.
 
 `agprefs::Agpref::parse` against every `Adobe_imageDevelopSettings.text` row: **0 parse failures
 across 380,307 rows.** 197 distinct keys observed. `classify_key`'s exact-match table (built from
-this real key set, not guessed) sorts 191 (97%) to an owner ticket:
+this real key set, not guessed) now sorts every one of them to an owner (updated by #157, which
+resolved the 6 this pass originally left unowned):
 
 | Owner | Real key count | Panel(s) |
 |---|---|---|
@@ -88,14 +89,27 @@ this real key set, not guessed) sorts 191 (97%) to an owner ticket:
 | #46 global | 56 | Basic/Tone, Detail (sharpen + luminance NR), Effects (grain + vignette), HDR/SDR rendition, auto-tone, parametric curve |
 | #47 crop/geometry | 33 | Transform: crop, manual/auto perspective, Upright |
 | #39 lens | 24 | Lens Corrections: profile-based + manual distortion/vignette, defringe (CA) |
-| #51 heal | 7 | spot heal, clone stamp, legacy red-eye, AI distraction removal |
+| #51 heal | 7 | spot heal, clone stamp, legacy red-eye, AI distraction removal, AI People/Reflection Removal |
+| #40 AI denoise | 2 | `FilterList`/`AllowFilters`, key-level default -- see below |
 | #49 masks | 2 | local adjustment groups, range masks |
-| unowned | 6 | see below |
+| #52 presets | 3 | `Preset`, `ToggleStyleAmount`, `ToggleStyleDigest` |
+| provenance-only | 1 | `LensBlur` -- present everywhere, never actually used |
 
-**Unowned keys** (a real gap, not a classifier miss): `FilterList`, `AllowFilters` (Adobe's newer
-AI-filter stack, e.g. Denoise), `LensBlur` (synthetic depth-of-field), `Preset`,
-`ToggleStyleAmount`, `ToggleStyleDigest` (preset/style-toggle bookkeeping). None has an existing
-Nicti ticket.
+**#157's `shed develop-usage` measurement** (`analyze_unowned_keys`) resolved the original 6
+unowned keys (`FilterList`, `AllowFilters`, `LensBlur`, `Preset`, `ToggleStyleAmount`,
+`ToggleStyleDigest`) by counting real presence and active usage against this same catalog:
+
+- `FilterList`/`AllowFilters` gate 4 distinct AI filters, with real but very uneven usage:
+  **20,303 Denoise, 47 People Removal, 6 Super Resolution, 1 Reflection Removal** entries (of
+  380,307 rows), read from `FilterList.Filters[].Title` -- summing to 20,357 entries across 20,356
+  active rows (one row holds 2 `Filters[]` entries). `classify_key` is per-key, so it defaults both
+  to `#40` (the dominant case) -- `#62`'s importer must still inspect each `Filters[]` entry's
+  `Title` to route People/Reflection Removal to `#51` and Super Resolution to the new `#174`.
+- `LensBlur` is present in 380,300/380,307 rows but **always as an empty bookkeeping table**
+  (`{  }`) -- 0 rows had real content. The AI Lens Blur filter has never actually been used in this
+  catalog; kept verbatim in the provenance blob, no render-owning ticket.
+- `Preset`/`ToggleStyleAmount`/`ToggleStyleDigest` (960/11/11 rows respectively) are style-preset
+  apply/toggle bookkeeping, not develop parameters -> `#52`.
 
 `Enable*` boolean toggles (e.g. `EnableLensCorrections`, `EnableRetouch`, `EnableSplitToning`) are
 filed under the panel they gate rather than a separate bucket — this needed an exact-match table,
@@ -103,7 +117,7 @@ not prefix matching: a first draft using prefix/substring heuristics only classi
 (58%), missing every `Enable*` toggle (no shared prefix with its panel's other keys) and every
 per-channel HSL key from either naming generation (`BlueHue`/`SaturationAdjustmentBlue` share no
 common substring). The exact-match table plus a suffix/prefix fallback (for a key a *different*
-catalog might contain that this one didn't) closed that gap to 6 genuinely-unowned keys.
+catalog might contain that this one didn't) closed that gap, and #157 closed the remaining 6.
 
 Mask/AI flags: `hasMasks` set on 13,258/380,307 rows, `hasAIMasks` on 12,015, `hasBigData`
 (external large-data reference, see below) on 26,195. `processVersion`: 380,300 rows at `15.4`
@@ -138,7 +152,8 @@ against `shed`'s own reading wasn't completed this pass.
 ## What's real vs. deferred
 
 Real, measured this pass: table/column shapes (137 tables), all aggregate counts above, the
-`agprefs` parse-failure rate (0/380,307), the develop-key classification (191/197), the collection
+`agprefs` parse-failure rate (0/380,307), the develop-key classification (191/197 initially,
+197/197 after #157), the collection
 kind split, the root-folder drive-letter/relative-path split, and the `pick`/`rating` type gotcha.
 
 Deferred, not resolved here: `.lrcat-data` blob linkage, smart-collection rule-criteria mapping (no

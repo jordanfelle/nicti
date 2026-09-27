@@ -176,9 +176,17 @@ test passing against lavapipe; pure Rust, no FFI, not path-gated. See
 `docs/research/calico-color-pipeline.md`) is real, tested (26 unit tests + 3 integration tests),
 pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
 `spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
-reading plus a pre-commit privacy check against the real catalog's own keyword/path strings; see
-`docs/research/shed-lrcat-schema.md`) is real, tested (17 unit tests on Unix, 16 on Windows), not
-path-gated.
+reading plus a pre-commit privacy check against the real catalog's own keyword/path strings, plus
+#157's `develop-usage` subcommand (`analyze_unowned_keys`) which measured real presence/active-use
+counts for the 6 keys `classify_key` originally left unowned and resolved all of them to an owner
+(or `ProvenanceOnly`, for `LensBlur`'s confirmed-zero-real-usage case) — see
+`docs/research/shed-lrcat-schema.md`) is real, tested (19 unit tests on Unix, 18 on Windows), not
+path-gated. `spikes/siamese` (#48/ADR-0024's masking research: BiRefNet/MobileSAM segmentation
+scaffolding over `ort`/`load-dynamic` (no real weights, same posture as `groom/ai.rs`), the
+brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` AI+geometry
+compose model with a shared bake key for a mask and its inverse, a guided-filter preview-to-full-
+res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe; see
+`docs/research/siamese-masking.md`) is real, tested (23 unit + 9 GPU-parity tests), not path-gated.
 
 ## Development workflow
 
