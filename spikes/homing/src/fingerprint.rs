@@ -1,8 +1,14 @@
 //! #71's relink-to-an-unrecognized-volume candidates (the part merged in from duplicate #21):
 //! four fingerprint tiers, cheapest first, so `homing relink` can try (a) before paying for (d).
 //!
-//! (a) size+mtime+name is the cheapest and least reliable -- a file moved onto a new volume keeps
-//! its name and size but not always its mtime (some copy tools reset it).
+//! (a) size+name is the cheapest and least reliable -- a file moved onto a new volume keeps its
+//! size and name, but either alone (or both, for two different files that happen to share them)
+//! is a weak signal with no content check behind it at all. `SizeNameKey` deliberately carries no
+//! mtime: mtime survives even less reliably across a copy than size/name do (some copy tools
+//! reset it on write), so it was dropped from this tier rather than included and then ignored --
+//! this doc comment previously said "size+mtime+name," a stale description from an earlier draft
+//! that never matched `SizeNameKey`'s actual fields (caught while cross-checking LRC's own
+//! `md5`/`importHash` against these tiers for #158).
 //! (b) partial BLAKE3 (first+last 64KB) is a fast, order-of-magnitude proxy for full-content
 //! identity -- cheap enough to run at import time on every file.
 //! (c) full-file BLAKE3 is the ground truth for "these bytes are identical," but its DNG

@@ -37,6 +37,10 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
 - **`shed`'s `open_backup` guard**: refuses a `.lock`/`-wal` sibling only when it has real content
   — a plain read-only open of an already-closed WAL-mode catalog leaves harmless zero-byte
   siblings behind, and presence-alone was a real false-positive this pass hit and fixed.
+- **`AgLibraryFile.md5` is unusable for relink/dedupe — never populated (#158/ADR-0158)**: 0/380,298
+  rows non-NULL in the real catalog, across every extension. `importHash` is 99.97% present and
+  100% distinct among non-NULL values (no duplicate groups) — shaped like a per-file identifier,
+  but its derivation is unconfirmed, so #62 keeps it provenance-only, not a relink/dedupe input.
 
 ## Package contents
 
@@ -45,5 +49,9 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   keyword/path strings, plus #157's `develop-usage` subcommand (`analyze_unowned_keys`) which
   measured real presence/active-use counts for the 6 keys `classify_key` originally left unowned
   and resolved all of them to an owner (or `ProvenanceOnly`, for `LensBlur`'s confirmed-zero-real-
-  usage case). Real, tested (19 unit tests on Unix, 18 on Windows), not path-gated. See
-  `docs/research/shed-lrcat-schema.md`.
+  usage case), plus #158's `hash-stats`/`verify-md5` subcommands (`hashes.rs`) which found
+  `AgLibraryFile.md5` unusable for `spikes/homing`'s relink tiers (never populated, 0/380,298 real
+  rows) and `importHash` provenance-only (present and unique per-file, but its derivation is
+  unconfirmed). Real, tested (38 unit tests on Unix, 37 on Windows — the one Unix-only test,
+  `open.rs`'s pre-existing URI-special-character case, predates #158 and is unrelated to it), not
+  path-gated. See `docs/research/shed-lrcat-schema.md` and `docs/adr/0158-lrc-hash-relink-seeding.md`.
