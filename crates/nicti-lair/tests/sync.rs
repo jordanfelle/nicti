@@ -65,7 +65,9 @@ fn remove_missing_deletes_the_row_and_its_preview_and_updates_facet_counts() {
     let path = write_fake_raw(dir.path(), "a.NEF", 1);
 
     sync_root(&store, root_id, dir.path(), &SyncOptions::default()).unwrap();
-    assert_eq!(store.facet_count(None, 0).unwrap(), 1);
+    // Ingest never sets a rating, so a freshly-cataloged asset is unrated (`None`), not `Some(0)`
+    // (#23 made "unrated" distinct from "0 stars").
+    assert_eq!(store.facet_count(None, None).unwrap(), 1);
     std::fs::remove_file(&path).unwrap();
 
     let opts = SyncOptions {
@@ -80,7 +82,7 @@ fn remove_missing_deletes_the_row_and_its_preview_and_updates_facet_counts() {
         .unwrap()
         .is_none());
     assert_eq!(
-        store.facet_count(None, 0).unwrap(),
+        store.facet_count(None, None).unwrap(),
         0,
         "facet count must drop along with the removed asset"
     );

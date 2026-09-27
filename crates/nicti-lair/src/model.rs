@@ -16,7 +16,11 @@ pub struct Asset {
     pub make: Option<String>,
     pub model: Option<String>,
     pub captured_at: Option<String>,
-    pub rating: i64,
+    /// `None` = unrated, `Some(-1)` = reject, `Some(0..=5)` = star rating (ADR-0059/0061).
+    pub rating: Option<i64>,
+    /// `None` = unflagged, `Some(1)` = pick.
+    pub flag: Option<i64>,
+    pub label: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub imported_at: i64,

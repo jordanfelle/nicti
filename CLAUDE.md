@@ -147,7 +147,9 @@ terse index: crate/spike → purpose → owning topic.
   removing) any asset whose file has disappeared, and reporting any folder whose every asset is
   now missing; an unresolvable root touches nothing, deferring to ADR-0071's offline-volume path.
   Both run serially; Pounce integration is a follow-up. See `catalog-engine`/`volume-identity`/
-  `preview-tiers` topics for the design this promotes.
+  `preview-tiers` topics for the design this promotes. **#23 (landing as a 4-PR stack)** extends
+  this crate further — see the `catalog-engine` topic's own "Package contents" section, not
+  duplicated here.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,

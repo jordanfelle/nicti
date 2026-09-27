@@ -124,9 +124,26 @@ pub trait CatalogStore: Module {
     /// suspected.
     fn clear_preview(&self, asset_id: i64, tier: PreviewTier) -> Result<(), CatalogError>;
 
-    /// Reads the trigger-maintained `(model, rating)` facet count (ADR-0103) — used by ingest's
-    /// tests to check the triggers stay consistent, and by any future facet-filtered browse view.
-    fn facet_count(&self, model: Option<&str>, rating: i64) -> Result<u64, CatalogError>;
+    /// Reads the trigger-maintained `(model, rating)` facet count (ADR-0103), summed across every
+    /// online volume — used by ingest's tests to check the triggers stay consistent, and by any
+    /// future facet-filtered browse view. `rating: None` reads the unrated bucket; `Some(-1)`
+    /// reads reject; `Some(0..=5)` reads a star rating.
+    fn facet_count(&self, model: Option<&str>, rating: Option<i64>) -> Result<u64, CatalogError>;
+
+    /// Sets (or clears, with `None`) the rating on every listed asset in one statement — so a
+    /// culling `rate_burst` across a multi-selection is one commit, not one per asset. A no-op on
+    /// an empty slice. `rating` must be `None`, `-1` (reject), or `0..=5` (star rating) — anything
+    /// else fails the schema's own `CHECK` constraint.
+    fn set_rating(&self, asset_ids: &[i64], rating: Option<i64>) -> Result<(), CatalogError>;
+
+    /// Sets (or clears, with `None`) the pick flag on every listed asset in one statement. A no-op
+    /// on an empty slice. `flag` must be `None` or `1` (pick) — anything else fails the schema's
+    /// own `CHECK` constraint.
+    fn set_flag(&self, asset_ids: &[i64], flag: Option<i64>) -> Result<(), CatalogError>;
+
+    /// Sets (or clears, with `None`) the free-text label on every listed asset in one statement. A
+    /// no-op on an empty slice.
+    fn set_label(&self, asset_ids: &[i64], label: Option<&str>) -> Result<(), CatalogError>;
 
     /// Every asset registered under this root, in `id` order. `patrol::sync_root` (#24) uses this
     /// to find rows whose file it needs to check for, since ingest only ever walks the disk and

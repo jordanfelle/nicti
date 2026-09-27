@@ -394,10 +394,11 @@ fn facet_counts_stay_consistent_with_inserted_assets() {
     let root_id = store.ensure_root(volume_id, "").unwrap();
     ingest_root(&store, root_id, dir.path()).unwrap();
 
-    // Neither synthetic file carries a Make/Model EXIF tag, so both land in the "" bucket at the
-    // default rating (0) -- this asserts the *count*, not real camera-model faceting (no EXIF
-    // Make/Model tag is set by `build_synthetic_nef`).
-    assert_eq!(store.facet_count(None, 0).unwrap(), 2);
+    // Neither synthetic file carries a Make/Model EXIF tag, so both land in the "" bucket,
+    // unrated -- this asserts the *count*, not real camera-model faceting (no EXIF Make/Model tag
+    // is set by `build_synthetic_nef`), and that a fresh insert leaves rating as NULL/unrated
+    // rather than defaulting to 0 stars.
+    assert_eq!(store.facet_count(None, None).unwrap(), 2);
 }
 
 #[test]
