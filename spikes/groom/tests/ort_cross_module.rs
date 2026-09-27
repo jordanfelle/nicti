@@ -19,9 +19,12 @@
 //! **Run this directly, not through `cargo test`'s harness process**: `spikes/litter/src/embed.rs`
 //! documents a known `ort`/`load-dynamic` static-destructor-ordering segfault on process exit
 //! after a real dylib load succeeds -- the test's own assertions still pass and print before that,
-//! but `cargo test`'s harness reports the child's segfault as a failure regardless. Build with
-//! `cargo test -p groom --test ort_cross_module -- --ignored --nocapture` and run the resulting
-//! binary under `target/debug/deps/` directly to see the real pass/fail signal.
+//! but `cargo test`'s harness reports the child's segfault as a failure regardless, since it
+//! judges pass/fail by the test process's exit status, not by what it printed before exiting.
+//! Build without running via `cargo test -p groom --test ort_cross_module --no-run`, then run the
+//! resulting binary directly (path printed by that command, under `target/debug/deps/`) with
+//! `--ignored --nocapture` -- the printed assertion output is the real pass/fail signal, not the
+//! process's exit status.
 
 #[test]
 #[ignore = "needs a real ONNX Runtime shared library on disk"]
