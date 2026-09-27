@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use crate::frame::{read_frame, Extent, FrameTexture};
+use crate::frame::{padded_bytes_per_row, read_frame, Extent, FrameTexture};
 use crate::geometry::Affine2D;
 use crate::gpu::GpuContext;
 use crate::renderer::GeometryExec;
@@ -76,10 +76,38 @@ pub struct TileBudget {
 
 const BYTES_PER_PIXEL: u64 = 8; // Rgba16Float
 
+/// The real, padded readback allocation size for a square `dim x dim` tile, matching
+/// `frame::read_frame`'s own `padded_bytes_per_row(width) * height` exactly (never the smaller,
+/// unpadded `width * height * bytes_per_pixel` estimate) -- `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`
+/// (256 bytes) can round a row up past what the raw pixel count alone would suggest, so a caller
+/// that only budgeted the unpadded size could see an actual host allocation exceed
+/// `max_staging_bytes` (CodeRabbit, #45 PR4).
+fn padded_staging_bytes(dim: u32) -> u64 {
+    u64::from(padded_bytes_per_row(dim)) * u64::from(dim)
+}
+
 fn core_size_from_budget(halo_px: u32, budget: TileBudget) -> u32 {
     let cap_from_dim = budget.max_dim.saturating_sub(2 * halo_px).max(1);
-    let max_padded_dim_from_bytes =
-        ((budget.max_staging_bytes / BYTES_PER_PIXEL) as f64).sqrt() as u32;
+
+    // sqrt(max_staging_bytes / bytes_per_pixel) is an upper bound on the padded dimension (row
+    // alignment only ever adds bytes, never removes them), then walk downward until the real,
+    // padded allocation size actually fits -- at most COPY_BYTES_PER_ROW_ALIGNMENT /
+    // BYTES_PER_PIXEL (32) steps, since alignment can round a row up by less than one alignment
+    // granularity's worth of pixels. Clamped to a safe ceiling before that: a caller passing an
+    // effectively unbounded `max_staging_bytes` (relying on `max_dim` alone to constrain size, a
+    // real pattern this crate's own tests use) would otherwise produce an estimate whose
+    // `padded_staging_bytes` computation overflows u32 arithmetic -- harmless to clamp, since
+    // `cap_from_bytes` is `min`'d against `cap_from_dim` below regardless, and no real
+    // `max_dim`/`max_texture_dimension_2d` gets anywhere near this ceiling.
+    const SAFE_DIM_CEILING: u32 = 1 << 16;
+    let mut max_padded_dim_from_bytes =
+        (((budget.max_staging_bytes / BYTES_PER_PIXEL) as f64).sqrt() as u32).min(SAFE_DIM_CEILING);
+    while max_padded_dim_from_bytes > 1
+        && padded_staging_bytes(max_padded_dim_from_bytes) > budget.max_staging_bytes
+    {
+        max_padded_dim_from_bytes -= 1;
+    }
+
     let cap_from_bytes = max_padded_dim_from_bytes.saturating_sub(2 * halo_px).max(1);
     cap_from_dim.min(cap_from_bytes)
 }
@@ -406,6 +434,41 @@ mod tests {
             assert!(
                 bytes <= budget.max_staging_bytes,
                 "tile {tile:?} exceeds byte budget"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_padded_tiles_stay_within_the_real_row_aligned_readback_size() {
+        // Regression test for a real gap CodeRabbit found: budgeting only the *unpadded*
+        // width*height*bytes_per_pixel size can produce a dimension whose actual, row-aligned
+        // `frame::read_frame` allocation exceeds `max_staging_bytes` -- picked so the naive
+        // unpadded ideal dimension (1000, not a multiple of 32) genuinely straddles this: at
+        // width=1000, an unpadded row is 8000 bytes, but COPY_BYTES_PER_ROW_ALIGNMENT (256)
+        // rounds that up to 8192, so a real 1000x1000 readback is 8,192,000 bytes -- over an
+        // 8,000,000-byte budget the unpadded math alone would call compliant.
+        let extent = Extent {
+            width: 4096,
+            height: 4096,
+        };
+        let roi = Rect {
+            x: 0,
+            y: 0,
+            width: 4096,
+            height: 4096,
+        };
+        let budget = TileBudget {
+            max_dim: 4096,
+            max_staging_bytes: 1000 * 1000 * BYTES_PER_PIXEL,
+            target_chunk_ms: 8.0,
+        };
+        for tile in TilePlanner::plan(extent, roi, 4, budget) {
+            let real_bytes =
+                u64::from(padded_bytes_per_row(tile.padded.width)) * u64::from(tile.padded.height);
+            assert!(
+                real_bytes <= budget.max_staging_bytes,
+                "tile {tile:?}: real padded readback size {real_bytes} exceeds budget {}",
+                budget.max_staging_bytes
             );
         }
     }

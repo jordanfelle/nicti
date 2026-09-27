@@ -71,7 +71,11 @@ jobs:
     - name: Scope rust workspace to shipping crates (skip CodeQL commit)
       if: matrix.language == 'rust'
       run: |
-        sed -i 's/members = \[".", "crates\/\*", "spikes\/\*", "bench\/whisker"\]/members = [".", "crates\/*"]/' Cargo.toml
+        # Matches the whole `members = [...]` line regardless of its current contents (CodeRabbit,
+        # #45 PR4: the previous version hardcoded the exact old member list and silently stopped
+        # matching -- a no-op, not an error -- the moment that list changed, e.g. bench/knead's
+        # addition) rather than pinning to one specific snapshot of the real workspace members.
+        sed -i 's/^members = \[.*\]$/members = [".", "crates\/*"]/' Cargo.toml
         grep -q '^members = \[".", "crates/\*"\]$' Cargo.toml
 
     # Add any setup steps before running the `github/codeql-action/init` action.

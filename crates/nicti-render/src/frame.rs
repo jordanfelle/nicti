@@ -63,8 +63,10 @@ impl FrameTexture {
 const BYTES_PER_PIXEL: u32 = 8; // Rgba16Float: 4 channels x 2 bytes
 
 /// WebGPU requires a buffer<->texture copy's row stride to be a multiple of
-/// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256).
-fn padded_bytes_per_row(width: u32) -> u32 {
+/// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256). `pub(crate)` so `tile.rs`'s own staging-byte
+/// budget math can account for the real, padded readback allocation size rather than an
+/// unpadded estimate (CodeRabbit, #45 PR4).
+pub(crate) fn padded_bytes_per_row(width: u32) -> u32 {
     let unpadded = width * BYTES_PER_PIXEL;
     unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
 }
