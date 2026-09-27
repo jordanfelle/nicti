@@ -135,6 +135,18 @@ host at install time; the other six extension points in ADR-0019 §7 remain thir
   including a tight compute loop with no host-call boundary, since the compiler inserts epoch
   checks at both function entries *and loop back-edges*[^9]. The module's registry entry flips to
   quarantined (persisted) so it isn't reinstantiated until explicitly re-enabled.
+- **Two further bounds on "immediate," not fully resolved here**: (1) a `network` call already
+  blocked inside the host's own `outgoing-handler` implementation (waiting on a slow or hung
+  remote) is host-side execution, not guest WASM — epoch checks only fire in compiled guest code,
+  so a kill doesn't interrupt that blocking host call by itself; the host's `outgoing-handler`
+  needs its own request timeout so a kill's worst-case latency stays bounded by that timeout, not
+  by the remote. (2) A large bulk-memory operation (e.g. a big `memory.copy`/`memory.fill`) may
+  compile to a tight native loop without an epoch check per byte, so its own worst-case duration
+  can add to kill latency; whoever implements this should verify wasmtime's actual bulk-memory
+  interruption granularity against the version shipped, and consider a `ResourceLimiter`/heap-size
+  cap as an additional bound if it isn't fine-grained enough — **this ADR doesn't claim
+  "immediate" is unconditionally true and shouldn't be read that way** until an implementation
+  measures and, if needed, bounds both of these.
 - **`gpu` constraint — epoch interruption does not stop already-submitted GPU work**: if a killed
   module already called a host import that submitted a GPU command buffer (a compute-shader
   dispatch, per ADR-0019 §6's direction for any future third-party render-adjacent work),
