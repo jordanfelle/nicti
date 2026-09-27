@@ -1,11 +1,11 @@
-//! Rough per-photo byte sizes, printed for the ADR's 2M-asset sizing table.
-//! Not an assertion of a specific number (that would make the test brittle
-//! against encoding tweaks) — just a documented order-of-magnitude check
-//! plus a sanity ceiling so a regression that bloats the format loudly fails
-//! CI instead of silently landing in the ADR's numbers.
+//! Rough per-photo byte sizes, printed for the ADR's 2M-asset sizing table. Not an assertion of a
+//! specific number (that would make the test brittle against encoding tweaks) -- just a
+//! documented order-of-magnitude check plus a sanity ceiling so a regression that bloats the
+//! format loudly fails CI instead of silently landing in the ADR's numbers. Promoted from
+//! `spikes/pawprint/tests/sizing.rs`.
 
-use pawprint::history::History;
-use pawprint::{EditDocument, StageEntry};
+use nicti_pawprint::history::History;
+use nicti_pawprint::{EditDocument, StageEntry};
 use serde_json::json;
 
 fn realistic_document() -> EditDocument {
@@ -57,9 +57,8 @@ fn per_photo_document_and_history_sizes() {
     let document_bytes = serde_json::to_vec(&doc).unwrap().len();
 
     let mut history = History::new(EditDocument::default());
-    // A realistic-ish edit session: a handful of coarse steps, each of
-    // which started life as a multi-tick slider drag that compaction
-    // collapsed to one entry (proven separately in
+    // A realistic-ish edit session: a handful of coarse steps, each of which started life as a
+    // multi-tick slider drag that compaction collapsed to one entry (proven separately in
     // history_and_compaction.rs), plus one named snapshot.
     for stage_id in [
         "white_balance",
@@ -73,9 +72,8 @@ fn per_photo_document_and_history_sizes() {
     }
     history.snapshot("v1 edit");
 
-    // Actually serialize the log rather than guessing a per-entry constant
-    // — the snapshot entry alone carries a full document copy, which a hand
-    // -picked estimate would badly undercount.
+    // Actually serialize the log rather than guessing a per-entry constant -- the snapshot entry
+    // alone carries a full document copy, which a hand-picked estimate would badly undercount.
     let history_bytes = history.serialized_len();
 
     println!(
@@ -83,9 +81,8 @@ fn per_photo_document_and_history_sizes() {
         history.len()
     );
 
-    // Sanity ceilings, not tight assertions — catch a format regression
-    // (e.g. someone switching to an uncompacted verbose encoding) without
-    // hand-tuning an exact byte count into the test.
+    // Sanity ceilings, not tight assertions -- catch a format regression (e.g. someone switching
+    // to an uncompacted verbose encoding) without hand-tuning an exact byte count into the test.
     assert!(
         document_bytes < 2_000,
         "a single edit document should stay well under 2KB"

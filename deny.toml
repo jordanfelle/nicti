@@ -170,7 +170,7 @@ name = "i-slint-renderer-software"
 allow = ["LGPL-2.1"]
 name = "rawler"
 
-# publish = false workspace crates carry no SPDX license (nicti, pawprint, whisker) -- this exempts
+# publish = false workspace crates carry no SPDX license (nicti, whisker) -- this exempts
 # them from the license check entirely rather than failing on our own unlicensed-by-design internal
 # crates (verified: `cargo deny check licenses` passes with them Unlicensed and this set to true;
 # flipping it to false reintroduces them as failures).

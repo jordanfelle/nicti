@@ -2,7 +2,7 @@
 paths:
   - "crates/nicti-claw/**"
   - "crates/dewclaw/**"
-  - "spikes/pawprint/**"
+  - "crates/nicti-pawprint/**"
   - "src/**"
   - "Cargo.toml"
 ---
@@ -35,5 +35,9 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   Generalized from the now-deleted `spikes/sheath` spike.
 - **`crates/dewclaw`** — test fixture (cdylib) for `nicti-claw`'s dylib tests, generalized from the
   now-deleted `spikes/dewclaw`.
-- **`spikes/pawprint`** (#21/ADR-0021) — edit-document hashing, history/compaction, and XMP
-  round-trip proof.
+- **`crates/nicti-pawprint`** (#21/#44/#45/ADR-0021, landed) — `EditDocument`/`StageEntry`
+  (`lib.rs`), canonical-JSON + blake3 stage hashing generalized to Tapetum's DAG (`canonical.rs`,
+  merges `spikes/pawprint`'s original one-upstream `hash_stage`/`cache_key` with
+  `spikes/loaf/src/hash.rs`'s DAG-generalized `chain`), and append-only edit history with
+  slider-drag compaction (`history.rs`) — promoted from `spikes/pawprint` (now deleted). Its XMP
+  round-trip proof stayed with #59/`spikes/scent` rather than being promoted here.

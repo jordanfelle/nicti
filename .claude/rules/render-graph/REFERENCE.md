@@ -2,6 +2,7 @@
 paths:
   - "spikes/loaf/**"
   - "crates/nicti-render/**"
+  - "crates/nicti-pawprint/**"
   - "docs/adr/0044-stage-cached-render-graph.md"
 ---
 
@@ -15,11 +16,16 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   heal/remove` → neutral branch `neutral_render → mask_bake` (decoupled from live sliders) → one
   fused live dispatch `WB → HueSatMap → exposure → tone → vibrance → mask compose/apply` → crop as
   an affine sample pass over the live suffix's own output only.
-- **Cache key**: `spikes/loaf/src/hash.rs::chain` generalizes ADR-0021's flat one-upstream chain to
-  a DAG; `graph.rs::RenderGraph::cache_key`/`invalidated_bakes` are the tested, structural proof
-  that a live-slider change triggers zero bake dispatches.
-- **Cache tiers**: `cache.rs::Tier<V>` — byte-budgeted LRU, generic over `size_of`, backs
-  VRAM/RAM/disk. Full-res (8280×5520) frame ≈349MB, screen-res (3840 long edge) ≈75MB.
+- **Cache key**: `nicti_pawprint::chain` generalizes ADR-0021's flat one-upstream chain to a DAG;
+  `nicti_render::graph::RenderGraph::cache_key`/`invalidated_bakes`/`set_own_hash` are the tested,
+  structural proof that a live-slider change triggers zero bake dispatches — **landed in #45**
+  (promoted from `spikes/loaf/src/graph.rs`; `set_own_hash` is the "update a node in place" API
+  the spike's own tests lacked).
+- **Cache tiers**: `nicti_render::cache::Tier<V>` — byte-budgeted LRU, generic over `size_of`,
+  backs VRAM/RAM/disk. Full-res (8280×5520) frame ≈349MB, screen-res (3840 long edge) ≈75MB.
+  **Landed in #45** (promoted from `spikes/loaf/src/cache.rs`, with its self-documented `O(n)`
+  `touch` replaced by an `O(log n)` generation-counter `BTreeMap`). The disk-tier codec (zstd/lz4)
+  stayed with #190, which needs real baked output to choose against.
 - **Disk compression**: zstd/lz4 both round-trip; synthetic-gradient ratios (~3688×/~247×) are
   **not** a real-photo promise — see follow-up #190.
 - **Mask refine**: `refine.rs::guided_upsample` — ported from `spikes/siamese/src/refine.rs`
@@ -40,13 +46,25 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 
 ## Package contents
 
-- **`spikes/loaf`** (#44/ADR-0044's stage-cached render-graph research) — a stage DAG
-  (`graph.rs`) with pawprint-style upstream-chained cache keys generalized to a DAG (`hash.rs`),
-  byte-budgeted VRAM/RAM/disk cache tiers (`cache.rs`), crop as a geometry-only affine sample pass
-  (`geometry.rs`), a guided-filter mask refine ported from `spikes/siamese` (`refine.rs`), three
-  `wgpu` kernels (`gpu.rs`: `live_suffix`, `present_sample`, `box_filter`) each with a
-  persistent-buffer `*Kernel` type for repeated-call timing, nearest-to-cursor bake prioritization
-  (`prefetch.rs`), and a discrete-event simulation of the #43 hero scenario's bake queue
-  (`sim.rs`). `src/bin/loaf.rs` exposes `graph`/`bench`/`sim` subcommands. Real, tested (32 unit +
-  3 GPU-parity tests), not path-gated — measured on the real reference RTX 5080 via the documented
-  cross-compile-to-Windows path, not just lavapipe. See `docs/research/loaf-render-graph.md`.
+- **`crates/nicti-render`** (#45, landed) — `graph.rs` (the stage DAG, `RenderGraph`/`StageNode`/
+  `StageKind`, promoted from `spikes/loaf/src/graph.rs` with a persistent memoized cache key and
+  the `set_own_hash` update API the spike lacked), `cache.rs` (`Tier<V>`, promoted from
+  `spikes/loaf/src/cache.rs` with an `O(log n)` touch), `prefetch.rs` (`priority_order`, promoted
+  as-is). The `RenderStage` execution trait itself (GPU buffer bindings, the fused live-suffix
+  dispatch) is still open — #45's own GPU slice.
+- **`crates/nicti-pawprint`** (#21/#44/#45, landed) — `EditDocument`/`StageEntry`/`history`
+  (promoted from `spikes/pawprint`) plus `canonical::{hash_value, chain}` (merging pawprint's
+  original one-upstream `hash_stage`/`cache_key` with `spikes/loaf/src/hash.rs`'s DAG-generalized
+  `chain` — `nicti_render::graph` is the DAG consumer of this hashing scheme).
+- **`spikes/loaf`** (#44/ADR-0044's stage-cached render-graph research; slated for deletion once
+  #45's remaining GPU slices land) — crop as a geometry-only affine sample pass (`geometry.rs`), a
+  guided-filter mask refine ported from `spikes/siamese` (`refine.rs`), three `wgpu` kernels
+  (`gpu.rs`: `live_suffix`, `present_sample`, `box_filter`) each with a persistent-buffer `*Kernel`
+  type for repeated-call timing, and a discrete-event simulation of the #43 hero scenario's bake
+  queue (`sim.rs`). `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` are now duplicated in
+  `crates/nicti-render`/`crates/nicti-pawprint` above (promoted, not moved, since the spike's
+  GPU/geometry/sim modules aren't promoted yet) — this copy is retained only until the whole spike
+  is deleted alongside #45's later PRs. `src/bin/loaf.rs` exposes `graph`/`bench`/`sim`
+  subcommands. Real, tested (32 unit + 3 GPU-parity tests), not path-gated — measured on the real
+  reference RTX 5080 via the documented cross-compile-to-Windows path, not just lavapipe. See
+  `docs/research/loaf-render-graph.md`.

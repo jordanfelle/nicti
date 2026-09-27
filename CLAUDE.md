@@ -85,10 +85,20 @@ terse index: crate/spike → purpose → owning topic.
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
-- **`crates/nicti-color`/`nicti-lens`/`nicti-render`/`nicti-ai`/`nicti-export`**
+- **`crates/nicti-color`/`nicti-lens`/`nicti-ai`/`nicti-export`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
-  `ColorProfile` (#38/#42), `LensCorrection` (#39), `RenderStage`
-  (Tapetum's future home, #44/#45), `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
+  `ColorProfile` (#38/#42), `LensCorrection` (#39),
+  `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
+- **`crates/nicti-render`** — the `RenderStage` extension point (execution signature still open,
+  #45's own GPU slice) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes
+  with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted VRAM/RAM/disk cache
+  tiers (`cache.rs`), and nearest-to-cursor bake prioritization (`prefetch.rs`) — promoted from
+  `spikes/loaf`. See [`render-graph`](.claude/rules/render-graph/REFERENCE.md)
+- **`crates/nicti-pawprint`** — the non-destructive `EditDocument`/`StageEntry` (ADR-0021), its
+  canonical-JSON + blake3 stage hashing (`canonical.rs`, feeding `nicti-render::graph`'s cache
+  key), and append-only edit history with slider-drag compaction (`history.rs`) — promoted from
+  `spikes/pawprint` (#21) and `spikes/loaf`'s DAG-generalized `hash::chain` (#44/#45). See
+  [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-decode`** — `RawDecoder` extension point plus its real implementation (#41,
   landed): `LibRawDecoder`/`decode_linear` (promoted from `spikes/retina`'s `libraw_ffi.rs` —
   the FFI wrapper, `shim.cpp`/`shim.h`, `build.rs`, and the vendored `LibRaw` git submodule all

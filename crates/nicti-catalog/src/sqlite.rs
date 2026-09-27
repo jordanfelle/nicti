@@ -12,12 +12,12 @@ use crate::{Asset, CatalogError, CatalogStore, NewAsset, Preview, PreviewTier};
 use nicti_claw::Module;
 
 /// The empty `EditDocument` shape (`{ stages: BTreeMap<String, StageEntry> }`, ADR-0021),
-/// serialized by hand rather than depending on `spikes/pawprint` (a spike crate — not something
-/// production code builds on top of, per this repo's package-map convention). Whichever ticket
-/// promotes `pawprint`'s `EditDocument` to a production crate can replace this literal with a real
-/// `serde_json::to_string(&EditDocument::default())` call; the on-disk shape is identical either
-/// way.
-const EMPTY_EDIT_DOCUMENT: &str = r#"{"stages":{}}"#;
+/// serialized from the real `nicti_pawprint::EditDocument` (#45 promoted it from `spikes/pawprint`)
+/// rather than a hand-written literal, so this can never drift from that type's actual shape.
+fn empty_edit_document() -> String {
+    serde_json::to_string(&nicti_pawprint::EditDocument::default())
+        .expect("EditDocument always serializes")
+}
 
 pub struct SqliteCatalog {
     conn: Mutex<Connection>,
@@ -226,7 +226,7 @@ impl CatalogStore for SqliteCatalog {
             "INSERT INTO edit_variant (asset_id, name, is_master, document) \
              VALUES (?1, 'master', 1, ?2) \
              ON CONFLICT(asset_id, name) DO NOTHING",
-            params![asset_id, EMPTY_EDIT_DOCUMENT],
+            params![asset_id, empty_edit_document()],
         )?;
         match t0_preview {
             Some(preview) => tx.execute(
@@ -338,5 +338,15 @@ impl CatalogStore for SqliteCatalog {
             )
             .optional()?;
         Ok(cnt.unwrap_or(0) as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::empty_edit_document;
+
+    #[test]
+    fn empty_edit_document_matches_the_on_disk_shape_adr_0021_documents() {
+        assert_eq!(empty_edit_document(), r#"{"stages":{}}"#);
     }
 }

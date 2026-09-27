@@ -15,11 +15,17 @@ tiers, crop-as-geometry, mask refine reuse, and the bake-scheduling contract it 
   an arbitrary DAG (`spikes/loaf/src/hash.rs::chain`, `graph.rs::RenderGraph::cache_key`) — a
   node's key changes iff its own params changed or any upstream node's did, proven both directions
   in `graph.rs`'s tests. Changing a live-suffix stage's params triggers **zero** bake dispatches, a
-  structural graph property, not a timing coincidence.
+  structural graph property, not a timing coincidence. **Landed in #45** as
+  `crates/nicti-pawprint::chain` (the hashing) plus `crates/nicti-render::graph::RenderGraph` (the
+  DAG), with `set_own_hash` added as the missing "update a node in place" API — the spike's own
+  cache-key test had no way to change one node without reconstructing the whole graph.
 - **Cache tiers**: `spikes/loaf/src/cache.rs::Tier<V>`, a byte-budgeted LRU generic over a
   `size_of` closure, backs VRAM/RAM/disk with different budgets from the same eviction logic. A
   full-res (8280×5520) RGBA16F frame is ~349MB, a screen-res (3840-long-edge) frame is ~75MB — a
-  resident N±2 screen-res window is under 2.5% of the reference machine's 16GB VRAM.
+  resident N±2 screen-res window is under 2.5% of the reference machine's 16GB VRAM. **Landed in
+  #45** as `crates/nicti-render::cache::Tier<V>`, with the spike's own self-documented `O(n)`
+  linear-scan `touch` replaced by an `O(log n)` generation-counter `BTreeMap` (the eviction/budget
+  semantics are unchanged; the disk-tier codec itself stayed with #190).
 - **Disk-tier compression**: zstd and lz4 both round-trip losslessly; a synthetic screen-res
   gradient compressed ~3688×/~247× respectively — explicitly not a real-photo promise (see
   follow-up #190), included only for real round-trip/timing evidence on a realistically-sized
