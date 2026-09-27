@@ -24,3 +24,11 @@ Full reasoning/history: `docs/decisions/culling.md`.
   density); `E:\cf\*.dd` is blank. Real measurement waits on the user's next con — see #180.
 - **`litter draft`'s `label.html` is local-only, never published** — real third-party photos +
   past artifact size limits at con scale.
+
+## Package contents
+
+- **`spikes/litter`** (#33/ADR-0025's burst/duplicate-grouping research) — EXIF/Nikon-MakerNote
+  capture-time reader, dHash/pHash/SSIM/DINOv2 similarity signals, two-level
+  sequence-constrained grouping. Real, tested (35 unit/integration tests), not path-gated,
+  pending the reference-labelling measurement pass ADR-0025 describes. See
+  `docs/research/litter-burst-grouping.md`.

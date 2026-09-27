@@ -34,3 +34,12 @@ Full reasoning/history: `docs/decisions/masking.md`.
 - **No real ONNX weights** — same "prove the loading shape, not real inference" posture as
   `spikes/groom/src/ai.rs` (ADR-0007). A full BiRefNet ONNX export exists publicly (~970MB) but
   wasn't downloaded (time budget, not a technical block — network access was confirmed available).
+
+## Package contents
+
+- **`spikes/siamese`** (#48/ADR-0024's masking research) — BiRefNet/MobileSAM segmentation
+  scaffolding over `ort`/`load-dynamic` (no real weights, same posture as `groom/ai.rs`), the
+  brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` AI+geometry
+  compose model with a shared bake key for a mask and its inverse, a guided-filter
+  preview-to-full-res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe. Real,
+  tested (23 unit + 9 GPU-parity tests), not path-gated. See `docs/research/siamese-masking.md`.

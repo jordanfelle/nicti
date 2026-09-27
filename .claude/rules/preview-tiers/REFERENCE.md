@@ -27,3 +27,25 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   **Real lossy WebP measured and rejected** — worse SSIM than AVIF at comparable size, worse
   encode/decode latency than JPEG at comparable quality, plus a native C dependency neither JPEG
   nor AVIF needs.
+
+## Package contents
+
+- **`spikes/sniff`** (#28's embedded-JPEG research, extended for #29's preview-tier-strategy
+  comparison) — a from-scratch TIFF/EXIF/Nikon-MakerNote IFD walker (generic over
+  `source::ByteSource`, `SliceSource`/`FileSource`, for #29's ranged seek-and-read extraction), no
+  LibRaw/rawler dependency (deliberately, to stay clear of #37's decoder choice); a
+  `zune-jpeg`/`fast_image_resize` decode/resize path; `codec.rs`'s JPEG-vs-AVIF-vs-WebP
+  tier-payload-format comparison (`ravif`/`avif-decode`, plus lossy WebP via `webp`/`libwebp-sys`,
+  added for #143's ADR-0022 follow-up, plus a swept `avif-speed` axis and `nicti-prowl`-reused SSIM
+  scoring — see the committed `run-codec-sweep.ps1`); `cache.rs`'s three cache-backend candidates
+  (SQLite BLOBs/pack-file/file-per-preview); `tier_bench.rs`'s end-to-end per-tier harness; and a
+  locate/read/decode-grid/decode-screen/extract-index/full-read latency benchmark with a
+  `--io {whole,ranged}` axis. `sniff inventory` cross-checked byte-exact against `exiftool` on real
+  Z8/D7500 files. **#28 closed**: full 9,142-file NVMe set plus the HDD (`E:\`) comparison both
+  measured — HDD is ~16x slower than NVMe for cold, randomly-ordered reads (the realistic
+  culling-browse case). Also found and fixed a real `FILE_FLAG_NO_BUFFERING` sector-alignment bug
+  shared by `read_cold`/`read_cold_range` (a resumed short read could pass a misaligned buffer
+  address/file offset to the next call, surfacing as `os error 87` on HDD ~10-19% of the time,
+  never on NVMe) — fixed by retrying the identical `seek_read` call on the same handle rather than
+  resuming from a running offset. See `docs/research/sniff-embedded-jpeg.md` for #28's write-up and
+  `docs/adr/0017-preview-tier-strategy.md` for #29's.

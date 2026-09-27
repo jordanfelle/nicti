@@ -42,3 +42,9 @@ Full reasoning/history: `docs/decisions/denoise.md`.
   directory first on PATH for *both* `cargo` and `rustc` — cargo shells out to a bare `rustc`
   lookup, so pointing only `cargo` at rustup while `rustc` still resolves to Homebrew's Rust (no
   Windows target) fails with a misleading "can't find crate for core/std".
+
+## Package contents
+
+- **`spikes/rods`** (#40/ADR-0040's demosaic+denoise comparison harness) — alignment, a fixed
+  color treatment, and a tiled CUDA/TensorRT-capable `ort` AI-denoise wrapper. See
+  `docs/research/rods-demosaic-denoise.md` for the module breakdown and results.

@@ -26,3 +26,14 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   handshake) still required for `rawler` (LGPL, no confirmed "or-later") but no longer for
   `lensfun-rs` (see licensing topic, ADR-0013 amendment). v2 third-party plugins are WASM
   (`wasmtime`) for non-hot-path extension points only, never a per-pixel render stage.
+
+## Package contents
+
+- **`crates/nicti-claw`** — the `Module` trait (identity/versioning shared by every extension
+  point), the lazy `OnceLock`-backed `Registry` (`registry.rs`), and the checked C-ABI dylib
+  handshake (`dylib.rs`) — the load-bearing crate every other `nicti-*` crate builds on.
+  Generalized from the now-deleted `spikes/sheath` spike.
+- **`crates/dewclaw`** — test fixture (cdylib) for `nicti-claw`'s dylib tests, generalized from the
+  now-deleted `spikes/dewclaw`.
+- **`spikes/pawprint`** (#21/ADR-0002) — edit-document hashing, history/compaction, and XMP
+  round-trip proof.

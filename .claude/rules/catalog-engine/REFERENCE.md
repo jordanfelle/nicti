@@ -38,3 +38,25 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   `build.rs`) but fails 3/8 query gates at 600k already (the earliest/widest failure in the
   series), attributed to `Guard`/iterator overhead. Crash-safety inconclusive (same OS-lock class
   as Turso/redb). Links cleanly alongside every other candidate, unlike libSQL.
+
+## Package contents
+
+- **`spikes/den`** (#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso
+  follow-up, #106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up,
+  #107/ADR-0012's schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, #115/ADR-0015's
+  RocksDB follow-up, and #116/ADR-0016's `fjall` follow-up) — one module per candidate:
+  `sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`libsql_engine.rs`/
+  `rocksdb_engine.rs`/`fjall_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind
+  matching Cargo features (`turso`, `redb`, `libsql`, `rocksdb`, `fjall` all default-off,
+  evaluated-not-adopted, kept for reference — `libsql` cannot be enabled in the same binary as
+  `sqlite`, both bundle their own SQLite C symbols and collide at link time, see ADR-0014's Spike
+  section; `rocksdb`/`fjall` have no such collision, see ADR-0015's/ADR-0016's Consequences; the
+  two facet-cache modules require `sqlite`, `facet_cache_duckdb` additionally requires `duckdb`),
+  plus `schema_fit.rs` (ADR-0002's JSON-column + append-only/burst-compacted history-table shape,
+  gated on both `sqlite` and `duckdb`) and `concurrent_bench.rs` (#115's genuinely concurrent
+  multi-writer-thread comparison between RocksDB and SQLite, gated on both, not part of the shared
+  `Workload` trait since only these two engines are compared this way). `gen.rs`'s
+  synthetic-catalog generator is reusable for future Library-scale benchmarks (see
+  `docs/benchmarks.md`). Not production code — don't build on top of a spike crate; **slated for
+  deletion once #22 lands**, see #123 for the follow-up cleanup (CI jobs, the Renovate rule,
+  `deny.toml` exceptions).
