@@ -1,7 +1,24 @@
 # Architecture Decision Records
 
-Nicti records significant technical decisions as ADRs, numbered sequentially starting at
-`0001-*.md`. See `CONTRIBUTING.md` for when to write one.
+Nicti records significant technical decisions as ADRs. See `CONTRIBUTING.md` for when to write
+one.
+
+**Numbering convention (changed 2026-09-27): a new ADR's number is its GitHub issue number, not
+the next sequential count.** `0001`-`0025` were assigned sequentially, one at a time by a single
+person; once multiple agents began working concurrent, long-lived branches, that scheme
+collided three times in one afternoon (PR #167 vs. #152's `0022`, vs. #159's `0023`, vs. #175's
+`0024`) — each branch's "next free slot" guess, taken from whatever `main` looked like at branch
+creation, silently went stale by merge time, since nothing else about a sequential counter is
+knowable without checking every other in-flight branch. GitHub issue numbers don't have this
+problem: they're allocated atomically and uniquely by GitHub itself, and every ADR already records
+its own ticket in the `**Ticket:**` field, so this reuses information that already existed rather
+than inventing new bookkeeping. Going forward: name a new ADR `docs/adr/00NN-slug.md` where `NN`
+is its ticket's issue number (zero-padded to at least 4 digits, matching the existing files'
+width), and title it `# ADR-00NN: ...` to match. If one ticket ever needs a second, later ADR,
+append a lowercase letter (`0040a-...`, `0040b-...`) rather than claiming a new ticket number for
+it. **The existing `0001`-`0025` files keep their original sequential numbers** — rekeying them to
+this convention is tracked as its own backlog item ([#183](https://github.com/jordanfelle/nicti/issues/183)),
+not done as part of this change.
 
 **ADRs are point-in-time records, not living documentation.** Phrases like "this session," "this
 sandbox," "the reference machine," or "solo + agent productivity" describe the context the
@@ -40,18 +57,13 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0023](0023-lrc-catalog-import-mapping.md) | Lightroom Classic catalog import mapping | Accepted |
 | [0024](0024-masking.md) | Masking | Proposed |
 | [0025](0025-burst-duplicate-grouping.md) | Burst/duplicate grouping | Proposed |
+| [0040](0040-demosaic-and-denoise.md) | Demosaic and noise reduction | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.
 
 **Numbering note:** 0018 and 0019 both touch the RAW decoder question (adopt/fork research vs.
 the decoder itself); this is intentional, not a numbering error — cross-reference both.
-
-**Numbering collision in flight (2026-09-26):** PR #167 (#40, demosaic/denoise) also claims
-`0023` on its own branch, predating `0023-lrc-catalog-import-mapping.md`'s merge to `main`. This
-ADR claims `0024` as the next free slot as of this PR's branch point; whichever of #167/this PR
-merges second needs to renumber to the actual next-free slot at merge time, not assume `0024`/
-whatever it branched with still holds.
 
 ## Template
 

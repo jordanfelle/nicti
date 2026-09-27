@@ -1,3 +1,5 @@
+mod cfa;
+mod classic;
 mod compression;
 mod frame;
 mod libraw_ffi;
@@ -10,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use libraw_ffi::DemosaicQuality;
 use nicti_prowl::manifest::{Manifest, Scope};
 use nicti_prowl::perf::Protocol;
 use serde::Serialize;
@@ -97,6 +100,31 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// For #40/ADR-0040: demosaics one NEF with LibRaw's classic pipeline (WB applied, caller's
+    /// choice of demosaic algorithm + NR knobs), writing a linear 16-bit camera-RGB TIFF +
+    /// metadata JSON sidecar `spikes/rods` compares against LRC. See `src/classic.rs`.
+    DumpClassic {
+        path: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, value_enum)]
+        demosaic: DemosaicQuality,
+        /// LibRaw's FBDD noise-reduction stage: 0=off, 1=before demosaic, 2=before demosaic +
+        /// smoother.
+        #[arg(long, default_value_t = 0)]
+        fbdd: i32,
+        /// LibRaw's post-demosaic wavelet denoise threshold, 0.0 = off.
+        #[arg(long, default_value_t = 0.0)]
+        wavelet: f32,
+    },
+    /// For #40/ADR-0040's Path A: writes the still-mosaiced, black-subtracted,
+    /// white-normalized Bayer plane (no WB, no demosaic) as a 16-bit grayscale TIFF + metadata
+    /// JSON sidecar. See `src/cfa.rs`.
+    DumpCfa {
+        path: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -132,6 +160,14 @@ fn main() -> anyhow::Result<()> {
         Command::Diff { path } => diff(&path),
         Command::Scan { dir, decoder, out } => scan(&dir, decoder, &out),
         Command::DumpLinear { path, out } => linear::dump_linear(&path, &out),
+        Command::DumpClassic {
+            path,
+            out,
+            demosaic,
+            fbdd,
+            wavelet,
+        } => classic::dump_classic(&path, &out, demosaic, fbdd, wavelet),
+        Command::DumpCfa { path, out } => cfa::dump_cfa(&path, &out),
     }
 }
 

@@ -21,8 +21,8 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
 `preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`lrc-migration` (0023), `masking` (0024), `culling` (0025). A new ADR adds a bullet to
-both files of its topic (or a new topic) and to this list — not inline here.
+`lrc-migration` (0023), `masking` (0024), `culling` (0025), `denoise` (0040). A new ADR adds a
+bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
 
@@ -145,9 +145,14 @@ via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`d
 0.8.0, plus `scan` for a manifest-free directory walk and `watch` for #24's `notify` research;
 also `dump-linear` (#38/ADR-0021: demosaics one NEF with white balance/color-matrix/gamma all
 disabled via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
-`spikes/calico` to consume, without calico depending on retina's FFI/submodule); see
-`docs/research/retina-raw-decoder.md`. Its own `vendor/LibRaw` submodule needs
-`git submodule update --init spikes/retina/vendor/LibRaw` before it builds.
+`spikes/calico` to consume, without calico depending on retina's FFI/submodule), and
+`dump-classic`/`dump-cfa` (#40/ADR-0040's classic-pipeline and Bayer-plane dumps for
+`spikes/rods` — see the `denoise` topic's REFERENCE.md); see `docs/research/retina-raw-decoder.md`.
+Its own `vendor/LibRaw` submodule needs `git submodule update --init spikes/retina/vendor/LibRaw`
+before it builds.
+`spikes/rods` (#40/ADR-0040's demosaic+denoise comparison harness — alignment, a fixed color
+treatment, and a tiled CUDA/TensorRT-capable `ort` AI-denoise wrapper; see the `denoise` topic's
+REFERENCE.md and `docs/research/rods-demosaic-denoise.md` for the module breakdown and results).
 `bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
 same "don't build on top of it" caveat applies. `spikes/homing` (#71/ADR-0020's volume-identity
 research: candidate identity keys measured against a drive-letter change/detach-reattach/reformat
