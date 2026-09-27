@@ -75,3 +75,17 @@ pub struct Preview {
     pub height: Option<u32>,
     pub bytes: Vec<u8>,
 }
+
+/// One node in the hierarchical keyword tree (#23). `path` is an id-based materialized path
+/// (`/1/5/12/`, one segment per ancestor id including this keyword's own, each `/`-terminated) --
+/// ids never change on rename, unlike a name-based path, and the trailing separator on every
+/// segment means a subtree `GLOB` prefix scan (`path GLOB '/1/5/*'`) can't also match an
+/// unrelated sibling whose id happens to share a numeric prefix (e.g. `/1/50/` under a naive
+/// name-based scheme without the separator).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keyword {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub path: String,
+}

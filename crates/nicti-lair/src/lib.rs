@@ -6,7 +6,9 @@
 //! (`patrol.rs`, #24), the manual "Synchronize Folder"-style sync layered on top of Scruff: after
 //! Scruff's disk-side pass, Patrol walks the catalog side, flags any asset whose file has
 //! disappeared, and optionally removes it, the way a cat patrols the same territory it already
-//! knows.
+//! knows. #23 (ADR-0023) adds hierarchical keywords/collections and a filter-query engine:
+//! `hunt.rs` (`Filter`/`Sort`/keyset-paginated `hunt`/`facets`) and `clowder.rs`
+//! (manual/smart collections — a clowder is a group of cats).
 
 use nicti_claw::{Module, Registry};
 
@@ -14,10 +16,14 @@ mod model;
 pub mod schema;
 mod sqlite;
 
+pub mod clowder;
+pub mod hunt;
 pub mod patrol;
 pub mod scruff;
 
-pub use model::{Asset, NewAsset, Preview, PreviewTier};
+pub use clowder::{Collection, CollectionKind};
+pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
+pub use model::{Asset, Keyword, NewAsset, Preview, PreviewTier};
 pub use sqlite::SqliteCatalog;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +44,11 @@ pub enum CatalogError {
         existing: Option<String>,
         incoming: Option<String>,
     },
+    /// A `hunt` call whose `Page::after` cursor variant doesn't match the query's own `Sort`
+    /// field (e.g. a `Cursor::Rating` passed alongside `SortField::Captured`) -- a programmer
+    /// error at the call site, not a data problem.
+    #[error("cursor variant does not match the query's sort field")]
+    CursorSortMismatch,
 }
 
 /// A catalog store backend. `Module` settles identity/versioning only (ADR-0019 §7); the
@@ -165,6 +176,112 @@ pub trait CatalogStore: Module {
     /// that's still gone — never by ingest, and never for an asset under a root that failed to
     /// resolve on disk (ADR-0071's offline-volume case is a separate path from this).
     fn remove_asset(&self, asset_id: i64) -> Result<(), CatalogError>;
+
+    /// Creates a new keyword under `parent_id` (`None` = top-level). Fails (a `UNIQUE` constraint
+    /// violation surfaced as `CatalogError::Sqlite`) if a sibling already has the same name,
+    /// case-insensitively.
+    fn create_keyword(&self, parent_id: Option<i64>, name: &str) -> Result<i64, CatalogError>;
+
+    /// Renames a keyword in place. Never touches `path` — this scheme's id-based materialized
+    /// path is exactly what makes a rename cheap: no descendant's `path` needs rewriting, unlike
+    /// a name-based path scheme.
+    fn rename_keyword(&self, keyword_id: i64, new_name: &str) -> Result<(), CatalogError>;
+
+    /// Moves a keyword (and its whole subtree) under a new parent (`None` = top-level),
+    /// rewriting `path` for the keyword and every descendant. Rare relative to tagging/rename, so
+    /// this is the one keyword operation that touches more than a single row.
+    fn move_keyword(&self, keyword_id: i64, new_parent_id: Option<i64>)
+        -> Result<(), CatalogError>;
+
+    /// Deletes a keyword and its entire subtree, along with every `asset_keyword` link to any of
+    /// them — never a partial delete that would leave an orphaned child keyword or a dangling
+    /// tag reference.
+    fn delete_keyword(&self, keyword_id: i64) -> Result<(), CatalogError>;
+
+    /// Tags every listed asset with `keyword_id` in one statement. Re-tagging an asset that
+    /// already carries this keyword is a no-op (`asset_keyword`'s own primary key absorbs the
+    /// duplicate), not an error.
+    fn tag(&self, asset_ids: &[i64], keyword_id: i64) -> Result<(), CatalogError>;
+
+    /// Removes `keyword_id` from every listed asset in one statement. A no-op for any asset that
+    /// didn't carry it.
+    fn untag(&self, asset_ids: &[i64], keyword_id: i64) -> Result<(), CatalogError>;
+
+    /// Every keyword directly tagged on this asset (not its ancestors) — the filter bar's own
+    /// subtree-inclusive matching is a query concern (#242), not this method's.
+    fn keywords_for(&self, asset_id: i64) -> Result<Vec<Keyword>, CatalogError>;
+
+    /// Resolves a `/`-free path of plain names (e.g. `["Events", "Named", "birthday-2026"]`) to
+    /// the keyword at that exact position in the tree, if one exists. Deliberately takes a
+    /// caller-split `&[&str]` rather than committing to one separator style itself — XMP's
+    /// `lr:hierarchicalSubject` uses `|`, LRC's `AgLibraryKeyword.genealogy` uses `/`-joined
+    /// ancestor ids, and this repo's own den-spike precedent used `.` — each caller splits its own
+    /// format and hands this method plain segments.
+    fn keyword_by_path(&self, segments: &[&str]) -> Result<Option<Keyword>, CatalogError>;
+
+    /// Runs a `Filter`/`Sort` query, keyset-paginated (`Page::after` echoes the last row's own
+    /// sort-key + id back in, never an `OFFSET` — O(n) at 2M rows per ADR-0067). Always scoped to
+    /// online volumes only, the same as `facet_count`.
+    fn hunt(&self, filter: &Filter, sort: Sort, page: &Page) -> Result<Vec<i64>, CatalogError>;
+
+    /// The total row count a `hunt` call with this `Filter` would match, ignoring `Page`.
+    fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError>;
+
+    /// Facet breakdowns (by model/rating/flag) for a `Filter`. An unfiltered `Filter` (the
+    /// `Default`) reads the trigger-maintained `facet_counts` cache for its model/rating facet
+    /// (the case ADR-0103 optimized); any narrowing filter computes a live, exact `GROUP BY` over
+    /// the narrowed set instead, since the cache's `(volume_id, model, rating)` grain can't answer
+    /// a keyword- or date-narrowed facet count on its own.
+    fn facets(&self, filter: &Filter) -> Result<FacetCounts, CatalogError>;
+
+    /// Looks up a single collection by id, `None` if it doesn't exist.
+    fn collection(&self, collection_id: i64) -> Result<Option<Collection>, CatalogError>;
+
+    /// Creates a new collection under `parent_id` (`None` = top-level). A `Smart` collection
+    /// starts with no rule set (`collection_filter` then returns `None` until `set_smart_rule`
+    /// is called); a `Manual` collection starts empty.
+    fn create_collection(
+        &self,
+        parent_id: Option<i64>,
+        name: &str,
+        kind: CollectionKind,
+    ) -> Result<i64, CatalogError>;
+
+    fn rename_collection(&self, collection_id: i64, new_name: &str) -> Result<(), CatalogError>;
+
+    /// Moves a collection (and its subtree, if any) under a new parent. Unlike `move_keyword`,
+    /// nothing else needs rewriting — collections aren't looked up by path, only by id.
+    fn move_collection(
+        &self,
+        collection_id: i64,
+        new_parent_id: Option<i64>,
+    ) -> Result<(), CatalogError>;
+
+    /// Deletes a collection and its subtree. For a `Manual` collection this also deletes its
+    /// `collection_asset` membership rows — the assets themselves are untouched, only their
+    /// membership in this collection.
+    fn delete_collection(&self, collection_id: i64) -> Result<(), CatalogError>;
+
+    /// Appends every listed asset to a `Manual` collection, in the given order, after whatever's
+    /// already there. A no-op on an asset already a member (its existing position is untouched,
+    /// not moved to the end).
+    fn add_to_collection(&self, collection_id: i64, asset_ids: &[i64]) -> Result<(), CatalogError>;
+
+    fn remove_from_collection(
+        &self,
+        collection_id: i64,
+        asset_ids: &[i64],
+    ) -> Result<(), CatalogError>;
+
+    /// Every asset in a `Manual` collection, in position order.
+    fn collection_assets(&self, collection_id: i64) -> Result<Vec<i64>, CatalogError>;
+
+    /// Sets (replacing any prior one) the saved `Filter` a `Smart` collection resolves to.
+    fn set_smart_rule(&self, collection_id: i64, filter: &Filter) -> Result<(), CatalogError>;
+
+    /// The saved `Filter` for a `Smart` collection — `None` if it has no rule set yet (or if
+    /// `collection_id` names a `Manual` collection, which has no rule at all).
+    fn collection_filter(&self, collection_id: i64) -> Result<Option<Filter>, CatalogError>;
 }
 
 /// Registry of catalog store modules, keyed by namespaced id.
