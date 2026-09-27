@@ -141,7 +141,10 @@ fn build_pipeline_jpeg(
         <text x="10" y="40" font-size="28" fill="#ffffff">Nicti</text>
     </svg>"##;
     let logo = prey::watermark::rasterize_svg(logo_svg, 200, 60)?;
-    prey::watermark::composite_parallel(&mut rgba, &logo, 20, (dst_height as i64) - 80);
+    // Sequential, not composite_parallel: ADR-0056's own decision (measured 1.18ms vs. 6.10ms
+    // p50 for a logo this size, rayon's per-row overhead exceeds the blend work) -- CodeRabbit
+    // review on PR #221 caught this pipeline using the candidate the ADR itself rejected.
+    prey::watermark::composite_sequential(&mut rgba, &logo, 20, (dst_height as i64) - 80);
     let watermarked = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
 
     let icc = prey::icc::srgb_icc_profile()?;
