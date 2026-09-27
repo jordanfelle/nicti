@@ -35,7 +35,7 @@ ADR-0019 §7's `Module` identity shape:
 id = "vendor.module_name"          # namespaced, ADR-0019/0021 convention
 version = "1.2.0"
 host_api_version = 1               # Claw host contract this module was built against
-extension_points = ["ModelProvider"]  # one or more of ADR-0019 §7's seven
+extension_points = ["ModelProvider"]  # one or more of ADR-0019 §7's seven, EXCEPT RenderStage
 
 [[capabilities]]
 kind = "network"
@@ -70,17 +70,28 @@ a design file, and reviewer/user time is scarcer here than at Figma's scale.
 **No entry, no access.** A capability the manifest doesn't declare is denied unconditionally —
 there is no ambient authority, no "ask forgiveness" fallback.
 
+**`RenderStage` is not a third-party-declarable extension point.** ADR-0019 §6 found a
+third-party per-pixel render stage isn't viable over WASM (the host↔guest buffer-copy cost), and
+any future opening of that extension point to third parties would need GPU shaders instead — a
+different mechanism this ADR doesn't cover. A manifest declaring `RenderStage` is rejected by the
+host at install time; the other six extension points in ADR-0019 §7 remain third-party-eligible.
+
 ### 2. Disclosure UX
 
 - **Install/enable time**: a consent screen lists every declared capability with its
   `justification` shown inline, grouped by kind. The module cannot be enabled without this screen
   being shown and accepted — no silent auto-enable.
-- **Update that adds or widens a capability disables the module until re-consented** — Chrome's
-  model[^2], chosen over Firefox's "block the update outright until approved"[^3]: Nicti is a
-  single-vendor desktop app with no staged-rollout complexity to protect against, so disabling the
-  already-updated module (rather than pinning the user to a stale version) is the simpler, safer
-  default — a security-relevant update still installs, it just doesn't silently gain new
-  authority.
+- **Update that adds a new capability kind, or widens an existing one's scope, disables the
+  module until re-consented** — Chrome's model[^2], chosen over Firefox's "block the update
+  outright until approved"[^3]: Nicti is a single-vendor desktop app with no staged-rollout
+  complexity to protect against, so disabling the already-updated module (rather than pinning the
+  user to a stale version) is the simpler, safer default — a security-relevant update still
+  installs, it just doesn't silently gain new authority. **"Widens" is evaluated field-by-field
+  within a capability, not just at the kind level**: an update that adds a host to an existing
+  `network` capability's `allowed_hosts`, adds a filesystem scope, or relaxes a resource-budget
+  override is exactly as much a widening as declaring a wholly new capability kind, and disables
+  the module the same way — mirroring Chrome's own `host_permissions` re-consent behavior[^2],
+  which this ADR would otherwise under-transcribe if read as kind-level only.
 - Capabilities may also be requested **lazily** at first actual use rather than only declared
   upfront in the install screen — Deno's `Deno.permissions.request()` pattern[^4] and Android's
   contextual rationale[^5] are the precedents — but the manifest must still pre-declare every
@@ -111,12 +122,21 @@ there is no ambient authority, no "ask forgiveness" fallback.
   low-collision, but Adobe's own shortcut reference blocked direct fetch (HTTP 403); **this
   specific binding needs a manual cross-check against Adobe's live page or in-app Help before
   it's locked**, not treated as ADR-final.
-- **Immediate, no restart required**: the host calls `Engine::increment_epoch()` targeting the
-  killed module's `Store`. wasmtime's own worked example confirms this interrupts code already
-  mid-execution, not just blocks new calls — including a tight compute loop with no host-call
-  boundary, since the compiler inserts epoch checks at both function entries *and loop
-  back-edges*[^9]. The module's registry entry flips to quarantined (persisted) so it isn't
-  reinstantiated until explicitly re-enabled.
+- **Immediate, no restart required, for the module's own WASM call stack**: the host calls
+  `Engine::increment_epoch()` targeting the killed module's `Store`. wasmtime's own worked example
+  confirms this interrupts code already mid-execution, not just blocks new calls — including a
+  tight compute loop with no host-call boundary, since the compiler inserts epoch checks at both
+  function entries *and loop back-edges*[^9]. The module's registry entry flips to quarantined
+  (persisted) so it isn't reinstantiated until explicitly re-enabled.
+- **`gpu` constraint — epoch interruption does not stop already-submitted GPU work**: if a killed
+  module already called a host import that submitted a GPU command buffer (a compute-shader
+  dispatch, per ADR-0019 §6's direction for any future third-party render-adjacent work),
+  `increment_epoch()` stops the module's *WASM* call stack but has no effect on work already
+  queued to the device — the GPU keeps executing until that dispatch completes on its own. This
+  ADR doesn't resolve that gap; whoever implements the `gpu` capability's enforcement needs its
+  own cancellation path (e.g. a device-level fence the host can drop/ignore, or bounding dispatch
+  size so a kill's worst-case latency stays acceptable), tracked as an open constraint the same
+  way the cdylib case below is.
 - **cdylib constraint**: epoch interruption is a WASM-specific primitive. If a future third-party
   module were ever hosted via ADR-0019 §4's cdylib boundary instead, in-process preemption of a
   runaway call isn't available the same way — true interruption there would require running that
