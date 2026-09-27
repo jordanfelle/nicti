@@ -523,6 +523,15 @@ pub struct PresentSampleKernel {
     output_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    // Fixed at construction, matching the actually-allocated buffer's real row-major shape --
+    // `dispatch` no longer takes these as separate runtime parameters (an adversarial-review
+    // finding: a caller could previously pass a `source_width * source_height` product that
+    // matched the buffer's flat length while describing a completely different, wrong shape --
+    // e.g. a buffer built for 10x10 dispatched as 20x5 -- and the WGSL kernel's row-major indexing
+    // would silently read the wrong positions instead of erroring. Fixing the shape here, once,
+    // removes the possibility entirely rather than trying to detect it after the fact).
+    source_width: u32,
+    source_height: u32,
     source_len: usize,
     out_width: u32,
     out_height: u32,
@@ -530,10 +539,17 @@ pub struct PresentSampleKernel {
 }
 
 impl PresentSampleKernel {
-    pub fn new(ctx: &GpuContext, source_len: usize, out_width: u32, out_height: u32) -> Self {
+    pub fn new(
+        ctx: &GpuContext,
+        source_width: u32,
+        source_height: u32,
+        out_width: u32,
+        out_height: u32,
+    ) -> Self {
         let device = &ctx.device;
         let pipeline = make_compute_pipeline(device, PRESENT_SAMPLE_WGSL, "present_sample");
 
+        let source_len = (source_width * source_height) as usize;
         let input_size = (source_len * std::mem::size_of::<[f32; 4]>()) as u64;
         let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("present_sample kernel source"),
@@ -582,6 +598,8 @@ impl PresentSampleKernel {
             output_buf,
             params_buf,
             bind_group,
+            source_width,
+            source_height,
             source_len,
             out_width,
             out_height,
@@ -593,8 +611,6 @@ impl PresentSampleKernel {
         &self,
         ctx: &GpuContext,
         source: &[[f32; 4]],
-        source_width: u32,
-        source_height: u32,
         transform: &crate::geometry::Affine2D,
     ) -> (Vec<[f32; 4]>, Option<f64>) {
         assert_eq!(
@@ -606,8 +622,8 @@ impl PresentSampleKernel {
             m0: transform.m[0],
             _pad_m0: 0.0,
             m1: transform.m[1],
-            source_width,
-            source_height,
+            source_width: self.source_width,
+            source_height: self.source_height,
             out_width: self.out_width,
             out_height: self.out_height,
             _pad_end: 0,
@@ -720,6 +736,10 @@ pub struct BoxFilterKernel {
     output_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    // Fixed at construction -- see `PresentSampleKernel`'s identical note on why `dispatch` no
+    // longer takes width/height as separate runtime parameters.
+    width: u32,
+    height: u32,
     field_len: usize,
     output_size: u64,
 }
@@ -777,6 +797,8 @@ impl BoxFilterKernel {
             output_buf,
             params_buf,
             bind_group,
+            width,
+            height,
             field_len,
             output_size,
         }
@@ -786,8 +808,6 @@ impl BoxFilterKernel {
         &self,
         ctx: &GpuContext,
         field: &[f32],
-        width: u32,
-        height: u32,
         radius: u32,
     ) -> (Vec<f32>, Option<f64>) {
         assert_eq!(
@@ -796,8 +816,8 @@ impl BoxFilterKernel {
             "BoxFilterKernel is sized for a fixed field length"
         );
         let params = BoxFilterParams {
-            width,
-            height,
+            width: self.width,
+            height: self.height,
             radius,
             _pad: 0,
         };

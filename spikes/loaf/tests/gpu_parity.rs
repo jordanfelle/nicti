@@ -14,6 +14,17 @@ fn with_ctx(f: impl FnOnce(&gpu::GpuContext)) {
     }
 }
 
+/// Runs `f` (expected to panic) with the default panic hook suppressed, so an intentional
+/// `catch_unwind`-based "this must panic" assertion doesn't also spam a backtrace to stderr on an
+/// otherwise-clean test run.
+fn expect_panic(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+    result.is_err()
+}
+
 #[test]
 fn live_suffix_gpu_matches_a_hand_computed_reference_pixel() {
     with_ctx(|ctx| {
@@ -132,5 +143,48 @@ fn box_filter_gpu_matches_cpu_reference() {
                 "index {i}: gpu={gpu_v} cpu={cpu_v}"
             );
         }
+    });
+}
+
+/// Regression test for an adversarial-review finding: `PresentSampleKernel::dispatch` used to take
+/// `source_width`/`source_height` as separate runtime parameters alongside a flat `source` slice --
+/// a caller could pass a `source_width * source_height` product that matched the buffer's flat
+/// length while describing a completely different, wrong shape (e.g. a buffer built for a real
+/// 10x10 layout, dispatched as 20x5 -- same element count, wrong row stride), and the WGSL
+/// kernel's row-major indexing would silently read the wrong positions instead of erroring. The
+/// fix removes the possibility structurally: `source_width`/`source_height` are now fixed at
+/// `new()` and no longer accepted at `dispatch()` at all, so only a genuinely wrong-*length*
+/// slice remains possible, which the existing length assert already catches cleanly.
+#[test]
+fn present_sample_kernel_panics_on_a_wrong_length_source_slice() {
+    with_ctx(|ctx| {
+        let kernel = gpu::PresentSampleKernel::new(ctx, 10, 10, 4, 4);
+        let wrong_length_source: Vec<[f32; 4]> = vec![[0.0, 0.0, 0.0, 1.0]; 42];
+        let transform = geometry::Affine2D::identity();
+        let panicked = expect_panic(std::panic::AssertUnwindSafe(|| {
+            kernel.dispatch(ctx, &wrong_length_source, &transform);
+        }));
+        assert!(
+            panicked,
+            "dispatch should panic when given a source slice whose length doesn't match what the \
+             kernel was constructed for, not silently proceed"
+        );
+    });
+}
+
+/// Same regression class as above, for `BoxFilterKernel::dispatch`.
+#[test]
+fn box_filter_kernel_panics_on_a_wrong_length_field_slice() {
+    with_ctx(|ctx| {
+        let kernel = gpu::BoxFilterKernel::new(ctx, 10, 10);
+        let wrong_length_field: Vec<f32> = vec![0.0; 42];
+        let panicked = expect_panic(std::panic::AssertUnwindSafe(|| {
+            kernel.dispatch(ctx, &wrong_length_field, 1);
+        }));
+        assert!(
+            panicked,
+            "dispatch should panic when given a field slice whose length doesn't match what the \
+             kernel was constructed for, not silently proceed"
+        );
     });
 }

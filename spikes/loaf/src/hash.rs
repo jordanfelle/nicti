@@ -7,7 +7,11 @@
 //!
 //! `-0.0` is normalized to `0.0` and `serde_json`'s `preserve_order`/`arbitrary_precision`
 //! features stay off (object keys sort, NaN/Infinity refuse to serialize) -- the exact citation
-//! trail is in ADR-0002; this module doesn't re-derive it, just reuses the same rule.
+//! trail is in ADR-0002; this module doesn't re-derive it, just reuses the same rule. "Refuse to
+//! serialize" means `hash_value` below panics via its own `.expect()` on a NaN/Infinity field --
+//! fail-fast, not a silently-wrong hash, but a real panic, not a graceful `Err` -- since a stage's
+//! params shouldn't legitimately contain either, this is treated as a caller bug, not a case worth
+//! a `Result`-returning API for.
 
 use serde::Serialize;
 

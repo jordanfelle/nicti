@@ -199,12 +199,12 @@ fn run_bench(out_dir: PathBuf, long_edge: u32) -> anyhow::Result<()> {
 
     let (present_out_w, present_out_h) = (1920u32, 1280u32);
     let present_kernel =
-        gpu::PresentSampleKernel::new(&ctx, pixel_count, present_out_w, present_out_h);
+        gpu::PresentSampleKernel::new(&ctx, long_edge, height, present_out_w, present_out_h);
     let transform =
         geometry::Affine2D::crop(0.0, 0.0, long_edge as f32, height as f32, 1920.0, 1280.0);
     let mut present_ns = Vec::new();
     protocol.run(|| {
-        let (_, ns) = present_kernel.dispatch(&ctx, &pixels, long_edge, height, &transform);
+        let (_, ns) = present_kernel.dispatch(&ctx, &pixels, &transform);
         if let Some(ns) = ns {
             present_ns.push(ns);
         }
@@ -220,7 +220,7 @@ fn run_bench(out_dir: PathBuf, long_edge: u32) -> anyhow::Result<()> {
     let box_kernel = gpu::BoxFilterKernel::new(&ctx, 512, 512);
     let mut box_ns = Vec::new();
     protocol.run(|| {
-        let (_, ns) = box_kernel.dispatch(&ctx, &field, 512, 512, 2);
+        let (_, ns) = box_kernel.dispatch(&ctx, &field, 2);
         if let Some(ns) = ns {
             box_ns.push(ns);
         }
