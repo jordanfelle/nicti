@@ -49,7 +49,8 @@ information. **#62 must not plan on `md5` as a relink input in any capacity** �
 hint, not even provenance (there's no value to preserve).
 
 This makes the original ADR-0061 Q1 pairing doubly wrong: not only was `md5`↔tier-(b) wrong in kind
-(a full-file-shaped hash can't seed a 128-byte-window partial hash), the column this repo's own
+(a full-file-shaped hash can't seed a partial hash covering only 64KB from the head and 64KB from
+the tail), the column this repo's own
 LRC installation actually writes to disk is never non-NULL in the first place. Whatever real-world
 condition fills LRC's `md5` column (a "Validate DNG"-only feature per secondary sources, never run
 here) doesn't apply to a working library that's just imported and used normally — the case #62 has
