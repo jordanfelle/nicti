@@ -1,7 +1,7 @@
 ## Culling
 
-Covers burst/duplicate grouping (#33) and subject grouping (#35). Blur/misfocus detection (#34)
-is a separate research ticket, not yet covered here — this file grows as it lands.
+Covers burst/duplicate grouping (#33), blur/misfocus/eye detection (#34), and subject grouping
+(#35).
 
 - **Burst/duplicate grouping (#33)**: `docs/adr/0033-burst-duplicate-grouping.md` — con-day
   duplicates are pose sets 2-30s apart, not sub-second bursts (measured on a real con day: most
@@ -18,7 +18,23 @@ is a separate research ticket, not yet covered here — this file grows as it la
   teardown-ordering quirk, not a bug in this crate. **Proposed, not Accepted** — the actual
   accuracy numbers wait on a real unculled con shoot (none exists on disk yet; every large con
   folder found is already culled), tracked in the labelling/measurement follow-up (#180).
-
+- **Blur/misfocus/eye detection (#34)**: `docs/adr/0034-blur-misfocus-eye-detection.md` — every
+  sharpness candidate (Laplacian variance, Tenengrad, a real 2D FFT high-frequency ratio,
+  structure-tensor motion/defocus discriminator) scores a frame's *sharpest tile*, not a whole-
+  frame average, so a shallow-depth-of-field shot isn't penalized for its own bokeh. Same
+  ground-truth gap as #33 (no unculled con shoot on disk), substituted this pass with synthetic
+  degradation of a synthetic keeper image set — which also enables a real (not fabricated)
+  measurement on that set: the keeper false-flag rate (all three candidates: 0.0% on this pass's
+  8-image synthetic set, not yet measured on real photos). A real finding: a single threshold
+  calibrated on defocus severity didn't transfer to detecting motion blur on this synthetic set,
+  even though motion blur's own relative score drop was severe — worth per-degradation calibration
+  once real labels exist. A Nikon `AFInfo2` AF-area reader (`af.rs`) targets the real Z8/Z9
+  `"0400"` version (an adversarial review + primary-source lookup caught an earlier draft reading
+  the wrong `"0100"`/`"0101"` offsets) and composes with any sharpness candidate for a misfocus
+  signal, but is unverified against a real NEF. Eye detection (human closed-eye, fursuit "eyes
+  obscured") is research-only this pass — real candidates were license-checked but none was run
+  against real weights, so no bundled candidate ships rather than fabricating a result. **Proposed,
+  not Accepted** — real numbers wait on the next unculled con card (#238), same as #33's own #180.
 - **Subject grouping (#35)**: `docs/adr/0035-subject-grouping.md` — clusters a shoot's photos by
   subject/person for review-per-subject. Human face-recognition models don't apply: most subjects
   are fursuiters, and InsightFace/RetinaFace are license-excluded anyway (non-commercial only).

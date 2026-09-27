@@ -8223,6 +8223,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "squint"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fast_image_resize",
+ "image",
+ "nicti-prowl",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zune-jpeg",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
