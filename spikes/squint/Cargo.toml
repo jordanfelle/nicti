@@ -1,0 +1,33 @@
+[package]
+name = "squint"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #34 (ADR-0034): blur/motion-blur/misfocus/eye detection -- candidate sharpness signals (Laplacian/Tenengrad/FFT/structure-tensor, AF-region-aware), a Nikon AFInfo2 AF-area reader, synthetic defocus/motion-blur/misfocus degradation of real keepers, and a labelling/eval harness. Not a production crate."
+
+[lib]
+name = "squint"
+path = "src/lib.rs"
+
+[[bin]]
+name = "squint"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+zune-jpeg = "0.5"
+fast_image_resize = "6"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rand = "0.8"
+rand_chacha = "0.3"
+rustfft = "6"
+# Reused for perf::Protocol/refset, same spike-depends-on-crate direction `spikes/litter` took.
+nicti-prowl = { path = "../../crates/nicti-prowl" }
+
+[dev-dependencies]
+tempfile = "3"

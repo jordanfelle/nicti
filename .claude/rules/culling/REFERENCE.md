@@ -1,6 +1,7 @@
 ---
 paths:
   - "spikes/litter/**"
+  - "spikes/squint/**"
   - "spikes/rosette/**"
 ---
 
@@ -25,6 +26,19 @@ Full reasoning/history: `docs/decisions/culling.md`.
   density); `E:\cf\*.dd` is blank. Real measurement waits on the user's next con — see #180.
 - **`litter draft`'s `label.html` is local-only, never published** — real third-party photos +
   past artifact size limits at con scale.
+- **Blur/misfocus/eye detection (#34)** — `docs/adr/0034`: every sharpness candidate scores a
+  frame's *sharpest tile*, not a whole-frame average (shallow-DoF safe). Same con-shoot gap as
+  #33; substituted with synthetic defocus/motion-blur/misfocus degradation of a synthetic keeper
+  image set this pass (8 generated images, not real photos), which also gives a real (not
+  fabricated) **keeper false-flag rate** on that set — 0.0% for all three candidates. **Gotcha**:
+  one threshold calibrated on defocus severity didn't transfer to detecting motion blur in this
+  pass's measurement, even though motion blur's own relative score drop was severe — calibrate
+  per-degradation-type, don't assume one cutoff generalizes. Nikon `AFInfo2` AF-area reader
+  (`af.rs`) targets the real Z8/Z9 `"0400"` version (an adversarial review + primary-source lookup
+  caught an earlier draft reading the wrong `"0100"`/`"0101"` offsets) but is still unverified
+  against a real NEF. **No eye-detection candidate shipped this pass** — real candidates
+  (MediaPipe/YuNet/OWLv2/DINOv2-probe) were license-checked but not run against real weights; see
+  `eyes.rs`'s doc comment rather than trusting a fabricated result.
 - **Subject grouping (#35) is NOT sequence-constrained** — reuses litter's DINOv2 embedder but
   needs its own clustering (DBSCAN + silhouette-guided eps), since the same subject can reappear
   anywhere in a shoot, not just nearby in capture order.
@@ -38,6 +52,12 @@ Full reasoning/history: `docs/decisions/culling.md`.
   sequence-constrained grouping. Real, tested (35 unit/integration tests), not path-gated,
   pending the reference-labelling measurement pass ADR-0033 describes. See
   `docs/research/litter-burst-grouping.md`.
+- **`spikes/squint`** (#34/ADR-0034's blur/misfocus/eye-detection research) — Laplacian
+  variance/Tenengrad/real-2D-FFT/structure-tensor sharpness candidates, disk/motion-blur synthetic
+  degradation, an AF-region-aware misfocus ratio, a Nikon `AFInfo2` AF-area reader, and a labelling/
+  eval harness. Real, tested (32 unit tests), not path-gated, pending the real con-card
+  measurement pass (#238) ADR-0034 describes. `eyes.rs` is research-only (no bundled candidate).
+  See `docs/research/squint-blur-eye-detection.md`.
 - **`spikes/rosette`** (#35/ADR-0035's subject-grouping research) — DINOv2/OpenCLIP/DINOv3
   embedding backbones (DINOv2 adapted from litter), DBSCAN + silhouette-guided eps clustering,
   full-frame-vs-crop ablation, burst-collapse helper, and a labelling/eval harness. Real, tested
