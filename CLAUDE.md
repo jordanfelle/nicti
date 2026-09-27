@@ -22,7 +22,7 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071), `color` (0038),
-`lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033), `denoise` (0040),
+`lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033, 0035), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044), `develop` (0099, 0053), `jobs` (0054), `export` (0056). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
@@ -158,6 +158,7 @@ terse index: crate/spike → purpose → owning topic.
 - **`spikes/shed`** (#61/ADR-0061) → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
 - **`spikes/siamese`** (#48/ADR-0048) → [`masking`](.claude/rules/masking/REFERENCE.md)
 - **`spikes/litter`** (#33/ADR-0033) → [`culling`](.claude/rules/culling/REFERENCE.md)
+- **`spikes/rosette`** (#35/ADR-0035) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
 - **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
 - **`spikes/pupil`** (#99/ADR-0099) → [`develop`](.claude/rules/develop/REFERENCE.md)

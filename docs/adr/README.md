@@ -40,6 +40,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0021](0021-non-destructive-edit-model.md) | 0002 | Non-destructive edit model | Accepted |
 | [0029](0029-preview-tier-strategy.md) | 0017 | Preview tier strategy | Accepted |
 | [0033](0033-burst-duplicate-grouping.md) | 0025 | Burst/duplicate grouping | Proposed |
+| [0035](0035-subject-grouping.md) | — | Subject grouping | Proposed — measurement pending |
 | [0037](0037-raw-decoder.md) | 0019 | RAW decoder | Accepted |
 | [0038](0038-color-pipeline.md) | 0021 | Color pipeline | Proposed |
 | [0040](0040-demosaic-and-denoise.md) | — | Demosaic and noise reduction | Proposed |
