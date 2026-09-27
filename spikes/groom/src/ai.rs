@@ -59,21 +59,26 @@ fn ort_err(e: impl std::fmt::Display) -> GroomAiError {
 /// Runtime shared library itself (`libonnxruntime.so`/`.dylib`/`onnxruntime.dll`), which is a
 /// *different* file from either wrapper's own `model_path` (the `.onnx` model file) -- this is
 /// the same "native runtime loads on demand, distinct from the Rust wrapper's own laziness"
-/// distinction ADR-0019 §3 draws. Same `OnceLock` pattern as
-/// `spikes/siamese/src/segment.rs::ensure_ort_environment` -- keep both in sync (#179).
+/// distinction ADR-0019 §3 draws. Same `OnceLock` pattern as the identical copies in
+/// `spikes/siamese/src/segment.rs`, `spikes/crouch/src/ort_contend.rs`, `spikes/rods/src/ai.rs`,
+/// and `spikes/litter/src/embed.rs` -- keep all five in sync (#179).
 ///
 /// `EnvironmentBuilder::commit()` returning `false` is not a failure: per its own doc comment
 /// (ort 2.0.0-rc.13), `false` means "an environment has already been configured" -- `commit()`
 /// only inserts the builder into a process-global `OnceLock`, it never calls ONNX Runtime's
 /// `CreateEnv` itself, so there is no way for it to report a genuine init failure at all. A real
 /// failure (bad dylib, version mismatch) surfaces from `ort::init_from` above instead, and is
-/// already propagated by the `?`. So this proceeds either way once `init_from` succeeds. **Known
-/// limitation**: `ort`'s public API exposes no way to inspect which dylib path or execution
-/// providers the winning environment (whichever caller committed first) actually used -- if two
-/// callers in the same process request genuinely incompatible configurations, the loser silently
-/// runs against the winner's environment instead of its own requested one, with no way to detect
-/// or warn about it here.
-fn ensure_ort_environment(dylib_path: &Path) -> Result<(), GroomAiError> {
+/// already propagated by the `?`. So this proceeds either way once `init_from` succeeds --
+/// verified in `tests/ort_cross_module.rs`, which exercises the real cross-crate race this was
+/// written for. **Known limitation**: `ort`'s public API exposes no way to inspect which dylib
+/// path the winning environment (whichever caller committed first) actually loaded, so a
+/// dylib-path mismatch across callers can't be detected here. Execution providers *can* be read
+/// back via `Environment::current()?.execution_providers()`, but that only reflects EPs set via
+/// `EnvironmentBuilder::with_execution_providers` -- none of these five wrappers set EPs at the
+/// environment level; each that supports EP selection (`crouch`, `rods`) requests it per-`Session`
+/// instead, which isn't visible on `Environment` at all. So even with that getter, there's no way
+/// to learn which EP a losing caller's session actually ends up using.
+pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), GroomAiError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     let result = INIT.get_or_init(|| {
         let builder =
@@ -269,18 +274,10 @@ mod tests {
         assert_eq!(mask.data.len(), mask.width * mask.height);
     }
 
-    /// Proves #179's actual fix: a second `ensure_ort_environment` call in the same process (the
-    /// scenario that used to fail forever once any earlier caller -- this test, or `siamese`, or a
-    /// future caller -- had already committed an environment) must succeed, not error. Needs a
-    /// real ONNX Runtime shared library to get past `ort::init_from`'s own dlopen, so this can't
-    /// run in CI (no real dylib on disk there) -- same posture as `runs_a_real_model_if_present`.
-    #[test]
-    #[ignore = "needs a real ONNX Runtime shared library on disk"]
-    fn ensure_ort_environment_second_call_in_process_succeeds() {
-        let dylib_path = std::env::var("NICTI_TEST_ORT_DYLIB").expect("set NICTI_TEST_ORT_DYLIB");
-        let dylib_path = Path::new(&dylib_path);
-        ensure_ort_environment(dylib_path).expect("first call must succeed");
-        ensure_ort_environment(dylib_path)
-            .expect("second call must reuse the already-committed environment, not error");
-    }
+    // A same-crate repeat call to `ensure_ort_environment` doesn't exercise #179's actual bug:
+    // the `OnceLock` here caches the *first* call's result, so a second call in this same test
+    // binary never re-runs `commit()` at all -- it can't distinguish the fixed code from the
+    // original bug. The real race is cross-crate (this crate's `OnceLock` vs. another spike's,
+    // both racing to insert into `ort`'s single process-global `G_ENV_OPTIONS`); that's what
+    // `tests/ort_cross_module.rs` reproduces instead.
 }
