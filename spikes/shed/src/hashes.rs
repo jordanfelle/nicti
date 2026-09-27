@@ -343,12 +343,22 @@ fn wsl_path(drive_letter_path: &str) -> Option<PathBuf> {
     Some(PathBuf::from(format!("/mnt/{letter}/{rest}")))
 }
 
-/// `wsl_path` if `full` looks like a Windows drive-letter path (every real root in the measured
-/// catalog is one, ADR-0061 Q1) -- otherwise, `full` unchanged, as an already-absolute Unix path.
-/// The fallback exists so this module's own tests can build a fixture root pointing at a real
-/// `TempDir` without going through a Windows-path round-trip; a real `.lrcat`'s roots never hit
-/// it, since ADR-0061 confirmed all 13 real root folders are drive-letter-prefixed.
+/// On Windows, a drive-letter path (`C:\...`) is already this machine's own real path -- `/mnt/x/`
+/// is a WSL-specific convention with no meaning to a native Windows process, and CI's own
+/// `cargo test (windows)` job runs on a real `windows-latest` runner, not WSL. `wsl_path`'s
+/// translation only applies elsewhere (this tool's actual real-world use: a Linux/WSL sandbox
+/// reading a Windows LRC catalog's own paths). Caught by CI itself, not local testing -- this
+/// developer's own sandbox is Linux/WSL, so every local run before this PR's initial push
+/// exercised only the `wsl_path`/Unix-fallback branches, never this one.
 fn resolve_local_path(full: &str) -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        return Some(PathBuf::from(full));
+    }
+    // `wsl_path` if `full` looks like a Windows drive-letter path (every real root in the measured
+    // catalog is one, ADR-0061 Q1) -- otherwise, `full` unchanged, as an already-absolute Unix
+    // path. The fallback exists so this module's own tests can build a fixture root pointing at a
+    // real `TempDir` without going through a Windows-path round-trip; a real `.lrcat`'s roots
+    // never hit it, since ADR-0061 confirmed all 13 real root folders are drive-letter-prefixed.
     wsl_path(full).or_else(|| full.starts_with('/').then(|| PathBuf::from(full)))
 }
 
@@ -615,6 +625,21 @@ mod tests {
     #[test]
     fn wsl_path_rejects_a_non_drive_letter_path() {
         assert_eq!(wsl_path("/already/unix/path"), None);
+    }
+
+    /// Regression test for a real CI-only bug this branch's first push shipped: `resolve_local_path`
+    /// unconditionally ran every path through `wsl_path`, which mapped a real Windows drive-letter
+    /// path (e.g. `C:\Users\...`) to a WSL-only `/mnt/c/...` path -- meaningless on a real
+    /// `windows-latest` CI runner, where `C:\Users\...` is already the correct native path. Caught
+    /// by `cargo test (windows)` in CI (this developer's own sandbox is Linux/WSL, so nothing
+    /// local ever exercised this branch); only compiles/asserts anything on Windows itself.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn resolve_local_path_uses_a_drive_letter_path_directly_on_windows() {
+        assert_eq!(
+            resolve_local_path(r"C:\Users\someone\test.nef"),
+            Some(PathBuf::from(r"C:\Users\someone\test.nef"))
+        );
     }
 
     #[test]
