@@ -1,0 +1,47 @@
+[package]
+name = "prey"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Throwaway spike for #56 (ADR-0056): export stack research -- resize (fast_image_resize vs GPU), JPEG/TIFF/PNG encode, EXIF/XMP/ICC metadata write, and watermark compositing (CPU vs GPU). Not a production crate -- see CLAUDE.md's package-map note on spikes/*."
+
+[lib]
+name = "prey"
+path = "src/lib.rs"
+
+[[bin]]
+name = "prey"
+path = "src/bin/prey.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
+fast_image_resize = "6"
+jpeg-encoder = "0.6"
+rayon = "1"
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+nicti-prowl = { path = "../../crates/nicti-prowl" }
+little_exif = "0.6.23"
+img-parts = "0.4.0"
+resvg = "0.48.1"
+usvg = "0.48.1"
+tiny-skia = "0.12.0"
+moxcms = "0.9.1"
+bytes = "1.12.1"
+mozjpeg = { version = "0.10.13", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Off by default so ordinary CI/dev builds never need a C compiler + nasm for mozjpeg-sys's
+# vendored mozjpeg build -- same pattern as nicti-decode's `libraw` feature. Enable explicitly
+# (`cargo test -p prey --features native`) to compare against the native encoder.
+native = ["dep:mozjpeg"]

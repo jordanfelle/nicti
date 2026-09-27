@@ -901,6 +901,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotli"
+version = "8.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
 name = "brotli-decompressor"
 version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1610,6 +1621,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89643801d9192df80c294f174d5fe0416395e7edb0bb3024784ba10fc933e76f"
 
 [[package]]
+name = "crc"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1941,6 +1967,12 @@ name = "dtor"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "ecolor"
@@ -2464,7 +2496,9 @@ version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
 dependencies = [
+ "fontconfig-parser",
  "log",
+ "memmap2",
  "slotmap",
  "tinyvec",
 ]
@@ -3871,7 +3905,7 @@ dependencies = [
  "exr",
  "gif",
  "image-webp",
- "moxcms",
+ "moxcms 0.8.1",
  "num-traits",
  "png",
  "qoi",
@@ -3911,6 +3945,17 @@ name = "imagesize"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
+name = "img-parts"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19734e3c43b2a850f5889c077056e47c874095f2d87e853c7c41214ae67375f0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "miniz_oxide 0.8.9",
+]
 
 [[package]]
 name = "imgref"
@@ -4632,6 +4677,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "little_exif"
+version = "0.6.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21eeb58b22d31be8dc5c625004fcd4b9b385cd3c05df575f523bcca382c51122"
+dependencies = [
+ "brotli",
+ "crc",
+ "log",
+ "miniz_oxide 0.8.9",
+ "paste",
+ "quick-xml 0.37.5",
+]
+
+[[package]]
 name = "loaf"
 version = "0.0.0"
 dependencies = [
@@ -4867,6 +4926,41 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "moxcms"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "396077b717181ce3f9a6b66739b269b82d756be5ec0f76be0bc40a7c51775830"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
+name = "mozjpeg"
+version = "0.10.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7891b80aaa86097d38d276eb98b3805d6280708c4e0a1e6f6aed9380c51fec9"
+dependencies = [
+ "arrayvec",
+ "bytemuck",
+ "libc",
+ "mozjpeg-sys",
+ "rgb",
+]
+
+[[package]]
+name = "mozjpeg-sys"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f0dc668bf9bf888c88e2fb1ab16a406d2c380f1d082b20d51dd540ab2aa70c1"
+dependencies = [
+ "cc",
+ "dunce",
+ "libc",
+ "nasm-rs",
 ]
 
 [[package]]
@@ -6269,6 +6363,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "prey"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "bytes",
+ "clap",
+ "fast_image_resize",
+ "image",
+ "img-parts",
+ "jpeg-encoder",
+ "little_exif",
+ "moxcms 0.9.1",
+ "mozjpeg",
+ "nicti-prowl",
+ "pollster",
+ "rayon",
+ "resvg",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tiny-skia 0.12.0",
+ "usvg",
+ "wgpu 30.0.1",
+]
+
+[[package]]
 name = "primal-check"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6406,6 +6528,15 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
+name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quick-xml"
@@ -6999,7 +7130,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "clap",
- "quick-xml",
+ "quick-xml 0.41.0",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
@@ -8827,7 +8958,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.41.0",
  "quote",
 ]
 
