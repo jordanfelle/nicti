@@ -160,3 +160,13 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   candidate (no CI job split needed, unlike ADR-0113's mandatory `--exclude den` fix). One real
   `deny.toml` edit was needed: `varint-rs` (transitive via `lsm-tree`) carries `0BSD`, not
   previously allowlisted.
+- **Keywords, collections, and filter/search backend**: `docs/adr/0023-keywords-collections-filter.md`
+  — the ticket ADR-0103's own Consequences section handed keyword-grain faceting to. PR 1 (of a
+  4-PR stack) fixes a real schema/ADR drift: `asset.rating` was `NOT NULL DEFAULT 0`, which
+  couldn't represent "unrated" as distinct from "0 stars" (ADR-0059/ADR-0061 require it to; the
+  real LRC catalog is 73% unrated). Moves `facet_counts` to a `(volume_id, model, rating)` grain so
+  an offline volume's assets drop out via a query-time join on `volume.online` (ADR-0071's
+  facet-exclusion hand-off), rather than a trigger recomputing every row on every online/offline
+  flip. Uses SQLite's documented table-rebuild recipe (new table under a scratch name, not
+  `ALTER TABLE ... RENAME`) since `preview`/`edit_variant` hold `FOREIGN KEY REFERENCES asset(id)`
+  that a rename would otherwise leave dangling.

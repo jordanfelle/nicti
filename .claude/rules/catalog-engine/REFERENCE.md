@@ -39,9 +39,15 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   series), attributed to `Guard`/iterator overhead. Crash-safety inconclusive (same OS-lock class
   as Turso/redb). Links cleanly alongside every other candidate, unlike libSQL.
 
+- **Keywords/collections/filter backend (#23, landing)**: `docs/adr/0023`. PR 1 (of 4) makes
+  `asset.rating` nullable (unrated ≠ 0 stars, per `xmp-interop`/`lrc-migration`) and moves
+  `facet_counts` to `(volume_id, model, rating)` so `facet_count` excludes offline-volume assets
+  via a query-time join, not a trigger. Uses SQLite's table-rebuild recipe (scratch-name table,
+  not `RENAME`) since `preview`/`edit_variant` FK-reference `asset(id)`.
+
 ## Package contents
 
-- **`crates/nicti-lair`** (#22, landed) — the real production catalog implementation:
+- **`crates/nicti-lair`** (#22, landed; #23 landing) — the real production catalog implementation:
   `schema.rs`/`sqlite.rs`/`scruff.rs`. Promotes the SQLite choice this topic's ADR series settled
   on. `spikes/den` (the throwaway comparison spike backing ADR-0067/0102/0106/0103/0107/0113/
   0115/0116 — one module per candidate engine plus a shared `Workload` trait and synthetic
