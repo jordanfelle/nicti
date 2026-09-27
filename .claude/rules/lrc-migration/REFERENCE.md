@@ -21,8 +21,14 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
 - **Develop settings**: `agprefs` crate (MIT) parses LRC's `s = { Key = Value }` Lua literal with
   zero failures on a real 380,307-row catalog — adopted over hand-rolling. `develop.rs`'s
   `classify_key` is an exact-match table (not prefix heuristics — those missed `Enable*` toggles
-  and per-channel HSL keys) sorting real keys to owner tickets #42/#46/#47/#39/#51/#49. Keep raw
-  LRC text verbatim in a provenance blob on import; translate only what's needed.
+  and per-channel HSL keys) sorting all real keys to owner tickets #42/#46/#47/#39/#51/#49/#40/#52.
+  Keep raw LRC text verbatim in a provenance blob on import; translate only what's needed.
+- **`FilterList`/`AllowFilters` gate 4 distinct AI filters (#157)**, not just Denoise: real usage
+  is 20,303 Denoise / 47 People Removal / 6 Super Resolution / 1 Reflection Removal (of 380,307
+  rows), read from `FilterList.Filters[].Title`. `classify_key` defaults the raw key to `#40`
+  (dominant case) — #62's importer must inspect each `Filters[]` entry and route People/Reflection
+  Removal to `#51`, Super Resolution to `#174`. `LensBlur` is present almost everywhere but always
+  empty (0/380,307 rows with real content) — provenance-only, no owner ticket needed.
 - **`lrcat-extractor` not a dependency** — its `rusqlite = "0.38"` pin conflicts with `den`'s
   `^0.40` via Cargo's workspace-wide `links = "sqlite3"` uniqueness (not per-binary, holds even
   behind an optional feature). Evaluate it standalone outside the workspace, not as a `spikes/*`

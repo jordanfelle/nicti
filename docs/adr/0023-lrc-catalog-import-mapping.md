@@ -80,8 +80,9 @@ settling the adopt-vs-hand-roll question this ADR's Context raised: adopt `agpre
 a second Lua-literal parser.
 
 197 distinct keys appear across the real catalog. `spikes/shed/src/develop.rs`'s `classify_key`
-sorts 191 of them (97%) into an owner ticket by an exact-match table built from this real key set,
-grouped by Develop-module panel:
+sorts all of them into an owner ticket by an exact-match table built from this real key set,
+grouped by Develop-module panel (updated by #157, which resolved the 6 keys the initial pass left
+unowned — see below):
 
 | Owner ticket | Panel(s) | Key count |
 |---|---|---|
@@ -89,15 +90,33 @@ grouped by Develop-module panel:
 | #46 (global) | Basic/Tone, Detail (sharpen + luminance NR), Effects (grain + vignette), HDR/SDR rendition, auto-tone, parametric curve | 56 |
 | #47 (crop/geometry) | Transform: crop, manual/auto perspective, Upright | 33 |
 | #39 (lens) | Lens Corrections: profile-based + manual distortion/vignette, defringe (CA) | 24 |
-| #51 (heal) | Spot heal, clone stamp, legacy red-eye, AI distraction removal | 7 |
+| #51 (heal) | Spot heal, clone stamp, legacy red-eye, AI distraction removal, AI People/Reflection Removal (#157) | 7 |
+| #40 (AI denoise) | `FilterList`/`AllowFilters`, key-level default (see #157 below) | 2 |
 | #49 (masks) | Local adjustment groups, range masks | 2 |
-| unowned | see below | 6 |
+| #52 (presets) | `Preset`, `ToggleStyleAmount`, `ToggleStyleDigest` (#157) | 3 |
+| provenance-only, no owner ticket | `LensBlur` (#157) | 1 |
 
-The 6 unowned keys are a real, current gap, not a classifier miss: `FilterList`/`AllowFilters`
-(Adobe's newer AI-filter stack, e.g. Denoise), `LensBlur` (synthetic depth-of-field blur), `Preset`
-(which preset was last applied — bookkeeping, not a develop parameter), and
-`ToggleStyleAmount`/`ToggleStyleDigest` (style-preset toggle bookkeeping). None has an existing
-Nicti ticket; see Consequences.
+**#157 resolved the 6 originally-unowned keys** (`FilterList`/`AllowFilters`/`LensBlur`/`Preset`/
+`ToggleStyleAmount`/`ToggleStyleDigest`) by measuring real presence/active-usage counts against
+this same catalog, rather than guessing from the key names alone:
+
+- **`FilterList`/`AllowFilters`** turned out to gate 4 distinct LRC AI filters, not one, with very
+  uneven real usage across the 380,307 rows: **20,303 Denoise, 47 People Removal, 6 Super
+  Resolution, 1 Reflection Removal** (`FilterList.Filters[].Title`). `classify_key` operates
+  per-key, not per-filter-entry, so it defaults `FilterList`/`AllowFilters` to `#40` (the dominant
+  case) — but #62's importer must inspect each `Filters[]` entry's `Title` and route People/
+  Reflection Removal to **#51** and Super Resolution to the new **#174** instead of assuming every
+  entry is Denoise.
+- **`LensBlur`** is present in nearly every row (380,300/380,307) but *always* as an empty
+  bookkeeping table (`{  }`) — **0 rows had real content**, i.e. the feature has never actually
+  been used in this catalog. Not worth a render-owning ticket for zero real usage; #62 keeps it
+  verbatim in the provenance blob (`Owner::ProvenanceOnly`) rather than silently dropping it.
+- **`Preset`/`ToggleStyleAmount`/`ToggleStyleDigest`** are style-preset apply/toggle bookkeeping
+  (which preset was last applied, digest of its content), not develop parameters themselves →
+  **#52** (presets, copy/paste, sync).
+
+See `spikes/shed/src/develop.rs`'s `analyze_unowned_keys`/`UNOWNED_KEYS` (the `shed develop-usage`
+subcommand) for the measurement, and its module doc comment for the full reasoning.
 
 `Enable*` boolean toggles (`EnableLensCorrections`, `EnableRetouch`, `EnableSplitToning`, etc.) are
 filed under the panel they gate, not a separate bucket — a first draft of `classify_key` used
@@ -184,9 +203,10 @@ constraint above (either the workspace's `den` spike is gone by then per its own
   - Smart-collection rule-criteria mapping onto #23's filter bar — unverified, no smart collections
     existed in the real catalog to measure against (Q3).
   - `.lrcat-data` blob linkage and whether #62 needs to import them (Q5).
-  - The 6 unowned develop-setting keys (`FilterList`/`AllowFilters`/`LensBlur`/`Preset`/
-    `ToggleStyleAmount`/`ToggleStyleDigest`) need an owner ticket decision before #62 relies on a
-    complete key set (Q4).
+  - ~~The 6 unowned develop-setting keys~~ **Resolved by #157** (Q4): `FilterList`/`AllowFilters`
+    default to #40 with a real per-filter-type split #62 must apply (#51 for People/Reflection
+    Removal, the new #174 for Super Resolution); `LensBlur` is provenance-only (zero real usage
+    measured); `Preset`/`ToggleStyleAmount`/`ToggleStyleDigest` → #52.
   - `AgLibraryFile.md5`/`importHash` cross-check against `spikes/homing`'s relink fingerprints (Q1).
   - `lrcat-extractor` adopt/fork re-evaluation once the `den`/`rusqlite` version conflict is no
     longer live in this workspace (Q8).

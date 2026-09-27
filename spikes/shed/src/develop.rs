@@ -11,9 +11,20 @@
 //! name doesn't share a prefix with the panel they gate, and per-channel HSL keys with no common
 //! `*Adjustment*` substring at all, e.g. `BlueHue`/`RedSaturation`), plus a suffix/prefix fallback
 //! for any key a *different* catalog (older LRC version, different feature set) might contain that
-//! this one didn't. `Owner::Unowned` is a real, reviewable finding either way -- either a key this
-//! pass confirmed has no current Nicti ticket (`FilterList`/`AllowFilters`/`LensBlur` -- newer
-//! Adobe AI features with no existing owner), or one the fallback heuristic genuinely can't place.
+//! this one didn't. `Owner::Unowned` remains for a key the fallback heuristic genuinely can't
+//! place -- #157 resolved the 6 keys that had no owner ticket after this pass's first sweep by
+//! measuring their real presence/active usage (`analyze_unowned_keys`, `UNOWNED_KEYS`) rather than
+//! guessing: `FilterList`/`AllowFilters` turned out to gate 4 distinct LRC AI filters, not one,
+//! with real but very unevenly distributed usage (20,303 Denoise / 47 People Removal / 6 Super
+//! Resolution / 1 Reflection Removal, of 380,307 rows) -- Denoise -> `AiDenoise` (#40), People/
+//! Reflection Removal -> `Heal` (#51, already scoped for "AI distraction removal"), Super
+//! Resolution has no existing owner and got a new ticket (#174). `LensBlur` is present in nearly
+//! every row (380,300/380,307) but always as an empty bookkeeping table -- 0 rows had real
+//! content, i.e. the feature has never actually been used in this catalog -- so it's `ProvenanceOnly`:
+//! not worth a render-owning ticket for a feature with zero real usage, but #62's importer still
+//! keeps it verbatim in the provenance blob rather than silently dropping it. `Preset`/
+//! `ToggleStyleAmount`/`ToggleStyleDigest` are style-preset apply/toggle bookkeeping, not develop
+//! parameters -> `Presets` (#52).
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -32,8 +43,16 @@ pub enum Owner {
     Lens,
     /// #42: color management (camera/working-space color profile references).
     Color,
-    /// #51: healing/removal (spot heal, clone stamp, legacy red-eye).
+    /// #51: healing/removal (spot heal, clone stamp, legacy red-eye, AI People/Reflection Removal).
     Heal,
+    /// #40: demosaic + noise reduction, including the AI Denoise entry inside `FilterList`.
+    AiDenoise,
+    /// #52: style-preset apply/toggle bookkeeping (which preset, toggle state/digest) -- not a
+    /// develop parameter itself.
+    Presets,
+    /// Confirmed real (not a classifier miss) but with zero active usage in the measured
+    /// catalog (#157) -- kept verbatim in #62's provenance blob, no render-owning ticket yet.
+    ProvenanceOnly,
     /// No confident match -- needs a human to assign it to a ticket before #62 relies on it.
     Unowned,
 }
@@ -243,6 +262,19 @@ fn exact_owner(key: &str) -> Option<Owner> {
         | "EnableDistractionRemoval" => Heal,
         // -- Masks + local adjustments (brush/gradient/AI local correction groups, range masks)
         "MaskGroupBasedCorrections" | "RangeMaskMapInfo" => Masks,
+        // -- AI filter-panel container (#157): key-level classification only -- `FilterList`
+        // holds several distinct filter types (Denoise dominant at 20,303/20,356 real active
+        // rows; People Removal/Reflection Removal -> Heal; Super Resolution -> #174), but
+        // `classify_key` operates per-key, not per-filter-entry. `AiDenoise` here is the
+        // majority-case default; #62's importer must still inspect `FilterList.Filters[].Title`
+        // to route People/Reflection Removal entries to #51 and Super Resolution entries to
+        // #174 (see this module's doc comment and `analyze_unowned_keys`'s `filter_titles`).
+        "FilterList" | "AllowFilters" => AiDenoise,
+        // -- Present in nearly every row but always an empty bookkeeping table in the measured
+        // catalog (0/380,300 rows had real content) -- see this module's doc comment.
+        "LensBlur" => ProvenanceOnly,
+        // -- Style-preset apply/toggle bookkeeping (#52), not a develop parameter.
+        "Preset" | "ToggleStyleAmount" | "ToggleStyleDigest" => Presets,
         _ => return None,
     })
 }
@@ -355,6 +387,108 @@ pub fn analyze(conn: &Connection) -> Result<DevelopReport> {
     })
 }
 
+/// The 6 keys #61 found with no owner ticket (see this module's doc comment). Order matches the
+/// report table in `docs/adr/0023-lrc-catalog-import-mapping.md`.
+pub const UNOWNED_KEYS: &[&str] = &[
+    "FilterList",
+    "AllowFilters",
+    "LensBlur",
+    "Preset",
+    "ToggleStyleAmount",
+    "ToggleStyleDigest",
+];
+
+#[derive(Debug, Serialize)]
+pub struct UnownedKeyUsage {
+    pub key: &'static str,
+    /// Rows where the key exists in the parsed struct at all, present or not truthy.
+    pub present_count: i64,
+    /// Rows where the value is also non-empty/non-zero/true -- see `is_active`. Distinguishes
+    /// "the panel wrote its usual bookkeeping key" (e.g. `LensBlur = {  }`, an empty table LRC
+    /// writes on every image regardless of whether the AI Lens Blur filter was ever opened) from
+    /// "the feature actually holds real data."
+    pub active_count: i64,
+    /// `FilterList` only: each entry's `Filters[].Title` value (LRC's own internal AI-filter type
+    /// string, e.g. `"$$$/CRaw/Filter/Title/Denoise=Denoise"` -- not user data, this identifies
+    /// which filter panel was applied, not anything the user typed) with a row count. Confirmed
+    /// `FilterList` is not single-purpose: it holds Denoise, People Removal, Reflection Removal,
+    /// and Super Resolution entries, which don't share one owner ticket.
+    pub filter_titles: Option<BTreeMap<String, i64>>,
+}
+
+/// A LRC develop-setting value counts as "active" when it isn't the trivial/default form for its
+/// type: `false`/`0`/empty string/empty list/empty struct. LRC writes several of the 6 unowned
+/// keys as an always-present empty container (`{  }`) regardless of whether the user ever touched
+/// the corresponding panel -- `present_count` alone would conflate "feature never used" with
+/// "feature used," this tells them apart.
+fn is_active(value: &agprefs::Value) -> bool {
+    use agprefs::Value;
+    match value {
+        Value::Unit => false,
+        Value::Bool(b) => *b,
+        Value::Int(i) => *i != 0,
+        Value::Float(f) => *f != 0.0,
+        Value::String(s) => !s.is_empty(),
+        Value::Values(vals) => !vals.is_empty(),
+        Value::Struct(fields) => !fields.is_empty(),
+    }
+}
+
+/// Aggregate presence/active counts for `UNOWNED_KEYS` only, across every row of
+/// `Adobe_imageDevelopSettings` -- the measurement #157 needs before deciding each key's owner.
+/// Reports counts only, no value contents: `Preset`/`ToggleStyleDigest` can carry
+/// user-created-preset identifiers, which ADR-0023's privacy policy keeps out of anything
+/// committed to this repo.
+pub fn analyze_unowned_keys(conn: &Connection) -> Result<Vec<UnownedKeyUsage>> {
+    let mut stmt = conn.prepare("SELECT text FROM Adobe_imageDevelopSettings")?;
+    let mut rows = stmt.query([])?;
+
+    let mut present: BTreeMap<&'static str, i64> = UNOWNED_KEYS.iter().map(|k| (*k, 0)).collect();
+    let mut active: BTreeMap<&'static str, i64> = UNOWNED_KEYS.iter().map(|k| (*k, 0)).collect();
+    let mut filter_titles: BTreeMap<String, i64> = BTreeMap::new();
+
+    while let Some(row) = rows.next()? {
+        let Some(text): Option<String> = row.get(0)? else {
+            continue;
+        };
+        let Ok(pref) = agprefs::Agpref::parse(&text) else {
+            continue;
+        };
+        let Some(fields) = pref.get_struct() else {
+            continue;
+        };
+        for key in UNOWNED_KEYS {
+            if let Some(value) = fields.get(*key) {
+                *present.get_mut(key).unwrap() += 1;
+                if is_active(value) {
+                    *active.get_mut(key).unwrap() += 1;
+                }
+            }
+        }
+        if let Some(agprefs::Value::Struct(filter_list)) = fields.get("FilterList") {
+            if let Some(agprefs::Value::Values(filters)) = filter_list.get("Filters") {
+                for filter in filters {
+                    if let agprefs::Value::Struct(filter_fields) = filter {
+                        if let Some(agprefs::Value::String(title)) = filter_fields.get("Title") {
+                            *filter_titles.entry(title.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(UNOWNED_KEYS
+        .iter()
+        .map(|key| UnownedKeyUsage {
+            key,
+            present_count: present[key],
+            active_count: active[key],
+            filter_titles: (*key == "FilterList").then(|| filter_titles.clone()),
+        })
+        .collect())
+}
+
 fn group_counts(conn: &Connection, sql: &str) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt
@@ -375,6 +509,12 @@ mod tests {
         assert_eq!(classify_key("LensProfileEnable"), Owner::Lens);
         assert_eq!(classify_key("CameraProfile"), Owner::Color);
         assert_eq!(classify_key("RetouchInfo"), Owner::Heal);
+        assert_eq!(classify_key("FilterList"), Owner::AiDenoise);
+        assert_eq!(classify_key("AllowFilters"), Owner::AiDenoise);
+        assert_eq!(classify_key("LensBlur"), Owner::ProvenanceOnly);
+        assert_eq!(classify_key("Preset"), Owner::Presets);
+        assert_eq!(classify_key("ToggleStyleAmount"), Owner::Presets);
+        assert_eq!(classify_key("ToggleStyleDigest"), Owner::Presets);
         assert_eq!(classify_key("SomeFutureAdobeKey"), Owner::Unowned);
     }
 
@@ -587,17 +727,8 @@ mod tests {
         "Whites2012",
     ];
 
-    const REAL_UNOWNED: &[&str] = &[
-        "AllowFilters",
-        "FilterList",
-        "LensBlur",
-        "Preset",
-        "ToggleStyleAmount",
-        "ToggleStyleDigest",
-    ];
-
     #[test]
-    fn classifies_the_real_catalogs_197_keys_as_191_owned_plus_6_unowned() {
+    fn classifies_the_real_catalogs_197_keys_with_zero_unowned() {
         assert_eq!(
             REAL_KEYS.len(),
             197,
@@ -609,11 +740,10 @@ mod tests {
                 unowned.push(*key);
             }
         }
-        assert_eq!(
-            unowned, REAL_UNOWNED,
-            "exact_owner's classified/unowned split no longer matches the real catalog's key set \
-             -- did an arm get added that was never actually observed, or a real key stop being \
-             classified?"
+        assert!(
+            unowned.is_empty(),
+            "#157 assigned an owner (or ProvenanceOnly) to every previously-unowned key -- a new \
+             Unowned hit here ({unowned:?}) means a real key stopped being classified"
         );
     }
 
@@ -653,5 +783,66 @@ mod tests {
             Some(&(1, Owner::CropGeometry))
         );
         assert_eq!(report.has_masks_count, 1);
+    }
+
+    #[test]
+    fn is_active_treats_empty_containers_and_falsy_scalars_as_inactive() {
+        use agprefs::Value;
+        assert!(!is_active(&Value::Unit));
+        assert!(!is_active(&Value::Bool(false)));
+        assert!(!is_active(&Value::Int(0)));
+        assert!(!is_active(&Value::Float(0.0)));
+        assert!(!is_active(&Value::String("".into())));
+        assert!(!is_active(&Value::Values(vec![])));
+        assert!(!is_active(&Value::Struct(Default::default())));
+
+        assert!(is_active(&Value::Bool(true)));
+        assert!(is_active(&Value::Int(1)));
+        assert!(is_active(&Value::String("x".into())));
+        assert!(is_active(&Value::Values(vec![Value::Int(1)])));
+    }
+
+    #[test]
+    fn analyze_unowned_keys_distinguishes_present_from_active_and_breaks_down_filter_titles() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE Adobe_imageDevelopSettings (id_local INTEGER PRIMARY KEY, text TEXT);",
+        )
+        .unwrap();
+        // LensBlur present but empty (LRC's real always-there-but-unused bookkeeping shape);
+        // FilterList present with one real Denoise entry; AllowFilters true to match.
+        conn.execute(
+            "INSERT INTO Adobe_imageDevelopSettings (text) VALUES (?1)",
+            [r#"s = {
+                LensBlur = {  },
+                AllowFilters = true,
+                FilterList = { Filters = { { Title = "$$$/CRaw/Filter/Title/Denoise=Denoise" } } },
+            }"#],
+        )
+        .unwrap();
+        // A second row: LensBlur present-but-empty again, nothing else present.
+        conn.execute(
+            "INSERT INTO Adobe_imageDevelopSettings (text) VALUES (?1)",
+            [r#"s = { LensBlur = {  } }"#],
+        )
+        .unwrap();
+
+        let usage = analyze_unowned_keys(&conn).unwrap();
+        let by_key: BTreeMap<&str, &UnownedKeyUsage> = usage.iter().map(|u| (u.key, u)).collect();
+
+        assert_eq!(by_key["LensBlur"].present_count, 2);
+        assert_eq!(by_key["LensBlur"].active_count, 0);
+        assert_eq!(by_key["FilterList"].present_count, 1);
+        assert_eq!(by_key["FilterList"].active_count, 1);
+        assert_eq!(by_key["AllowFilters"].present_count, 1);
+        assert_eq!(by_key["AllowFilters"].active_count, 1);
+        assert_eq!(by_key["Preset"].present_count, 0);
+
+        let titles = by_key["FilterList"].filter_titles.as_ref().unwrap();
+        assert_eq!(
+            titles.get("$$$/CRaw/Filter/Title/Denoise=Denoise"),
+            Some(&1)
+        );
+        assert!(by_key["AllowFilters"].filter_titles.is_none());
     }
 }
