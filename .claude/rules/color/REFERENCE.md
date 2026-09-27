@@ -23,9 +23,10 @@ Full reasoning/history: `docs/decisions/color.md`.
   (Fritsch-Carlson monotonic spline) → sRGB.
 - **Profile source: parse the user's own installed Adobe `.dcp`/`.xmp` at runtime**, never bundle
   one (ADR-0003) — falls back to LibRaw's built-in camera matrix when none is installed. Adobe
-  Raw "Look" `.xmp` profiles (e.g. Adobe Vivid) have an undocumented embedded look-table encoding
-  — `xmp_profile.rs` attempts a DCP-style IFD decode and fails cleanly
-  (`UnrecognizedTableFormat`) rather than guessing; unresolved pending a real sample file.
+  Raw "Look" `.xmp` profiles (e.g. Adobe Vivid) resolved in #150: `crs:LookTable` is an MD5
+  fingerprint, the payload is `crs:Table_<id>` in the DNG SDK's `dng_big_table` wire format
+  (base85 + zlib); `xmp_profile.rs` decodes it and self-checks by recomputing that same
+  fingerprint. Verified against all six real Adobe Raw profiles.
 - **Working-space candidates**: linear ProPhoto (ACR's own), Rec.2020, ACEScg — picked by lowest
   measured ΔE00 against LRC exports, not decided yet.
 - **HueSatMap storage order**: value outermost, hue middle, saturation innermost (DNG SDK's

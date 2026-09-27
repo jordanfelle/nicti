@@ -78,14 +78,18 @@ normal `clippy`/`test` jobs.
   `BaselineExposureOffset`, `ProfileName`. Tested only against synthetic DCPs built byte-for-byte
   in test code — never a real Adobe file, per ADR-0003.
 - **`xmp_profile.rs`** — Adobe Raw "Look" `.xmp` profile parsing (e.g. the user's installed Adobe
-  Vivid preset). **This is the one piece of the plan that had to be timeboxed, not completed**:
-  the embedded look-table's exact binary encoding inside these files is undocumented, and with no
-  real sample file available in this sandbox (ADR-0003 forbids adding one, and reverse-engineering
-  an undocumented format from zero real samples risks silently producing plausible-but-wrong
-  colors — worse than refusing), this parser reads the RDF/XML container and attempts to decode an
-  embedded base64 look table as a DCP-style IFD (plausible, since Adobe is known to reuse DNG tag
-  semantics for these), but returns a clear, typed `UnrecognizedTableFormat` error rather than a
-  guess when that doesn't parse. See Deferred below and the filed follow-up issue.
+  Vivid preset). **Resolved in #150**, once the user's real installed profiles (reachable from this
+  WSL sandbox via the Windows side, `/mnt/c/...`) turned out to make the sample-file blocker moot.
+  `crs:LookTable` is the table's own MD5 fingerprint, not the data; the actual payload is a second
+  attribute, `crs:Table_<id>`, encoded in the DNG SDK's `dng_big_table` wire format (a Z85-like
+  base85 variant + zlib, read as a spec reference only, never vendored) wrapping
+  `dng_look_table::GetStream`'s tagged record. The parser recomputes the same canonical
+  re-serialization the SDK hashes for `crs:LookTable` and compares it against the ID in the file —
+  a wrong decode can't produce the right hash, the strongest correctness proof available without an
+  LRC render. Verified against all six real Adobe Raw profiles (Color/Landscape/Monochrome/
+  Neutral/Portrait/Vivid): all six decode and fingerprint-match. `Clarity2012`/`ToneCurvePV2012`/
+  `RGBTable` look settings calico doesn't apply are surfaced via
+  `LookProfile::unsupported_settings` rather than silently dropped.
 - **`cct.rs`** — DNG's dual-illuminant CCT-based matrix interpolation (`solve_camera_to_xyz`):
   iteratively estimates the shooting illuminant's correlated color temperature from the as-shot
   neutral, using McCamy's published 1992 cubic xy→CCT approximation as a documented stand-in for
@@ -168,11 +172,10 @@ neither can exist in this sandbox, see Context). Not fabricated here.
   `calico render <tiff> <json> --dcp <path-to-installed-dcp> [--look <path-to-vivid-xmp>] --space
   <candidate> --out <png>` for each working-space candidate, then `calico compare <ours.png>
   <lrc-export.tiff> --heatmap <path>` against the matching LRC export.
-- **To fill in**: mean/p95/max ΔE00 per working-space candidate, per profile (Standard/Color vs.
-  Vivid, the latter only if `xmp_profile.rs` successfully decoded the installed Vivid `.xmp` —
-  record whether it did), and the winning candidate per the decision rule above. Move this ADR to
-  Accepted once filled in and the bar is met (or record why it wasn't, and what follow-up that
-  implies).
+- **To fill in**: mean/p95/max ΔE00 per working-space candidate, per profile (Standard/Color and
+  Vivid both in scope now that #150 resolved `xmp_profile.rs`'s decode), and the winning candidate
+  per the decision rule above. Move this ADR to Accepted once filled in and the bar is met (or
+  record why it wasn't, and what follow-up that implies).
 
 ## Consequences
 
@@ -199,9 +202,11 @@ known to visibly affect. See `dcp.rs`'s `hue_sat_map` closure for the full note.
 - **Reference-machine ΔE measurement run** (this ADR's own Measured results, above) — filed as
   [#149](https://github.com/jordanfelle/nicti/issues/149), same pattern as #90/#97's
   reference-machine follow-ups, Part of #7.
-- **Adobe Raw `.xmp` "Look" profile decode** (`xmp_profile.rs`'s `UnrecognizedTableFormat` path) —
-  filed as [#150](https://github.com/jordanfelle/nicti/issues/150); needs a real sample file and a
-  way to validate against it, neither available in this sandbox.
+- ~~**Adobe Raw `.xmp` "Look" profile decode**~~ — resolved in
+  [#150](https://github.com/jordanfelle/nicti/issues/150); see the `xmp_profile.rs` bullet above.
+  Remaining gap: `crs:RGBTable`-based looks use a separate `dng_rgb_table` container this parser
+  doesn't decode (none of the six real Adobe Raw profiles checked use it, so it's untested either
+  way) — a future issue if a look profile using it ever needs support.
 - **Per-pixel black-level shading** (`retina`'s `cblack` pattern map beyond the four per-channel
   scalars) — out of scope for this pass, noted in `shim.h`.
 - **Real GPU hardware timing** for the 3D-texture HueSatMap kernel — this ADR only establishes

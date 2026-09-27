@@ -168,8 +168,10 @@ interpolation, a Fritsch-Carlson monotonic tone-curve spline, CIEDE2000 comparis
 reference pipeline, and — this repo's first 3D-texture wgpu kernel (`spikes/glint`'s own kernels
 are storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a real CPU/GPU parity
 test passing against lavapipe; pure Rust, no FFI, not path-gated. See
-`docs/research/calico-color-pipeline.md`) is real, tested (26 unit tests + 3 integration tests),
-pending only the reference-machine ΔE-against-LRC measurement pass ADR-0021 describes.
+`docs/research/calico-color-pipeline.md`) is real, tested (39 unit tests + 3 integration tests,
+plus a local-only `--ignored` test that verifies `xmp_profile.rs`'s Adobe Raw "Look" `.xmp` decode
+against the user's real installed profiles, #150), pending only the reference-machine
+ΔE-against-LRC measurement pass ADR-0021 describes.
 `spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
 reading plus a pre-commit privacy check against the real catalog's own keyword/path strings, plus
 #157's `develop-usage` subcommand (`analyze_unowned_keys`) which measured real presence/active-use
