@@ -21,8 +21,8 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0001/0002/0004, v1 target), `licensing` (0003/0013, 0018),
 `gpu-gui-and-healing` (0005/0006/0007), `catalog-engine` (0008–0012, 0014–0016),
 `preview-tiers` (0017, 0022), `raw-decoder` (0019), `volume-identity` (0020), `color` (0021),
-`lrc-migration` (0023), `masking` (0024), `denoise` (0040). A new ADR adds a bullet to
-both files of its topic (or a new topic) and to this list — not inline here.
+`lrc-migration` (0023), `masking` (0024), `culling` (0025), `denoise` (0040). A new ADR adds a
+bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
 
@@ -187,6 +187,11 @@ brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` 
 compose model with a shared bake key for a mask and its inverse, a guided-filter preview-to-full-
 res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe; see
 `docs/research/siamese-masking.md`) is real, tested (23 unit + 9 GPU-parity tests), not path-gated.
+`spikes/litter` (#33/ADR-0025's burst/duplicate-grouping research — EXIF/Nikon-MakerNote
+capture-time reader, dHash/pHash/SSIM/DINOv2 similarity signals, two-level sequence-constrained
+grouping; see `docs/research/litter-burst-grouping.md` and `.claude/rules/culling/REFERENCE.md`)
+is real, tested (35 unit/integration tests), not path-gated, pending the reference-labelling
+measurement pass ADR-0025 describes.
 
 ## Development workflow
 
