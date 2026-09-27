@@ -33,6 +33,12 @@ pub enum CanonicalError {
          than risk two different params colliding on the same cache key."
     )]
     NonFinite,
+    /// `serde_json::to_value` failed -- e.g. a map-keyed type whose keys aren't strings. In
+    /// practice every real caller only ever hashes a `StageEntry` (always string-keyed), so this
+    /// is defensive: a public, generically-typed function that already returns `Result` should
+    /// never panic on a caller's input instead of reporting it through that same `Result`.
+    #[error("value could not be serialized to JSON: {0}")]
+    Serialization(String),
 }
 
 /// Normalizes `-0.0` to `0.0` and, for every object, rebuilds it from a sorted `BTreeMap` so the
@@ -41,9 +47,16 @@ pub enum CanonicalError {
 fn canonicalize(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if f == 0.0 {
-                    *n = serde_json::Number::from_f64(0.0).expect("0.0 is finite");
+            // Only a number that's actually stored as a float (has a fractional
+            // representation, e.g. `-0.0`) gets normalized here -- `is_f64()` is false for a
+            // JSON integer literal like `0`, so this never turns an int `0` into a float `0.0`.
+            // Conflating the two would violate this crate's own int-vs-float distinctness rule
+            // (`5500` must hash differently from `5500.0`, see `apply_relative`'s doc comment).
+            if n.is_f64() {
+                if let Some(f) = n.as_f64() {
+                    if f == 0.0 {
+                        *n = serde_json::Number::from_f64(0.0).expect("0.0 is finite");
+                    }
                 }
             }
         }
@@ -78,7 +91,8 @@ fn contains_null(value: &serde_json::Value) -> bool {
 /// `f32`/`f64` field, silently becomes) a JSON `null` anywhere -- see this module's doc comment
 /// for why that's treated as a hard error rather than silently hashing it.
 pub fn hash_value<T: Serialize>(value: &T) -> Result<blake3::Hash, CanonicalError> {
-    let mut v = serde_json::to_value(value).expect("value always serializes to JSON");
+    let mut v =
+        serde_json::to_value(value).map_err(|e| CanonicalError::Serialization(e.to_string()))?;
     canonicalize(&mut v);
     if contains_null(&v) {
         return Err(CanonicalError::NonFinite);
@@ -111,6 +125,17 @@ mod tests {
         let a = serde_json::json!({ "b": 2, "a": 1 });
         let b = serde_json::json!({ "a": 1, "b": 2 });
         assert_eq!(hash_value(&a).unwrap(), hash_value(&b).unwrap());
+    }
+
+    #[test]
+    fn hash_value_distinguishes_integer_zero_from_float_zero() {
+        let int_zero = serde_json::json!({ "count": 0 });
+        let float_zero = serde_json::json!({ "count": 0.0 });
+        assert_ne!(
+            hash_value(&int_zero).unwrap(),
+            hash_value(&float_zero).unwrap(),
+            "an integer 0 must not be normalized into a float 0.0"
+        );
     }
 
     #[test]
@@ -175,5 +200,29 @@ mod tests {
         let base = chain(&[blake3::hash(b"one")], own);
         let changed = chain(&[blake3::hash(b"one-changed")], own);
         assert_ne!(base, changed);
+    }
+
+    /// A type whose `Serialize` impl produces a map keyed by a compound (non-primitive) value --
+    /// `serde_json` supports primitive (numeric/string/bool) map keys by converting them to their
+    /// string form, but not a sequence like this one, so `serde_json::to_value` genuinely fails
+    /// on it. A real (if unlikely, given every actual caller only ever hashes a `StageEntry`,
+    /// always string-keyed) way for serialization to fail.
+    struct SequenceKeyedMap;
+
+    impl Serialize for SequenceKeyedMap {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry(&vec![1, 2, 3], "value")?;
+            map.end()
+        }
+    }
+
+    #[test]
+    fn hash_value_returns_a_serialization_error_instead_of_panicking() {
+        assert!(matches!(
+            hash_value(&SequenceKeyedMap),
+            Err(CanonicalError::Serialization(_))
+        ));
     }
 }
