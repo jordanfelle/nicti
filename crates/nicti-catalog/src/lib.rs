@@ -59,7 +59,12 @@ pub trait CatalogStore: Module {
         rel_path: &str,
     ) -> Result<Option<Asset>, CatalogError>;
 
-    fn find_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Asset>, CatalogError>;
+    /// Every asset sharing this fingerprint, ordered by id. Plural, not `Option<Asset>`: more
+    /// than one real asset can share a fingerprint (a literal duplicate file, or a genuine
+    /// collision), and a caller trying to tell a move apart from a duplicate needs to check each
+    /// candidate's own old path rather than being handed an arbitrary single match that might be
+    /// the wrong one (found by CodeRabbit's review).
+    fn find_by_fingerprint(&self, fingerprint: &str) -> Result<Vec<Asset>, CatalogError>;
 
     /// Upserts on `(root_id, rel_path)`: a brand-new path inserts a fresh asset (plus its master
     /// `edit_variant`, an empty `EditDocument`); a path that already exists updates its stat/
@@ -95,6 +100,13 @@ pub trait CatalogStore: Module {
         asset_id: i64,
         tier: PreviewTier,
     ) -> Result<Option<Preview>, CatalogError>;
+
+    /// Removes a stored preview, if one exists. Ingest calls this on a rescan whose file no
+    /// longer yields an extractable preview (an in-place edit that removed the embedded JPEG, a
+    /// truncated/corrupted rewrite) — a no-op the rest of the time (nothing stored, nothing to
+    /// remove), so it's safe to call unconditionally rather than only when a stale preview is
+    /// suspected.
+    fn clear_preview(&self, asset_id: i64, tier: PreviewTier) -> Result<(), CatalogError>;
 
     /// Reads the trigger-maintained `(model, rating)` facet count (ADR-0011) — used by ingest's
     /// tests to check the triggers stay consistent, and by any future facet-filtered browse view.

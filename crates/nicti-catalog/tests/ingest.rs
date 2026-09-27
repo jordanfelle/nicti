@@ -295,6 +295,49 @@ fn a_corrupt_file_is_reported_as_failed_without_aborting_the_run() {
         .is_none());
 }
 
+/// Regression test for a finding from CodeRabbit's review: a rescan whose file no longer yields
+/// an extractable preview must clear the stale one left by an earlier scan, not leave it sitting
+/// under the asset's row describing bytes the file no longer has.
+#[test]
+fn rescanning_a_file_that_loses_its_preview_clears_the_stale_one() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_synthetic_nef(dir.path(), "IMG_0001.NEF");
+
+    let volume_id = store
+        .upsert_volume("test-volume", None, None, 1000)
+        .unwrap();
+    let root_id = store.ensure_root(volume_id, "").unwrap();
+
+    ingest_root(&store, root_id, dir.path()).unwrap();
+    let asset = store
+        .find_asset_by_path(root_id, "IMG_0001.NEF")
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .get_preview(asset.id, PreviewTier::T0)
+        .unwrap()
+        .is_some());
+
+    // Overwrite the same path with content that has no embedded preview at all, and a different
+    // size so the unchanged-check doesn't just skip it.
+    std::fs::write(
+        &path,
+        b"no longer a tiff file, and a different size than before",
+    )
+    .unwrap();
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.updated, 1);
+
+    assert!(
+        store
+            .get_preview(asset.id, PreviewTier::T0)
+            .unwrap()
+            .is_none(),
+        "the stale preview from the earlier scan must be cleared, not left behind"
+    );
+}
+
 #[test]
 fn facet_counts_stay_consistent_with_inserted_assets() {
     let store = SqliteCatalog::open_in_memory().unwrap();

@@ -34,11 +34,11 @@ impl SqliteCatalog {
         Self::init(conn)
     }
 
-    fn init(conn: Connection) -> Result<Self, CatalogError> {
+    fn init(mut conn: Connection) -> Result<Self, CatalogError> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        crate::schema::migrate(&conn)?;
+        crate::schema::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -160,18 +160,15 @@ impl CatalogStore for SqliteCatalog {
             .optional()?)
     }
 
-    fn find_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Asset>, CatalogError> {
+    fn find_by_fingerprint(&self, fingerprint: &str) -> Result<Vec<Asset>, CatalogError> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn
-            .query_row(
-                &format!(
-                    "SELECT {ASSET_COLUMNS} FROM asset WHERE fingerprint = ?1 \
-                     ORDER BY id ASC LIMIT 1"
-                ),
-                [fingerprint],
-                Self::row_to_asset,
-            )
-            .optional()?)
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS} FROM asset WHERE fingerprint = ?1 ORDER BY id ASC"
+        ))?;
+        let rows = stmt
+            .query_map([fingerprint], Self::row_to_asset)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     fn insert_asset(&self, root_id: i64, asset: &NewAsset) -> Result<i64, CatalogError> {
@@ -296,6 +293,15 @@ impl CatalogStore for SqliteCatalog {
                 },
             )
             .optional()?)
+    }
+
+    fn clear_preview(&self, asset_id: i64, tier: PreviewTier) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM preview WHERE asset_id = ?1 AND tier = ?2",
+            params![asset_id, tier.as_str()],
+        )?;
+        Ok(())
     }
 
     fn facet_count(&self, model: Option<&str>, rating: i64) -> Result<u64, CatalogError> {

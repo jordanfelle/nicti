@@ -161,14 +161,25 @@ const MIGRATIONS: &[&str] = &[MIGRATION_V1];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call
 /// on every open: a database already at the latest version runs nothing.
-pub fn migrate(conn: &Connection) -> Result<(), CatalogError> {
+///
+/// Each migration's DDL and its `user_version` bump run inside one transaction, committed
+/// together — found by CodeRabbit's review: without this, a migration that failed partway through
+/// (e.g. process killed mid-`execute_batch`) could leave its tables created but `user_version`
+/// still at the old value, so the next open would retry the same (non-idempotent, plain
+/// `CREATE TABLE`) DDL against a database that already has some of those tables, failing outright
+/// with no way to recover short of deleting the catalog file.
+pub fn migrate(conn: &mut Connection) -> Result<(), CatalogError> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let version = (i + 1) as i64;
         if version > current {
-            conn.execute_batch(sql)?;
-            // `PRAGMA user_version = N` doesn't accept a bound parameter, only a literal.
-            conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
+            let tx = conn.transaction()?;
+            tx.execute_batch(sql)?;
+            // `PRAGMA user_version = N` doesn't accept a bound parameter, only a literal. The
+            // pragma write participates in the same transaction as any other write here, so a
+            // rollback undoes it along with the DDL.
+            tx.execute_batch(&format!("PRAGMA user_version = {version}"))?;
+            tx.commit()?;
         }
     }
     Ok(())
@@ -180,9 +191,9 @@ mod tests {
 
     #[test]
     fn migrate_is_idempotent_against_an_already_migrated_database() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        migrate(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();

@@ -77,10 +77,17 @@ impl FileSource {
 
 impl ByteSource for FileSource {
     fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        if offset + (len as u64) <= self.head.len() as u64 {
-            let start = offset as usize;
-            let end = start + len;
-            return Ok(self.head[start..end].to_vec());
+        // Checked, not a plain `offset + len as u64`: both are derived from attacker-controlled
+        // IFD offset/length fields (`ifd.rs`'s `as_offset`/`as_u32`), and while a real overflow
+        // needs an offset near `u64::MAX` (far past anything real file-offset arithmetic
+        // produces), a checked add costs nothing and never trades a wraparound for a wrong
+        // (and possibly out-of-bounds) head-window hit -- found by CodeRabbit's review.
+        if let Some(end) = offset.checked_add(len as u64) {
+            if end <= self.head.len() as u64 {
+                let start = offset as usize;
+                let end = end as usize;
+                return Ok(self.head[start..end].to_vec());
+            }
         }
         let clamped_len = len.min((self.len.saturating_sub(offset)) as usize);
         if clamped_len == 0 {
