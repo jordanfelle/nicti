@@ -373,6 +373,15 @@ update) are both reused, no new review needed. `cargo deny check licenses` passe
 `deny.toml` entries needed. **DNG/TIFF tag-700 embedded-XMP write is out of scope for this pass**
 (see the research doc) — no TIFF-writer crate was evaluated or added.
 
+**Update (2026-09-27, [#44](https://github.com/jordanfelle/nicti/issues/44)'s `loaf` spike,
+`docs/adr/0044-stage-cached-render-graph.md`):** two new crates for the disk cache tier's
+compression candidates — `zstd` v0.13.3 (`MIT`) plus its own `zstd-safe`/`zstd-sys` v7.3.0/
+2.1.0+zstd.1.5.7 (`BSD-3-Clause`, already on `deny.toml`'s allowlist), and `lz4_flex` v0.11.6
+(`MIT`) — confirmed via `cargo metadata`'s own `license` field, not assumed. `wgpu`/`pollster`/
+`bytemuck`/`half`/`blake3` are all already-reviewed crates reused unchanged from glint/calico/
+siamese's own prior updates above. `cargo deny --workspace --all-features check licenses` passes
+clean, no new `deny.toml` entries needed.
+
 ## Native libraries
 
 | Component | Used for | Code license | Data/weights license | Link model | Permissive-compatible? | Copyleft(GPL-3)-compatible? | Verdict |

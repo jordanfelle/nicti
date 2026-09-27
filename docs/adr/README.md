@@ -58,6 +58,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0024](0024-masking.md) | Masking | Proposed |
 | [0025](0025-burst-duplicate-grouping.md) | Burst/duplicate grouping | Proposed |
 | [0040](0040-demosaic-and-denoise.md) | Demosaic and noise reduction | Proposed |
+| [0044](0044-stage-cached-render-graph.md) | Stage-cached render graph (Tapetum) | Proposed |
 | [0059](0059-xmp-interop.md) | XMP interop with Lightroom Classic | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
