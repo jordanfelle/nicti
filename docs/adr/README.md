@@ -38,7 +38,8 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0021](0021-color-pipeline.md) | Color pipeline | Proposed |
 | [0022](0022-preview-codec-followup.md) | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
 | [0023](0023-lrc-catalog-import-mapping.md) | Lightroom Classic catalog import mapping | Accepted |
-| [0024](0024-demosaic-and-denoise.md) | Demosaic and noise reduction | Proposed |
+| [0024](0024-masking.md) | Masking | Proposed |
+| [0025](0025-demosaic-and-denoise.md) | Demosaic and noise reduction | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.

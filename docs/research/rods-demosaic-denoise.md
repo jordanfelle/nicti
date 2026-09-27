@@ -1,10 +1,10 @@
 # Rods: demosaic + denoise measurements
 
 Findings for [#40](https://github.com/jordanfelle/nicti/issues/40), feeding
-[docs/adr/0024-demosaic-and-denoise.md](../adr/0024-demosaic-and-denoise.md)'s shipping decision.
+[docs/adr/0025-demosaic-and-denoise.md](../adr/0025-demosaic-and-denoise.md)'s shipping decision.
 Tooling: `spikes/rods/` (alignment/metrics/AI-denoise harness) plus new `retina dump-classic`/
 `dump-cfa` subcommands — see those crates' own module docs. This is a findings doc, not the ADR;
-the shipping decision itself belongs to ADR-0024.
+the shipping decision itself belongs to ADR-0025.
 
 ## Method
 
@@ -24,7 +24,7 @@ not yet as "does this beat LRC."
 
 ### Ground truth: RawNIND, not a real Z8 tripod shoot
 
-The real Z8 tripod shoot this ticket originally planned (see ADR-0024's Context) won't happen for
+The real Z8 tripod shoot this ticket originally planned (see ADR-0025's Context) won't happen for
 weeks/months. By user decision, this pass used **RawNIND** (`doi:10.14428/DVN/DEQCIM`,
 CC-BY-SA-4.0, dataverse.uclouvain.be) instead — a public dataset of real paired noisy/clean raw
 photos across several camera brands. Picked over ELD (the other real candidate found, Nikon D850
@@ -35,7 +35,7 @@ each a base-ISO-50 ground truth plus a full climbing ISO ladder to 51200 — the
 tripod shoot would have had. All 60 files' SHA1s verified against the filename-embedded hash.
 
 Every quality number below is therefore **provisional against a Z6, not a Z8** — the exact caveat
-ADR-0024 states up front. A real Z8 verification pass is filed as
+ADR-0025 states up front. A real Z8 verification pass is filed as
 [#164](https://github.com/jordanfelle/nicti/issues/164); the LRC comparison itself is
 [#163](https://github.com/jordanfelle/nicti/issues/163).
 
@@ -55,7 +55,7 @@ tested against a real Z6 NEF, all 7 demosaic qualities (linear/VNG/PPG/AHD/DCB/D
 `retina_libraw_process_classic` now rejects any nonzero `threshold` outright rather than trusting a
 caller to detect the corruption after the fact. `postprocessing_aux.cpp` shows `wavelet_denoise()`
 operating on still-mosaiced Bayer data via a `BAYER(row,col)` macro (dcraw-legacy, pre-demosaic),
-not post-demosaic as the original ADR-0024 plan assumed — an observed processing path, not a
+not post-demosaic as the original ADR-0025 plan assumed — an observed processing path, not a
 confirmed root cause: `retina_classic_image` always reports a fixed `iwidth*iheight*4` length
 regardless of what LibRaw's own internals actually allocated, so this evidence doesn't by itself
 establish a single-channel allocation or that any length check actually caught one. Classic-NR
@@ -211,7 +211,7 @@ cross-compiles cleanly, no C/C++ dependency to fight (unlike `retina`'s vendored
 
 ## Consequences
 
-- **Feeds ADR-0024's decision** (see that ADR for the actual shipping call) — this doc supplies
+- **Feeds ADR-0025's decision** (see that ADR for the actual shipping call) — this doc supplies
   the evidence, not the ruling.
 - **Still needed before the decision rule is actually satisfied**: real LRC AI Denoise comparison
   ([#163](https://github.com/jordanfelle/nicti/issues/163), user's own export batch, not yet run),

@@ -1,4 +1,4 @@
-//! `retina dump-classic`: for #40/ADR-0024's demosaic + noise-reduction spike. Runs LibRaw's
+//! `retina dump-classic`: for #40/ADR-0025's demosaic + noise-reduction spike. Runs LibRaw's
 //! classic pipeline with WB applied and the caller's choice of demosaic algorithm plus NR knobs
 //! (see shim.h's `retina_libraw_process_classic`), writing a linear 16-bit camera-RGB TIFF +
 //! metadata JSON sidecar for `spikes/rods` to consume.
