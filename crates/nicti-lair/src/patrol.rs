@@ -69,6 +69,20 @@ pub fn sync_root(
 
     report.ingest = ingest_root(store, root_id, root_path)?;
 
+    // Re-check reachability after ingest's own (potentially long, on a large library) disk walk --
+    // narrows, though doesn't fully close, the window where a drive could be unplugged mid-sync: a
+    // disconnect that surfaces as a plain "not found" (rather than an I/O error) on the catalog-side
+    // per-asset checks below would otherwise look identical to every one of this root's files
+    // actually having vanished, which is exactly the mass-flag/mass-delete outcome this guard exists
+    // to prevent. Found by adversarial review.
+    match root_path.try_exists() {
+        Ok(true) if root_path.is_dir() => {}
+        _ => {
+            report.root_unreachable = true;
+            return Ok(report);
+        }
+    }
+
     // Any path Scruff couldn't even walk (a permission-denied subdirectory) can't be trusted to
     // report an accurate "gone from disk" either way -- an asset under it is left alone rather than
     // risk flagging it missing (or, worse under `remove_missing`, deleting it) based on a read
@@ -82,6 +96,15 @@ pub fn sync_root(
 
     let now = now_unix();
     let assets = store.list_assets_by_root(root_id)?;
+    // `present_dirs` holds every ancestor prefix of a present asset's directory, not just its
+    // immediate parent -- a directory with a live file two levels down still counts as "has present
+    // content" all the way up, not just at that exact depth. `missing_dirs` stays immediate-parent
+    // only: reporting each missing leaf directory once is enough, an ancestor whose *only* content
+    // is that already-reported subdirectory doesn't need its own redundant entry. Found by
+    // adversarial review: without the ancestor rollup on the present side, a directory containing
+    // both a directly-missing file and a subdirectory with a still-present file was wrongly reported
+    // as "every asset missing" -- the set-difference below never saw that subdirectory's presence
+    // roll up to the parent it's nested under.
     let mut present_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut missing_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -95,9 +118,7 @@ pub fn sync_root(
 
         match asset_path.try_exists() {
             Ok(true) => {
-                if !dir.is_empty() {
-                    present_dirs.insert(dir);
-                }
+                present_dirs.extend(ancestor_prefixes(&dir));
                 if asset.missing_since.is_some() {
                     store.set_asset_missing(asset.id, None)?;
                     report.found_again += 1;
@@ -138,6 +159,20 @@ fn dir_prefix(rel_path: &str) -> String {
     }
 }
 
+/// `dir` itself, plus every one of its own ancestor directory prefixes (`"2026/09"` yields
+/// `["2026/09", "2026"]`) -- used to roll a present asset's directory up through every level above
+/// it, so a live file nested several directories deep still marks all of its ancestors as "has
+/// present content," not just its own immediate parent. Empty input yields nothing (a top-level
+/// file's empty `dir_prefix` has no directory to roll up into).
+fn ancestor_prefixes(dir: &str) -> impl Iterator<Item = String> + '_ {
+    let mut current = Some(dir).filter(|d| !d.is_empty());
+    std::iter::from_fn(move || {
+        let this = current.take()?;
+        current = this.rfind('/').map(|idx| &this[..idx]);
+        Some(this.to_string())
+    })
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -155,5 +190,21 @@ mod tests {
     #[test]
     fn dir_prefix_returns_the_directory_portion() {
         assert_eq!(super::dir_prefix("2026/09/a.nef"), "2026/09");
+    }
+
+    #[test]
+    fn ancestor_prefixes_of_empty_dir_is_empty() {
+        assert_eq!(
+            super::ancestor_prefixes("").collect::<Vec<_>>(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn ancestor_prefixes_includes_every_level_up_to_the_root() {
+        assert_eq!(
+            super::ancestor_prefixes("2026/09").collect::<Vec<_>>(),
+            vec!["2026/09".to_string(), "2026".to_string()]
+        );
     }
 }

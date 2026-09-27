@@ -199,3 +199,36 @@ fn a_directory_whose_every_asset_is_missing_is_reported() {
     let report = sync_root(&store, root_id, dir.path(), &SyncOptions::default()).unwrap();
     assert_eq!(report.missing_folders, vec!["2026/09".to_string()]);
 }
+
+/// Regression test for a finding from adversarial review: a directory that directly contains a
+/// missing file *and* has a subdirectory with a still-present file must not be reported as "every
+/// asset missing" -- the subdirectory's presence has to roll up to every ancestor above it, not
+/// just its own immediate parent.
+#[test]
+fn a_directory_with_a_missing_direct_file_but_a_present_nested_file_is_not_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, root_id) = setup();
+    let sub = dir.path().join("2026").join("09");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_fake_raw(dir.path().join("2026").as_path(), "a.NEF", 1);
+    write_fake_raw(&sub, "b.NEF", 2);
+
+    sync_root(&store, root_id, dir.path(), &SyncOptions::default()).unwrap();
+    std::fs::remove_file(dir.path().join("2026").join("a.NEF")).unwrap();
+
+    let report = sync_root(&store, root_id, dir.path(), &SyncOptions::default()).unwrap();
+    assert!(
+        report.missing_folders.is_empty(),
+        "\"2026\" still has live content nested under 2026/09 and must not be listed: {:?}",
+        report.missing_folders
+    );
+
+    let a = store
+        .find_asset_by_path(root_id, "2026/a.NEF")
+        .unwrap()
+        .unwrap();
+    assert!(
+        a.missing_since.is_some(),
+        "the directly-missing file is still flagged"
+    );
+}
