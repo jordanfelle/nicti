@@ -2,7 +2,7 @@
 paths:
   - "spikes/calico/**"
   - "spikes/retina/**"
-  - "crates/nicti-color/**"
+  - "crates/nicti-calico/**"
 ---
 
 # Color Pipeline — Quick Reference

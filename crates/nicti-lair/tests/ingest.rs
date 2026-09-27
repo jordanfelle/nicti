@@ -3,12 +3,12 @@
 //! The repo has no real NEF/NRW fixtures (see the `raw-decoder`/`preview-tiers` topics -- the
 //! reference dataset lives on the actual library, not in-tree), so these tests build a minimal
 //! synthetic little-endian TIFF with a Nikon-MakerNote-embedded PreviewIFD JPEG by hand, the same
-//! way `nicti-decode`'s own `embedded::ifd` tests do.
+//! way `nicti-cornea`'s own `embedded::ifd` tests do.
 
 use std::path::Path;
 
-use nicti_catalog::scruff::ingest_root;
-use nicti_catalog::{CatalogStore, PreviewTier, SqliteCatalog};
+use nicti_lair::scruff::ingest_root;
+use nicti_lair::{CatalogStore, PreviewTier, SqliteCatalog};
 
 const TAG_IMAGE_WIDTH: u16 = 0x0100;
 const TAG_IMAGE_LENGTH: u16 = 0x0101;

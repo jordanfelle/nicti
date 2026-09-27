@@ -2,7 +2,7 @@
 //! golden, and fail past a per-render threshold.
 //!
 //! Nothing in this repo can render a NEF yet (#37/#38 are still open research, every
-//! `nicti-decode`/`nicti-render` crate is a trait boundary only -- see CLAUDE.md's package map),
+//! `nicti-cornea`/`nicti-render` crate is a trait boundary only -- see CLAUDE.md's package map),
 //! so this module is deliberately built against a pluggable [`Render`] trait rather than a real
 //! decoder, and is only tested with synthetic images. The real goldens land once #41 (RAW ->
 //! linear -> working-space pipeline) exists -- see the follow-up issue this PR files.

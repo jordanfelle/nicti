@@ -9,7 +9,7 @@
 //! defines), so there's nothing to vendor beyond LibRaw's own C++ and this shim.
 //!
 //! Everything below is gated behind the `libraw` feature (off by default) via the `imp` module
-//! selected at the bottom of this file: `nicti-catalog` depends on this crate for its pure-Rust
+//! selected at the bottom of this file: `nicti-lair` depends on this crate for its pure-Rust
 //! `embedded` module alone and must never be forced to have `vendor/LibRaw` checked out or a C++
 //! compiler installed just to build. When the feature isn't active, `cc` isn't even resolvable
 //! as an extern crate (it's an optional build-dependency gated by that same feature) -- a runtime
@@ -209,7 +209,7 @@ mod imp {
         if !vendor.join("libraw/libraw.h").exists() {
             panic!(
                 "vendor/LibRaw submodule not checked out -- run `git submodule update --init \
-                 crates/nicti-decode/vendor/LibRaw` (nicti-decode's `libraw` feature is \
+                 crates/nicti-cornea/vendor/LibRaw` (nicti-cornea's `libraw` feature is \
                  path-gated in CI, not part of the always-on jobs; see CLAUDE.md's CI \
                  path-gating note)"
             );

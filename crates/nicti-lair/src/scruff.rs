@@ -1,7 +1,7 @@
 //! Scruff: the import/ingest pipeline (#22). Named the way a mother cat carries a kitten by the
 //! scruff of its neck -- this is what actually moves a file into the catalog. Scans a folder for
 //! RAW files, fingerprints and upserts each one, and extracts its T0 grid preview (ADR-0029) via
-//! `nicti_decode::embedded`'s IFD walker -- no RAW decode needed for that.
+//! `nicti_cornea::embedded`'s IFD walker -- no RAW decode needed for that.
 //!
 //! Runs serially in v1; wiring this into Pounce (the job scheduler) is a follow-up, not part of
 //! this ticket.
@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
-use nicti_decode::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
+use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 
 use crate::{CatalogError, CatalogStore, NewAsset, Preview};
 

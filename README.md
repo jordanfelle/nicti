@@ -5,7 +5,9 @@
 A fast, non-destructive RAW photo editor and digital asset manager, aiming to be a viable
 open-source replacement for Adobe Lightroom Classic — built around a stage-cached render pipeline
 so editing a heavy stack of AI masks and denoise doesn't mean waiting on every navigation and crop.
-Named after the nictitating membrane, a cat's third eyelid; see `CONTRIBUTING.md` for the
+Named after the nictitating membrane, a cat's third eyelid that sweeps across the eye to clear
+debris without losing vision — the namesake for an editor built to be non-destructive: it clears
+and reprocesses without ever losing the original image data. See `CONTRIBUTING.md` for the
 feline-naming convention that continues throughout the project.
 
 ## Status
@@ -28,8 +30,8 @@ into `requirements`/`research`/`build` children — `docs/adr/` is the design re
 
 - `crates/nicti-claw` — the module/plugin registry every other crate builds on.
 - `crates/nicti-prowl` — the benchmark + golden-image harness.
-- `crates/nicti-decode`, `nicti-color`, `nicti-lens`, `nicti-render`, `nicti-ai`, `nicti-export`,
-  `nicti-catalog` — one crate per extension point (RAW decode, color, lens correction, render
+- `crates/nicti-cornea`, `nicti-calico`, `nicti-iris`, `nicti-render`, `nicti-stalk`, `nicti-preen`,
+  `nicti-lair` — one crate per extension point (RAW decode, color, lens correction, render
   pipeline, AI models, export, catalog store), currently trait definitions only.
 - `spikes/*` — throwaway research spikes backing specific ADRs; not production code, not a base
   to build on. `bench/whisker` is benchmark tooling in the same category.

@@ -1,10 +1,10 @@
-//! `retina dump-linear`: writes `nicti-decode`'s [`LinearFrame`] (demosaiced-but-uncorrected
+//! `retina dump-linear`: writes `nicti-cornea`'s [`LinearFrame`] (demosaiced-but-uncorrected
 //! linear camera RGB plus the metadata needed to color-correct it) to a TIFF + JSON sidecar pair,
 //! so `spikes/calico` (#38/ADR-0038) can develop/test its color pipeline without depending on
-//! `nicti-decode`'s LibRaw FFI/vendored submodule directly. LibRaw's demosaic is a stand-in for
+//! `nicti-cornea`'s LibRaw FFI/vendored submodule directly. LibRaw's demosaic is a stand-in for
 //! this hand-off only -- the demosaic algorithm itself is #40's decision, not this ticket's.
 //!
-//! The actual decode/demosaic step is `nicti-decode`'s `RawDecoder::decode_linear` (promoted out
+//! The actual decode/demosaic step is `nicti-cornea`'s `RawDecoder::decode_linear` (promoted out
 //! of this function in #41) -- this module is now just the TIFF/JSON serialization glue calico's
 //! file-based tooling still expects.
 //!
@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use image::{ImageBuffer, Rgb};
-use nicti_decode::{LibRawDecoder, LinearFrame, RawDecoder};
+use nicti_cornea::{LibRawDecoder, LinearFrame, RawDecoder};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -58,7 +58,7 @@ impl From<&LinearFrame> for LinearMeta {
     }
 }
 
-/// Decodes `path` via `nicti-decode`'s `LibRawDecoder`, and writes the TIFF + JSON sidecar into
+/// Decodes `path` via `nicti-cornea`'s `LibRawDecoder`, and writes the TIFF + JSON sidecar into
 /// `out_dir` (created if missing), named after `path`'s file stem.
 pub fn dump_linear(path: &Path, out_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(out_dir)?;

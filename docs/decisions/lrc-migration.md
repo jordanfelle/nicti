@@ -56,12 +56,12 @@ is the per-topic summary; those two are the full research trail.
 - **`lrcat-extractor` (MPL-2.0) — real Cargo constraint found, not adopted as a dependency**: its
   own `rusqlite = "0.38"` pin cannot coexist in this workspace's single Cargo.lock with the
   workspace's own unconditional `rusqlite = "^0.40"` pins (`spikes/den` originally, now
-  `crates/nicti-catalog`/`homing`/`pupil`/`shed`/`sniff` since #123 deleted `den`) — Cargo's
+  `crates/nicti-lair`/`homing`/`pupil`/`shed`/`sniff` since #123 deleted `den`) — Cargo's
   `links = "sqlite3"` uniqueness is enforced workspace-wide, not per binary, and this holds even
   with `lrcat-extractor` behind an optional, default-off feature (Cargo still solves for every
   feature combination the workspace could activate). Evaluated standalone (outside the workspace)
   instead: it opens/reads the real v13 catalog fine; a full feature-parity comparison against
-  `shed`'s own reading is deferred to #62, once `nicti-catalog`/its callers get their own isolated
+  `shed`'s own reading is deferred to #62, once `nicti-lair`/its callers get their own isolated
   build or `lrcat-extractor` bumps its pin (deleting `den` did not resolve this constraint — it
   just moved onto the real crates).
 - **Version support**: only v13 (the user's current LRC) was available to measure; older-version

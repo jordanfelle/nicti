@@ -14,7 +14,7 @@ use nicti_claw::{Module, Registry};
 use serde_json::Value;
 
 // Gated behind the `libraw` feature (off by default): `LibRawHandle` calls into the vendored
-// LibRaw C++ archive `build.rs` compiles, and `nicti-catalog` depends on this crate for its
+// LibRaw C++ archive `build.rs` compiles, and `nicti-lair` depends on this crate for its
 // pure-Rust `embedded` module alone -- it must never need `vendor/LibRaw` checked out, a C++
 // compiler, or a link against `libretina_libraw.a` just to build. See build.rs's own doc comment
 // for the other half of this gate.
@@ -31,7 +31,7 @@ pub mod embedded;
 /// A RAW decoder backend.
 pub trait RawDecoder: Module {
     /// Decodes `path` and runs LibRaw's demosaic with white balance, camera-color-matrix, and
-    /// gamma all disabled (see `crates/nicti-decode/shim.h`'s `retina_libraw_process_linear` doc
+    /// gamma all disabled (see `crates/nicti-cornea/shim.h`'s `retina_libraw_process_linear` doc
     /// comment) — the black/white-level-scaled, demosaiced-but-uncorrected linear camera RGB a
     /// `ColorProfile` implementation (#38/#42) needs to reach a working-space image.
     fn decode_linear(&self, path: &Path) -> Result<LinearFrame, DecodeError>;

@@ -1,7 +1,7 @@
 ---
 paths:
   - "spikes/shed/**"
-  - "crates/nicti-catalog/**"
+  - "crates/nicti-lair/**"
   - "docs/adr/0061*"
 ---
 
@@ -31,10 +31,10 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   Removal to `#51`, Super Resolution to `#174`. `LensBlur` is present almost everywhere but always
   empty (0/380,307 rows with real content) — provenance-only, no owner ticket needed.
 - **`lrcat-extractor` not a dependency** — its `rusqlite = "0.38"` pin conflicts with every
-  workspace member's `^0.40` (`nicti-catalog`, `homing`, `pupil`, `shed`, `sniff`) via Cargo's
+  workspace member's `^0.40` (`nicti-lair`, `homing`, `pupil`, `shed`, `sniff`) via Cargo's
   workspace-wide `links = "sqlite3"` uniqueness (not per-binary, holds even behind an optional
   feature). Evaluate it standalone outside the workspace, not as a `spikes/*` dependency, until
-  `nicti-catalog`/its callers get their own isolated build or `lrcat-extractor` bumps its pin.
+  `nicti-lair`/its callers get their own isolated build or `lrcat-extractor` bumps its pin.
   (This conflict originally involved `spikes/den`'s own `^0.40` pin too, before #123 deleted it —
   the constraint didn't go away, it just moved onto the real crates.)
 - **`shed`'s `open_backup` guard**: refuses a `.lock`/`-wal` sibling only when it has real content

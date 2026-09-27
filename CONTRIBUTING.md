@@ -11,16 +11,16 @@ and this doc is the canonical guide for making one.
   by `spikes/sniff`). `brew install nasm` (macOS/Linuxbrew), `choco install nasm` (Windows),
   `apt-get install nasm` (Debian/Ubuntu).
 - **A C/C++ toolchain** — MSVC on Windows (the Visual Studio Build Tools), a standard
-  gcc/clang setup elsewhere. Needed for `nicti-decode`'s vendored LibRaw build.
+  gcc/clang setup elsewhere. Needed for `nicti-cornea`'s vendored LibRaw build.
 - **Linux GUI headers** (`libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, `libxi-dev`,
   `libxrandr-dev`, `libgl1-mesa-dev`, `libfontconfig1-dev`) — only if you're touching
   `spikes/pelt-egui`/`pelt-iced`/`pelt-slint` on Linux.
 - **libclang/LLVM** — only if you're touching `spikes/pelt-slint` (its `i-slint-renderer-skia`
   dependency's `skia-bindings` crate needs `bindgen`, same requirement as any other bindgen-based
   build). Not needed on Windows CI (the runner ships LLVM by default).
-- **The LibRaw submodule** — only if you're touching `crates/nicti-decode` or `spikes/retina`:
+- **The LibRaw submodule** — only if you're touching `crates/nicti-cornea` or `spikes/retina`:
   ```bash
-  git submodule update --init crates/nicti-decode/vendor/LibRaw
+  git submodule update --init crates/nicti-cornea/vendor/LibRaw
   ```
 - **[pre-commit](https://pre-commit.com/)**:
   ```bash
@@ -79,7 +79,9 @@ push) mirror the same exclude list, so a clean local commit should mean clean CI
 
 Name new crates, modules, internal tools, and subsystems with a feline-anatomy/behavior angle
 rather than a purely descriptive name — the project itself is named after the nictitating
-membrane (a cat's third eyelid), and that theme continues throughout. Examples: `Tapetum`
+membrane, a cat's third eyelid that sweeps across the eye to clear debris without losing vision,
+mirroring an editor that's non-destructive: it clears and reprocesses without ever losing the
+original image data. That theme continues throughout. Examples: `Tapetum`
 (stage-cached render graph), `Claw` (module/plugin registry), `Pounce` (job scheduler), `Sniff`
 (embedded-JPEG fast preview path).
 

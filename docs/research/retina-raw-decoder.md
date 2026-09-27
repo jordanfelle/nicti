@@ -138,7 +138,7 @@ spikes/retina/vendor/LibRaw` before building if it's missing.
 
 ## Recommendations for #41
 
-- Implement `nicti-decode`'s `RawDecoder` using LibRaw+#826 — the LGPL question is resolved (see
+- Implement `nicti-cornea`'s `RawDecoder` using LibRaw+#826 — the LGPL question is resolved (see
   ADR-0037's Licensing section), the remaining gate is the decode-latency product call in its
   Decision section.
 - Adopt `RawFrame`'s shape (metadata + Bayer plane) as the decode output type; it already matches

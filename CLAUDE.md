@@ -64,7 +64,9 @@ bullet to both files of its topic (or a new topic) and to this list — not inli
 
 Name new crates, modules, internal tools, and subsystems with a feline-anatomy/behavior angle
 rather than a purely descriptive name — the project itself is named after the nictitating
-membrane (a cat's third eyelid), and that theme continues throughout. Examples already assigned
+membrane, a cat's third eyelid that sweeps across the eye to clear debris without losing vision,
+mirroring an editor that's non-destructive: it clears and reprocesses without ever losing the
+original image data. That theme continues throughout. Examples already assigned
 for planned subsystems: `Tapetum` (stage-cached render graph — the tapetum lucidum bounces light
 back through the retina for reuse, mapping to reusing baked stage output), `Claw` (on-demand
 module/plugin registry — claws stay sheathed until needed), `Pounce` (job scheduler with priority
@@ -85,7 +87,7 @@ terse index: crate/spike → purpose → owning topic.
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
-- **`crates/nicti-color`/`nicti-lens`/`nicti-ai`/`nicti-export`**
+- **`crates/nicti-calico`/`nicti-iris`/`nicti-stalk`/`nicti-preen`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39),
   `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
@@ -93,13 +95,15 @@ terse index: crate/spike → purpose → owning topic.
   #45's own GPU slice) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes
   with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted VRAM/RAM/disk cache
   tiers (`cache.rs`), and nearest-to-cursor bake prioritization (`prefetch.rs`) — promoted from
-  `spikes/loaf`. See [`render-graph`](.claude/rules/render-graph/REFERENCE.md)
+  `spikes/loaf`. See [`render-graph`](.claude/rules/render-graph/REFERENCE.md). **Not yet renamed
+  to `nicti-tapetum`** — deferred to whoever lands the rest of the #45 stack, to avoid rebasing
+  onto a moving target; see the naming-convention section above.
 - **`crates/nicti-pawprint`** — the non-destructive `EditDocument`/`StageEntry` (ADR-0021), its
   canonical-JSON + blake3 stage hashing (`canonical.rs`, feeding `nicti-render::graph`'s cache
   key), and append-only edit history with slider-drag compaction (`history.rs`) — promoted from
   `spikes/pawprint` (#21) and `spikes/loaf`'s DAG-generalized `hash::chain` (#44/#45). See
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
-- **`crates/nicti-decode`** — `RawDecoder` extension point plus its real implementation (#41,
+- **`crates/nicti-cornea`** — `RawDecoder` extension point plus its real implementation (#41,
   landed): `LibRawDecoder`/`decode_linear` (promoted from `spikes/retina`'s `libraw_ffi.rs` —
   the FFI wrapper, `shim.cpp`/`shim.h`, `build.rs`, and the vendored `LibRaw` git submodule all
   moved here) returns a `LinearFrame` (demosaiced-but-uncorrected linear camera RGB + the metadata
@@ -110,18 +114,18 @@ terse index: crate/spike → purpose → owning topic.
   `spikes/rods`'s scope, not this crate's — `decode_linear` always uses LibRaw's own demosaic as a
   placeholder. **The LibRaw FFI/build.rs/submodule is entirely behind a non-default `libraw`
   Cargo feature** (`LibRawDecoder`, `LibRawHandle`, and `build.rs`'s C++ compile all `#[cfg]`-gated
-  on it) — `nicti-catalog` depends on this crate for `embedded` alone with the feature off, so it
+  on it) — `nicti-lair` depends on this crate for `embedded` alone with the feature off, so it
   never needs `vendor/LibRaw` checked out or a C++ compiler; `spikes/retina` and the path-gated
   `decode-linux`/`decode-windows` CI job both enable it explicitly. A CI-only `--exclude
-  nicti-decode` on the always-on clippy/test jobs is belt-and-suspenders on top of this, not the
+  nicti-cornea` on the always-on clippy/test jobs is belt-and-suspenders on top of this, not the
   actual mechanism — the feature gate is what actually keeps the C++ build off every PR that
   doesn't touch it (a workspace `--exclude` alone doesn't stop a still-unexcluded dependent like
-  `nicti-catalog` from pulling the dependency's build script in anyway). Also `embedded` (#22): the
+  `nicti-lair` from pulling the dependency's build script in anyway). Also `embedded` (#22): the
   TIFF/EXIF/Nikon-MakerNote IFD walker promoted from
   `spikes/sniff` (`Walker`/`FileSource`/`SliceSource`), used at import time to extract a NEF/DNG's
   embedded T0 grid preview without a RAW decode. Trimmed vs. `sniff`'s own copy: no cold/warm
   `FILE_FLAG_NO_BUFFERING` benchmarking distinction, which stays `sniff`-only
-- **`crates/nicti-catalog`** — `CatalogStore` extension point plus its real implementation (#22,
+- **`crates/nicti-lair`** — `CatalogStore` extension point plus its real implementation (#22,
   landed): `schema.rs` (SQLite migrations — `volume`/`root`/`asset`, ADR-0071; `preview`, ADR-0029;
   `edit_variant`/`edit_history`, ADR-0021; trigger-maintained `facet_counts`, ADR-0103),
   `sqlite.rs` (`SqliteCatalog`), and `scruff.rs` (the Scruff import/ingest pipeline: scan → stat →
@@ -135,7 +139,7 @@ terse index: crate/spike → purpose → owning topic.
   [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/groom`** (#50/ADR-0050) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
-- **`spikes/retina`** (#37/ADR-0037; own decode step promoted to `crates/nicti-decode` in #41,
+- **`spikes/retina`** (#37/ADR-0037; own decode step promoted to `crates/nicti-cornea` in #41,
   see that bullet above) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
 - **`spikes/homing`** (#71/ADR-0071, Windows-only, unverified in this sandbox) →
   [`volume-identity`](.claude/rules/volume-identity/REFERENCE.md)
@@ -273,7 +277,7 @@ slow warm ones: `rust-cache` had "No cache found" on both, since these were bran
 restore main's cache and skip the save step, which used to be a 20-30 minute cost on the Windows
 job by itself and was pushing this repo's cache usage over GitHub's 10GB/repo limit.
 `CARGO_PROFILE_DEV_DEBUG: 0` (workflow-level env) additionally strips debuginfo from Rust and
-native build scripts (e.g. nicti-decode's bundled LibRaw), which was most of that cache size.
+native build scripts (e.g. nicti-cornea's bundled LibRaw), which was most of that cache size.
 `retina-linux` also uses `save-if: false` (cold cost is only 2.5min). `spikes/**` is also excluded
 from Renovate (`renovate.json`) since every spike is throwaway and generates bump-PR churn nobody
 will act on before it's deleted or promoted.
