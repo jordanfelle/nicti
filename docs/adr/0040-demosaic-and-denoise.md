@@ -123,6 +123,7 @@ candidate), Windows-native CUDA for the full-resolution rows:**
 | Metric | Value |
 |---|---|
 | SCUNet, 256px crop, CUDA vs CPU | 44.8ms vs 1605.8ms — **~36x speedup**, quality matched to 4 decimals |
+| SCUNet, 128px tile, CUDA vs CPU (ADR-0054/#205 follow-up) | 33.3ms vs 186.9ms — **~5.6x speedup only**, fixed per-call overhead dominates at this size (isolated per-tile timing, not this row's own full-frame crop scoring) |
 | NAFNet, full 6064×4040 frame | **30.7s total wall time** (CPU version never finished after 90+ min) |
 | SCUNet, full 6064×4040 frame | **50.9s total wall time** (post edge-tile-padding fix) |
 

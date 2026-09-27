@@ -61,10 +61,16 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   present on the reference machine and was re-installed fresh this pass (Python 3.13 venv,
   `onnxruntime-gpu==1.30.0`, `nvidia-cudnn-cu13==9.26.0.51` — matching #40's own cited versions,
   pip/winget only, no NVIDIA login) — check before assuming a prior pass's environment still holds.
-- **Open follow-ups**: [#205](https://github.com/jordanfelle/nicti/issues/205) (measure a smaller
-  SCUNet tile size, 128px, if a same-API wgpu background chunk of similar duration to 256px ever
-  exists); [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake chunking or
-  explicit cross-lane concurrency, CPU decode vs. GPU work, to bound their own worst-case latency).
+- **[#205](https://github.com/jordanfelle/nicti/issues/205), measured**: 128px SCUNet tile does
+  *not* clear the same-API contention budget either — 128px/256px land within the same order of
+  magnitude (33.3ms/37.0ms p50, isolated per-tile timing via the new `bench-tile` subcommand),
+  fixed per-call overhead dominates at 128px, and 128px needs 5.4x more tiles/frame so its
+  estimated whole-frame cost is ~4.9x *worse* (~88.1s vs. ~18.0s) — strictly worse, not a tradeoff.
+  Moot for now: SCUNet's real path is cross-API CUDA, already found contention-free above; only
+  matters for a hypothetical future same-API `wgpu` background chunk.
+- **Open follow-up**: [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake
+  chunking or explicit cross-lane concurrency, CPU decode vs. GPU work, to bound their own
+  worst-case latency).
 
 ## Package contents
 
@@ -73,7 +79,9 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `prefetch.rs` (copy of ADR-0044's own priority ordering), `gpu_contend.rs` (persistent
   `busy.wgsl` kernel + throttled/unthrottled `BackgroundLoad`, the wgpu-vs-wgpu contention
   harness), `ort_contend.rs` (`TileLoad`, trimmed from `spikes/rods::ai::TiledDenoiser`, the
-  CUDA-vs-wgpu contention harness), `sim.rs` (tile-granular hero-scenario re-sim). `src/bin/
-  crouch.rs` exposes `bench-wgpu`/`bench-ort`/`sim` subcommands. 37 unit tests, real reference-
-  hardware numbers for both contention cases (not just lavapipe correctness). See
+  CUDA-vs-wgpu contention harness, plus `tiles_for_frame` — a pure helper mirroring
+  `rods::ai::TiledDenoiser::denoise`'s own stride/edge-clamp loop, used by #205's whole-frame cost
+  estimate), `sim.rs` (tile-granular hero-scenario re-sim). `src/bin/crouch.rs` exposes
+  `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands. 42 unit tests, real reference-hardware
+  numbers for both contention cases (not just lavapipe correctness). See
   `docs/research/crouch-scheduler.md`.

@@ -161,6 +161,135 @@ pub fn suspiciously_close_to_cpu_speed(cuda_ms: f64, cpu_ms: f64) -> bool {
     cuda_ms > cpu_ms * 0.5
 }
 
+/// Counts how many `tile x tile` inference calls `TiledDenoiser::denoise`
+/// (`spikes/rods/src/ai.rs`) would make to cover a `width x height` frame at this `overlap` --
+/// same stride and edge-tile-clamp loop as that function, kept in lockstep with it rather than
+/// re-derived from a closed-form formula, since the real loop's "last tile may overshoot the
+/// overlap-derived stride" edge behavior (`if x + tile_w >= width { break }`) doesn't reduce to a
+/// simple `ceil(width / stride)` once `tile > stride` (an overlap-driven stride, as used here,
+/// always has this property). Used to turn an isolated per-tile timing into an estimated
+/// whole-frame cost -- #205's own scope, not a duplicate of `rods`'s own full-image timing
+/// (`--time` on `rods compare`), which needs a real image to run against.
+pub fn tiles_for_frame(width: u32, height: u32, tile: u32, overlap: u32) -> u32 {
+    assert!(tile > 0, "tile must be nonzero");
+    assert!(
+        overlap < tile,
+        "overlap ({overlap}) must be strictly less than tile ({tile})"
+    );
+    let stride = tile.saturating_sub(overlap).max(1);
+
+    let mut count = 0u32;
+    let mut y = 0u32;
+    loop {
+        let tile_h = tile.min(height - y);
+        let mut x = 0u32;
+        loop {
+            let tile_w = tile.min(width - x);
+            count += 1;
+            if x + tile_w >= width {
+                break;
+            }
+            x += stride;
+        }
+        if y + tile_h >= height {
+            break;
+        }
+        y += stride;
+    }
+    count
+}
+
+#[cfg(test)]
+mod tiles_for_frame_tests {
+    use super::tiles_for_frame;
+
+    #[test]
+    fn exact_multiple_no_overlap() {
+        // 4 tiles tile along each axis at stride==tile, no remainder.
+        assert_eq!(tiles_for_frame(1024, 1024, 256, 0), 16);
+    }
+
+    #[test]
+    fn single_tile_covers_whole_frame() {
+        assert_eq!(tiles_for_frame(200, 100, 256, 32), 1);
+    }
+
+    #[test]
+    fn real_full_resolution_frame_128px() {
+        // 6064x4040 @ 128px tile / 32px overlap (stride 96): matches manual count from the same
+        // stride/edge-clamp loop as `rods::ai::TiledDenoiser::denoise`.
+        let tiles_x = {
+            let mut x = 0u32;
+            let mut n = 0u32;
+            loop {
+                let tile_w = 128u32.min(6064 - x);
+                n += 1;
+                if x + tile_w >= 6064 {
+                    break;
+                }
+                x += 96;
+            }
+            n
+        };
+        let tiles_y = {
+            let mut y = 0u32;
+            let mut n = 0u32;
+            loop {
+                let tile_h = 128u32.min(4040 - y);
+                n += 1;
+                if y + tile_h >= 4040 {
+                    break;
+                }
+                y += 96;
+            }
+            n
+        };
+        assert_eq!(tiles_for_frame(6064, 4040, 128, 32), tiles_x * tiles_y);
+    }
+
+    #[test]
+    fn real_full_resolution_frame_256px() {
+        // Same independent per-axis loop as the 128px test above, at 256px tile / 32px overlap
+        // (stride 224).
+        let tiles_x = {
+            let mut x = 0u32;
+            let mut n = 0u32;
+            loop {
+                let tile_w = 256u32.min(6064 - x);
+                n += 1;
+                if x + tile_w >= 6064 {
+                    break;
+                }
+                x += 224;
+            }
+            n
+        };
+        let tiles_y = {
+            let mut y = 0u32;
+            let mut n = 0u32;
+            loop {
+                let tile_h = 256u32.min(4040 - y);
+                n += 1;
+                if y + tile_h >= 4040 {
+                    break;
+                }
+                y += 224;
+            }
+            n
+        };
+        assert_eq!(tiles_for_frame(6064, 4040, 256, 32), tiles_x * tiles_y);
+        // Cross-check: a larger tile with the same overlap must need no more tiles than the
+        // smaller one over the same frame (coarser stride, fewer steps per axis).
+        assert!(tiles_for_frame(6064, 4040, 256, 32) <= tiles_for_frame(6064, 4040, 128, 32));
+    }
+
+    #[test]
+    #[should_panic(expected = "must be strictly less than tile")]
+    fn overlap_not_less_than_tile_panics() {
+        tiles_for_frame(100, 100, 64, 64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
