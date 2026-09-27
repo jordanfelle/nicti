@@ -50,29 +50,36 @@ fn ort_err(e: impl std::fmt::Display) -> SegmentError {
     SegmentError::Ort(e.to_string())
 }
 
-/// Initializes the global `ort` environment exactly once -- same `OnceLock` pattern as
-/// `spikes/groom/src/ai.rs::ensure_ort_environment`, since the environment is process-global and
-/// `load-dynamic` requires this to run before any other `ort` API call.
+/// Initializes the global `ort` environment exactly once -- same `OnceLock` pattern as the
+/// identical copies in `spikes/groom/src/ai.rs`, `spikes/crouch/src/ort_contend.rs`,
+/// `spikes/rods/src/ai.rs`, and `spikes/litter/src/embed.rs`, since the environment is
+/// process-global and `load-dynamic` requires this to run before any other `ort` API call. Keep
+/// all five in sync (#179).
 ///
-/// **Known gap, shared with groom's identical implementation, deliberately not fixed here:**
-/// `commit()` returns `false` both when the environment failed to initialize *and* when a
-/// different caller already committed a (possibly compatible) environment first -- this code
-/// treats both as a permanent error, cached forever by the `OnceLock`. If groom's and this
-/// module's wrappers ever ran in the same process, whichever committed second would fail every
-/// subsequent call, even with a perfectly usable environment already active. Fixing this properly
-/// means deciding how to verify an already-committed environment's compatibility (EP support,
-/// dylib path) before accepting it, which isn't a contained change and would need to touch both
-/// modules together to stay consistent -- filed as issue #179 rather than fixed unilaterally here.
-fn ensure_ort_environment(dylib_path: &Path) -> Result<(), SegmentError> {
+/// `EnvironmentBuilder::commit()` returning `false` is not a failure: per its own doc comment
+/// (ort 2.0.0-rc.13), `false` means "an environment has already been configured" -- `commit()`
+/// only inserts the builder into a process-global `OnceLock`, it never calls ONNX Runtime's
+/// `CreateEnv` itself, so there is no way for it to report a genuine init failure at all. A real
+/// failure (bad dylib, version mismatch) surfaces from `ort::init_from` above instead, and is
+/// already propagated by the `?`. So this proceeds either way once `init_from` succeeds -- if
+/// groom's and this module's wrappers ever run in the same process, whichever calls this second
+/// no longer fails every subsequent model load; it just reuses whichever environment committed
+/// first, verified in `tests/ort_cross_module.rs` (in `spikes/groom`, exercising all five crates
+/// together). **Known limitation**: `ort`'s public API exposes no way to inspect which dylib path
+/// the winning environment actually loaded, so a dylib-path mismatch across callers can't be
+/// detected here. Execution providers *can* be read back via
+/// `Environment::current()?.execution_providers()`, but that only reflects EPs set via
+/// `EnvironmentBuilder::with_execution_providers` -- none of these five wrappers set EPs at the
+/// environment level; each that supports EP selection (`crouch`, `rods`) requests it
+/// per-`Session` instead, which isn't visible on `Environment` at all. So even with that getter,
+/// there's no way to learn which EP a losing caller's session actually ends up using.
+pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), SegmentError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     let result = INIT.get_or_init(|| {
         let builder =
             ort::init_from(dylib_path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
-        if builder.commit() {
-            Ok(())
-        } else {
-            Err("ort environment commit() returned false".to_string())
-        }
+        builder.commit();
+        Ok(())
     });
     result.clone().map_err(SegmentError::Ort)
 }
@@ -318,4 +325,11 @@ mod tests {
             .expect("a real model should load and run");
         assert_eq!(alpha.data.len(), alpha.width * alpha.height);
     }
+
+    // A same-crate repeat call to `ensure_ort_environment` doesn't exercise #179's actual bug:
+    // the `OnceLock` here caches the *first* call's result, so a second call in this same test
+    // binary never re-runs `commit()` at all -- it can't distinguish the fixed code from the
+    // original bug. The real race is cross-crate (this crate's `OnceLock` vs. another spike's,
+    // both racing to insert into `ort`'s single process-global `G_ENV_OPTIONS`); that's what
+    // `spikes/groom/tests/ort_cross_module.rs` reproduces instead.
 }
