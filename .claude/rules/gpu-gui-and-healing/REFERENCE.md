@@ -46,3 +46,18 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     directly on the reference machine's Windows side via WSL interop
     (`powershell.exe -Command "& '<unc-path-from-wslpath--w>' --ignored --nocapture"`) — same
     pattern `spikes/retina`/`spikes/sniff` already used for their own real-hardware passes.
+
+## Package contents
+
+- **`spikes/glint`** (#16/ADR-0005) — wgpu-vs-CUDA measured comparison: correctness, feature/limit
+  availability, throughput, dispatch overhead, host↔device interop cost.
+- **`spikes/pelt` + `spikes/pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0006) — GUI-framework
+  research. `pelt` is the toolkit-agnostic shared fixture/math crate; each `pelt-*` is one
+  candidate's virtualized-grid + loupe + custom-wgpu-viewport spike. No `spikes/pelt-gpui` exists
+  (ADR-0006's Hard-gate-1 early exit).
+- **`spikes/groom`** (#50/ADR-0007) — healing/removal research: CPU clone-stamp/Poisson-heal +
+  auto-source-pick reference, a `wgpu` compute-shader Poisson twin proven correct against it,
+  `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox),
+  crop/resize/feather compositing, and the `HealStage`/`Spot` edit-model representation with a
+  pawprint-style `cache_key()`. See `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN
+  licensing findings.

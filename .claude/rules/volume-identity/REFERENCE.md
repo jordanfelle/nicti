@@ -31,3 +31,16 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   `volume::windows_impl`/`mount_events::windows_impl` are unverified. Everything cross-platform
   (schema/fingerprint/path) is real: 29 tests pass, workspace clippy/test/fmt/cargo-deny clean.
   Reference-machine run required before Accepted — see ADR-0020's Measured results (all TBD).
+
+## Package contents
+
+- **`spikes/homing`** (#71/ADR-0020's volume-identity research) — candidate identity keys measured
+  against a drive-letter change/detach-reattach/reformat survival table, a `volume`/`root`/`asset`
+  SQLite schema, size+name/partial-BLAKE3/full-BLAKE3/EXIF-natural-key relink tiers, and a
+  `sysinfo`-poll-vs-`CM_Register_Notification` mount-detection comparison — lib+bin split so its
+  currently-CLI-unwired helpers don't trip `dead_code` the way a bin-only spike would; `lib.rs`
+  re-exports `fingerprint`/`mount_events`/`path`/`relink`/`schema`/`volume`. Windows-only research
+  written in a Linux/WSL sandbox with no mountable NTFS volume: its `windows_impl` modules are
+  unverified against real hardware, while its cross-platform schema/fingerprint/path logic is real,
+  tested (29 unit tests), and — unlike `den`/`pelt-*`/`retina` — not path-gated out of CI's normal
+  `clippy`/`test` jobs, since it needs no heavy native build (same as `sniff`).

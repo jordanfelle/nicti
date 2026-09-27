@@ -37,3 +37,13 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
 - **`shed`'s `open_backup` guard**: refuses a `.lock`/`-wal` sibling only when it has real content
   — a plain read-only open of an already-closed WAL-mode catalog leaves harmless zero-byte
   siblings behind, and presence-alone was a real false-positive this pass hit and fixed.
+
+## Package contents
+
+- **`spikes/shed`** (#61/ADR-0023's `.lrcat` schema-mapping research) — schema/inventory/
+  develop-settings reading plus a pre-commit privacy check against the real catalog's own
+  keyword/path strings, plus #157's `develop-usage` subcommand (`analyze_unowned_keys`) which
+  measured real presence/active-use counts for the 6 keys `classify_key` originally left unowned
+  and resolved all of them to an owner (or `ProvenanceOnly`, for `LensBlur`'s confirmed-zero-real-
+  usage case). Real, tested (19 unit tests on Unix, 18 on Windows), not path-gated. See
+  `docs/research/shed-lrcat-schema.md`.

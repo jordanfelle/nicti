@@ -69,140 +69,44 @@ preemption), `Sniff` (embedded-JPEG fast preview path for culling).
 ## Package map
 
 `crates/*` (a Cargo workspace member glob, landed in #20) holds the real production crate layout
-from ADR-0004 §8:
+from ADR-0004 §8. `spikes/*` holds throwaway research spikes not yet promoted — don't build on top
+of one; each is deleted once its own ticket promotes it (as #20 already did for
+`spikes/sheath`/`spikes/dewclaw`). Full per-spike/per-crate module breakdown moved out to each
+topic's own `.claude/rules/<topic>/REFERENCE.md` "Package contents" section (#173) — this stays a
+terse index: crate/spike → purpose → owning topic.
 
-- **`crates/nicti-claw`** — the `Module` trait (identity/versioning shared by every extension
-  point), the lazy `OnceLock`-backed `Registry` (`crates/nicti-claw/src/registry.rs`), and the
-  checked C-ABI dylib handshake (`crates/nicti-claw/src/dylib.rs`) — the load-bearing crate every
-  other `nicti-*` crate builds on. Generalized from the now-deleted `spikes/sheath` spike.
-- **`crates/dewclaw`** — test fixture (cdylib) for `nicti-claw`'s dylib tests, generalized from
-  the now-deleted `spikes/dewclaw`.
-- **`crates/nicti-prowl`** — the benchmark + golden-image harness (#17); see the Performance
-  targets and benchmarking section above for its module breakdown.
-- One crate per extension point, each holding only its supertrait plus a `Registry` type alias —
-  no execution methods yet, those belong to the tickets named below: `nicti-decode` (`RawDecoder`,
-  #37/#40/#41), `nicti-color` (`ColorProfile`, #38/#42), `nicti-lens` (`LensCorrection`, #39),
-  `nicti-render` (`RenderStage`, Tapetum's future home, #44/#45), `nicti-ai` (`ModelProvider`,
-  #48-#53/#33-#36), `nicti-export` (`Exporter`, #56/#57), `nicti-catalog` (`CatalogStore`, #22's
-  future home).
+- **`crates/nicti-claw`**, **`crates/dewclaw`** — Claw registry + its dylib test fixture →
+  [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
+- **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
+  and benchmarking section above
+- **`crates/nicti-decode`/`nicti-color`/`nicti-lens`/`nicti-render`/`nicti-ai`/`nicti-export`/`nicti-catalog`**
+  — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
+  `RawDecoder` (#37/#40/#41), `ColorProfile` (#38/#42), `LensCorrection` (#39), `RenderStage`
+  (Tapetum's future home, #44/#45), `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57),
+  `CatalogStore` (#22's future home)
+- **`spikes/pawprint`** (#21/ADR-0002) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
+- **`spikes/glint`** (#16/ADR-0005) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/pelt` + `pelt-egui`/`pelt-iced`/`pelt-slint`** (#68/ADR-0006) →
+  [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/groom`** (#50/ADR-0007) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`spikes/sniff`** (#28/#29/ADR-0017) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
+- **`spikes/den`** (#67+/ADR-0008–0016, slated for deletion once #22 lands, see #123) →
+  [`catalog-engine`](.claude/rules/catalog-engine/REFERENCE.md)
+- **`spikes/retina`** (#37/ADR-0019) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)
+- **`spikes/homing`** (#71/ADR-0020, Windows-only, unverified in this sandbox) →
+  [`volume-identity`](.claude/rules/volume-identity/REFERENCE.md)
+- **`spikes/calico`** (#38/ADR-0021) → [`color`](.claude/rules/color/REFERENCE.md)
+- **`spikes/shed`** (#61/ADR-0023) → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
+- **`spikes/siamese`** (#48/ADR-0024) → [`masking`](.claude/rules/masking/REFERENCE.md)
+- **`spikes/litter`** (#33/ADR-0025) → [`culling`](.claude/rules/culling/REFERENCE.md)
+- **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
+- **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
+- **`bench/whisker`** (workspace member) — benchmark tooling for #43, not a production crate; same
+  "don't build on top of it" caveat as a spike
 
 The root placeholder binary crate (`src/main.rs`) still exists only so CI/lint tooling has
-something real to run against; it is not the shipping v1 target's home yet. `spikes/*` still
-holds throwaway research spikes not yet promoted — `spikes/pawprint` (#21/ADR-0002's
-edit-document hashing, history/compaction, and XMP round-trip proof), `spikes/glint`
-(#16/ADR-0005's wgpu-vs-CUDA measured comparison — correctness, feature/limit availability,
-throughput, dispatch overhead, host↔device interop cost), and `spikes/pelt` +
-`spikes/pelt-egui`/`spikes/pelt-iced`/`spikes/pelt-slint` (#68/ADR-0006's GUI-framework research —
-`pelt` is the toolkit-agnostic shared fixture/math crate, each `pelt-*` is one candidate's
-virtualized-grid + loupe + custom-wgpu-viewport spike; no `spikes/pelt-gpui` exists, see
-ADR-0006's Hard-gate-1 early exit), and `spikes/sniff` (#28's embedded-JPEG research, extended for
-#29's preview-tier-strategy comparison: a from-scratch TIFF/EXIF/Nikon-MakerNote IFD walker (now
-generic over `source::ByteSource` — `SliceSource`/`FileSource` — for #29's ranged, seek-and-read
-extraction) — no LibRaw/rawler dependency, deliberately, to stay clear of #37's still-open decoder
-choice — plus a `zune-jpeg`/`fast_image_resize` decode/resize path, `codec.rs`'s JPEG-vs-AVIF-vs-WebP
-tier-payload-format comparison (`ravif`/`avif-decode`, pure Rust, plus lossy WebP via the
-C-linked `webp`/`libwebp-sys`, added for #143's ADR-0022 follow-up alongside a swept `avif-speed`
-axis and `nicti-prowl`-reused SSIM scoring — see the committed `run-codec-sweep.ps1`), `cache.rs`'s three
-cache-backend candidates (SQLite BLOBs/pack-file/file-per-preview), `tier_bench.rs`'s end-to-end
-per-tier harness, and a locate/read/decode-grid/decode-screen/extract-index/full-read latency
-benchmark with a `--io {whole,ranged}` axis; `sniff inventory` cross-checked byte-exact against
-`exiftool` on real Z8/D7500 files. **#28 closed**: full 9,142-file NVMe set plus the HDD (`E:\`)
-comparison the issue's own scope called for are both measured — HDD is ~16x slower than NVMe for
-cold, randomly-ordered reads, same order/cold-ness on both drives (the realistic culling-browse
-case). Also found and fixed a real `FILE_FLAG_NO_BUFFERING` sector-alignment bug shared by
-`read_cold`/`read_cold_range` (a resumed short read could pass a misaligned buffer address/file
-offset to the next call, surfacing as `os error 87` on HDD ~10-19% of the time, never on NVMe) —
-fixed by retrying the identical `seek_read` call on the same handle rather than resuming from a
-running offset. See `docs/research/sniff-embedded-jpeg.md` for #28's write-up and
-`docs/adr/0017-preview-tier-strategy.md` for #29's), `spikes/groom` (#50/ADR-0007's
-healing-and-removal research: CPU
-clone-stamp/Poisson-heal/auto-source-pick reference plus a `wgpu` compute-shader Poisson twin
-proven correct against it, `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding with no real
-ONNX weights in this sandbox, crop/resize/feather compositing, and the `HealStage`/`Spot`
-edit-model representation with a pawprint-style `cache_key()`; see
-`docs/research/groom-healing-removal.md` for the LaMa/MI-GAN licensing findings), and `spikes/den`
-(#67/ADR-0008's catalog-database-engine comparison plus #102/ADR-0009's Turso follow-up,
-#106/ADR-0010's `redb` follow-up, #103/ADR-0011's facet-count-cache follow-up, #107/ADR-0012's
-schema-fit reconsideration, #113/ADR-0014's `libSQL` follow-up, #115/ADR-0015's RocksDB follow-up,
-and #116/ADR-0016's `fjall` follow-up — one module per candidate,
-`sqlite.rs`/`duckdb_engine.rs`/`lmdb.rs`/`turso_engine.rs`/`redb_engine.rs`/`libsql_engine.rs`/
-`rocksdb_engine.rs`/`fjall_engine.rs`/`facet_cache_trigger.rs`/`facet_cache_duckdb.rs`, behind
-matching Cargo features (`turso`, `redb`, `libsql`, `rocksdb`, and `fjall` are all default-off,
-evaluated-not-adopted, kept for reference — `libsql` additionally cannot be enabled in the same
-binary as `sqlite`, both bundle their own SQLite C symbols and collide at link time, see
-ADR-0014's Spike section; `rocksdb` and `fjall` have no such collision, they link cleanly
-alongside every other engine, see ADR-0015's/ADR-0016's Consequences; the two facet-cache modules
-require `sqlite`, and `facet_cache_duckdb` additionally requires `duckdb`), plus `schema_fit.rs`
-(ADR-0002's JSON-column + append-only/burst-compacted history-table shape, gated on both `sqlite`
-and `duckdb`) and `concurrent_bench.rs` (#115's own reason for existing — a genuinely concurrent
-multi-writer-thread comparison between RocksDB and SQLite, gated on both `rocksdb` and `sqlite`,
-not part of the shared `Workload` trait since only these two engines are compared this way);
-`gen.rs`'s synthetic-catalog generator is reusable for future Library-scale benchmarks, see
-`docs/benchmarks.md`) — not production code; don't build on top of a spike crate, and expect each
-to be deleted once its own ticket promotes it (as #20 just did for
-`spikes/sheath`/`spikes/dewclaw`), and `spikes/retina` (#37/ADR-0019's RAW decoder comparison —
-vendors LibRaw's HE/HE\*-capable fork as a git submodule at `spikes/retina/vendor/LibRaw`, compiled
-via the `cc` crate through a hand-written shim, no bindgen; `sweep`/`compare`/`diff` against rawler
-0.8.0, plus `scan` for a manifest-free directory walk and `watch` for #24's `notify` research;
-also `dump-linear` (#38/ADR-0021: demosaics one NEF with white balance/color-matrix/gamma all
-disabled via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
-`spikes/calico` to consume, without calico depending on retina's FFI/submodule), and
-`dump-classic`/`dump-cfa` (#40/ADR-0040's classic-pipeline and Bayer-plane dumps for
-`spikes/rods` — see the `denoise` topic's REFERENCE.md); see `docs/research/retina-raw-decoder.md`.
-Its own `vendor/LibRaw` submodule needs `git submodule update --init spikes/retina/vendor/LibRaw`
-before it builds.
-`spikes/rods` (#40/ADR-0040's demosaic+denoise comparison harness — alignment, a fixed color
-treatment, and a tiled CUDA/TensorRT-capable `ort` AI-denoise wrapper; see the `denoise` topic's
-REFERENCE.md and `docs/research/rods-demosaic-denoise.md` for the module breakdown and results).
-`bench/whisker` (a workspace member) is benchmark tooling for #43, not a production crate either —
-same "don't build on top of it" caveat applies. `spikes/homing` (#71/ADR-0020's volume-identity
-research: candidate identity keys measured against a drive-letter change/detach-reattach/reformat
-survival table, a `volume`/`root`/`asset` SQLite schema, size+name/partial-BLAKE3/full-BLAKE3/
-EXIF-natural-key relink tiers, and a `sysinfo`-poll-vs-`CM_Register_Notification` mount-detection
-comparison — lib+bin split so its currently-CLI-unwired helpers don't trip `dead_code` the way a
-bin-only spike would; `lib.rs` re-exports `fingerprint`/`mount_events`/`path`/`relink`/`schema`/
-`volume`) is Windows-only research written in a Linux/WSL sandbox with no mountable NTFS volume:
-its `windows_impl` modules are unverified against real hardware (see ADR-0020's own sandbox-note
-and Measured-results section, all marked TBD pending a reference-machine pass), while its
-cross-platform schema/fingerprint/path logic is real, tested (29 unit tests), and — unlike
-`den`/`pelt-*`/`retina` — not path-gated out of CI's normal `clippy`/`test` jobs, since it needs no
-heavy native build (same as `sniff`). `spikes/calico` (#38/ADR-0021's color-pipeline research: a
-from-scratch DNG-spec Camera Profile (`.dcp`) tag reader over a hand-rolled TIFF/IFD parser,
-DNG-spec CCT-based dual-illuminant matrix interpolation, three working-space candidates
-(ProPhoto/Rec.2020/ACEScg), a HueSatMap/LookTable trilinear HSV implementation with hue-wrap-aware
-interpolation, a Fritsch-Carlson monotonic tone-curve spline, CIEDE2000 comparison tooling, a CPU
-reference pipeline, and — this repo's first 3D-texture wgpu kernel (`spikes/glint`'s own kernels
-are storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a real CPU/GPU parity
-test passing against lavapipe; pure Rust, no FFI, not path-gated. See
-`docs/research/calico-color-pipeline.md`) is real, tested (39 unit tests + 3 integration tests,
-plus a local-only `--ignored` test that verifies `xmp_profile.rs`'s Adobe Raw "Look" `.xmp` decode
-against the user's real installed profiles, #150), pending only the reference-machine
-ΔE-against-LRC measurement pass ADR-0021 describes.
-`spikes/shed` (#61/ADR-0023's `.lrcat` schema-mapping research — schema/inventory/develop-settings
-reading plus a pre-commit privacy check against the real catalog's own keyword/path strings, plus
-#157's `develop-usage` subcommand (`analyze_unowned_keys`) which measured real presence/active-use
-counts for the 6 keys `classify_key` originally left unowned and resolved all of them to an owner
-(or `ProvenanceOnly`, for `LensBlur`'s confirmed-zero-real-usage case) — see
-`docs/research/shed-lrcat-schema.md`) is real, tested (19 unit tests on Unix, 18 on Windows), not
-path-gated. `spikes/siamese` (#48/ADR-0024's masking research: BiRefNet/MobileSAM segmentation
-scaffolding over `ort`/`load-dynamic` (no real weights, same posture as `groom/ai.rs`), the
-brush/gradient local-adjustment geometry model, the `MaskGroup`/`MaskComponent` AI+geometry
-compose model with a shared bake key for a mask and its inverse, a guided-filter preview-to-full-
-res refine, and 4 WGSL kernels (5 files) parity-tested against lavapipe; see
-`docs/research/siamese-masking.md`) is real, tested (23 unit + 9 GPU-parity tests), not path-gated.
-`spikes/litter` (#33/ADR-0025's burst/duplicate-grouping research — EXIF/Nikon-MakerNote
-capture-time reader, dHash/pHash/SSIM/DINOv2 similarity signals, two-level sequence-constrained
-grouping; see `docs/research/litter-burst-grouping.md` and `.claude/rules/culling/REFERENCE.md`)
-is real, tested (35 unit/integration tests), not path-gated, pending the reference-labelling
-measurement pass ADR-0025 describes. `spikes/scent` (#59/ADR-0059's XMP-interop research — the
-LRC-convention rating/label/keyword field mapping, a `quick-xml`-based event-copy-and-patch packet
-reader/writer that preserves every property it doesn't own, `.xmp` sidecar naming + atomic write,
-JPEG-embedded APP1 XMP read/write (DNG/TIFF tag-700 write deferred, see the ADR), and the
-ADR-0002 conflict rule + `crs:` write-gate wired to real file mtimes/hashes; see
-`docs/research/scent-xmp-interop.md` and `.claude/rules/xmp-interop/REFERENCE.md`) is real, tested
-(36 unit + 2 env-gated real-file integration tests, all passing — the real-file tests skip cleanly
-in this sandbox, same constraint `homing` already documents), not path-gated, pending the
-follow-up hands-on LRC session the ADR describes before it can move to Accepted.
+something real to run against; it is not the shipping v1 target's home yet.
+
 
 ## Development workflow
 

@@ -28,3 +28,15 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
 - **Conflict rule**: ADR-0002's hash-then-mtime-then-ambiguity-window rule, reimplemented against
   real file mtimes/hashes (not depended on from `spikes/pawprint` — spikes don't depend on other
   spikes in this repo, only on real `crates/*`).
+
+## Package contents
+
+- **`spikes/scent`** (#59/ADR-0059's XMP-interop research) — the LRC-convention
+  rating/label/keyword field mapping, a `quick-xml`-based event-copy-and-patch packet
+  reader/writer that preserves every property it doesn't own, `.xmp` sidecar naming + atomic
+  write, JPEG-embedded APP1 XMP read/write (DNG/TIFF tag-700 write deferred, see the ADR), and the
+  ADR-0002 conflict rule + `crs:` write-gate wired to real file mtimes/hashes. Real, tested (36
+  unit + 2 env-gated real-file integration tests, all passing — the real-file tests skip cleanly
+  in this sandbox, same constraint `homing` already documents), not path-gated, pending the
+  follow-up hands-on LRC session the ADR describes before it can move to Accepted. See
+  `docs/research/scent-xmp-interop.md`.

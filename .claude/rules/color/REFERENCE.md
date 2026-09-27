@@ -45,3 +45,18 @@ Full reasoning/history: `docs/decisions/color.md`.
   LibRaw's own `user_mul={1,1,1,1}`/`output_color=0`/`gamm={1,1}` params) — hands linear camera RGB
   + metadata (black/max/cam_mul/pre_mul/cam_xyz/cblack) to calico without calico depending on
   retina's LibRaw FFI/submodule.
+
+## Package contents
+
+- **`spikes/calico`** (#38/ADR-0021's color-pipeline research) — a from-scratch DNG-spec Camera
+  Profile (`.dcp`) tag reader over a hand-rolled TIFF/IFD parser, DNG-spec CCT-based
+  dual-illuminant matrix interpolation, three working-space candidates (ProPhoto/Rec.2020/ACEScg),
+  a HueSatMap/LookTable trilinear HSV implementation with hue-wrap-aware interpolation, a
+  Fritsch-Carlson monotonic tone-curve spline, CIEDE2000 comparison tooling, a CPU reference
+  pipeline, and — this repo's first 3D-texture wgpu kernel (`spikes/glint`'s own kernels are
+  storage-buffer-only, ADR-0005) — a GPU port of the HueSatMap lookup with a real CPU/GPU parity
+  test passing against lavapipe; pure Rust, no FFI, not path-gated. Real, tested (39 unit tests +
+  3 integration tests, plus a local-only `--ignored` test that verifies `xmp_profile.rs`'s Adobe
+  Raw "Look" `.xmp` decode against the user's real installed profiles, #150), pending only the
+  reference-machine ΔE-against-LRC measurement pass ADR-0021 describes. See
+  `docs/research/calico-color-pipeline.md`.

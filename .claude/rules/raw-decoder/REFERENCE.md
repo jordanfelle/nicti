@@ -36,3 +36,17 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
   unmaintainable per-machine at that size; needs multi-person/multi-machine access, tracked
   separately (#136), not solved by #37. `retina scan` (no manifest CSV needed) runs directly
   against the live library or any ad hoc subset instead.
+
+## Package contents
+
+- **`spikes/retina`** (#37/ADR-0019's RAW decoder comparison) — vendors LibRaw's HE/HE\*-capable
+  fork as a git submodule at `spikes/retina/vendor/LibRaw` (needs
+  `git submodule update --init spikes/retina/vendor/LibRaw` before it builds), compiled via the
+  `cc` crate through a hand-written shim, no bindgen. Subcommands: `sweep`/`compare`/`diff` against
+  rawler 0.8.0, `scan` for a manifest-free directory walk, `watch` for #24's `notify` research,
+  `dump-linear` (#38/ADR-0021: demosaics one NEF with white balance/color-matrix/gamma all disabled
+  via LibRaw's own params, writing a linear-camera-RGB TIFF + metadata JSON sidecar for
+  `spikes/calico` to consume, without calico depending on retina's FFI/submodule), and
+  `dump-classic`/`dump-cfa` (#40/ADR-0040's classic-pipeline and Bayer-plane dumps for
+  `spikes/rods` — see the `denoise` topic's REFERENCE.md). See
+  `docs/research/retina-raw-decoder.md`.
