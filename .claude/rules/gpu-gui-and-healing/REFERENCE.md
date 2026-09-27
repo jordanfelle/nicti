@@ -25,13 +25,14 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   storage is `Rgba16Float` **textures** (`crates/nicti-render::frame::FrameTexture`), not the
   `array<vec4<f32>>` storage **buffers** `spikes/glint`/`spikes/loaf` use — a texture format needs
   no `SHADER_F16` feature at all, so it works identically on Vulkan, Dx12, WARP and lavapipe.
-- **GUI framework** — `docs/adr/0068`: **Proposed, pending reference-machine pass**; hard-gate
-  findings final. **Correction (2026-09-26)**: Prior-art section wrongly claimed RapidRAW uses
-  egui/eframe — it's Tauri+React; doesn't change the Decision. GPUI eliminated (Windows backend has
-  no wgpu/Vulkan path). egui currently leads
+- **GUI framework** — `docs/adr/0068`: **Accepted — egui** (2026-09-27, #90), on hard-gate evidence
+  alone; the reference-machine benchmark pass was waived, see the ADR's Amendments. **Correction
+  (2026-09-26)**: Prior-art section wrongly claimed RapidRAW uses egui/eframe — it's Tauri+React;
+  doesn't change the Decision. GPUI eliminated (Windows backend has no wgpu/Vulkan path). egui wins
   (wgpu 30.0.0 match, MIT/Apache-2.0). Iced pins wgpu 27 (compat cost). Slint's GPU integration is
   cleanest but its license (`GPL-3.0-only OR LicenseRef-Slint-*`) needs its own ADR-0018 amendment
-  to ship. Final pick waits on `bench/pelt/pelt.ahk`+`run-pelt.ps1` reference-machine numbers.
+  to ship. `spikes/pelt*`/`bench/pelt/` slated for deletion, tracked in #232; real perf validation
+  against the actual UI crate tracked in #233.
 - **Healing/removal** — `docs/adr/0050`: **Accepted** (2026-09-26, #97's reference-machine pass).
   Ships both classic clone/heal (CPU Poisson-Jacobi + `wgpu` compute-shader twin) and AI removal
   (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`.

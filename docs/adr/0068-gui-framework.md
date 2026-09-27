@@ -1,8 +1,7 @@
 # ADR-0068: GUI framework
 
-- **Status:** Proposed — hard-gate findings below are final (static, code/dependency-graph
-  evidence, not hardware-dependent); the measured-gate tables and final Decision are pending a
-  baseline run on the reference machine (see Measured results)
+- **Status:** Accepted — egui (via eframe), 2026-09-27 (#90), on the hard-gate evidence alone;
+  see Amendments for why the reference-machine benchmark pass was waived
 - **Date:** 2026-09-23
 - **Ticket:** [#68](https://github.com/jordanfelle/nicti/issues/68) Research: GUI framework (GPUI vs Iced vs egui vs Slint)
 - **Formerly:** ADR-0006 (sequential numbering, pre-#183)
@@ -39,9 +38,8 @@ Constraints already fixed by earlier ADRs/docs:
   Windows, and could not drive AutoHotkey or capture a real screen. Every dependency-graph, API,
   and license finding below is real, current-crate evidence (crates.io downloads, `cargo add
   --dry-run`, `cargo deny`, and each crate's own published `Cargo.toml`/source, all checked
-  2026-09-23) — but the Measured-gates tables are placeholders, exactly like
-  `docs/benchmarks/hero-scenario.md`'s own "filled in after the baseline runs" precedent. **The
-  final Decision below is provisional** on those measurements.
+  2026-09-23). The Measured-gates table was never filled in — #90 waived that reference-machine
+  pass; see Amendments for why the Decision below did not need it.
 
 ## Decision rule (stated before measuring, per ADR-0016's own methodology)
 
@@ -80,9 +78,13 @@ per this rule, GPUI's spike was not built (see Decision, Hard gate 1).
 
 ## Decision
 
-**Provisional, pending the measured gates: egui (via eframe) is the leading candidate — it is the
-only one of the four that clears every hard gate with no caveat.** Final selection between egui,
-Iced, and Slint waits on the reference-machine numbers. GPUI is eliminated by Hard gate 1, with
+**egui (via eframe).** It is the only one of the four candidates that clears every hard gate with
+no caveat: wgpu 30.0.0 matches ADR-0016's choice exactly, its license is MIT/Apache-2.0, and its
+`egui_wgpu::CallbackTrait` viewport integration is proven in `spikes/pelt-egui`. Iced clears the
+gates too but pins wgpu 27, a real version-compatibility cost against ADR-0016's wgpu-30 pick.
+Slint's GPU integration is the cleanest of the three but its GPL-3.0/dual-commercial license needs
+its own ADR-0018 amendment before it could ship — not a decision to make implicitly here. GPUI is
+eliminated by Hard gate 1, with
 concrete evidence, not a measurement — see below.
 
 ### Hard gate 1 — GPUI: **fails**, confirmed with more precision than ADR-0016's own flag
@@ -179,19 +181,18 @@ exception**
 
 ## Measured results
 
-_Pending a baseline run on the reference machine (RTX 5080, Windows, native — not WSL, same
-caveat as ADR-0016's own hardware-identity rule). `spikes/pelt-egui`, `spikes/pelt-iced`, and
-`spikes/pelt-slint` each build and compile-check clean (`cargo check`/`cargo build`/`cargo test`/
-`cargo clippy --workspace --all-targets --all-features -- -D warnings`/`cargo fmt --check` all
-pass in this sandbox), but none has been run against a real display or driven by
-`bench/pelt/pelt.ahk` — this sandbox has no GPU-backed Vulkan/Dx12 and no Windows. Filled in after
-the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results section._
-
-| Candidate | Grid scroll (2M cells) p95 | Loupe next/prev p95 | Slider drag p95 | Viewport pan p95 |
-|---|---|---|---|---|
-| egui | _pending_ | _pending_ | _pending_ | _pending_ |
-| Iced | _pending_ | _pending_ | _pending_ | _pending_ |
-| Slint | _pending_ | _pending_ | _pending_ | _pending_ |
+**Waived (#90, 2026-09-27).** `spikes/pelt-egui`, `spikes/pelt-iced`, and `spikes/pelt-slint` each
+build and compile-check clean (`cargo check`/`cargo build`/`cargo test`/`cargo clippy --workspace
+--all-targets --all-features -- -D warnings`/`cargo fmt --check` all pass in this sandbox), but
+none was ever run against a real display or driven by `bench/pelt/pelt.ahk` — this sandbox has no
+GPU-backed Vulkan/Dx12 and no Windows. The reference-machine pass this table was pending on was
+waived rather than run: the Decision above already follows from the hard gates alone (Iced's older
+wgpu and Slint's license cost are real regardless of frame times, and egui has no known reason to
+miss a mature immediate-mode toolkit's usual performance envelope on an RTX 5080), so a synthetic-
+spike benchmark could only have mattered by finding a problem with egui specifically — see
+Amendments. Real performance validation against these same targets happens against the actual UI
+crate once it exists, via #43's hero-scenario tooling (tracked in #233), which supersedes this
+table.
 
 ## Options considered
 
@@ -217,16 +218,17 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
 
 ## Consequences
 
-- **If egui wins** (current lead per the hard gates): `nicti-render`'s viewport integration is the
+- **egui is selected**: `nicti-render`'s viewport integration is the
   `egui_wgpu::CallbackTrait` shape already proven in `spikes/pelt-egui/src/viewport.rs` — a
   `prepare`/`paint` split sharing eframe's device, `wgpu` pinned at exactly the version ADR-0016
   already chose, no version-compatibility tax.
-- **If Slint wins**: needs an ADR-0018 amendment (a GPL-3.0/dual-commercial dependency is a real
-  outbound-license decision, feeding directly into #66) before it ships beyond this research spike
-  — not automatic, and not implied by this ADR passing it through the hard gates.
-- **If Iced wins**: `nicti-render` either targets wgpu 27 (revisiting ADR-0016's own wgpu-30-
-  specific `SHADER_F16`/Vulkan findings against that older version) or blocks on an iced upgrade to
-  wgpu 30 — a real, non-trivial dependency to carry forward, not a footnote.
+- **Slint was not selected**: it would have needed an ADR-0018 amendment (a GPL-3.0/dual-commercial
+  dependency is a real outbound-license decision, feeding directly into #66) before it could ship
+  beyond a research spike — not automatic, and not implied by passing it through the hard gates.
+- **Iced was not selected**: it would have meant `nicti-render` either targeting wgpu 27
+  (revisiting ADR-0016's own wgpu-30-specific `SHADER_F16`/Vulkan findings against that older
+  version) or blocking on an iced upgrade to wgpu 30 — a real, non-trivial dependency to carry
+  forward, not a footnote.
 - **GPUI is closed out for Nicti's v1 (Windows) target** on hard evidence, not a hunch — this can
   be revisited only if GPUI ships an official Windows Vulkan/wgpu-interop backend in the future
   (its own crate features show no sign of one as of v0.2.2, 2026-09-23).
@@ -235,10 +237,23 @@ the baseline runs, same as `docs/benchmarks/hero-scenario.md`'s own Results sect
   not, as confirmed directly by having to hand-roll the identical windowing math
   (`spikes/pelt/src/virtualize.rs`, shared and unit-tested once, driving both `pelt-iced` and
   `pelt-slint`'s own manual visible-range logic) for both of them in this pass. This is a real,
-  measured (in code, not in frame-time) ergonomics cost for whichever of those two might still win
-  on the pending hardware numbers.
+  measured (in code, not in frame-time) ergonomics cost that neither Iced nor Slint was picked
+  despite, since egui already wins on the hard gates alone.
 
 ## Amendments
+
+- **2026-09-27 (#90)**: Status moved from Proposed to **Accepted — egui**. The planned
+  reference-machine benchmark pass (`bench/pelt` against the three `pelt-*` spikes) was waived
+  rather than run. Reasoning: the hard gates already fully determine the pick — Iced's wgpu-27 tax
+  and Slint's license cost are static, hardware-independent facts, and egui has no known
+  performance concern serious enough to expect it to miss a mature immediate-mode toolkit's usual
+  frame-time envelope on the RTX 5080 reference machine. A synthetic-spike benchmark could only
+  have been decisive by finding a problem with egui specifically; absent a concrete reason to
+  suspect one, running it wasn't worth the reference-machine time. Real performance validation
+  against this ADR's measured-gate targets (`docs/benchmarks.md`) is deferred to #233, against the
+  actual UI crate once built, using #43's hero-scenario tooling — a stronger signal than a
+  synthetic spike either way, since it measures the real app rather than a throwaway fixture. The
+  `pelt-*` spikes and `bench/pelt/` tooling are tracked for deletion in #232.
 
 - **2026-09-26**: the Prior art section's RapidRAW citation was wrong — it claimed
   `egui`/`eframe`, verified 2026-09-23, but RapidRAW actually uses Tauri + React (see
@@ -286,12 +301,9 @@ once #20/whatever real UI crate this ADR points to lands. (`spikes/sheath` was p
   scene via `slint::Image::try_from` every `BeforeRendering` frame.
 - **No `spikes/pelt-gpui`** — see Hard gate 1's Early-exit note.
 
-**What's left before this ADR's Status can move to Accepted:** a baseline run on the reference
-machine for all three remaining candidates' measured gates, using `bench/pelt/pelt.ahk` +
-`bench/pelt/run-pelt.ps1` (same screen-capture method as `bench/run-hero.ps1`/`bench/whisker`,
-generalized over grid/loupe/slider/pan instead of switch/crop/zoom) — see that directory's own
-files for exact usage. `bench/pelt/pelt-config.ini.example` documents the indicator/ROI
-calibration keys, same shape as `bench/lrc/hero-config.ini.example`.
+**Status: Accepted (#90, 2026-09-27).** `spikes/pelt`, `spikes/pelt-egui`/`pelt-iced`/`pelt-slint`,
+and `bench/pelt/` are now dead weight — tracked for deletion in #232, along with the CI jobs and
+Renovate rule that only existed for them.
 
 [^g1]: `gpui` v0.2.2 `Cargo.toml` — feature list (`macos-blade`/`wayland`/`x11` pull
     `blade-graphics`; no such feature exists for Windows) and
