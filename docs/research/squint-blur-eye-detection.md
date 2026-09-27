@@ -74,17 +74,22 @@ severity threshold doesn't automatically generalize across degradation types on 
 data exists, rather than assuming one number covers both blur types.
 
 **Second real finding**: localized misfocus (blurring only the centered ~22%-of-area subject
-region) is detected 0% of the time by every global candidate, despite a score-ratio drop as severe
-as `defocus_r6`/`r10`'s own. This is structural, not a calibration gap: `max_over_tiles` reports
-the frame's sharpest tile, and most of the frame stays sharp when only the subject region is
-blurred -- exactly the case `af_region_misfocus_ratio` exists to catch (AF-region sharpness
-relative to the frame's own max), not a redundant candidate alongside the global ones.
+region) is not detected by any global candidate at its calibrated threshold (0% detection), despite
+a `mean_score_ratio` drop as severe as `defocus_r6`/`r10`'s own. The ratio genuinely drops; the
+*absolute* degraded score just doesn't cross the shared threshold, because `max_over_tiles` reports
+the frame's sharpest tile and the untouched background keeps supplying a high absolute score
+regardless of subject-region severity -- exactly the case `af_region_misfocus_ratio` exists to
+catch (AF-region sharpness relative to the frame's own max), not a redundant candidate alongside
+the global ones.
 
 ## AF-area reader (`af.rs`)
 
 Nikon `AFInfo2` (tag `0x00B7`) parsed from published third-party documentation of the format (no
-Nikon spec, no code copied from any specific tool) -- version `"0100"`/`"0101"` fixed layout only.
-Unit-tested against a synthetic fixture built to the real Z8's declared dimensions (8256x5504,
+Nikon spec, no code copied from any specific tool) -- only version `"0400"` (Z8/Z9) is supported;
+`"0100"`/`"0101"` return `None` rather than parse against an incomplete field table (an earlier
+draft read a single, wrong, shared offset for those two and rejected `"0400"` outright -- caught by
+adversarial review + a primary-source lookup, see ADR-0034's Decision section). Unit-tested against
+a synthetic fixture built to the real Z8's declared dimensions (8256x5504,
 per `docs/research/sniff-embedded-jpeg.md`), **not yet cross-checked against a real NEF** -- no
 such file exists in this sandbox. `#238` tracks that cross-check (exiftool-independent-parse,
 same method `spikes/litter`'s `nef.rs` used for its own MakerNote fields) alongside the real

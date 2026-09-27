@@ -212,6 +212,22 @@ fn run_labels(work: &Path, labels_path: &Path) -> anyhow::Result<()> {
         by_filename.insert(l.filename.clone(), l);
     }
 
+    // A `labels.json` matched by filename alone can silently misapply: if the NEF directory was
+    // re-populated (different photos, filenames reused/renumbered) since the draft that produced
+    // this labels.json was exported, a same-named-but-different frame would get the old file's
+    // tags with no error. Cross-check the content identifier before trusting a match.
+    for frame in &frames {
+        if let Some(label) = by_filename.get(&frame.filename) {
+            if label.sha256 != frame.sha256 {
+                anyhow::bail!(
+                    "label row for {} doesn't match this draft's frame (sha256 mismatch) -- \
+                     labels.json looks stale, re-run `squint draft` and re-export",
+                    frame.filename
+                );
+            }
+        }
+    }
+
     #[derive(Serialize)]
     struct TagStats {
         tag: String,
@@ -267,4 +283,63 @@ fn run_labels(work: &Path, labels_path: &Path) -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use squint::label::LabelRow;
+
+    fn write_draft_json(work: &Path, frames: &[DraftFrame]) {
+        fs::write(
+            work.join("draft.json"),
+            serde_json::to_string(frames).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn frame(filename: &str, sha256: &str) -> DraftFrame {
+        DraftFrame {
+            index: 0,
+            filename: filename.to_string(),
+            sha256: sha256.to_string(),
+            thumb: "thumbs/0000.jpg".to_string(),
+            candidate_scores: vec![("laplacian_variance".to_string(), 1.0)],
+        }
+    }
+
+    #[test]
+    fn run_labels_rejects_a_sha256_mismatch_for_a_matching_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        write_draft_json(dir.path(), &[frame("DSC_0001.NEF", "aaa")]);
+
+        let labels = vec![LabelRow {
+            filename: "DSC_0001.NEF".to_string(),
+            sha256: "bbb".to_string(), // different content -- a stale labels.json
+            sharp: true,
+            ..Default::default()
+        }];
+        let labels_path = dir.path().join("labels.json");
+        fs::write(&labels_path, serde_json::to_string(&labels).unwrap()).unwrap();
+
+        let err = run_labels(dir.path(), &labels_path).unwrap_err();
+        assert!(err.to_string().contains("sha256 mismatch"));
+    }
+
+    #[test]
+    fn run_labels_accepts_a_matching_sha256() {
+        let dir = tempfile::tempdir().unwrap();
+        write_draft_json(dir.path(), &[frame("DSC_0001.NEF", "aaa")]);
+
+        let labels = vec![LabelRow {
+            filename: "DSC_0001.NEF".to_string(),
+            sha256: "aaa".to_string(),
+            sharp: true,
+            ..Default::default()
+        }];
+        let labels_path = dir.path().join("labels.json");
+        fs::write(&labels_path, serde_json::to_string(&labels).unwrap()).unwrap();
+
+        assert!(run_labels(dir.path(), &labels_path).is_ok());
+    }
 }

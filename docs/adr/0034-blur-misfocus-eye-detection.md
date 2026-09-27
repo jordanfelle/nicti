@@ -156,15 +156,18 @@ the real con-card labelling pass should calibrate per degradation class (or use 
 classifier) rather than reusing a single defocus-derived cutoff.
 
 **A second real finding, from adding `Misfocus` to the sweep**: localized misfocus (blurring only
-the centered ~22%-of-area subject region, background untouched) is detected 0% of the time by
-every *global* candidate here, even though its score ratio drops as sharply as `defocus_r6`/`r10`
-(0.1-0.5% of baseline). This isn't a threshold-calibration gap like the motion-blur finding above —
-it's structural: `max_over_tiles` reports the frame's *sharpest* tile, and a small localized
-misfocus region leaves most of the frame's tiles fully sharp, so the frame-level score never drops
-regardless of how out-of-focus the subject itself is. **This is exactly why `af_region_misfocus_ratio`
-exists as its own candidate** (AF-region sharpness relative to the frame's own max, not the frame's
-max alone) rather than being redundant with the global candidates above — a whole-frame max-tile
-score structurally cannot detect this failure mode at all, at any threshold.
+the centered ~22%-of-area subject region, background untouched) is not detected by any *global*
+candidate here at its calibrated threshold (0% detection), despite its `mean_score_ratio` dropping
+as sharply as `defocus_r6`/`r10`'s own (0.1-0.5% of baseline). The ratio genuinely drops; what
+doesn't happen is the *absolute*, per-image degraded score crossing that candidate's shared
+threshold — because `max_over_tiles` reports the frame's *sharpest* tile, and the untouched
+background tiles keep contributing a high absolute score independent of how out-of-focus the
+subject region gets, so the frame-level max stays well above a threshold calibrated against
+whole-frame defocus severity. **This is structurally why `af_region_misfocus_ratio` exists as its
+own candidate** (AF-region sharpness relative to the frame's own max, not the frame's max alone)
+rather than being redundant with the global candidates above — no threshold tuned for whole-frame
+defocus can reliably catch a misfocus this localized, since the frame's own untouched background
+always supplies a high max regardless of severity.
 
 The 50%/100% split at r6/r10 is a sanity check on the methodology itself, not a finding: the
 threshold *is* the median r6 score by construction, so ~50% of r6-degraded images are always
@@ -199,9 +202,12 @@ in progress, scoped separately since it's a UI feature, not a culling-signal que
 #238's own real-file cross-check, since showing an unverified AF position directly to the user is a
 different risk bar than only feeding it into an internal scoring signal.
 
-**A real, flagged risk, not silently assumed away**: `AFInfo2`'s binary layout is reconstructed from
-published third-party documentation, not verified against a real file — if the actual on-disk
-layout differs from the documented version-`"0100"`/`"0101"` fixed layout (e.g. a firmware/body
-difference), `af::parse_af_info2`'s fields would silently return wrong values with no parse error.
-Worth checking against a real Z8 NEF (and exiftool's own independent parse, the same cross-check
-`spikes/litter`'s `nef.rs` used) before trusting `AfArea` on real input.
+**A real, flagged risk, not silently assumed away**: `AFInfo2`'s supported `"0400"` layout is
+reconstructed from published third-party documentation, not verified against a real file — if the
+actual on-disk layout differs from that documented Z8/Z9 offset table (e.g. a firmware/body
+difference), `af::parse_af_info2_v0400`'s fields would silently return wrong values with no parse
+error, and the still-open center-vs-top-left question (see the Decision section) compounds that
+risk. `"0100"`/`"0101"` return `None` rather than parse against an incomplete field table, so they
+carry no such silent-wrongness risk — just a coverage gap for those bodies. Worth checking against a
+real Z8 NEF (and exiftool's own independent parse, the same cross-check `spikes/litter`'s `nef.rs`
+used) before trusting `AfArea` on real input.
