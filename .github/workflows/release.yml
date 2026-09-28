@@ -159,6 +159,20 @@ jobs:
           rm -f "$key_file"
           sha256sum "$installer" > "$installer.sha256"
 
+      # The build-time placeholder-key check above only catches an *unrotated* placeholder --
+      # it says nothing about whether the real secret (NICTI_UPDATE_MINISIGN_KEY_B64) actually
+      # corresponds to the real public key compiled into this build's nicti-shed. A mismatch
+      # there (the secret rotated without updating PUBLIC_KEY_BASE64, or vice versa) would
+      # otherwise ship a release that every real client silently fails to verify, and nothing
+      # earlier in this workflow would have caught it. Block the actual publish on this, not
+      # just the placeholder check.
+      - name: Verify installer signature matches the compiled public key
+        shell: bash
+        run: |
+          public_key=$(grep -oP '(?<=PUBLIC_KEY_BASE64: &str = ")[^"]+' crates/nicti-shed/src/lib.rs)
+          installer=$(ls packaging/windows/Nicti-Setup-*.exe)
+          rsign verify "$installer" -P "$public_key" -x "$installer.minisig" -q
+
       - name: Upload dry-run artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -66,20 +66,39 @@ FunctionEnd
 ; since `File` fails atomically when the destination is locked) if it never does.
 Function InstallExe
   StrCmp $IsUpdate "1" 0 do_copy
+    ; InitPluginsDir: $PLUGINSDIR is only created on first plugin use or here -- nsExec below is
+    ; a plugin call, but FileOpen isn't, so without this the directory isn't guaranteed to exist
+    ; yet when FileOpen runs.
+    InitPluginsDir
     ; Kill only the nicti.exe running from *this* $INSTDIR, not every process named nicti.exe --
     ; `taskkill /IM` matches by image name alone, which would also force-close an unrelated
     ; portable or development copy the user happens to be running at the same time. Written out
     ; as a small script file (into $PLUGINSDIR, NSIS's own auto-cleaned temp dir) rather than an
     ; inline `-Command` string, since escaping PowerShell's own quoting inside NSIS's quoting
     ; inside nsExec's quoting is exactly the kind of nesting that's easy to get subtly wrong.
+    ; The install path is passed as a script *argument*, never interpolated into the script's own
+    ; text -- embedding it inside a single-quoted PowerShell string literal would break on a path
+    ; containing an apostrophe (e.g. a Windows profile named "O'Neil"), silently defeating the
+    ; whole comparison. Passing it as `-InstallPath` sidesteps that entirely, and also means this
+    ; script's own text is fixed ASCII, so a plain (ANSI) FileWrite can't mangle it either -- a
+    ; Unicode path only ever reaches PowerShell as a real command-line argument, not through this
+    ; file's own encoding.
     FileOpen $3 "$PLUGINSDIR\kill-nicti.ps1" w
-    FileWrite $3 "Get-Process -Name nicti -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\nicti.exe' } | Stop-Process -Force$\r$\n"
+    IfErrors kill_script_failed 0
+    FileWrite $3 "param([string]$$InstallPath)$\r$\n"
+    FileWrite $3 "Get-Process -Name nicti -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq $$InstallPath } | Stop-Process -Force$\r$\n"
     FileClose $3
     ; -Force: same reasoning the old `/F` had -- this is an update overwriting the running
     ; instance's own files, not a "please save your work" prompt; the app has nothing unsaved to
     ; lose here (ADR-0021's catalog DB is the authority, not in-memory state).
-    nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-nicti.ps1"'
+    nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-nicti.ps1" -InstallPath "$INSTDIR\nicti.exe"'
     Pop $0
+  kill_script_failed:
+    ; Couldn't even write the helper script -- falls through to the retry loop below rather than
+    ; aborting here (both this label and the success path above converge on the same
+    ; initialization below): the running instance is still up, so the very next File attempt
+    ; will simply fail and retry/time out the normal way instead of leaving this as a silent
+    ; no-op.
 
   StrCpy $2 0 ; retry counter
   do_copy:

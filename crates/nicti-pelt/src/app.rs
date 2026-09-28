@@ -182,7 +182,7 @@ impl eframe::App for PeltApp {
         }
         if let Some(err) = self.update.last_error() {
             egui::Panel::top("update_error").show(ui, |ui| {
-                ui.colored_label(egui::Color32::RED, format!("Update check failed: {err}"));
+                ui.colored_label(egui::Color32::RED, format!("Update failed: {err}"));
             });
         }
 
