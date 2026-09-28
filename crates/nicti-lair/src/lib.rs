@@ -8,7 +8,9 @@
 //! disappeared, and optionally removes it, the way a cat patrols the same territory it already
 //! knows. #23 (ADR-0023) adds hierarchical keywords/collections and a filter-query engine:
 //! `hunt.rs` (`Filter`/`Sort`/keyset-paginated `hunt`/`facets`) and `clowder.rs`
-//! (manual/smart collections — a clowder is a group of cats).
+//! (manual/smart collections — a clowder is a group of cats). #25 (ADR-0025) adds `ninelives.rs`:
+//! continuous, crash-safe `VACUUM INTO` backup with integrity verification and retention — a cat
+//! has nine lives, and a verified backup is a spare one for the catalog.
 
 use nicti_claw::{Module, Registry};
 
@@ -18,6 +20,7 @@ mod sqlite;
 
 pub mod clowder;
 pub mod hunt;
+pub mod ninelives;
 pub mod patrol;
 pub mod pounce_jobs;
 pub mod scruff;

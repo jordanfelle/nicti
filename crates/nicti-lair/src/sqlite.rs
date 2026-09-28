@@ -3,10 +3,10 @@
 //! `CatalogStore`) requires `Send + Sync` since it's shared as `Arc<dyn CatalogStore>` through the
 //! Claw registry.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OptionalExtension, ToSql};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, ToSql};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
@@ -46,6 +46,32 @@ fn glob_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Runs a self-check pragma (`quick_check` or `integrity_check` -- always one of this module's own
+/// hardcoded literals, never external input, so `format!`ing it into the SQL carries no injection
+/// risk) against any connection and collapses its result rows to `None` (healthy) or `Some(msg)`
+/// (every non-"ok" row joined together). Shared by `SqliteCatalog::quick_check` (the live catalog)
+/// and `ninelives::verify` (a freshly written backup copy) so both read the same pragma the same
+/// way.
+pub(crate) fn first_check_problem(
+    conn: &Connection,
+    pragma: &str,
+) -> Result<Option<String>, CatalogError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA {pragma}"))?;
+    let mut rows = stmt.query([])?;
+    let mut problems = Vec::new();
+    while let Some(row) = rows.next()? {
+        let msg: String = row.get(0)?;
+        if !msg.eq_ignore_ascii_case("ok") {
+            problems.push(msg);
+        }
+    }
+    Ok(if problems.is_empty() {
+        None
+    } else {
+        Some(problems.join("; "))
+    })
 }
 
 fn row_to_keyword(row: &rusqlite::Row) -> rusqlite::Result<Keyword> {
@@ -236,27 +262,95 @@ fn empty_edit_document() -> String {
 
 pub struct SqliteCatalog {
     conn: Mutex<Connection>,
+    /// This catalog's own file path, `None` for an in-memory catalog (tests only). Nine Lives
+    /// (#25, `crate::ninelives`) needs this to open its own read-only snapshot connection rather
+    /// than sharing (and blocking on) the locked writer connection above.
+    path: Option<PathBuf>,
 }
 
 impl SqliteCatalog {
     pub fn open(path: &Path) -> Result<Self, CatalogError> {
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::init(conn, Some(path.to_path_buf()))
     }
 
     pub fn open_in_memory() -> Result<Self, CatalogError> {
         let conn = Connection::open_in_memory()?;
-        Self::init(conn)
+        Self::init(conn, None)
     }
 
-    fn init(mut conn: Connection) -> Result<Self, CatalogError> {
+    fn init(mut conn: Connection, path: Option<PathBuf>) -> Result<Self, CatalogError> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         crate::schema::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            path,
         })
+    }
+
+    /// This catalog's own file path, `None` for an in-memory catalog (tests only).
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Rows changed on this connection since it was opened (`sqlite3_total_changes`) -- a
+    /// per-connection counter that resets to 0 every process start, not a persisted one. Nine
+    /// Lives (#25) uses this alongside its own startup bookkeeping to tell "nothing changed since
+    /// the last backup this session" apart from "a previous session crashed before backing up its
+    /// own changes" (see `ninelives::NineLives::due`'s own doc comment).
+    pub fn change_counter(&self) -> u64 {
+        self.conn.lock().unwrap().total_changes()
+    }
+
+    /// `PRAGMA user_version` of the live catalog -- Nine Lives compares this against a freshly
+    /// written backup's own `user_version` as one of its verification checks (a `VACUUM INTO` copy
+    /// always carries the source's schema version, so a mismatch would mean something read a
+    /// different file than it meant to, not a real migration race).
+    pub fn user_version(&self) -> Result<i64, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+    }
+
+    /// `PRAGMA quick_check` on the live catalog -- the cheap structural check Nine Lives runs
+    /// before every backup attempt (`docs/adr/0025`'s "check the live DB too" step), so a corrupt
+    /// live catalog is reported rather than silently backed up over yesterday's still-good copies.
+    /// `Ok(None)` means healthy; `Ok(Some(msg))` carries the first problem SQLite reported.
+    pub fn quick_check(&self) -> Result<Option<String>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        first_check_problem(&conn, "quick_check")
+    }
+
+    /// Opens a fresh, independent read-only connection onto this catalog's own file for Nine
+    /// Lives to run `VACUUM INTO` against, so a ~2s snapshot at 2M rows (ADR-0067's own measured
+    /// figure) never holds the `conn` mutex every other catalog query goes through. Returns
+    /// `Err(CatalogError::Io(_))` for an in-memory catalog (`path` is `None`) -- there is no file
+    /// to reopen read-only; a caller backing up an in-memory catalog (tests only) uses the locked
+    /// main connection directly instead, see `ninelives::snapshot_into`'s own doc comment.
+    pub fn open_snapshot_reader(&self) -> Result<Connection, CatalogError> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or_else(|| CatalogError::Io("catalog has no backing file to snapshot".into()))?;
+        Ok(Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?)
+    }
+
+    /// Runs `VACUUM INTO ?1` (bound, never interpolated) on the *locked* main connection --
+    /// `ninelives::snapshot_into`'s only path for an in-memory catalog, since there's no file to
+    /// open a second, independent read-only connection onto. Never used for a file-backed catalog
+    /// (that path uses `open_snapshot_reader` instead, precisely to avoid holding this lock for
+    /// the duration of a multi-second vacuum).
+    pub(crate) fn vacuum_into_locked(&self, target: &Path) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| CatalogError::Io("backup target path is not valid UTF-8".into()))?;
+        conn.execute("VACUUM INTO ?1", params![target_str])?;
+        Ok(())
     }
 
     /// Total asset count across every root/volume -- a placeholder library-view figure

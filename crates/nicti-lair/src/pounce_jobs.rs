@@ -2,16 +2,20 @@
 //! [`PatrolSync`] one chunk (one file, or one already-cataloged asset) per
 //! [`nicti_pounce::ChunkedJob::step`] call. Both run on Pounce's CPU lane, `Priority::Background`
 //! -- CPU/disk-bound scan work that never needs the GPU/`ort` worker (#206's own finding: decode
-//! is CPU-only and shouldn't serialize behind GPU dispatch).
+//! is CPU-only and shouldn't serialize behind GPU dispatch). `BackupJob` (#25) is a third client,
+//! splitting `ninelives::run_backup`'s four steps (stale-partial sweep + live quick_check,
+//! snapshot, verify, rotate) across four chunks instead of running them in one call, so the
+//! activity panel shows real per-step progress on a run that can take seconds at 2M rows.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
+use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
 use crate::scruff::{Ingest, IngestReport};
-use crate::CatalogStore;
+use crate::{CatalogStore, SqliteCatalog};
 
 /// A shared slot a caller can poll for the final report once a job reaches `Done`. Stays `None`
 /// if the job was cancelled or failed instead -- check the activity panel's own
@@ -169,6 +173,175 @@ impl ChunkedJob for SyncJob {
             let report = self.sync.take().unwrap().into_report();
             *self.result.lock().unwrap() = Some(report);
             Ok(Step::Done)
+        }
+    }
+}
+
+/// `BackupJob`'s own chunks, one per `ninelives` step -- see that module's `run_backup` doc
+/// comment for why this job re-implements the same sequence chunk-by-chunk instead of calling it.
+enum BackupPhase {
+    QuickCheck,
+    Snapshot,
+    Verify { partial: PathBuf },
+    Rotate { partial: PathBuf },
+}
+
+/// Nine Lives' (#25) own Pounce client: `nicti-pelt`'s app loop submits this whenever
+/// `NineLives::due` says a backup should run. Four chunks (`QuickCheck` -> `Snapshot` -> `Verify`
+/// -> `Rotate`), each a thin wrapper around one `ninelives` free function, so the activity panel
+/// shows real progress across a run that can take a couple of seconds at 2M rows rather than one
+/// opaque `Step::Done`.
+///
+/// Cancellation between chunks (`nicti_pounce::ChunkedJob`'s only cancellation granularity, see
+/// its own doc comment) can leave a `.partial` file on disk if it happens after `Snapshot` but
+/// before `Rotate` -- there's no on-cancel callback to delete it synchronously, so it's swept up
+/// by the *next* run's own `QuickCheck` chunk instead (`ninelives::cleanup_stale_partials`).
+pub struct BackupJob {
+    catalog: Arc<SqliteCatalog>,
+    policy: BackupPolicy,
+    now_unix: i64,
+    stale_partials_removed: u64,
+    phase: Option<BackupPhase>,
+    progress: Progress,
+    result: ReportSlot<BackupReport>,
+}
+
+impl BackupJob {
+    /// `now_unix` is read once at construction (not re-read per chunk) so every timestamp this run
+    /// produces (the snapshot's own filename, in particular) reflects when the run was submitted,
+    /// not whenever its `Snapshot` chunk happened to actually execute.
+    pub fn new(
+        catalog: Arc<SqliteCatalog>,
+        policy: BackupPolicy,
+        now_unix: i64,
+    ) -> (Self, ReportSlot<BackupReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = BackupJob {
+            catalog,
+            policy,
+            now_unix,
+            stale_partials_removed: 0,
+            phase: Some(BackupPhase::QuickCheck),
+            progress: Progress {
+                done: 0,
+                total: Some(4),
+            },
+            result: result.clone(),
+        };
+        (job, result)
+    }
+
+    fn finish(&mut self, outcome: BackupOutcome, pruned: u64) -> Step {
+        *self.result.lock().unwrap() = Some(BackupReport {
+            outcome,
+            stale_partials_removed: self.stale_partials_removed,
+            pruned,
+        });
+        Step::Done
+    }
+}
+
+impl ChunkedJob for BackupJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Backup,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        "Catalog backup".to_string()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    /// Never returns `Err` -- any `CatalogError` from a `ninelives` step is caught and routed
+    /// through `finish(BackupOutcome::Failed(_))` instead, so this job always reaches `Done` and
+    /// its `ReportSlot` always resolves. An adversarial review caught that returning `Err` here
+    /// (this crate's other `ChunkedJob`s, `IngestJob`/`SyncJob`, do exactly that on their own
+    /// errors) would leave `nicti-pelt`'s `poll_backup` waiting on a `ReportSlot` that never
+    /// fills in, since `nicti_pounce::Pounce` marks a job `JobState::Failed` and drops it on an
+    /// `Err` return without ever calling back into the job itself -- silently and permanently
+    /// hiding every future scheduled backup's failure, not just this one's, since `NineLives`
+    /// only advances its own "last backup" bookkeeping from a *resolved* report (see
+    /// `NineLives::due`'s doc comment and `app.rs::poll_backup`).
+    fn step(&mut self) -> Result<Step, JobError> {
+        let phase = self
+            .phase
+            .take()
+            .expect("BackupJob::step called again after it already reported Done");
+        match phase {
+            BackupPhase::QuickCheck => {
+                let stale_partials_removed = match ninelives::cleanup_stale_partials(&self.policy) {
+                    Ok(n) => n,
+                    Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                };
+                self.stale_partials_removed = stale_partials_removed;
+                match self.catalog.quick_check() {
+                    Ok(Some(problem)) => {
+                        return Ok(self.finish(BackupOutcome::LiveCorrupt(problem), 0));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                }
+                self.progress = Progress {
+                    done: 1,
+                    total: Some(4),
+                };
+                self.phase = Some(BackupPhase::Snapshot);
+                Ok(Step::Yield)
+            }
+
+            BackupPhase::Snapshot => {
+                let partial =
+                    match ninelives::snapshot_into(&self.catalog, &self.policy, self.now_unix) {
+                        Ok(partial) => partial,
+                        Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                    };
+                self.progress = Progress {
+                    done: 2,
+                    total: Some(4),
+                };
+                self.phase = Some(BackupPhase::Verify { partial });
+                Ok(Step::Yield)
+            }
+
+            BackupPhase::Verify { partial } => {
+                match ninelives::verify(&self.catalog, &partial) {
+                    Ok(None) => {}
+                    Ok(Some(problem)) => {
+                        let _ = std::fs::remove_file(&partial);
+                        return Ok(self.finish(BackupOutcome::VerifyFailed(problem), 0));
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&partial);
+                        return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0));
+                    }
+                }
+                self.progress = Progress {
+                    done: 3,
+                    total: Some(4),
+                };
+                self.phase = Some(BackupPhase::Rotate { partial });
+                Ok(Step::Yield)
+            }
+
+            BackupPhase::Rotate { partial } => {
+                let (final_path, pruned) = match ninelives::rotate(&self.policy, &partial) {
+                    Ok(result) => result,
+                    Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                };
+                self.progress = Progress {
+                    done: 4,
+                    total: Some(4),
+                };
+                Ok(self.finish(BackupOutcome::Verified(final_path), pruned))
+            }
         }
     }
 }

@@ -3,17 +3,19 @@
 //! culling UX is #32, the filter bar is #242) and the wgpu device Tapetum's `GpuContext` shares
 //! with eframe (ADR-0016). Also owns Pounce (#55): the job runtime plus the activity panel
 //! (`crate::activity`) that reads it, and the Library view's Import/Sync buttons that submit real
-//! jobs to it.
+//! jobs to it. Also polls Nine Lives (#25) on a slow timer and submits a `BackupJob` when it says
+//! one is due -- see this file's own `poll_backup` doc comment.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
-use nicti_lair::pounce_jobs::{IngestJob, SyncJob};
+use nicti_lair::pounce_jobs::{BackupJob, IngestJob, ReportSlot, SyncJob};
 use nicti_lair::{CatalogError, CatalogStore, SqliteCatalog};
 use nicti_pounce::telemetry::{default_vram_source, TelemetrySampler};
-use nicti_pounce::Pounce;
+use nicti_pounce::{JobKind, JobState, Pounce};
 use nicti_tapetum::gpu::GpuContext;
 
 use crate::render::DevelopView;
@@ -64,7 +66,26 @@ pub struct PeltApp {
     telemetry: TelemetrySampler,
     import_path_input: String,
     update: UpdateChecker,
+    /// Nine Lives' (#25) own scheduler, `None` when the catalog itself failed to open (nothing to
+    /// back up). See `poll_backup`'s own doc comment for how this gets checked and acted on.
+    nine_lives: Option<NineLives>,
+    last_backup_poll: Option<Instant>,
+    /// The most recently submitted `BackupJob`'s result slot, polled once per `poll_backup` tick
+    /// until it reports -- then folded into `last_backup_summary` and dropped.
+    pending_backup_result: Option<ReportSlot<BackupReport>>,
+    /// The catalog's own change counter at the moment the pending job was submitted -- fed into
+    /// `NineLives::record_ran` only once that job's report actually resolves as `Verified` (never
+    /// on submission itself, and never on a failed/skipped outcome). See `poll_backup`'s own doc
+    /// comment for why: an adversarial review caught that recording it eagerly at submit time,
+    /// regardless of outcome, would leave a failure permanently silent and could suppress every
+    /// later scheduled attempt until the catalog happened to change again.
+    pending_backup_changes: Option<u64>,
+    last_backup_summary: Option<String>,
 }
+
+/// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
+/// directory listing), but there's no reason to run it every single frame.
+const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 impl PeltApp {
     pub fn new(cc: &eframe::CreationContext<'_>, version: String) -> Self {
@@ -88,9 +109,15 @@ impl PeltApp {
             .insert(resources);
 
         let catalog_path = catalog::resolve_path();
-        let catalog = match catalog::open(&catalog_path) {
-            Ok(store) => CatalogOpenState::Open(Arc::new(store)),
-            Err(e) => CatalogOpenState::Error(e.to_string()),
+        let (catalog, nine_lives) = match catalog::open(&catalog_path) {
+            Ok(store) => {
+                let policy = BackupPolicy::for_catalog(&catalog_path);
+                (
+                    CatalogOpenState::Open(Arc::new(store)),
+                    Some(NineLives::new(policy)),
+                )
+            }
+            Err(e) => (CatalogOpenState::Error(e.to_string()), None),
         };
 
         let egui_ctx = cc.egui_ctx.clone();
@@ -122,12 +149,120 @@ impl PeltApp {
             telemetry,
             import_path_input: String::new(),
             update,
+            nine_lives,
+            last_backup_poll: None,
+            pending_backup_result: None,
+            pending_backup_changes: None,
+            last_backup_summary: None,
+        }
+    }
+
+    /// Checks Nine Lives' (#25) own `due()` at most once per `BACKUP_POLL_INTERVAL` and submits a
+    /// `BackupJob` when it says yes -- nothing runs on exit, by this ticket's own design (see
+    /// `ninelives`'s module doc comment), so a slow poll while the app is open is the only place
+    /// this ever fires. Also folds a previously-submitted job's result into
+    /// `last_backup_summary` once it's ready, and skips submitting a new one while one is still
+    /// running or queued (checked via `Pounce::snapshot`, not local state, since that's the same
+    /// source of truth the activity panel itself reads).
+    ///
+    /// `NineLives::record_ran` is called only once a pending job's report resolves as
+    /// `BackupOutcome::Verified`, never at submission time and never on any other outcome. An
+    /// adversarial review caught that the original version called it eagerly, right after
+    /// `submit`, regardless of what the job later did -- combined with `BackupJob::step` itself
+    /// (before its own fix) never resolving its `ReportSlot` at all on a genuine error, a single
+    /// transient I/O failure would silently and permanently suppress every later scheduled backup
+    /// until the catalog happened to change again. `BackupJob` now always resolves its slot (see
+    /// its own doc comment), and this method now only ever advances the "last backup" baseline on
+    /// an actual success -- a failure leaves the baseline where it was, so `NineLives::due` keeps
+    /// retrying on the very next poll rather than waiting for unrelated further edits.
+    fn poll_backup(&mut self) {
+        if let Some(result) = self.pending_backup_result.clone() {
+            if let Some(report) = result.lock().unwrap().take() {
+                if matches!(report.outcome, BackupOutcome::Verified(_)) {
+                    if let (Some(nine_lives), Some(changes)) =
+                        (self.nine_lives.as_mut(), self.pending_backup_changes)
+                    {
+                        nine_lives.record_ran(changes);
+                    }
+                }
+                self.last_backup_summary = Some(summarize_backup(&report));
+                self.pending_backup_result = None;
+                self.pending_backup_changes = None;
+            }
+        }
+
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return;
+        };
+        let Some(nine_lives) = self.nine_lives.as_mut() else {
+            return;
+        };
+
+        let now = Instant::now();
+        if self
+            .last_backup_poll
+            .is_some_and(|last| now.duration_since(last) < BACKUP_POLL_INTERVAL)
+        {
+            return;
+        }
+        self.last_backup_poll = Some(now);
+
+        let already_running = self.pounce.snapshot().into_iter().any(|s| {
+            s.kind == JobKind::Backup && matches!(s.state, JobState::Queued | JobState::Running)
+        });
+        if already_running {
+            return;
+        }
+
+        let now_unix = now_unix();
+        let changes = store.change_counter();
+        let due = match nine_lives.due(now_unix, changes) {
+            Ok(due) => due,
+            Err(e) => {
+                self.last_backup_summary = Some(format!("backup scheduling check failed: {e}"));
+                return;
+            }
+        };
+        if !due {
+            return;
+        }
+
+        let (job, result) = BackupJob::new(store.clone(), nine_lives.policy().clone(), now_unix);
+        self.pounce.submit(Box::new(job));
+        self.pending_backup_result = Some(result);
+        self.pending_backup_changes = Some(changes);
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// One line for the Library view -- `poll_backup`'s own result handling calls this once a
+/// submitted `BackupJob`'s report is ready.
+fn summarize_backup(report: &BackupReport) -> String {
+    match &report.outcome {
+        BackupOutcome::Verified(path) => {
+            format!("Last backup: {}", path.display())
+        }
+        BackupOutcome::LiveCorrupt(msg) => {
+            format!("Backup skipped -- catalog failed its own integrity check: {msg}")
+        }
+        BackupOutcome::VerifyFailed(msg) => {
+            format!("Backup failed verification and was discarded: {msg}")
+        }
+        BackupOutcome::Failed(msg) => {
+            format!("Backup failed: {msg}")
         }
     }
 }
 
 impl eframe::App for PeltApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_backup();
         self.update.poll();
         if self.update.is_checking() || self.update.is_applying() {
             // Nothing else drives a repaint while a background check or apply is in flight
@@ -278,6 +413,9 @@ impl PeltApp {
                     ),
                 );
             }
+        }
+        if let Some(summary) = &self.last_backup_summary {
+            ui.label(summary);
         }
         ui.label("Grid virtualization at scale lands in #30. Filter bar lands in #242.");
     }

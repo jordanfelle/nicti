@@ -48,12 +48,21 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   manual + smart) landed alongside it; `hunt.rs`'s `Filter`/`Sort`/keyset-paginated `hunt` is the
   query both the filter bar (#242) and a smart collection's saved rule resolve through. Filename
   search is a plain `GLOB` scan for now — FTS5 is a documented, not-yet-done follow-up.
+- **Continuous backup (#25, landed)**: `docs/adr/0025`, "Nine Lives". `VACUUM INTO` from a second,
+  independent read-only connection (`SqliteCatalog::open_snapshot_reader`) — proven, not just
+  assumed, never to block a concurrent writer (`tests/ninelives.rs`'s own concurrent-writer test).
+  Write `.partial` -> `PRAGMA integrity_check` + `user_version` match -> rename -> prune to newest
+  9. `PRAGMA quick_check` on the live catalog gates every run before it touches any existing backup.
+  Scheduled by `NineLives::due`, polled ~every 30s by `nicti-pelt`'s app loop — nothing runs at
+  startup or on exit, by design. Runs as a 4-chunk Pounce job (`pounce_jobs::BackupJob`, new
+  `JobKind::Backup`).
 
 ## Package contents
 
-- **`crates/nicti-lair`** (#22, landed; #23 landed) — the real production catalog implementation:
-  `schema.rs`/`sqlite.rs`/`scruff.rs`/`patrol.rs`/`hunt.rs`/`clowder.rs`. Promotes the SQLite
-  choice this topic's ADR series settled on. `spikes/den` (the throwaway comparison spike backing
-  ADR-0067/0102/0106/0103/0107/0113/0115/0116 — one module per candidate engine plus a shared
-  `Workload` trait and synthetic catalog generator) was deleted in #123 once #22 landed; the
-  per-candidate findings above are the durable record, not the spike code itself.
+- **`crates/nicti-lair`** (#22, landed; #23 landed; #25 landed) — the real production catalog
+  implementation: `schema.rs`/`sqlite.rs`/`scruff.rs`/`patrol.rs`/`hunt.rs`/`clowder.rs`/
+  `ninelives.rs`. Promotes the SQLite choice this topic's ADR series settled on. `spikes/den` (the
+  throwaway comparison spike backing ADR-0067/0102/0106/0103/0107/0113/0115/0116 — one module per
+  candidate engine plus a shared `Workload` trait and synthetic catalog generator) was deleted in
+  #123 once #22 landed; the per-candidate findings above are the durable record, not the spike
+  code itself.
