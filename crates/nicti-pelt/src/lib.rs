@@ -11,7 +11,13 @@
 mod activity;
 mod app;
 mod catalog;
+// #31 phase 2: DecodeJob/LoupeSession land here, real and tested, but wiring them into the
+// egui Loupe view (app.rs's View::Loupe placeholder) is phase 3's job -- nothing calls them yet.
+#[allow(dead_code)]
+mod decode_job;
 mod develop_panel;
+#[allow(dead_code)]
+mod loupe;
 mod render;
 mod update;
 mod viewport;
