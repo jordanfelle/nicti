@@ -114,6 +114,27 @@ shared connection mutex every other catalog query does for the duration of `PRAG
 consistent with every other read on this crate's `CatalogStore` trait (not a new architectural
 concern this ticket introduces), but not separately measured at 2M-row scale either.
 
+**CodeRabbit's own review** (run automatically once the PR's CI turned green) found no actionable
+code-content bugs, but its security-architecture pass raised two real, if "inferred" (its own
+term — no externally-reachable attacker path established, this being a single-user local desktop
+app), design points, both addressed:
+
+- `rotate`/`verify`/`snapshot_into`/`cleanup_stale_partials` were `pub`, not `pub(crate)` — nothing
+  in `rotate`'s own signature enforced that its caller had already run `verify` on the same file
+  first, so a hypothetical external caller of this crate as a library could call it directly on an
+  unverified file and publish it as a "verified" backup. Fixed: all four are now `pub(crate)`
+  (confirmed nothing outside this crate ever called them directly — only `run_backup` and
+  `pounce_jobs::BackupJob`, both already this crate's own internals, did), closing the gap
+  structurally rather than by convention alone.
+- `cleanup_stale_partials` doesn't distinguish an abandoned `.partial` from another run's own
+  `.partial` still being written — two genuinely overlapping backup runs sharing `policy.dir`
+  could have one delete the other's in-progress file. Accepted as a known limitation, documented
+  inline rather than fixed: `nicti-pelt`'s `poll_backup` never submits a second `BackupJob` while
+  one is already running (checked against `Pounce::snapshot()`), so this crate has exactly one
+  production caller and it never overlaps itself — a real fix (run/process-identity-tagged
+  filenames, a lock file) would be speculative machinery for a scenario nothing in this crate's own
+  callers can currently create.
+
 **A separate, real Windows-only CI failure, and three attempts to fix it before finding the actual
 cause.** `cargo test (windows)` failed two unit tests with `Io("Access is denied. (os error 5)")`
 after the review fixes above landed. The first three fix attempts all assumed the same wrong root

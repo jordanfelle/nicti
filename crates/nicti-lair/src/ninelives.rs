@@ -83,7 +83,7 @@ pub struct BackupEntry {
 
 /// Every verified backup (`<stem>.<epoch>.sqlite`, no `.partial` suffix) under `policy.dir`,
 /// oldest first. A missing `dir` (nothing has ever backed up here) is `Ok(vec![])`, not an error.
-pub fn list_verified(policy: &BackupPolicy) -> Result<Vec<BackupEntry>, CatalogError> {
+pub(crate) fn list_verified(policy: &BackupPolicy) -> Result<Vec<BackupEntry>, CatalogError> {
     let entries = match fs::read_dir(&policy.dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -120,7 +120,17 @@ pub fn list_verified(policy: &BackupPolicy) -> Result<Vec<BackupEntry>, CatalogE
 /// of every [`run_backup`]/`BackupJob` so an abandoned copy never lingers past the *next* attempt,
 /// even though it can't be cleaned up the instant a cancellation happens. Returns how many were
 /// removed; a missing `dir` is `Ok(0)`.
-pub fn cleanup_stale_partials(policy: &BackupPolicy) -> Result<u64, CatalogError> {
+///
+/// Doesn't distinguish "abandoned by a crash/cancellation" from "another run's own `.partial`
+/// currently being written" -- a CodeRabbit review flagged that two processes/backup runs
+/// genuinely overlapping on the same `policy.dir` could have one delete the other's in-progress
+/// file out from under it. Accepted as a known limitation, not fixed: `nicti-pelt`'s app loop
+/// never submits a second `BackupJob` while one is already `Queued`/`Running` (`poll_backup`'s own
+/// `already_running` check against `Pounce::snapshot()`), so this crate has exactly one production
+/// caller and it never overlaps itself. A real fix (embedding a run/process identity in the
+/// `.partial` filename, or a lock file) is speculative machinery for a scenario this crate's own
+/// callers don't create.
+pub(crate) fn cleanup_stale_partials(policy: &BackupPolicy) -> Result<u64, CatalogError> {
     let entries = match fs::read_dir(&policy.dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -251,7 +261,7 @@ fn retry_rusqlite_open_on_transient_access_denied(
 /// `catalog.path()` is `None`) has no file to reopen, so it falls back to
 /// `SqliteCatalog::vacuum_into_locked`, which does briefly hold that lock -- acceptable there since
 /// nothing else is contending for an in-memory test catalog's connection.
-pub fn snapshot_into(
+pub(crate) fn snapshot_into(
     catalog: &SqliteCatalog,
     policy: &BackupPolicy,
     now_unix: i64,
@@ -296,7 +306,10 @@ pub fn snapshot_into(
 /// catalog (a `VACUUM INTO` copy always carries the source's schema version; a mismatch means this
 /// read a different/stale file, not a real migration race). `Ok(None)` means the copy is good;
 /// `Ok(Some(msg))` names the first problem found.
-pub fn verify(catalog: &SqliteCatalog, partial: &Path) -> Result<Option<String>, CatalogError> {
+pub(crate) fn verify(
+    catalog: &SqliteCatalog,
+    partial: &Path,
+) -> Result<Option<String>, CatalogError> {
     // Retried: the same Windows antivirus-scan race `retry_on_transient_access_denied` documents,
     // hitting this open instead of the fsync in `snapshot_into` -- opens the same just-written
     // file, just moments later.
@@ -321,7 +334,18 @@ pub fn verify(catalog: &SqliteCatalog, partial: &Path) -> Result<Option<String>,
 /// oldest verified backups down to `policy.keep`. Pruning only ever removes backups *older* than
 /// the one just rotated in, and only after it's already verified and renamed -- a run that fails
 /// verification never reaches this function, so a bad copy can never push out a good one.
-pub fn rotate(policy: &BackupPolicy, partial: &Path) -> Result<(PathBuf, u64), CatalogError> {
+///
+/// `pub(crate)`, not `pub` -- this function trusts its own caller to have already run [`verify`]
+/// on `partial` first; nothing here re-checks that. `run_backup` and `pounce_jobs::BackupJob` are
+/// this crate's only two callers, and both always verify immediately before rotating. Keeping this
+/// (and [`verify`]/[`snapshot_into`]/[`cleanup_stale_partials`]) out of the crate's public API
+/// closes the gap a CodeRabbit review flagged: an external caller of this crate as a library could
+/// otherwise call this function directly on an unverified file and publish it as a "verified"
+/// backup, since nothing in its own signature enforces the invariant.
+pub(crate) fn rotate(
+    policy: &BackupPolicy,
+    partial: &Path,
+) -> Result<(PathBuf, u64), CatalogError> {
     let final_name = partial
         .file_name()
         .and_then(|n| n.to_str())
