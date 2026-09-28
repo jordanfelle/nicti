@@ -50,9 +50,10 @@ and Ultralytics YOLO as a culling/detection candidate (#108).
   against a documented self-export recipe, untested against a real model this pass. **Proposed,
   measurement pending** — same "no real unculled/labelled shoot exists yet" constraint as #33,
   plus no DINOv3/OpenCLIP model file obtained in this pass.
-- **YOLO as a culling/detection candidate (#108)**: `docs/adr/0108-yolo-culling-detection-
-  candidate.md` — Ultralytics YOLO was excluded on license grounds until ADR-0066 made Nicti's own
-  outbound license AGPL-3.0-or-later. Re-verified the license against the primary source
+- **YOLO as a culling/detection candidate (#108)**:
+  `docs/adr/0108-yolo-culling-detection-candidate.md` — Ultralytics YOLO was excluded on license
+  grounds until ADR-0066 made Nicti's own outbound license AGPL-3.0-or-later. Re-verified the
+  license against the primary source
   (`ultralytics/ultralytics`'s `LICENSE` file, fetched fresh rather than re-trusting the existing
   `docs/licensing.md` row): genuinely AGPL-3.0, no drift; current model family is YOLO26
   (n/s/m/l/x), ONNX-exportable, fitting the existing `ort`-based inference pattern litter/rosette
