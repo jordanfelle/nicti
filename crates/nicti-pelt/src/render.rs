@@ -398,11 +398,15 @@ impl DevelopView {
 
     /// Auto-level (#47): renders the image with crop/straighten reset to identity (so detection
     /// isn't biased by any rotation already applied), runs Canny+Hough on that render, and -- if a
-    /// confident near-horizontal/near-vertical line was found -- adds the detected correction to
-    /// the crop's current `rotation_degrees` (clamped), exactly like
-    /// [`Self::straighten_from_drag`] does for the manual gesture. A no-op (leaves
-    /// `rotation_degrees` untouched) if no confident line was detected -- see
-    /// `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment for when that happens.
+    /// confident near-horizontal/near-vertical line was found -- **sets** the crop's
+    /// `rotation_degrees` (clamped) to the detected correction. Unlike
+    /// [`Self::straighten_from_drag`] (which is inherently relative -- a drag only ever describes
+    /// a delta from wherever the crop already is), the detected angle here is measured against the
+    /// identity-rotation render, so it's already the absolute angle that levels the image; adding
+    /// it to whatever `rotation_degrees` already held would double-apply any rotation the user had
+    /// already dialed in. A no-op (leaves `rotation_degrees` untouched) if no confident line was
+    /// detected -- see `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment for when
+    /// that happens.
     pub fn apply_auto_straighten(&mut self) {
         let had_crop = self.document.stages.remove(CROP);
         let was_before = self.show_before;
@@ -430,7 +434,7 @@ impl DevelopView {
             return;
         };
         let mut crop: CropParams = self.stage_params(CROP);
-        crop.set_rotation(crop.rotation_degrees + delta);
+        crop.set_rotation(delta);
         self.set_stage_params(CROP, &crop);
     }
 }

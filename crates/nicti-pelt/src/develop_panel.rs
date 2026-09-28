@@ -357,7 +357,7 @@ pub fn handle_viewport_gesture(
                 develop.set_stage_params(CROP, &new_crop);
             }
             DragTarget::Corner(idx) => {
-                let mut new_rect = state.start_crop.effective_rect(source);
+                let start_rect = state.start_crop.effective_rect(source);
                 // Inverse-rotate the image-space delta into the rect's own unrotated local frame
                 // -- a corner drag should feel like resizing the rect along its own edges, not
                 // the screen's, once it's been straightened.
@@ -365,42 +365,52 @@ pub fn handle_viewport_gesture(
                 let (sin_t, cos_t) = theta.sin_cos();
                 let local_dx = cos_t * delta.0 - sin_t * delta.1;
                 let local_dy = sin_t * delta.0 + cos_t * delta.1;
-                match idx {
-                    0 => {
-                        new_rect.x += local_dx;
-                        new_rect.y += local_dy;
-                        new_rect.width -= local_dx;
-                        new_rect.height -= local_dy;
-                    }
-                    1 => {
-                        new_rect.y += local_dy;
-                        new_rect.width += local_dx;
-                        new_rect.height -= local_dy;
-                    }
-                    2 => {
-                        new_rect.width += local_dx;
-                        new_rect.height += local_dy;
-                    }
-                    _ => {
-                        new_rect.x += local_dx;
-                        new_rect.width -= local_dx;
-                        new_rect.height += local_dy;
-                    }
-                }
-                new_rect.x = new_rect.x.clamp(0.0, source.0);
-                new_rect.y = new_rect.y.clamp(0.0, source.1);
-                // `.max(1.0)` guards against `clamp`'s own `min > max` panic: once `new_rect.x`
-                // (or `.y`) lands within 1px of `source.0`/`.1` -- an entirely ordinary drag, not
-                // just an exact-boundary case -- `source.0 - new_rect.x` drops below the lower
-                // bound `1.0`, which `f32::clamp` panics on rather than saturating. Matches the
-                // `DragTarget::Pan` branch below, which already guards the same computation.
-                new_rect.width = new_rect.width.clamp(1.0, (source.0 - new_rect.x).max(1.0));
-                new_rect.height = new_rect.height.clamp(1.0, (source.1 - new_rect.y).max(1.0));
+
+                // Each corner drag moves exactly one edge per axis and keeps the *opposite* edge
+                // fixed (idx 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left). Clamp both
+                // the moving edge AND the fixed edge to the source bounds first (an adversarial
+                // review of an earlier version of this fix caught that leaving the fixed edge
+                // unclamped regresses the old code's unconditional containment guarantee -- a
+                // stale/corrupt persisted `CropParams` with an out-of-bounds start_rect, e.g. from
+                // an imported edit predating a source-resolution change, could no longer self-heal
+                // via a corner drag), then derive that axis's size from the distance between them
+                // (floored at 1.0). Deriving size this way, instead of clamping position and size
+                // independently as the original pre-review version did, keeps the fixed edge from
+                // drifting once an ordinary (in-bounds) drag crosses a source boundary, while still
+                // guaranteeing the final rect stays within `[0, source]` even from corrupt input.
+                let moves_left = matches!(idx, 0 | 3);
+                let (x, width) = if moves_left {
+                    let fixed_right = (start_rect.x + start_rect.width).clamp(0.0, source.0);
+                    let moving_x = (start_rect.x + local_dx).clamp(0.0, source.0);
+                    let width = (fixed_right - moving_x).max(1.0);
+                    ((fixed_right - width).clamp(0.0, source.0), width)
+                } else {
+                    let fixed_left = start_rect.x.clamp(0.0, source.0);
+                    let moving_right =
+                        (start_rect.x + start_rect.width + local_dx).clamp(0.0, source.0);
+                    let width = (moving_right - fixed_left).max(1.0);
+                    (fixed_left, width)
+                };
+
+                let moves_top = matches!(idx, 0 | 1);
+                let (y, height) = if moves_top {
+                    let fixed_bottom = (start_rect.y + start_rect.height).clamp(0.0, source.1);
+                    let moving_y = (start_rect.y + local_dy).clamp(0.0, source.1);
+                    let height = (fixed_bottom - moving_y).max(1.0);
+                    ((fixed_bottom - height).clamp(0.0, source.1), height)
+                } else {
+                    let fixed_top = start_rect.y.clamp(0.0, source.1);
+                    let moving_bottom =
+                        (start_rect.y + start_rect.height + local_dy).clamp(0.0, source.1);
+                    let height = (moving_bottom - fixed_top).max(1.0);
+                    (fixed_top, height)
+                };
+
                 let mut new_crop = state.start_crop;
-                new_crop.x = new_rect.x;
-                new_crop.y = new_rect.y;
-                new_crop.width = new_rect.width;
-                new_crop.height = new_rect.height;
+                new_crop.x = x;
+                new_crop.y = y;
+                new_crop.width = width;
+                new_crop.height = height;
                 develop.set_stage_params(CROP, &new_crop);
             }
             DragTarget::Pan => {
