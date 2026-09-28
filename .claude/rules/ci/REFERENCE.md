@@ -53,3 +53,15 @@ run alone is treated as noise, e.g. a cold cache right after a `Cargo.lock` bump
 legitimately makes a job slower raises that job's budget in `ci-budgets.json` in the same PR,
 rather than leaving the watcher to keep re-filing against a budget everyone's already accepted
 missing.
+
+**`nicti-pelt`/`nicti` unconditionally build LibRaw's C++ now (#31 phase 1)** — `nicti-pelt`
+depends on `nicti-cornea` with the `libraw` feature always on (the shipped app must actually
+decode real NEFs), unlike `nicti-cornea`/`retina`/`knead` themselves, which stay path-gated
+research/optional targets. Every job whose graph includes `nicti-pelt`/`nicti` needs
+`submodules: true` as a result: `clippy`/`test` (linux+windows), `build-windows`,
+`release.yml`'s Windows build, and CodeQL's `rust` job (its own LoadManifest phase runs
+`build.rs` while resolving the crate graph, same mechanism as this file's own `#127` note above
+for a from-scratch spike compile). `decode-linux`/`decode-windows` still exist for their own
+direct-target coverage of `nicti-cornea`/`retina`/`knead` (excluded as direct targets elsewhere),
+but no longer avoid the LibRaw C++ compile itself — a decode-path-touching PR now pays that cost
+twice per platform (once transitively via `nicti-pelt` in the always-on jobs, once directly here).

@@ -59,17 +59,24 @@ jobs:
           filters: |
             decode:
               # #37/#41: crates/nicti-cornea bundles LibRaw's full C++ source (via a git
-              # submodule, promoted out of spikes/retina in #41) and compiles it from scratch on
-              # every touching PR -- moved out of the always-on jobs so an unrelated PR doesn't
-              # pay for a C++ recompile. spikes/retina is included too: its own research tooling
-              # (compare/sweep/scan/watch/dump-classic/dump-cfa for #40) depends on nicti-cornea
-              # and needs the same path-gated job. .gitmodules is included since a submodule
-              # URL/branch/path change there affects this job's
-              # checkout step without necessarily touching any file under crates/nicti-cornea/**
-              # itself (CodeRabbit, PR #203). bench/knead (#45 PR4) depends on nicti-cornea with
-              # the libraw feature always on (its whole point is a real decode), so it pays the
-              # same C++ compile cost on every build -- same path-gated job, not the always-on
-              # jobs, for the same reason.
+              # submodule, promoted out of spikes/retina in #41). This job still exists to run
+              # clippy/test directly *on* nicti-cornea/retina/knead (the always-on jobs
+              # `--exclude` all three as direct targets) -- but as of #31, it no longer avoids the
+              # C++ recompile itself: nicti-pelt now unconditionally requests nicti-cornea's
+              # `libraw` feature, so clippy/test (linux+windows) and build-windows already compile
+              # LibRaw transitively via nicti-pelt on *every* PR, decode-path-touching or not. A PR
+              # that does touch these paths now pays the compile cost twice per platform (once
+              # transitively in the always-on jobs, once directly here) -- accepted for now since
+              # this job's own direct-target coverage (retina's comparison tooling, knead's golden
+              # harness) still isn't exercised by the always-on jobs at all, but worth revisiting
+              # if the double compile becomes a real time sink. spikes/retina is included too: its
+              # own research tooling (compare/sweep/scan/watch/dump-classic/dump-cfa for #40)
+              # depends on nicti-cornea and needs the same path-gated job. .gitmodules is included
+              # since a submodule URL/branch/path change there affects this job's checkout step
+              # without necessarily touching any file under crates/nicti-cornea/** itself
+              # (CodeRabbit, PR #203). bench/knead (#45 PR4) depends on nicti-cornea with the
+              # libraw feature always on (its whole point is a real decode), so it's covered by
+              # this same path-gated job too.
               - 'crates/nicti-cornea/**'
               - 'spikes/retina/**'
               - 'bench/knead/**'
@@ -106,6 +113,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # #31: nicti-pelt now unconditionally depends on nicti-cornea's `libraw` feature (it's
+          # the real production app, not opt-in research tooling like retina/knead) -- the
+          # `--exclude nicti-cornea` below only drops nicti-cornea as a *direct* clippy/test
+          # target, it doesn't stop nicti-pelt (still included) from pulling in and compiling its
+          # C++ dependency. Without this, build.rs's libraw/libraw.h check fails with a confusing
+          # error instead of a clear one (same gotcha decode-linux/decode-windows already
+          # document for nicti-cornea itself).
+          submodules: true
       # #29: rav1e/rav1d (spikes/sniff's AVIF tier-payload-format candidate) build their
       # optimized SIMD paths via nasm -- ubuntu-latest doesn't ship it by default.
       - run: sudo apt-get update && sudo apt-get install -y nasm
@@ -136,6 +151,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          submodules: true # #31, see the Linux clippy job's own comment above
       # #29: see the Linux clippy job's own nasm comment above -- same requirement, Windows's
       # own package manager.
       - run: choco install nasm -y
@@ -158,6 +174,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          submodules: true # #31, see the clippy (linux) job's own comment above
       # #29: see the clippy job's own nasm comment above -- same requirement here.
       - run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@stable
@@ -175,6 +192,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          submodules: true # #31, see the clippy (linux) job's own comment above
       # #29: see the Linux clippy job's own nasm comment above -- same requirement here.
       - run: choco install nasm -y
       - uses: dtolnay/rust-toolchain@stable
@@ -282,6 +300,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # #31: nicti (via nicti-pelt) now unconditionally builds with nicti-cornea's `libraw`
+          # feature on -- the shipped v1 binary must actually decode real NEFs, so unlike
+          # nicti-cornea/retina/knead this can't be path-gated away from a required check; this
+          # job now pays LibRaw's C++ compile cost on every PR, not just ones that touch decode
+          # paths. See this workflow's own ci-budgets.json entry, raised in the same PR that
+          # added this.
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

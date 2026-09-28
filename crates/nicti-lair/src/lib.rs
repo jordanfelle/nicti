@@ -85,6 +85,19 @@ pub trait CatalogStore: Module {
         rel_path: &str,
     ) -> Result<Option<Asset>, CatalogError>;
 
+    /// Reads a single asset by its own row id. `hunt`/`collection_assets` return bare ids with no
+    /// other way to turn one back into a row (short of a full-root scan via
+    /// `list_assets_by_root`) — #31 (loupe) needs this to resolve a navigation cursor's current
+    /// id into a real asset to display.
+    fn get_asset(&self, id: i64) -> Result<Option<Asset>, CatalogError>;
+
+    /// Reads a root's own `rel_path` (which callers store as an absolute folder path under
+    /// ADR-0071's placeholder-volume-identity stand-in — see `nicti-pelt::register_root`) by its
+    /// row id. Combined with `Asset::rel_path`, this is what lets a caller build a real
+    /// filesystem path to open (`root_path.join(&asset.rel_path)`, the same pattern
+    /// `patrol::sync_root` already uses internally). `None` if the root id doesn't exist.
+    fn get_root_path(&self, root_id: i64) -> Result<Option<String>, CatalogError>;
+
     /// Every asset sharing this fingerprint, ordered by id. Plural, not `Option<Asset>`: more
     /// than one real asset can share a fingerprint (a literal duplicate file, or a genuine
     /// collision), and a caller trying to tell a move apart from a duplicate needs to check each

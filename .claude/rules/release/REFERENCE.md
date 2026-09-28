@@ -10,6 +10,11 @@ paths:
 
 Full reasoning/history: `docs/decisions/release.md`.
 
+- **Release build now needs the LibRaw submodule (#31 phase 1)**: `release.yml`'s Windows build
+  job's checkout has `submodules: true` — `nicti` (via `nicti-pelt`) unconditionally requests
+  `nicti-cornea`'s `libraw` feature now, so `cargo build --release -p nicti` would otherwise fail
+  build.rs's `libraw/libraw.h` check. See [`ci`](../ci/REFERENCE.md) for the full set of jobs this
+  same change touched.
 - **Windows installer (#249/ADR-0249)**: per-user NSIS (`packaging/windows/nicti.nsi`),
   `RequestExecutionLevel user`, installs to `%LOCALAPPDATA%\Programs\Nicti`. **No UAC ever** —
   this is Chrome's non-admin mode, chosen specifically so the in-app updater can re-run the

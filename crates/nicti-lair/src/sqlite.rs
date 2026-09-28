@@ -483,6 +483,28 @@ impl CatalogStore for SqliteCatalog {
             .optional()?)
     }
 
+    fn get_asset(&self, id: i64) -> Result<Option<Asset>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                &format!("SELECT {ASSET_COLUMNS} FROM asset WHERE id = ?1"),
+                params![id],
+                Self::row_to_asset,
+            )
+            .optional()?)
+    }
+
+    fn get_root_path(&self, root_id: i64) -> Result<Option<String>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT rel_path FROM root WHERE id = ?1",
+                params![root_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     fn find_by_fingerprint(&self, fingerprint: &str) -> Result<Vec<Asset>, CatalogError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
@@ -1381,6 +1403,45 @@ mod tests {
             height: None,
             imported_at: 0,
         }
+    }
+
+    #[test]
+    fn get_asset_returns_the_row_by_id() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let id = store
+            .insert_asset(root_id, &new_asset("a.NEF", Some("Z8")), None)
+            .unwrap();
+
+        let asset = store.get_asset(id).unwrap().unwrap();
+        assert_eq!(asset.id, id);
+        assert_eq!(asset.rel_path, "a.NEF");
+        assert_eq!(asset.model, Some("Z8".to_string()));
+    }
+
+    #[test]
+    fn get_asset_returns_none_for_an_id_that_does_not_exist() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        assert_eq!(store.get_asset(999).unwrap(), None);
+    }
+
+    #[test]
+    fn get_root_path_returns_the_root_s_rel_path() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "/photos/2026-event").unwrap();
+
+        assert_eq!(
+            store.get_root_path(root_id).unwrap(),
+            Some("/photos/2026-event".to_string())
+        );
+    }
+
+    #[test]
+    fn get_root_path_returns_none_for_a_root_id_that_does_not_exist() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        assert_eq!(store.get_root_path(999).unwrap(), None);
     }
 
     #[test]
