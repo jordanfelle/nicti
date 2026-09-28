@@ -35,16 +35,18 @@ concurrency:
   #
   # KNOWN LIMIT (a second CodeRabbit pass, same PR): a GitHub Actions concurrency group only
   # ever holds one running run plus one *pending* run -- it is not an unbounded FIFO queue. If a
-  # third push to main lands while one run is already executing and a second is already queued,
-  # that third push's own pending run is what gets replaced (the second push's dedicated edge
-  # build is simply never run, not delayed). In practice this only drops that intermediate
-  # push's own edge publish, not correctness of the channel itself: whichever run does end up
-  # executing always builds from its own actual `HEAD`, so `edge` still converges on the true
-  # tip of main once the burst settles -- it just isn't guaranteed to have published a distinct
-  # build for every single individual merge if several land within one build's runtime. A real
-  # fix (an external queue/self-hosted runner that retains every push) is a meaningfully bigger
-  # change than this ticket's scope and isn't justified for how infrequently main sees multiple
-  # merges within a single ~10-15 minute Windows build window on this repo today.
+  # third push to main lands while one run (from the first push) is already executing and a
+  # second push's run is already the queued pending run, that third push's run replaces the
+  # *second* push's pending run (the second push's own dedicated edge build is simply discarded,
+  # never run -- the third push's run is what actually runs next, not delayed and not itself
+  # discarded). In practice this only drops that intermediate push's own edge publish, not
+  # correctness of the channel itself: whichever run does end up executing always builds from
+  # its own actual `HEAD`, so `edge` still converges on the true tip of main once the burst
+  # settles -- it just isn't guaranteed to have published a distinct build for every single
+  # individual merge if several land within one build's runtime. A real fix (an external
+  # queue/self-hosted runner that retains every push) is a meaningfully bigger change than this
+  # ticket's scope and isn't justified for how infrequently main sees multiple merges within a
+  # single ~10-15 minute Windows build window on this repo today.
   cancel-in-progress: false
 
 permissions:
@@ -324,20 +326,48 @@ jobs:
               --notes "$notes" \
               --prerelease
 
-            # Upload this run's replacement assets FIRST (CodeRabbit review, PR #268): deleting
-            # a prior version's stale-named assets before the upload would reopen the same
-            # availability gap the original delete-then-recreate design had -- if the upload
-            # then failed, `edge` would be left with no working installer at all until the next
-            # successful run. `--clobber` overwrites this run's own filenames in place either
-            # way, so upload-then-clean is strictly safer with no downside.
-            gh release upload edge --repo "${GITHUB_REPOSITORY}" --clobber \
-              packaging/windows/Nicti-Setup-*.exe \
-              packaging/windows/Nicti-Setup-*.exe.minisig \
-              packaging/windows/Nicti-Setup-*.exe.sha256
+            # Upload under temporary names first, then swap (CodeRabbit review, PR #268):
+            # `gh release upload --clobber` deletes an existing same-named asset before
+            # uploading its replacement -- not atomic, so a failed upload after that delete
+            # leaves `edge` missing that asset entirely. This bites on every ordinary push that
+            # doesn't change Cargo.toml's version (the common case, since the installer filename
+            # is version-derived and stays the same across most edge builds), not just the
+            # version-bump case the upload-before-cleanup reorder above already covers. Staging
+            # under a unique temp suffix means none of the previously-published assets are
+            # touched until every new file has fully uploaded; the final swap is a metadata-only
+            # rename (delete old, then PATCH the temp asset's name into place), not a re-upload,
+            # so there's no meaningful window where the canonical name has no content behind it.
+            tmp_dir=$(mktemp -d)
+            tmp_suffix=".pending-${GITHUB_SHA:0:7}"
+            declare -a final_names=()
+            declare -a tmp_paths=()
+            for f in packaging/windows/Nicti-Setup-*.exe packaging/windows/Nicti-Setup-*.exe.minisig packaging/windows/Nicti-Setup-*.exe.sha256; do
+              final="$(basename "$f")"
+              tmp_path="$tmp_dir/${final}${tmp_suffix}"
+              cp "$f" "$tmp_path"
+              final_names+=("$final")
+              tmp_paths+=("$tmp_path")
+            done
+
+            gh release upload edge --repo "${GITHUB_REPOSITORY}" "${tmp_paths[@]}"
+
+            for i in "${!final_names[@]}"; do
+              final="${final_names[$i]}"
+              tmp_name="$(basename "${tmp_paths[$i]}")"
+              existing_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$final\") | .id")
+              if [[ -n "$existing_id" ]]; then
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
+              fi
+              tmp_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$tmp_name\") | .id")
+              gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${tmp_id}" -f name="$final" >/dev/null
+            done
+
+            rm -rf "$tmp_dir"
 
             # Finding 4: remove any asset left over from a prior version bump (a differently
-            # named exe/.minisig/.sha256 that --clobber above won't touch) -- `edge` should only
-            # ever carry exactly one version's installer.
+            # named exe/.minisig/.sha256 the swap above didn't touch, since it only knew this
+            # run's own filenames) -- `edge` should only ever carry exactly one version's
+            # installer.
             current_names="packaging/windows/Nicti-Setup-*.exe packaging/windows/Nicti-Setup-*.exe.minisig packaging/windows/Nicti-Setup-*.exe.sha256"
             for existing in $(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'); do
               keep=0
