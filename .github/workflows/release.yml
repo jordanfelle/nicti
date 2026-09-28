@@ -108,6 +108,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # #31: nicti (via nicti-pelt) now unconditionally depends on nicti-cornea's `libraw`
+          # feature -- without this, `cargo build --release -p nicti` below fails build.rs's
+          # libraw/libraw.h check (same submodule requirement ci.yml's decode/build jobs
+          # document).
+          submodules: true
 
       - name: Resolve version
         id: version

@@ -60,6 +60,12 @@ jobs:
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         persist-credentials: false
+        # #31: the analyzed scope below (root + crates/*) includes nicti-pelt, which now
+        # unconditionally requests nicti-cornea's `libraw` feature -- CodeQL's own LoadManifest
+        # phase runs build.rs while resolving the crate graph (see this job's own #127 comment
+        # just below), so without this it hits the same libraw/libraw.h submodule-missing failure
+        # every other job touched in this PR needed the same fix for.
+        submodules: true
 
     # #127: scope the rust workspace analyzed here to the shipping v1 target (root package +
     # crates/*) before CodeQL's extractor loads the workspace manifest. Without this, the

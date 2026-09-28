@@ -18,7 +18,7 @@ serde = "1"
 serde_json = "1"
 nicti-tapetum = { path = "../nicti-tapetum" }
 nicti-lair = { path = "../nicti-lair" }
-nicti-cornea = { path = "../nicti-cornea" }
+nicti-cornea = { path = "../nicti-cornea", features = ["libraw"] }
 nicti-pounce = { path = "../nicti-pounce" }
 nicti-shed = { path = "../nicti-shed" }
 nicti-claw = { path = "../nicti-claw" }
