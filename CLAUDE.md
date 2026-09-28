@@ -87,6 +87,9 @@ terse index: crate/spike → purpose → owning topic.
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
+- **`crates/nicti-haw`** (#229) — shared, process-wide `ort`/`load-dynamic` environment init,
+  replacing the six duplicated crate-local copies in `spikes/groom`/`siamese`/`crouch`/`rods`/
+  `litter`/`rosette`; see its own doc comment for the cross-crate path-mismatch rationale.
 - **`crates/nicti-pounce`** (#55, landed) — Pounce: the production job scheduler, promoted from
   `spikes/crouch`'s research (#54/ADR-0054). `job.rs`/`cancel.rs`/`queue.rs`/`admission.rs`/
   `throttle.rs` are the scheduler core (a two-class priority queue, cooperative cancellation, the
