@@ -87,6 +87,20 @@ terse index: crate/spike → purpose → owning topic.
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
+- **`crates/nicti-pounce`** (#55, landed) — Pounce: the production job scheduler, promoted from
+  `spikes/crouch`'s research (#54/ADR-0054). `job.rs`/`cancel.rs`/`queue.rs`/`admission.rs`/
+  `throttle.rs` are the scheduler core (a two-class priority queue, cooperative cancellation, the
+  `IS_EDITING` gate, VRAM admission, CPU/disk throttling), unchanged in design from the spike but
+  reworked for a real threaded runtime: `queue::Scheduler::take_next`/`finish` (split from the
+  spike's single `run_next`) so a worker thread never holds the lane's lock across a job's own
+  `step()`. `runtime.rs`'s `Pounce` is the new part the spike didn't build: two lanes (`Lane::Gpu`,
+  exactly one worker thread and real VRAM admission; `Lane::Cpu`, a pool of worker threads gated by
+  a live-adjustable `Throttle`), a `JobId`-keyed status map for an activity panel to poll
+  (`snapshot`), and an independent `CancelToken` registry (`Pounce::cancel` can't just delegate to
+  `Scheduler::cancel`, which only finds a job still sitting in its queue — most of a fast-yielding
+  job's lifetime is spent checked out by a worker thread instead). `telemetry.rs` adds
+  `TelemetrySampler`, a throttled (<=1/s) wrapper `nicti-pelt::activity` and #70 both poll. See
+  [`jobs`](.claude/rules/jobs/REFERENCE.md).
 - **`crates/nicti-calico`/`nicti-iris`/`nicti-stalk`/`nicti-preen`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39),
@@ -146,10 +160,11 @@ terse index: crate/spike → purpose → owning topic.
   Scruff — after Scruff's disk-side pass, walks the catalog side, flagging (or, if opted into,
   removing) any asset whose file has disappeared, and reporting any folder whose every asset is
   now missing; an unresolvable root touches nothing, deferring to ADR-0071's offline-volume path.
-  Both run serially; Pounce integration is a follow-up. See `catalog-engine`/`volume-identity`/
-  `preview-tiers` topics for the design this promotes. **#23** extends this crate further with
-  `hunt.rs`/`clowder.rs` — see the `catalog-engine` topic's own "Package contents" section, not
-  duplicated here.
+  Both are also steppable one file/asset at a time (`scruff::Ingest`/`patrol::Sync`, #55) and wired
+  into Pounce (`pounce_jobs.rs`'s `IngestJob`/`SyncJob`, `Lane::Cpu`/`Priority::Background`) — see
+  `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this promotes, and
+  `jobs` for the Pounce wiring. **#23** extends this crate further with `hunt.rs`/`clowder.rs` —
+  see the `catalog-engine` topic's own "Package contents" section, not duplicated here.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,
@@ -159,7 +174,13 @@ terse index: crate/spike → purpose → owning topic.
   this ticket's. Named "pelt" (not the issue's own `nicti-ui`) to match the feline naming
   convention below, reusing the name from the now-deleted `spikes/pelt-*` research spikes (#232).
   Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
-  `nicti_pelt::run()` shim). See [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md).
+  `nicti_pelt::run()` shim). **`activity.rs`** (#55) adds the Pounce activity/progress panel (a
+  bottom status bar: running/queued counts, CPU/RAM/VRAM telemetry, a live CPU-lane concurrency
+  control, and a per-job list with cancel buttons) plus Import/Sync buttons on the Library view
+  (`app.rs`'s `submit_root_job`) that submit `nicti-lair::pounce_jobs::IngestJob`/`SyncJob` to a
+  `nicti_pounce::Pounce` owned by `PeltApp`. See
+  [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md) and
+  [`jobs`](.claude/rules/jobs/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/groom`** (#50/ADR-0050) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)

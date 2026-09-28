@@ -8,6 +8,7 @@
 //! Explicitly out of scope here (each has, or will have, its own ticket): grid virtualization at
 //! scale (#30), the loupe view (#31), culling UX (#32), the filter bar (#242).
 
+mod activity;
 mod app;
 mod catalog;
 mod render;

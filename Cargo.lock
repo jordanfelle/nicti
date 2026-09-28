@@ -3549,6 +3549,7 @@ dependencies = [
  "nicti-claw",
  "nicti-cornea",
  "nicti-pawprint",
+ "nicti-pounce",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3580,8 +3581,18 @@ dependencies = [
  "egui-wgpu",
  "nicti-cornea",
  "nicti-lair",
+ "nicti-pounce",
  "nicti-tapetum",
  "wgpu",
+]
+
+[[package]]
+name = "nicti-pounce"
+version = "0.0.0"
+dependencies = [
+ "sysinfo",
+ "thiserror 2.0.21",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -19,6 +19,7 @@ mod sqlite;
 pub mod clowder;
 pub mod hunt;
 pub mod patrol;
+pub mod pounce_jobs;
 pub mod scruff;
 
 pub use clowder::{Collection, CollectionKind};

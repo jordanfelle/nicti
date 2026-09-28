@@ -1,6 +1,9 @@
 # ADR-0054: Job scheduler design (Pounce)
 
-- **Status:** Proposed — decision rules #1-#2 measured clean on the real reference RTX 5080
+- **Status:** Proposed — the design itself (this ADR) stays Proposed pending real hardware
+  measurement of the two-lane runtime #55 built; that runtime (`crates/nicti-pounce`) has landed
+  and promotes every decision rule below into production code, wired to real clients
+  (`nicti-lair::pounce_jobs`). Decision rules #1-#2 measured clean on the real reference RTX 5080
   (Windows-native, wgpu-vs-wgpu and ort/CUDA-vs-wgpu contention both real, not simulated); rule #3
   is both structurally unit-tested and confirmed on real hardware (the unthrottled stress test);
   rule #4 (`IS_EDITING`/priority correctness) is structural and unit-tested only, not itself a
@@ -376,8 +379,15 @@ adversarial review above had itself just touched, one docs-only), all fixed:
 
 ## Consequences
 
-- **Unblocks #55** (build: the real scheduler + activity panel) — `spikes/crouch`'s
-  `job`/`queue`/`cancel`/`admission`/`throttle`/`telemetry` modules are its starting point.
+- **#55 landed** (build: the real scheduler + activity panel) — `crates/nicti-pounce` promotes
+  `spikes/crouch`'s `job`/`queue`/`cancel`/`admission`/`throttle`/`telemetry` modules into a real
+  threaded runtime (`runtime::Pounce`), with Scruff/Patrol import/sync as its first real
+  `Lane::Cpu` clients. Two lanes (GPU/CPU) structurally answer this ADR's own "one serial worker"
+  framing per #206's option 2 — see `docs/decisions/jobs.md`'s "#55: the production build" section
+  for what changed versus this ADR's own research design (`take_next`/`finish` replacing
+  `run_next`, an independent `CancelToken` registry fixing a real cancellation bug the new
+  runtime's own tests caught). No real bake pipeline exists yet, so the GPU lane and VRAM admission
+  are still only exercised by synthetic jobs, same as this ADR's own structural-only rules.
 - **Shares its telemetry source with #70** (standalone bottleneck indicator) — `telemetry.rs`'s
   `HostTelemetrySource`/`VramSource`, not a second implementation.
 - **[#205](https://github.com/jordanfelle/nicti/issues/205) measured, resolved**: a smaller 128px

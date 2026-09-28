@@ -1,0 +1,16 @@
+[package]
+name = "nicti-pounce"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Pounce (#54/#55, ADR-0054): the production job scheduler -- a two-lane (GPU/CPU) runtime over the two-class (foreground/background) priority queue, cooperative cancellation, IS_EDITING preemption gate, VRAM admission, and CPU/disk throttling researched in spikes/crouch. Promotes that spike's job/queue/cancel/admission/throttle/telemetry modules into a real threaded runtime real callers (Scruff/Patrol import and sync, an activity panel) can submit jobs to."
+
+[dependencies]
+sysinfo = "0.37"
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Foundation"] }
+
+[dev-dependencies]

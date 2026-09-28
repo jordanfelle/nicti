@@ -3,8 +3,10 @@
 //! RAW files, fingerprints and upserts each one, and extracts its T0 grid preview (ADR-0029) via
 //! `nicti_cornea::embedded`'s IFD walker -- no RAW decode needed for that.
 //!
-//! Runs serially in v1; wiring this into Pounce (the job scheduler) is a follow-up, not part of
-//! this ticket.
+//! Runs serially per call, but steppably: [`Ingest`] processes one candidate file per `step()`
+//! call, so `nicti-pounce`'s cooperative scheduler (`pounce_jobs::IngestJob`) can interleave it
+//! with other background/foreground work instead of blocking a worker thread for a whole
+//! directory walk in one uninterruptible call.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -201,23 +203,73 @@ pub fn ingest_root(
     root_id: i64,
     root_path: &Path,
 ) -> Result<IngestReport, CatalogError> {
-    let mut report = IngestReport::default();
+    let mut ingest = Ingest::new(root_id, root_path);
+    while ingest.step(store)? {}
+    Ok(ingest.into_report())
+}
 
-    for entry in candidate_files(root_path) {
-        let path = match entry {
-            Ok(path) => path,
-            Err(e) => {
-                let path = e.path().unwrap_or(root_path).to_path_buf();
-                report.failed.push((path, e.to_string()));
-                continue;
-            }
-        };
-        if let Err(e) = ingest_one(store, root_id, root_path, &path, &mut report) {
-            report.failed.push((path, e.to_string()));
+/// A steppable ingest run: one call to [`Ingest::step`] scans, fingerprints, and upserts exactly
+/// one candidate file (or records one walk error), matching the granularity a cooperative
+/// scheduler needs to interleave this with other work. [`ingest_root`] is a thin loop over this.
+pub struct Ingest {
+    root_id: i64,
+    root_path: PathBuf,
+    candidates: Box<dyn Iterator<Item = Result<PathBuf, walkdir::Error>> + Send>,
+    report: IngestReport,
+}
+
+impl Ingest {
+    pub fn new(root_id: i64, root_path: &Path) -> Self {
+        Ingest {
+            root_id,
+            root_path: root_path.to_path_buf(),
+            candidates: Box::new(candidate_files(root_path)),
+            report: IngestReport::default(),
         }
     }
 
-    Ok(report)
+    /// Processes exactly one candidate file (or one walk error). Returns `Ok(true)` if more
+    /// candidates remain, `Ok(false)` once the walk is exhausted -- the walk being lazy
+    /// (`walkdir::WalkDir`'s own iterator), the total candidate count is never known up front, so
+    /// a caller reporting progress from this must treat it as indeterminate (no fabricated total).
+    pub fn step(&mut self, store: &dyn CatalogStore) -> Result<bool, CatalogError> {
+        let Some(entry) = self.candidates.next() else {
+            return Ok(false);
+        };
+        match entry {
+            Ok(path) => {
+                if let Err(e) = ingest_one(
+                    store,
+                    self.root_id,
+                    &self.root_path,
+                    &path,
+                    &mut self.report,
+                ) {
+                    self.report.failed.push((path, e.to_string()));
+                }
+            }
+            Err(e) => {
+                let path = e.path().unwrap_or(&self.root_path).to_path_buf();
+                self.report.failed.push((path, e.to_string()));
+            }
+        }
+        Ok(true)
+    }
+
+    /// How many candidates have been processed so far (added + updated + skipped + moved +
+    /// failed) -- the "done" half of a progress reading; the total stays unknown (`None`) since
+    /// the walk is lazy.
+    pub fn processed_count(&self) -> u64 {
+        self.report.added
+            + self.report.updated
+            + self.report.skipped_unchanged
+            + self.report.moved
+            + self.report.failed.len() as u64
+    }
+
+    pub fn into_report(self) -> IngestReport {
+        self.report
+    }
 }
 
 fn ingest_one(
