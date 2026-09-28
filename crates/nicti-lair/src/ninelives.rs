@@ -17,6 +17,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags};
 
@@ -165,6 +166,57 @@ fn unique_partial_path(policy: &BackupPolicy, now_unix: i64) -> PathBuf {
     }
 }
 
+/// A freshly written or renamed file on Windows can transiently refuse even a read-only open with
+/// `ERROR_ACCESS_DENIED` (`io::ErrorKind::PermissionDenied`, "Access is denied. (os error 5)") --
+/// real-time antivirus (Windows Defender by default on GitHub's own Windows runners) scanning a
+/// just-created/just-renamed file before releasing it, not a bug in the write itself. Confirmed on
+/// CI, not a plausible-sounding guess: `cargo test (windows)` failed exactly this way, on exactly
+/// this message, at the fsync step right after `VACUUM INTO` writes a fresh `.partial` -- Linux has
+/// no equivalent lock and never reproduces it. Retries a bounded number of times with a short delay
+/// rather than failing outright; every call site below is a background job step (never a hot path),
+/// so this budget (well under a second in the worst case) is cheap insurance, not a real cost.
+fn retry_on_transient_access_denied<T>(
+    mut f: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    const MAX_ATTEMPTS: u32 = 20;
+    const DELAY: Duration = Duration::from_millis(25);
+    let mut last_err = None;
+    for _ in 0..MAX_ATTEMPTS {
+        match f() {
+            Ok(value) => return Ok(value),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                last_err = Some(e);
+                std::thread::sleep(DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop only exits via return, or after at least one PermissionDenied"))
+}
+
+/// The `rusqlite`-flavored twin of [`retry_on_transient_access_denied`] -- `verify`'s own
+/// `Connection::open_with_flags` on a just-written `.partial` hits the identical Windows
+/// antivirus-scan race, but surfaces it as a `rusqlite::Error` (an underlying SQLite `SQLITE_IOERR`
+/// wrapping the same OS error), not a bare `std::io::Error`.
+fn retry_rusqlite_open_on_transient_access_denied(
+    mut f: impl FnMut() -> rusqlite::Result<Connection>,
+) -> rusqlite::Result<Connection> {
+    const MAX_ATTEMPTS: u32 = 20;
+    const DELAY: Duration = Duration::from_millis(25);
+    let mut last_err = None;
+    for _ in 0..MAX_ATTEMPTS {
+        match f() {
+            Ok(conn) => return Ok(conn),
+            Err(e) if e.to_string().contains("Access is denied") => {
+                last_err = Some(e);
+                std::thread::sleep(DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop only exits via return, or after at least one matching error"))
+}
+
 /// Writes a fresh, unverified snapshot of `catalog` to a new `.partial` file under `policy.dir`
 /// and fsyncs it, returning its path. Uses `catalog`'s own independent read-only reader connection
 /// when it has a backing file (`SqliteCatalog::open_snapshot_reader`) so this never holds the
@@ -193,8 +245,11 @@ pub fn snapshot_into(
 
     // `VACUUM INTO` already fsyncs internally per SQLite's own documented behavior, but this makes
     // the durability guarantee explicit in this module's own code rather than resting entirely on
-    // an unstated implementation detail of a pragma this crate doesn't control.
-    let file = fs::File::open(&partial).map_err(|e| CatalogError::Io(e.to_string()))?;
+    // an unstated implementation detail of a pragma this crate doesn't control. Retried: see
+    // `retry_on_transient_access_denied`'s own doc comment for the real Windows race this opens
+    // the freshly-written file right into.
+    let file = retry_on_transient_access_denied(|| fs::File::open(&partial))
+        .map_err(|e| CatalogError::Io(e.to_string()))?;
     file.sync_all()
         .map_err(|e| CatalogError::Io(e.to_string()))?;
 
@@ -208,7 +263,12 @@ pub fn snapshot_into(
 /// read a different/stale file, not a real migration race). `Ok(None)` means the copy is good;
 /// `Ok(Some(msg))` names the first problem found.
 pub fn verify(catalog: &SqliteCatalog, partial: &Path) -> Result<Option<String>, CatalogError> {
-    let reader = Connection::open_with_flags(partial, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Retried: the same Windows antivirus-scan race `retry_on_transient_access_denied` documents,
+    // hitting this open instead of the fsync in `snapshot_into` -- opens the same just-written
+    // file, just moments later.
+    let reader = retry_rusqlite_open_on_transient_access_denied(|| {
+        Connection::open_with_flags(partial, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    })?;
     if let Some(problem) = first_check_problem(&reader, "integrity_check")? {
         return Ok(Some(problem));
     }
@@ -235,7 +295,10 @@ pub fn rotate(policy: &BackupPolicy, partial: &Path) -> Result<(PathBuf, u64), C
         .ok_or_else(|| CatalogError::Io("malformed backup partial filename".into()))?
         .to_string();
     let final_path = policy.dir.join(final_name);
-    fs::rename(partial, &final_path).map_err(|e| CatalogError::Io(e.to_string()))?;
+    // Retried for the same reason as `snapshot_into`'s fsync and `verify`'s open -- see
+    // `retry_on_transient_access_denied`'s own doc comment.
+    retry_on_transient_access_denied(|| fs::rename(partial, &final_path))
+        .map_err(|e| CatalogError::Io(e.to_string()))?;
 
     let verified = list_verified(policy)?; // ascending by created_unix
     let mut pruned = 0u64;
@@ -522,7 +585,22 @@ mod tests {
         assert_eq!(report.pruned, 0);
 
         // The backup is a real, independently-openable catalog with the seeded row in it.
-        let reopened = SqliteCatalog::open(&path).unwrap();
+        // Reopening a file this soon after `rotate` renamed it into place can hit the same
+        // transient Windows antivirus-scan race `retry_on_transient_access_denied` documents (this
+        // test's own reopen isn't inside that helper's coverage, since `SqliteCatalog::open`
+        // returns `CatalogError`, not a bare `io::Error`) -- retried here rather than in library
+        // code, since no real production caller reopens a backup file this immediately today.
+        let mut attempts_left = 20;
+        let reopened = loop {
+            match SqliteCatalog::open(&path) {
+                Ok(catalog) => break catalog,
+                Err(_) if attempts_left > 1 => {
+                    attempts_left -= 1;
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => panic!("failed to reopen the backup after retrying: {e}"),
+            }
+        };
         assert_eq!(reopened.asset_count().unwrap(), 0); // no assets, but this proves it opens
     }
 
@@ -552,7 +630,9 @@ mod tests {
         let BackupOutcome::Verified(first_path) = first.outcome else {
             panic!("expected the first run to succeed, got {:?}", first.outcome);
         };
-        let first_contents = std::fs::read(&first_path).unwrap();
+        // See `retry_on_transient_access_denied`'s own doc comment -- reading a file this soon
+        // after `rotate` renamed it into place can hit the same transient Windows race.
+        let first_contents = retry_on_transient_access_denied(|| fs::read(&first_path)).unwrap();
 
         // Same `now_unix` as the first run -- this used to overwrite `first_path` via `rotate`'s
         // `fs::rename`.
@@ -567,7 +647,7 @@ mod tests {
         assert_ne!(first_path, second_path);
         assert!(first_path.exists(), "the first run's backup must survive");
         assert_eq!(
-            std::fs::read(&first_path).unwrap(),
+            retry_on_transient_access_denied(|| fs::read(&first_path)).unwrap(),
             first_contents,
             "the first run's backup content must be untouched"
         );

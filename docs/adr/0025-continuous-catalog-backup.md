@@ -114,6 +114,19 @@ shared connection mutex every other catalog query does for the duration of `PRAG
 consistent with every other read on this crate's `CatalogStore` trait (not a new architectural
 concern this ticket introduces), but not separately measured at 2M-row scale either.
 
+**A separate, real Windows-only failure surfaced by CI itself (not the review), after the fixes
+above landed**: `cargo test (windows)` failed two unit tests with `Io("Access is denied. (os error
+5)")` — a freshly-written or freshly-renamed file transiently refusing even a read-only open,
+`ERROR_ACCESS_DENIED`, which GitHub's Windows runners hit reliably enough on a create/rename-then-
+immediately-reopen pattern to be a known class of flake (real-time antivirus scanning a new file
+before releasing it; Linux has no equivalent lock and never reproduced it). Fixed with a small,
+bounded retry (`ninelives::retry_on_transient_access_denied` / its `rusqlite`-flavored twin) around
+every genuine production call site that reopens a file it just wrote (`snapshot_into`'s fsync,
+`verify`'s open of the `.partial`, `rotate`'s rename) — cheap insurance on a background-job-only
+code path, not a real cost. Two of this ticket's own new tests reopen a freshly-rotated backup file
+for their own assertions (mimicking a hypothetical future "restore" caller) and needed the same
+retry to stop being Windows-flaky themselves.
+
 ## What this doesn't do
 
 - No UI for picking a different backup drive/location — `BackupPolicy::for_catalog`'s default
