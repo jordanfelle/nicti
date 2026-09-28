@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use semver::Version;
+use ureq::tls::{TlsConfig, TlsProvider};
 
 use crate::check::{self, EdgeRelease, LatestRelease, ReleaseAsset};
 use crate::verify;
@@ -21,8 +22,20 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 
 fn agent() -> ureq::Agent {
+    // ureq's `TlsConfigBuilder::provider` defaults to `TlsProvider::Rustls` regardless of which
+    // TLS-implementation crate features are actually compiled in -- this crate's Cargo.toml
+    // builds `ureq` with `default-features = false, features = ["native-tls"]` specifically so
+    // no `rustls`/`webpki-roots` code ever gets compiled in (see the `[target.'cfg(windows)'.
+    // dependencies]` comment there), but without this explicit override, ureq still tries to
+    // *use* Rustls at the first real HTTPS request and panics ("provider is Rustls but feature
+    // is not enabled: rustls") since that implementation was never compiled in. The feature flag
+    // only controls which providers are *available*; this is what actually selects one.
+    let tls_config = TlsConfig::builder()
+        .provider(TlsProvider::NativeTls)
+        .build();
     ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
+        .tls_config(tls_config)
         .build()
         .into()
 }
