@@ -282,7 +282,11 @@ pub fn snapshot_into(
     // the retry loop's guard was never even matching). `VACUUM INTO` already fsyncs the target
     // internally per SQLite's own documented behavior, which is what this module actually relies
     // on for durability -- the deleted step was redundant defense-in-depth that turned out to
-    // actively break Windows instead of adding anything real.
+    // actively break Windows instead of adding anything real. That reliance depends on this
+    // connection never running with `PRAGMA synchronous=OFF`: checked, not just assumed --
+    // `SqliteCatalog::open_snapshot_reader` sets no pragmas at all on the reader connection this
+    // `VACUUM INTO` runs through, so it uses SQLite's own compiled-in default (`FULL`), same as
+    // every other connection in this crate.
     Ok(partial)
 }
 
