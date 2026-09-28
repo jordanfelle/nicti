@@ -231,6 +231,26 @@ jobs:
       # run) the `edge` tag as a single atomic ref update, then edit-in-place/clobber-upload onto
       # the same release object. `set -euo pipefail` means any failed step here (including the
       # stale-run guard below) stops the job instead of silently falling through.
+      #
+      # A second adversarial pass on this rewrite (still PR #268) found three more real issues,
+      # addressed below:
+      #   4. "Never delete" means a version bump (Cargo.toml's version, which the installer
+      #      filename embeds) leaves the *previous* version's exe/.minisig/.sha256 permanently
+      #      attached alongside the new ones forever -- `--clobber` only overwrites an asset
+      #      whose filename matches exactly, it never removes a differently-named one. Fixed by
+      #      deleting every existing asset that isn't one of this run's exact filenames before
+      #      uploading.
+      #   5. The two GET calls against the tag ref used the plural `git/refs/{ref}` route, which
+      #      is documented for update/delete, not fetch -- `git/ref/{ref}` (singular) is the
+      #      correct fetch endpoint and doesn't prefix-match (the plural GET form returns an
+      #      array if more than one ref shares the prefix, e.g. a future `edge-preview` tag).
+      #   6. `cancel-in-progress` cancellation is best-effort, not synchronous -- two runs can
+      #      still both pass the top-of-step stale-run guard and then race on the actual
+      #      tag-move/upload calls if they're close enough together. The single guard at the top
+      #      doesn't cover that; re-checking main's SHA again immediately before the mutating
+      #      calls shrinks (without fully eliminating) that window, which is an acceptable
+      #      tradeoff for an unsigned, best-effort prerelease channel rather than a reason to add
+      #      real cross-run locking here.
       - name: Publish edge release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
@@ -241,30 +261,54 @@ jobs:
 
           # Guard against an out-of-order re-run: if main has advanced past this run's commit by
           # the time it gets here, this run is stale -- publishing would move `edge` backward.
-          remote_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
-          if [[ "$remote_main_sha" != "${GITHUB_SHA}" ]]; then
-            echo "::notice::main has advanced to $remote_main_sha since this run started at ${GITHUB_SHA} -- skipping the edge publish so this stale run can't move edge backward."
-            exit 0
-          fi
+          # Checked again right before the mutating calls below (finding 6).
+          check_not_stale() {
+            remote_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
+            if [[ "$remote_main_sha" != "${GITHUB_SHA}" ]]; then
+              echo "::notice::main has advanced to $remote_main_sha since this run started at ${GITHUB_SHA} -- skipping the edge publish so this stale run can't move edge backward."
+              exit 0
+            fi
+          }
+          check_not_stale
 
-          if gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" >/dev/null 2>&1; then
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/edge" >/dev/null 2>&1; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" -f sha="${GITHUB_SHA}" -F force=true >/dev/null
           else
             gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/edge" -f sha="${GITHUB_SHA}" >/dev/null
           fi
 
-          actual_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" --jq '.object.sha')
+          actual_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/edge" --jq '.object.sha')
           if [[ "$actual_sha" != "${GITHUB_SHA}" ]]; then
             echo "::error::edge tag points at $actual_sha after the move, not this commit (${GITHUB_SHA})."
             exit 1
           fi
 
+          check_not_stale
+
           notes="Automatic build from the latest commit on main (${GITHUB_SHA}). Unsigned and may be unstable -- for the stable channel, see the latest versioned release instead."
-          if gh release view edge --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          release_exists=0
+          gh release view edge --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && release_exists=1
+
+          if [[ "$release_exists" == "1" ]]; then
             gh release edit edge --repo "${GITHUB_REPOSITORY}" \
               --title "Nicti edge (${GITHUB_SHA:0:7})" \
               --notes "$notes" \
               --prerelease
+
+            # Finding 4: remove any asset left over from a prior version bump (a differently
+            # named exe/.minisig/.sha256 that --clobber below won't touch) before uploading this
+            # run's files -- `edge` should only ever carry exactly one version's installer.
+            current_names="packaging/windows/Nicti-Setup-*.exe packaging/windows/Nicti-Setup-*.exe.minisig packaging/windows/Nicti-Setup-*.exe.sha256"
+            for existing in $(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'); do
+              keep=0
+              for f in $current_names; do
+                [[ "$existing" == "$(basename "$f")" ]] && keep=1
+              done
+              if [[ "$keep" == "0" ]]; then
+                gh release delete-asset edge "$existing" --repo "${GITHUB_REPOSITORY}" --yes
+              fi
+            done
+
             gh release upload edge --repo "${GITHUB_REPOSITORY}" --clobber \
               packaging/windows/Nicti-Setup-*.exe \
               packaging/windows/Nicti-Setup-*.exe.minisig \
