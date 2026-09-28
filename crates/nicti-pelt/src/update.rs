@@ -3,10 +3,35 @@
 //! "update available" banner. The actual check/download/apply only exists on Windows (Nicti's
 //! only shipping platform, ADR-0015) -- on every other platform this always reports "up to
 //! date," matching `nicti-shed`'s own `cfg(windows)`-gating of its `net` module.
+//!
+//! #282 added the Edge channel alongside the original Stable one: same background-thread
+//! plumbing, but the "is there something newer" identity differs (semver vs. a build commit
+//! SHA, see `nicti_shed::check::edge_update_available`'s own doc comment), so `available` holds
+//! an [`AvailableUpdate`] rather than a bare `nicti_shed::LatestRelease`.
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 
-use nicti_shed::LatestRelease;
+use nicti_shed::state::Channel;
+use nicti_shed::{EdgeRelease, LatestRelease};
+
+/// Guards every `update.json` read-modify-write round trip (the channel picker's `save_channel`
+/// on the UI thread, and a background check's own `mark_checked`/save in `run_check`) against
+/// each other -- both do a plain load-then-save with no file lock of their own, so without this
+/// a channel switch landing mid-check could lose either write to the other's clobbering `fs::write`
+/// (an adversarial review caught this: `state::save` isn't atomic-rename, so the loser's fields
+/// are silently dropped, not merged). Process-wide is enough -- only one `nicti.exe` instance
+/// touches this file at a time in practice.
+static STATE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Either channel's "here's what's available" result, carrying whichever release type that
+/// channel's own check produced. Like `UpdateEvent` below, only ever constructed by the
+/// `cfg(windows)` `run_check`/`apply_update` -- genuinely dead on non-Windows, not an oversight.
+#[allow(dead_code)]
+#[derive(Clone)]
+enum AvailableUpdate {
+    Stable(LatestRelease),
+    Edge(EdgeRelease),
+}
 
 // `Available`/`Failed` are only ever constructed by the `cfg(windows)` `run_check` below --
 // the non-Windows stub always returns `UpToDate` (there's no update channel to check on a
@@ -14,7 +39,7 @@ use nicti_shed::LatestRelease;
 // oversight.
 #[allow(dead_code)]
 enum UpdateEvent {
-    Available(LatestRelease),
+    Available(AvailableUpdate),
     UpToDate,
     Failed(String),
 }
@@ -22,12 +47,13 @@ enum UpdateEvent {
 pub struct UpdateChecker {
     receiver: Option<mpsc::Receiver<UpdateEvent>>,
     apply_receiver: Option<mpsc::Receiver<Result<(), String>>>,
-    available: Option<LatestRelease>,
+    available: Option<AvailableUpdate>,
     /// A copy of the release currently being applied, kept only so a failed apply can restore
     /// [`Self::available`] for a retry -- the original was moved into the apply thread.
-    pending_release: Option<LatestRelease>,
+    pending_release: Option<AvailableUpdate>,
     last_error: Option<String>,
     applying: bool,
+    channel: Channel,
 }
 
 impl UpdateChecker {
@@ -39,6 +65,7 @@ impl UpdateChecker {
             pending_release: None,
             last_error: None,
             applying: false,
+            channel: load_channel(),
         }
     }
 
@@ -51,11 +78,34 @@ impl UpdateChecker {
         }
         self.last_error = None;
         let current_version = current_version.to_string();
+        let channel = self.channel;
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(run_check(&current_version, force));
+            let _ = tx.send(run_check(&current_version, channel, force));
         });
+    }
+
+    /// The channel the next check will run against.
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    /// Switches channel, persists the choice, and clears any stale result from the other
+    /// channel's last check -- a stale Stable "you're up to date" (or vice versa) must never
+    /// linger onscreen after switching, since it no longer answers the right question. Does not
+    /// itself spawn a check; the caller (the channel picker's own `changed()` handler) does that
+    /// immediately after, with `force: true`, so switching to Edge surfaces a prompt for
+    /// whatever edge build is currently out, not just the next one.
+    pub fn set_channel(&mut self, channel: Channel) {
+        if channel == self.channel || self.applying {
+            return;
+        }
+        self.channel = channel;
+        self.available = None;
+        self.last_error = None;
+        self.receiver = None;
+        save_channel(channel);
     }
 
     /// Drains any background thread's result that has landed (a check, or an apply). Call once
@@ -103,8 +153,14 @@ impl UpdateChecker {
         }
     }
 
-    pub fn available_version(&self) -> Option<&semver::Version> {
-        self.available.as_ref().map(|r| &r.version)
+    /// A short display label for whatever update is available -- a semver string on Stable
+    /// (`"0.2.0"`), or a short commit SHA on Edge (`"edge (abc1234)"`, matching `release.yml`'s
+    /// own release-title convention).
+    pub fn available_label(&self) -> Option<String> {
+        match self.available.as_ref()? {
+            AvailableUpdate::Stable(r) => Some(r.version.to_string()),
+            AvailableUpdate::Edge(r) => Some(format!("edge ({})", r.short_sha)),
+        }
     }
 
     pub fn last_error(&self) -> Option<&str> {
@@ -149,26 +205,66 @@ impl Default for UpdateChecker {
     }
 }
 
-#[cfg(windows)]
-fn run_check(current_version: &str, force: bool) -> UpdateEvent {
-    let path = nicti_shed::state::default_path();
-    let now = nicti_shed::state::now_unix();
-    let mut state = path
+fn load_channel() -> Channel {
+    nicti_shed::state::default_path()
         .as_deref()
         .map(nicti_shed::state::load)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .channel
+}
 
-    if !force && !state.should_check_now(now) {
+/// Persists just the channel choice -- reloads the current state first (rather than writing a
+/// fresh default) so this never clobbers `auto_check`/`last_check_unix` a background check
+/// already saved. Holds [`STATE_WRITE_LOCK`] across the whole load-mutate-save round trip so a
+/// concurrent `run_check` save can't interleave with it.
+fn save_channel(channel: Channel) {
+    let Some(path) = nicti_shed::state::default_path() else {
+        return;
+    };
+    let _guard = STATE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = nicti_shed::state::load(&path);
+    state.channel = channel;
+    let _ = nicti_shed::state::save(&path, &state);
+}
+
+#[cfg(windows)]
+fn run_check(current_version: &str, channel: Channel, force: bool) -> UpdateEvent {
+    let path = nicti_shed::state::default_path();
+    let now = nicti_shed::state::now_unix();
+    // A racy read against a concurrent `save_channel` write is fine here -- worst case this
+    // check runs once more or less than the 24h throttle intends, never a corrupted read (each
+    // writer always writes a complete valid JSON document, see `state::save`'s doc comment).
+    let should_check = path
+        .as_deref()
+        .map(nicti_shed::state::load)
+        .unwrap_or_default()
+        .should_check_now(now)
+        || force;
+
+    if !should_check {
         return UpdateEvent::UpToDate;
     }
 
-    let result = match semver::Version::parse(current_version) {
-        Ok(current) => nicti_shed::net::check_for_update(&current),
-        Err(e) => Err(nicti_shed::ShedError::InvalidVersion(e.to_string())),
+    let result = match channel {
+        Channel::Stable => match semver::Version::parse(current_version) {
+            Ok(current) => nicti_shed::net::check_for_update(&current)
+                .map(|opt| opt.map(AvailableUpdate::Stable)),
+            Err(e) => Err(nicti_shed::ShedError::InvalidVersion(e.to_string())),
+        },
+        Channel::Edge => {
+            nicti_shed::net::check_for_edge_update().map(|opt| opt.map(AvailableUpdate::Edge))
+        }
     };
 
-    state.mark_checked(now);
+    // Reload fresh (rather than reusing the pre-network-call read above) and hold
+    // `STATE_WRITE_LOCK` only across this short load-mutate-save round trip, not the whole
+    // network check -- a concurrent `save_channel` from the channel picker must never be
+    // blocked for the duration of an HTTP request, and reloading here means this save only ever
+    // touches `last_check_unix`, never clobbers a channel switch that landed mid-check.
     if let Some(path) = &path {
+        let _guard = STATE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = nicti_shed::state::load(path);
+        state.mark_checked(now);
         let _ = nicti_shed::state::save(path, &state);
     }
 
@@ -180,16 +276,23 @@ fn run_check(current_version: &str, force: bool) -> UpdateEvent {
 }
 
 #[cfg(not(windows))]
-fn run_check(_current_version: &str, _force: bool) -> UpdateEvent {
+fn run_check(_current_version: &str, _channel: Channel, _force: bool) -> UpdateEvent {
     UpdateEvent::UpToDate
 }
 
 #[cfg(windows)]
-fn apply_update(release: LatestRelease) -> Result<(), String> {
-    nicti_shed::net::download_and_apply(&release).map_err(|e| e.to_string())
+fn apply_update(release: AvailableUpdate) -> Result<(), String> {
+    match release {
+        AvailableUpdate::Stable(r) => {
+            nicti_shed::net::download_and_apply(&r).map_err(|e| e.to_string())
+        }
+        AvailableUpdate::Edge(r) => {
+            nicti_shed::net::download_and_apply_edge(&r).map_err(|e| e.to_string())
+        }
+    }
 }
 
 #[cfg(not(windows))]
-fn apply_update(_release: LatestRelease) -> Result<(), String> {
+fn apply_update(_release: AvailableUpdate) -> Result<(), String> {
     Err("updates are only supported on Windows".to_string())
 }

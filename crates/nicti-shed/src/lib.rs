@@ -16,7 +16,14 @@ pub mod verify;
 #[cfg(windows)]
 pub mod net;
 
-pub use check::{LatestRelease, ReleaseAsset};
+pub use check::{EdgeRelease, LatestRelease, ReleaseAsset};
+
+/// The commit SHA this binary was built from (see `build.rs`) -- the edge channel's own identity
+/// check, since edge builds don't bump `Cargo.toml`'s version per commit the way a stable release
+/// does. "unknown" if neither `GITHUB_SHA` nor a local `git rev-parse HEAD` was available at
+/// build time (a source tarball with no `.git`, say) -- never a build failure, since this only
+/// ever feeds the opt-in Edge channel's own UI nicety.
+pub const BUILD_COMMIT_SHA: &str = env!("NICTI_GIT_SHA");
 
 /// The minisign public key every downloaded installer is verified against, embedded at compile
 /// time so a compromised update server (or a MITM'd download) can't also spoof the verification

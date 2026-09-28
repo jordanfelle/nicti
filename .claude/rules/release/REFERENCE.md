@@ -60,12 +60,25 @@ Full reasoning/history: `docs/decisions/release.md`.
   infrequently this repo sees multiple main merges within one ~10-15 minute Windows build.
 - See `docs/releasing.md` for the actual cut-a-release runbook and the one-time minisign
   key-generation steps.
+- **In-app Edge channel (#282)**: `nicti-shed`'s `UpdateState` gained a `channel: Channel`
+  (Stable/Edge) field. On Edge, the check hits `check::EDGE_RELEASE_URL`
+  (`GET /repos/.../releases/tags/edge`) instead of `/releases/latest`, and identity is a commit
+  SHA compare (`check::edge_update_available`), not semver — edge builds don't bump
+  `Cargo.toml`'s version per commit, so the installer filename/version alone can't tell one edge
+  build from the next. The running binary's own build commit
+  (`nicti_shed::BUILD_COMMIT_SHA`, embedded by `crates/nicti-shed/build.rs` from `GITHUB_SHA`,
+  falling back to `git rev-parse HEAD` for a local build) is compared against the edge release's
+  `target_commitish`. `crates/nicti-pelt`'s top bar gained a Stable/Edge `ComboBox`
+  (`UpdateChecker::set_channel`) that force-rechecks immediately on switch, so picking Edge
+  surfaces whatever edge build is currently out rather than waiting for the next one.
 
 ## Package contents
 
 - `packaging/windows/nicti.nsi` — the installer script, not a crate.
 - `.github/workflows/release.yml` — tag-triggered build+sign+publish; `workflow_dispatch` runs the
   same steps as a dry run (uploads a workflow artifact instead of publishing).
-- `crates/nicti-shed` — `check.rs` (GitHub releases/latest parse + semver compare, cross-platform),
-  `verify.rs` (minisign verification), `net.rs` (Windows-only download + verify + re-exec),
-  `state.rs` (the 24h auto-check throttle).
+- `crates/nicti-shed` — `check.rs` (GitHub releases/latest parse + semver compare, cross-platform;
+  `parse_edge_release`/`edge_update_available` for the Edge channel, #282), `verify.rs` (minisign
+  verification), `net.rs` (Windows-only download + verify + re-exec; `check_for_edge_update`/
+  `download_and_apply_edge` for Edge), `state.rs` (the 24h auto-check throttle + `Channel`),
+  `build.rs` (embeds `BUILD_COMMIT_SHA`, #282).

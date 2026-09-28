@@ -102,3 +102,29 @@ ships. Every other workspace crate (`nicti-pelt`, `nicti-tapetum`, etc.) stays p
 per the package map's `publish = false` convention — they're internal, never independently
 versioned or released. `release.yml` fails a `v*` tag push outright if the tag doesn't match that
 version, so there's never a real ambiguity about "what version is this release."
+
+## In-app Edge channel (#282)
+
+The Stable channel's whole update-identity story leans on semver: `release.yml` refuses to
+publish a tag whose version doesn't match `Cargo.toml`, so "is `latest` newer than `current`" is
+just `semver::Version` comparison. The Edge channel (#267) has no equivalent to compare — it
+republishes the same `edge` tag/release at whatever commit `main` is at, and doesn't bump
+`Cargo.toml`'s version on every commit (most edge builds ship the exact same installer filename
+and `CARGO_PKG_VERSION` as the one before it). Semver comparison would report "up to date"
+forever after the first edge install, which defeats the entire point of an in-app edge-channel
+prompt.
+
+The fix is to compare identity, not ordering: the edge release's `target_commitish` (which
+`release.yml`'s own publish step sets to the exact `GITHUB_SHA` it built from) against the
+*running binary's own build commit*. That value has to come from somewhere real, not just
+`CARGO_PKG_VERSION` — `crates/nicti-shed/build.rs` embeds it at compile time, preferring
+`GITHUB_SHA` (already set on every Actions run, no extra process spawn) and falling back to `git
+rev-parse HEAD` for a local `cargo build`, with `"unknown"` as a last resort so a source tarball
+with no `.git` still builds (an "always looks out of date" degrade is acceptable there — it's an
+opt-in channel's own UI nicety, not the minisign trust boundary, and never blocks a build).
+
+`UpdateState` gained a persisted `channel: Channel` field (`#[serde(default)]`'s `Stable`, so an
+existing install's state file never silently opts itself onto unsigned, unreviewed edge builds
+just because this field didn't exist yet). Switching channel in `nicti-pelt`'s picker force-
+rechecks immediately rather than waiting for the next 24h auto-check — landing on Edge with no
+prompt until tomorrow would look like the switch silently did nothing.

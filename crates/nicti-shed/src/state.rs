@@ -12,12 +12,25 @@ use crate::ShedError;
 
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
+/// Which release `nicti-shed` checks against -- see `check::RELEASES_LATEST_URL`/
+/// `check::EDGE_RELEASE_URL`. Defaults to `Stable` on any state file that predates this field
+/// (`#[serde(default)]` on `UpdateState::channel`), so an existing install never silently opts
+/// itself into unsigned, unreviewed edge builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Channel {
+    #[default]
+    Stable,
+    Edge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateState {
     #[serde(default = "default_true")]
     pub auto_check: bool,
     #[serde(default)]
     pub last_check_unix: Option<u64>,
+    #[serde(default)]
+    pub channel: Channel,
 }
 
 fn default_true() -> bool {
@@ -29,6 +42,7 @@ impl Default for UpdateState {
         Self {
             auto_check: true,
             last_check_unix: None,
+            channel: Channel::default(),
         }
     }
 }
@@ -114,8 +128,15 @@ mod tests {
         let state = UpdateState {
             auto_check: false,
             last_check_unix: None,
+            channel: Channel::default(),
         };
         assert!(!state.should_check_now(1_000_000));
+    }
+
+    #[test]
+    fn state_predating_channel_field_defaults_to_stable() {
+        let state: UpdateState = serde_json::from_str(r#"{"auto_check":true}"#).unwrap();
+        assert_eq!(state.channel, Channel::Stable);
     }
 
     #[test]
