@@ -395,9 +395,12 @@ fn hsl_band_weight(hue: f32, band_index: usize) -> f32 {
 /// `(1 - |2l-1|)`'s denominator goes negative for `l > 1`), while the luminance shift is a
 /// separate additive step in the same cube-root perceptual space [`apply_tone`] uses. An
 /// achromatic pixel (`max == min`, no defined hue) passes through unchanged -- correct, since
-/// every band's saturation is already 0 there and only the luminance shift could apply, and
-/// [`HslParams::is_noop`] is what callers check to skip this pass entirely, not a per-pixel
-/// hue test.
+/// every band's saturation is already 0 there; there's no per-pixel hue test to skip this
+/// function itself. [`HslParams::is_noop`] exists for a caller that wants to skip the whole HSL
+/// pass at the params level (this stage is fused into the same per-pixel dispatch every other
+/// live stage shares, so nothing here currently calls it for that purpose -- see the sibling
+/// [`crate::coat::SharpenParams::is_noop`]/[`crate::coat::NoiseReductionParams::is_noop`] for the
+/// stage that actually does skip work based on it, `LiveSuffixKernel::encode`'s fast path).
 pub fn apply_hsl(rgb: [f32; 3], hsl: &HslParams) -> [f32; 3] {
     let max = rgb[0].max(rgb[1]).max(rgb[2]);
     let min = rgb[0].min(rgb[1]).min(rgb[2]);

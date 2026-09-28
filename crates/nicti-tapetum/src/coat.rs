@@ -93,8 +93,12 @@ pub struct HslParams {
 }
 
 impl HslParams {
-    /// True when every band is a no-op -- lets a caller skip the HSL pass entirely rather than
-    /// paying for an identity transform.
+    /// True when every band is a no-op. Unlike [`SharpenParams::is_noop`]/
+    /// [`NoiseReductionParams::is_noop`] (which gate a real fast path in
+    /// `stages::LiveSuffixKernel::encode`), nothing currently calls this to skip work -- HSL is
+    /// fused into the same per-pixel dispatch every other live stage shares, so there's no
+    /// separate pass to skip. Kept as a public predicate for a future caller (e.g. a "this panel
+    /// has edits" UI indicator).
     pub fn is_noop(&self) -> bool {
         self.bands
             .iter()

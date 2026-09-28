@@ -190,16 +190,20 @@ impl eframe::App for PeltApp {
             });
         }
 
-        // The Develop panel and viewport both need this frame's render, so it's done once here
-        // (a live-only change costs 0 bake dispatches, so calling it once per UI frame is cheap)
-        // rather than the panel and viewport each re-rendering independently.
-        let develop_frame = if self.view == View::Develop {
+        // The Develop panel needs a render to show its histogram against (a live-only change
+        // costs 0 bake dispatches, so this is cheap). The panel itself then mutates `develop`'s
+        // document via its sliders -- so the viewport paint below re-renders *after* the panel,
+        // not from this same texture, or a slider drag would visibly lag its own edit by one UI
+        // frame (the histogram itself still reflects the pre-edit state at this point in the
+        // frame; a real re-render for it too would need restructuring the panel to render at its
+        // own end instead of its own start, not worth it for a histogram bar's one-frame lag).
+        let panel_frame = if self.view == View::Develop {
             self.develop.as_mut().map(|d| d.render())
         } else {
             None
         };
 
-        if let (View::Develop, Some(frame)) = (self.view, &develop_frame) {
+        if let (View::Develop, Some(frame)) = (self.view, &panel_frame) {
             egui::Panel::right("develop_panel")
                 .min_size(280.0)
                 .show(ui, |ui| {
@@ -209,6 +213,12 @@ impl eframe::App for PeltApp {
                 });
         }
 
+        let viewport_frame = if self.view == View::Develop {
+            self.develop.as_mut().map(|d| d.render())
+        } else {
+            None
+        };
+
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.show_library(ui),
             View::Loupe => {
@@ -217,7 +227,7 @@ impl eframe::App for PeltApp {
             }
             View::Develop => {
                 ui.heading("Develop");
-                if let Some(frame) = develop_frame {
+                if let Some(frame) = viewport_frame {
                     let available = ui.available_size();
                     let (rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
