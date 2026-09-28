@@ -19,6 +19,8 @@ use nicti_pounce::telemetry::{default_load_source, default_vram_source, Telemetr
 use nicti_pounce::{JobKind, JobState, Pounce};
 use nicti_tapetum::gpu::GpuContext;
 
+use nicti_shed::state::Channel as UpdateChannel;
+
 use crate::render::DevelopView;
 use crate::update::UpdateChecker;
 use crate::viewport::{ViewportCallback, ViewportResources};
@@ -308,13 +310,42 @@ impl eframe::App for PeltApp {
                     {
                         self.update.spawn_check(&self.version, true);
                     }
+
+                    // #282: switching channel here re-checks immediately (`force: true`) rather
+                    // than waiting for the next 24h auto-check, so picking Edge surfaces whatever
+                    // edge build is currently out right away instead of looking like a no-op.
+                    //
+                    // Disabled (not just guarded after the fact) while a check/apply is in
+                    // flight: `channel` below is a fresh local copy re-read from
+                    // `self.update.channel()` every frame, so a click accepted mid-check would
+                    // only render for that one frame before silently snapping back once
+                    // `self.update.channel()` is re-read next frame -- an adversarial review
+                    // caught this landing as a picked value with no visible effect and no error.
+                    // `add_enabled_ui` stops the click from ever registering in the first place,
+                    // matching the "Check for updates" button's own disabled state above.
+                    let mut channel = self.update.channel();
+                    let busy = self.update.is_checking() || self.update.is_applying();
+                    ui.add_enabled_ui(!busy, |ui| {
+                        egui::ComboBox::from_id_salt("update_channel")
+                            .selected_text(match channel {
+                                UpdateChannel::Stable => "Stable",
+                                UpdateChannel::Edge => "Edge",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut channel, UpdateChannel::Stable, "Stable");
+                                ui.selectable_value(&mut channel, UpdateChannel::Edge, "Edge");
+                            });
+                    });
+                    if !busy && channel != self.update.channel() {
+                        self.update.set_channel(channel, &self.version);
+                    }
                 });
             });
         });
 
         crate::activity::show(ui, &self.pounce, &self.telemetry, &mut self.bottleneck);
 
-        if let Some(new_version) = self.update.available_version().cloned() {
+        if let Some(new_version) = self.update.available_label() {
             egui::Panel::top("update_banner").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("Nicti {new_version} is available."));

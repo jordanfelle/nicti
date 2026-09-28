@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
+build = "build.rs"
 description = "The in-app updater (#249): checks GitHub Releases for a newer nicti version, minisign-verifies the downloaded installer against a compiled-in public key, and re-runs it silently (/S /UPDATE) -- never runs an unverified binary. Named after a cat shedding its old coat. Version-compare/asset-pick/minisign-verify logic is cross-platform and unit-tested on every CI platform; the actual network check + download + re-exec path is cfg(windows)-only, matching Nicti's Windows-only v1 target (ADR-0015)."
 
 [dependencies]

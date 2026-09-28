@@ -4,6 +4,7 @@
 //! not pulling in a per-platform-paths dependency until a second location is actually needed.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -12,12 +13,32 @@ use crate::ShedError;
 
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
+/// Makes each `save` call's temp filename unique on top of the process id -- the id alone isn't
+/// enough for two same-process calls racing outside `nicti-pelt`'s own `STATE_WRITE_LOCK` (this
+/// function is public; nothing stops a future caller from invoking it without that lock), where
+/// both could otherwise write through the same temp path and one `rename` could either publish
+/// the other call's bytes or fail outright (CodeRabbit review, PR #283).
+static NEXT_SAVE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Which release `nicti-shed` checks against -- see `check::RELEASES_LATEST_URL`/
+/// `check::EDGE_RELEASE_URL`. Defaults to `Stable` on any state file that predates this field
+/// (`#[serde(default)]` on `UpdateState::channel`), so an existing install never silently opts
+/// itself into unsigned, unreviewed edge builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Channel {
+    #[default]
+    Stable,
+    Edge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateState {
     #[serde(default = "default_true")]
     pub auto_check: bool,
     #[serde(default)]
     pub last_check_unix: Option<u64>,
+    #[serde(default)]
+    pub channel: Channel,
 }
 
 fn default_true() -> bool {
@@ -29,6 +50,7 @@ impl Default for UpdateState {
         Self {
             auto_check: true,
             last_check_unix: None,
+            channel: Channel::default(),
         }
     }
 }
@@ -58,12 +80,25 @@ pub fn load(path: &Path) -> UpdateState {
         .unwrap_or_default()
 }
 
+/// Writes `state` to `path` by writing a temp file in the same directory then renaming it over
+/// the destination -- a plain `fs::write` truncates the destination in place first, so a reader
+/// (or a crash mid-write) could observe a partially-written file; `state::load` treats that as
+/// unparseable and silently resets to defaults, losing every saved preference. A same-directory
+/// rename is atomic on both Windows (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, what Rust's
+/// `fs::rename` uses there) and POSIX, so a reader only ever sees the old complete file or the
+/// new complete file, never a partial one. The temp filename embeds this process's PID so two
+/// processes racing a save (there's no cross-process lock, only the in-process
+/// `nicti-pelt::update::STATE_WRITE_LOCK`) can't collide on the same temp path. (CodeRabbit
+/// review, PR #283.)
 pub fn save(path: &Path, state: &UpdateState) -> Result<(), ShedError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(ShedError::Io)?;
     }
     let json = serde_json::to_string_pretty(state).map_err(|e| ShedError::Parse(e.to_string()))?;
-    std::fs::write(path, json).map_err(ShedError::Io)
+    let save_id = NEXT_SAVE_ID.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{}-{save_id}", std::process::id()));
+    std::fs::write(&tmp_path, json).map_err(ShedError::Io)?;
+    std::fs::rename(&tmp_path, path).map_err(ShedError::Io)
 }
 
 pub fn now_unix() -> u64 {
@@ -114,8 +149,15 @@ mod tests {
         let state = UpdateState {
             auto_check: false,
             last_check_unix: None,
+            channel: Channel::default(),
         };
         assert!(!state.should_check_now(1_000_000));
+    }
+
+    #[test]
+    fn state_predating_channel_field_defaults_to_stable() {
+        let state: UpdateState = serde_json::from_str(r#"{"auto_check":true}"#).unwrap();
+        assert_eq!(state.channel, Channel::Stable);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use semver::Version;
 
-use crate::check::{self, LatestRelease};
+use crate::check::{self, EdgeRelease, LatestRelease, ReleaseAsset};
 use crate::verify;
 use crate::{ShedError, PUBLIC_KEY_BASE64, RELEASES_LATEST_URL};
 
@@ -39,6 +39,19 @@ pub fn check_for_update(current: &Version) -> Result<Option<LatestRelease>, Shed
     }
 }
 
+/// Checks the `edge` release (see `check::EDGE_RELEASE_URL`) against this binary's own build
+/// commit ([`crate::BUILD_COMMIT_SHA`]). Returns `Ok(None)` when already on the current edge
+/// build -- that's the expected common case, not an error.
+pub fn check_for_edge_update() -> Result<Option<EdgeRelease>, ShedError> {
+    let body = get_string(check::EDGE_RELEASE_URL)?;
+    let release = check::parse_edge_release(&body)?;
+    if check::edge_update_available(crate::BUILD_COMMIT_SHA, &release.commit_sha) {
+        Ok(Some(release))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Downloads the installer and its minisig sidecar, verifies the installer against
 /// [`PUBLIC_KEY_BASE64`], and -- only once verification succeeds -- spawns it with `/S /UPDATE`
 /// and exits this process. An installer that fails verification is deleted, never executed, and
@@ -46,14 +59,27 @@ pub fn check_for_update(current: &Version) -> Result<Option<LatestRelease>, Shed
 /// than silently retrying (a persistently failing verification is a signal something's wrong,
 /// not a transient condition to paper over).
 pub fn download_and_apply(release: &LatestRelease) -> Result<(), ShedError> {
-    let installer_bytes = get_bytes(&release.installer.download_url)?;
-    let signature_text = get_string(&release.minisig.download_url)?;
+    download_verify_and_launch(&release.installer, &release.minisig)
+}
+
+/// The edge-channel counterpart of [`download_and_apply`] -- same verify-then-launch path, just
+/// over an [`EdgeRelease`]'s assets instead of a [`LatestRelease`]'s.
+pub fn download_and_apply_edge(release: &EdgeRelease) -> Result<(), ShedError> {
+    download_verify_and_launch(&release.installer, &release.minisig)
+}
+
+fn download_verify_and_launch(
+    installer: &ReleaseAsset,
+    minisig: &ReleaseAsset,
+) -> Result<(), ShedError> {
+    let installer_bytes = get_bytes(&installer.download_url)?;
+    let signature_text = get_string(&minisig.download_url)?;
 
     verify::verify_installer(PUBLIC_KEY_BASE64, &installer_bytes, &signature_text)?;
 
     let dir = std::env::temp_dir().join("nicti-update");
     std::fs::create_dir_all(&dir).map_err(ShedError::Io)?;
-    let installer_path = dir.join(&release.installer.name);
+    let installer_path = dir.join(&installer.name);
     std::fs::write(&installer_path, &installer_bytes).map_err(ShedError::Io)?;
 
     // nicti.nsi's own /UPDATE handling waits for a running nicti.exe to exit before overwriting
