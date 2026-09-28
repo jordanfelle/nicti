@@ -367,19 +367,10 @@ jobs:
           gh release view edge --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && release_exists=1
 
           if [[ "$release_exists" == "1" ]]; then
-            # `--target` here isn't just cosmetic: `nicti-shed`'s Edge-channel update check (#282)
-            # reads this release's `target_commitish` as the edge build's identity. Without
-            # `--target`, `gh release edit` only ever updates title/notes/prerelease -- the
-            # underlying tag ref moves every push (the `git/refs/tags/edge` PATCH above), but
-            # `target_commitish` stays frozen at whatever the release's original `gh release
-            # create --target` set, forever, even though the assets underneath it keep changing.
-            # Confirmed by direct testing against the live release (#284): editing without
-            # `--target` left it stale; adding it updated it immediately.
             gh release edit edge --repo "${GITHUB_REPOSITORY}" \
               --title "Nicti edge (${GITHUB_SHA:0:7})" \
               --notes "$notes" \
-              --prerelease \
-              --target "${GITHUB_SHA}"
+              --prerelease
 
             # Upload under temporary names first, then swap (CodeRabbit review, PR #268):
             # `gh release upload --clobber` deletes an existing same-named asset before
@@ -441,6 +432,18 @@ jobs:
                 gh release delete-asset edge "$existing" --repo "${GITHUB_REPOSITORY}" --yes
               fi
             done
+
+            # `--target` is deliberately deferred to here, after the upload, every swap, and the
+            # stale-asset cleanup above have all already succeeded (CodeRabbit review, PR #285) --
+            # not folded into the `gh release edit` at the top of this branch. `target_commitish`
+            # is what `nicti-shed`'s Edge-channel check (#282) reads as "which commit is this
+            # build," so advertising the new SHA before its assets are actually fully in place
+            # would let a client see a build identity whose installer doesn't match yet -- exactly
+            # the kind of half-published state a failed swap (#284) already produced once for
+            # real. `set -euo pipefail` means this line is simply never reached if anything above
+            # failed, so a failure run correctly leaves `target_commitish` at the last *fully*
+            # published commit instead of the one that failed partway through.
+            gh release edit edge --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}"
           else
             gh release create edge \
               --repo "${GITHUB_REPOSITORY}" \
