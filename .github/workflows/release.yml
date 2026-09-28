@@ -28,10 +28,23 @@ concurrency:
   # serialize main-push edge publishers, not race them. Two overlapping runs could otherwise both
   # pass the "is main still at my SHA" guard before either had moved the `edge` tag, then
   # interleave their tag-move/upload calls -- with cancel-in-progress off, a later push's run
-  # simply queues behind the current one instead of running concurrently with it, so by the time
-  # it starts, any earlier run has already fully finished (published or cleanly skipped as
-  # stale). Tag-push (stable release) runs already never shared a group with anything else (each
-  # tag is its own `github.ref`), so this doesn't change their behavior at all.
+  # queues behind the current one instead of running concurrently with it, so by the time it
+  # starts, any earlier run has already fully finished (published or cleanly skipped as stale).
+  # Tag-push (stable release) runs already never shared a group with anything else (each tag is
+  # its own `github.ref`), so this doesn't change their behavior at all.
+  #
+  # KNOWN LIMIT (a second CodeRabbit pass, same PR): a GitHub Actions concurrency group only
+  # ever holds one running run plus one *pending* run -- it is not an unbounded FIFO queue. If a
+  # third push to main lands while one run is already executing and a second is already queued,
+  # that third push's own pending run is what gets replaced (the second push's dedicated edge
+  # build is simply never run, not delayed). In practice this only drops that intermediate
+  # push's own edge publish, not correctness of the channel itself: whichever run does end up
+  # executing always builds from its own actual `HEAD`, so `edge` still converges on the true
+  # tip of main once the burst settles -- it just isn't guaranteed to have published a distinct
+  # build for every single individual merge if several land within one build's runtime. A real
+  # fix (an external queue/self-hosted runner that retains every push) is a meaningfully bigger
+  # change than this ticket's scope and isn't justified for how infrequently main sees multiple
+  # merges within a single ~10-15 minute Windows build window on this repo today.
   cancel-in-progress: false
 
 permissions:
@@ -311,9 +324,20 @@ jobs:
               --notes "$notes" \
               --prerelease
 
+            # Upload this run's replacement assets FIRST (CodeRabbit review, PR #268): deleting
+            # a prior version's stale-named assets before the upload would reopen the same
+            # availability gap the original delete-then-recreate design had -- if the upload
+            # then failed, `edge` would be left with no working installer at all until the next
+            # successful run. `--clobber` overwrites this run's own filenames in place either
+            # way, so upload-then-clean is strictly safer with no downside.
+            gh release upload edge --repo "${GITHUB_REPOSITORY}" --clobber \
+              packaging/windows/Nicti-Setup-*.exe \
+              packaging/windows/Nicti-Setup-*.exe.minisig \
+              packaging/windows/Nicti-Setup-*.exe.sha256
+
             # Finding 4: remove any asset left over from a prior version bump (a differently
-            # named exe/.minisig/.sha256 that --clobber below won't touch) before uploading this
-            # run's files -- `edge` should only ever carry exactly one version's installer.
+            # named exe/.minisig/.sha256 that --clobber above won't touch) -- `edge` should only
+            # ever carry exactly one version's installer.
             current_names="packaging/windows/Nicti-Setup-*.exe packaging/windows/Nicti-Setup-*.exe.minisig packaging/windows/Nicti-Setup-*.exe.sha256"
             for existing in $(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'); do
               keep=0
@@ -324,11 +348,6 @@ jobs:
                 gh release delete-asset edge "$existing" --repo "${GITHUB_REPOSITORY}" --yes
               fi
             done
-
-            gh release upload edge --repo "${GITHUB_REPOSITORY}" --clobber \
-              packaging/windows/Nicti-Setup-*.exe \
-              packaging/windows/Nicti-Setup-*.exe.minisig \
-              packaging/windows/Nicti-Setup-*.exe.sha256
           else
             gh release create edge \
               --repo "${GITHUB_REPOSITORY}" \

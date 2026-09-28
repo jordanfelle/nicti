@@ -45,13 +45,17 @@ Full reasoning/history: `docs/decisions/release.md`.
   auto-installed over a stable install. No separate `develop` branch: `main` only ever advances
   via a reviewed, CI-passing PR merge already, so it's already the "always good, frequently
   updated" branch a `develop` branch would otherwise exist for. **The `edge` release/tag is
-  force-moved and reused, never deleted** (CodeRabbit review, PR #268, caught a delete-then-
-  recreate approach's real availability gap and stale-tag risk; two follow-up review passes on
-  that rewrite found three more — stale-asset accumulation across version bumps, a wrong
-  plural/singular tag-ref GET endpoint, and a concurrent-run race that a second stale-check alone
-  only narrowed rather than closed, fixed by serializing main-push runs via `cancel-in-progress:
-  false` in the workflow's concurrency group instead) — see the step's own comment in
-  `release.yml` for the full list and how each is handled.
+  force-moved and reused, never deleted** (three rounds of CodeRabbit review on PR #268 — see
+  the workflow's own comments for the full list: a delete-then-recreate approach's availability
+  gap and stale-tag risk, stale-asset accumulation across version bumps, a wrong plural/singular
+  tag-ref GET endpoint, a concurrent-run race fixed by serializing main-push runs via
+  `cancel-in-progress: false`, and an upload-before-delete asset-cleanup ordering fix).
+  **Known limit**: a GitHub Actions concurrency group holds one running + one pending run, not
+  an unbounded queue — a third push landing while two are already in flight drops that middle
+  push's own dedicated edge build (the channel still converges on the true tip of main once the
+  burst settles; it just isn't guaranteed to publish one distinct build per individual merge
+  under a rapid burst). Accepted rather than building a real external queue, given how
+  infrequently this repo sees multiple main merges within one ~10-15 minute Windows build.
 - See `docs/releasing.md` for the actual cut-a-release runbook and the one-time minisign
   key-generation steps.
 
