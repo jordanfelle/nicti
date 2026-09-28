@@ -3,6 +3,7 @@ paths:
   - "spikes/pupil/**"
   - "bench/lrc/auto-tone.ahk"
   - "docs/adr/0099-classic-auto-tone.md"
+  - "crates/nicti-tapetum/src/perk.rs"
 ---
 
 # Develop (Auto-Tone) — Quick Reference
@@ -31,6 +32,13 @@ Full reasoning/history: `docs/decisions/develop.md`.
 - **The real LRC capture AND the sample-set selection are both deferred to #202** — `ref-10k`
   isn't reachable from the sandbox this ADR was authored in, so `bench/lrc/auto-tone.ahk` takes
   its source directory as a CLI arg rather than reading a frozen file list.
+- **#46 shipped Auto with candidate A, provisionally** — `crates/nicti-tapetum/src/perk.rs` ports
+  `pupil::heuristic::estimate` onto `crate::histogram::Histogram` (production code, not a spike),
+  wired to `nicti-pelt`'s Develop panel Auto button. This is a deliberate choice to unblock #46's
+  Auto button on a research ticket with no fixed completion date, not a claim that ADR-0099's
+  decision rule is resolved -- it isn't; #202 still owns picking the final candidate. If #202
+  picks B instead, only `perk::estimate`'s body changes (same `Histogram` in, same
+  `ExposureParams`/`ToneParams` out).
 
 ## Package contents
 

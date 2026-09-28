@@ -75,7 +75,11 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell: `lib.rs` (`run`, the
   `WgpuSetup::CreateNew` device-descriptor wiring), `app.rs` (`PeltApp`, view routing), `render.rs`
   (`DevelopView` — wires a synthetic gradient `LinearFrame` through the real Tapetum pipeline;
-  a real NEF is #31's job), `viewport.rs` (`ViewportResources`/`ViewportCallback`, the
+  a real NEF is #31's job; #46: now owns a real in-memory `nicti_pawprint::EditDocument` +
+  `StageRegistry`, `histogram`/`apply_auto_tone` methods, `show_before` toggle), `develop_panel.rs`
+  (#46: the Develop view's right-side edit panel — Basic/Tone Curve/HSL/Detail sections, live
+  histogram, Auto + before/after buttons; see `render-graph`'s own "#46 completion" bullet),
+  `viewport.rs` (`ViewportResources`/`ViewportCallback`, the
   `egui_wgpu::CallbackTrait` display pass) and `catalog.rs` (opens a `nicti-lair` `SqliteCatalog`).
   Supersedes `spikes/pelt-egui` as the real, non-throwaway crate ADR-0068 points to.
 - **`spikes/groom`** (#50/ADR-0050) — healing/removal research: CPU clone-stamp/Poisson-heal +

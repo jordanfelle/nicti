@@ -115,12 +115,76 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   applies as a green-gain multiplier in the as-shot path (no chromaticity to shift without an
   explicit temp) but as a perpendicular xy shift in the temp-override path -- two different
   approximations, both documented, not accidentally inconsistent.
+- **#46 completion (remaining slices, all in one PR)**: adds four more live stages --
+  `TONE_CURVE`/`HSL`/`SHARPEN`/`NOISE_REDUCTION` -- plus a live histogram, before/after compare,
+  and a provisional Auto-tone button.
+  - **Tone Curve + HSL** fuse into the same per-pixel `live_suffix.wgsl` dispatch every other live
+    stage already shares. `color::build_tone_curve_lut` builds a 256-entry monotone-cubic (PCHIP)
+    LUT from the 4 region sliders (fixed split points at x=0.25/0.75, per `ToneCurveParams`'s own
+    doc comment), uploaded as `array<vec4<f32>, 64>` in `LiveUniforms` (WGSL's uniform-address
+    -space array rules force the vec4 packing -- same reason `LiveUniforms` was already vec4-only).
+    `color::apply_hsl` is HSV-based, not canonical HSL (`l=(max+min)/2` breaks for this crate's
+    unbounded-above-1.0 linear working-space values) -- 8 bands, each a raised-cosine (Hann) hue
+    -weight window (`hsl_band_weight`, +/-45 degrees around a 45-degree-spaced center), hue/sat
+    adjusted in HSV space, luminance shifted separately in `apply_tone`'s own cube-root perceptual
+    space.
+  - **Sharpening/Noise Reduction are a second, separate multi-pass path** inside the *same*
+    `LiveExec::encode` call (`stages.rs::LiveSuffixKernel::encode`) -- unlike every other live
+    stage, a blur needs neighboring pixels, so it can't fuse into the per-pixel shader.
+    `DecodeExec` already sets the "one `encode` call, several internal compute passes" precedent
+    for a baked node; ADR-0044's "one fused live dispatch" invariant is about the render graph's
+    own dispatch *count*, not about internal pass count. Fast path: when both `SharpenParams`/
+    `NoiseReductionParams` are at their default (`is_noop()`), `encode` runs the original single
+    per-pixel dispatch straight to `output` -- today's exact pre-#46 cost, paid only when a Detail
+    -panel edit is actually active. Otherwise: per-pixel -> `stage_a`, then `detail_blur.wgsl` (one
+    shared separable-Gaussian pipeline, `direction` uniform picks horizontal/vertical) runs twice
+    per sigma (NR's fixed `NR_BASE_SIGMA` and Sharpen's own `radius_px`, both scaled by a new
+    `LiveParams::pixel_scale` -- render extent / source extent, so a screen-res preview and a
+    full-res export sharpen the same image *content*), then `detail_combine.wgsl` implements
+    `detail::apply_detail_rgb`'s luma/chroma split (NR-luminance and Sharpen both operate on luma
+    only via `detail::apply_detail`'s single-channel formula, avoiding color fringing;
+    NR-color is a separate ungated chroma-only lerp toward its own blurred chroma).
+    **Gotcha, real**: each of the 4 blur dispatches (H/V x NR/Sharpen sigma) needs its own
+    dedicated uniform buffer, never a shared one written+rewritten between dispatches --
+    `gpu.queue.write_buffer` calls all land before the *whole render's* one `queue.submit`
+    (not per-dispatch), so two dispatches recorded in the same encoder sharing one buffer would
+    both end up reading only the *last* write at execution time, not a snapshot each. Kernel
+    intermediate textures (`stage_a` and each blur's H/V output) are freshly allocated per
+    `encode` call (`FrameTexture::new`, no pooling) -- this only runs on an already-live
+    -recomputed frame, not a hot bake-tier path, so the allocation cost is fine.
+  - **Histogram**: `histogram.rs`'s `Histogram`/`from_display_pixels` bins a display-encoded
+    (`geometry::output_encode`) RGBA buffer into 256 R/G/B/luma buckets, with nearest-rank
+    percentile/mean/fraction-below/fraction-above matching `spikes/pupil::histogram`'s own
+    semantics. `nicti-pelt`'s `DevelopView::histogram` computes it via a plain CPU `read_frame`
+    readback -- ADR-0016's "never a full-frame host<->device round-trip in the hot path" concern
+    is about a real full-res photo; this view still renders a small synthetic frame (#31 hasn't
+    landed a real NEF yet), so the readback cost here is trivial. A throttled/GPU histogram is a
+    follow-up once #31 replaces the synthetic frame with a real one.
+  - **Auto tone (provisional)**: `perk.rs::estimate` ports `spikes/pupil::heuristic`'s candidate A
+    (percentile heuristic) onto `histogram::Histogram`, outputting `ExposureParams`/`ToneParams`
+    directly (normalized to `coat.rs`'s -1.0..=1.0 convention). Explicitly provisional pending
+    #202's reference-machine run picking a final candidate (ADR-0099); swapping to candidate B
+    only changes `perk::estimate`'s own body. `spikes/pupil` is untouched -- still #202's own
+    measurement tool, not depended on here (spikes stay self-contained).
+  - **Before/after**: `DevelopView::show_before` renders with an empty `EditDocument`, reusing
+    `apply_document`'s existing "no entry -> stage's own default" fallback for the whole document
+    at once, rather than a second code path.
+  - **UI**: `nicti-pelt`'s `develop_panel.rs` is new -- Basic/Tone Curve/HSL/Detail sections, a
+    painted histogram, Auto and before/after buttons, double-click-to-reset per slider. `render.rs`'s
+    `DevelopView` now owns a real in-memory `nicti_pawprint::EditDocument` (catalog persistence is
+    #31's scope, once a real asset exists to persist against) and a `StageRegistry` covering every
+    stage id `build_graph` adds.
 
 ## Package contents
 
 - **`crates/nicti-tapetum`** (#45, landed) — `coat.rs` (#46: typed `WbParams`/`ExposureParams`/
-  `ToneParams`/`VibranceParams`, `#[serde(default)]` so a missing/unrecognized field always parses
-  to something sane — see this file's own "#46 slice 1/5" bullet above), `graph.rs` (the stage DAG,
+  `ToneParams`/`ToneCurveParams`/`VibranceParams`/`HslParams`/`SharpenParams`/
+  `NoiseReductionParams`, `#[serde(default)]` so a missing/unrecognized field always parses
+  to something sane — see this file's own "#46 slice 1/5"/"#46 completion" bullets above),
+  `detail.rs` (#46: `gaussian_kernel`/`gaussian_blur`/`apply_detail`/`apply_detail_rgb` — the CPU
+  reference the GPU Sharpen/NR multi-pass proves itself against), `histogram.rs` (#46: the live
+  -histogram bin counter), `perk.rs` (#46: the provisional Auto-tone port of `pupil::heuristic`),
+  `graph.rs` (the stage DAG,
   `RenderGraph`/`StageNode`/`StageKind`, promoted from `spikes/loaf/src/graph.rs`, now deleted, with
   a persistent memoized cache key and the `set_own_hash` update API the spike lacked, plus #46's
   `apply_document` — the "wire an `EditDocument`'s params into the graph's own_hash" step that

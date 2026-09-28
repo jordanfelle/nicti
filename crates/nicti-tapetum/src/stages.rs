@@ -18,8 +18,12 @@ use nicti_cornea::LinearFrame;
 use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
-use crate::coat::{self, ExposureParams, ToneParams, VibranceParams, WbParams};
+use crate::coat::{
+    self, ExposureParams, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
+    ToneParams, VibranceParams, WbParams,
+};
 use crate::color;
+use crate::detail::{self, MAX_BLUR_RADIUS};
 use crate::frame::FrameTexture;
 use crate::geometry::Affine2D;
 use crate::gpu::{make_compute_pipeline, GpuContext};
@@ -36,7 +40,11 @@ pub const WB: &str = "nicti.wb";
 pub const EXPOSURE: &str = "nicti.exposure";
 pub const WORKING_SPACE: &str = "nicti.working_space";
 pub const TONE: &str = "nicti.tone";
+pub const TONE_CURVE: &str = "nicti.tone_curve";
 pub const VIBRANCE: &str = "nicti.vibrance";
+pub const HSL: &str = "nicti.hsl";
+pub const SHARPEN: &str = "nicti.sharpen";
+pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
 pub const CROP: &str = "nicti.crop";
 
 /// A `RenderStage` whose identity/kind/defaults are all fixed at construction -- every stage id
@@ -135,11 +143,39 @@ pub fn tone_stage() -> BasicStage {
         default_params: || coat::default_value::<ToneParams>(),
     }
 }
+pub fn tone_curve_stage() -> BasicStage {
+    BasicStage {
+        id: TONE_CURVE,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<ToneCurveParams>(),
+    }
+}
 pub fn vibrance_stage() -> BasicStage {
     BasicStage {
         id: VIBRANCE,
         kind: StageKind::Live,
         default_params: || coat::default_value::<VibranceParams>(),
+    }
+}
+pub fn hsl_stage() -> BasicStage {
+    BasicStage {
+        id: HSL,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<HslParams>(),
+    }
+}
+pub fn sharpen_stage() -> BasicStage {
+    BasicStage {
+        id: SHARPEN,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<SharpenParams>(),
+    }
+}
+pub fn noise_reduction_stage() -> BasicStage {
+    BasicStage {
+        id: NOISE_REDUCTION,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<NoiseReductionParams>(),
     }
 }
 pub fn crop_stage() -> BasicStage {
@@ -362,6 +398,10 @@ impl BakedExec for PassthroughExec {
 // Live suffix (fused Live dispatch): WB + camera->working-space + exposure + tone + vibrance.
 // ---------------------------------------------------------------------------------------------
 
+const CURVE_LUT_GROUPS: usize = 64; // 256 entries, 4 per vec4.
+const HSL_BAND_COUNT: usize = 8;
+const BLUR_WEIGHT_GROUPS: usize = 9; // (2*MAX_BLUR_RADIUS+1)=35 taps, 4 per vec4, 9 groups.
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct LiveUniforms {
@@ -372,22 +412,149 @@ struct LiveUniforms {
     tone0: [f32; 4],
     /// whites, blacks, vibrance, _pad.
     tone1: [f32; 4],
+    /// #46's Tone Curve LUT (`color::build_tone_curve_lut`), 256 entries packed 4-per-vec4.
+    curve_lut: [[f32; 4]; CURVE_LUT_GROUPS],
+    /// #46's 8-band HSL panel, one vec4 (hue, saturation, luminance, unused) per band.
+    hsl_bands: [[f32; 4]; HSL_BAND_COUNT],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct BlurUniforms {
+    /// x: 0 = horizontal, 1 = vertical. yzw unused.
+    direction: [u32; 4],
+    weights: [[f32; 4]; BLUR_WEIGHT_GROUPS],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct CombineUniforms {
+    /// luminance, color, detail, unused.
+    nr: [f32; 4],
+    /// amount, unused, detail, unused.
+    sharpen: [f32; 4],
 }
 
 /// The live suffix's full per-render parameter set -- everything [`LiveSuffixKernel::set_params`]
-/// needs to write its uniform buffer. Grouped into one struct (rather than a growing list of
+/// needs to write its uniform buffers. Grouped into one struct (rather than a growing list of
 /// positional args) now that #46 adds several more fields beyond the original exposure/contrast/
 /// vibrance trio.
 pub struct LiveParams {
     pub working_space_matrix: color::Mat3,
     pub exposure: ExposureParams,
     pub tone: ToneParams,
+    pub tone_curve: ToneCurveParams,
     pub vibrance: VibranceParams,
+    pub hsl: HslParams,
+    pub sharpen: SharpenParams,
+    pub noise_reduction: NoiseReductionParams,
+    /// Render extent's long edge divided by the source frame's own long edge -- lets Sharpening/
+    /// Noise Reduction's blur radii scale with actual output resolution (a screen-res preview and
+    /// a full-res export should sharpen the same image *content*, not the same pixel count). `1.0`
+    /// for a native-extent render.
+    pub pixel_scale: f32,
 }
 
+impl Default for LiveParams {
+    fn default() -> Self {
+        Self {
+            working_space_matrix: color::mat3_identity(),
+            exposure: ExposureParams::default(),
+            tone: ToneParams::default(),
+            tone_curve: ToneCurveParams::default(),
+            vibrance: VibranceParams::default(),
+            hsl: HslParams::default(),
+            sharpen: SharpenParams::default(),
+            noise_reduction: NoiseReductionParams::default(),
+            pixel_scale: 1.0,
+        }
+    }
+}
+
+fn pack_lut(lut: &[f32; 256]) -> [[f32; 4]; CURVE_LUT_GROUPS] {
+    std::array::from_fn(|g| {
+        let base = g * 4;
+        [lut[base], lut[base + 1], lut[base + 2], lut[base + 3]]
+    })
+}
+
+fn pack_hsl(hsl: &HslParams) -> [[f32; 4]; HSL_BAND_COUNT] {
+    std::array::from_fn(|i| {
+        let band = hsl.bands[i];
+        [band.hue, band.saturation, band.luminance, 0.0]
+    })
+}
+
+fn pack_blur_weights(kernel: [f32; 2 * MAX_BLUR_RADIUS + 1]) -> [[f32; 4]; BLUR_WEIGHT_GROUPS] {
+    // BLUR_WEIGHT_GROUPS*4 (36) is one slot wider than the kernel's own 35 taps -- the trailing
+    // slot stays zero, matching `detail_blur.wgsl`'s own fixed `RADIUS`-driven loop bound (which
+    // only ever reads the first 35).
+    let mut out = [[0.0f32; 4]; BLUR_WEIGHT_GROUPS];
+    for (i, &w) in kernel.iter().enumerate() {
+        out[i / 4][i % 4] = w;
+    }
+    out
+}
+
+/// Per-render state [`LiveSuffixKernel::encode`] needs but that isn't part of the main per-pixel
+/// uniform buffer -- mirrors `CropKernel`'s own `transform: Mutex<Affine2D>` pattern for the same
+/// reason: `encode` only has `&self` (the `LiveExec` trait's signature), and the numeric NR/
+/// sharpen values decide both which code path to take (the fast single-dispatch path when both
+/// are a no-op) and what blur radii to build, not just what to write into a uniform buffer.
+#[derive(Debug, Clone, Copy)]
+struct DetailState {
+    sharpen: SharpenParams,
+    noise_reduction: NoiseReductionParams,
+    pixel_scale: f32,
+}
+
+impl Default for DetailState {
+    fn default() -> Self {
+        Self {
+            sharpen: SharpenParams::default(),
+            noise_reduction: NoiseReductionParams::default(),
+            pixel_scale: 1.0,
+        }
+    }
+}
+
+/// Fixed blur sigma (in native pixels, before `pixel_scale`) for Noise Reduction's own reference
+/// blur -- LRC's Luminance/Color Noise Reduction sliders don't expose a separate radius control,
+/// unlike Sharpening's `radius_px`, so this is a single v1 constant rather than a slider-driven
+/// value.
+const NR_BASE_SIGMA: f32 = 2.0;
+
+/// Fuses #46's Tone Curve + HSL into the same per-pixel dispatch every other live stage already
+/// shares (`live_suffix.wgsl`), and adds a second, separate multi-pass path for Sharpening/Noise
+/// Reduction (`detail_blur.wgsl` + `detail_combine.wgsl`) -- unlike every other live stage, those
+/// two need neighboring pixels, not just this pixel's own value, so they can't be folded into the
+/// same per-pixel shader. `LiveExec::encode` is still called exactly once per render either way
+/// (ADR-0044's "one fused live dispatch" invariant is about dispatch *count* from the render
+/// graph's point of view, not about how many compute passes one `encode` call may itself record --
+/// `DecodeExec` already sets this precedent for a baked node), and when both Sharpening and Noise
+/// Reduction are at their default (no-op) values, `encode` takes a single-pass fast path identical
+/// to this stage's pre-#46 cost -- the common case (an unedited or Detail-panel-untouched image)
+/// pays nothing extra.
 pub struct LiveSuffixKernel {
     pipeline: wgpu::ComputePipeline,
     uniform_buf: wgpu::Buffer,
+    blur_pipeline: wgpu::ComputePipeline,
+    combine_pipeline: wgpu::ComputePipeline,
+    nr_h_buf: wgpu::Buffer,
+    nr_v_buf: wgpu::Buffer,
+    sharpen_h_buf: wgpu::Buffer,
+    sharpen_v_buf: wgpu::Buffer,
+    combine_buf: wgpu::Buffer,
+    detail_state: std::sync::Mutex<DetailState>,
+}
+
+fn make_uniform_buffer(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
+    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 impl LiveSuffixKernel {
@@ -397,15 +564,37 @@ impl LiveSuffixKernel {
             include_str!("../shaders/live_suffix.wgsl"),
             "main",
         );
-        let uniform_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("live_suffix uniforms"),
-            size: std::mem::size_of::<LiveUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let blur_pipeline = make_compute_pipeline(
+            &gpu.device,
+            include_str!("../shaders/detail_blur.wgsl"),
+            "main",
+        );
+        let combine_pipeline = make_compute_pipeline(
+            &gpu.device,
+            include_str!("../shaders/detail_combine.wgsl"),
+            "main",
+        );
+        let uniform_buf = make_uniform_buffer(
+            gpu,
+            "live_suffix uniforms",
+            std::mem::size_of::<LiveUniforms>() as u64,
+        );
+        let blur_size = std::mem::size_of::<BlurUniforms>() as u64;
         Self {
             pipeline,
             uniform_buf,
+            blur_pipeline,
+            combine_pipeline,
+            nr_h_buf: make_uniform_buffer(gpu, "detail_blur nr h", blur_size),
+            nr_v_buf: make_uniform_buffer(gpu, "detail_blur nr v", blur_size),
+            sharpen_h_buf: make_uniform_buffer(gpu, "detail_blur sharpen h", blur_size),
+            sharpen_v_buf: make_uniform_buffer(gpu, "detail_blur sharpen v", blur_size),
+            combine_buf: make_uniform_buffer(
+                gpu,
+                "detail_combine uniforms",
+                std::mem::size_of::<CombineUniforms>() as u64,
+            ),
+            detail_state: std::sync::Mutex::new(DetailState::default()),
         }
     }
 
@@ -414,6 +603,7 @@ impl LiveSuffixKernel {
     pub fn set_params(&self, gpu: &GpuContext, params: &LiveParams) {
         let m = params.working_space_matrix;
         let exposure_mult = color::exposure_multiplier(params.exposure.stops);
+        let lut = color::build_tone_curve_lut(&params.tone_curve);
         let u = LiveUniforms {
             col0: [m[0][0], m[1][0], m[2][0], 0.0],
             col1: [m[0][1], m[1][1], m[2][1], 0.0],
@@ -430,14 +620,20 @@ impl LiveSuffixKernel {
                 params.vibrance.amount,
                 0.0,
             ],
+            curve_lut: pack_lut(&lut),
+            hsl_bands: pack_hsl(&params.hsl),
         };
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
-    }
-}
 
-impl LiveExec for LiveSuffixKernel {
-    fn encode(
+        *self.detail_state.lock().unwrap() = DetailState {
+            sharpen: params.sharpen,
+            noise_reduction: params.noise_reduction,
+            pixel_scale: params.pixel_scale,
+        };
+    }
+
+    fn dispatch_pointwise(
         &self,
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
@@ -474,6 +670,194 @@ impl LiveExec for LiveSuffixKernel {
             output.extent.height.div_ceil(8),
             1,
         );
+    }
+
+    /// One direction (horizontal or vertical) of a separable blur -- `call.buf` is one of this
+    /// kernel's own dedicated blur uniform buffers (never shared between two distinct blur
+    /// invocations recorded in the same `encode` call: `gpu.queue.write_buffer` writes all land
+    /// before the encoder's own commands ever execute, so two dispatches sharing one buffer would
+    /// both see only the *last* write, not a snapshot each -- see this kernel's own struct doc
+    /// comment).
+    fn dispatch_blur(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &FrameTexture,
+        output: &FrameTexture,
+        call: BlurCall<'_>,
+    ) {
+        gpu.queue
+            .write_buffer(call.buf, 0, bytemuck::bytes_of(&call.uniforms));
+
+        let bind_group_layout = self.blur_pipeline.get_bind_group_layout(0);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("detail_blur bind group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&input.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: call.buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("detail_blur"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.blur_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            output.extent.width.div_ceil(8),
+            output.extent.height.div_ceil(8),
+            1,
+        );
+    }
+
+    /// Runs both blur directions for one sigma, allocating fresh intermediate textures --
+    /// intermediates never need pooling here (unlike a hot-path bake tier) since this only runs
+    /// on an already-live-recomputed frame, at most a handful of times per user interaction.
+    fn run_blur(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &FrameTexture,
+        sigma: f32,
+        h_buf: &wgpu::Buffer,
+        v_buf: &wgpu::Buffer,
+    ) -> FrameTexture {
+        let extent = src.extent;
+        let weights = pack_blur_weights(detail::gaussian_kernel(sigma));
+        let horizontal = FrameTexture::new(gpu, extent);
+        self.dispatch_blur(
+            gpu,
+            encoder,
+            src,
+            &horizontal,
+            BlurCall {
+                uniforms: BlurUniforms {
+                    direction: [0, 0, 0, 0],
+                    weights,
+                },
+                buf: h_buf,
+            },
+        );
+        let vertical = FrameTexture::new(gpu, extent);
+        self.dispatch_blur(
+            gpu,
+            encoder,
+            &horizontal,
+            &vertical,
+            BlurCall {
+                uniforms: BlurUniforms {
+                    direction: [1, 0, 0, 0],
+                    weights,
+                },
+                buf: v_buf,
+            },
+        );
+        vertical
+    }
+}
+
+/// Bundles a blur dispatch's uniform contents with the dedicated buffer to write them into --
+/// see [`LiveSuffixKernel::dispatch_blur`]'s own doc comment for why the buffer must be one of
+/// this kernel's own per-invocation buffers, never shared.
+struct BlurCall<'a> {
+    uniforms: BlurUniforms,
+    buf: &'a wgpu::Buffer,
+}
+
+impl LiveExec for LiveSuffixKernel {
+    fn encode(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &FrameTexture,
+        output: &FrameTexture,
+    ) {
+        let detail = *self.detail_state.lock().unwrap();
+        if detail.sharpen.is_noop() && detail.noise_reduction.is_noop() {
+            self.dispatch_pointwise(gpu, encoder, input, output);
+            return;
+        }
+
+        let extent = output.extent;
+        let stage_a = FrameTexture::new(gpu, extent);
+        self.dispatch_pointwise(gpu, encoder, input, &stage_a);
+
+        let nr_sigma = (NR_BASE_SIGMA * detail.pixel_scale).max(0.05);
+        let sharpen_sigma = (detail.sharpen.radius_px * detail.pixel_scale).max(0.05);
+        let nr_blurred = self.run_blur(
+            gpu,
+            encoder,
+            &stage_a,
+            nr_sigma,
+            &self.nr_h_buf,
+            &self.nr_v_buf,
+        );
+        let sharpen_blurred = self.run_blur(
+            gpu,
+            encoder,
+            &stage_a,
+            sharpen_sigma,
+            &self.sharpen_h_buf,
+            &self.sharpen_v_buf,
+        );
+
+        let cu = CombineUniforms {
+            nr: [
+                detail.noise_reduction.luminance,
+                detail.noise_reduction.color,
+                detail.noise_reduction.detail,
+                0.0,
+            ],
+            sharpen: [detail.sharpen.amount, 0.0, detail.sharpen.detail, 0.0],
+        };
+        gpu.queue
+            .write_buffer(&self.combine_buf, 0, bytemuck::bytes_of(&cu));
+
+        let bind_group_layout = self.combine_pipeline.get_bind_group_layout(0);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("detail_combine bind group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&stage_a.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&nr_blurred.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&sharpen_blurred.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&output.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.combine_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("detail_combine"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.combine_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(extent.width.div_ceil(8), extent.height.div_ceil(8), 1);
     }
 }
 
@@ -621,7 +1005,11 @@ mod tests {
             EXPOSURE,
             WORKING_SPACE,
             TONE,
+            TONE_CURVE,
             VIBRANCE,
+            HSL,
+            SHARPEN,
+            NOISE_REDUCTION,
             CROP,
         ] {
             assert!(id.starts_with("nicti."), "{id} must be namespaced");
@@ -643,7 +1031,11 @@ mod tests {
         assert_eq!(exposure_stage().kind(), StageKind::Live);
         assert_eq!(working_space_stage().kind(), StageKind::Live);
         assert_eq!(tone_stage().kind(), StageKind::Live);
+        assert_eq!(tone_curve_stage().kind(), StageKind::Live);
         assert_eq!(vibrance_stage().kind(), StageKind::Live);
+        assert_eq!(hsl_stage().kind(), StageKind::Live);
+        assert_eq!(sharpen_stage().kind(), StageKind::Live);
+        assert_eq!(noise_reduction_stage().kind(), StageKind::Live);
     }
 
     #[test]
@@ -902,7 +1294,25 @@ mod tests {
             blacks: -0.05,
         };
         let vibrance = VibranceParams { amount: 0.4 };
+        let tone_curve = ToneCurveParams {
+            shadows: 0.2,
+            darks: -0.1,
+            lights: 0.15,
+            highlights: -0.05,
+        };
+        let mut hsl = HslParams::default();
+        hsl.bands[0] = crate::coat::HslBand {
+            hue: 0.3,
+            saturation: -0.4,
+            luminance: 0.2,
+        };
+        hsl.bands[4] = crate::coat::HslBand {
+            hue: -0.2,
+            saturation: 0.3,
+            luminance: -0.1,
+        };
         let exposure_mult = color::exposure_multiplier(exposure.stops);
+        let lut = color::build_tone_curve_lut(&tone_curve);
 
         let kernel = LiveSuffixKernel::new(&gpu);
         kernel.set_params(
@@ -911,7 +1321,10 @@ mod tests {
                 working_space_matrix: matrix,
                 exposure,
                 tone,
+                tone_curve,
                 vibrance,
+                hsl,
+                ..Default::default()
             },
         );
         let mut encoder = gpu
@@ -925,7 +1338,9 @@ mod tests {
             let mut rgb = color::mat3_apply(matrix, [px[0], px[1], px[2]]);
             rgb = rgb.map(|c| c * exposure_mult);
             rgb = color::apply_tone(rgb, &tone);
+            rgb = color::apply_tone_curve(rgb, &lut);
             rgb = color::apply_vibrance(rgb, vibrance.amount);
+            rgb = color::apply_hsl(rgb, &hsl);
             for c in 0..3 {
                 assert!(
                     (actual[i][c] - rgb[c]).abs() < 0.01,
@@ -1013,7 +1428,17 @@ mod tests {
                 .unwrap();
             prev = Some(id);
         }
-        let live_ids = [WB, WORKING_SPACE, EXPOSURE, TONE, VIBRANCE];
+        let live_ids = [
+            WB,
+            WORKING_SPACE,
+            EXPOSURE,
+            TONE,
+            TONE_CURVE,
+            VIBRANCE,
+            HSL,
+            SHARPEN,
+            NOISE_REDUCTION,
+        ];
         for id in live_ids {
             graph
                 .add_node(crate::graph::StageNode {
@@ -1060,14 +1485,36 @@ mod tests {
             ..Default::default()
         };
         let vibrance = VibranceParams { amount: 0.3 };
+        let tone_curve = ToneCurveParams {
+            shadows: 0.1,
+            ..Default::default()
+        };
+        let mut hsl = HslParams::default();
+        hsl.bands[0].saturation = 0.2;
+        let sharpen = SharpenParams {
+            amount: 0.5,
+            radius_px: 1.0,
+            detail: 0.5,
+        };
+        let noise_reduction = NoiseReductionParams {
+            luminance: 0.4,
+            color: 0.3,
+            detail: 0.5,
+        };
         let exposure_mult = color::exposure_multiplier(exposure.stops);
+        let lut = color::build_tone_curve_lut(&tone_curve);
         live_kernel.set_params(
             &gpu,
             &LiveParams {
                 working_space_matrix: matrix,
                 exposure,
                 tone,
+                tone_curve,
                 vibrance,
+                hsl,
+                sharpen,
+                noise_reduction,
+                pixel_scale: 1.0,
             },
         );
 
@@ -1092,14 +1539,48 @@ mod tests {
 
         let actual = crate::test_util::read_frame(&gpu, &output);
         let decoded = normalize_cpu_reference(&frame);
-        for (i, d) in decoded.iter().enumerate() {
-            let mut rgb = color::mat3_apply(matrix, [d[0], d[1], d[2]]);
-            rgb = rgb.map(|c| c * exposure_mult);
-            rgb = color::apply_tone(rgb, &tone);
-            rgb = color::apply_vibrance(rgb, vibrance.amount);
+        let point_wise: Vec<[f32; 3]> = decoded
+            .iter()
+            .map(|d| {
+                let mut rgb = color::mat3_apply(matrix, [d[0], d[1], d[2]]);
+                rgb = rgb.map(|c| c * exposure_mult);
+                rgb = color::apply_tone(rgb, &tone);
+                rgb = color::apply_tone_curve(rgb, &lut);
+                rgb = color::apply_vibrance(rgb, vibrance.amount);
+                rgb = color::apply_hsl(rgb, &hsl);
+                rgb
+            })
+            .collect();
+
+        // Detail (Sharpen/NR) needs neighboring pixels -- build the same blur-per-channel-plane
+        // + combine pipeline `LiveSuffixKernel::encode`'s multi-pass path runs on the GPU,
+        // against the point-wise result above, over the whole (tiny, 2x2) frame.
+        let detail_extent = crate::detail::Extent2D {
+            width: extent.width as usize,
+            height: extent.height as usize,
+        };
+        let planes: [Vec<f32>; 3] =
+            std::array::from_fn(|c| point_wise.iter().map(|p| p[c]).collect());
+        let nr_blurred_planes = planes
+            .clone()
+            .map(|p| crate::detail::gaussian_blur(&p, detail_extent, 2.0));
+        let sharpen_blurred_planes = planes
+            .clone()
+            .map(|p| crate::detail::gaussian_blur(&p, detail_extent, sharpen.radius_px));
+
+        for (i, original) in point_wise.iter().enumerate() {
+            let blurred_nr = std::array::from_fn(|c| nr_blurred_planes[c][i]);
+            let blurred_sharpen = std::array::from_fn(|c| sharpen_blurred_planes[c][i]);
+            let rgb = crate::detail::apply_detail_rgb(
+                *original,
+                blurred_nr,
+                blurred_sharpen,
+                &noise_reduction,
+                &sharpen,
+            );
             for c in 0..3 {
                 assert!(
-                    (actual[i][c] - rgb[c]).abs() < 0.02,
+                    (actual[i][c] - rgb[c]).abs() < 0.03,
                     "pixel {i} channel {c}: gpu={} expected={}",
                     actual[i][c],
                     rgb[c]

@@ -57,6 +57,9 @@ pub struct PeltApp {
     catalog_path: PathBuf,
     catalog: CatalogOpenState,
     develop: Option<DevelopView>,
+    /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
+    /// part of any edit document.
+    hsl_band_selected: usize,
     pounce: Pounce,
     telemetry: TelemetrySampler,
     import_path_input: String,
@@ -114,6 +117,7 @@ impl PeltApp {
             catalog_path,
             catalog,
             develop: Some(develop),
+            hsl_band_selected: 0,
             pounce,
             telemetry,
             import_path_input: String::new(),
@@ -186,13 +190,42 @@ impl eframe::App for PeltApp {
             });
         }
 
+        // The Develop panel and viewport both need this frame's render, so it's done once here
+        // (a live-only change costs 0 bake dispatches, so calling it once per UI frame is cheap)
+        // rather than the panel and viewport each re-rendering independently.
+        let develop_frame = if self.view == View::Develop {
+            self.develop.as_mut().map(|d| d.render())
+        } else {
+            None
+        };
+
+        if let (View::Develop, Some(frame)) = (self.view, &develop_frame) {
+            egui::Panel::right("develop_panel")
+                .min_size(280.0)
+                .show(ui, |ui| {
+                    if let Some(develop) = self.develop.as_mut() {
+                        crate::develop_panel::show(ui, develop, frame, &mut self.hsl_band_selected);
+                    }
+                });
+        }
+
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.show_library(ui),
             View::Loupe => {
                 ui.heading("Loupe");
                 ui.label("Prefetch + instant zoom lands in #31.");
             }
-            View::Develop => self.show_develop(ui),
+            View::Develop => {
+                ui.heading("Develop");
+                if let Some(frame) = develop_frame {
+                    let available = ui.available_size();
+                    let (rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
+                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                        rect,
+                        ViewportCallback { frame },
+                    ));
+                }
+            }
         });
     }
 }
@@ -265,21 +298,6 @@ impl PeltApp {
                 self.pounce.submit(Box::new(job));
             }
         }
-    }
-
-    fn show_develop(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Develop");
-        let Some(develop) = self.develop.as_mut() else {
-            return;
-        };
-        let frame = develop.render();
-
-        let available = ui.available_size();
-        let (rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
-            ViewportCallback { frame },
-        ));
     }
 }
 
