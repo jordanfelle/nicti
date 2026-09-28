@@ -70,6 +70,13 @@ pub struct PeltApp {
     /// The most recently submitted `BackupJob`'s result slot, polled once per `poll_backup` tick
     /// until it reports -- then folded into `last_backup_summary` and dropped.
     pending_backup_result: Option<ReportSlot<BackupReport>>,
+    /// The catalog's own change counter at the moment the pending job was submitted -- fed into
+    /// `NineLives::record_ran` only once that job's report actually resolves as `Verified` (never
+    /// on submission itself, and never on a failed/skipped outcome). See `poll_backup`'s own doc
+    /// comment for why: an adversarial review caught that recording it eagerly at submit time,
+    /// regardless of outcome, would leave a failure permanently silent and could suppress every
+    /// later scheduled attempt until the catalog happened to change again.
+    pending_backup_changes: Option<u64>,
     last_backup_summary: Option<String>,
 }
 
@@ -141,6 +148,7 @@ impl PeltApp {
             nine_lives,
             last_backup_poll: None,
             pending_backup_result: None,
+            pending_backup_changes: None,
             last_backup_summary: None,
         }
     }
@@ -152,11 +160,30 @@ impl PeltApp {
     /// `last_backup_summary` once it's ready, and skips submitting a new one while one is still
     /// running or queued (checked via `Pounce::snapshot`, not local state, since that's the same
     /// source of truth the activity panel itself reads).
+    ///
+    /// `NineLives::record_ran` is called only once a pending job's report resolves as
+    /// `BackupOutcome::Verified`, never at submission time and never on any other outcome. An
+    /// adversarial review caught that the original version called it eagerly, right after
+    /// `submit`, regardless of what the job later did -- combined with `BackupJob::step` itself
+    /// (before its own fix) never resolving its `ReportSlot` at all on a genuine error, a single
+    /// transient I/O failure would silently and permanently suppress every later scheduled backup
+    /// until the catalog happened to change again. `BackupJob` now always resolves its slot (see
+    /// its own doc comment), and this method now only ever advances the "last backup" baseline on
+    /// an actual success -- a failure leaves the baseline where it was, so `NineLives::due` keeps
+    /// retrying on the very next poll rather than waiting for unrelated further edits.
     fn poll_backup(&mut self) {
         if let Some(result) = self.pending_backup_result.clone() {
             if let Some(report) = result.lock().unwrap().take() {
+                if matches!(report.outcome, BackupOutcome::Verified(_)) {
+                    if let (Some(nine_lives), Some(changes)) =
+                        (self.nine_lives.as_mut(), self.pending_backup_changes)
+                    {
+                        nine_lives.record_ran(changes);
+                    }
+                }
                 self.last_backup_summary = Some(summarize_backup(&report));
                 self.pending_backup_result = None;
+                self.pending_backup_changes = None;
             }
         }
 
@@ -196,10 +223,10 @@ impl PeltApp {
             return;
         }
 
-        nine_lives.record_ran(changes);
         let (job, result) = BackupJob::new(store.clone(), nine_lives.policy().clone(), now_unix);
         self.pounce.submit(Box::new(job));
         self.pending_backup_result = Some(result);
+        self.pending_backup_changes = Some(changes);
     }
 }
 
@@ -222,6 +249,9 @@ fn summarize_backup(report: &BackupReport) -> String {
         }
         BackupOutcome::VerifyFailed(msg) => {
             format!("Backup failed verification and was discarded: {msg}")
+        }
+        BackupOutcome::Failed(msg) => {
+            format!("Backup failed: {msg}")
         }
     }
 }

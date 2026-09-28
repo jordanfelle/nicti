@@ -179,8 +179,11 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   mechanism. Snapshots from a second, independent read-only connection
   (`SqliteCatalog::open_snapshot_reader`) rather than the shared `Mutex<Connection>` every other
   catalog query goes through, so the ~2s vacuum at 2M rows (ADR-0067's own measured figure) never
-  blocks a real query — proven with a real concurrent-writer-thread test, not just asserted from
-  WAL mode's documented semantics. Every snapshot lands at a `.partial` path first, gets a full
+  blocks a real query — exercised with a real, deliberately-paced concurrent-writer-thread test
+  (not just asserted from WAL mode's documented semantics), though that test's own doc comment is
+  honest that a small-scale timing comparison like this can't distinguish "correct" from
+  "accidentally reverted to the shared connection" the way it would at 2M rows; ADR-0067 is where
+  that scale's own timing was actually measured. Every snapshot lands at a `.partial` path first, gets a full
   `PRAGMA integrity_check` plus a `PRAGMA user_version` match against the live catalog, and only
   then gets renamed into its final name and fsynced; a copy that fails either check is deleted
   without touching any existing good backup. `PRAGMA quick_check` runs against the *live* catalog

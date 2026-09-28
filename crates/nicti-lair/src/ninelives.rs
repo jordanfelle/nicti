@@ -142,17 +142,24 @@ pub fn cleanup_stale_partials(policy: &BackupPolicy) -> Result<u64, CatalogError
     Ok(removed)
 }
 
-/// Picks a `.partial` target name that doesn't already exist, starting from `now_unix` and
-/// bumping by a second at a time on collision (two runs landing in the same wall-clock second --
-/// far rarer than `policy.interval_secs`, but cheap to guard against outright).
+/// Picks a `.partial` target name whose epoch collides with neither an existing `.partial` at
+/// that epoch nor an existing *final* `<stem>.<epoch>.sqlite` -- checking only the former was a
+/// real gap an adversarial review caught: a rerun landing on an epoch that already has a verified
+/// backup would still write and verify its `.partial` there without incident, then `rotate`'s
+/// `fs::rename` would silently overwrite that already-verified backup (`rename`/`MoveFileExW`
+/// both replace an existing destination with no error), destroying it with no record that it
+/// happened. Bumps by a second at a time on either collision -- far rarer than
+/// `policy.interval_secs` in real scheduled use, but reachable by a caller-chosen `now_unix`
+/// (tests, or a future manual "back up now" button ADR-0025 flags as intended future work).
 fn unique_partial_path(policy: &BackupPolicy, now_unix: i64) -> PathBuf {
     let mut epoch = now_unix;
     loop {
-        let candidate = policy
+        let partial = policy
             .dir
             .join(format!("{}.{epoch}.sqlite.partial", policy.stem));
-        if !candidate.exists() {
-            return candidate;
+        let final_name = policy.dir.join(format!("{}.{epoch}.sqlite", policy.stem));
+        if !partial.exists() && !final_name.exists() {
+            return partial;
         }
         epoch += 1;
     }
@@ -253,6 +260,14 @@ pub enum BackupOutcome {
     /// The written copy failed `verify` (integrity_check or a `user_version` mismatch) and was
     /// deleted -- every existing verified backup is untouched.
     VerifyFailed(String),
+    /// A step failed for a reason unrelated to the catalog's or the copy's own integrity (a disk
+    /// I/O error, a permission failure, a transient file lock) -- every existing verified backup
+    /// is untouched. `pounce_jobs::BackupJob` maps any such error to this variant rather than
+    /// letting its own `step()` return `Err`, specifically so the job always reaches `Done` and
+    /// its `ReportSlot` always resolves -- an adversarial review caught that a `step()` failure
+    /// used to leave the slot permanently unresolved and silently suppress every later scheduled
+    /// attempt (see `NineLives::due`'s and `pounce_jobs::BackupJob`'s own doc comments).
+    Failed(String),
 }
 
 /// The full outcome of one backup attempt, whether run via [`run_backup`] or step-by-step through
@@ -509,6 +524,53 @@ mod tests {
         // The backup is a real, independently-openable catalog with the seeded row in it.
         let reopened = SqliteCatalog::open(&path).unwrap();
         assert_eq!(reopened.asset_count().unwrap(), 0); // no assets, but this proves it opens
+    }
+
+    #[test]
+    fn unique_partial_path_skips_an_epoch_whose_final_name_already_exists() {
+        // An adversarial review caught this: the original version only checked for a colliding
+        // `.partial`, never the *final* name a same-epoch rerun would eventually `rotate` into --
+        // which would silently overwrite an already-verified backup via `fs::rename`.
+        let dir = tempfile::tempdir().unwrap();
+        let p = policy(dir.path());
+        std::fs::create_dir_all(&p.dir).unwrap();
+        std::fs::write(p.dir.join("cat.1000.sqlite"), b"already verified").unwrap();
+
+        let candidate = unique_partial_path(&p, 1_000);
+        assert_eq!(candidate, p.dir.join("cat.1001.sqlite.partial"));
+    }
+
+    #[test]
+    fn rerunning_snapshot_at_the_same_epoch_never_overwrites_the_earlier_verified_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_path = dir.path().join("test.catalog.sqlite");
+        let catalog = SqliteCatalog::open(&catalog_path).unwrap();
+        catalog.upsert_volume("vol", None, None, 1000).unwrap();
+
+        let policy = BackupPolicy::for_catalog(&catalog_path);
+        let first = run_backup(&catalog, &policy, 1_000).unwrap();
+        let BackupOutcome::Verified(first_path) = first.outcome else {
+            panic!("expected the first run to succeed, got {:?}", first.outcome);
+        };
+        let first_contents = std::fs::read(&first_path).unwrap();
+
+        // Same `now_unix` as the first run -- this used to overwrite `first_path` via `rotate`'s
+        // `fs::rename`.
+        let second = run_backup(&catalog, &policy, 1_000).unwrap();
+        let BackupOutcome::Verified(second_path) = second.outcome else {
+            panic!(
+                "expected the second run to succeed, got {:?}",
+                second.outcome
+            );
+        };
+
+        assert_ne!(first_path, second_path);
+        assert!(first_path.exists(), "the first run's backup must survive");
+        assert_eq!(
+            std::fs::read(&first_path).unwrap(),
+            first_contents,
+            "the first run's backup content must be untouched"
+        );
     }
 
     #[test]

@@ -29,11 +29,18 @@ is a spare one for the catalog):
 1. **Snapshot from a second, independent read-only connection**
    (`SqliteCatalog::open_snapshot_reader`), never the shared `Mutex<Connection>`. WAL mode lets a
    reader run alongside the writer, so the ~2s `VACUUM INTO` never blocks a real catalog query.
-   Proven, not just claimed: `tests/ninelives.rs::snapshot_never_blocks_a_concurrent_writer` runs a
-   background writer thread concurrently with a real snapshot. An in-memory catalog (tests only,
-   `SqliteCatalog::path()` is `None`) has no file to reopen, so it falls back to
-   `SqliteCatalog::vacuum_into_locked`, which does briefly hold the lock — acceptable there since
-   nothing else contends for an in-memory test catalog's connection.
+   Exercised, not just asserted from WAL's documented semantics:
+   `tests/ninelives.rs::snapshot_completes_without_waiting_for_a_slower_concurrent_writer` runs a
+   deliberately-paced background writer thread and confirms the snapshot returns well before the
+   writer's own bounded wall-clock pace finishes, with neither side erroring or deadlocking. That
+   test's own doc comment is explicit about its limit: at this small a row count, a snapshot
+   completes quickly regardless of which connection performs it, so this specific timing
+   comparison doesn't distinguish "correct" from "accidentally reverted to the shared connection"
+   the way it would at the 2M-row scale ADR-0067 actually measured (2.0s/2.5s p50/p95) — it's real
+   evidence, not a tautology, but not a substitute for a reference-hardware pass at that scale
+   either. An in-memory catalog (tests only, `SqliteCatalog::path()` is `None`) has no file to
+   reopen, so it falls back to `SqliteCatalog::vacuum_into_locked`, which does briefly hold the
+   lock — acceptable there since nothing else contends for an in-memory test catalog's connection.
 2. **Write-then-verify-then-rename.** A snapshot lands at `<stem>.<epoch>.sqlite.partial` first.
    `ninelives::verify` runs a full `PRAGMA integrity_check` on the copy (never the live catalog —
    see step 3) plus a `PRAGMA user_version` match against the live catalog. Only a copy that passes
@@ -76,6 +83,37 @@ is a spare one for the catalog):
    `chrono`/`time` crate exists anywhere in this workspace today, and adding one for filename
    cosmetics alone wasn't worth it.
 
+## Review findings
+
+An adversarial review (before this PR opened, per this repo's own standing practice) caught two
+real bugs, both fixed before merge:
+
+- **`NineLives::record_ran` was called eagerly at job-submission time, regardless of outcome, and
+  `BackupJob::step` returned `Err` on a genuine I/O failure** — `nicti_pounce::Pounce` marks a job
+  `JobState::Failed` on an `Err` return and never calls back into it, so its `ReportSlot` was left
+  permanently unresolved. Combined, a single transient failure (a disk error, a momentarily-locked
+  file) would silently and permanently suppress every later scheduled attempt, since the "last
+  backup" baseline had already advanced as if the attempt had succeeded. Fixed by (a) adding
+  `BackupOutcome::Failed(String)` and having `BackupJob::step` route every `ninelives` error
+  through `finish` instead of returning `Err`, so the job always reaches `Done` and its
+  `ReportSlot` always resolves, and (b) moving `NineLives::record_ran` to fire only once a
+  resolved report is actually `BackupOutcome::Verified` — a failure now leaves the "last backup"
+  baseline untouched, so `NineLives::due` retries on the very next poll rather than waiting for an
+  unrelated further catalog edit.
+- **`unique_partial_path` only checked for a colliding `.partial` name, never the *final*
+  `<stem>.<epoch>.sqlite` a same-epoch rerun would eventually `rotate` into** — `fs::rename`
+  silently overwrites an existing destination on both Unix and Windows, so two runs landing on the
+  same `now_unix` (unreachable through today's only production call site,
+  `nicti-pelt`'s 30s-interval poll, but directly reachable by any caller passing its own
+  `now_unix`, including tests and a future manual "back up now" button) would destroy an
+  already-verified backup with no record that it happened. Fixed by checking both names before
+  picking an epoch.
+
+The review also flagged, without treating as blocking: `SqliteCatalog::quick_check` holds the same
+shared connection mutex every other catalog query does for the duration of `PRAGMA quick_check` —
+consistent with every other read on this crate's `CatalogStore` trait (not a new architectural
+concern this ticket introduces), but not separately measured at 2M-row scale either.
+
 ## What this doesn't do
 
 - No UI for picking a different backup drive/location — `BackupPolicy::for_catalog`'s default
@@ -90,7 +128,10 @@ is a spare one for the catalog):
 
 Not reference-hardware-measured this pass (unlike several other ADRs in this repo) — ADR-0067
 already measured `VACUUM INTO`'s own timing (2.0/2.5s p50/p95 at 2M rows) as part of its engine
-comparison; this ticket's own tests instead prove the *concurrency* property that measurement
-didn't cover (a real writer thread never blocked during a real snapshot,
-`tests/ninelives.rs::snapshot_never_blocks_a_concurrent_writer`), plus correctness of verification,
-rotation, and scheduling — all fast, deterministic, no hardware dependency.
+comparison; this ticket's own tests instead exercise the *concurrency* property that measurement
+didn't cover (a real writer thread still making progress, and the snapshot itself returning
+without waiting for it,
+`tests/ninelives.rs::snapshot_completes_without_waiting_for_a_slower_concurrent_writer` — see its
+own doc comment for the honest limit of what a small-scale timing test like this can and can't
+distinguish), plus correctness of verification, rotation, and scheduling — all fast, deterministic,
+no hardware dependency.

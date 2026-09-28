@@ -260,6 +260,16 @@ impl ChunkedJob for BackupJob {
         self.progress
     }
 
+    /// Never returns `Err` -- any `CatalogError` from a `ninelives` step is caught and routed
+    /// through `finish(BackupOutcome::Failed(_))` instead, so this job always reaches `Done` and
+    /// its `ReportSlot` always resolves. An adversarial review caught that returning `Err` here
+    /// (this crate's other `ChunkedJob`s, `IngestJob`/`SyncJob`, do exactly that on their own
+    /// errors) would leave `nicti-pelt`'s `poll_backup` waiting on a `ReportSlot` that never
+    /// fills in, since `nicti_pounce::Pounce` marks a job `JobState::Failed` and drops it on an
+    /// `Err` return without ever calling back into the job itself -- silently and permanently
+    /// hiding every future scheduled backup's failure, not just this one's, since `NineLives`
+    /// only advances its own "last backup" bookkeeping from a *resolved* report (see
+    /// `NineLives::due`'s doc comment and `app.rs::poll_backup`).
     fn step(&mut self) -> Result<Step, JobError> {
         let phase = self
             .phase
@@ -267,14 +277,17 @@ impl ChunkedJob for BackupJob {
             .expect("BackupJob::step called again after it already reported Done");
         match phase {
             BackupPhase::QuickCheck => {
-                self.stale_partials_removed = ninelives::cleanup_stale_partials(&self.policy)
-                    .map_err(|e| JobError::new(e.to_string()))?;
-                if let Some(problem) = self
-                    .catalog
-                    .quick_check()
-                    .map_err(|e| JobError::new(e.to_string()))?
-                {
-                    return Ok(self.finish(BackupOutcome::LiveCorrupt(problem), 0));
+                let stale_partials_removed = match ninelives::cleanup_stale_partials(&self.policy) {
+                    Ok(n) => n,
+                    Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                };
+                self.stale_partials_removed = stale_partials_removed;
+                match self.catalog.quick_check() {
+                    Ok(Some(problem)) => {
+                        return Ok(self.finish(BackupOutcome::LiveCorrupt(problem), 0));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
                 }
                 self.progress = Progress {
                     done: 1,
@@ -285,8 +298,11 @@ impl ChunkedJob for BackupJob {
             }
 
             BackupPhase::Snapshot => {
-                let partial = ninelives::snapshot_into(&self.catalog, &self.policy, self.now_unix)
-                    .map_err(|e| JobError::new(e.to_string()))?;
+                let partial =
+                    match ninelives::snapshot_into(&self.catalog, &self.policy, self.now_unix) {
+                        Ok(partial) => partial,
+                        Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                    };
                 self.progress = Progress {
                     done: 2,
                     total: Some(4),
@@ -296,11 +312,16 @@ impl ChunkedJob for BackupJob {
             }
 
             BackupPhase::Verify { partial } => {
-                let problem = ninelives::verify(&self.catalog, &partial)
-                    .map_err(|e| JobError::new(e.to_string()))?;
-                if let Some(problem) = problem {
-                    let _ = std::fs::remove_file(&partial);
-                    return Ok(self.finish(BackupOutcome::VerifyFailed(problem), 0));
+                match ninelives::verify(&self.catalog, &partial) {
+                    Ok(None) => {}
+                    Ok(Some(problem)) => {
+                        let _ = std::fs::remove_file(&partial);
+                        return Ok(self.finish(BackupOutcome::VerifyFailed(problem), 0));
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&partial);
+                        return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0));
+                    }
                 }
                 self.progress = Progress {
                     done: 3,
@@ -311,8 +332,10 @@ impl ChunkedJob for BackupJob {
             }
 
             BackupPhase::Rotate { partial } => {
-                let (final_path, pruned) = ninelives::rotate(&self.policy, &partial)
-                    .map_err(|e| JobError::new(e.to_string()))?;
+                let (final_path, pruned) = match ninelives::rotate(&self.policy, &partial) {
+                    Ok(result) => result,
+                    Err(e) => return Ok(self.finish(BackupOutcome::Failed(e.to_string()), 0)),
+                };
                 self.progress = Progress {
                     done: 4,
                     total: Some(4),
