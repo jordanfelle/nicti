@@ -66,7 +66,19 @@ fn a_different_dylib_path_is_rejected_before_reaching_session_builder() {
     // identity, so this doesn't need two distinct real dylib builds. Not a contrived case: two
     // separate build systems/toolchains passing an absolute vs. a relative path to the same
     // installed runtime is a realistic way this could actually happen.
-    let relative_path = std::path::PathBuf::from(".").join(absolute_path);
+    //
+    // Built via string concatenation, not `PathBuf::join` -- `NICTI_TEST_ORT_DYLIB` is documented
+    // (see this file's own doc comment) to be set to an absolute path, and `Path::join` discards
+    // `self` entirely when the argument is itself absolute (std's own documented behavior), which
+    // would silently make `relative_path` byte-identical to `absolute_path` instead of a `./`
+    // -prefixed spelling of it.
+    let relative_path = std::path::PathBuf::from(format!("./{dylib_path}"));
+    assert_ne!(
+        absolute_path,
+        relative_path.as_path(),
+        "test setup bug: relative_path must actually be a different path string from \
+         absolute_path, or the assertion below would prove nothing"
+    );
 
     groom::ai::ensure_ort_environment(absolute_path)
         .expect("groom (first caller) commits the absolute path");
