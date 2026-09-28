@@ -397,14 +397,22 @@ jobs:
 
             gh release upload edge --repo "${GITHUB_REPOSITORY}" "${tmp_paths[@]}"
 
+            # `gh release view --json assets` surfaces gh's own GraphQL global node id under
+            # `.id` (e.g. "RA_kwDO..."), not the plain REST integer id the
+            # `/releases/assets/{id}` DELETE/PATCH endpoints below require -- every rename in
+            # this loop 404s on that id (#284, confirmed directly: it silently never came up in
+            # any prior run, since this branch's very first real execution -- the first push
+            # after a real `edge` release already existed -- was this same run). Read ids from
+            # `GET /repos/.../releases/tags/edge` instead, whose `assets[].id` is the real REST
+            # integer.
             for i in "${!final_names[@]}"; do
               final="${final_names[$i]}"
               tmp_name="$(basename "${tmp_paths[$i]}")"
-              existing_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$final\") | .id")
+              existing_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/edge" --jq ".assets[] | select(.name==\"$final\") | .id")
               if [[ -n "$existing_id" ]]; then
                 gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
               fi
-              tmp_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$tmp_name\") | .id")
+              tmp_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/edge" --jq ".assets[] | select(.name==\"$tmp_name\") | .id")
               gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${tmp_id}" -f name="$final" >/dev/null
             done
 
@@ -424,6 +432,18 @@ jobs:
                 gh release delete-asset edge "$existing" --repo "${GITHUB_REPOSITORY}" --yes
               fi
             done
+
+            # `--target` is deliberately deferred to here, after the upload, every swap, and the
+            # stale-asset cleanup above have all already succeeded (CodeRabbit review, PR #285) --
+            # not folded into the `gh release edit` at the top of this branch. `target_commitish`
+            # is what `nicti-shed`'s Edge-channel check (#282) reads as "which commit is this
+            # build," so advertising the new SHA before its assets are actually fully in place
+            # would let a client see a build identity whose installer doesn't match yet -- exactly
+            # the kind of half-published state a failed swap (#284) already produced once for
+            # real. `set -euo pipefail` means this line is simply never reached if anything above
+            # failed, so a failure run correctly leaves `target_commitish` at the last *fully*
+            # published commit instead of the one that failed partway through.
+            gh release edit edge --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}"
           else
             gh release create edge \
               --repo "${GITHUB_REPOSITORY}" \
