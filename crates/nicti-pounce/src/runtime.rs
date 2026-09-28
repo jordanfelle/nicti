@@ -231,12 +231,21 @@ impl Pounce {
         self.inner.set_status(status);
 
         let lane = self.inner.lane(spec.lane);
-        let cancel_token = lane.scheduler.lock().unwrap().submit(id, job);
-        self.inner
-            .cancel_tokens
-            .lock()
-            .unwrap()
-            .insert(id, cancel_token);
+        {
+            // Register the cancel token *before* releasing the lane lock -- once it's released,
+            // a worker can immediately take this job, run it to `Done` (a real one-chunk job
+            // can finish before this thread ever reaches the `insert` below), and call
+            // `finish_status`, which removes a token that isn't in the registry yet -- a no-op.
+            // `submit` then inserts it anyway, and nothing ever removes it again: a permanent
+            // leak for every fast job that hits this window (found by CodeRabbit's review).
+            let mut scheduler = lane.scheduler.lock().unwrap();
+            let cancel_token = scheduler.submit(id, job);
+            self.inner
+                .cancel_tokens
+                .lock()
+                .unwrap()
+                .insert(id, cancel_token);
+        }
         lane.notify();
         (self.inner.on_change)();
         id
@@ -421,8 +430,20 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
         };
 
         let id = taken.id;
-        {
+        let terminal = {
             let mut scheduler = lane_state.scheduler.lock().unwrap();
+            // Re-check cancellation now, under the same lock `finish` uses to decide whether to
+            // re-enqueue the job -- a cancellation landing in the window between this chunk's
+            // own check above and this point would otherwise leave `terminal` at `None` (so
+            // `Queued` gets written below) even though `finish` itself, reading the same live
+            // `CancelToken` a moment later, correctly drops the job without re-enqueuing it: the
+            // job would end up permanently stuck reporting `Queued`, with its `cancel_tokens`
+            // entry never removed either (found by CodeRabbit's review).
+            let terminal = if terminal.is_none() && taken.cancel.is_cancelled() {
+                Some(JobState::Cancelled)
+            } else {
+                terminal
+            };
             // A non-terminal (`Yielded`, not cancelled) status must be written *before*
             // `finish` re-enqueues the job, and while this same lock is still held -- once
             // `finish` returns, another CPU-lane worker (the GPU lane only ever has one) can
@@ -436,7 +457,8 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                 inner.update_state(id, JobState::Queued, progress);
             }
             scheduler.finish(taken, outcome);
-        }
+            terminal
+        };
 
         if let Some(state) = terminal {
             inner.finish_status(id, state, progress);
@@ -861,6 +883,59 @@ mod tests {
                         snapshot
                             .iter()
                             .any(|s| s.id == *id && s.state == JobState::Done)
+                    })
+                },
+                Duration::from_secs(2)
+            ));
+            pounce.shutdown();
+        }
+    }
+
+    #[test]
+    fn fast_single_chunk_jobs_never_leave_a_stuck_status_or_registry_leak() {
+        // Regression test for two more real races a CodeRabbit review caught, both about the
+        // window right after a job is handed off between two different locks/threads:
+        // 1. `submit` used to register a job's `CancelToken` in `cancel_tokens` *after* releasing
+        //    the lane lock -- a worker could take a fast (single-chunk) job, run it to `Done`,
+        //    and call `finish_status` (which removes the registry entry) all before `submit`'s
+        //    own `insert` ever ran, leaking that entry forever once `insert` finally executed.
+        // 2. A cancellation landing between this chunk's own `is_cancelled()` check and the
+        //    `scheduler.finish` call a moment later left `terminal` stuck at `None` (so `Queued`
+        //    was written) even though `finish` itself, re-reading the same live token, correctly
+        //    dropped the job without re-enqueuing it.
+        // Neither is deterministically reproducible without hooks into those exact windows, so
+        // this stress-submits many single-chunk jobs (the shape most likely to hit window 1) and
+        // cancels half of them immediately after submit (most likely to hit window 2) across
+        // several runs, asserting every job reaches a real terminal state -- never stuck at
+        // `Queued` forever.
+        for _ in 0..20 {
+            let pounce = Pounce::new(u64::MAX, 4, 4, || {});
+            let ids: Vec<JobId> = (0..30)
+                .map(|i| {
+                    let id = pounce.submit(Box::new(StepJob {
+                        spec: cpu_spec(),
+                        label: "fast".into(),
+                        remaining: 1,
+                        on_step: None,
+                    }));
+                    if i % 2 == 0 {
+                        pounce.cancel(id);
+                    }
+                    id
+                })
+                .collect();
+
+            assert!(wait_until(
+                || {
+                    let snapshot = pounce.snapshot();
+                    ids.iter().all(|id| {
+                        snapshot.iter().any(|s| {
+                            s.id == *id
+                                && matches!(
+                                    s.state,
+                                    JobState::Done | JobState::Cancelled | JobState::Failed(_)
+                                )
+                        })
                     })
                 },
                 Duration::from_secs(2)
