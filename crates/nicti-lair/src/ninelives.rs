@@ -195,9 +195,14 @@ fn retry_on_transient_access_denied<T>(
 }
 
 /// The `rusqlite`-flavored twin of [`retry_on_transient_access_denied`] -- `verify`'s own
-/// `Connection::open_with_flags` on a just-written `.partial` hits the identical Windows
-/// antivirus-scan race, but surfaces it as a `rusqlite::Error` (an underlying SQLite `SQLITE_IOERR`
-/// wrapping the same OS error), not a bare `std::io::Error`.
+/// `Connection::open_with_flags` on a just-written `.partial` can hit the identical Windows
+/// antivirus-scan race, surfaced as a `rusqlite::Error` rather than a bare `std::io::Error`.
+/// Matches on the typed `ErrorCode` (`PermissionDenied`, or `CannotOpen` -- SQLite's Windows VFS
+/// maps a `CreateFile` failure while opening a database file to `SQLITE_CANTOPEN`, not always
+/// `SQLITE_IOERR`/`PermissionDenied`), never on the error's rendered message text: an adversarial
+/// review of this fix caught that a string-`contains` check on "Access is denied" would be both
+/// locale-dependent and, if SQLite's actual message text turned out not to include that exact
+/// substring, silently never retry at all -- this typed check has neither problem.
 fn retry_rusqlite_open_on_transient_access_denied(
     mut f: impl FnMut() -> rusqlite::Result<Connection>,
 ) -> rusqlite::Result<Connection> {
@@ -207,8 +212,13 @@ fn retry_rusqlite_open_on_transient_access_denied(
     for _ in 0..MAX_ATTEMPTS {
         match f() {
             Ok(conn) => return Ok(conn),
-            Err(e) if e.to_string().contains("Access is denied") => {
-                last_err = Some(e);
+            Err(rusqlite::Error::SqliteFailure(ffi_err, msg))
+                if matches!(
+                    ffi_err.code,
+                    rusqlite::ErrorCode::PermissionDenied | rusqlite::ErrorCode::CannotOpen
+                ) =>
+            {
+                last_err = Some(rusqlite::Error::SqliteFailure(ffi_err, msg));
                 std::thread::sleep(DELAY);
             }
             Err(e) => return Err(e),
@@ -586,15 +596,25 @@ mod tests {
 
         // The backup is a real, independently-openable catalog with the seeded row in it.
         // Reopening a file this soon after `rotate` renamed it into place can hit the same
-        // transient Windows antivirus-scan race `retry_on_transient_access_denied` documents (this
-        // test's own reopen isn't inside that helper's coverage, since `SqliteCatalog::open`
-        // returns `CatalogError`, not a bare `io::Error`) -- retried here rather than in library
-        // code, since no real production caller reopens a backup file this immediately today.
+        // transient Windows antivirus-scan race `retry_rusqlite_open_on_transient_access_denied`
+        // documents (this test's own reopen isn't inside that helper's coverage, since
+        // `SqliteCatalog::open` returns `CatalogError`, not a bare `rusqlite::Result`) -- retried
+        // here rather than in library code, since no real production caller reopens a backup file
+        // this immediately today. Scoped to the same typed `ErrorCode` shape as the production
+        // helpers, not "any `CatalogError`" -- an adversarial review caught that retrying on
+        // literally any error here would mask a genuine regression (corruption, a real logic bug)
+        // behind ~500ms of pointless retries instead of failing on the very first attempt.
         let mut attempts_left = 20;
         let reopened = loop {
             match SqliteCatalog::open(&path) {
                 Ok(catalog) => break catalog,
-                Err(_) if attempts_left > 1 => {
+                Err(CatalogError::Sqlite(rusqlite::Error::SqliteFailure(ref ffi_err, _)))
+                    if attempts_left > 1
+                        && matches!(
+                            ffi_err.code,
+                            rusqlite::ErrorCode::PermissionDenied | rusqlite::ErrorCode::CannotOpen
+                        ) =>
+                {
                     attempts_left -= 1;
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }

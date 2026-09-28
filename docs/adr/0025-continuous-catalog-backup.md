@@ -125,7 +125,16 @@ every genuine production call site that reopens a file it just wrote (`snapshot_
 `verify`'s open of the `.partial`, `rotate`'s rename) — cheap insurance on a background-job-only
 code path, not a real cost. Two of this ticket's own new tests reopen a freshly-rotated backup file
 for their own assertions (mimicking a hypothetical future "restore" caller) and needed the same
-retry to stop being Windows-flaky themselves.
+retry to stop being Windows-flaky themselves. A follow-up focused review of this fix itself (run
+before pushing, per this repo's own adversarial-review rule) caught that the `rusqlite`-flavored
+retry originally matched on the error's rendered message text (`.to_string().contains("Access is
+denied")`) — locale-dependent, and silently a no-op if SQLite's actual Windows message text turned
+out not to contain that exact substring. Fixed to match on the typed `rusqlite::ErrorCode`
+(`PermissionDenied` or `CannotOpen` — SQLite's Windows VFS doesn't consistently map a `CreateFile`
+failure to one specific code) instead, and the same review caught the test-side retry (for
+`SqliteCatalog::open`, which doesn't go through either retry helper directly) was scoped to "any
+`CatalogError` at all," which would have silently masked a genuine regression behind ~500ms of
+pointless retries instead of failing fast — narrowed to the identical typed-`ErrorCode` shape.
 
 ## What this doesn't do
 
