@@ -378,13 +378,26 @@ impl DevelopView {
         self.set_stage_params(TONE, &tone);
     }
 
+    /// Whether `document` holds any real edit at all -- what a caller (the Loupe view, #31 phase
+    /// 3) checks before calling [`Self::load_real_frame`], so switching to a different photo in
+    /// Loupe doesn't silently discard an unsaved edit session open on the Develop tab for
+    /// whatever's currently loaded. Catalog persistence of edits is a separate, still-open
+    /// follow-up (see this file's own module doc comment) -- this only guards against *losing*
+    /// an in-memory edit to an unrelated navigation action, not against it never being saved at
+    /// all.
+    pub fn has_edits(&self) -> bool {
+        !self.document.stages.is_empty()
+    }
+
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
     /// resetting `document` to a fresh default -- edits aren't persisted across a navigation
     /// change yet (catalog persistence of edits is a documented follow-up, not this ticket's
     /// scope, per this file's own module doc comment) -- and updating the `DECODE` stage's
     /// `own_hash` to `identity` so Tapetum's baked-output cache doesn't collide between different
     /// real photos at the same pixel extent. `identity` is the caller's job to compute
-    /// (`crate::loupe::asset_cache_key`) -- this crate stays decoupled from `nicti-lair`.
+    /// (`crate::loupe::asset_cache_key`) -- this crate stays decoupled from `nicti-lair`. Callers
+    /// should check [`Self::has_edits`] first if silently discarding an active edit session would
+    /// be a surprise (the Loupe view does -- see its own caller-side guard).
     pub fn load_real_frame(&mut self, frame: Arc<LinearFrame>, identity: blake3::Hash) {
         self.extent = Extent {
             width: frame.width,
@@ -459,5 +472,35 @@ impl DevelopView {
         let mut crop: CropParams = self.stage_params(CROP);
         crop.set_rotation(delta);
         self.set_stage_params(CROP, &crop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nicti_tapetum::gpu::{GpuContext, GpuPreference};
+
+    /// Regression test for a real data-loss bug caught in this ticket's own adversarial review:
+    /// an earlier version of the Loupe view (#31 phase 3) would call `load_real_frame`
+    /// unconditionally, silently discarding whatever edits were open on the Develop tab the
+    /// moment a different photo's decode landed in the shared `DevelopView`. `has_edits` is what
+    /// the Loupe view's own caller-side guard checks before doing that -- this proves it actually
+    /// reflects `document`'s real state, not just that it compiles.
+    #[test]
+    fn has_edits_reflects_the_document_s_real_state() {
+        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
+            eprintln!("no wgpu adapter available in this environment, skipping");
+            return;
+        };
+        let mut view = DevelopView::new(Arc::new(gpu));
+        assert!(!view.has_edits(), "a fresh DevelopView has no edits yet");
+
+        let mut exposure: ExposureParams = view.stage_params(EXPOSURE);
+        exposure.stops = 1.0;
+        view.set_stage_params(EXPOSURE, &exposure);
+        assert!(view.has_edits(), "a real stage entry was just set");
+
+        view.reset_stage(EXPOSURE);
+        assert!(!view.has_edits(), "the only edit was just reset away");
     }
 }

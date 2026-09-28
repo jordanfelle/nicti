@@ -559,7 +559,13 @@ impl PeltApp {
         );
         let _ = session.set_cursor(0, store.as_ref(), &self.pounce);
         self.loupe = Some(session);
-        self.loupe_loaded_asset = None;
+        // Deliberately NOT resetting `loupe_loaded_asset` here: it tracks which asset id is
+        // currently loaded into the shared `develop` view, independent of which `LoupeSession`
+        // object exists -- if the new session's first asset happens to be the same one already
+        // loaded (adversarial review caught this: an earlier version reset it unconditionally,
+        // which forced a needless reset-to-default-document even when re-opening Loupe onto the
+        // very same photo already being edited on the Develop tab), `show_loupe`'s own
+        // already-loaded check should skip reloading it, not discard those edits for no reason.
         self.loupe_zoomed = false;
         self.loupe_pan = [0.0, 0.0];
         self.loupe_t0 = None;
@@ -639,6 +645,33 @@ impl PeltApp {
         match frame {
             Some(frame) => {
                 if self.loupe_loaded_asset != Some(asset_id) {
+                    // Adversarial review caught a real data-loss path here: `develop` is one
+                    // instance shared with the Develop tab, and switching Loupe to a different
+                    // photo than whatever Develop currently has loaded would otherwise silently
+                    // discard any unsaved edits on it the instant this decode landed -- no
+                    // warning, no user action beyond having navigated in a different tab. Refuse
+                    // to swap (and don't paint a viewport this frame) until the user explicitly
+                    // says to discard those edits.
+                    let develop_has_unsaved_edits =
+                        self.develop.as_ref().is_some_and(DevelopView::has_edits);
+                    if develop_has_unsaved_edits {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Develop has unsaved edits open for a different photo.",
+                        );
+                        if ui
+                            .button("Discard those edits and view this photo")
+                            .clicked()
+                        {
+                            if let (Some(develop), Ok(Some(asset))) =
+                                (self.develop.as_mut(), store.get_asset(asset_id))
+                            {
+                                develop.load_real_frame(frame, asset_cache_key(&asset));
+                                self.loupe_loaded_asset = Some(asset_id);
+                            }
+                        }
+                        return;
+                    }
                     if let (Some(develop), Ok(Some(asset))) =
                         (self.develop.as_mut(), store.get_asset(asset_id))
                     {
