@@ -367,10 +367,19 @@ jobs:
           gh release view edge --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && release_exists=1
 
           if [[ "$release_exists" == "1" ]]; then
+            # `--target` here isn't just cosmetic: `nicti-shed`'s Edge-channel update check (#282)
+            # reads this release's `target_commitish` as the edge build's identity. Without
+            # `--target`, `gh release edit` only ever updates title/notes/prerelease -- the
+            # underlying tag ref moves every push (the `git/refs/tags/edge` PATCH above), but
+            # `target_commitish` stays frozen at whatever the release's original `gh release
+            # create --target` set, forever, even though the assets underneath it keep changing.
+            # Confirmed by direct testing against the live release (#284): editing without
+            # `--target` left it stale; adding it updated it immediately.
             gh release edit edge --repo "${GITHUB_REPOSITORY}" \
               --title "Nicti edge (${GITHUB_SHA:0:7})" \
               --notes "$notes" \
-              --prerelease
+              --prerelease \
+              --target "${GITHUB_SHA}"
 
             # Upload under temporary names first, then swap (CodeRabbit review, PR #268):
             # `gh release upload --clobber` deletes an existing same-named asset before
@@ -397,14 +406,22 @@ jobs:
 
             gh release upload edge --repo "${GITHUB_REPOSITORY}" "${tmp_paths[@]}"
 
+            # `gh release view --json assets` surfaces gh's own GraphQL global node id under
+            # `.id` (e.g. "RA_kwDO..."), not the plain REST integer id the
+            # `/releases/assets/{id}` DELETE/PATCH endpoints below require -- every rename in
+            # this loop 404s on that id (#284, confirmed directly: it silently never came up in
+            # any prior run, since this branch's very first real execution -- the first push
+            # after a real `edge` release already existed -- was this same run). Read ids from
+            # `GET /repos/.../releases/tags/edge` instead, whose `assets[].id` is the real REST
+            # integer.
             for i in "${!final_names[@]}"; do
               final="${final_names[$i]}"
               tmp_name="$(basename "${tmp_paths[$i]}")"
-              existing_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$final\") | .id")
+              existing_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/edge" --jq ".assets[] | select(.name==\"$final\") | .id")
               if [[ -n "$existing_id" ]]; then
                 gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
               fi
-              tmp_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$tmp_name\") | .id")
+              tmp_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/edge" --jq ".assets[] | select(.name==\"$tmp_name\") | .id")
               gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${tmp_id}" -f name="$final" >/dev/null
             done
 
