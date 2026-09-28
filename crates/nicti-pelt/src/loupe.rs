@@ -57,13 +57,13 @@ pub struct LoupeSession {
     decoder: Arc<dyn RawDecoder + Send + Sync>,
     cache: Tier<Arc<LinearFrame>>,
     inflight: HashMap<i64, Inflight>,
-    /// The last decode error per asset, so a caller can show it instead of silently retrying
-    /// forever -- `request_prefetch` skips any asset recorded here, rather than resubmitting it
-    /// every time it re-enters the prefetch window (a real bug an earlier version had: cleared on
-    /// every submission attempt, and neither `inflight` nor `cache` account for a failed asset,
-    /// so it kept getting retried on every cursor move that touched it). Cleared only by an
-    /// explicit [`Self::retry`] call.
-    errors: HashMap<i64, String>,
+    /// The last decode error per asset, paired with the identity it was recorded against -- so a
+    /// caller can show it instead of silently retrying forever (`request_prefetch` skips any
+    /// asset with an error recorded *for its current identity*), while a later re-ingest (fixing
+    /// or replacing the file) doesn't leave a stale error blocking the new revision's own decode:
+    /// a mismatched key is treated as no error at all, not as a still-failing one. Cleared for the
+    /// current revision only by an explicit [`Self::retry`] call.
+    errors: HashMap<i64, (blake3::Hash, String)>,
 }
 
 impl LoupeSession {
@@ -129,13 +129,21 @@ impl LoupeSession {
         let hi = (self.cursor + PREFETCH_RADIUS).min(self.asset_ids.len() - 1);
         for index in lo..=hi {
             let asset_id = self.asset_ids[index];
-            if self.inflight.contains_key(&asset_id) || self.errors.contains_key(&asset_id) {
+            if self.inflight.contains_key(&asset_id) {
                 continue;
             }
             let Some(asset) = store.get_asset(asset_id)? else {
                 continue;
             };
             let key = asset_cache_key(&asset);
+            if let Some((error_key, _)) = self.errors.get(&asset_id) {
+                if *error_key == key {
+                    continue; // still the same failed revision -- wait for an explicit retry
+                }
+                // A stale error from a since-superseded revision (a re-ingest changed this
+                // asset's identity) -- clear it rather than let it keep blocking the new one.
+                self.errors.remove(&asset_id);
+            }
             if self.cache.contains(&key) {
                 continue;
             }
@@ -189,7 +197,15 @@ impl LoupeSession {
                     }
                 }
                 Err(msg) => {
-                    self.errors.insert(asset_id, msg);
+                    // Same symmetry as the Ok branch: a failure against a since-superseded
+                    // identity is stale, not a real error for the *current* revision -- discard
+                    // rather than record it (it'll get a fresh attempt on the next set_cursor
+                    // that includes it, same as a discarded stale success).
+                    if let Ok(Some(asset)) = store.get_asset(asset_id) {
+                        if asset_cache_key(&asset) == submitted_key {
+                            self.errors.insert(asset_id, (submitted_key, msg));
+                        }
+                    }
                 }
             }
         }
@@ -205,10 +221,19 @@ impl LoupeSession {
         self.cache.get(&key).cloned()
     }
 
-    /// The current image's last decode error, if any -- cleared only by [`Self::retry`].
-    pub fn current_error(&self) -> Option<&str> {
+    /// The current image's last decode error, if any recorded for its *current* identity -- a
+    /// stale error from a since-superseded revision reads as no error, matching
+    /// `request_prefetch`'s own treatment. Cleared for the current revision only by
+    /// [`Self::retry`].
+    pub fn current_error(&self, store: &dyn CatalogStore) -> Option<&str> {
         let asset_id = self.current_asset_id()?;
-        self.errors.get(&asset_id).map(String::as_str)
+        let (error_key, msg) = self.errors.get(&asset_id)?;
+        let asset = store.get_asset(asset_id).ok()??;
+        if asset_cache_key(&asset) == *error_key {
+            Some(msg.as_str())
+        } else {
+            None
+        }
     }
 
     /// Clears a failed asset's recorded error so the next `set_cursor` call (if it's still in the
@@ -403,11 +428,11 @@ mod tests {
         session.set_cursor(0, &store, &pounce).unwrap();
         wait_for(|| {
             session.poll(&store);
-            session.current_error().is_some()
+            session.current_error(&store).is_some()
         });
         assert!(session.current_frame(&store).is_none());
         assert!(session
-            .current_error()
+            .current_error(&store)
             .unwrap()
             .contains("simulated failure"));
     }
@@ -429,7 +454,7 @@ mod tests {
         session.set_cursor(0, &store, &pounce).unwrap();
         wait_for(|| {
             session.poll(&store);
-            session.current_error().is_some()
+            session.current_error(&store).is_some()
         });
         assert_eq!(decoder.calls.load(Ordering::SeqCst), 1);
 
@@ -441,13 +466,96 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         session.poll(&store);
         assert_eq!(decoder.calls.load(Ordering::SeqCst), 1);
-        assert!(session.current_error().is_some());
+        assert!(session.current_error(&store).is_some());
 
         // An explicit retry clears the error and allows exactly one more decode attempt.
         session.retry(bad_id);
-        assert!(session.current_error().is_none());
+        assert!(session.current_error(&store).is_none());
         session.set_cursor(0, &store, &pounce).unwrap();
         wait_for(|| decoder.calls.load(Ordering::SeqCst) == 2);
+    }
+
+    /// Fails or succeeds based on a shared flag rather than the path -- lets a test flip a single
+    /// asset's outcome (simulating "the file was fixed/replaced and re-ingested") without needing
+    /// a different path per outcome.
+    struct ConfigurableDecoder {
+        should_fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl Module for ConfigurableDecoder {
+        fn id(&self) -> &str {
+            "test.decoder.configurable"
+        }
+        fn schema_version(&self) -> u32 {
+            1
+        }
+        fn migrate_params(&self, _: u32, _: serde_json::Value) -> Option<serde_json::Value> {
+            None
+        }
+    }
+
+    impl RawDecoder for ConfigurableDecoder {
+        fn decode_linear(&self, path: &Path) -> Result<LinearFrame, DecodeError> {
+            if self.should_fail.load(Ordering::SeqCst) {
+                return Err(DecodeError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other("simulated failure"),
+                });
+            }
+            Ok(LinearFrame {
+                make: "Test".to_string(),
+                model: "Configurable".to_string(),
+                width: 2,
+                height: 2,
+                black: 0,
+                maximum: 4095,
+                cam_mul: [1.0, 1.0, 1.0, 1.0],
+                pre_mul: [1.0, 1.0, 1.0, 1.0],
+                cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                cblack: [0, 0, 0, 0],
+                pixels: vec![0; 2 * 2 * 3],
+            })
+        }
+    }
+
+    #[test]
+    fn a_re_ingest_clears_a_stale_error_from_an_old_revision() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "/photos").unwrap();
+        let asset_id = store
+            .insert_asset(root_id, &new_asset("flaky.NEF"), None)
+            .unwrap();
+        let pounce = Pounce::new(0, 2, 2, || {});
+        let decoder = Arc::new(ConfigurableDecoder {
+            should_fail: std::sync::atomic::AtomicBool::new(true),
+        });
+        let mut session = LoupeSession::new(vec![asset_id], decoder.clone(), u64::MAX);
+
+        session.set_cursor(0, &store, &pounce).unwrap();
+        wait_for(|| {
+            session.poll(&store);
+            session.current_error(&store).is_some()
+        });
+
+        // Simulate the file being fixed and re-ingested: same path, new fingerprint. The stale
+        // error (recorded against the *old* identity) must not keep blocking the new one -- that's
+        // exactly the CodeRabbit-caught bug this test reproduces.
+        decoder.should_fail.store(false, Ordering::SeqCst);
+        let mut fixed = new_asset("flaky.NEF");
+        fixed.fingerprint = Some("fp-flaky.NEF-fixed".to_string());
+        store.insert_asset(root_id, &fixed, None).unwrap();
+
+        assert!(
+            session.current_error(&store).is_none(),
+            "a stale error recorded against the old identity must not apply to the new one"
+        );
+        session.set_cursor(0, &store, &pounce).unwrap();
+        wait_for(|| {
+            session.poll(&store);
+            session.current_frame(&store).is_some()
+        });
+        assert!(session.current_error(&store).is_none());
     }
 
     #[test]
