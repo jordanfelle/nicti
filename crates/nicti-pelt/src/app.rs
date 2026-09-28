@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nicti_cornea::{LibRawDecoder, RawDecoder};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, ReportSlot, SyncJob};
-use nicti_lair::{CatalogError, CatalogStore, SqliteCatalog};
+use nicti_lair::{CatalogError, CatalogStore, PreviewTier, SqliteCatalog};
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
 use nicti_pounce::{JobKind, JobState, Pounce};
@@ -21,9 +22,10 @@ use nicti_tapetum::gpu::GpuContext;
 
 use nicti_shed::state::Channel as UpdateChannel;
 
+use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::render::DevelopView;
 use crate::update::UpdateChecker;
-use crate::viewport::{ViewportCallback, ViewportResources};
+use crate::viewport::{fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::{catalog, CatalogOpenState};
 
 /// VRAM Pounce's GPU-lane admission control (ADR-0054 decision rule #5) budgets against -- a
@@ -39,6 +41,10 @@ const TELEMETRY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// Import/Sync root registers under one fixed placeholder volume, with the folder's own full path
 /// as its `rel_path`, rather than inventing volume-mount detection prematurely.
 const PLACEHOLDER_VOLUME_IDENTITY_KEY: &str = "nicti-pelt-local-placeholder";
+/// RAM budget for the loupe's decoded-frame cache (#31) -- a placeholder pending real tuning
+/// against actual machine RAM, matching `PLACEHOLDER_VRAM_BUDGET_BYTES`'s own "not measured yet"
+/// status.
+const PLACEHOLDER_LOUPE_CACHE_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -89,6 +95,27 @@ pub struct PeltApp {
     /// later scheduled attempt until the catalog happened to change again.
     pending_backup_changes: Option<u64>,
     last_backup_summary: Option<String>,
+    /// The real RAW decoder every `LoupeSession` (#31) this app creates shares -- constructed
+    /// once here rather than per-session, since `LibRawDecoder` is a stateless unit struct with
+    /// no per-session setup.
+    decoder: Arc<dyn RawDecoder + Send + Sync>,
+    loupe: Option<LoupeSession>,
+    /// Which asset id's decoded frame is currently loaded into `develop` -- so the loupe doesn't
+    /// re-`load_real_frame` (which resets the in-memory edit document) every single frame just
+    /// because the cursor hasn't moved.
+    loupe_loaded_asset: Option<i64>,
+    /// `false` = "Fit" (aspect-correct, the default on every fresh cursor move), `true` = "100%"
+    /// (1:1 pixel zoom for focus-checking, #31's own ticket title). Toggled by Space.
+    loupe_zoomed: bool,
+    /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
+    /// mode -- reset to `[0.0, 0.0]` on every cursor move, matching a fresh image's own natural
+    /// centered view rather than wherever the previous image happened to be panned to.
+    loupe_pan: [f32; 2],
+    /// The current asset's T0 embedded-preview texture, decoded once per asset id and cached here
+    /// -- the instant fallback shown while a real decode is still in flight. `None` once the real
+    /// decode lands (nothing clears it eagerly; it's simply not looked at once `current_frame`
+    /// starts returning `Some`, and gets replaced the next time a *different* asset needs it).
+    loupe_t0: Option<(i64, egui::TextureHandle)>,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -169,6 +196,12 @@ impl PeltApp {
             pending_backup_result: None,
             pending_backup_changes: None,
             last_backup_summary: None,
+            decoder: Arc::new(LibRawDecoder),
+            loupe: None,
+            loupe_loaded_asset: None,
+            loupe_zoomed: false,
+            loupe_pan: [0.0, 0.0],
+            loupe_t0: None,
         }
     }
 
@@ -400,10 +433,7 @@ impl eframe::App for PeltApp {
 
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.show_library(ui),
-            View::Loupe => {
-                ui.heading("Loupe");
-                ui.label("Prefetch + instant zoom lands in #31.");
-            }
+            View::Loupe => self.show_loupe(ui),
             View::Develop => {
                 ui.heading("Develop");
                 if let Some(frame) = viewport_frame {
@@ -411,7 +441,7 @@ impl eframe::App for PeltApp {
                     let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
-                        ViewportCallback { frame },
+                        ViewportCallback::identity(frame),
                     ));
                     if let Some(develop) = self.develop.as_mut() {
                         crate::develop_panel::handle_viewport_gesture(ui, &response, rect, develop);
@@ -448,6 +478,12 @@ impl PeltApp {
                     }
                     if ui.button("Sync").clicked() {
                         self.submit_root_job(&store, RootAction::Sync);
+                    }
+                    // #31: a folder-ordered asset list, not real grid/filter-driven selection
+                    // (#30/#242's job, confirmed not a hard blocker for the loupe) -- reuses the
+                    // same path field and root-registration path Import/Sync already use.
+                    if ui.button("Open in Loupe").clicked() {
+                        self.open_in_loupe(&store);
                     }
                 });
             }
@@ -492,6 +528,214 @@ impl PeltApp {
                     SyncJob::new(dyn_store, root_id, &path, SyncOptions::default());
                 self.pounce.submit(Box::new(job));
             }
+        }
+    }
+
+    /// Registers `self.import_path_input` the same way `submit_root_job` does, then builds a
+    /// fresh `LoupeSession` over every asset already cataloged under that root (in `id` order --
+    /// a real grid/filter-driven ordering is #30/#242's job) and switches to the Loupe view. A
+    /// blank path or a registration/listing failure is a no-op, same as `submit_root_job`'s own.
+    fn open_in_loupe(&mut self, store: &Arc<SqliteCatalog>) {
+        let path = PathBuf::from(self.import_path_input.trim());
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        let Ok(root_id) = register_root(store.as_ref(), &path) else {
+            return;
+        };
+        let Ok(assets) = store.list_assets_by_root(root_id) else {
+            return;
+        };
+        let ids: Vec<i64> = assets.iter().map(|a| a.id).collect();
+        // A prior session's in-flight decodes are for a now-abandoned folder -- cancel them
+        // rather than let them keep running to a result nothing will ever look at.
+        if let Some(mut old) = self.loupe.take() {
+            old.cancel_all(&self.pounce);
+        }
+        let mut session = LoupeSession::new(
+            ids,
+            self.decoder.clone(),
+            PLACEHOLDER_LOUPE_CACHE_BUDGET_BYTES,
+        );
+        let _ = session.set_cursor(0, store.as_ref(), &self.pounce);
+        self.loupe = Some(session);
+        self.loupe_loaded_asset = None;
+        self.loupe_zoomed = false;
+        self.loupe_pan = [0.0, 0.0];
+        self.loupe_t0 = None;
+        self.view = View::Loupe;
+    }
+
+    /// #31: the Loupe view. Navigates with Left/Right (directional prefetch keeps the neighbors
+    /// decoding ahead of the cursor, `LoupeSession`'s own job), toggles Fit/100% zoom with Space,
+    /// and drags to pan while zoomed. Shows the T0 embedded preview instantly while a real decode
+    /// is still in flight -- the real "< 50ms next/prev" target a RAW decode itself can't hit.
+    fn show_loupe(&mut self, ui: &mut egui::Ui) {
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            ui.heading("Loupe");
+            ui.colored_label(egui::Color32::RED, "Catalog is not open.");
+            return;
+        };
+        let store = store.clone();
+
+        let Some(loupe) = self.loupe.as_mut() else {
+            ui.heading("Loupe");
+            ui.label("Open a folder from the Library view to browse it here.");
+            return;
+        };
+
+        loupe.poll(store.as_ref());
+
+        if loupe.is_empty() {
+            ui.heading("Loupe");
+            ui.label("This folder has no assets.");
+            return;
+        }
+
+        let mut cursor_moved = false;
+        ui.input(|i| {
+            if i.key_pressed(egui::Key::ArrowRight) && loupe.cursor() + 1 < loupe.len() {
+                let _ = loupe.set_cursor(loupe.cursor() + 1, store.as_ref(), &self.pounce);
+                cursor_moved = true;
+            } else if i.key_pressed(egui::Key::ArrowLeft) && loupe.cursor() > 0 {
+                let _ = loupe.set_cursor(loupe.cursor() - 1, store.as_ref(), &self.pounce);
+                cursor_moved = true;
+            }
+            if i.key_pressed(egui::Key::Space) {
+                self.loupe_zoomed = !self.loupe_zoomed;
+            }
+        });
+        if cursor_moved {
+            self.loupe_zoomed = false;
+            self.loupe_pan = [0.0, 0.0];
+        }
+
+        let loupe = self.loupe.as_mut().expect("checked Some above");
+        let Some(asset_id) = loupe.current_asset_id() else {
+            return; // is_empty() already checked above; unreachable in practice
+        };
+        let frame = loupe.current_frame(store.as_ref());
+        let cursor_label = format!("{} / {}", loupe.cursor() + 1, loupe.len());
+        let error_label = loupe.current_error(store.as_ref()).map(str::to_string);
+        let cursor = loupe.cursor();
+
+        let mut retry_clicked = false;
+        ui.horizontal(|ui| {
+            ui.heading("Loupe");
+            ui.label(cursor_label);
+            if let Some(err) = &error_label {
+                ui.colored_label(egui::Color32::RED, err);
+                retry_clicked = ui.button("Retry").clicked();
+            }
+        });
+        if retry_clicked {
+            let loupe = self.loupe.as_mut().expect("checked Some above");
+            loupe.retry(asset_id);
+            // retry() only clears the error -- request_prefetch has to actually run again to
+            // resubmit it, same as any other cursor-move-triggered prefetch.
+            let _ = loupe.set_cursor(cursor, store.as_ref(), &self.pounce);
+        }
+
+        match frame {
+            Some(frame) => {
+                if self.loupe_loaded_asset != Some(asset_id) {
+                    if let (Some(develop), Ok(Some(asset))) =
+                        (self.develop.as_mut(), store.get_asset(asset_id))
+                    {
+                        develop.load_real_frame(frame, asset_cache_key(&asset));
+                        self.loupe_loaded_asset = Some(asset_id);
+                    }
+                }
+                self.paint_loupe_viewport(ui);
+            }
+            None => self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id),
+        }
+    }
+
+    /// Renders `self.develop`'s currently-loaded frame and paints it at the current zoom mode's
+    /// scale/offset -- split out from `show_loupe` only because borrowing `self.develop` mutably
+    /// (for `render()`) alongside reading `self.loupe_zoomed`/`self.loupe_pan` and writing
+    /// `self.loupe_pan` from a drag is otherwise an awkward simultaneous-borrow shape.
+    fn paint_loupe_viewport(&mut self, ui: &mut egui::Ui) {
+        let Some(develop) = self.develop.as_mut() else {
+            return;
+        };
+        let rendered = develop.render();
+        let tex_extent = develop.source_extent();
+
+        let available = ui.available_size();
+        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+        let rect_size = (rect.width(), rect.height());
+
+        let scale = if self.loupe_zoomed {
+            one_to_one_scale(rect_size, tex_extent)
+        } else {
+            fit_scale(rect_size, tex_extent)
+        };
+
+        if self.loupe_zoomed && response.dragged() {
+            let delta = response.drag_delta();
+            // Screen-pixel drag -> texture-UV delta: dividing by the screen extent the current
+            // scale maps to (rect size / scale) keeps the drag 1:1 with the cursor regardless of
+            // the actual zoom factor.
+            if scale[0] > 0.0 {
+                self.loupe_pan[0] -= delta.x / (rect_size.0 / scale[0]);
+            }
+            if scale[1] > 0.0 {
+                self.loupe_pan[1] -= delta.y / (rect_size.1 / scale[1]);
+            }
+        }
+        let offset = if self.loupe_zoomed {
+            self.loupe_pan
+        } else {
+            [0.0, 0.0]
+        };
+
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            ViewportCallback {
+                frame: rendered,
+                view_scale: scale,
+                view_offset: offset,
+            },
+        ));
+    }
+
+    /// The instant fallback while a real decode is still in flight: JPEG-decodes the asset's T0
+    /// embedded preview (extracted at import time, `nicti_lair::scruff::Ingest`) and shows it,
+    /// caching the resulting texture per asset id so it's only decoded once, not every frame.
+    fn show_loupe_t0_fallback(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &dyn CatalogStore,
+        asset_id: i64,
+    ) {
+        if self.loupe_t0.as_ref().map(|(id, _)| *id) != Some(asset_id) {
+            self.loupe_t0 = None;
+            if let Ok(Some(preview)) = store.get_preview(asset_id, PreviewTier::T0) {
+                if let Ok(decoded) = image::load_from_memory(&preview.bytes) {
+                    let rgba = decoded.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        [w as usize, h as usize],
+                        rgba.as_raw(),
+                    );
+                    let texture = ui.ctx().load_texture(
+                        format!("loupe-t0-{asset_id}"),
+                        color_image,
+                        egui::TextureOptions::default(),
+                    );
+                    self.loupe_t0 = Some((asset_id, texture));
+                }
+            }
+        }
+
+        ui.label("Decoding full-resolution image...");
+        if let Some((_, texture)) = &self.loupe_t0 {
+            let available = ui.available_size();
+            ui.centered_and_justified(|ui| {
+                ui.add(egui::Image::new((texture.id(), texture.size_vec2())).max_size(available));
+            });
         }
     }
 }

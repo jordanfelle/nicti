@@ -3741,6 +3741,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
+ "image",
  "nicti-claw",
  "nicti-cornea",
  "nicti-lair",

@@ -6,17 +6,13 @@
 //! `nicti-ui` name #241 was filed under.
 //!
 //! Explicitly out of scope here (each has, or will have, its own ticket): grid virtualization at
-//! scale (#30), the loupe view (#31), culling UX (#32), the filter bar (#242).
+//! scale (#30), culling UX (#32), the filter bar (#242).
 
 mod activity;
 mod app;
 mod catalog;
-// #31 phase 2: DecodeJob/LoupeSession land here, real and tested, but wiring them into the
-// egui Loupe view (app.rs's View::Loupe placeholder) is phase 3's job -- nothing calls them yet.
-#[allow(dead_code)]
 mod decode_job;
 mod develop_panel;
-#[allow(dead_code)]
 mod loupe;
 mod render;
 mod update;
