@@ -48,6 +48,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0038](0038-color-pipeline.md) | 0021 | Color pipeline | Proposed |
 | [0040](0040-demosaic-and-denoise.md) | — | Demosaic and noise reduction | Proposed |
 | [0044](0044-stage-cached-render-graph.md) | — | Stage-cached render graph (Tapetum) | Proposed |
+| [0047](0047-crop-straighten-autolevel.md) | — | Crop, straighten, and auto-level | Accepted |
 | [0048](0048-masking.md) | 0024 | Masking | Proposed |
 | [0050](0050-healing-and-removal.md) | 0007 | Healing and removal | Proposed |
 | [0053](0053-ai-auto-tone.md) | — | AI auto-tone (MLP, per-user edit history) | Proposed |

@@ -5,12 +5,13 @@
 //! (once #31 lands persistence) will read too.
 
 use nicti_tapetum::coat::{
-    ExposureParams, HslBand, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
-    ToneParams, VibranceParams, WbParams,
+    CropParams, ExposureParams, HslBand, HslParams, NoiseReductionParams, SharpenParams,
+    ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use nicti_tapetum::frame::FrameTexture;
+use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    EXPOSURE, HSL, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    CROP, EXPOSURE, HSL, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
 };
 
 use crate::render::DevelopView;
@@ -132,6 +133,54 @@ pub fn show(
         develop.set_stage_params(HSL, &hsl);
     });
 
+    ui.collapsing("Crop & Straighten", |ui| {
+        let mut crop: CropParams = develop.stage_params(CROP);
+        ui.label(
+            "Hold Ctrl and drag along something in the photo that should be level, or use the \
+             rotate handle / freeform drag on the overlay.",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Rotation");
+            let mut rotation = crop.rotation_degrees;
+            let response = ui.add(egui::Slider::new(
+                &mut rotation,
+                -MAX_STRAIGHTEN_DEGREES..=MAX_STRAIGHTEN_DEGREES,
+            ));
+            if response.double_clicked() {
+                rotation = 0.0;
+            }
+            if response.changed() || response.double_clicked() {
+                crop.set_rotation(rotation);
+            }
+        });
+        if ui.button("Auto-level").clicked() {
+            develop.apply_auto_straighten();
+            crop = develop.stage_params(CROP);
+        }
+        develop.set_stage_params(CROP, &crop);
+
+        ui.separator();
+        ui.label("Crop rectangle (source pixels; 0 width/height = full frame)");
+        let (src_w, src_h) = develop.source_extent();
+        ui.horizontal(|ui| {
+            ui.label("X");
+            ui.add(egui::DragValue::new(&mut crop.x).range(0.0..=src_w));
+            ui.label("Y");
+            ui.add(egui::DragValue::new(&mut crop.y).range(0.0..=src_h));
+        });
+        ui.horizontal(|ui| {
+            ui.label("W");
+            ui.add(egui::DragValue::new(&mut crop.width).range(0.0..=src_w));
+            ui.label("H");
+            ui.add(egui::DragValue::new(&mut crop.height).range(0.0..=src_h));
+        });
+        develop.set_stage_params(CROP, &crop);
+
+        if ui.button("Reset crop").clicked() {
+            develop.reset_stage(CROP);
+        }
+    });
+
     ui.collapsing("Detail", |ui| {
         let mut sharpen: SharpenParams = develop.stage_params(SHARPEN);
         slider(ui, "Sharpen Amount", &mut sharpen.amount, 0.0..=1.5, 0.0);
@@ -157,10 +206,310 @@ pub fn show(
             HSL,
             SHARPEN,
             NOISE_REDUCTION,
+            CROP,
         ] {
             develop.reset_stage(id);
         }
     }
+}
+
+/// Which part of the crop overlay a drag started on -- decides what the drag does. Checked in
+/// this order (rotate handle first, since it sits just outside the rect and would otherwise be
+/// shadowed by a corner) each time a drag begins; the choice is then remembered in egui's own
+/// per-widget temp storage for the duration of that one drag, so a fast pointer move mid-drag
+/// can't suddenly switch what's being manipulated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DragTarget {
+    Straighten,
+    Rotate,
+    Corner(usize),
+    Pan,
+}
+
+/// Drag-start state stashed in egui memory (keyed by a fixed `Id`) so [`handle_viewport_gesture`]
+/// -- a plain per-frame function, not a struct with its own state -- can compute a delta relative
+/// to where the gesture began, not just this frame's incremental pointer motion.
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+    target: DragTarget,
+    start_pointer: egui::Pos2,
+    start_crop: CropParams,
+}
+
+const DRAG_STATE_ID: &str = "nicti_pelt::develop_panel::crop_drag_state";
+const HANDLE_RADIUS_PX: f32 = 6.0;
+const ROTATE_HANDLE_OFFSET_PX: f32 = 28.0;
+
+/// Maps a screen-space point (inside `rect`) to source-image pixel space -- the whole,
+/// uncropped-canvas render is painted stretched to fill `rect` (see `app.rs`'s
+/// `ui.allocate_exact_size`), so this can be anisotropic when `rect`'s aspect ratio doesn't match
+/// the source's.
+fn screen_to_image(rect: egui::Rect, source: (f32, f32), p: egui::Pos2) -> (f32, f32) {
+    (
+        (p.x - rect.left()) / rect.width().max(1.0) * source.0,
+        (p.y - rect.top()) / rect.height().max(1.0) * source.1,
+    )
+}
+
+fn image_to_screen(rect: egui::Rect, source: (f32, f32), p: (f32, f32)) -> egui::Pos2 {
+    egui::pos2(
+        rect.left() + p.0 / source.0.max(1.0) * rect.width(),
+        rect.top() + p.1 / source.1.max(1.0) * rect.height(),
+    )
+}
+
+/// The forward (clockwise-positive, y-down) content-rotation matrix's action on a vector relative
+/// to `center` -- matches `geometry::Affine2D::crop_and_rotate`'s own documented sign convention
+/// exactly (that function applies the *inverse*; this is its forward counterpart, used here only
+/// to draw/hit-test the overlay in the same visually-rotated frame the image itself renders in).
+fn rotate_forward(center: (f32, f32), p: (f32, f32), degrees: f32) -> (f32, f32) {
+    let theta = degrees.to_radians();
+    let (sin_t, cos_t) = theta.sin_cos();
+    let (rx, ry) = (p.0 - center.0, p.1 - center.1);
+    (
+        center.0 + cos_t * rx - sin_t * ry,
+        center.1 + sin_t * rx + cos_t * ry,
+    )
+}
+
+/// Draws the crop/straighten overlay (rect outline, corner handles, rotate handle) and handles
+/// every gesture on it: **Ctrl+drag** anywhere is the reference-line straighten gesture (distinct
+/// from the two below); a plain drag on the small rotate handle above the rect is freeform
+/// rotate; a plain drag on a corner handle resizes the rect; a plain drag inside the rect (and not
+/// on a handle) pans it. `rect` is the on-screen area the current (full-canvas) render is painted
+/// into -- see `screen_to_image`'s own doc comment for why the mapping can be anisotropic.
+pub fn handle_viewport_gesture(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    rect: egui::Rect,
+    develop: &mut DevelopView,
+) {
+    let source = develop.source_extent();
+    let crop: CropParams = develop.stage_params(CROP);
+    let crop_rect = crop.effective_rect(source);
+    let center = crop_rect.center_absolute();
+    let state_id = egui::Id::new(DRAG_STATE_ID);
+
+    if response.drag_started() {
+        let ctrl = ui.input(|i| i.modifiers.ctrl);
+        let Some(pointer) = response.interact_pointer_pos() else {
+            return;
+        };
+        let target = if ctrl {
+            DragTarget::Straighten
+        } else {
+            let rotated_top = rotate_forward(
+                center,
+                (center.0, crop_rect.y - ROTATE_HANDLE_OFFSET_PX),
+                crop.rotation_degrees,
+            );
+            let screen_rotate_handle = image_to_screen(rect, source, rotated_top);
+            if pointer.distance(screen_rotate_handle) <= HANDLE_RADIUS_PX * 2.0 {
+                DragTarget::Rotate
+            } else if let Some(corner) =
+                corner_hit(rect, source, &crop_rect, crop.rotation_degrees, pointer)
+            {
+                DragTarget::Corner(corner)
+            } else {
+                DragTarget::Pan
+            }
+        };
+        ui.data_mut(|d| {
+            d.insert_temp(
+                state_id,
+                DragState {
+                    target,
+                    start_pointer: pointer,
+                    start_crop: crop,
+                },
+            )
+        });
+    }
+
+    if response.dragged() {
+        let Some(state) = ui.data(|d| d.get_temp::<DragState>(state_id)) else {
+            return;
+        };
+        let Some(pointer) = response.interact_pointer_pos() else {
+            return;
+        };
+        let start_img = screen_to_image(rect, source, state.start_pointer);
+        let cur_img = screen_to_image(rect, source, pointer);
+        let delta = (cur_img.0 - start_img.0, cur_img.1 - start_img.1);
+
+        match state.target {
+            DragTarget::Straighten => {
+                // Only applied on release (matches "release to auto-rotate" in the ticket) --
+                // nothing to do while still dragging.
+            }
+            DragTarget::Rotate => {
+                let start_angle = (state.start_pointer.y - image_to_screen(rect, source, center).y)
+                    .atan2(state.start_pointer.x - image_to_screen(rect, source, center).x);
+                let cur_angle = (pointer.y - image_to_screen(rect, source, center).y)
+                    .atan2(pointer.x - image_to_screen(rect, source, center).x);
+                let delta_deg = (cur_angle - start_angle).to_degrees();
+                let mut new_crop = state.start_crop;
+                new_crop.set_rotation(state.start_crop.rotation_degrees + delta_deg);
+                develop.set_stage_params(CROP, &new_crop);
+            }
+            DragTarget::Corner(idx) => {
+                let mut new_rect = state.start_crop.effective_rect(source);
+                // Inverse-rotate the image-space delta into the rect's own unrotated local frame
+                // -- a corner drag should feel like resizing the rect along its own edges, not
+                // the screen's, once it's been straightened.
+                let theta = (-state.start_crop.rotation_degrees).to_radians();
+                let (sin_t, cos_t) = theta.sin_cos();
+                let local_dx = cos_t * delta.0 - sin_t * delta.1;
+                let local_dy = sin_t * delta.0 + cos_t * delta.1;
+                match idx {
+                    0 => {
+                        new_rect.x += local_dx;
+                        new_rect.y += local_dy;
+                        new_rect.width -= local_dx;
+                        new_rect.height -= local_dy;
+                    }
+                    1 => {
+                        new_rect.y += local_dy;
+                        new_rect.width += local_dx;
+                        new_rect.height -= local_dy;
+                    }
+                    2 => {
+                        new_rect.width += local_dx;
+                        new_rect.height += local_dy;
+                    }
+                    _ => {
+                        new_rect.x += local_dx;
+                        new_rect.width -= local_dx;
+                        new_rect.height += local_dy;
+                    }
+                }
+                new_rect.x = new_rect.x.clamp(0.0, source.0);
+                new_rect.y = new_rect.y.clamp(0.0, source.1);
+                new_rect.width = new_rect.width.clamp(1.0, source.0 - new_rect.x);
+                new_rect.height = new_rect.height.clamp(1.0, source.1 - new_rect.y);
+                let mut new_crop = state.start_crop;
+                new_crop.x = new_rect.x;
+                new_crop.y = new_rect.y;
+                new_crop.width = new_rect.width;
+                new_crop.height = new_rect.height;
+                develop.set_stage_params(CROP, &new_crop);
+            }
+            DragTarget::Pan => {
+                let mut new_rect = state.start_crop.effective_rect(source);
+                new_rect.x =
+                    (new_rect.x + delta.0).clamp(0.0, (source.0 - new_rect.width).max(0.0));
+                new_rect.y =
+                    (new_rect.y + delta.1).clamp(0.0, (source.1 - new_rect.height).max(0.0));
+                let mut new_crop = state.start_crop;
+                new_crop.x = new_rect.x;
+                new_crop.y = new_rect.y;
+                new_crop.width = new_rect.width;
+                new_crop.height = new_rect.height;
+                develop.set_stage_params(CROP, &new_crop);
+            }
+        }
+    }
+
+    if response.drag_stopped() {
+        if let Some(state) = ui.data(|d| d.get_temp::<DragState>(state_id)) {
+            if state.target == DragTarget::Straighten {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    let start_img = screen_to_image(rect, source, state.start_pointer);
+                    let cur_img = screen_to_image(rect, source, pointer);
+                    develop.straighten_from_drag(cur_img.0 - start_img.0, cur_img.1 - start_img.1);
+                }
+            }
+        }
+        ui.data_mut(|d| d.remove::<DragState>(state_id));
+    }
+
+    draw_crop_overlay(ui, rect, source, &crop);
+}
+
+/// Hit-tests the 4 corner handles (0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left, in the
+/// rect's own rotated frame) against a screen-space pointer position.
+fn corner_hit(
+    rect: egui::Rect,
+    source: (f32, f32),
+    crop_rect: &nicti_tapetum::geometry::CropRect,
+    rotation_degrees: f32,
+    pointer: egui::Pos2,
+) -> Option<usize> {
+    let center = crop_rect.center_absolute();
+    let corners = [
+        (crop_rect.x, crop_rect.y),
+        (crop_rect.x + crop_rect.width, crop_rect.y),
+        (
+            crop_rect.x + crop_rect.width,
+            crop_rect.y + crop_rect.height,
+        ),
+        (crop_rect.x, crop_rect.y + crop_rect.height),
+    ];
+    corners.iter().enumerate().find_map(|(i, &c)| {
+        let rotated = rotate_forward(center, c, rotation_degrees);
+        let screen = image_to_screen(rect, source, rotated);
+        if pointer.distance(screen) <= HANDLE_RADIUS_PX * 2.0 {
+            Some(i)
+        } else {
+            None
+        }
+    })
+}
+
+/// Draws the crop rect outline (rotated per `crop.rotation_degrees`), its 4 corner handles, and
+/// the rotate handle above its top edge.
+fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), crop: &CropParams) {
+    let crop_rect = crop.effective_rect(source);
+    let center = crop_rect.center_absolute();
+    let corners_img = [
+        (crop_rect.x, crop_rect.y),
+        (crop_rect.x + crop_rect.width, crop_rect.y),
+        (
+            crop_rect.x + crop_rect.width,
+            crop_rect.y + crop_rect.height,
+        ),
+        (crop_rect.x, crop_rect.y + crop_rect.height),
+    ];
+    let painter = ui.painter_at(rect);
+    let screen_points: Vec<egui::Pos2> = corners_img
+        .iter()
+        .map(|&c| {
+            image_to_screen(
+                rect,
+                source,
+                rotate_forward(center, c, crop.rotation_degrees),
+            )
+        })
+        .collect();
+    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 210, 0));
+    for i in 0..4 {
+        painter.line_segment([screen_points[i], screen_points[(i + 1) % 4]], stroke);
+    }
+    for &p in &screen_points {
+        painter.circle_filled(p, HANDLE_RADIUS_PX, egui::Color32::from_rgb(255, 210, 0));
+    }
+    let rotated_top = rotate_forward(
+        center,
+        (center.0, crop_rect.y - ROTATE_HANDLE_OFFSET_PX),
+        crop.rotation_degrees,
+    );
+    let handle_screen = image_to_screen(rect, source, rotated_top);
+    painter.line_segment(
+        [
+            image_to_screen(
+                rect,
+                source,
+                rotate_forward(center, (center.0, crop_rect.y), crop.rotation_degrees),
+            ),
+            handle_screen,
+        ],
+        stroke,
+    );
+    painter.circle_filled(
+        handle_screen,
+        HANDLE_RADIUS_PX,
+        egui::Color32::from_rgb(0, 200, 255),
+    );
 }
 
 fn show_histogram(ui: &mut egui::Ui, develop: &DevelopView, frame: &FrameTexture) {

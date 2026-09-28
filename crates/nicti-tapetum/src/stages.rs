@@ -19,8 +19,8 @@ use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
 use crate::coat::{
-    self, ExposureParams, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
-    ToneParams, VibranceParams, WbParams,
+    self, CropParams, ExposureParams, HslParams, NoiseReductionParams, SharpenParams,
+    ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use crate::color;
 use crate::detail::{self, MAX_BLUR_RADIUS};
@@ -182,7 +182,7 @@ pub fn crop_stage() -> BasicStage {
     BasicStage {
         id: CROP,
         kind: StageKind::Geometry,
-        default_params: || json!({"x": 0.0, "y": 0.0}),
+        default_params: || coat::default_value::<CropParams>(),
     }
 }
 
@@ -1370,6 +1370,64 @@ mod tests {
         let output = FrameTexture::new(&gpu, out_extent);
 
         let transform = Affine2D::crop(1.0, 1.0);
+        let kernel = CropKernel::new(&gpu);
+        kernel.set_transform(transform);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(&gpu, &mut encoder, &input, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let actual = crate::test_util::read_frame(&gpu, &output);
+        for oy in 0..out_extent.height {
+            for ox in 0..out_extent.width {
+                let expected = crate::geometry::sample_bilinear(
+                    &input_data,
+                    (extent.width, extent.height),
+                    &transform,
+                    (ox, oy),
+                );
+                let got = actual[(oy * out_extent.width + ox) as usize];
+                for c in 0..4 {
+                    assert!(
+                        (got[c] - expected[c]).abs() < 0.01,
+                        "({ox},{oy}) channel {c}: gpu={} cpu={}",
+                        got[c],
+                        expected[c]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same shape as `present_sample_gpu_matches_cpu_reference`, but with a real straighten
+    /// rotation baked into the affine transform (#47) -- proves the GPU kernel matches
+    /// `geometry::affine_for_crop`'s composed rotation+translation, not just the pre-#47
+    /// translation-only case.
+    #[test]
+    fn present_sample_gpu_matches_cpu_reference_with_straighten_rotation() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 6,
+            height: 6,
+        };
+        let input_data: Vec<[f32; 4]> = (0..36)
+            .map(|i| [i as f32 * 0.005, i as f32 * 0.01, i as f32 * 0.015, 1.0])
+            .collect();
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let out_extent = crate::frame::Extent {
+            width: 6,
+            height: 6,
+        };
+        let output = FrameTexture::new(&gpu, out_extent);
+
+        let rect = crate::geometry::CropRect {
+            x: 0.0,
+            y: 0.0,
+            width: 6.0,
+            height: 6.0,
+        };
+        let transform = crate::geometry::affine_for_crop(rect, 12.0);
         let kernel = CropKernel::new(&gpu);
         kernel.set_transform(transform);
         let mut encoder = gpu

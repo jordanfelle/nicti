@@ -19,12 +19,12 @@ use std::sync::Arc;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::coat::{
-    self, ExposureParams, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
-    ToneParams, VibranceParams, WbParams,
+    self, CropParams, ExposureParams, HslParams, NoiseReductionParams, SharpenParams,
+    ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{Extent, FrameTexture};
-use nicti_tapetum::geometry::{output_encode, Affine2D};
+use nicti_tapetum::geometry::{self, output_encode};
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
 use nicti_tapetum::histogram::{self, Histogram};
@@ -215,7 +215,7 @@ impl DevelopView {
         let decode_kernel = DecodeKernel::new(&gpu);
         let live_kernel = LiveSuffixKernel::new(&gpu);
         let crop_kernel = CropKernel::new(&gpu);
-        crop_kernel.set_transform(Affine2D::IDENTITY);
+        crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
 
         Self {
@@ -294,6 +294,12 @@ impl DevelopView {
         let hsl: HslParams = Self::resolve(doc, HSL);
         let sharpen: SharpenParams = Self::resolve(doc, SHARPEN);
         let noise_reduction: NoiseReductionParams = Self::resolve(doc, NOISE_REDUCTION);
+        let crop: CropParams = Self::resolve(doc, CROP);
+
+        let source_extent = (self.extent.width as f32, self.extent.height as f32);
+        let rect = crop.effective_rect(source_extent);
+        let transform = geometry::affine_for_crop(rect, crop.rotation_degrees);
+        self.crop_kernel.set_transform(transform);
 
         let matrix =
             color::camera_to_working_space_matrix(self.frame.cam_mul, &self.frame.cam_xyz, &wb);
@@ -367,5 +373,64 @@ impl DevelopView {
         let (exposure, tone) = nicti_tapetum::perk::estimate(&hist);
         self.set_stage_params(EXPOSURE, &exposure);
         self.set_stage_params(TONE, &tone);
+    }
+
+    /// The source frame's own extent, in pixels -- what a crop/straighten UI needs to map a
+    /// normalized overlay rect (or a viewport drag position) into `CropParams`'s own source-pixel
+    /// space.
+    pub fn source_extent(&self) -> (f32, f32) {
+        (self.extent.width as f32, self.extent.height as f32)
+    }
+
+    /// The Ctrl-drag-a-reference-line gesture (#47): given a drag vector `(dx, dy)` in the *same*
+    /// pixel space the current render is displayed in, computes the correcting rotation and adds
+    /// it to the crop's current `rotation_degrees` (clamped). Distinct from
+    /// [`Self::apply_auto_straighten`] (the Canny/Hough button) -- both write into the same
+    /// `CropParams::rotation_degrees` field, since they're complementary entry points to the same
+    /// value, not alternates with separate storage. A zero-length drag is a documented no-op
+    /// (`geometry::straighten_delta_degrees` itself returns `0.0` for one).
+    pub fn straighten_from_drag(&mut self, dx: f32, dy: f32) {
+        let delta = geometry::straighten_delta_degrees(dx, dy);
+        let mut crop: CropParams = self.stage_params(CROP);
+        crop.set_rotation(crop.rotation_degrees + delta);
+        self.set_stage_params(CROP, &crop);
+    }
+
+    /// Auto-level (#47): renders the image with crop/straighten reset to identity (so detection
+    /// isn't biased by any rotation already applied), runs Canny+Hough on that render, and -- if a
+    /// confident near-horizontal/near-vertical line was found -- adds the detected correction to
+    /// the crop's current `rotation_degrees` (clamped), exactly like
+    /// [`Self::straighten_from_drag`] does for the manual gesture. A no-op (leaves
+    /// `rotation_degrees` untouched) if no confident line was detected -- see
+    /// `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment for when that happens.
+    pub fn apply_auto_straighten(&mut self) {
+        let had_crop = self.document.stages.remove(CROP);
+        let was_before = self.show_before;
+        self.show_before = false;
+        let uncropped = self.render();
+        self.show_before = was_before;
+        if let Some(entry) = had_crop {
+            self.document.stages.insert(CROP.to_string(), entry);
+        }
+
+        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, &uncropped);
+        let display: Vec<[f32; 4]> = pixels
+            .iter()
+            .map(|p| {
+                let encoded = output_encode([p[0], p[1], p[2]]);
+                [encoded[0], encoded[1], encoded[2], p[3]]
+            })
+            .collect();
+
+        let Some(delta) = nicti_tapetum::autolevel::detect_level_angle(
+            &display,
+            uncropped.extent.width,
+            uncropped.extent.height,
+        ) else {
+            return;
+        };
+        let mut crop: CropParams = self.stage_params(CROP);
+        crop.set_rotation(crop.rotation_degrees + delta);
+        self.set_stage_params(CROP, &crop);
     }
 }
