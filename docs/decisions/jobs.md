@@ -44,7 +44,18 @@ shaped its design.
   cross-platform cost to being Windows-specific here that NVML would avoid. `nvml-wrapper` stays a
   documented option for a future non-NVIDIA verification pass, not implemented. This telemetry
   source is explicitly shared with #70 (the standalone hardware-bottleneck indicator), per that
-  ticket's own body — not a second implementation.
+  ticket's own body — not a second implementation. **#70/ADR-0070, built**: GPU-busy% and
+  disk-busy% both come from Windows PDH counters (`telemetry::pdh`), for the same vendor-neutrality
+  reason DXGI was picked over `nvml-wrapper` above — `\GPU Engine(*)\Utilization Percentage`
+  (LUID-filtered to the same adapter `DxgiVramSource` already queries, summed per-`(phys, eng)`
+  across processes, busiest engine wins) and `\PhysicalDisk(*)\% Idle Time` (busiest disk,
+  excluding `_Total`). `TelemetrySampler` moved off the UI thread onto a background thread
+  (`TelemetrySampler::spawn`, replacing `new`) once the GPU Engine wildcard query was added, since
+  enumerating it can be slow and the old per-frame `sample()` ran on the UI thread. The pure
+  classifier (`nicti_pounce::hackles::classify` — CPU/GPU/Disk → which resource is the current
+  limit, with a 5-point hysteresis margin between busy candidates) is its own module, UI-agnostic
+  and unit-tested without a reference machine. See ADR-0070 for the full decision record and its
+  still-open reference-machine checklist.
 - **Same-API contention (real RTX 5080, throttled — the realistic mode)**: a persistent, tunable
   `busy.wgsl` compute kernel stands in for a real bake stage (ADR-0044's own persistent-kernel
   pattern, `spikes/loaf::gpu::LiveSuffixKernel`'s reasoning). Foreground latency under a

@@ -53,10 +53,25 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   itself (an adversarial review caught this only being enforced in `admission.rs`'s own isolated
   tests; a follow-up CodeRabbit review then caught the wired-in version itself leaking an
   over-total-budget job forever — both fixed, see `docs/adr/0054`'s Review findings).
-- **Telemetry** (`telemetry.rs`): `sysinfo` for CPU/RAM, DXGI (`IDXGIAdapter3::
+- **Telemetry** (`telemetry/mod.rs`): `sysinfo` for CPU/RAM, DXGI (`IDXGIAdapter3::
   QueryVideoMemoryInfo`) for VRAM behind a `VramSource` trait — picked over `nvml-wrapper` for
   vendor neutrality (v1 target is Windows-only anyway). Windows-only code, unverified in this
   sandbox (no GPU adapter under WSL) — shared with #70's own bottleneck indicator.
+  `TelemetrySampler::spawn` (not `new`) owns a background thread now (#70), sampling at most once
+  per interval and calling an `on_sample` callback (`PeltApp` wires this to
+  `egui_ctx.request_repaint()`) — `sample()` is a non-blocking read, `None` until the first sample
+  lands.
+- **Bottleneck indicator (#70/ADR-0070, built)**: GPU-busy%/disk-busy% via Windows PDH
+  (`telemetry/pdh.rs`, `LoadSource` trait mirroring `VramSource`'s honesty convention — `None`
+  never fabricated as 0) — picked over `nvml-wrapper` for the same vendor-neutrality reason as
+  VRAM's DXGI source above. `\GPU Engine(*)\Utilization Percentage`, LUID-filtered to the same
+  adapter `DxgiVramSource` queries, summed per-`(phys, eng)` across processes then busiest-engine-
+  wins (`pdh::aggregate_engines`); `\PhysicalDisk(*)\% Idle Time`, busiest disk excluding `_Total`.
+  The classifier (`nicti_pounce::hackles::classify`) is its own pure, UI-agnostic module — CPU/GPU/
+  Disk readings → `Limit` (a specific resource, or `Idle`), with a 5-point hysteresis margin so two
+  near-equal busy resources don't flip the headline every sample. `crates/nicti-pelt/src/
+  activity.rs` shows the headline plus per-resource colored readouts. Unverified against a real
+  reference machine (this sandbox has no GPU/PDH) — see ADR-0070's reference-machine checklist.
 - **Same-API contention (real RTX 5080, throttled/realistic)**: foreground latency under a
   background `wgpu` chunk tracks chunk size ~1:1 — 1/4/16/64ms nominal chunks measured
   0.93/3.8/15.8/67.6ms p50 foreground latency (p95 close to p50 at every size — corrected numbers

@@ -14,7 +14,8 @@ use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, ReportSlot, SyncJob};
 use nicti_lair::{CatalogError, CatalogStore, SqliteCatalog};
-use nicti_pounce::telemetry::{default_vram_source, TelemetrySampler};
+use nicti_pounce::hackles;
+use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
 use nicti_pounce::{JobKind, JobState, Pounce};
 use nicti_tapetum::gpu::GpuContext;
 
@@ -64,6 +65,11 @@ pub struct PeltApp {
     hsl_band_selected: usize,
     pounce: Pounce,
     telemetry: TelemetrySampler,
+    /// The bottleneck classifier's last verdict (#70/ADR-0070) -- kept across frames so
+    /// `hackles::classify`'s hysteresis has a `previous` to compare a fresh reading against.
+    /// `None` until the first real telemetry sample lands (`TelemetrySampler::sample` itself
+    /// returns `None` that whole time), distinct from a classified `Idle`.
+    bottleneck: Option<hackles::Verdict>,
     import_path_input: String,
     update: UpdateChecker,
     /// Nine Lives' (#25) own scheduler, `None` when the catalog itself failed to open (nothing to
@@ -130,7 +136,13 @@ impl PeltApp {
             (cpu_threads / 2).max(1),
             move || egui_ctx.request_repaint(),
         );
-        let telemetry = TelemetrySampler::new(default_vram_source(), TELEMETRY_MIN_INTERVAL);
+        let telemetry_ctx = cc.egui_ctx.clone();
+        let telemetry = TelemetrySampler::spawn(
+            default_vram_source(),
+            default_load_source(),
+            TELEMETRY_MIN_INTERVAL,
+            move || telemetry_ctx.request_repaint(),
+        );
 
         let mut update = UpdateChecker::new();
         // Startup check is best-effort and throttled to at most once per 24h
@@ -147,6 +159,7 @@ impl PeltApp {
             hsl_band_selected: 0,
             pounce,
             telemetry,
+            bottleneck: None,
             import_path_input: String::new(),
             update,
             nine_lives,
@@ -299,7 +312,7 @@ impl eframe::App for PeltApp {
             });
         });
 
-        crate::activity::show(ui, &self.pounce, &mut self.telemetry);
+        crate::activity::show(ui, &self.pounce, &self.telemetry, &mut self.bottleneck);
 
         if let Some(new_version) = self.update.available_version().cloned() {
             egui::Panel::top("update_banner").show(ui, |ui| {
