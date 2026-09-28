@@ -10,6 +10,7 @@ description = "Catalog schema + import/ingest pipeline (#22, ADR-0019 §8): SQLi
 nicti-claw = { path = "../nicti-claw" }
 nicti-cornea = { path = "../nicti-cornea" }
 nicti-pawprint = { path = "../nicti-pawprint" }
+nicti-pounce = { path = "../nicti-pounce" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 blake3 = "1"
 kamadak-exif = "0.6"

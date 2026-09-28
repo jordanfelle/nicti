@@ -1,6 +1,9 @@
 ---
 paths:
   - "spikes/crouch/**"
+  - "crates/nicti-pounce/**"
+  - "crates/nicti-lair/src/pounce_jobs.rs"
+  - "crates/nicti-pelt/src/activity.rs"
   - "docs/adr/0054-job-scheduler-pounce.md"
 ---
 
@@ -8,6 +11,27 @@ paths:
 
 Full reasoning/history: `docs/decisions/jobs.md`.
 
+- **Production crate (#55, landed): `crates/nicti-pounce`** — promotes `spikes/crouch`'s
+  `job`/`cancel`/`queue`/`admission`/`throttle`/`telemetry` (unchanged in design) into a real
+  threaded runtime, `runtime::Pounce`. Two lanes answer #206's "CPU decode vs. GPU work" question
+  structurally: `Lane::Gpu` (one worker thread, real VRAM admission, ADR-0054's one-chunk-in-flight
+  rule) and `Lane::Cpu` (a worker-thread pool gated by a live-adjustable `Throttle` — Scruff/
+  Patrol's import/sync scan, `nicti-lair::pounce_jobs`, is the first real client). `queue::
+  Scheduler::take_next`/`finish` replaces the spike's single `run_next` so a worker never holds
+  the lane's lock across a job's own `step()`. `Pounce::cancel` keeps its own `JobId`-keyed
+  `CancelToken` registry rather than delegating to `Scheduler::cancel` — the scheduler's own
+  `cancel` only finds a job still sitting in its queue, which most of a fast-yielding job's
+  lifetime isn't (a real bug this ticket's own tests caught: cancelling a job with no per-job
+  delay raced the job to completion before `Scheduler::cancel` ever found it queued). No bake
+  pipeline exists yet (Tapetum has no worker; Develop renders synchronously every frame), so the
+  GPU lane and VRAM admission are exercised only by synthetic jobs in `nicti-pounce`'s own tests —
+  the first real bake job is a follow-up tied to #31/#27.
+- **UI (#55, landed): `crates/nicti-pelt/src/activity.rs`** — a bottom status bar reading
+  `Pounce::snapshot()`: collapsed, running/queued counts + a `TelemetrySampler` readout (CPU/RAM/
+  VRAM, VRAM shown "n/a" rather than fabricated when unavailable); expanded, one row per job with
+  a progress bar/spinner and a cancel button; plus a live CPU-lane concurrency `DragValue`. The
+  Library view's Import/Sync buttons (`app.rs`) register a placeholder single-volume root (no real
+  volume-identity system wired into this shell yet) and submit `IngestJob`/`SyncJob`.
 - **Scheduler (#54)** — `docs/adr/0054`: **Proposed**, same-API and cross-API contention both
   measured on real RTX 5080 hardware; wiring into a real bake pipeline is #55's build.
 - **Model**: `job::ChunkedJob` (`spec()`/`step() -> Yield|Done`) — cooperative cancellation only

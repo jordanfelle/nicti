@@ -1,0 +1,160 @@
+//! Pounce's first real clients (#55): `IngestJob`/`SyncJob` step Scruff's [`Ingest`] / Patrol's
+//! [`PatrolSync`] one chunk (one file, or one already-cataloged asset) per
+//! [`nicti_pounce::ChunkedJob::step`] call. Both run on Pounce's CPU lane, `Priority::Background`
+//! -- CPU/disk-bound scan work that never needs the GPU/`ort` worker (#206's own finding: decode
+//! is CPU-only and shouldn't serialize behind GPU dispatch).
+
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
+
+use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
+use crate::scruff::{Ingest, IngestReport};
+use crate::CatalogStore;
+
+/// A shared slot a caller can poll for the final report once a job reaches `Done`. Stays `None`
+/// if the job was cancelled or failed instead -- check the activity panel's own
+/// `nicti_pounce::JobState` for that; this slot only ever holds a *successful* report.
+pub type ReportSlot<R> = Arc<Mutex<Option<R>>>;
+
+pub struct IngestJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    ingest: Option<Ingest>,
+    label: String,
+    progress: Progress,
+    result: ReportSlot<IngestReport>,
+}
+
+impl IngestJob {
+    /// `store` is `Arc<dyn CatalogStore + Send + Sync>` (not the concrete `SqliteCatalog`) so this
+    /// job doesn't need to know which catalog-store backend is running -- a caller upcasts via a
+    /// plain `Arc` coercion (`store as Arc<dyn CatalogStore + Send + Sync>`).
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        root_id: i64,
+        root_path: &Path,
+    ) -> (Self, ReportSlot<IngestReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = IngestJob {
+            store,
+            ingest: Some(Ingest::new(root_id, root_path)),
+            label: format!("Import: {}", root_path.display()),
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for IngestJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Import,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let ingest = self
+            .ingest
+            .as_mut()
+            .expect("IngestJob::step called again after it already reported Done");
+        let more = ingest
+            .step(self.store.as_ref())
+            .map_err(|e| JobError::new(e.to_string()))?;
+        self.progress = Progress {
+            done: ingest.processed_count(),
+            total: None, // Scruff's walk is lazy -- never a known total, see Ingest's own doc comment
+        };
+        if more {
+            Ok(Step::Yield)
+        } else {
+            let report = self.ingest.take().unwrap().into_report();
+            *self.result.lock().unwrap() = Some(report);
+            Ok(Step::Done)
+        }
+    }
+}
+
+pub struct SyncJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    sync: Option<PatrolSync>,
+    label: String,
+    done_count: u64,
+    progress: Progress,
+    result: ReportSlot<SyncReport>,
+}
+
+impl SyncJob {
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        root_id: i64,
+        root_path: &Path,
+        opts: SyncOptions,
+    ) -> (Self, ReportSlot<SyncReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = SyncJob {
+            store,
+            sync: Some(PatrolSync::new(root_id, root_path, opts)),
+            label: format!("Sync: {}", root_path.display()),
+            done_count: 0,
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for SyncJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Sync,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let sync = self
+            .sync
+            .as_mut()
+            .expect("SyncJob::step called again after it already reported Done");
+        let more = sync
+            .step(self.store.as_ref())
+            .map_err(|e| JobError::new(e.to_string()))?;
+        self.done_count += 1;
+        self.progress = Progress {
+            done: self.done_count,
+            total: sync.total_hint(),
+        };
+        if more {
+            Ok(Step::Yield)
+        } else {
+            let report = self.sync.take().unwrap().into_report();
+            *self.result.lock().unwrap() = Some(report);
+            Ok(Step::Done)
+        }
+    }
+}

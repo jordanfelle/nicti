@@ -152,3 +152,52 @@ shaped its design.
   chunking, or an explicit multi-lane concurrency model — CPU decode running independent of the
   GPU/`ort` worker — to bound their own worst-case foreground-preemption latency) — not solved
   this pass, a genuine gap in scope (#37 has no streaming decode interface yet).
+
+## #55: the production build
+
+Promotes `spikes/crouch` into `crates/nicti-pounce`, wires in Scruff/Patrol as its first real
+clients (`nicti-lair::pounce_jobs`), and adds an activity panel to `nicti-pelt`. The scheduler
+core (`job`/`cancel`/`queue`/`admission`/`throttle`) is unchanged in design from the research
+above; three things changed to make it a real runtime rather than a single-threaded research
+harness:
+
+1. **`queue::Scheduler::run_next` split into `take_next`/`finish`.** The spike's `run_next` held
+   the scheduler's own lock across a job's `step()` call, which was fine when the spike's own
+   timing loop was the only caller running on one thread. A real worker thread must *not* hold the
+   lane's lock while `step()` runs (submit/cancel/reprioritize from other threads would otherwise
+   block for a chunk's entire duration), so `take_next` removes an entry and hands it to the
+   caller, which steps it without any lock held, then calls `finish` to report the outcome and let
+   the scheduler decide whether to re-enqueue it. `Scheduler::submit` also now takes a
+   caller-supplied `JobId` instead of minting its own — `Pounce` has two independent `Scheduler`s
+   (one per lane), and ids must stay unique across both for the activity panel's status map to key
+   on correctly.
+2. **Two lanes, resolving #206's own open question.** `Lane::Gpu` keeps ADR-0054's one-serial-
+   worker rule (real VRAM admission); `Lane::Cpu` is a pool of worker threads gated by a
+   live-adjustable `Throttle`, so Scruff/Patrol's CPU-bound scan never waits behind the GPU/`ort`
+   worker — the structural half of #206's option 2 (an explicit multi-lane concurrency model). The
+   tile-granular sim re-run #206 also asked for is still open; commented on the issue rather than
+   closed by this ticket.
+3. **A real concurrency bug this ticket's own tests caught**: cancelling a job by calling
+   `Scheduler::cancel(id)` only reaches it if it's currently sitting in the scheduler's own
+   `foreground`/`background` collections — a job a worker thread has already taken out via
+   `take_next` to step isn't there, and with `take_next`/`finish` deliberately not holding the
+   lock across `step`, a fast-yielding job spends very little of its lifetime actually queued.
+   `runtime::tests::cancelling_mid_job_stops_it_at_the_next_boundary` first failed intermittently
+   against a job with no per-step delay — the job simply finished (raced the test's own `cancel()`
+   call) before ever landing back in the queue for `Scheduler::cancel` to find it. Fixed by giving
+   `Pounce` its own `JobId`-keyed `CancelToken` registry, populated at `submit` time and cleared
+   once a job reaches a terminal state — cancelling through this registry reaches a job regardless
+   of whether it's queued or checked out, since a `CancelToken` clone shares the same underlying
+   `AtomicBool` either way (`cancel.rs`'s own doc comment).
+
+No real bake pipeline exists yet to give the GPU lane real jobs (Tapetum has no worker; the
+Develop panel renders synchronously every frame) — the GPU lane and VRAM admission are exercised
+only by synthetic jobs in `nicti-pounce`'s own tests. Scruff/Patrol (`IngestJob`/`SyncJob`) are the
+first real, `Lane::Cpu` clients. Both `scruff::Ingest` and `patrol::Sync` were rewritten as
+explicit step-by-step state machines (one candidate file, or one already-cataloged asset, per
+`step()` call) so a cooperative scheduler can interleave them with other work — `ingest_root`/
+`sync_root` are now thin loops over these, preserving their existing test coverage exactly.
+
+**Consequences**: unblocks the first real bake-job follow-up (tied to #31/loupe and #27/preview
+cache) and #70 (shares `telemetry::TelemetrySampler`, not a second implementation). #206 stays
+open — the sim re-run against the new two-lane model hasn't happened yet.
