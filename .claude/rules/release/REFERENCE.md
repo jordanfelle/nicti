@@ -36,6 +36,13 @@ Full reasoning/history: `docs/decisions/release.md`.
   the actual HTTP check + download + re-exec-installer path is `cfg(windows)`-only (`ureq` +
   `native-tls`, so it rides the OS trust store — no `webpki-roots`, which isn't on `deny.toml`'s
   allowlist). Auto-check state: `%LOCALAPPDATA%\Nicti\update.json`, at most once per 24h.
+- **Edge channel (#267)**: every push to `main` also rebuilds and republishes a single moving
+  `edge` prerelease at that commit (delete + recreate, not accumulate) — same installer/minisign
+  pipeline as a real release, just gated on `github.ref == 'refs/heads/main'` instead of a tag.
+  `--prerelease` keeps it out of `/releases/latest`, which is what `nicti-shed`'s auto-updater
+  polls, so it can never get auto-installed over a stable install. No separate `develop` branch:
+  `main` only ever advances via a reviewed, CI-passing PR merge already, so it's already the
+  "always good, frequently updated" branch a `develop` branch would otherwise exist for.
 - See `docs/releasing.md` for the actual cut-a-release runbook and the one-time minisign
   key-generation steps.
 

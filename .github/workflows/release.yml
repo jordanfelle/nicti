@@ -5,16 +5,29 @@ name: Release
 # once that application is approved, and publishes to a GitHub Release. `workflow_dispatch`
 # without a tag runs the same build+sign steps and uploads a workflow artifact instead of
 # publishing, for a dry run.
+#
+# #267: two channels out of this one workflow, not two branches. A `vX.Y.Z` tag push still cuts
+# the real, permanent, Cargo.toml-version-matched stable release exactly as before. A push to
+# `main` (i.e. every merge) additionally builds and republishes a single moving `edge`
+# prerelease at that commit -- watch that release page (or the repo, with "Releases only"
+# notifications) for a build off the tip of main. GitHub's `/releases/latest` API (what
+# nicti-shed's auto-updater polls) never returns a prerelease, so `edge` can't be picked up by
+# the stable auto-update channel -- no updater code change needed for this.
 
 on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  # A stable-release build (tag push) always runs to completion, even if superseded -- it's a
+  # permanent artifact. An edge build (branch push) is a moving target: if main advances again
+  # before the previous edge build finishes, that in-flight build is already obsolete.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -184,7 +197,7 @@ jobs:
             packaging/windows/Nicti-Setup-*.exe.sha256
 
       - name: Publish release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -194,6 +207,29 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "Nicti ${NICTI_VERSION}" \
             --generate-notes \
+            packaging/windows/Nicti-Setup-*.exe \
+            packaging/windows/Nicti-Setup-*.exe.minisig \
+            packaging/windows/Nicti-Setup-*.exe.sha256
+
+      # #267: the bleeding-edge channel. `edge` is a single moving tag/release -- delete
+      # (`--cleanup-tag` removes the git tag too, not just the release) and recreate on every
+      # main push, rather than accumulate one release per merge. `--target` re-creates the tag
+      # at this commit since the old one was just deleted; `--prerelease` is what keeps this out
+      # of `/releases/latest` (see the top-of-file comment), so nicti-shed's stable auto-updater
+      # never sees it.
+      - name: Publish edge release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete edge --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag || true
+          gh release create edge \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Nicti edge (${GITHUB_SHA:0:7})" \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --notes "Automatic build from the latest commit on main (${GITHUB_SHA}). Unsigned and may be unstable -- for the stable channel, see the latest versioned release instead." \
             packaging/windows/Nicti-Setup-*.exe \
             packaging/windows/Nicti-Setup-*.exe.minisig \
             packaging/windows/Nicti-Setup-*.exe.sha256
