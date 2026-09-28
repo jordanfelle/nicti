@@ -335,12 +335,22 @@ mod tests {
                 calls_cb.fetch_add(1, Ordering::Relaxed);
             },
         );
-        thread::sleep(Duration::from_millis(150));
+        // Poll with a generous deadline rather than one fixed sleep-then-snapshot window: a
+        // fixed 150ms window flaked to 0 samples on Windows CI (`cargo test` runs every test's
+        // own background sampler thread concurrently, and a loaded/virtualized runner can delay
+        // a fresh thread's first scheduling past 150ms). Waiting for *at least* 2 samples, however
+        // long that actually takes up to a generous cap, checks the same "fires repeatedly"
+        // behavior without being sensitive to how fast the CI host schedules threads today.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let final_count = calls.load(Ordering::Relaxed);
         drop(sampler);
         assert!(
-            calls.load(Ordering::Relaxed) >= 2,
-            "expected at least 2 samples in 150ms at a 20ms interval, got {}",
-            calls.load(Ordering::Relaxed)
+            final_count >= 2,
+            "expected at least 2 samples within 5s at a 20ms interval, got {}",
+            final_count
         );
     }
 
