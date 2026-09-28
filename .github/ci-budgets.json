@@ -3,6 +3,7 @@
   "CI": {
     "cargo fmt": 2,
     "detect path changes": 1,
+    "ADR reference check": 1,
     "cargo deny (licenses)": 2,
     "cargo clippy (linux)": 3,
     "cargo test (linux)": 3,
