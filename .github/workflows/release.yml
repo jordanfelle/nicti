@@ -56,8 +56,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Cheap, Linux-only gate in front of the expensive Windows build. Before #267, the placeholder
+  # key check below only ever ran on a deliberate tag push or workflow_dispatch -- someone
+  # actively cutting a release, who'd see and act on the failure. Once #267 made every push to
+  # main trigger this workflow too, that same hard failure started firing on every single merge
+  # (the production minisign keypair hasn't been generated yet, see docs/releasing.md), turning
+  # main permanently red for a condition that isn't actually a bug in any of those merges. A tag
+  # push shipping with the placeholder key still *is* a real bug (silently breaks every future
+  # client's update-signature check) and must keep failing hard; an automatic edge build hitting
+  # the same not-yet-configured state is expected/inert until the one-time key setup happens, and
+  # should just skip cleanly instead.
+  check-release-key:
+    name: check production minisign key
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: crates/nicti-shed/src/lib.rs
+          sparse-checkout-cone-mode: false
+
+      - name: Check for the placeholder minisign key
+        id: check
+        shell: bash
+        run: |
+          if grep -q 'RWQQhGAWQ6j6RtbA5MtQbNkvNW+yqSuYR0GAJ+YBR1DbMY87J0uIxEmK' crates/nicti-shed/src/lib.rs; then
+            # A tag push and an explicit workflow_dispatch are both someone deliberately
+            # exercising the build/sign pipeline (the latter is docs/releasing.md's own
+            # pre-tag dry-run step) -- they should see and act on a loud failure, not have it
+            # silently downgrade to a no-op skip the way an automatic main-push edge build does.
+            if [[ "${GITHUB_REF_TYPE}" == "tag" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              echo "::error::crates/nicti-shed/src/lib.rs still has the placeholder PUBLIC_KEY_BASE64 -- generate the real production keypair per docs/releasing.md before releasing."
+              exit 1
+            fi
+            echo "::notice::Skipping this edge build: crates/nicti-shed/src/lib.rs still has the placeholder minisign PUBLIC_KEY_BASE64. Generate the real production keypair per docs/releasing.md to enable edge builds."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: build installer (windows)
+    needs: check-release-key
+    if: needs.check-release-key.outputs.ready == 'true'
     runs-on: windows-latest
     permissions:
       contents: write # only this job needs to publish a release
