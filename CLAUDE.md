@@ -240,7 +240,13 @@ gh issue edit N --repo jordanfelle/nicti --add-assignee jordanfelle --add-label 
 
 (`in-progress` is a real label in this repo, not a placeholder — create it with `gh label create`
 if it's ever missing.) When the PR merges, `gh issue close N` and drop the `in-progress` label in
-the same turn as the merge — don't leave it dangling on a closed issue.
+the same turn as the merge — don't leave it dangling on a closed issue. In that same turn, also
+refresh the `nicti-backlog` skill's local cache so it doesn't sit stale until its own next
+self-sync:
+
+```bash
+python3 ~/.claude/skills/nicti-backlog/cache.py sync
+```
 
 This is this repo's equivalent of the Shutterpaws/Scrumboy board-sync rule (see the launch-root
 `~/git/CLAUDE.md`'s ticket-lifecycle rule) — same reasoning, adapted to plain GitHub Issues
