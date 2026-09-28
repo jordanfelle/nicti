@@ -5,15 +5,48 @@ name: Release
 # once that application is approved, and publishes to a GitHub Release. `workflow_dispatch`
 # without a tag runs the same build+sign steps and uploads a workflow artifact instead of
 # publishing, for a dry run.
+#
+# #267: two channels out of this one workflow, not two branches. A `vX.Y.Z` tag push still cuts
+# the real, permanent, Cargo.toml-version-matched stable release exactly as before. A push to
+# `main` (i.e. every merge) additionally builds and republishes a single moving `edge`
+# prerelease at that commit -- watch that release page (or the repo, with "Releases only"
+# notifications) for a build off the tip of main. GitHub's `/releases/latest` API (what
+# nicti-shed's auto-updater polls) never returns a prerelease, so `edge` can't be picked up by
+# the stable auto-update channel -- no updater code change needed for this.
 
 on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
+  # Never cancel-in-progress (CodeRabbit review, PR #268): the point of this shared group is to
+  # serialize main-push edge publishers, not race them. Two overlapping runs could otherwise both
+  # pass the "is main still at my SHA" guard before either had moved the `edge` tag, then
+  # interleave their tag-move/upload calls -- with cancel-in-progress off, a later push's run
+  # queues behind the current one instead of running concurrently with it, so by the time it
+  # starts, any earlier run has already fully finished (published or cleanly skipped as stale).
+  # Tag-push (stable release) runs already never shared a group with anything else (each tag is
+  # its own `github.ref`), so this doesn't change their behavior at all.
+  #
+  # KNOWN LIMIT (a second CodeRabbit pass, same PR): a GitHub Actions concurrency group only
+  # ever holds one running run plus one *pending* run -- it is not an unbounded FIFO queue. If a
+  # third push to main lands while one run (from the first push) is already executing and a
+  # second push's run is already the queued pending run, that third push's run replaces the
+  # *second* push's pending run (the second push's own dedicated edge build is simply discarded,
+  # never run -- the third push's run is what actually runs next, not delayed and not itself
+  # discarded). In practice this only drops that intermediate push's own edge publish, not
+  # correctness of the channel itself: whichever run does end up executing always builds from
+  # its own actual `HEAD`, so `edge` still converges on the true tip of main once the burst
+  # settles -- it just isn't guaranteed to have published a distinct build for every single
+  # individual merge if several land within one build's runtime. A real fix (an external
+  # queue/self-hosted runner that retains every push) is a meaningfully bigger change than this
+  # ticket's scope and isn't justified for how infrequently main sees multiple merges within a
+  # single ~10-15 minute Windows build window on this repo today.
   cancel-in-progress: false
 
 permissions:
@@ -80,9 +113,12 @@ jobs:
       # SmartScreen/Authenticode signing, once the SignPath Foundation application (a follow-up
       # to #249, see the ADR) is approved. Skipped entirely until then -- v1's first releases
       # ship unsigned, relying on the minisign signature below (not Authenticode) as the actual
-      # update-integrity check.
+      # update-integrity check. Also gated on `github.ref_type == 'tag'` (#267): the edge channel
+      # is meant to stay minisign-only even after SignPath is enabled -- it's an unreviewed,
+      # possibly-broken build of the tip of main, and Authenticode-signing it would put Nicti's
+      # verified-publisher reputation behind every merge rather than just real releases.
       - name: Upload nicti.exe for signing
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         id: upload_nicti_exe
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -90,7 +126,7 @@ jobs:
           path: target/release/nicti.exe
 
       - name: Sign nicti.exe (SignPath)
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         uses: SignPath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -117,9 +153,9 @@ jobs:
           & makensis "/DVERSION=$env:NICTI_VERSION" "/DSRCDIR=${{ github.workspace }}\target\release" packaging\windows\nicti.nsi
 
       # SignPath also has to sign the installer itself, not just nicti.exe -- both binaries ship
-      # to the user. Same gate as above.
+      # to the user. Same gate as above (edge builds excluded, #267).
       - name: Upload installer for signing
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         id: upload_installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -127,7 +163,7 @@ jobs:
           path: packaging/windows/Nicti-Setup-*.exe
 
       - name: Sign installer (SignPath)
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         uses: SignPath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -184,7 +220,7 @@ jobs:
             packaging/windows/Nicti-Setup-*.exe.sha256
 
       - name: Publish release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -197,3 +233,159 @@ jobs:
             packaging/windows/Nicti-Setup-*.exe \
             packaging/windows/Nicti-Setup-*.exe.minisig \
             packaging/windows/Nicti-Setup-*.exe.sha256
+
+      # #267: the bleeding-edge channel. `edge` is a single moving tag/release, force-moved and
+      # reused (never deleted) on every main push, rather than accumulating one release per
+      # merge. `--prerelease` is what keeps this out of `/releases/latest` (see the top-of-file
+      # comment), so nicti-shed's stable auto-updater never sees it.
+      #
+      # CodeRabbit review (PR #268) caught three real issues in an earlier delete-then-recreate
+      # approach and this rewrite addresses all three at the root instead of patching around them:
+      #   1. Deleting the old `edge` release before the new one's assets finish uploading left a
+      #      window where `edge` didn't exist at all if upload failed or was canceled mid-step.
+      #   2. GitHub doesn't guarantee run ordering -- a re-run of an older, superseded workflow
+      #      run (stale GITHUB_SHA) could still overwrite a newer edge build with an older one.
+      #   3. A partially-failed tag delete could leave `gh release create --target` silently
+      #      targeting the wrong (stale) commit, and the script had no `set -e` to stop on it.
+      # Fix: never delete the `edge` release at all -- force-move (or create, on the very first
+      # run) the `edge` tag as a single atomic ref update, then edit-in-place/clobber-upload onto
+      # the same release object. `set -euo pipefail` means any failed step here (including the
+      # stale-run guard below) stops the job instead of silently falling through.
+      #
+      # A second adversarial pass on this rewrite (still PR #268) found three more real issues,
+      # addressed below:
+      #   4. "Never delete" means a version bump (Cargo.toml's version, which the installer
+      #      filename embeds) leaves the *previous* version's exe/.minisig/.sha256 permanently
+      #      attached alongside the new ones forever -- `--clobber` only overwrites an asset
+      #      whose filename matches exactly, it never removes a differently-named one. Fixed by
+      #      deleting every existing asset that isn't one of this run's exact filenames before
+      #      uploading.
+      #   5. The two GET calls against the tag ref used the plural `git/refs/{ref}` route, which
+      #      is documented for update/delete, not fetch -- `git/ref/{ref}` (singular) is the
+      #      correct fetch endpoint and doesn't prefix-match (the plural GET form returns an
+      #      array if more than one ref shares the prefix, e.g. a future `edge-preview` tag).
+      #   6. `cancel-in-progress` cancellation is best-effort, not synchronous -- two runs could
+      #      both pass a plain stale-run guard and then race on the actual tag-move/upload calls
+      #      if they were close enough together. A second CodeRabbit pass on this same PR pointed
+      #      out that a second guard call only narrows that TOCTOU window, it doesn't close it --
+      #      the real fix is to stop the runs from overlapping at all. `cancel-in-progress: false`
+      #      above does that: main-push runs now queue in this one shared concurrency group
+      #      instead of running concurrently, so by the time any run reaches this step, every
+      #      earlier-queued run has already fully finished. The second guard call below is now
+      #      pure defense-in-depth for a state that should never actually occur -- so it fails
+      #      loudly (exit 1) instead of quietly exiting 0, since seeing it fire would mean the
+      #      serialization assumption above was somehow violated (worth investigating), not a
+      #      normal, expected outcome the way a stale run at the very start of the step is.
+      - name: Publish edge release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # true (0) if main is still at this run's commit, false otherwise -- callers decide
+          # what a stale result means for them (see the two call sites below).
+          still_current() {
+            remote_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
+            [[ "$remote_main_sha" == "${GITHUB_SHA}" ]]
+          }
+
+          # Guard against an out-of-order re-run: if main has already advanced past this run's
+          # commit before any of this run's own changes have been made, this run is simply stale
+          # -- skip cleanly, there's nothing to undo yet.
+          if ! still_current; then
+            echo "::notice::main has advanced since this run started at ${GITHUB_SHA} -- skipping the edge publish so this stale run can't move edge backward."
+            exit 0
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/edge" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" -f sha="${GITHUB_SHA}" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/edge" -f sha="${GITHUB_SHA}" >/dev/null
+          fi
+
+          actual_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/edge" --jq '.object.sha')
+          if [[ "$actual_sha" != "${GITHUB_SHA}" ]]; then
+            echo "::error::edge tag points at $actual_sha after the move, not this commit (${GITHUB_SHA})."
+            exit 1
+          fi
+
+          if ! still_current; then
+            echo "::error::main advanced after this run already moved the edge tag to ${GITHUB_SHA} -- with main-push runs serialized (cancel-in-progress: false), this should never happen. Failing loudly rather than silently leaving a partially-applied publish."
+            exit 1
+          fi
+
+          notes="Automatic build from the latest commit on main (${GITHUB_SHA}). Unsigned and may be unstable -- for the stable channel, see the latest versioned release instead."
+          release_exists=0
+          gh release view edge --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && release_exists=1
+
+          if [[ "$release_exists" == "1" ]]; then
+            gh release edit edge --repo "${GITHUB_REPOSITORY}" \
+              --title "Nicti edge (${GITHUB_SHA:0:7})" \
+              --notes "$notes" \
+              --prerelease
+
+            # Upload under temporary names first, then swap (CodeRabbit review, PR #268):
+            # `gh release upload --clobber` deletes an existing same-named asset before
+            # uploading its replacement -- not atomic, so a failed upload after that delete
+            # leaves `edge` missing that asset entirely. This bites on every ordinary push that
+            # doesn't change Cargo.toml's version (the common case, since the installer filename
+            # is version-derived and stays the same across most edge builds), not just the
+            # version-bump case the upload-before-cleanup reorder above already covers. Staging
+            # under a unique temp suffix means none of the previously-published assets are
+            # touched until every new file has fully uploaded; the final swap is a metadata-only
+            # rename (delete old, then PATCH the temp asset's name into place), not a re-upload,
+            # so there's no meaningful window where the canonical name has no content behind it.
+            tmp_dir=$(mktemp -d)
+            tmp_suffix=".pending-${GITHUB_SHA:0:7}"
+            declare -a final_names=()
+            declare -a tmp_paths=()
+            for f in packaging/windows/Nicti-Setup-*.exe packaging/windows/Nicti-Setup-*.exe.minisig packaging/windows/Nicti-Setup-*.exe.sha256; do
+              final="$(basename "$f")"
+              tmp_path="$tmp_dir/${final}${tmp_suffix}"
+              cp "$f" "$tmp_path"
+              final_names+=("$final")
+              tmp_paths+=("$tmp_path")
+            done
+
+            gh release upload edge --repo "${GITHUB_REPOSITORY}" "${tmp_paths[@]}"
+
+            for i in "${!final_names[@]}"; do
+              final="${final_names[$i]}"
+              tmp_name="$(basename "${tmp_paths[$i]}")"
+              existing_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$final\") | .id")
+              if [[ -n "$existing_id" ]]; then
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
+              fi
+              tmp_id=$(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"$tmp_name\") | .id")
+              gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${tmp_id}" -f name="$final" >/dev/null
+            done
+
+            rm -rf "$tmp_dir"
+
+            # Finding 4: remove any asset left over from a prior version bump (a differently
+            # named exe/.minisig/.sha256 the swap above didn't touch, since it only knew this
+            # run's own filenames) -- `edge` should only ever carry exactly one version's
+            # installer.
+            current_names="packaging/windows/Nicti-Setup-*.exe packaging/windows/Nicti-Setup-*.exe.minisig packaging/windows/Nicti-Setup-*.exe.sha256"
+            for existing in $(gh release view edge --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'); do
+              keep=0
+              for f in $current_names; do
+                [[ "$existing" == "$(basename "$f")" ]] && keep=1
+              done
+              if [[ "$keep" == "0" ]]; then
+                gh release delete-asset edge "$existing" --repo "${GITHUB_REPOSITORY}" --yes
+              fi
+            done
+          else
+            gh release create edge \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Nicti edge (${GITHUB_SHA:0:7})" \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --notes "$notes" \
+              packaging/windows/Nicti-Setup-*.exe \
+              packaging/windows/Nicti-Setup-*.exe.minisig \
+              packaging/windows/Nicti-Setup-*.exe.sha256
+          fi

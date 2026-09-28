@@ -36,6 +36,28 @@ Full reasoning/history: `docs/decisions/release.md`.
   the actual HTTP check + download + re-exec-installer path is `cfg(windows)`-only (`ureq` +
   `native-tls`, so it rides the OS trust store — no `webpki-roots`, which isn't on `deny.toml`'s
   allowlist). Auto-check state: `%LOCALAPPDATA%\Nicti\update.json`, at most once per 24h.
+- **Edge channel (#267)**: every push to `main` also rebuilds and republishes a single moving
+  `edge` prerelease at that commit — same installer/minisign pipeline as a real release, gated on
+  `github.ref == 'refs/heads/main'` instead of a tag, with SignPath (Authenticode) signing
+  explicitly excluded via `&& github.ref_type == 'tag'` on all four of its steps, so edge stays
+  minisign-only even once SignPath is enabled. `--prerelease` keeps it out of
+  `/releases/latest`, which is what `nicti-shed`'s auto-updater polls, so it can never get
+  auto-installed over a stable install. No separate `develop` branch: `main` only ever advances
+  via a reviewed, CI-passing PR merge already, so it's already the "always good, frequently
+  updated" branch a `develop` branch would otherwise exist for. **The `edge` release/tag is
+  force-moved and reused, never deleted** (four rounds of CodeRabbit review on PR #268 — see the
+  workflow's own comments for the full list: a delete-then-recreate approach's availability gap
+  and stale-tag risk, stale-asset accumulation across version bumps, a wrong plural/singular
+  tag-ref GET endpoint, a concurrent-run race fixed by serializing main-push runs via
+  `cancel-in-progress: false`, and asset uploads staged under a temp name then server-side
+  renamed into place instead of `--clobber`, since `--clobber` itself deletes-then-uploads each
+  same-named asset non-atomically — the case that hits on every ordinary push, not just a
+  version bump). **Known limit**: a GitHub Actions concurrency group holds one running + one
+  pending run, not an unbounded queue — a third push landing while two are already in flight
+  discards the *second* push's pending run (the channel still converges on the true tip of main
+  once the burst settles; it just isn't guaranteed to publish one distinct build per individual
+  merge under a rapid burst). Accepted rather than building a real external queue, given how
+  infrequently this repo sees multiple main merges within one ~10-15 minute Windows build.
 - See `docs/releasing.md` for the actual cut-a-release runbook and the one-time minisign
   key-generation steps.
 

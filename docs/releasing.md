@@ -4,7 +4,17 @@ See [ADR-0249](adr/0249-windows-installer-and-updates.md) and
 [`.claude/rules/release/REFERENCE.md`](../.claude/rules/release/REFERENCE.md) for the design this
 implements.
 
-## Cutting a release
+## Bleeding-edge builds (no action needed)
+
+Every push to `main` automatically builds and republishes the `edge` GitHub Release/tag at that
+commit — no separate branch or manual step. Watch [the `edge`
+release](https://github.com/jordanfelle/nicti/releases/tag/edge) (or watch the whole repo with
+"Releases only" custom notifications) to get notified on every merge. It stays unsigned even
+once SignPath is enabled for the stable channel below -- treat it as exactly what it is: whatever
+the tip of `main` currently builds, which may be broken. The stable channel is the one to
+actually recommend to anyone else.
+
+## Cutting a (stable) release
 
 1. Bump the `version` field in the root `Cargo.toml` (the `nicti` package) — every other
    workspace crate stays `0.0.0`.
