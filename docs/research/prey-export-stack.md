@@ -46,6 +46,13 @@ correctness-only, run against `llvmpipe`, not the real RTX 5080.
 - `encode_image_crate_jpeg` (`encode.rs`): `image::codecs::jpeg::JpegEncoder`, the naive baseline.
 - `native::encode_mozjpeg` (`encode.rs`, `native` Cargo feature only): real mozjpeg via
   `mozjpeg-sys`'s vendored C build. Also has a native `write_icc_profile` (multi-segment-safe).
+- `encode_jpeg_encoder_with_sampling` / `native::encode_mozjpeg_with_sampling` (`encode.rs`, #223):
+  same two encoders, but with chroma subsampling pinned explicitly instead of left at each
+  library's own default -- see "Quality-matched JPEG-encoder comparison (#223)" below for why.
+- `find_matched_quality` (`encode.rs`, #223): given an encode closure and a target SSIM, scans
+  quality 1-100 ascending and returns the first quality whose decoded output scores at least the
+  target -- the quality-matching step this ADR's own decision rule requires before comparing
+  encoder candidates' size or speed (nominal "quality 90" isn't comparable across encoders).
 
 `turbojpeg` (libjpeg-turbo bindings) was not reached this pass.
 
@@ -123,11 +130,60 @@ cross-compile-to-Windows-and-run-via-WSL-interop path ADR-0044/0054 used against
 mozjpeg's output is ~2.6x smaller than either pure-Rust encoder's at the same nominal "quality 90"
 parameter, but nominal quality numbers aren't comparable across encoders -- mozjpeg's own default
 quantization tables and (by default) optimized Huffman coding are more perceptually tuned per
-quality unit than either pure-Rust encoder's. **A quality-matched (SSIM- or file-size-normalized)
-comparison was not done this pass** -- the raw numbers above are real, but "is mozjpeg's
-2.6x-smaller file actually the same perceptual quality, or just lower quality at the same nominal
-number" is an open question a follow-up needs to close before this can move to Accepted. mozjpeg
-is also ~2.5-3x slower to encode than either pure-Rust option.
+quality unit than either pure-Rust encoder's. mozjpeg is also ~2.5-3x slower to encode than either
+pure-Rust option. **This pass's own "is mozjpeg's 2.6x-smaller file actually the same perceptual
+quality" question is now closed -- see the next section.**
+
+**Quality-matched JPEG-encoder comparison (#223), chroma subsampling pinned to 4:2:0 on both
+sides:**
+
+Following up on the open question above turned up a second, more consequential confound than
+"nominal quality numbers aren't calibrated the same way": `jpeg-encoder` 0.6.1's own default
+(`Encoder::new`) silently switches chroma subsampling from 4:2:0 to 4:4:4 at quality 90 and above,
+while mozjpeg's libjpeg default (`jpeg_set_defaults`) stays fixed at 4:2:0 regardless of quality.
+The original quality-90 comparison above was therefore partly comparing 4:4:4 output (jpeg-encoder)
+against 4:2:0 output (mozjpeg) -- a bigger deal than an uncalibrated quantizer, since chroma
+subsampling roughly halves chroma-plane data outright. Confirmed with a regression test
+(`jpeg_encoder_default_sampling_switches_at_quality_90`): the size jump crossing quality 90 shrinks
+once subsampling is pinned instead of left to switch.
+
+With subsampling pinned to 4:2:0 on both candidates (`encode_jpeg_encoder_with_sampling`/
+`native::encode_mozjpeg_with_sampling`) and each encoder's quality matched to reach a fixed target
+SSIM against the source (`find_matched_quality`, `prey quality-sweep`), on a smoother
+"photo_like_frame" test source (large-scale tonal gradient plus moderate-frequency texture --
+`synthetic_frame`'s per-pixel-varying blue channel turned out to be adversarially high-frequency
+for chroma subsampling, capping SSIM around 0.91 even at quality 100 and making it useless for
+finding *any* quality-matched threshold above that):
+
+| Target SSIM | `jpeg-encoder` matched q | size | mozjpeg matched q | size | size ratio | encode time (jpeg-encoder / mozjpeg) | time ratio |
+|---|---|---|---|---|---|---|---|
+| 0.98 | 30 | 173,118 bytes | 44 | 133,967 bytes | 1.29x | 29.07ms / 116.36ms | 4.00x |
+| 0.95 | 17 | 130,870 bytes | 26 | 90,584 bytes | 1.44x | 23.41ms / 104.69ms | 4.47x |
+
+mozjpeg's smaller-file result is now **real and confirmed on this synthetic source**, not an
+artifact of mismatched subsampling or an uncalibrated quality parameter -- ~1.3-1.4x smaller at
+genuinely matched perceptual quality, consistent across two different SSIM targets on the same
+image. But it is also consistently **~4-4.5x slower** at that same matched quality, which fails
+this ADR's own decision rule (a candidate's encode time must stay <=1.5x the fastest to "earn its
+place" over the pure-Rust default). **Conclusion for this pass: `jpeg-encoder` stays the v1
+default.** mozjpeg's size advantage doesn't clear the speed bar this ADR set before measuring --
+see ADR-0056's own JPEG encoder section for the same conclusion. Two caveats on how far this
+generalizes, not just the usual hardware one:
+
+- **Hardware**: these p50 numbers are this sandbox's Linux CPU, not the Windows reference machine.
+  The *ratio* between the two encoders is what this measurement is really about, and isn't
+  expected to flip on different hardware, but a reference-machine re-confirmation would still be
+  worth doing before fully closing this out.
+- **Image content**: measured against one synthetic test image (`photo_like_frame`), not a real
+  NEF-derived render. This pass's own experience shows the result is content-sensitive --
+  `synthetic_frame`'s per-pixel chroma noise capped SSIM around 0.91 regardless of quality and had
+  to be swapped out for a smoother fixture before either encoder's quality-vs-SSIM curve was even
+  usable. A real photo's noise/texture profile (sensor noise, foliage/fur detail, sky gradients)
+  could plausibly shift the matched-quality size/speed gap in either direction. Treat "jpeg-encoder
+  wins" as this pass's result on synthetic content, not yet a real-photo-confirmed conclusion --
+  the real-NEF re-measurement this doc's "What wasn't reachable" section already tracks (blocked on
+  #41 landing a full render pipeline) should re-run this same `quality-sweep` comparison once real
+  renders exist, not just re-confirm timing on different hardware.
 
 **Metadata write (2048x1365 JPEG, 420,176-byte base):**
 
@@ -215,8 +271,14 @@ pipeline output (see below).
 
 - Real full-resolution GPU resize timing against the reference RTX 5080 (needs the
   cross-compile-to-Windows-via-WSL-interop path, not attempted this pass).
-- A quality-matched (SSIM- or size-normalized) comparison between mozjpeg and the pure-Rust JPEG
-  encoders -- the raw quality-90 numbers above aren't directly comparable.
+- A reference-machine (real Windows target hardware) re-confirmation of the quality-matched
+  JPEG-encoder speed ratio (#223 closed the SSIM-matched comparison itself on this sandbox's
+  Linux CPU).
+- A real-NEF re-measurement of #223's quality-matched JPEG-encoder comparison: the SSIM/size/speed
+  numbers above are against one synthetic test image (`photo_like_frame`), and this pass's own
+  experience shows the result is content-sensitive (a different synthetic fixture,
+  `synthetic_frame`, couldn't even reach a usable SSIM target at 4:2:0). Blocked on #41's full
+  render pipeline existing so a real decoded/rendered photo is available to sweep against.
 - `turbojpeg` (libjpeg-turbo bindings) as a fourth JPEG encoder candidate.
 - ICC/EXIF/XMP write into a TIFF export target -- no crate in this workspace builds arbitrary
   TIFF tags (same class of gap ADR-0059 already flagged for DNG).
@@ -228,7 +290,7 @@ pipeline output (see below).
 ## Reproducing
 
 ```bash
-cargo test -p prey                                    # 35 unit tests, synthetic images only
+cargo test -p prey                                    # unit tests, synthetic images only
 cargo test -p prey --features native                   # + mozjpeg-backed tests
 cargo build -p prey --release
 target/release/prey resize --src-width 3840 --src-height 2160 --dst-long-edge 1024
@@ -238,4 +300,5 @@ target/release/prey watermark --width 2048 --height 1365
 target/release/prey pipeline --src-width 3840 --src-height 2160 --dst-long-edge 1024 \
     --out-file /tmp/prey-pipeline.jpg
 exiftool -validate -warning -a /tmp/prey-pipeline.jpg   # expect "Validate: OK"
+target/release/prey quality-sweep --width 2048 --height 1365 --target-ssim 0.98  # #223
 ```

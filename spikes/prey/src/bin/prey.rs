@@ -41,6 +41,20 @@ enum Command {
         #[arg(long, default_value = "bench-results")]
         out_dir: PathBuf,
     },
+    /// Quality-matched JPEG-encoder comparison (#223): for each encoder candidate, find the
+    /// smallest quality parameter reaching `target_ssim` against the source, then measure encode
+    /// time and output size at *that* quality -- not at a shared nominal "quality" number, which
+    /// isn't comparable across encoders (see ADR-0056's own decision rule).
+    QualitySweep {
+        #[arg(long, default_value_t = 2048)]
+        width: u32,
+        #[arg(long, default_value_t = 1365)]
+        height: u32,
+        #[arg(long, default_value_t = 0.98)]
+        target_ssim: f64,
+        #[arg(long, default_value = "bench-results")]
+        out_dir: PathBuf,
+    },
     /// Measure EXIF+XMP+ICC metadata write on a JPEG at a chosen size.
     Metadata {
         #[arg(long, default_value_t = 2048)]
@@ -89,6 +103,29 @@ fn synthetic_frame(width: u32, height: u32) -> RgbImage {
         } else {
             Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
         }
+    })
+}
+
+/// A smooth large-scale tonal gradient plus moderate-frequency texture (period tens of pixels,
+/// amplitude ~25) -- unlike [`synthetic_frame`]'s per-pixel-varying blue channel, which is
+/// adversarially high-frequency for chroma subsampling (measured: with 4:2:0 pinned, SSIM caps
+/// out around 0.91 even at quality 100 on that fixture -- a real ceiling from the *test image*,
+/// not any encoder's fault) and so can't reach a meaningful quality-matched SSIM target at all.
+/// This fixture stays in the 0.94-0.998 SSIM range across quality 15-100 at 4:2:0, closer to how
+/// real photographic chroma content responds to subsampling -- used only by `QualitySweep`,
+/// which is what actually needs a source where quality changes visibly move the SSIM needle.
+fn photo_like_frame(width: u32, height: u32) -> RgbImage {
+    RgbImage::from_fn(width, height, |x, y| {
+        let fx = x as f64 / width as f64;
+        let fy = y as f64 / height as f64;
+        let texture = 25.0 * ((x as f64 * 0.35).sin() * (y as f64 * 0.28).cos());
+        let r =
+            (128.0 + 100.0 * (fx * std::f64::consts::PI).sin() + texture).clamp(0.0, 255.0) as u8;
+        let g =
+            (128.0 + 100.0 * (fy * std::f64::consts::PI).sin() + texture).clamp(0.0, 255.0) as u8;
+        let b = (128.0 + 60.0 * ((fx + fy) * std::f64::consts::PI).sin() + texture)
+            .clamp(0.0, 255.0) as u8;
+        Rgb([r, g, b])
     })
 }
 
@@ -246,6 +283,116 @@ fn main() -> anyhow::Result<()> {
                 });
                 println!("  mozjpeg output size: {mozjpeg_bytes} bytes");
                 report("encode-mozjpeg-native", protocol, stats, &out_dir);
+            }
+            #[cfg(not(feature = "native"))]
+            println!("  (mozjpeg skipped -- rebuild with --features native)");
+        }
+
+        Command::QualitySweep {
+            width,
+            height,
+            target_ssim,
+            out_dir,
+        } => {
+            // photo_like_frame, not synthetic_frame -- the latter's per-pixel-varying blue
+            // channel is adversarially high-frequency for chroma subsampling and can't reach a
+            // meaningful SSIM target at 4:2:0 at all (measured ceiling ~0.91 even at quality
+            // 100); see photo_like_frame's own doc comment.
+            let img = photo_like_frame(width, height);
+            println!("quality-matched sweep {width}x{height} @ target SSIM {target_ssim}");
+            println!(
+                "  (chroma subsampling pinned to 4:2:0 on both candidates -- jpeg-encoder's own \
+                 default silently switches to 4:4:4 at quality >=90 while mozjpeg's stays fixed \
+                 at 4:2:0, which would otherwise confound this comparison; see encode.rs's doc \
+                 comments)"
+            );
+
+            fn decode_jpeg(bytes: &[u8]) -> anyhow::Result<RgbImage> {
+                Ok(image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg)?.to_rgb8())
+            }
+
+            // 4:2:0 on both sides: mozjpeg's own fixed default, and the subsampling mode a real
+            // web/print export target actually uses (ADR-0056's decision rule requires 4:2:0
+            // support, not just 4:4:4).
+            let jpeg_encoder_matched = prey::encode::find_matched_quality(
+                &img,
+                target_ssim,
+                |q| {
+                    prey::encode::encode_jpeg_encoder_with_sampling(
+                        &img,
+                        q,
+                        None,
+                        jpeg_encoder::SamplingFactor::F_2_2,
+                    )
+                },
+                decode_jpeg,
+            )?;
+            println!(
+                "  jpeg-encoder (4:2:0): matched q={} size={} bytes ssim={:.4}",
+                jpeg_encoder_matched.quality,
+                jpeg_encoder_matched.size_bytes,
+                jpeg_encoder_matched.ssim
+            );
+            let q = jpeg_encoder_matched.quality;
+            let stats = protocol.run(|| {
+                prey::encode::encode_jpeg_encoder_with_sampling(
+                    &img,
+                    q,
+                    None,
+                    jpeg_encoder::SamplingFactor::F_2_2,
+                )
+                .unwrap();
+            });
+            report(
+                "quality-matched-jpeg-encoder-420",
+                protocol,
+                stats,
+                &out_dir,
+            );
+
+            #[cfg(feature = "native")]
+            {
+                let mozjpeg_matched = prey::encode::find_matched_quality(
+                    &img,
+                    target_ssim,
+                    |q| {
+                        prey::encode::native::encode_mozjpeg_with_sampling(
+                            &img,
+                            q as f32,
+                            None,
+                            (2, 2),
+                            (2, 2),
+                        )
+                    },
+                    decode_jpeg,
+                )?;
+                println!(
+                    "  mozjpeg (4:2:0): matched q={} size={} bytes ssim={:.4}",
+                    mozjpeg_matched.quality, mozjpeg_matched.size_bytes, mozjpeg_matched.ssim
+                );
+                let q = mozjpeg_matched.quality;
+                let stats = protocol.run(|| {
+                    prey::encode::native::encode_mozjpeg_with_sampling(
+                        &img,
+                        q as f32,
+                        None,
+                        (2, 2),
+                        (2, 2),
+                    )
+                    .unwrap();
+                });
+                report(
+                    "quality-matched-mozjpeg-native-420",
+                    protocol,
+                    stats,
+                    &out_dir,
+                );
+
+                let size_ratio =
+                    jpeg_encoder_matched.size_bytes as f64 / mozjpeg_matched.size_bytes as f64;
+                println!(
+                    "  jpeg-encoder is {size_ratio:.2}x the size of mozjpeg at matched SSIM {target_ssim}, both at 4:2:0"
+                );
             }
             #[cfg(not(feature = "native"))]
             println!("  (mozjpeg skipped -- rebuild with --features native)");
