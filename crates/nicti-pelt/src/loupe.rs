@@ -189,12 +189,25 @@ impl LoupeSession {
         self.errors.get(&asset_id).map(String::as_str)
     }
 
-    /// Cancels every in-flight decode -- for a caller tearing down the session (switching folders,
-    /// closing the loupe view) before its jobs would naturally finish.
-    pub fn cancel_all(&self, pounce: &Pounce) {
+    /// Cancels every in-flight decode and forgets about it -- for a caller tearing down the
+    /// session (switching folders, closing the loupe view) before its jobs would naturally
+    /// finish. Clears `inflight` immediately rather than waiting for each job's `ReportSlot` to
+    /// resolve, because a job `Pounce::cancel` catches while still queued (not yet picked up by a
+    /// worker) never runs its own `step()` at all -- `queue::Scheduler::take_next` drops it
+    /// straight into `cancelled_while_queued` -- so its slot would never resolve, and `poll`'s own
+    /// "only remove from `inflight` once the slot resolves" rule would otherwise wedge that asset
+    /// id out of `inflight` (and therefore un-resubmittable) for the rest of this session's life.
+    /// A job that's already running when cancelled still finishes its one chunk and resolves its
+    /// slot normally -- that result is simply no longer looked at, which is fine: nothing else
+    /// holds a reference to `inflight`'s entry once this drops it, so there's nothing to leak,
+    /// just wasted work matching the caller's own "abandon everything" intent. (Caught by
+    /// adversarial review: an earlier version left `inflight` entries in place until their slot
+    /// resolved, which for a cancelled-while-queued job never happened.)
+    pub fn cancel_all(&mut self, pounce: &Pounce) {
         for inflight in self.inflight.values() {
             pounce.cancel(inflight.job_id);
         }
+        self.inflight.clear();
     }
 }
 
@@ -390,5 +403,83 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         session.poll(&store);
         assert_eq!(decoder.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Slow enough that, with only one CPU worker and a 3-wide prefetch window, at least one
+    /// submitted job is still sitting in the queue (never picked up by `step()`) when the test
+    /// calls `cancel_all` right after submitting -- the exact race `cancel_all`'s own doc comment
+    /// describes.
+    struct SlowDecoder;
+
+    impl Module for SlowDecoder {
+        fn id(&self) -> &str {
+            "test.decoder.slow"
+        }
+        fn schema_version(&self) -> u32 {
+            1
+        }
+        fn migrate_params(&self, _: u32, _: serde_json::Value) -> Option<serde_json::Value> {
+            None
+        }
+    }
+
+    impl RawDecoder for SlowDecoder {
+        fn decode_linear(&self, _path: &Path) -> Result<LinearFrame, DecodeError> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(LinearFrame {
+                make: "Test".to_string(),
+                model: "Slow".to_string(),
+                width: 2,
+                height: 2,
+                black: 0,
+                maximum: 4095,
+                cam_mul: [1.0, 1.0, 1.0, 1.0],
+                pre_mul: [1.0, 1.0, 1.0, 1.0],
+                cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                cblack: [0, 0, 0, 0],
+                pixels: vec![0; 2 * 2 * 3],
+            })
+        }
+    }
+
+    #[test]
+    fn cancel_all_never_permanently_wedges_an_asset_out_of_inflight() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "/photos").unwrap();
+        let ids: Vec<i64> = (0..3)
+            .map(|i| {
+                store
+                    .insert_asset(root_id, &new_asset(&format!("{i}.NEF")), None)
+                    .unwrap()
+            })
+            .collect();
+        // One CPU worker: with a 3-wide window (cursor=1 -> indices 0,1,2) and a 200ms decoder,
+        // at most one job can be running at a time when cancel_all is called immediately after
+        // submit -- the other two are guaranteed still queued, never having run step() at all.
+        let pounce = Pounce::new(0, 1, 1, || {});
+        let mut session = LoupeSession::new(ids, Arc::new(SlowDecoder), u64::MAX);
+
+        session.set_cursor(1, &store, &pounce).unwrap();
+        assert_eq!(
+            session.inflight.len(),
+            3,
+            "all three should have been submitted"
+        );
+        session.cancel_all(&pounce);
+        assert!(
+            session.inflight.is_empty(),
+            "cancel_all must not leave any asset permanently wedged in inflight"
+        );
+
+        // Wait out any job that was already running (up to 200ms) plus its cancellation, then
+        // confirm the session is still usable: a fresh set_cursor can resubmit and actually
+        // complete a decode for the same assets, proving nothing was left un-resubmittable.
+        std::thread::sleep(Duration::from_millis(250));
+        session.set_cursor(1, &store, &pounce).unwrap();
+        wait_for(|| {
+            session.poll(&store);
+            session.current_frame(&store).is_some()
+        });
     }
 }
