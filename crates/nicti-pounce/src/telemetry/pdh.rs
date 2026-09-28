@@ -294,7 +294,11 @@ mod windows_impl {
                 .into_iter()
                 .filter_map(|(name, value)| parse_engine_instance(&name).map(|inst| (inst, value)))
                 .collect();
-            if parsed.is_empty() {
+            // Not just "did anything parse" -- PDH can report instances for another adapter
+            // (e.g. an integrated GPU) with none for `self.target_luid` at all, in which case
+            // `aggregate_engines`'s per-target sum would be empty and fold to a fabricated 0.0
+            // rather than the honest "n/a" (caught by CodeRabbit's review of this PR).
+            if !parsed.iter().any(|(inst, _)| inst.luid == self.target_luid) {
                 return None;
             }
             Some(aggregate_engines(&parsed, self.target_luid))
