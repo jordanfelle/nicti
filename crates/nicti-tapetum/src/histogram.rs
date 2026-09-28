@@ -1,8 +1,11 @@
-//! CPU reference for the Develop panel's live histogram (#46). The production path
-//! (`HistogramKernel`/`histogram.wgsl` in `stages.rs`) bins the display-encoded render on the GPU
-//! into the same 256 buckets this module computes, so the two must agree bin-for-bin -- proven by
-//! `stages.rs`'s own GPU-vs-CPU parity test, the same pattern every other kernel in this crate
-//! already follows.
+//! The Develop panel's live histogram (#46). This is a plain CPU implementation, not a GPU
+//! kernel -- `nicti-pelt`'s `DevelopView::histogram` builds it from a `frame::read_frame` CPU
+//! readback of the current render, display-encoded via `crate::geometry::output_encode`. ADR-0016's
+//! "never a full-frame host<->device round-trip in the hot path" concern is about a real full-res
+//! photo; this view still renders a small synthetic frame (#31 hasn't landed a real NEF yet), so
+//! the readback cost here is trivial. A throttled/GPU histogram is a follow-up once #31 replaces
+//! the synthetic frame with a real one -- see `render-graph`'s own "#46 completion" REFERENCE.md
+//! bullet.
 
 /// R/G/B/luma counts across 256 buckets each, from a display-encoded (sRGB gamma, `0.0..=1.0`)
 /// image -- the same space `crate::geometry::output_encode` produces, matching what a photo

@@ -131,8 +131,7 @@ fn hsl_band_weight(hue: f32, band_index: i32) -> f32 {
     if (d >= 45.0) {
         return 0.0;
     }
-    let c = 0.5 * (1.0 + cos(PI * d / 45.0));
-    return c * c;
+    return 0.5 * (1.0 + cos(PI * d / 45.0));
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {

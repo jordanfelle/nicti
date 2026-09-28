@@ -385,7 +385,7 @@ fn hsl_band_weight(hue: f32, band_index: usize) -> f32 {
     if d >= 45.0 {
         0.0
     } else {
-        (0.5 * (1.0 + (std::f32::consts::PI * d / 45.0).cos())).powi(2)
+        0.5 * (1.0 + (std::f32::consts::PI * d / 45.0).cos())
     }
 }
 
@@ -903,12 +903,20 @@ mod tests {
 
     #[test]
     fn hsl_band_weight_sums_to_one_between_adjacent_band_centers() {
-        // At the midpoint between two adjacent band centers (22.5 degrees), both bands' weights
-        // should be equal and each should be exactly 0.25 (cos^2(45 deg / 2)... verifying the
-        // window is well-behaved, not asserting a specific external constant).
+        // The raised-cosine (Hann) window is a partition of unity: at the midpoint between two
+        // adjacent band centers (22.5 degrees), the two overlapping bands' weights must sum to
+        // exactly 1.0 -- not just be equal to each other -- so a hue exactly between two band
+        // centers gets the same total influence as a hue exactly at one. A squared version of
+        // this window (an earlier draft of this function) breaks that property (0.25+0.25=0.5,
+        // not 1.0), which is what this test's tighter assertion below is a regression guard for.
         let w0 = hsl_band_weight(22.5, 0);
         let w1 = hsl_band_weight(22.5, 1);
         assert!((w0 - w1).abs() < 1e-4, "{w0} vs {w1}");
+        assert!(
+            (w0 + w1 - 1.0).abs() < 1e-4,
+            "w0+w1={} should be 1.0",
+            w0 + w1
+        );
         assert!(w0 > 0.0 && w0 < 1.0);
     }
 
