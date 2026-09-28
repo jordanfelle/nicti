@@ -46,11 +46,12 @@ Full reasoning/history: `docs/decisions/release.md`.
   via a reviewed, CI-passing PR merge already, so it's already the "always good, frequently
   updated" branch a `develop` branch would otherwise exist for. **The `edge` release/tag is
   force-moved and reused, never deleted** (CodeRabbit review, PR #268, caught a delete-then-
-  recreate approach's real availability gap and stale-tag risk; a follow-up adversarial pass on
-  that rewrite found three more: stale-asset accumulation across version bumps, a wrong
-  plural/singular tag-ref GET endpoint, and a residual concurrent-run race that `cancel-in-
-  progress` alone doesn't fully close) — see the step's own comment in `release.yml` for the
-  full list and how each is handled.
+  recreate approach's real availability gap and stale-tag risk; two follow-up review passes on
+  that rewrite found three more — stale-asset accumulation across version bumps, a wrong
+  plural/singular tag-ref GET endpoint, and a concurrent-run race that a second stale-check alone
+  only narrowed rather than closed, fixed by serializing main-push runs via `cancel-in-progress:
+  false` in the workflow's concurrency group instead) — see the step's own comment in
+  `release.yml` for the full list and how each is handled.
 - See `docs/releasing.md` for the actual cut-a-release runbook and the one-time minisign
   key-generation steps.
 

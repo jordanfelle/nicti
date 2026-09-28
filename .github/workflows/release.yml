@@ -24,10 +24,15 @@ on:
 
 concurrency:
   group: release-${{ github.ref }}
-  # A stable-release build (tag push) always runs to completion, even if superseded -- it's a
-  # permanent artifact. An edge build (branch push) is a moving target: if main advances again
-  # before the previous edge build finishes, that in-flight build is already obsolete.
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  # Never cancel-in-progress (CodeRabbit review, PR #268): the point of this shared group is to
+  # serialize main-push edge publishers, not race them. Two overlapping runs could otherwise both
+  # pass the "is main still at my SHA" guard before either had moved the `edge` tag, then
+  # interleave their tag-move/upload calls -- with cancel-in-progress off, a later push's run
+  # simply queues behind the current one instead of running concurrently with it, so by the time
+  # it starts, any earlier run has already fully finished (published or cleanly skipped as
+  # stale). Tag-push (stable release) runs already never shared a group with anything else (each
+  # tag is its own `github.ref`), so this doesn't change their behavior at all.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -244,13 +249,18 @@ jobs:
       #      is documented for update/delete, not fetch -- `git/ref/{ref}` (singular) is the
       #      correct fetch endpoint and doesn't prefix-match (the plural GET form returns an
       #      array if more than one ref shares the prefix, e.g. a future `edge-preview` tag).
-      #   6. `cancel-in-progress` cancellation is best-effort, not synchronous -- two runs can
-      #      still both pass the top-of-step stale-run guard and then race on the actual
-      #      tag-move/upload calls if they're close enough together. The single guard at the top
-      #      doesn't cover that; re-checking main's SHA again immediately before the mutating
-      #      calls shrinks (without fully eliminating) that window, which is an acceptable
-      #      tradeoff for an unsigned, best-effort prerelease channel rather than a reason to add
-      #      real cross-run locking here.
+      #   6. `cancel-in-progress` cancellation is best-effort, not synchronous -- two runs could
+      #      both pass a plain stale-run guard and then race on the actual tag-move/upload calls
+      #      if they were close enough together. A second CodeRabbit pass on this same PR pointed
+      #      out that a second guard call only narrows that TOCTOU window, it doesn't close it --
+      #      the real fix is to stop the runs from overlapping at all. `cancel-in-progress: false`
+      #      above does that: main-push runs now queue in this one shared concurrency group
+      #      instead of running concurrently, so by the time any run reaches this step, every
+      #      earlier-queued run has already fully finished. The second guard call below is now
+      #      pure defense-in-depth for a state that should never actually occur -- so it fails
+      #      loudly (exit 1) instead of quietly exiting 0, since seeing it fire would mean the
+      #      serialization assumption above was somehow violated (worth investigating), not a
+      #      normal, expected outcome the way a stale run at the very start of the step is.
       - name: Publish edge release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
@@ -259,17 +269,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Guard against an out-of-order re-run: if main has advanced past this run's commit by
-          # the time it gets here, this run is stale -- publishing would move `edge` backward.
-          # Checked again right before the mutating calls below (finding 6).
-          check_not_stale() {
+          # true (0) if main is still at this run's commit, false otherwise -- callers decide
+          # what a stale result means for them (see the two call sites below).
+          still_current() {
             remote_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
-            if [[ "$remote_main_sha" != "${GITHUB_SHA}" ]]; then
-              echo "::notice::main has advanced to $remote_main_sha since this run started at ${GITHUB_SHA} -- skipping the edge publish so this stale run can't move edge backward."
-              exit 0
-            fi
+            [[ "$remote_main_sha" == "${GITHUB_SHA}" ]]
           }
-          check_not_stale
+
+          # Guard against an out-of-order re-run: if main has already advanced past this run's
+          # commit before any of this run's own changes have been made, this run is simply stale
+          # -- skip cleanly, there's nothing to undo yet.
+          if ! still_current; then
+            echo "::notice::main has advanced since this run started at ${GITHUB_SHA} -- skipping the edge publish so this stale run can't move edge backward."
+            exit 0
+          fi
 
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/edge" >/dev/null 2>&1; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" -f sha="${GITHUB_SHA}" -F force=true >/dev/null
@@ -283,7 +296,10 @@ jobs:
             exit 1
           fi
 
-          check_not_stale
+          if ! still_current; then
+            echo "::error::main advanced after this run already moved the edge tag to ${GITHUB_SHA} -- with main-push runs serialized (cancel-in-progress: false), this should never happen. Failing loudly rather than silently leaving a partially-applied publish."
+            exit 1
+          fi
 
           notes="Automatic build from the latest commit on main (${GITHUB_SHA}). Unsigned and may be unstable -- for the stable channel, see the latest versioned release instead."
           release_exists=0
