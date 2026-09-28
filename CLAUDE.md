@@ -102,9 +102,8 @@ terse index: crate/spike → purpose → owning topic.
   a live-adjustable `Throttle`), a `JobId`-keyed status map for an activity panel to poll
   (`snapshot`), and an independent `CancelToken` registry (`Pounce::cancel` can't just delegate to
   `Scheduler::cancel`, which only finds a job still sitting in its queue — most of a fast-yielding
-  job's lifetime is spent checked out by a worker thread instead). `telemetry.rs` adds
-  `TelemetrySampler`, a throttled (<=1/s) wrapper `nicti-pelt::activity` and #70 both poll. See
-  [`jobs`](.claude/rules/jobs/REFERENCE.md).
+  job's lifetime is spent checked out by a worker thread instead). `telemetry/`/`hackles.rs` are
+  #70's build (bottleneck indicator) — see [`jobs`](.claude/rules/jobs/REFERENCE.md).
 - **`crates/nicti-calico`/`nicti-iris`/`nicti-stalk`/`nicti-preen`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `ColorProfile` (#38/#42), `LensCorrection` (#39),
@@ -179,11 +178,11 @@ terse index: crate/spike → purpose → owning topic.
   this ticket's. Named "pelt" (not the issue's own `nicti-ui`) to match the feline naming
   convention below, reusing the name from the now-deleted `spikes/pelt-*` research spikes (#232).
   Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
-  `nicti_pelt::run()` shim). **`activity.rs`** (#55) adds the Pounce activity/progress panel (a
-  bottom status bar: running/queued counts, CPU/RAM/VRAM telemetry, a live CPU-lane concurrency
-  control, and a per-job list with cancel buttons) plus Import/Sync buttons on the Library view
-  (`app.rs`'s `submit_root_job`) that submit `nicti-lair::pounce_jobs::IngestJob`/`SyncJob` to a
-  `nicti_pounce::Pounce` owned by `PeltApp`. See
+  `nicti_pelt::run()` shim). **`activity.rs`** (#55, #70) adds the Pounce activity/progress panel
+  (a bottom status bar: bottleneck headline, running/queued counts, CPU/RAM/VRAM/GPU/Disk
+  telemetry, CPU-lane concurrency control, per-job cancel list) plus Import/Sync buttons on the
+  Library view (`app.rs`'s `submit_root_job`) that submit
+  `nicti-lair::pounce_jobs::IngestJob`/`SyncJob` to a `nicti_pounce::Pounce` owned by `PeltApp`. See
   [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md) and
   [`jobs`](.claude/rules/jobs/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)

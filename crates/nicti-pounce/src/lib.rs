@@ -10,6 +10,7 @@
 
 pub mod admission;
 pub mod cancel;
+pub mod hackles;
 pub mod job;
 pub mod queue;
 pub mod runtime;
