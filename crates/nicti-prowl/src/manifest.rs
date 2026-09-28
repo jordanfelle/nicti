@@ -6,7 +6,7 @@
 //! any future research ticket's own harness) shares it instead of re-implementing it.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 use rand::rngs::StdRng;
@@ -195,8 +195,25 @@ fn check_one(root: &Path, entry: &Entry) -> CheckResult {
 
 fn hash_file(mut file: File) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s
 }
 
 #[cfg(test)]
@@ -227,7 +244,22 @@ mod tests {
         File::create(&path).unwrap().write_all(content).unwrap();
         let mut hasher = Sha256::new();
         hasher.update(content);
-        format!("{:x}", hasher.finalize())
+        hex_encode(&hasher.finalize())
+    }
+
+    #[test]
+    fn hash_file_matches_known_sha256_test_vector() {
+        // Independently-known SHA-256 digest of the ASCII string "hello" (NIST/RFC test
+        // vector), not derived from this module's own hasher/hex_encode -- pins hash_file to
+        // ground truth instead of only round-tripping against itself.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        File::create(&path).unwrap().write_all(b"hello").unwrap();
+        let digest = hash_file(File::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            digest,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     #[test]
