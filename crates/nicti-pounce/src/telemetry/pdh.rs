@@ -167,7 +167,18 @@ mod windows_impl {
             return None;
         }
 
-        let mut buffer: Vec<u8> = vec![0; buffer_size as usize];
+        // `PDH_FMT_COUNTERVALUE_ITEM_W` contains a pointer field (`szName`) and a union with a
+        // pointer variant, so it needs pointer alignment (8 on x86_64) -- a `Vec<u8>` only
+        // guarantees 1-byte alignment, so casting *that* buffer's pointer to this struct type and
+        // reading through it would be misaligned-pointer UB (found by adversarial review: it
+        // happened to work in testing because the allocator over-aligns most allocations this
+        // size, but nothing guarantees that). `Vec<u64>` guarantees 8-byte alignment instead, so
+        // this rounds the byte count up to a whole number of `u64` words -- the buffer holds the
+        // fixed-size item array *and* PDH's own trailing variable-length string storage in one
+        // contiguous region, per `PdhGetFormattedCounterArrayW`'s documented shape, so it must
+        // stay a raw word buffer rather than becoming a typed `Vec<PDH_FMT_COUNTERVALUE_ITEM_W>`.
+        let word_count = (buffer_size as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut buffer: Vec<u64> = vec![0; word_count];
         let status = unsafe {
             PdhGetFormattedCounterArrayW(
                 counter,
@@ -214,10 +225,20 @@ mod windows_impl {
         target_luid: u64,
     }
 
-    // Safety: `PdhLoadSource` is only ever driven from a single thread at a time (moved once into
-    // `TelemetrySampler`'s background thread, all methods take `&mut self`) -- PDH's own docs
-    // don't document query handles as apartment-affine the way some COM objects are, so this is
-    // the same "no concurrent access, ownership transfer only" contract `Send` promises.
+    // Safety: `PdhLoadSource` is only ever driven from a single thread at a time -- never two
+    // threads calling into it concurrently -- which is the "ownership transfer only" contract
+    // `Send` promises. Worth being honest about what this does and doesn't rule out (flagged by
+    // adversarial review): `new()` (`PdhOpenQueryW`/`PdhAddEnglishCounterW`) runs wherever
+    // `default_load_source()` is called from -- today that's the UI thread, in
+    // `nicti-pelt::app.rs` -- and the resulting value is then moved once into
+    // `TelemetrySampler`'s background thread, where every later `query()` call
+    // (`PdhCollectQueryData`/`PdhGetFormattedCounterArrayW`) runs. So the query handle is created
+    // on one thread and used from a different one, sequentially, never concurrently. PDH is a
+    // flat Win32 handle API (no COM apartment model), and nothing in its documentation ties a
+    // query handle to its creating thread the way some older Win32 subsystems do -- but that's an
+    // absence-of-evidence argument, not a confirmed one, and this exact pattern is unverified
+    // against real hardware. See `docs/adr/0070-bottleneck-telemetry.md`'s reference-machine
+    // checklist.
     unsafe impl Send for PdhLoadSource {}
 
     impl PdhLoadSource {

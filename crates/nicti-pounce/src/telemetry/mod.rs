@@ -229,7 +229,14 @@ impl TelemetrySampler {
                     vram: vram.query(),
                     load: load.query(),
                 };
-                *latest_thread.lock().unwrap() = Some(sample);
+                // Recovers from a poisoned lock rather than panicking: the mutex only ever
+                // guards a plain assignment (no invariant that could be left broken by a
+                // panic mid-write), so a stale poison flag from some earlier panic shouldn't
+                // permanently crash every future sample on this thread or every future
+                // `sample()` call on the UI thread.
+                *latest_thread
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sample);
                 on_sample();
 
                 // Sleep in small chunks rather than one `thread::sleep(min_interval)` so
@@ -256,8 +263,13 @@ impl TelemetrySampler {
     }
 
     /// Returns the latest sample without blocking. `None` before the first sample lands.
+    /// Recovers from a poisoned lock rather than panicking, for the same reason `spawn`'s
+    /// own write side does.
     pub fn sample(&self) -> Option<Sample> {
-        *self.latest.lock().unwrap()
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 

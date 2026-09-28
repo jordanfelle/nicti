@@ -29,7 +29,7 @@ pub enum Limit {
 
 /// How busy one resource is. Boundaries are inclusive on the lower end of each band ("below 60%"
 /// is `Calm`; exactly 60% is already `Busy`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Calm,
     Busy,

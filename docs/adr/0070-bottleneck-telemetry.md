@@ -99,6 +99,27 @@ DXGI (any WDDM driver populates it), matching ADR-0054's own reasoning rather th
   process's instances on the very next `PdhCollectQueryData` call, with no extra
   `PdhAddEnglishCounterW`/re-open needed. This is a reference-machine checklist item, not yet
   confirmed.
+- **Found by adversarial review, unverified without real hardware** (none of these can be
+  reproduced in this sandbox, so none are fixed speculatively -- see the checklist below):
+  - `parse_engine_instance`'s prefix/segment matching assumes PDH's real `\GPU Engine(*)` instance
+    names never carry a duplicate-disambiguation `#N` suffix landing *before* the `engtype`
+    segment is fully consumed (a suffix after `engtype` is harmless, since `EngineKey` only
+    depends on `phys`/`eng`), and assumes lowercase hex/prefix casing throughout. Either mismatch
+    fails closed -- the instance is silently dropped, never fabricated -- but could undercount a
+    real reading or make GPU-busy% permanently `None` on some real machine's actual naming
+    convention.
+  - `\PhysicalDisk(*)\% Idle Time` can be administratively disabled (historically via `diskperf`);
+    if so, disk-busy% would correctly report `None` forever with no visible cause.
+  - `PdhLoadSource::new()` (`PdhOpenQueryW`/`PdhAddEnglishCounterW`) runs on whichever thread calls
+    `default_load_source()` -- today, the UI thread, before the resulting value moves once into
+    `TelemetrySampler`'s background thread, where every later `query()` call runs. PDH has no
+    documented apartment/thread-affinity model for query handles, but that's an absence-of-
+    evidence argument, not a confirmed one -- see `telemetry/pdh.rs`'s own `unsafe impl Send`
+    comment.
+  - `DxgiVramSource`/`query_adapter0_luid` call `CreateDXGIFactory1` from the background thread now
+    (previously the UI thread, once per frame) with no explicit `CoInitializeEx` -- widely believed
+    unnecessary for DXGI factory creation, but this exact call site is newly exercised off the UI
+    thread by this ticket.
 
 ## Reference-machine checklist (promotes this ADR to Accepted)
 
@@ -115,6 +136,17 @@ DXGI (any WDDM driver populates it), matching ADR-0054's own reasoning rather th
    egui's own input-driven repaint).
 5. Record the three runs' actual numbers here, and re-tune `BUSY_THRESHOLD`/`SATURATED_THRESHOLD`/
    `HYSTERESIS_MARGIN` against them if the defaults look wrong in practice.
+6. Confirm the real `\GPU Engine(*)` instance-name shape on this machine matches
+   `parse_engine_instance`'s assumptions (no PDH-internal `#N` disambiguation before `engtype`, all
+   lowercase) -- if GPU-busy% comes back `None` even under real GPU load, this parsing mismatch is
+   the first thing to check.
+7. Confirm `\PhysicalDisk(*)\% Idle Time` actually returns instances (not disabled via `diskperf`)
+   -- if disk-busy% is permanently `None` even under real disk load, check this before assuming a
+   parsing bug.
+8. Confirm no PDH thread-affinity issue in practice: `PdhLoadSource::new()` runs on the UI thread,
+   `query()` runs on the background thread -- if PDH calls fail or silently return no data only in
+   the real app (not in an isolated same-thread test), this cross-thread handle pattern is the
+   suspect.
 
 ## Options considered
 
