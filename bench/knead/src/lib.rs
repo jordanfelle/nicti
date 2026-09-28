@@ -20,7 +20,8 @@ use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, CROP,
-    DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
+    DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION, SHARPEN, TONE,
+    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 
 /// One real render of a NEF: decodes it, runs it through the full graph at full resolution and
@@ -52,7 +53,17 @@ fn build_graph() -> RenderGraph {
             .unwrap();
         prev = Some(id);
     }
-    let live_ids = [WB, WORKING_SPACE, EXPOSURE, TONE, VIBRANCE];
+    let live_ids = [
+        WB,
+        WORKING_SPACE,
+        EXPOSURE,
+        TONE,
+        TONE_CURVE,
+        VIBRANCE,
+        HSL,
+        SHARPEN,
+        NOISE_REDUCTION,
+    ];
     for id in live_ids {
         graph
             .add_node(StageNode {
@@ -75,7 +86,17 @@ fn build_graph() -> RenderGraph {
     graph
 }
 
-pub const LIVE_IDS: [&str; 5] = [WB, WORKING_SPACE, EXPOSURE, TONE, VIBRANCE];
+pub const LIVE_IDS: [&str; 9] = [
+    WB,
+    WORKING_SPACE,
+    EXPOSURE,
+    TONE,
+    TONE_CURVE,
+    VIBRANCE,
+    HSL,
+    SHARPEN,
+    NOISE_REDUCTION,
+];
 
 impl RealRender {
     /// Decodes `nef_path` via the real LibRaw-backed decoder and prepares every kernel this
@@ -108,6 +129,7 @@ impl RealRender {
                 exposure: ExposureParams::default(),
                 tone: ToneParams::default(),
                 vibrance: VibranceParams::default(),
+                ..Default::default()
             },
         );
         let crop_kernel = CropKernel::new(&gpu);

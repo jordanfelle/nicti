@@ -57,6 +57,9 @@ pub struct PeltApp {
     catalog_path: PathBuf,
     catalog: CatalogOpenState,
     develop: Option<DevelopView>,
+    /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
+    /// part of any edit document.
+    hsl_band_selected: usize,
     pounce: Pounce,
     telemetry: TelemetrySampler,
     import_path_input: String,
@@ -114,6 +117,7 @@ impl PeltApp {
             catalog_path,
             catalog,
             develop: Some(develop),
+            hsl_band_selected: 0,
             pounce,
             telemetry,
             import_path_input: String::new(),
@@ -186,13 +190,52 @@ impl eframe::App for PeltApp {
             });
         }
 
+        // The Develop panel needs a render to show its histogram against (a live-only change
+        // costs 0 bake dispatches, so this is cheap). The panel itself then mutates `develop`'s
+        // document via its sliders -- so the viewport paint below re-renders *after* the panel,
+        // not from this same texture, or a slider drag would visibly lag its own edit by one UI
+        // frame (the histogram itself still reflects the pre-edit state at this point in the
+        // frame; a real re-render for it too would need restructuring the panel to render at its
+        // own end instead of its own start, not worth it for a histogram bar's one-frame lag).
+        let panel_frame = if self.view == View::Develop {
+            self.develop.as_mut().map(|d| d.render())
+        } else {
+            None
+        };
+
+        if let (View::Develop, Some(frame)) = (self.view, &panel_frame) {
+            egui::Panel::right("develop_panel")
+                .min_size(280.0)
+                .show(ui, |ui| {
+                    if let Some(develop) = self.develop.as_mut() {
+                        crate::develop_panel::show(ui, develop, frame, &mut self.hsl_band_selected);
+                    }
+                });
+        }
+
+        let viewport_frame = if self.view == View::Develop {
+            self.develop.as_mut().map(|d| d.render())
+        } else {
+            None
+        };
+
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.show_library(ui),
             View::Loupe => {
                 ui.heading("Loupe");
                 ui.label("Prefetch + instant zoom lands in #31.");
             }
-            View::Develop => self.show_develop(ui),
+            View::Develop => {
+                ui.heading("Develop");
+                if let Some(frame) = viewport_frame {
+                    let available = ui.available_size();
+                    let (rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
+                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                        rect,
+                        ViewportCallback { frame },
+                    ));
+                }
+            }
         });
     }
 }
@@ -265,21 +308,6 @@ impl PeltApp {
                 self.pounce.submit(Box::new(job));
             }
         }
-    }
-
-    fn show_develop(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Develop");
-        let Some(develop) = self.develop.as_mut() else {
-            return;
-        };
-        let frame = develop.render();
-
-        let available = ui.available_size();
-        let (rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
-            ViewportCallback { frame },
-        ));
     }
 }
 

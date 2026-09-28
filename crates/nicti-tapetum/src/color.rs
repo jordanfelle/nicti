@@ -19,7 +19,7 @@
 //! is available -- #42's still-Proposed scope). Good enough for a manual WB slider to move the
 //! image in the expected direction; not claimed to match Adobe's own temp/tint numbers exactly.
 
-use crate::coat::{ToneParams, WbParams};
+use crate::coat::{HslParams, ToneCurveParams, ToneParams, WbParams};
 
 pub type Mat3 = [[f32; 3]; 3];
 
@@ -273,6 +273,195 @@ pub fn apply_tone(rgb: [f32; 3], tone: &ToneParams) -> [f32; 3] {
     shifted.map(|p| p.max(0.0).powi(3))
 }
 
+/// Fixed x-positions of the Tone Curve's 4 region-slider control points -- see
+/// [`ToneCurveParams`]'s own doc comment for why these are fixed rather than user-adjustable.
+const TONE_CURVE_X: [f32; 4] = [0.0, 0.25, 0.75, 1.0];
+
+/// A 256-entry lookup table sampling a monotone cubic (Fritsch-Carlson/PCHIP) spline through the
+/// Tone Curve's 4 control points -- built once per render (not per pixel) on the CPU, then either
+/// looked up directly ([`apply_tone_curve`]'s CPU reference) or uploaded into the live-suffix
+/// uniform buffer for the GPU kernel to sample. Each region slider moves its own control point's
+/// y-value by up to +/-0.3 (matching [`apply_tone`]'s own 0.3 magnitude for whites/blacks), then
+/// clamps to `0.0..=1.0` -- PCHIP itself does not enforce monotonicity when the (possibly
+/// clamped) control points aren't themselves monotonic, e.g. at extreme, opposing slider values;
+/// that's an accepted v1 edge case, not a correctness bug for any single slider in isolation.
+pub fn build_tone_curve_lut(curve: &ToneCurveParams) -> [f32; 256] {
+    let shifts = [curve.shadows, curve.darks, curve.lights, curve.highlights];
+    let xs = TONE_CURVE_X;
+    let ys: [f32; 4] = std::array::from_fn(|i| (xs[i] + shifts[i] * 0.3).clamp(0.0, 1.0));
+
+    // Fritsch-Carlson tangents: 0 at a local extremum (a sign change or a flat segment) rather
+    // than the naive average, which is what keeps a monotone *input* producing a monotone
+    // *output* (Hyman/PCHIP's whole point).
+    let h: [f32; 3] = std::array::from_fn(|i| xs[i + 1] - xs[i]);
+    let delta: [f32; 3] = std::array::from_fn(|i| (ys[i + 1] - ys[i]) / h[i]);
+    let mut m = [0.0f32; 4];
+    m[0] = delta[0];
+    m[3] = delta[2];
+    for i in 1..3 {
+        let (d0, d1) = (delta[i - 1], delta[i]);
+        m[i] = if d0 == 0.0 || d1 == 0.0 || d0.signum() != d1.signum() {
+            0.0
+        } else {
+            let (w1, w2) = (2.0 * h[i] + h[i - 1], h[i] + 2.0 * h[i - 1]);
+            (w1 + w2) / (w1 / d0 + w2 / d1)
+        };
+    }
+
+    let mut lut = [0.0f32; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        let x = i as f32 / 255.0;
+        // Find the segment: xs is fixed and sorted, so a linear scan over 3 segments is fine.
+        let seg = if x < xs[1] {
+            0
+        } else if x < xs[2] {
+            1
+        } else {
+            2
+        };
+        let hseg = h[seg];
+        let t = ((x - xs[seg]) / hseg).clamp(0.0, 1.0);
+        let (t2, t3) = (t * t, t * t * t);
+        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        let h10 = t3 - 2.0 * t2 + t;
+        let h01 = -2.0 * t3 + 3.0 * t2;
+        let h11 = t3 - t2;
+        *entry =
+            (h00 * ys[seg] + h10 * hseg * m[seg] + h01 * ys[seg + 1] + h11 * hseg * m[seg + 1])
+                .clamp(0.0, 1.0);
+    }
+    lut
+}
+
+/// Applies a 256-entry tone-curve LUT (see [`build_tone_curve_lut`]) per channel, in the same
+/// cube-root perceptual space [`apply_tone`] already uses -- LRC's own Tone Curve panel is applied
+/// per-channel identically, not against a single luma value.
+pub fn apply_tone_curve(rgb: [f32; 3], lut: &[f32; 256]) -> [f32; 3] {
+    rgb.map(|c| {
+        let perceptual = c.max(0.0).cbrt().clamp(0.0, 1.0);
+        let pos = perceptual * 255.0;
+        let i0 = (pos.floor() as usize).min(254);
+        let frac = pos - i0 as f32;
+        let looked_up = lut[i0] * (1.0 - frac) + lut[i0 + 1] * frac;
+        looked_up.max(0.0).powi(3)
+    })
+}
+
+/// Hue in degrees (`0.0..360.0`), from the standard "which channel is max" formula -- built only
+/// from `(max, min, delta)` ratios, so it stays well-defined for the unbounded-above-1.0 linear
+/// working-space values this module works in (only division by `delta` risks instability, guarded
+/// by the caller checking `delta` first). Returns `0.0` for an achromatic pixel (`delta == 0.0`);
+/// callers must check for that case themselves since hue is undefined there, not `0.0` by
+/// meaning.
+fn rgb_hue_degrees(rgb: [f32; 3], max: f32, delta: f32) -> f32 {
+    let [r, g, b] = rgb;
+    let raw = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (raw * 60.0).rem_euclid(360.0)
+}
+
+/// Smallest signed angular distance from `hue` to `center`, in `-180.0..=180.0` degrees.
+fn hue_delta_degrees(hue: f32, center: f32) -> f32 {
+    let raw = (hue - center).rem_euclid(360.0);
+    if raw > 180.0 {
+        raw - 360.0
+    } else {
+        raw
+    }
+}
+
+/// This band's membership weight for a pixel at `hue` degrees -- a raised-cosine (Hann) window
+/// spanning +/-45 degrees around the band's own center, so adjacent bands (45 degrees apart, per
+/// [`HslParams`]'s doc comment) cross over at weight 0.5 exactly at their shared midpoint, with no
+/// hard edges between bands.
+fn hsl_band_weight(hue: f32, band_index: usize) -> f32 {
+    let center = band_index as f32 * 45.0;
+    let d = hue_delta_degrees(hue, center).abs();
+    if d >= 45.0 {
+        0.0
+    } else {
+        0.5 * (1.0 + (std::f32::consts::PI * d / 45.0).cos())
+    }
+}
+
+/// HSL panel, 8-band Hue/Saturation/Luminance adjustment. A v1 approximation of LRC's own HSL
+/// panel: hue/saturation are adjusted in HSV space (`v = max` handles this crate's unbounded-
+/// above-1.0 linear working-space values the way canonical HSL's `l = (max+min)/2` cannot --
+/// `(1 - |2l-1|)`'s denominator goes negative for `l > 1`), while the luminance shift is a
+/// separate additive step in the same cube-root perceptual space [`apply_tone`] uses. An
+/// achromatic pixel (`max == min`, no defined hue) passes through unchanged -- correct, since
+/// every band's saturation is already 0 there; there's no per-pixel hue test to skip this
+/// function itself. [`HslParams::is_noop`] exists for a caller that wants to skip the whole HSL
+/// pass at the params level (this stage is fused into the same per-pixel dispatch every other
+/// live stage shares, so nothing here currently calls it for that purpose -- see the sibling
+/// [`crate::coat::SharpenParams::is_noop`]/[`crate::coat::NoiseReductionParams::is_noop`] for the
+/// stage that actually does skip work based on it, `LiveSuffixKernel::encode`'s fast path).
+pub fn apply_hsl(rgb: [f32; 3], hsl: &HslParams) -> [f32; 3] {
+    let max = rgb[0].max(rgb[1]).max(rgb[2]);
+    let min = rgb[0].min(rgb[1]).min(rgb[2]);
+    let delta = max - min;
+    if delta <= 1e-6 || max <= 0.0 {
+        return rgb;
+    }
+
+    let hue = rgb_hue_degrees(rgb, max, delta);
+    let weights: [f32; 8] = std::array::from_fn(|i| hsl_band_weight(hue, i));
+    let hue_shift: f32 = weights
+        .iter()
+        .zip(hsl.bands.iter())
+        .map(|(w, b)| w * b.hue)
+        .sum::<f32>()
+        * 30.0;
+    let sat_shift: f32 = weights
+        .iter()
+        .zip(hsl.bands.iter())
+        .map(|(w, b)| w * b.saturation)
+        .sum();
+    let luma_shift: f32 = weights
+        .iter()
+        .zip(hsl.bands.iter())
+        .map(|(w, b)| w * b.luminance)
+        .sum::<f32>()
+        * 0.3;
+
+    let sat = (delta / max).clamp(0.0, 1.0);
+    let new_hue = (hue + hue_shift).rem_euclid(360.0);
+    let new_sat = (sat * (1.0 + sat_shift)).max(0.0);
+    let hue_rotated = hsv_to_rgb(new_hue, new_sat, max);
+
+    let perceptual = hue_rotated.map(|c| c.max(0.0).cbrt());
+    perceptual.map(|p| (p + luma_shift).max(0.0).powi(3))
+}
+
+/// Standard HSV -> RGB, sector formula. `v` is not assumed to be in `0.0..=1.0` -- it's just
+/// carried through as an overall scale, matching this module's unbounded-above-1.0 working-space
+/// convention.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let c = v * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = if h_prime < 1.0 {
+        (c, x, 0.0)
+    } else if h_prime < 2.0 {
+        (x, c, 0.0)
+    } else if h_prime < 3.0 {
+        (0.0, c, x)
+    } else if h_prime < 4.0 {
+        (0.0, x, c)
+    } else if h_prime < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = v - c;
+    [r1 + m, g1 + m, b1 + m]
+}
+
 /// Luma-preserving saturation boost, weighted more heavily on already-low-saturation pixels (the
 /// conventional definition of "vibrance" vs. a flat "saturation" boost). `vibrance` of 0.0 is a
 /// no-op. Luma uses Rec.709 weights as a working approximation in ProPhoto space, not a
@@ -299,6 +488,7 @@ pub fn srgb_oetf(linear: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coat::HslBand;
 
     #[test]
     fn mat3_invert_of_identity_is_identity() {
@@ -576,6 +766,164 @@ mod tests {
             low_growth > high_growth,
             "low-saturation pixel should gain relatively more spread: {low_growth} vs {high_growth}"
         );
+    }
+
+    #[test]
+    fn tone_curve_lut_is_identity_at_all_zero_params() {
+        let lut = build_tone_curve_lut(&ToneCurveParams::default());
+        for (i, &entry) in lut.iter().enumerate() {
+            let x = i as f32 / 255.0;
+            assert!(
+                (entry - x).abs() < 1e-3,
+                "lut[{i}]={entry} should be near-identity {x}",
+            );
+        }
+    }
+
+    #[test]
+    fn tone_curve_lut_endpoints_are_pinned_regardless_of_interior_sliders() {
+        let curve = ToneCurveParams {
+            darks: -0.8,
+            lights: 0.8,
+            ..Default::default()
+        };
+        let lut = build_tone_curve_lut(&curve);
+        assert!((lut[0] - 0.0).abs() < 1e-3);
+        assert!((lut[255] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tone_curve_lut_shadows_slider_moves_only_the_low_end() {
+        let base = build_tone_curve_lut(&ToneCurveParams::default());
+        let lifted = build_tone_curve_lut(&ToneCurveParams {
+            shadows: 0.5,
+            ..Default::default()
+        });
+        assert!(
+            lifted[0] > base[0],
+            "positive shadows should lift the black point: {} vs {}",
+            lifted[0],
+            base[0]
+        );
+        assert!(
+            (lifted[255] - base[255]).abs() < 1e-3,
+            "shadows should barely move the white point: {} vs {}",
+            lifted[255],
+            base[255]
+        );
+    }
+
+    #[test]
+    fn apply_tone_curve_with_identity_lut_is_near_identity() {
+        let lut = build_tone_curve_lut(&ToneCurveParams::default());
+        let rgb = [0.2, 0.5, 0.8];
+        let out = apply_tone_curve(rgb, &lut);
+        for (a, b) in rgb.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-2, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn apply_hsl_with_all_zero_params_is_identity() {
+        let rgb = [0.6, 0.2, 0.3];
+        let out = apply_hsl(rgb, &HslParams::default());
+        for (a, b) in rgb.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn apply_hsl_passes_through_an_achromatic_pixel_unchanged() {
+        let rgb = [0.4, 0.4, 0.4];
+        let mut hsl = HslParams::default();
+        hsl.bands[0].saturation = 1.0; // red band, maxed
+        let out = apply_hsl(rgb, &hsl);
+        assert_eq!(out, rgb);
+    }
+
+    #[test]
+    fn apply_hsl_red_band_change_leaves_pure_blue_untouched() {
+        let blue = [0.05, 0.05, 0.9];
+        let mut hsl = HslParams::default();
+        hsl.bands[0] = HslBand {
+            hue: 0.8,
+            saturation: -0.8,
+            luminance: 0.8,
+        };
+        let out = apply_hsl(blue, &hsl);
+        for (a, b) in blue.iter().zip(out.iter()) {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "a red-band edit should not move a pure-blue pixel: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_hsl_saturation_band_reduces_delta_for_a_matching_hue() {
+        let red = [0.8, 0.2, 0.2];
+        let mut hsl = HslParams::default();
+        hsl.bands[0].saturation = -0.9; // red band, desaturate hard
+        let out = apply_hsl(red, &hsl);
+        let out_delta = out[0].max(out[1]).max(out[2]) - out[0].min(out[1]).min(out[2]);
+        let in_delta = red[0].max(red[1]).max(red[2]) - red[0].min(red[1]).min(red[2]);
+        assert!(
+            out_delta < in_delta,
+            "desaturating the red band should shrink a red pixel's channel spread: {out_delta} vs {in_delta}"
+        );
+    }
+
+    #[test]
+    fn apply_hsl_hue_shift_rotates_a_red_pixel_toward_the_next_band() {
+        let red = [0.8, 0.2, 0.2];
+        let mut hsl = HslParams::default();
+        hsl.bands[0].hue = 1.0; // red band, rotate hue positively (toward orange)
+        let out = apply_hsl(red, &hsl);
+        // Rotating red toward orange should increase the green channel relative to blue.
+        assert!(
+            out[1] > red[1] || out[1] > out[2],
+            "hue rotation toward orange should raise green relative to input/blue: out={out:?}"
+        );
+    }
+
+    #[test]
+    fn rgb_hue_degrees_matches_known_primaries() {
+        assert!((rgb_hue_degrees([1.0, 0.0, 0.0], 1.0, 1.0) - 0.0).abs() < 1e-3);
+        assert!((rgb_hue_degrees([0.0, 1.0, 0.0], 1.0, 1.0) - 120.0).abs() < 1e-3);
+        assert!((rgb_hue_degrees([0.0, 0.0, 1.0], 1.0, 1.0) - 240.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hsv_to_rgb_round_trips_known_primaries() {
+        let red = hsv_to_rgb(0.0, 1.0, 1.0);
+        assert!((red[0] - 1.0).abs() < 1e-5 && red[1].abs() < 1e-5 && red[2].abs() < 1e-5);
+        let green = hsv_to_rgb(120.0, 1.0, 1.0);
+        assert!(green[0].abs() < 1e-5 && (green[1] - 1.0).abs() < 1e-5 && green[2].abs() < 1e-5);
+    }
+
+    #[test]
+    fn hsl_band_weight_sums_to_one_between_adjacent_band_centers() {
+        // The raised-cosine (Hann) window is a partition of unity: at the midpoint between two
+        // adjacent band centers (22.5 degrees), the two overlapping bands' weights must sum to
+        // exactly 1.0 -- not just be equal to each other -- so a hue exactly between two band
+        // centers gets the same total influence as a hue exactly at one. A squared version of
+        // this window (an earlier draft of this function) breaks that property (0.25+0.25=0.5,
+        // not 1.0), which is what this test's tighter assertion below is a regression guard for.
+        let w0 = hsl_band_weight(22.5, 0);
+        let w1 = hsl_band_weight(22.5, 1);
+        assert!((w0 - w1).abs() < 1e-4, "{w0} vs {w1}");
+        assert!(
+            (w0 + w1 - 1.0).abs() < 1e-4,
+            "w0+w1={} should be 1.0",
+            w0 + w1
+        );
+        assert!(w0 > 0.0 && w0 < 1.0);
+    }
+
+    #[test]
+    fn hsl_band_weight_is_zero_beyond_45_degrees() {
+        assert_eq!(hsl_band_weight(50.0, 0), 0.0);
+        assert_eq!(hsl_band_weight(310.0, 0), 0.0); // -50 deg wrapped
     }
 
     #[test]

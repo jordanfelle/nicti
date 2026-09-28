@@ -9,10 +9,13 @@
 pub mod cache;
 pub mod coat;
 pub mod color;
+pub mod detail;
 pub mod frame;
 pub mod geometry;
 pub mod gpu;
 pub mod graph;
+pub mod histogram;
+pub mod perk;
 pub mod prefetch;
 pub mod renderer;
 pub mod stages;

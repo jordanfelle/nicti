@@ -11,6 +11,7 @@
 mod activity;
 mod app;
 mod catalog;
+mod develop_panel;
 mod render;
 mod update;
 mod viewport;

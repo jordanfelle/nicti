@@ -133,3 +133,10 @@ Synthetic-data sanity checks only (see `spikes/pupil`'s tests and `tests/smoke.r
   ticket's output.
 - #202 tracks the deferred reference-machine run; until it lands, this ADR's Status stays
   Proposed and its decision rule is unresolved.
+
+**Update (#46 shipped, provisional)**: #46 didn't wait for #202 to ship an Auto button at all —
+`crates/nicti-tapetum/src/perk.rs` ports candidate A (the heuristic) into production code now,
+explicitly flagged provisional in its own doc comment and in the `develop` topic's own
+REFERENCE.md. This ADR's Status stays Proposed and its decision rule stays unresolved either
+way — shipping A now is a scheduling choice (an unblocked Auto button beats an indefinitely
+blocked one), not a claim that A has won the comparison #202 still owns.

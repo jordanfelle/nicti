@@ -1,27 +1,52 @@
 //! Wires a synthetic `LinearFrame` through the real Tapetum pipeline (decode -> demosaic/denoise/
-//! lens/heal passthrough -> fused live suffix -> crop), so the Develop placeholder panel has a
-//! real, non-mock render to display. Loading an actual NEF is #31's (loupe) scope -- that needs
-//! the `libraw` feature, which this crate deliberately never forwards (`nicti-cornea`'s own
-//! feature-gate doc comment: a caller wanting the real decoder enables it explicitly, this crate
-//! isn't that caller yet). Graph-building shape copied from `bench/knead/src/lib.rs::build_graph`
+//! lens/heal passthrough -> fused live suffix -> crop), so the Develop panel (`develop_panel.rs`)
+//! has a real, non-mock render to display and edit. Loading an actual NEF is #31's (loupe) scope
+//! -- that needs the `libraw` feature, which this crate deliberately never forwards (`nicti-cornea`'s
+//! own feature-gate doc comment: a caller wanting the real decoder enables it explicitly, this
+//! crate isn't that caller yet). Graph-building shape copied from `bench/knead/src/lib.rs::build_graph`
 //! (not depended on -- `bench/knead` isn't a production crate, see its own Cargo.toml).
+//!
+//! #46 adds real editing: an in-memory `nicti_pawprint::EditDocument` (catalog persistence of
+//! edits is #31's scope, once a real asset exists to persist against -- this ticket only proves
+//! the sliders actually change the render), a before/after toggle (renders with an empty document
+//! so every stage falls back to its own default, reusing the exact same `apply_document` fallback
+//! path a missing entry already takes), and a live histogram (a CPU readback + display-encode of
+//! the current render -- cheap at this view's small synthetic extent; a throttled/GPU histogram
+//! for a real full-res photo is a follow-up once #31 replaces the synthetic frame).
 
 use std::sync::Arc;
 
 use nicti_cornea::LinearFrame;
-use nicti_tapetum::coat::{ExposureParams, ToneParams, VibranceParams, WbParams};
+use nicti_pawprint::{EditDocument, StageEntry};
+use nicti_tapetum::coat::{
+    self, ExposureParams, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
+    ToneParams, VibranceParams, WbParams,
+};
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{Extent, FrameTexture};
-use nicti_tapetum::geometry::Affine2D;
+use nicti_tapetum::geometry::{output_encode, Affine2D};
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::histogram::{self, Histogram};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, CROP,
-    DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, VIBRANCE, WB, WORKING_SPACE,
+    self, CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec,
+    CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION, SHARPEN, TONE,
+    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
+use nicti_tapetum::{RenderStage, StageRegistry};
 
-const LIVE_IDS: [&str; 5] = [WB, WORKING_SPACE, EXPOSURE, TONE, VIBRANCE];
+const LIVE_IDS: [&str; 9] = [
+    WB,
+    WORKING_SPACE,
+    EXPOSURE,
+    TONE,
+    TONE_CURVE,
+    VIBRANCE,
+    HSL,
+    SHARPEN,
+    NOISE_REDUCTION,
+];
 
 fn build_graph() -> RenderGraph {
     let mut graph = RenderGraph::new();
@@ -58,6 +83,67 @@ fn build_graph() -> RenderGraph {
         })
         .unwrap();
     graph
+}
+
+macro_rules! render_stage_factory {
+    ($name:ident, $stage_fn:path) => {
+        fn $name() -> Arc<dyn RenderStage> {
+            Arc::new($stage_fn())
+        }
+    };
+}
+render_stage_factory!(decode_factory, stages::decode_stage);
+render_stage_factory!(demosaic_factory, stages::demosaic_stage);
+render_stage_factory!(denoise_factory, stages::denoise_stage);
+render_stage_factory!(lens_factory, stages::lens_stage);
+render_stage_factory!(heal_factory, stages::heal_stage);
+render_stage_factory!(wb_factory, stages::wb_stage);
+render_stage_factory!(working_space_factory, stages::working_space_stage);
+render_stage_factory!(exposure_factory, stages::exposure_stage);
+render_stage_factory!(tone_factory, stages::tone_stage);
+render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
+render_stage_factory!(vibrance_factory, stages::vibrance_stage);
+render_stage_factory!(hsl_factory, stages::hsl_stage);
+render_stage_factory!(sharpen_factory, stages::sharpen_stage);
+render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
+render_stage_factory!(crop_factory, stages::crop_stage);
+
+type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
+
+/// Every stage this crate's own render graph (`build_graph`) can reference -- `apply_document`
+/// errors on any graph node id missing from this registry, so this list must stay in sync with
+/// `build_graph`'s own node ids.
+fn build_registry() -> StageRegistry {
+    let mut registry = StageRegistry::new();
+    let entries: [StageFactoryEntry; 15] = [
+        (DECODE, decode_factory),
+        (DEMOSAIC, demosaic_factory),
+        (DENOISE, denoise_factory),
+        (LENS, lens_factory),
+        (HEAL, heal_factory),
+        (WB, wb_factory),
+        (WORKING_SPACE, working_space_factory),
+        (EXPOSURE, exposure_factory),
+        (TONE, tone_factory),
+        (TONE_CURVE, tone_curve_factory),
+        (VIBRANCE, vibrance_factory),
+        (HSL, hsl_factory),
+        (SHARPEN, sharpen_factory),
+        (NOISE_REDUCTION, noise_reduction_factory),
+        (CROP, crop_factory),
+    ];
+    for (id, factory) in entries {
+        registry
+            .register(
+                nicti_claw::Descriptor {
+                    id,
+                    schema_version: 1,
+                },
+                factory,
+            )
+            .expect("every stage id above is namespaced and registered exactly once");
+    }
+    registry
 }
 
 /// A synthetic 64x64 "RAW" gradient frame -- a real `LinearFrame`, real decode/normalize/live-
@@ -102,13 +188,21 @@ fn synthetic_linear_frame() -> LinearFrame {
 /// render measured ~1000x too slow in this repo's own prior research, see
 /// `nicti_tapetum::gpu::make_compute_pipeline`'s own doc comment) and reused across every render.
 pub struct DevelopView {
+    gpu: Arc<GpuContext>,
     frame: LinearFrame,
     extent: Extent,
     graph: RenderGraph,
+    registry: StageRegistry,
+    /// The user's actual edits. Not yet persisted to a catalog (#31's scope, once a real asset
+    /// exists) -- lives only for this session/view's lifetime.
+    document: EditDocument,
     decode_kernel: DecodeKernel,
     live_kernel: LiveSuffixKernel,
     crop_kernel: CropKernel,
     renderer: Renderer,
+    /// When true, `render()` renders with every stage at its default instead of `document`'s own
+    /// values -- the before/after toggle.
+    pub show_before: bool,
 }
 
 impl DevelopView {
@@ -120,39 +214,104 @@ impl DevelopView {
         };
         let decode_kernel = DecodeKernel::new(&gpu);
         let live_kernel = LiveSuffixKernel::new(&gpu);
-        let matrix = color::camera_to_working_space_matrix(
-            frame.cam_mul,
-            &frame.cam_xyz,
-            &WbParams::default(),
-        );
-        live_kernel.set_params(
-            &gpu,
-            &LiveParams {
-                working_space_matrix: matrix,
-                exposure: ExposureParams::default(),
-                tone: ToneParams::default(),
-                vibrance: VibranceParams::default(),
-            },
-        );
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(Affine2D::IDENTITY);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
 
         Self {
+            gpu,
             frame,
             extent,
             graph: build_graph(),
+            registry: build_registry(),
+            document: EditDocument::default(),
             decode_kernel,
             live_kernel,
             crop_kernel,
             renderer,
+            show_before: false,
         }
     }
 
-    /// Renders the current frame at its native extent, returning the final (post-crop) texture --
-    /// a cache hit on every call after the first, since nothing about the request changes yet
-    /// (real per-render params land once #46/#47's live sliders exist).
+    /// Reads a stage's current typed params -- `document`'s own entry if present, else the
+    /// registered stage's own `default_params()`. Never affected by `show_before` (that only
+    /// changes what `render()` itself uses); a UI slider always reflects the real edit, not
+    /// whatever the before/after toggle happens to show right now.
+    pub fn stage_params<T: serde::de::DeserializeOwned + Default>(&self, stage_id: &str) -> T {
+        match self.document.stages.get(stage_id) {
+            Some(entry) => coat::parse(&entry.params),
+            None => T::default(),
+        }
+    }
+
+    /// Sets a stage's params from a typed value, replacing any existing entry -- the write half
+    /// of [`Self::stage_params`].
+    pub fn set_stage_params<T: serde::Serialize>(&mut self, stage_id: &str, params: &T) {
+        let value = serde_json::to_value(params).expect("a coat params struct always serializes");
+        self.document.stages.insert(
+            stage_id.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: value,
+            },
+        );
+    }
+
+    /// Removes a stage's entry entirely, reverting it to its own default -- what a slider's
+    /// double-click-to-reset gesture calls.
+    pub fn reset_stage(&mut self, stage_id: &str) {
+        self.document.stages.remove(stage_id);
+    }
+
+    fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id: &str) -> T {
+        match doc.stages.get(id) {
+            Some(entry) => coat::parse(&entry.params),
+            None => T::default(),
+        }
+    }
+
+    /// Renders the current frame at its native extent, returning the final (post-crop) texture.
+    /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
+    /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
+    /// gives a document with no entry for a stage, just applied to the whole document at once.
     pub fn render(&mut self) -> Arc<FrameTexture> {
+        let empty;
+        let doc = if self.show_before {
+            empty = EditDocument::default();
+            &empty
+        } else {
+            &self.document
+        };
+        self.graph
+            .apply_document(doc, &self.registry)
+            .expect("build_registry covers every id build_graph adds");
+
+        let wb: WbParams = Self::resolve(doc, WB);
+        let exposure: ExposureParams = Self::resolve(doc, EXPOSURE);
+        let tone: ToneParams = Self::resolve(doc, TONE);
+        let tone_curve: ToneCurveParams = Self::resolve(doc, TONE_CURVE);
+        let vibrance: VibranceParams = Self::resolve(doc, VIBRANCE);
+        let hsl: HslParams = Self::resolve(doc, HSL);
+        let sharpen: SharpenParams = Self::resolve(doc, SHARPEN);
+        let noise_reduction: NoiseReductionParams = Self::resolve(doc, NOISE_REDUCTION);
+
+        let matrix =
+            color::camera_to_working_space_matrix(self.frame.cam_mul, &self.frame.cam_xyz, &wb);
+        self.live_kernel.set_params(
+            &self.gpu,
+            &LiveParams {
+                working_space_matrix: matrix,
+                exposure,
+                tone,
+                tone_curve,
+                vibrance,
+                hsl,
+                sharpen,
+                noise_reduction,
+                pixel_scale: 1.0,
+            },
+        );
+
         let decode_exec = DecodeExec {
             kernel: &self.decode_kernel,
             frame: &self.frame,
@@ -177,5 +336,36 @@ impl DevelopView {
         self.renderer
             .render(&req)
             .expect("the synthetic frame's own graph/extent are always internally consistent")
+    }
+
+    /// A live histogram of `frame`'s display-encoded pixels -- a CPU readback, cheap at this
+    /// view's small synthetic extent (see this module's own doc comment for why a full-res photo
+    /// would need a different, throttled/GPU approach instead).
+    pub fn histogram(&self, frame: &FrameTexture) -> Histogram {
+        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, frame);
+        let display: Vec<[f32; 4]> = pixels
+            .iter()
+            .map(|p| {
+                let encoded = output_encode([p[0], p[1], p[2]]);
+                [encoded[0], encoded[1], encoded[2], p[3]]
+            })
+            .collect();
+        histogram::from_display_pixels(&display)
+    }
+
+    /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
+    /// histograms it, and writes `nicti_tapetum::perk::estimate`'s Exposure/Basic-tone output into
+    /// `document` -- see `perk.rs`'s own doc comment for why this is provisional (candidate A,
+    /// pending #202).
+    pub fn apply_auto_tone(&mut self) {
+        let was_before = self.show_before;
+        self.show_before = true;
+        let default_render = self.render();
+        let hist = self.histogram(&default_render);
+        self.show_before = was_before;
+
+        let (exposure, tone) = nicti_tapetum::perk::estimate(&hist);
+        self.set_stage_params(EXPOSURE, &exposure);
+        self.set_stage_params(TONE, &tone);
     }
 }

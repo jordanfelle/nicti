@@ -1,10 +1,15 @@
 // The fused live suffix (ADR-0044's "one fused live dispatch"): white balance + camera->working
 // -space color (folded into one 3x3 on the CPU, see color.rs::camera_to_working_space_matrix),
-// exposure, Basic-panel tone (contrast/highlights/shadows/whites/blacks), and vibrance -- exactly
-// one dispatch regardless of how many of these params changed. Output stays in linear ProPhoto
-// RGB (the working space); no display/export color management here (#42's scope, see color.rs's
-// own doc comment on the deliberate simplification vs. the original design sketch: no HueSatMap/
-// LookTable bindings are reserved).
+// exposure, Basic-panel tone (contrast/highlights/shadows/whites/blacks), #46's Tone Curve, #46's
+// 8-band HSL, and vibrance -- exactly one dispatch regardless of how many of these params changed.
+// Output stays in linear ProPhoto RGB (the working space); no display/export color management
+// here (#42's scope, see color.rs's own doc comment on the deliberate simplification vs. the
+// original design sketch: no DCP HueSatMap/LookTable bindings are reserved -- #46's own HSL below
+// is the user-facing HSL panel, a different thing from #42's profile-driven HueSatMap).
+//
+// #46's Sharpening/Noise Reduction are a separate pass (`detail_blur.wgsl`/`detail_combine.wgsl`,
+// see `stages.rs::LiveSuffixKernel::encode`'s own doc comment) -- unlike everything in this file,
+// they need neighboring pixels, which a per-pixel-only shader like this one can't provide.
 
 struct Uniforms {
     // Row-major 3x3 camera-RGB -> working-space matrix, one column per vec4 (w unused, alignment
@@ -16,11 +21,17 @@ struct Uniforms {
     tone0: vec4<f32>,
     // whites, blacks, vibrance, unused.
     tone1: vec4<f32>,
+    // Tone Curve LUT, 256 entries packed 4-per-vec4 (see color.rs::build_tone_curve_lut).
+    curve_lut: array<vec4<f32>, 64>,
+    // HSL panel's 8 bands, one vec4 each: hue, saturation, luminance, unused.
+    hsl_bands: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u: Uniforms;
+
+const PI: f32 = 3.14159265358979;
 
 // Basic-panel tone controls in a rough perceptual (cube-root) space -- see color.rs::apply_tone's
 // own doc comment for what each control does and why this is a v1 global approximation.
@@ -46,6 +57,142 @@ fn apply_tone(rgb: vec3<f32>, contrast: f32, highlights: f32, shadows: f32, whit
     return clamped * clamped * clamped;
 }
 
+// One LUT entry, given a 0..255 integer index -- WGSL can't dynamically index a vec4's
+// components, so this unpacks the 4-per-vec4 packing color.rs::build_tone_curve_lut's own doc
+// comment describes.
+fn lut_at(index: i32) -> f32 {
+    let clamped = clamp(index, 0, 255);
+    let group = u.curve_lut[clamped / 4];
+    let comp = clamped % 4;
+    if (comp == 0) { return group.x; }
+    if (comp == 1) { return group.y; }
+    if (comp == 2) { return group.z; }
+    return group.w;
+}
+
+// Mirrors color.rs::apply_tone_curve exactly: per-channel, in the same cube-root perceptual space
+// apply_tone uses, with linear interpolation between adjacent LUT entries.
+fn apply_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
+    let perceptual = clamp(pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / 3.0)), vec3<f32>(0.0), vec3<f32>(1.0));
+    let pos = perceptual * 255.0;
+    let i0 = vec3<i32>(floor(pos));
+    let frac = pos - vec3<f32>(i0);
+    let looked_up = vec3<f32>(
+        mix(lut_at(i0.x), lut_at(i0.x + 1), frac.x),
+        mix(lut_at(i0.y), lut_at(i0.y + 1), frac.y),
+        mix(lut_at(i0.z), lut_at(i0.z + 1), frac.z),
+    );
+    let clamped = max(looked_up, vec3<f32>(0.0));
+    return clamped * clamped * clamped;
+}
+
+fn hsl_band(index: i32) -> vec3<f32> {
+    return u.hsl_bands[index].xyz;
+}
+
+// Standard "which channel is max" hue formula -- mirrors color.rs::rgb_hue_degrees exactly.
+// Undefined (returns 0.0) when delta is ~0; callers must not call this on an achromatic pixel.
+fn rgb_hue_degrees(rgb: vec3<f32>, mx: f32, delta: f32) -> f32 {
+    var raw: f32;
+    if (mx == rgb.r) {
+        raw = ((rgb.g - rgb.b) / delta) % 6.0;
+    } else if (mx == rgb.g) {
+        raw = (rgb.b - rgb.r) / delta + 2.0;
+    } else {
+        raw = (rgb.r - rgb.g) / delta + 4.0;
+    }
+    if (raw < 0.0) {
+        raw = raw + 6.0;
+    }
+    var deg = raw * 60.0;
+    deg = deg % 360.0;
+    if (deg < 0.0) {
+        deg = deg + 360.0;
+    }
+    return deg;
+}
+
+fn hue_delta_degrees(hue: f32, center: f32) -> f32 {
+    var raw = (hue - center) % 360.0;
+    if (raw < 0.0) {
+        raw = raw + 360.0;
+    }
+    if (raw > 180.0) {
+        raw = raw - 360.0;
+    }
+    return raw;
+}
+
+// Mirrors color.rs::hsl_band_weight exactly: a raised-cosine (Hann) window spanning +/-45
+// degrees around a band's own 45-degree-spaced center.
+fn hsl_band_weight(hue: f32, band_index: i32) -> f32 {
+    let center = f32(band_index) * 45.0;
+    let d = abs(hue_delta_degrees(hue, center));
+    if (d >= 45.0) {
+        return 0.0;
+    }
+    return 0.5 * (1.0 + cos(PI * d / 45.0));
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let c = v * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - abs((h_prime % 2.0) - 1.0));
+    var rgb: vec3<f32>;
+    if (h_prime < 1.0) {
+        rgb = vec3<f32>(c, x, 0.0);
+    } else if (h_prime < 2.0) {
+        rgb = vec3<f32>(x, c, 0.0);
+    } else if (h_prime < 3.0) {
+        rgb = vec3<f32>(0.0, c, x);
+    } else if (h_prime < 4.0) {
+        rgb = vec3<f32>(0.0, x, c);
+    } else if (h_prime < 5.0) {
+        rgb = vec3<f32>(x, 0.0, c);
+    } else {
+        rgb = vec3<f32>(c, 0.0, x);
+    }
+    let m = v - c;
+    return rgb + vec3<f32>(m);
+}
+
+// Mirrors color.rs::apply_hsl exactly -- see its own doc comment for the HSV-plus-separate-
+// perceptual-luma-shift approximation this uses instead of canonical HSL.
+fn apply_hsl(rgb: vec3<f32>) -> vec3<f32> {
+    let mx = max(rgb.r, max(rgb.g, rgb.b));
+    let mn = min(rgb.r, min(rgb.g, rgb.b));
+    let delta = mx - mn;
+    if (delta <= 1e-6 || mx <= 0.0) {
+        return rgb;
+    }
+
+    let hue = rgb_hue_degrees(rgb, mx, delta);
+    var hue_shift = 0.0;
+    var sat_shift = 0.0;
+    var luma_shift = 0.0;
+    for (var i: i32 = 0; i < 8; i = i + 1) {
+        let w = hsl_band_weight(hue, i);
+        let band = hsl_band(i);
+        hue_shift = hue_shift + w * band.x;
+        sat_shift = sat_shift + w * band.y;
+        luma_shift = luma_shift + w * band.z;
+    }
+    hue_shift = hue_shift * 30.0;
+    luma_shift = luma_shift * 0.3;
+
+    let sat = clamp(delta / mx, 0.0, 1.0);
+    var new_hue = (hue + hue_shift) % 360.0;
+    if (new_hue < 0.0) {
+        new_hue = new_hue + 360.0;
+    }
+    let new_sat = max(sat * (1.0 + sat_shift), 0.0);
+    let hue_rotated = hsv_to_rgb(new_hue, new_sat, mx);
+
+    let perceptual = pow(max(hue_rotated, vec3<f32>(0.0)), vec3<f32>(1.0 / 3.0));
+    let shifted = max(perceptual + vec3<f32>(luma_shift), vec3<f32>(0.0));
+    return shifted * shifted * shifted;
+}
+
 fn apply_vibrance(rgb: vec3<f32>, vibrance: f32) -> vec3<f32> {
     let mx = max(rgb.r, max(rgb.g, rgb.b));
     let mn = min(rgb.r, min(rgb.g, rgb.b));
@@ -69,6 +216,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = m * px.rgb;
     rgb = rgb * u.tone0.x;
     rgb = apply_tone(rgb, u.tone0.y, u.tone0.z, u.tone0.w, u.tone1.x, u.tone1.y);
+    rgb = apply_tone_curve(rgb);
     rgb = apply_vibrance(rgb, u.tone1.z);
+    rgb = apply_hsl(rgb);
     textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(rgb, px.a));
 }

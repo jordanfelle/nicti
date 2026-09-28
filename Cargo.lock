@@ -3671,12 +3671,16 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
+ "nicti-claw",
  "nicti-cornea",
  "nicti-lair",
+ "nicti-pawprint",
  "nicti-pounce",
  "nicti-shed",
  "nicti-tapetum",
  "semver",
+ "serde",
+ "serde_json",
  "wgpu",
 ]
 
