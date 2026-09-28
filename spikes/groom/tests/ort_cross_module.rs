@@ -1,8 +1,9 @@
 //! Reproduces #179's actual failure mode directly, rather than a same-crate repeat call (which
-//! can't reach it -- each crate's own wrapper delegates to `nicti-haw`'s one process-global
-//! `OnceLock`, which caches the *first* call's result, so a second call *within one crate* never
-//! re-runs `commit()` and would trivially pass under the original buggy code too, given the first
-//! call already succeeded).
+//! can't reach it -- each crate's own wrapper delegates to `nicti-haw`'s one process-global,
+//! mutex-guarded state, which only records a dylib path after a *successful* commit, so a
+//! same-path second call *within one crate* reuses that recorded path and never re-runs
+//! `commit()` -- it would trivially pass under the original buggy code too, given the first call
+//! already succeeded).
 //!
 //! The real bug is cross-crate: six throwaway spikes (`groom`, `siamese`, `crouch`, `rods`,
 //! `litter`, `rosette`) each used to carry their own copy of `ensure_ort_environment`, but `ort`'s

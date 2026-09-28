@@ -300,9 +300,9 @@ mod tests {
     }
 
     // A same-crate repeat call to `ensure_ort_environment` doesn't exercise #179's actual bug (or
-    // #229's): `nicti-haw`'s own `OnceLock` caches the *first* call's result, so a second call in
-    // this same test binary never re-runs `commit()` at all -- it can't distinguish the fixed
-    // code from the original bug, or a same-path second call from a genuinely different-path one.
-    // The real races are cross-crate; `spikes/groom/tests/ort_cross_module.rs` reproduces those
-    // instead.
+    // #229's): `nicti-haw`'s own process-global mutex-guarded state only records a dylib path
+    // after a *successful* commit, so a same-path second call in this same test binary reuses
+    // that recorded path and never re-runs `commit()` -- it can't distinguish the fixed code from
+    // the original bug, or a same-path second call from a genuinely different-path one. The real
+    // races are cross-crate; `spikes/groom/tests/ort_cross_module.rs` reproduces those instead.
 }
