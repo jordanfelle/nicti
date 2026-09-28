@@ -93,9 +93,12 @@ jobs:
       # SmartScreen/Authenticode signing, once the SignPath Foundation application (a follow-up
       # to #249, see the ADR) is approved. Skipped entirely until then -- v1's first releases
       # ship unsigned, relying on the minisign signature below (not Authenticode) as the actual
-      # update-integrity check.
+      # update-integrity check. Also gated on `github.ref_type == 'tag'` (#267): the edge channel
+      # is meant to stay minisign-only even after SignPath is enabled -- it's an unreviewed,
+      # possibly-broken build of the tip of main, and Authenticode-signing it would put Nicti's
+      # verified-publisher reputation behind every merge rather than just real releases.
       - name: Upload nicti.exe for signing
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         id: upload_nicti_exe
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -103,7 +106,7 @@ jobs:
           path: target/release/nicti.exe
 
       - name: Sign nicti.exe (SignPath)
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         uses: SignPath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -130,9 +133,9 @@ jobs:
           & makensis "/DVERSION=$env:NICTI_VERSION" "/DSRCDIR=${{ github.workspace }}\target\release" packaging\windows\nicti.nsi
 
       # SignPath also has to sign the installer itself, not just nicti.exe -- both binaries ship
-      # to the user. Same gate as above.
+      # to the user. Same gate as above (edge builds excluded, #267).
       - name: Upload installer for signing
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         id: upload_installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -140,7 +143,7 @@ jobs:
           path: packaging/windows/Nicti-Setup-*.exe
 
       - name: Sign installer (SignPath)
-        if: vars.SIGNPATH_ENABLED == 'true'
+        if: vars.SIGNPATH_ENABLED == 'true' && github.ref_type == 'tag'
         uses: SignPath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -211,19 +214,30 @@ jobs:
             packaging/windows/Nicti-Setup-*.exe.minisig \
             packaging/windows/Nicti-Setup-*.exe.sha256
 
-      # #267: the bleeding-edge channel. `edge` is a single moving tag/release -- delete
-      # (`--cleanup-tag` removes the git tag too, not just the release) and recreate on every
-      # main push, rather than accumulate one release per merge. `--target` re-creates the tag
-      # at this commit since the old one was just deleted; `--prerelease` is what keeps this out
-      # of `/releases/latest` (see the top-of-file comment), so nicti-shed's stable auto-updater
-      # never sees it.
+      # #267: the bleeding-edge channel. `edge` is a single moving tag/release -- delete and
+      # recreate on every main push, rather than accumulate one release per merge. `--prerelease`
+      # is what keeps this out of `/releases/latest` (see the top-of-file comment), so
+      # nicti-shed's stable auto-updater never sees it.
+      #
+      # `gh release delete --cleanup-tag` makes two separate API calls (delete release, delete
+      # tag); if the tag-delete half fails while the release-delete half succeeds, a stale `edge`
+      # git tag survives, and `gh release create edge --target "$GITHUB_SHA"` silently *ignores*
+      # `--target` whenever the tag already exists (reusing the existing tag's commit instead) --
+      # so a naive `|| true` here would ship binaries built from the current commit under a
+      # release/tag that actually still points at a stale one, with no failed step to flag it.
+      # So: force-delete the tag ref directly (independent of whether a release existed for it,
+      # and independent of whether the `gh release delete` above succeeded), then verify after
+      # creation that `edge` really points at this commit -- fail loudly rather than ship a
+      # mismatched tag/artifact binding.
       - name: Publish edge release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete edge --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag || true
+          gh release delete edge --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag 2>/dev/null || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" >/dev/null 2>&1 || true
+
           gh release create edge \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Nicti edge (${GITHUB_SHA:0:7})" \
@@ -233,3 +247,9 @@ jobs:
             packaging/windows/Nicti-Setup-*.exe \
             packaging/windows/Nicti-Setup-*.exe.minisig \
             packaging/windows/Nicti-Setup-*.exe.sha256
+
+          actual_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" --jq '.object.sha')
+          if [[ "$actual_sha" != "${GITHUB_SHA}" ]]; then
+            echo "::error::edge tag points at $actual_sha, not this commit (${GITHUB_SHA}) -- a stale tag from a prior run was not fully cleaned up. Re-run this job."
+            exit 1
+          fi
