@@ -18,3 +18,10 @@ wgpu = "30"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
+# Auto-level (#47): downscale -> Canny edge detection -> Hough line transform -> median angle.
+# `imageproc` covers both primitives without pulling in the full opencv-rust binding surface (see
+# `docs/adr/0047-crop-straighten-autolevel.md` for the comparison) -- default features disabled
+# since auto-level needs neither `text` (font rendering, `ab_glyph`) nor `fft` (`rustdct`) nor
+# `rayon`; both licensed MIT, matching `deny.toml`'s existing allowlist with no new entry needed.
+imageproc = { version = "0.27", default-features = false }
+image = { version = "0.25", default-features = false }

@@ -175,6 +175,23 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
     #31's scope, once a real asset exists to persist against) and a `StageRegistry` covering every
     stage id `build_graph` adds.
 
+- **Crop/straighten/auto-level (#47)** — `docs/adr/0047`: **Accepted**. Rotation composes into the
+  existing affine crop transform (`geometry::Affine2D::crop_and_rotate`/`affine_for_crop`), no new
+  stage, no shader change (`present_sample.wgsl` already read a full 2x3 affine). Both the manual
+  Ctrl-drag-a-reference-line gesture (`nicti-pelt::render::DevelopView::straighten_from_drag`) and
+  the Canny/Hough auto-level button (`nicti_tapetum::autolevel::detect_level_angle`, via
+  `imageproc` -- chosen over `opencv-rust`, both primitives confirmed present in its actual source)
+  write into the same `coat::CropParams::rotation_degrees` field via `straighten_delta_degrees`'s
+  shared sign-convention math (clockwise-positive, y-down; locked in by a GPU/CPU parity test with
+  a real 12-degree rotation, not just the pre-#47 translation-only case). `CropParams` (x/y/width/
+  height/rotation, `Default` = full-frame no-op) is a real cached `StageEntry`, wired through
+  `stages::crop_stage`'s `default_params`. The interactive Develop preview's own canvas doesn't
+  resize to the crop rect (deliberate, matches real editor UX); the already-landed (#45 PR4)
+  `tile::TiledRender`/`MemorySink` full-res export path already supports an arbitrary output
+  extent, so the crop rect *is* honored end-to-end at export time. Two follow-ups filed: #272
+  (live-preview canvas resize) and #273 (real-photo Canny/Hough threshold tuning,
+  `needs-physical-testing`).
+
 ## Package contents
 
 - **`crates/nicti-tapetum`** (#45, landed) — `coat.rs` (#46: typed `WbParams`/`ExposureParams`/

@@ -13,6 +13,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::geometry::CropRect;
+
 /// White balance. `temp_k: None` means "use the frame's own as-shot white balance"
 /// (`LinearFrame::cam_mul`) -- the conventional default for a freshly imported photo.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -158,6 +160,65 @@ impl NoiseReductionParams {
     }
 }
 
+/// Crop + straighten (#47): `x`/`y`/`width`/`height` are the crop rectangle in *source-image*
+/// pixel space (top-left origin). `width`/`height` of `0.0` (the default, via `Default`) is a
+/// sentinel meaning "no crop yet -- use the full source frame": [`Self::effective_rect`] resolves
+/// that sentinel against the actual source extent, so `Default` stays a true no-op like every
+/// other coat params struct, rather than a degenerate zero-size rect. `rotation_degrees` is the
+/// manual straighten angle (see `geometry::Affine2D::crop_and_rotate`'s own doc comment for the
+/// clockwise-positive/y-down sign convention), populated either by the Ctrl-drag-a-reference-line
+/// gesture or the Canny/Hough auto-level button -- both write into this same field, since they're
+/// complementary entry points to the same underlying value, not alternates with separate storage.
+/// Always clamped to `geometry::MAX_STRAIGHTEN_DEGREES` before being stored (`set_rotation`).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CropParams {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub rotation_degrees: f32,
+}
+
+impl CropParams {
+    /// True when this is exactly the "no crop, no rotation" no-op state.
+    pub fn is_noop(&self) -> bool {
+        self.x == 0.0
+            && self.y == 0.0
+            && self.width <= 0.0
+            && self.height <= 0.0
+            && self.rotation_degrees == 0.0
+    }
+
+    /// Resolves this crop's rectangle against `source_extent` (in pixels): `width`/`height` <= 0.0
+    /// (the `Default` sentinel) means "the full source frame," ignoring `x`/`y` too (a zero-size
+    /// rect with a nonzero offset is not a meaningful crop, so the whole rect resets together, not
+    /// just the size half of it).
+    pub fn effective_rect(&self, source_extent: (f32, f32)) -> CropRect {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return CropRect {
+                x: 0.0,
+                y: 0.0,
+                width: source_extent.0,
+                height: source_extent.1,
+            };
+        }
+        CropRect {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// Sets `rotation_degrees`, clamped to `geometry::MAX_STRAIGHTEN_DEGREES` -- the single
+    /// writer both the straighten gesture and the auto-level button should call, so neither entry
+    /// point can bypass the clamp by writing the field directly.
+    pub fn set_rotation(&mut self, degrees: f32) {
+        self.rotation_degrees = crate::geometry::clamp_rotation_degrees(degrees);
+    }
+}
+
 /// Parses a stage's raw JSON params into a typed struct, falling back to `T::default()` on any
 /// deserialization failure (a schema this build genuinely can't parse) rather than propagating an
 /// error -- consistent with `nicti_claw::Registry::get`'s own "no recognized module -> `None`,
@@ -263,6 +324,75 @@ mod tests {
             ..Default::default()
         };
         assert!(!nonzero.is_noop());
+    }
+
+    #[test]
+    fn crop_params_default_is_noop() {
+        assert!(CropParams::default().is_noop());
+        let nonzero = CropParams {
+            rotation_degrees: 1.0,
+            ..Default::default()
+        };
+        assert!(!nonzero.is_noop());
+    }
+
+    #[test]
+    fn crop_params_default_effective_rect_is_the_full_source_frame() {
+        let rect = CropParams::default().effective_rect((100.0, 50.0));
+        assert_eq!(
+            rect,
+            crate::geometry::CropRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0
+            }
+        );
+    }
+
+    #[test]
+    fn crop_params_effective_rect_uses_the_explicit_rect_when_set() {
+        let params = CropParams {
+            x: 5.0,
+            y: 6.0,
+            width: 20.0,
+            height: 10.0,
+            rotation_degrees: 0.0,
+        };
+        let rect = params.effective_rect((100.0, 50.0));
+        assert_eq!(
+            rect,
+            crate::geometry::CropRect {
+                x: 5.0,
+                y: 6.0,
+                width: 20.0,
+                height: 10.0
+            }
+        );
+    }
+
+    #[test]
+    fn crop_params_set_rotation_clamps_to_max_straighten_range() {
+        let mut params = CropParams::default();
+        params.set_rotation(9000.0);
+        assert_eq!(
+            params.rotation_degrees,
+            crate::geometry::MAX_STRAIGHTEN_DEGREES
+        );
+    }
+
+    #[test]
+    fn crop_params_round_trips_through_parse() {
+        let params = CropParams {
+            x: 1.0,
+            y: 2.0,
+            width: 30.0,
+            height: 40.0,
+            rotation_degrees: 3.5,
+        };
+        let value = serde_json::to_value(params).unwrap();
+        let parsed: CropParams = parse(&value);
+        assert_eq!(parsed, params);
     }
 
     #[test]

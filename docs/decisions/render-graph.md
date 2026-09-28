@@ -134,3 +134,20 @@ already claimed to follow it, not a design reconsideration. Included here becaus
 access surfaced a bug no synthetic fixture could" is exactly the kind of finding this document
 exists to record, matching this file's own established practice of noting "a real timing bug this
 pass caught" above.
+
+## #47: Crop, straighten, and auto-level
+
+See `docs/adr/0047-crop-straighten-autolevel.md` for the full record -- summarized here since this
+file is this topic's "full reasoning/history" home per `CLAUDE.md`'s own convention. Straighten
+(manual Ctrl-drag-a-reference-line gesture, and an automatic Canny/Hough auto-level button) composes
+a rotation into the existing affine crop transform (`geometry::Affine2D::crop_and_rotate`,
+`affine_for_crop`) rather than adding a new pipeline stage -- `present_sample.wgsl` needed no
+change at all, since it already read a full 2x3 affine. `imageproc` (Canny + Hough, both
+primitives confirmed present by reading its actual source before committing to it) was chosen over
+`opencv-rust`, matching the ticket's own stated preference. The crop rectangle is a real, typed,
+cached `CropParams` `StageEntry` (`coat.rs`), with an interactive overlay (resize handles, a
+freeform-rotate handle, pan, and the Ctrl-drag gesture) in `nicti-pelt`; the live preview's own
+canvas doesn't resize to the crop rect (deliberate, matches real editor UX -- see the ADR's own
+"Crop rectangle scope" section), while the already-existing `tile::TiledRender`/`MemorySink`
+full-res export path (landed in #45 PR4) already supports an arbitrary decoupled output extent, so
+crop *does* actually resize the framing at export time.

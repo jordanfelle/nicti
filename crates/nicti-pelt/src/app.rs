@@ -364,11 +364,14 @@ impl eframe::App for PeltApp {
                 ui.heading("Develop");
                 if let Some(frame) = viewport_frame {
                     let available = ui.available_size();
-                    let (rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
+                    let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
                         ViewportCallback { frame },
                     ));
+                    if let Some(develop) = self.develop.as_mut() {
+                        crate::develop_panel::handle_viewport_gesture(ui, &response, rect, develop);
+                    }
                 }
             }
         });
