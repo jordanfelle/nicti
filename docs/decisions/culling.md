@@ -50,18 +50,18 @@ Covers burst/duplicate grouping (#33), blur/misfocus/eye detection (#34), and su
   against a documented self-export recipe, untested against a real model this pass. **Proposed,
   measurement pending** — same "no real unculled/labelled shoot exists yet" constraint as #33,
   plus no DINOv3/OpenCLIP model file obtained in this pass.
-- **Subject grouping (#35)**: `docs/adr/0035-subject-grouping.md` — clusters a shoot's photos by
-  subject/person for review-per-subject. Human face-recognition models don't apply: most subjects
-  are fursuiters, and InsightFace/RetinaFace are license-excluded anyway (non-commercial only).
-  `spikes/rosette` uses general image embeddings instead (DINOv2, reused from litter's own
-  embedder; OpenCLIP; DINOv3), clustered with DBSCAN over cosine distance and a
-  silhouette-coefficient-guided `eps` sweep — not litter's own sequence-constrained grouping,
-  which only links nearby frames in capture order and would miss a subject reappearing elsewhere
-  in the shoot. A full-frame-vs-subject-crop ablation is included (crop source: a precomputed
-  mask, same shape as `spikes/siamese`'s BiRefNet output). **DINOv3 is license-gated** (Meta's
-  DINOv3 License requires a "Built with DINOv3" attribution if adopted) and its ONNX export sits
-  behind a Hugging Face manual-accept gate; **no clean-license OpenCLIP ONNX export was found**
-  (the one community export, Apple's MobileCLIP2, is research-only) — its embedder is implemented
-  against a documented self-export recipe, untested against a real model this pass. **Proposed,
-  measurement pending** — same "no real unculled/labelled shoot exists yet" constraint as #33,
-  plus no DINOv3/OpenCLIP model file obtained in this pass.
+- **YOLO as a culling/detection candidate (#108)**: `docs/adr/0108-yolo-culling-detection-
+  candidate.md` — Ultralytics YOLO was excluded on license grounds until ADR-0066 made Nicti's own
+  outbound license AGPL-3.0-or-later. Re-verified the license against the primary source
+  (`ultralytics/ultralytics`'s `LICENSE` file, fetched fresh rather than re-trusting the existing
+  `docs/licensing.md` row): genuinely AGPL-3.0, no drift; current model family is YOLO26
+  (n/s/m/l/x), ONNX-exportable, fitting the existing `ort`-based inference pattern litter/rosette
+  already use. **Complementary, not redundant**, with #34 (which scores sharpness *within* a
+  region, a different primitive from detection) and #35 (whose cited prior art, the Fursee paper,
+  runs YOLO as a head-crop pre-processing stage feeding a DINOv3 embedder — detection and
+  embedding are sequential, not competing). The Fursee paper's own hybrid pipeline reaches 93.33%
+  retrieval hit rate / 0.8755 clustering F1 on fursuit identity, but that's a downstream-clustering
+  number, not a standalone YOLO detection benchmark — no ticket has measured fursuit-head detection
+  accuracy in isolation. **Accepted, deferred**: no dedicated integration this pass — #35's own
+  full-frame-vs-crop ablation (pending #243) is the concrete mechanism to decide whether a
+  detection stage is worth adding, so this ticket doesn't duplicate that pending experiment.

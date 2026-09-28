@@ -44,6 +44,12 @@ Full reasoning/history: `docs/decisions/culling.md`.
   anywhere in a shoot, not just nearby in capture order.
 - **DINOv3 license-gated + HF manual-download gate; no clean OpenCLIP ONNX export found** — both
   real weights are TBD for #35, same as litter's own con-shoot ground truth.
+- **YOLO (#108) is complementary to #34/#35, not redundant** — different primitive from #34's
+  in-region sharpness scoring; a sequential pre-crop stage in #35's own cited Fursee prior art, not
+  a competing embedding choice. License re-verified against primary source (still genuinely
+  AGPL-3.0, current family YOLO26, ONNX-exportable) — no drift from the existing `docs/
+  licensing.md` row. **Deferred, not integrated**: #35's crop ablation (pending #243) is the actual
+  decision mechanism, so #108 doesn't duplicate it.
 
 ## Package contents
 
