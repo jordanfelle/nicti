@@ -114,9 +114,17 @@ pub fn parse_edge_release(json: &str) -> Result<EdgeRelease, ShedError> {
     let raw: RawEdgeRelease =
         serde_json::from_str(json).map_err(|e| ShedError::Parse(e.to_string()))?;
 
-    if raw.target_commitish.len() < 7 {
+    // Every ASCII hex digit is exactly one byte, so a length check alone (the original form of
+    // this guard) doesn't rule out a non-ASCII string that's *byte*-long-enough but splits a
+    // multi-byte UTF-8 character right at the 7-byte mark -- `target_commitish[..7]` below would
+    // then panic instead of returning an error (CodeRabbit review, PR #283). Requiring every byte
+    // to be an ASCII hex digit rules that out entirely, and is what a real commit SHA always is
+    // anyway.
+    if raw.target_commitish.len() < 7
+        || !raw.target_commitish.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return Err(ShedError::Parse(format!(
-            "edge release's target_commitish is too short to be a commit SHA: {:?}",
+            "edge release's target_commitish isn't a plausible commit SHA: {:?}",
             raw.target_commitish
         )));
     }
@@ -315,6 +323,18 @@ mod tests {
     #[test]
     fn rejects_edge_release_with_too_short_a_commitish() {
         let json = edge_release_json("abc", &[]);
+        assert!(matches!(
+            parse_edge_release(&json),
+            Err(ShedError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_non_ascii_commitish_instead_of_panicking() {
+        // 8 bytes, none of them a valid single-byte boundary at index 7 (each "é" is 2 UTF-8
+        // bytes) -- a naive byte-length check alone would accept this and then panic slicing
+        // `[..7]` mid-character.
+        let json = edge_release_json("éééé", &[]);
         assert!(matches!(
             parse_edge_release(&json),
             Err(ShedError::Parse(_))

@@ -91,21 +91,33 @@ impl UpdateChecker {
         self.channel
     }
 
-    /// Switches channel, persists the choice, and clears any stale result from the other
-    /// channel's last check -- a stale Stable "you're up to date" (or vice versa) must never
-    /// linger onscreen after switching, since it no longer answers the right question. Does not
-    /// itself spawn a check; the caller (the channel picker's own `changed()` handler) does that
-    /// immediately after, with `force: true`, so switching to Edge surfaces a prompt for
-    /// whatever edge build is currently out, not just the next one.
-    pub fn set_channel(&mut self, channel: Channel) {
+    /// Switches channel, persists the choice, clears any stale result from the other channel's
+    /// last check, and spawns an immediate forced re-check -- so picking Edge surfaces whatever
+    /// edge build is currently out right away, not just the next one, and a stale Stable "you're
+    /// up to date" (or vice versa) never lingers onscreen answering the wrong question.
+    ///
+    /// The visible channel is only ever changed *after* `save_channel` succeeds (CodeRabbit
+    /// review, PR #283): committing it first and persisting second means a save failure (a full
+    /// disk, a permissions problem) would leave the UI showing the new channel while the file on
+    /// disk still says the old one -- silently reverting on the next launch with no warning ever
+    /// shown. A failed switch instead leaves the channel unchanged and surfaces the error exactly
+    /// like a failed check would.
+    pub fn set_channel(&mut self, channel: Channel, current_version: &str) {
         if channel == self.channel || self.applying {
             return;
         }
-        self.channel = channel;
-        self.available = None;
-        self.last_error = None;
-        self.receiver = None;
-        save_channel(channel);
+        match save_channel(channel) {
+            Ok(()) => {
+                self.channel = channel;
+                self.available = None;
+                self.last_error = None;
+                self.receiver = None;
+                self.spawn_check(current_version, true);
+            }
+            Err(e) => {
+                self.last_error = Some(format!("failed to switch update channel: {e}"));
+            }
+        }
     }
 
     /// Drains any background thread's result that has landed (a check, or an apply). Call once
@@ -217,14 +229,20 @@ fn load_channel() -> Channel {
 /// fresh default) so this never clobbers `auto_check`/`last_check_unix` a background check
 /// already saved. Holds [`STATE_WRITE_LOCK`] across the whole load-mutate-save round trip so a
 /// concurrent `run_check` save can't interleave with it.
-fn save_channel(channel: Channel) {
+///
+/// `Ok(())` on a platform with no state path at all (non-Windows, `default_path()` is always
+/// `None`) -- there's genuinely nothing to persist to there, which isn't the same failure as a
+/// real write erroring out on a platform that does have one, and `set_channel` (the only caller)
+/// must not refuse an in-memory-only channel switch just because this build has no update
+/// mechanism to begin with.
+fn save_channel(channel: Channel) -> Result<(), nicti_shed::ShedError> {
     let Some(path) = nicti_shed::state::default_path() else {
-        return;
+        return Ok(());
     };
     let _guard = STATE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = nicti_shed::state::load(&path);
     state.channel = channel;
-    let _ = nicti_shed::state::save(&path, &state);
+    nicti_shed::state::save(&path, &state)
 }
 
 #[cfg(windows)]

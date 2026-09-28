@@ -72,12 +72,24 @@ pub fn load(path: &Path) -> UpdateState {
         .unwrap_or_default()
 }
 
+/// Writes `state` to `path` by writing a temp file in the same directory then renaming it over
+/// the destination -- a plain `fs::write` truncates the destination in place first, so a reader
+/// (or a crash mid-write) could observe a partially-written file; `state::load` treats that as
+/// unparseable and silently resets to defaults, losing every saved preference. A same-directory
+/// rename is atomic on both Windows (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, what Rust's
+/// `fs::rename` uses there) and POSIX, so a reader only ever sees the old complete file or the
+/// new complete file, never a partial one. The temp filename embeds this process's PID so two
+/// processes racing a save (there's no cross-process lock, only the in-process
+/// `nicti-pelt::update::STATE_WRITE_LOCK`) can't collide on the same temp path. (CodeRabbit
+/// review, PR #283.)
 pub fn save(path: &Path, state: &UpdateState) -> Result<(), ShedError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(ShedError::Io)?;
     }
     let json = serde_json::to_string_pretty(state).map_err(|e| ShedError::Parse(e.to_string()))?;
-    std::fs::write(path, json).map_err(ShedError::Io)
+    let tmp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    std::fs::write(&tmp_path, json).map_err(ShedError::Io)?;
+    std::fs::rename(&tmp_path, path).map_err(ShedError::Io)
 }
 
 pub fn now_unix() -> u64 {

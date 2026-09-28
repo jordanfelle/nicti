@@ -337,8 +337,7 @@ impl eframe::App for PeltApp {
                             });
                     });
                     if !busy && channel != self.update.channel() {
-                        self.update.set_channel(channel);
-                        self.update.spawn_check(&self.version, true);
+                        self.update.set_channel(channel, &self.version);
                     }
                 });
             });
