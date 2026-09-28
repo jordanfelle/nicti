@@ -135,6 +135,34 @@ app), design points, both addressed:
   filenames, a lock file) would be speculative machinery for a scenario nothing in this crate's own
   callers can currently create.
 
+**A second, later CodeRabbit pass reviewed the actual diff line-by-line** (rather than only the
+architecture summary above) and found two more real issues, both verified independently before
+fixing (never blind-applied — one of its three suggestions turned out to be stale):
+
+- **Confirmed and fixed**: `NineLives::due` cleared its one-time startup grace
+  (`checked_since_startup`) unconditionally on every call, regardless of the result — contradicting
+  this very ADR's own stated guarantee. Two concrete failure modes: (1) a poll landing before the
+  interval had elapsed would still spend the grace for nothing, so a previous session's
+  never-backed-up changes could go unbacked-up for the rest of *this* session too if the user made
+  no further edits; (2) a startup-triggered run that failed would never retry on the next poll,
+  since `poll_backup` only ever calls `record_ran` for a `Verified` outcome, and the grace was
+  already spent regardless of the failure. Fixed by moving the flag-clear out of `due` and into
+  `record_ran` — the grace now stays available until an attempt actually resolves, not until one is
+  merely attempted. Two new tests cover both scenarios directly.
+- **Confirmed and fixed**: `rotate`'s `fs::rename` durably commits the file's own data (via `VACUUM
+  INTO`'s own internal fsync, already relied on), but on POSIX the *directory entry* the rename
+  produces is a separate write, not guaranteed durable until the containing directory itself is
+  fsynced — a crash between the rename and this sync could lose the new name even though `verify`
+  already reported the file's contents good. Fixed by fsyncing `policy.dir` after the rename,
+  POSIX-only (`#[cfg(unix)]`; NTFS journals a rename's directory-entry update as part of the same
+  transaction, so Windows has no equivalent gap).
+- **Checked and found stale, not applied**: a third suggestion (open the snapshot's fsync target
+  with write access before calling `sync_all`) named the exact real bug the prior "find and fix the
+  real Windows bug" commit already fixed — by a different, more thorough route (deleting the
+  redundant manual fsync step entirely, rather than opening it with write access to keep it). The
+  review thread was attached to already-deleted code; correctly identified as no longer applicable
+  rather than reapplied on top of code that no longer exists.
+
 **A separate, real Windows-only CI failure, and three attempts to fix it before finding the actual
 cause.** `cargo test (windows)` failed two unit tests with `Io("Access is denied. (os error 5)")`
 after the review fixes above landed. The first three fix attempts all assumed the same wrong root

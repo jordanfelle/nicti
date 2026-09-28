@@ -353,9 +353,22 @@ pub(crate) fn rotate(
         .ok_or_else(|| CatalogError::Io("malformed backup partial filename".into()))?
         .to_string();
     let final_path = policy.dir.join(final_name);
-    // Retried for the same reason as `snapshot_into`'s fsync and `verify`'s open -- see
+    // Retried for the same reason as `verify`'s open -- see
     // `retry_on_transient_access_denied`'s own doc comment.
     retry_on_transient_access_denied(|| fs::rename(partial, &final_path))
+        .map_err(|e| CatalogError::Io(e.to_string()))?;
+
+    // A CodeRabbit review caught a real gap here: `fs::rename` durably commits the file's own
+    // *data* (this crate's file-content durability already comes from `VACUUM INTO`'s own internal
+    // fsync, per `snapshot_into`'s doc comment), but on POSIX the *directory entry* the rename
+    // produces is a separate write that isn't guaranteed durable until the containing directory
+    // itself is fsynced -- a crash between the rename and this sync could lose the new name (or
+    // resurrect the old one) even though `verify` already reported the file's contents as good.
+    // Windows has no equivalent gap (NTFS journals a rename's directory-entry update as part of
+    // the same transaction the file system already commits), so this is POSIX-only.
+    #[cfg(unix)]
+    fs::File::open(&policy.dir)
+        .and_then(|dir| dir.sync_all())
         .map_err(|e| CatalogError::Io(e.to_string()))?;
 
     let verified = list_verified(policy)?; // ascending by created_unix
@@ -486,13 +499,20 @@ impl NineLives {
     ///   [`NineLives::record_ran`] was last called (a real change happened this session and
     ///   enough time has passed).
     ///
-    /// Mutates this instance's own startup-tracking as a side effect -- call at most once per poll
-    /// tick, and call [`NineLives::record_ran`] after actually attempting a run so the next call's
-    /// comparison has a fresh baseline.
+    /// Reads `newest`/`is_startup_check` but only [`NineLives::record_ran`] mutates
+    /// `checked_since_startup` -- a CodeRabbit review caught that clearing it here unconditionally,
+    /// on every call regardless of the result, breaks the exact guarantee this doc comment and
+    /// `docs/adr/0025-continuous-catalog-backup.md` both promise: (1) a poll before the interval
+    /// has elapsed would still consume the one-time startup grace, so a previous session's
+    /// never-backed-up changes could go unbacked-up for the rest of *this* session too if the user
+    /// makes no further edits; (2) a startup-triggered run that fails would never retry on the next
+    /// poll, since nothing ever calls `record_ran` for a non-`Verified` outcome (see
+    /// `nicti-pelt::app::poll_backup`), so the flag would already be permanently spent. Both are
+    /// exercised by `due_startup_grace_survives_a_poll_before_the_interval_elapses` and
+    /// `due_startup_grace_survives_a_failed_attempt`.
     pub fn due(&mut self, now_unix: i64, current_changes: u64) -> Result<bool, CatalogError> {
         let newest = list_verified(&self.policy)?.last().map(|e| e.created_unix);
         let is_startup_check = !self.checked_since_startup;
-        self.checked_since_startup = true;
 
         Ok(match newest {
             None => true,
@@ -503,10 +523,13 @@ impl NineLives {
         })
     }
 
-    /// Records that a backup attempt just ran (whatever its outcome), resetting the "changed since
-    /// last backup" baseline so `due` doesn't immediately re-fire on the very next tick.
+    /// Records that a backup attempt just ran and *resolved* (only ever called for a
+    /// `BackupOutcome::Verified` report, see `poll_backup`'s own doc comment) -- resets the
+    /// "changed since last backup" baseline, and is also the only place that ever spends the
+    /// one-time startup grace (see `due`'s own doc comment for why `due` itself must not).
     pub fn record_ran(&mut self, changes_at_run: u64) {
         self.baseline_changes = changes_at_run;
+        self.checked_since_startup = true;
     }
 }
 
@@ -613,13 +636,54 @@ mod tests {
 
         let mut nine = NineLives::new(p);
         // Changed already (current_changes=5 differs from the default baseline of 0), but the
-        // interval hasn't elapsed yet -- not due. This call also consumes the one-time "startup"
-        // check, so the next call below is exercising the plain changed+elapsed path, not the
-        // startup path `due_fires_on_startup_once_interval_has_elapsed_even_with_no_local_changes`
-        // already covers.
+        // interval hasn't elapsed yet -- not due. The startup grace is still unspent at this point
+        // (only `record_ran` spends it, and it's never called here), so the assertion below is
+        // satisfied by either the startup grace or the changed-since-baseline check -- either way,
+        // it's genuinely due once the interval elapses.
         assert!(!nine.due(1_000 + 500, 5).unwrap());
         // Now the interval has elapsed too, with the same unrecorded change.
         assert!(nine.due(1_000 + 900, 5).unwrap());
+    }
+
+    #[test]
+    fn due_startup_grace_survives_a_poll_before_the_interval_elapses() {
+        // A CodeRabbit review caught this: `due` used to spend the one-time startup grace on its
+        // very first call regardless of the result, so a poll that happened to land before the
+        // interval had elapsed would consume it for nothing -- if the user then made no further
+        // edits this session, a previous session's never-backed-up changes would go unbacked-up
+        // for the rest of this one too.
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = policy(dir.path());
+        p.interval_secs = 900;
+        std::fs::create_dir_all(&p.dir).unwrap();
+        std::fs::write(p.dir.join("cat.1000.sqlite"), b"x").unwrap();
+
+        let mut nine = NineLives::new(p);
+        // Polled early, well before the interval elapses -- not due, and must not spend the grace.
+        assert!(!nine.due(1_000 + 100, 0).unwrap());
+        // Now the interval has elapsed; nothing changed locally, but the startup grace (never
+        // spent above, since `record_ran` was never called) must still fire this once.
+        assert!(nine.due(1_000 + 900, 0).unwrap());
+    }
+
+    #[test]
+    fn due_startup_grace_survives_a_failed_attempt() {
+        // The other half of the same CodeRabbit finding: a startup-triggered run that fails (any
+        // outcome other than `Verified`) never calls `record_ran` (see `poll_backup`'s own doc
+        // comment), so the startup grace must still be unspent on the next poll -- otherwise a
+        // failed first attempt would permanently suppress every later one, contradicting
+        // `docs/adr/0025-continuous-catalog-backup.md`'s own stated retry guarantee.
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = policy(dir.path());
+        p.interval_secs = 900;
+        std::fs::create_dir_all(&p.dir).unwrap();
+        std::fs::write(p.dir.join("cat.1000.sqlite"), b"x").unwrap();
+
+        let mut nine = NineLives::new(p);
+        assert!(nine.due(1_000 + 900, 0).unwrap()); // startup grace fires
+                                                    // The attempt failed -- `record_ran` deliberately not called, matching `poll_backup`'s own
+                                                    // "only on Verified" rule.
+        assert!(nine.due(1_000 + 900, 0).unwrap()); // must still fire: grace was never spent
     }
 
     #[test]
