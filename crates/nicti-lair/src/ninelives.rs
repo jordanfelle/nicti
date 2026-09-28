@@ -166,27 +166,35 @@ fn unique_partial_path(policy: &BackupPolicy, now_unix: i64) -> PathBuf {
     }
 }
 
+/// Shared retry budget for the Windows-transient-lock helpers below: 50 attempts, 100ms apart
+/// (~5s worst case per call site). The original budget (20 attempts, 25ms -- ~500ms) was not
+/// enough: two separate real Windows CI runs still failed with the identical `ERROR_ACCESS_DENIED`
+/// after exhausting it, under the heavier file-I/O contention of `nicti-lair`'s full parallel unit
+/// test suite (many tests each creating their own tempdir/catalog concurrently) rather than a
+/// single isolated operation -- raised by 10x rather than guessed at again, since guessing once
+/// already cost a full CI round-trip. Every call site this guards is a background-job step (never
+/// a hot path), so this budget being generous is cheap insurance, not a real cost.
+const RETRY_MAX_ATTEMPTS: u32 = 50;
+const RETRY_DELAY: Duration = Duration::from_millis(100);
+
 /// A freshly written or renamed file on Windows can transiently refuse even a read-only open with
 /// `ERROR_ACCESS_DENIED` (`io::ErrorKind::PermissionDenied`, "Access is denied. (os error 5)") --
 /// real-time antivirus (Windows Defender by default on GitHub's own Windows runners) scanning a
 /// just-created/just-renamed file before releasing it, not a bug in the write itself. Confirmed on
 /// CI, not a plausible-sounding guess: `cargo test (windows)` failed exactly this way, on exactly
 /// this message, at the fsync step right after `VACUUM INTO` writes a fresh `.partial` -- Linux has
-/// no equivalent lock and never reproduces it. Retries a bounded number of times with a short delay
-/// rather than failing outright; every call site below is a background job step (never a hot path),
-/// so this budget (well under a second in the worst case) is cheap insurance, not a real cost.
+/// no equivalent lock and never reproduces it. Retries with [`RETRY_MAX_ATTEMPTS`]/[`RETRY_DELAY`]
+/// rather than failing outright.
 fn retry_on_transient_access_denied<T>(
     mut f: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    const MAX_ATTEMPTS: u32 = 20;
-    const DELAY: Duration = Duration::from_millis(25);
     let mut last_err = None;
-    for _ in 0..MAX_ATTEMPTS {
+    for _ in 0..RETRY_MAX_ATTEMPTS {
         match f() {
             Ok(value) => return Ok(value),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 last_err = Some(e);
-                std::thread::sleep(DELAY);
+                std::thread::sleep(RETRY_DELAY);
             }
             Err(e) => return Err(e),
         }
@@ -206,10 +214,8 @@ fn retry_on_transient_access_denied<T>(
 fn retry_rusqlite_open_on_transient_access_denied(
     mut f: impl FnMut() -> rusqlite::Result<Connection>,
 ) -> rusqlite::Result<Connection> {
-    const MAX_ATTEMPTS: u32 = 20;
-    const DELAY: Duration = Duration::from_millis(25);
     let mut last_err = None;
-    for _ in 0..MAX_ATTEMPTS {
+    for _ in 0..RETRY_MAX_ATTEMPTS {
         match f() {
             Ok(conn) => return Ok(conn),
             Err(rusqlite::Error::SqliteFailure(ffi_err, msg))
@@ -219,7 +225,7 @@ fn retry_rusqlite_open_on_transient_access_denied(
                 ) =>
             {
                 last_err = Some(rusqlite::Error::SqliteFailure(ffi_err, msg));
-                std::thread::sleep(DELAY);
+                std::thread::sleep(RETRY_DELAY);
             }
             Err(e) => return Err(e),
         }
@@ -603,8 +609,9 @@ mod tests {
         // this immediately today. Scoped to the same typed `ErrorCode` shape as the production
         // helpers, not "any `CatalogError`" -- an adversarial review caught that retrying on
         // literally any error here would mask a genuine regression (corruption, a real logic bug)
-        // behind ~500ms of pointless retries instead of failing on the very first attempt.
-        let mut attempts_left = 20;
+        // behind pointless retries instead of failing on the very first attempt. Same
+        // `RETRY_MAX_ATTEMPTS`/`RETRY_DELAY` budget as the production helpers.
+        let mut attempts_left = RETRY_MAX_ATTEMPTS;
         let reopened = loop {
             match SqliteCatalog::open(&path) {
                 Ok(catalog) => break catalog,
@@ -616,7 +623,7 @@ mod tests {
                         ) =>
                 {
                     attempts_left -= 1;
-                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    std::thread::sleep(RETRY_DELAY);
                 }
                 Err(e) => panic!("failed to reopen the backup after retrying: {e}"),
             }

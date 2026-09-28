@@ -136,6 +136,15 @@ failure to one specific code) instead, and the same review caught the test-side 
 `CatalogError` at all," which would have silently masked a genuine regression behind ~500ms of
 pointless retries instead of failing fast — narrowed to the identical typed-`ErrorCode` shape.
 
+**The initial ~500ms retry budget (20 attempts, 25ms) was itself not enough**: `cargo test
+(windows)` failed the identical two tests, on the identical `ERROR_ACCESS_DENIED` message, a second
+time after that budget was already in place — not a different bug, the same transient lock lasting
+longer than assumed under the heavier file-I/O contention of running `nicti-lair`'s full parallel
+unit test suite (many tests each creating their own tempdir/catalog concurrently), rather than a
+single isolated operation. Raised to 50 attempts/100ms (~5s worst case per call site) — still cheap
+for a background-job-only code path, and this time based on two consecutive real CI data points
+rather than a single guess.
+
 ## What this doesn't do
 
 - No UI for picking a different backup drive/location — `BackupPolicy::for_catalog`'s default
