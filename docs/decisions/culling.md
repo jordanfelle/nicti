@@ -1,7 +1,7 @@
 ## Culling
 
-Covers burst/duplicate grouping (#33), blur/misfocus/eye detection (#34), and subject grouping
-(#35).
+Covers burst/duplicate grouping (#33), blur/misfocus/eye detection (#34), subject grouping (#35),
+and Ultralytics YOLO as a culling/detection candidate (#108).
 
 - **Burst/duplicate grouping (#33)**: `docs/adr/0033-burst-duplicate-grouping.md` — con-day
   duplicates are pose sets 2-30s apart, not sub-second bursts (measured on a real con day: most

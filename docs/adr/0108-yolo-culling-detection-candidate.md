@@ -22,9 +22,11 @@ Three questions, per the ticket:
 3. Which YOLO version/weights, and does the AGPL-3.0 assumption in `docs/licensing.md` hold up
    against the actual repo/weights in question?
 
-Both blocking tickets are closed: ADR-0034 (blur/misfocus/eye detection) and ADR-0035 (subject
-grouping) each shipped with their own "Consequences" section already addressing #108 directly, so
-this ADR mostly collects and confirms their findings rather than starting from scratch.
+Both blocking issues (#34, #35) are closed on GitHub — their research passes shipped — even though
+their own ADRs (ADR-0034, ADR-0035) remain **Proposed**, pending a later real-photo measurement
+pass (#238/#243) rather than Accepted. Each already shipped its own "Consequences" section
+addressing #108 directly, so this ADR mostly collects and confirms their findings rather than
+starting from scratch; it doesn't depend on either ADR reaching Accepted first.
 
 ## Decision
 
