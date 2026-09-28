@@ -41,6 +41,13 @@ pub fn asset_cache_key(asset: &Asset) -> blake3::Hash {
 
 struct Inflight {
     job_id: JobId,
+    /// The asset's identity at the moment this decode was submitted -- `poll` compares this
+    /// against the asset's *current* identity before caching a completed frame, and discards it
+    /// on a mismatch instead of caching a decode of the old file content under the new identity's
+    /// key. Without this, a re-ingest (fingerprint/mtime change) racing an in-flight decode of the
+    /// same asset could otherwise store stale pixel data under the fresh key, and `current_frame`
+    /// would serve it as if it were current.
+    cache_key: blake3::Hash,
     slot: ReportSlot<DecodeResult>,
 }
 
@@ -51,7 +58,11 @@ pub struct LoupeSession {
     cache: Tier<Arc<LinearFrame>>,
     inflight: HashMap<i64, Inflight>,
     /// The last decode error per asset, so a caller can show it instead of silently retrying
-    /// forever. Cleared the next time that asset is (re-)submitted for decode.
+    /// forever -- `request_prefetch` skips any asset recorded here, rather than resubmitting it
+    /// every time it re-enters the prefetch window (a real bug an earlier version had: cleared on
+    /// every submission attempt, and neither `inflight` nor `cache` account for a failed asset,
+    /// so it kept getting retried on every cursor move that touched it). Cleared only by an
+    /// explicit [`Self::retry`] call.
     errors: HashMap<i64, String>,
 }
 
@@ -118,7 +129,7 @@ impl LoupeSession {
         let hi = (self.cursor + PREFETCH_RADIUS).min(self.asset_ids.len() - 1);
         for index in lo..=hi {
             let asset_id = self.asset_ids[index];
-            if self.inflight.contains_key(&asset_id) {
+            if self.inflight.contains_key(&asset_id) || self.errors.contains_key(&asset_id) {
                 continue;
             }
             let Some(asset) = store.get_asset(asset_id)? else {
@@ -132,10 +143,16 @@ impl LoupeSession {
                 continue;
             };
             let path = PathBuf::from(root_path).join(&asset.rel_path);
-            self.errors.remove(&asset_id);
             let (job, slot) = DecodeJob::new(self.decoder.clone(), path, index);
             let job_id = pounce.submit(Box::new(job));
-            self.inflight.insert(asset_id, Inflight { job_id, slot });
+            self.inflight.insert(
+                asset_id,
+                Inflight {
+                    job_id,
+                    cache_key: key,
+                    slot,
+                },
+            );
         }
         let cursor = self.cursor;
         pounce.reprioritize(move |spec| {
@@ -148,21 +165,27 @@ impl LoupeSession {
 
     /// Polls every in-flight decode, moving a finished one into the cache (success) or the error
     /// map (failure). Call once per frame -- the same pattern `app.rs::poll_backup` already uses
-    /// for its own `ReportSlot`.
+    /// for its own `ReportSlot`. A successful decode is only cached if the asset's identity still
+    /// matches what was submitted -- see [`Inflight::cache_key`]'s own doc comment for why a
+    /// mismatch (a re-ingest racing this decode) discards the result instead of caching it under
+    /// the asset's new identity. A discarded/mismatched asset isn't explicitly requeued here; it
+    /// naturally gets resubmitted by the next `set_cursor` that includes it, since it's neither
+    /// cached nor (after this) in flight.
     pub fn poll(&mut self, store: &dyn CatalogStore) {
         let mut finished = Vec::new();
         for (&asset_id, inflight) in &self.inflight {
             if let Some(result) = inflight.slot.lock().unwrap().take() {
-                finished.push((asset_id, result));
+                finished.push((asset_id, inflight.cache_key, result));
             }
         }
-        for (asset_id, result) in finished {
+        for (asset_id, submitted_key, result) in finished {
             self.inflight.remove(&asset_id);
             match result {
                 Ok(frame) => {
                     if let Ok(Some(asset)) = store.get_asset(asset_id) {
-                        let key = asset_cache_key(&asset);
-                        self.cache.put(key, frame);
+                        if asset_cache_key(&asset) == submitted_key {
+                            self.cache.put(submitted_key, frame);
+                        }
                     }
                 }
                 Err(msg) => {
@@ -182,11 +205,18 @@ impl LoupeSession {
         self.cache.get(&key).cloned()
     }
 
-    /// The current image's last decode error, if any -- cleared automatically the next time that
-    /// asset's decode is (re-)submitted.
+    /// The current image's last decode error, if any -- cleared only by [`Self::retry`].
     pub fn current_error(&self) -> Option<&str> {
         let asset_id = self.current_asset_id()?;
         self.errors.get(&asset_id).map(String::as_str)
+    }
+
+    /// Clears a failed asset's recorded error so the next `set_cursor` call (if it's still in the
+    /// prefetch window) resubmits it for decode -- what a caller wires to an explicit "Retry"
+    /// action (#31 phase 3), since `request_prefetch` otherwise never retries a failed asset on
+    /// its own.
+    pub fn retry(&mut self, asset_id: i64) {
+        self.errors.remove(&asset_id);
     }
 
     /// Cancels every in-flight decode and forgets about it -- for a caller tearing down the
@@ -383,6 +413,44 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_asset_is_not_resubmitted_until_an_explicit_retry() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "/photos").unwrap();
+        let bad_id = store
+            .insert_asset(root_id, &new_asset("bad.NEF"), None)
+            .unwrap();
+        let pounce = Pounce::new(0, 2, 2, || {});
+        let decoder = Arc::new(CountingDecoder {
+            calls: AtomicUsize::new(0),
+        });
+        let mut session = LoupeSession::new(vec![bad_id], decoder.clone(), u64::MAX);
+
+        session.set_cursor(0, &store, &pounce).unwrap();
+        wait_for(|| {
+            session.poll(&store);
+            session.current_error().is_some()
+        });
+        assert_eq!(decoder.calls.load(Ordering::SeqCst), 1);
+
+        // Re-requesting the same window (as any further navigation touching this asset would)
+        // must not retry it on its own -- that's the bug CodeRabbit caught: request_prefetch used
+        // to check only inflight/cache, not errors, so a failed asset got retried on every cursor
+        // move that put it back in the window.
+        session.set_cursor(0, &store, &pounce).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        session.poll(&store);
+        assert_eq!(decoder.calls.load(Ordering::SeqCst), 1);
+        assert!(session.current_error().is_some());
+
+        // An explicit retry clears the error and allows exactly one more decode attempt.
+        session.retry(bad_id);
+        assert!(session.current_error().is_none());
+        session.set_cursor(0, &store, &pounce).unwrap();
+        wait_for(|| decoder.calls.load(Ordering::SeqCst) == 2);
+    }
+
+    #[test]
     fn resubmitting_an_already_cached_asset_does_not_decode_it_again() {
         let (store, ids, pounce) = setup(1);
         let decoder = Arc::new(CountingDecoder {
@@ -481,5 +549,43 @@ mod tests {
             session.poll(&store);
             session.current_frame(&store).is_some()
         });
+    }
+
+    #[test]
+    fn a_completed_decode_is_discarded_if_the_asset_s_identity_changed_while_in_flight() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "/photos").unwrap();
+        let asset_id = store
+            .insert_asset(root_id, &new_asset("0.NEF"), None)
+            .unwrap();
+        let pounce = Pounce::new(0, 2, 2, || {});
+        // SlowDecoder's 200ms gives this test a real window to mutate the asset's identity
+        // (simulating a concurrent re-ingest) before the decode it started against the old
+        // identity completes.
+        let mut session = LoupeSession::new(vec![asset_id], Arc::new(SlowDecoder), u64::MAX);
+
+        session.set_cursor(0, &store, &pounce).unwrap();
+        assert_eq!(session.inflight.len(), 1);
+
+        // Simulate a re-ingest changing this asset's fingerprint (a real Scruff/Patrol rescan
+        // upserts in place on (root_id, rel_path) -- same path used here) while its decode,
+        // started against the *old* identity, is still running.
+        let mut re_ingested = new_asset("0.NEF");
+        re_ingested.fingerprint = Some("fp-0.NEF-changed".to_string());
+        store.insert_asset(root_id, &re_ingested, None).unwrap();
+
+        wait_for(|| {
+            session.poll(&store);
+            session.inflight.is_empty()
+        });
+
+        // The stale decode must not have been cached under the asset's new identity -- if it
+        // had, current_frame (which always resolves against the *current* row) would wrongly
+        // return the old file's pixels as if they belonged to the new revision.
+        assert!(
+            session.current_frame(&store).is_none(),
+            "a decode completed against a stale identity must be discarded, not cached under the new one"
+        );
     }
 }
