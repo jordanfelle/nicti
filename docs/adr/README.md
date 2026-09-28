@@ -40,6 +40,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0021](0021-non-destructive-edit-model.md) | 0002 | Non-destructive edit model | Accepted |
 | [0023](0023-keywords-collections-filter.md) | — | Keywords, collections, and filter/search backend | Accepted |
 | [0024](0024-manual-catalog-sync.md) | — | Manual catalog sync, not a live filesystem watcher | Accepted |
+| [0025](0025-continuous-catalog-backup.md) | — | Continuous catalog backup + integrity checks (Nine Lives) | Accepted |
 | [0029](0029-preview-tier-strategy.md) | 0017 | Preview tier strategy | Accepted |
 | [0033](0033-burst-duplicate-grouping.md) | 0025 | Burst/duplicate grouping | Proposed |
 | [0034](0034-blur-misfocus-eye-detection.md) | — | Blur/misfocus/eye detection | Proposed |

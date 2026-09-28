@@ -48,6 +48,7 @@ pub enum JobKind {
     Export,
     Import,
     Sync,
+    Backup,
 }
 
 /// Static metadata a job declares up front, before it runs -- what the scheduler needs to make an

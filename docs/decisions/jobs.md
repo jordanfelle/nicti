@@ -201,3 +201,17 @@ explicit step-by-step state machines (one candidate file, or one already-catalog
 **Consequences**: unblocks the first real bake-job follow-up (tied to #31/loupe and #27/preview
 cache) and #70 (shares `telemetry::TelemetrySampler`, not a second implementation). #206 stays
 open — the sim re-run against the new two-lane model hasn't happened yet.
+
+**#25's own client (landed)**: `pounce_jobs::BackupJob`, a third `Lane::Cpu`/`Priority::Background`
+client alongside `IngestJob`/`SyncJob`, and a new `JobKind::Backup` variant (nothing in this crate
+matches on `JobKind` exhaustively, so this was a purely additive change). Four chunks instead of
+one file/asset per `step()` — quick_check, snapshot (`VACUUM INTO`), verify, rotate — since each of
+Nine Lives' (`nicti-lair::ninelives`, ADR-0025) own steps is a single, indivisible-ish unit of work
+rather than a naturally per-file loop the way ingest/sync are. Surfaced a real gap in this crate's
+own cancellation model while designing it: `ChunkedJob` has no on-cancel callback, only "the
+scheduler stops calling `step()` again between chunks" — so a `BackupJob` cancelled between its
+`Snapshot` and `Rotate` chunks can't synchronously delete the `.partial` file it already wrote; that
+cleanup happens on the *next* run's own first chunk instead (`ninelives::cleanup_stale_partials`).
+Not a defect in this ticket, just a real, previously-undocumented consequence of the "cooperative,
+between-chunks-only" cancellation model #54/#55 chose — recorded here since it's this crate's own
+scheduling contract, not something #25's own ADR should have to re-derive.

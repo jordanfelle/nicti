@@ -20,7 +20,7 @@ file under the line-count gate. Each topic has:
   of reasoning. Not auto-loaded by Claude Code, but a normal repo doc any contributor can read.
 
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
-`gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
+`gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044), `develop` (0099, 0053), `jobs` (0054), `export` (0056),
@@ -168,7 +168,8 @@ terse index: crate/spike → purpose → owning topic.
   into Pounce (`pounce_jobs.rs`'s `IngestJob`/`SyncJob`, `Lane::Cpu`/`Priority::Background`) — see
   `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this promotes, and
   `jobs` for the Pounce wiring. **#23** extends this crate further with `hunt.rs`/`clowder.rs` —
-  see the `catalog-engine` topic's own "Package contents" section, not duplicated here.
+  see the `catalog-engine` topic's own "Package contents" section (also covers **#25**'s
+  `ninelives.rs`/`BackupJob`), not duplicated here.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,

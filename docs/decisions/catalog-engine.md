@@ -174,3 +174,30 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   manual/smart collections (`clowder.rs`, a smart collection's membership is a saved `Filter`,
   never stored) — all in one PR rather than the originally-planned 4-PR stack, once it became
   clear the layers were too interdependent for the stack's overhead to pay for itself.
+- **Continuous catalog backup + integrity checks**: `docs/adr/0025-continuous-catalog-backup.md`
+  ("Nine Lives") — the actual build ADR-0067 left open once it picked `VACUUM INTO` as the
+  mechanism. Snapshots from a second, independent read-only connection
+  (`SqliteCatalog::open_snapshot_reader`) rather than the shared `Mutex<Connection>` every other
+  catalog query goes through, so the ~2s vacuum at 2M rows (ADR-0067's own measured figure) never
+  blocks a real query — proven with a real concurrent-writer-thread test, not just asserted from
+  WAL mode's documented semantics. Every snapshot lands at a `.partial` path first, gets a full
+  `PRAGMA integrity_check` plus a `PRAGMA user_version` match against the live catalog, and only
+  then gets renamed into its final name and fsynced; a copy that fails either check is deleted
+  without touching any existing good backup. `PRAGMA quick_check` runs against the *live* catalog
+  before every attempt, so a corrupted live store is reported (`BackupOutcome::LiveCorrupt`)
+  instead of silently overwriting yesterday's still-good copies. Retention keeps the newest 9
+  verified backups, pruned only after a new one has already passed verification and been renamed
+  in. Scheduling (`NineLives::due`) is a cheap poll `nicti-pelt`'s app loop runs roughly every 30s:
+  due if no backup exists yet, or the newest is past the 15-minute default interval and either this
+  is the first check since the process started (covers a previous session's committed-but-never-
+  backed-up changes) or the catalog's own change counter has moved since the last completed run.
+  Nothing runs at startup or on exit — the entire point of this ticket versus Lightroom Classic's
+  backup-on-close prompt. Runs as a 4-chunk `nicti_pounce` job (`pounce_jobs::BackupJob`, new
+  `JobKind::Backup`: quick_check -> snapshot -> verify -> rotate) so the activity panel shows real
+  per-step progress; a cancellation between chunks can leave a `.partial` file on disk (`
+  ChunkedJob` has no on-cancel callback, only "the scheduler stops calling `step()` again"), swept
+  up by the next run's own first chunk rather than deleted synchronously — a deliberate, small
+  narrowing from this ticket's original design sketch once the job trait's real cancellation
+  granularity became clear. Filenames use plain Unix-second epochs, not a formatted UTC calendar
+  timestamp — no `chrono`/`time` crate exists anywhere in this workspace, and adding one for
+  filename cosmetics alone wasn't worth it.
