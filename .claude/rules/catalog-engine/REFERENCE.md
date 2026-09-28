@@ -39,17 +39,21 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   series), attributed to `Guard`/iterator overhead. Crash-safety inconclusive (same OS-lock class
   as Turso/redb). Links cleanly alongside every other candidate, unlike libSQL.
 
-- **Keywords/collections/filter backend (#23, landing)**: `docs/adr/0023`. PR 1 (of 4) makes
-  `asset.rating` nullable (unrated ≠ 0 stars, per `xmp-interop`/`lrc-migration`) and moves
-  `facet_counts` to `(volume_id, model, rating)` so `facet_count` excludes offline-volume assets
-  via a query-time join, not a trigger. Uses SQLite's table-rebuild recipe (scratch-name table,
-  not `RENAME`) since `preview`/`edit_variant` FK-reference `asset(id)`.
+- **Keywords/collections/filter backend (#23, landed)**: `docs/adr/0023`. `asset.rating` is now
+  nullable (unrated ≠ 0 stars, per `xmp-interop`/`lrc-migration`); `facet_counts` moved to
+  `(volume_id, model, rating)` so `facet_count`/`facets` exclude offline-volume assets via a
+  query-time join, not a trigger (SQLite's table-rebuild recipe, not `RENAME`, since
+  `preview`/`edit_variant` FK-reference `asset(id)`). Hierarchical keywords (`keyword`/
+  `asset_keyword`, id-based materialized path) and collections (`collection`/`collection_asset`,
+  manual + smart) landed alongside it; `hunt.rs`'s `Filter`/`Sort`/keyset-paginated `hunt` is the
+  query both the filter bar (#242) and a smart collection's saved rule resolve through. Filename
+  search is a plain `GLOB` scan for now — FTS5 is a documented, not-yet-done follow-up.
 
 ## Package contents
 
-- **`crates/nicti-lair`** (#22, landed; #23 landing) — the real production catalog implementation:
-  `schema.rs`/`sqlite.rs`/`scruff.rs`. Promotes the SQLite choice this topic's ADR series settled
-  on. `spikes/den` (the throwaway comparison spike backing ADR-0067/0102/0106/0103/0107/0113/
-  0115/0116 — one module per candidate engine plus a shared `Workload` trait and synthetic
-  catalog generator) was deleted in #123 once #22 landed; the per-candidate findings above are
-  the durable record, not the spike code itself.
+- **`crates/nicti-lair`** (#22, landed; #23 landed) — the real production catalog implementation:
+  `schema.rs`/`sqlite.rs`/`scruff.rs`/`patrol.rs`/`hunt.rs`/`clowder.rs`. Promotes the SQLite
+  choice this topic's ADR series settled on. `spikes/den` (the throwaway comparison spike backing
+  ADR-0067/0102/0106/0103/0107/0113/0115/0116 — one module per candidate engine plus a shared
+  `Workload` trait and synthetic catalog generator) was deleted in #123 once #22 landed; the
+  per-candidate findings above are the durable record, not the spike code itself.

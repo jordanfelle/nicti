@@ -309,11 +309,75 @@ BEGIN
 END;
 "#;
 
+/// #23 (v4): hierarchical keywords. `keyword.path` is an id-based materialized path (see
+/// `model::Keyword`'s doc comment) -- computed and maintained in Rust
+/// (`SqliteCatalog::create_keyword`/`move_keyword`), not by a trigger, since a rename/move needs
+/// to rewrite every descendant's `path` in one pass, which is far more naturally expressed as a
+/// recursive Rust walk than nested trigger logic.
+///
+/// `UNIQUE(parent_id, name_fold)` alone can't enforce "no two sibling keywords share a name" for
+/// *top-level* keywords: SQLite treats every `NULL` in a `UNIQUE` index as distinct from every
+/// other `NULL`, so a plain table-level constraint would silently let two root keywords both be
+/// named, say, "Events". A regular unique index handles every non-root case; a second, partial
+/// unique index (`WHERE parent_id IS NULL`) closes the root-level gap.
+const MIGRATION_V4: &str = r#"
+CREATE TABLE keyword (
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER REFERENCES keyword(id),
+    name        TEXT NOT NULL,
+    name_fold   TEXT NOT NULL,
+    path        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_keyword_unique_child ON keyword(parent_id, name_fold);
+CREATE UNIQUE INDEX idx_keyword_unique_root_child ON keyword(name_fold) WHERE parent_id IS NULL;
+CREATE INDEX idx_keyword_path ON keyword(path);
+
+CREATE TABLE asset_keyword (
+    keyword_id  INTEGER NOT NULL REFERENCES keyword(id),
+    asset_id    INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    PRIMARY KEY (keyword_id, asset_id)
+);
+CREATE INDEX idx_asset_keyword_asset ON asset_keyword(asset_id);
+"#;
+
+/// #23 (v5): collections. `manual` and `smart` share one table (`kind` discriminates); a manual
+/// collection's membership lives in `collection_asset` (with a `REAL position` for user-ordering
+/// -- fractional so inserting between two existing rows never needs to renumber the rest), a
+/// smart collection's membership is never stored -- `rule_json` holds a serialized, versioned
+/// `hunt::Filter` (`SmartRule` in `sqlite.rs`), and resolving one means calling `hunt` with it.
+/// Same NULL-parent uniqueness gap as `keyword` (see `MIGRATION_V4`'s doc comment), same fix.
+const MIGRATION_V5: &str = r#"
+CREATE TABLE collection (
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER REFERENCES collection(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('manual', 'smart')),
+    name        TEXT NOT NULL,
+    name_fold   TEXT NOT NULL,
+    rule_json   TEXT
+);
+CREATE UNIQUE INDEX idx_collection_unique_child ON collection(parent_id, name_fold);
+CREATE UNIQUE INDEX idx_collection_unique_root_child ON collection(name_fold) WHERE parent_id IS NULL;
+
+CREATE TABLE collection_asset (
+    collection_id   INTEGER NOT NULL REFERENCES collection(id),
+    asset_id        INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    position        REAL NOT NULL,
+    PRIMARY KEY (collection_id, asset_id)
+);
+CREATE INDEX idx_collection_asset_position ON collection_asset(collection_id, position);
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
 /// shipped a v1 to begin with.
-const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2, MIGRATION_V3];
+const MIGRATIONS: &[&str] = &[
+    MIGRATION_V1,
+    MIGRATION_V2,
+    MIGRATION_V3,
+    MIGRATION_V4,
+    MIGRATION_V5,
+];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call
 /// on every open: a database already at the latest version runs nothing.

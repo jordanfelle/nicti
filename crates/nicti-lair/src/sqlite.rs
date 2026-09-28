@@ -7,14 +7,188 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
+use unicode_normalization::UnicodeNormalization;
 
-use crate::{Asset, CatalogError, CatalogStore, NewAsset, Preview, PreviewTier};
+use crate::{
+    Asset, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, FacetCounts, Filter,
+    Keyword, NewAsset, Page, Preview, PreviewTier, Sort, SortDirection, SortField,
+};
 use nicti_claw::Module;
+
+/// `hunt`'s `rating` sort key stand-in for NULL/unrated -- distinct from `FACET_UNRATED_SENTINEL`
+/// (a different table, different constraint), but the same idea: well outside the real `-1..=5`
+/// range so it can never collide with a genuine rating, placing unrated assets at one end of a
+/// rating-sorted page rather than interleaving with real ratings.
+const RATING_SORT_SENTINEL: i64 = -1000;
+
+/// Case/composition-folded form for `keyword.name_fold` -- same NFC-then-lowercase rule
+/// `scruff.rs::fold` uses for `rel_path_fold`, so two visually-identical names typed via different
+/// input methods (composed vs. decomposed Unicode) still collide as the same keyword.
+fn fold_keyword_name(name: &str) -> String {
+    let composed: String = name.nfc().collect();
+    composed.to_lowercase()
+}
+
+/// Escapes SQLite `GLOB` metacharacters (`*`, `?`, `[`) as one-character classes (`[*]`, `[?]`,
+/// `[[]`) so caller text used in `hunt`'s `rel_path_prefix`/`filename_contains` filters is matched
+/// literally, not as a wildcard/character-class pattern -- without this, a search for `IMG_[1]`
+/// would match `IMG_1` (character class), and a lone unmatched `[` would match nothing at all.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '*' | '?' | '[' => {
+                out.push('[');
+                out.push(ch);
+                out.push(']');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn row_to_keyword(row: &rusqlite::Row) -> rusqlite::Result<Keyword> {
+    Ok(Keyword {
+        id: row.get(0)?,
+        parent_id: row.get(1)?,
+        name: row.get(2)?,
+        path: row.get(3)?,
+    })
+}
 
 /// `facet_counts.rating`'s stand-in for NULL/unrated (schema.rs's `MIGRATION_V3` — a PRIMARY KEY
 /// column can't itself be NULL), chosen well outside the real `-1..=5` range so it can never
 /// collide with a genuine rating.
 const FACET_UNRATED_SENTINEL: i64 = -128;
+
+/// A `Filter` compiled to a bound SQL fragment, shared by `hunt`/`hunt_count`/`facets` so all
+/// three answer exactly the same predicate. Always includes `v.online = 1` (facet_count's own
+/// online-volume scoping) -- the caller's query must join `asset a` to `root r` (`r.id =
+/// a.root_id`) and `volume v` (`v.id = r.volume_id`) for this fragment's `v`/`a` aliases to
+/// resolve.
+struct FilterSql {
+    where_clause: String,
+    params: Vec<Box<dyn ToSql>>,
+}
+
+fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, CatalogError> {
+    let mut clauses: Vec<String> = vec!["v.online = 1".to_string()];
+    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+
+    if let Some(keyword_id) = filter.keyword_id {
+        if filter.include_subtree {
+            // A saved smart-collection rule can outlive the keyword it names (`delete_keyword`
+            // doesn't touch `collection.rule_json`) -- a missing keyword must make this filter
+            // match nothing, not fail the whole query with a `QueryReturnedNoRows` error.
+            let path: Option<String> = conn
+                .query_row(
+                    "SELECT path FROM keyword WHERE id = ?1",
+                    [keyword_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match path {
+                Some(path) => {
+                    clauses.push(
+                        "EXISTS (SELECT 1 FROM asset_keyword ak JOIN keyword k ON k.id = ak.keyword_id \
+                         WHERE ak.asset_id = a.id AND k.path GLOB ?)"
+                            .to_string(),
+                    );
+                    params.push(Box::new(format!("{path}*")));
+                }
+                None => clauses.push("0".to_string()),
+            }
+        } else {
+            clauses.push(
+                "EXISTS (SELECT 1 FROM asset_keyword ak \
+                 WHERE ak.asset_id = a.id AND ak.keyword_id = ?)"
+                    .to_string(),
+            );
+            params.push(Box::new(keyword_id));
+        }
+    }
+
+    if filter.rating_min.is_some() || filter.rating_max.is_some() || filter.include_unrated {
+        let min = filter.rating_min.unwrap_or(-1);
+        let max = filter.rating_max.unwrap_or(5);
+        if filter.include_unrated {
+            clauses.push("(a.rating IS NULL OR (a.rating >= ? AND a.rating <= ?))".to_string());
+        } else {
+            clauses.push("(a.rating IS NOT NULL AND a.rating >= ? AND a.rating <= ?)".to_string());
+        }
+        params.push(Box::new(min));
+        params.push(Box::new(max));
+    }
+
+    if let Some(flag) = filter.flag {
+        clauses.push("a.flag = ?".to_string());
+        params.push(Box::new(flag));
+    }
+    if let Some(label) = &filter.label {
+        clauses.push("a.label = ?".to_string());
+        params.push(Box::new(label.clone()));
+    }
+    if let Some(make) = &filter.make {
+        clauses.push("a.make = ?".to_string());
+        params.push(Box::new(make.clone()));
+    }
+    if let Some(model) = &filter.model {
+        clauses.push("a.model = ?".to_string());
+        params.push(Box::new(model.clone()));
+    }
+    if let Some(after) = &filter.captured_after {
+        clauses.push("a.captured_at >= ?".to_string());
+        params.push(Box::new(after.clone()));
+    }
+    if let Some(before) = &filter.captured_before {
+        clauses.push("a.captured_at <= ?".to_string());
+        params.push(Box::new(before.clone()));
+    }
+    if let Some(root_id) = filter.root_id {
+        clauses.push("a.root_id = ?".to_string());
+        params.push(Box::new(root_id));
+    }
+    if let Some(prefix) = &filter.rel_path_prefix {
+        clauses.push("a.rel_path_fold GLOB ?".to_string());
+        params.push(Box::new(format!(
+            "{}*",
+            glob_escape(&fold_keyword_name(prefix))
+        )));
+    }
+    if let Some(needle) = &filter.filename_contains {
+        clauses.push("a.rel_path_fold GLOB ?".to_string());
+        params.push(Box::new(format!(
+            "*{}*",
+            glob_escape(&fold_keyword_name(needle))
+        )));
+    }
+
+    Ok(FilterSql {
+        where_clause: clauses.join(" AND "),
+        params,
+    })
+}
+
+fn row_to_collection(row: &rusqlite::Row) -> rusqlite::Result<Collection> {
+    let kind_str: String = row.get(2)?;
+    let kind = kind_str.parse().unwrap_or(CollectionKind::Manual);
+    Ok(Collection {
+        id: row.get(0)?,
+        parent_id: row.get(1)?,
+        kind,
+        name: row.get(3)?,
+    })
+}
+
+/// `collection.rule_json`'s on-disk shape for a `Smart` collection -- versioned so a future
+/// change to `Filter`'s own shape can still read an old row (#155's LRC smart-collection mapping
+/// is expected to be the first real consumer of a `v: 1` rule beyond this crate's own tests).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SmartRule {
+    v: u32,
+    filter: Filter,
+}
 
 /// SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 32766 -- comfortably above any realistic
 /// culling multi-selection, but chunked well under it anyway so a "select all" bulk action
@@ -460,6 +634,597 @@ impl CatalogStore for SqliteCatalog {
         tx.commit()?;
         Ok(())
     }
+
+    fn create_keyword(&self, parent_id: Option<i64>, name: &str) -> Result<i64, CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let name_fold = fold_keyword_name(name);
+        let parent_path: Option<String> = match parent_id {
+            Some(pid) => Some(tx.query_row(
+                "SELECT path FROM keyword WHERE id = ?1",
+                [pid],
+                |row| row.get(0),
+            )?),
+            None => None,
+        };
+        tx.execute(
+            "INSERT INTO keyword (parent_id, name, name_fold, path) VALUES (?1, ?2, ?3, '')",
+            params![parent_id, name, name_fold],
+        )?;
+        let keyword_id = tx.last_insert_rowid();
+        let path = format!(
+            "{}{}/",
+            parent_path.unwrap_or_else(|| "/".to_string()),
+            keyword_id
+        );
+        tx.execute(
+            "UPDATE keyword SET path = ?1 WHERE id = ?2",
+            params![path, keyword_id],
+        )?;
+        tx.commit()?;
+        Ok(keyword_id)
+    }
+
+    fn rename_keyword(&self, keyword_id: i64, new_name: &str) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let name_fold = fold_keyword_name(new_name);
+        conn.execute(
+            "UPDATE keyword SET name = ?1, name_fold = ?2 WHERE id = ?3",
+            params![new_name, name_fold, keyword_id],
+        )?;
+        Ok(())
+    }
+
+    fn move_keyword(
+        &self,
+        keyword_id: i64,
+        new_parent_id: Option<i64>,
+    ) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let old_path: String = tx.query_row(
+            "SELECT path FROM keyword WHERE id = ?1",
+            [keyword_id],
+            |row| row.get(0),
+        )?;
+        let new_parent_path: Option<String> = match new_parent_id {
+            Some(pid) => Some(tx.query_row(
+                "SELECT path FROM keyword WHERE id = ?1",
+                [pid],
+                |row| row.get(0),
+            )?),
+            None => None,
+        };
+
+        // Reject moving under itself or one of its own descendants -- either would corrupt the
+        // materialized path (the node's own id would appear twice, or a descendant would end up
+        // "above" its own ancestor). `old_path` is a literal id-based prefix of every descendant's
+        // path (including the node's own, trivially) and of no other keyword's, so this one
+        // string check covers both cases without an extra query.
+        if let Some(new_parent_path) = &new_parent_path {
+            if new_parent_path.starts_with(&old_path) {
+                return Err(CatalogError::WouldCreateCycle);
+            }
+        }
+
+        let new_path = format!(
+            "{}{}/",
+            new_parent_path.unwrap_or_else(|| "/".to_string()),
+            keyword_id
+        );
+
+        tx.execute(
+            "UPDATE keyword SET parent_id = ?1 WHERE id = ?2",
+            params![new_parent_id, keyword_id],
+        )?;
+
+        // Rewrite this keyword's own path, plus every descendant's -- a descendant's path always
+        // starts with the parent's old path as a literal prefix (id-based segments), so a plain
+        // suffix-preserving replace on every matching row is correct without a recursive walk.
+        let glob = format!("{old_path}*");
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare("SELECT id, path FROM keyword WHERE path GLOB ?1")?;
+            let rows = stmt
+                .query_map([glob], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, path) in rows {
+            let rewritten = format!("{new_path}{}", &path[old_path.len()..]);
+            tx.execute(
+                "UPDATE keyword SET path = ?1 WHERE id = ?2",
+                params![rewritten, id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn delete_keyword(&self, keyword_id: i64) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let path: String = tx.query_row(
+            "SELECT path FROM keyword WHERE id = ?1",
+            [keyword_id],
+            |row| row.get(0),
+        )?;
+        let glob = format!("{path}*");
+        tx.execute(
+            "DELETE FROM asset_keyword WHERE keyword_id IN \
+                (SELECT id FROM keyword WHERE path GLOB ?1)",
+            [glob.clone()],
+        )?;
+        tx.execute("DELETE FROM keyword WHERE path GLOB ?1", [glob])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn tag(&self, asset_ids: &[i64], keyword_id: i64) -> Result<(), CatalogError> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for asset_id in asset_ids {
+            tx.execute(
+                "INSERT INTO asset_keyword (keyword_id, asset_id) VALUES (?1, ?2) \
+                 ON CONFLICT(keyword_id, asset_id) DO NOTHING",
+                params![keyword_id, asset_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn untag(&self, asset_ids: &[i64], keyword_id: i64) -> Result<(), CatalogError> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for asset_id in asset_ids {
+            tx.execute(
+                "DELETE FROM asset_keyword WHERE keyword_id = ?1 AND asset_id = ?2",
+                params![keyword_id, asset_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn keywords_for(&self, asset_id: i64) -> Result<Vec<Keyword>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT k.id, k.parent_id, k.name, k.path FROM keyword k \
+             JOIN asset_keyword ak ON ak.keyword_id = k.id \
+             WHERE ak.asset_id = ?1 ORDER BY k.path ASC",
+        )?;
+        let rows = stmt
+            .query_map([asset_id], row_to_keyword)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn keyword_by_path(&self, segments: &[&str]) -> Result<Option<Keyword>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut parent_id: Option<i64> = None;
+        let mut found: Option<Keyword> = None;
+        for segment in segments {
+            let name_fold = fold_keyword_name(segment);
+            let row: Option<Keyword> = conn
+                .query_row(
+                    "SELECT id, parent_id, name, path FROM keyword \
+                     WHERE name_fold = ?1 AND parent_id IS ?2",
+                    params![name_fold, parent_id],
+                    row_to_keyword,
+                )
+                .optional()?;
+            match row {
+                Some(k) => {
+                    parent_id = Some(k.id);
+                    found = Some(k);
+                }
+                None => return Ok(None),
+            }
+        }
+        Ok(found)
+    }
+
+    fn hunt(&self, filter: &Filter, sort: Sort, page: &Page) -> Result<Vec<i64>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let filter_sql = build_filter_sql(&conn, filter)?;
+        let mut where_parts = vec![filter_sql.where_clause];
+        let mut all_params: Vec<Box<dyn ToSql>> = filter_sql.params;
+
+        let sort_column = match sort.field {
+            SortField::Captured => "COALESCE(a.captured_at, '')",
+            SortField::Imported => "a.imported_at",
+            SortField::Filename => "a.rel_path_fold",
+            SortField::Rating => "COALESCE(a.rating, -1000)",
+        };
+        let (cmp, order) = match sort.direction {
+            SortDirection::Asc => (">", "ASC"),
+            SortDirection::Desc => ("<", "DESC"),
+        };
+
+        if let Some(cursor) = &page.after {
+            let (cursor_key, cursor_id): (Box<dyn ToSql>, i64) = match (cursor, sort.field) {
+                (Cursor::Captured { captured_at, id }, SortField::Captured) => {
+                    (Box::new(captured_at.clone().unwrap_or_default()), *id)
+                }
+                (Cursor::Imported { imported_at, id }, SortField::Imported) => {
+                    (Box::new(*imported_at), *id)
+                }
+                (Cursor::Filename { rel_path_fold, id }, SortField::Filename) => {
+                    (Box::new(rel_path_fold.clone()), *id)
+                }
+                (Cursor::Rating { rating, id }, SortField::Rating) => {
+                    (Box::new(rating.unwrap_or(RATING_SORT_SENTINEL)), *id)
+                }
+                _ => return Err(CatalogError::CursorSortMismatch),
+            };
+            where_parts.push(format!("({sort_column}, a.id) {cmp} (?, ?)"));
+            all_params.push(cursor_key);
+            all_params.push(Box::new(cursor_id));
+        }
+
+        let where_clause = where_parts.join(" AND ");
+        let limit = page.limit.max(1);
+        let sql = format!(
+            "SELECT a.id FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE {where_clause} \
+             ORDER BY {sort_column} {order}, a.id {order} \
+             LIMIT ?"
+        );
+        all_params.push(Box::new(limit));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let filter_sql = build_filter_sql(&conn, filter)?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE {}",
+            filter_sql.where_clause
+        );
+        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
+        let count: i64 = conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    fn facets(&self, filter: &Filter) -> Result<FacetCounts, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        // An unfiltered query reads the trigger-maintained cache (ADR-0103's own optimized case);
+        // any narrowing filter falls back to a live, exact GROUP BY, since the cache's
+        // (volume_id, model, rating) grain has no way to answer a keyword/date/etc-narrowed facet
+        // count on its own.
+        let is_unfiltered = *filter == Filter::default();
+
+        let (by_model, by_rating) = if is_unfiltered {
+            let mut stmt = conn.prepare(
+                "SELECT fc.model, SUM(fc.cnt) FROM facet_counts fc \
+                     JOIN volume v ON v.id = fc.volume_id \
+                     WHERE v.online = 1 GROUP BY fc.model",
+            )?;
+            let by_model = stmt
+                .query_map([], |row| {
+                    let model: String = row.get(0)?;
+                    let cnt: i64 = row.get(1)?;
+                    Ok((
+                        if model.is_empty() { None } else { Some(model) },
+                        cnt as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut stmt = conn.prepare(
+                "SELECT fc.rating, SUM(fc.cnt) FROM facet_counts fc \
+                     JOIN volume v ON v.id = fc.volume_id \
+                     WHERE v.online = 1 GROUP BY fc.rating",
+            )?;
+            let by_rating = stmt
+                .query_map([], |row| {
+                    let rating: i64 = row.get(0)?;
+                    let cnt: i64 = row.get(1)?;
+                    Ok((
+                        if rating == FACET_UNRATED_SENTINEL {
+                            None
+                        } else {
+                            Some(rating)
+                        },
+                        cnt as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (by_model, by_rating)
+        } else {
+            let filter_sql = build_filter_sql(&conn, filter)?;
+            let base = format!(
+                "FROM asset a \
+                     JOIN root r ON r.id = a.root_id \
+                     JOIN volume v ON v.id = r.volume_id \
+                     WHERE {}",
+                filter_sql.where_clause
+            );
+
+            let sql = format!("SELECT a.model, COUNT(*) {base} GROUP BY a.model");
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let by_model = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)? as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let sql = format!("SELECT a.rating, COUNT(*) {base} GROUP BY a.rating");
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let by_rating = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (by_model, by_rating)
+        };
+
+        // `flag` has no trigger-maintained cache at all (it's a much lower-cardinality, cheaper
+        // aggregate than model/rating), so it's always a live GROUP BY, filtered or not.
+        let by_flag: Vec<(Option<i64>, u64)> = {
+            let filter_sql = build_filter_sql(&conn, filter)?;
+            let sql = format!(
+                "SELECT a.flag, COUNT(*) FROM asset a \
+                 JOIN root r ON r.id = a.root_id \
+                 JOIN volume v ON v.id = r.volume_id \
+                 WHERE {} GROUP BY a.flag",
+                filter_sql.where_clause
+            );
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let total: u64 = by_model.iter().map(|(_, cnt)| cnt).sum();
+
+        Ok(FacetCounts {
+            by_model,
+            by_rating,
+            by_flag,
+            total,
+        })
+    }
+
+    fn collection(&self, collection_id: i64) -> Result<Option<Collection>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT id, parent_id, kind, name FROM collection WHERE id = ?1",
+                [collection_id],
+                row_to_collection,
+            )
+            .optional()?)
+    }
+
+    fn create_collection(
+        &self,
+        parent_id: Option<i64>,
+        name: &str,
+        kind: CollectionKind,
+    ) -> Result<i64, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let name_fold = fold_keyword_name(name);
+        conn.execute(
+            "INSERT INTO collection (parent_id, kind, name, name_fold) VALUES (?1, ?2, ?3, ?4)",
+            params![parent_id, kind.as_str(), name, name_fold],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn rename_collection(&self, collection_id: i64, new_name: &str) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let name_fold = fold_keyword_name(new_name);
+        conn.execute(
+            "UPDATE collection SET name = ?1, name_fold = ?2 WHERE id = ?3",
+            params![new_name, name_fold, collection_id],
+        )?;
+        Ok(())
+    }
+
+    fn move_collection(
+        &self,
+        collection_id: i64,
+        new_parent_id: Option<i64>,
+    ) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+
+        // Unlike `keyword`, a collection has no materialized path to check with a single string
+        // comparison -- walk the `parent_id` chain from the proposed new parent upward instead,
+        // rejecting the move if it ever reaches `collection_id` itself (moving under itself or
+        // one of its own descendants, either of which would create a cycle: `delete_collection`'s
+        // subtree walk assumes a tree, not a graph, and would never terminate against one).
+        if let Some(new_parent_id) = new_parent_id {
+            let mut current = Some(new_parent_id);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = current {
+                if id == collection_id {
+                    return Err(CatalogError::WouldCreateCycle);
+                }
+                if !seen.insert(id) {
+                    // Already-corrupted data unrelated to this move (shouldn't happen once this
+                    // check is in place, but don't loop forever walking a pre-existing cycle).
+                    break;
+                }
+                current = conn
+                    .query_row(
+                        "SELECT parent_id FROM collection WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+            }
+        }
+
+        conn.execute(
+            "UPDATE collection SET parent_id = ?1 WHERE id = ?2",
+            params![new_parent_id, collection_id],
+        )?;
+        Ok(())
+    }
+
+    fn delete_collection(&self, collection_id: i64) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Collections form a small tree too (organizational nesting), same subtree-delete shape
+        // as `delete_keyword` -- walked in Rust rather than a recursive CTE, since the tree is
+        // expected to be shallow and this keeps the same style as the rest of this file.
+        // `seen` guards against a cycle in already-on-disk data (should be impossible going
+        // forward now that `move_collection` rejects one, but this walk must never hang against
+        // data that predates that check, or that got there some other way).
+        let mut to_delete = vec![collection_id];
+        let mut seen: std::collections::HashSet<i64> = std::iter::once(collection_id).collect();
+        let mut i = 0;
+        while i < to_delete.len() {
+            let parent = to_delete[i];
+            let mut stmt = tx.prepare("SELECT id FROM collection WHERE parent_id = ?1")?;
+            let children: Vec<i64> = stmt
+                .query_map([parent], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for child in children {
+                if seen.insert(child) {
+                    to_delete.push(child);
+                }
+            }
+            i += 1;
+        }
+        for id in &to_delete {
+            tx.execute(
+                "DELETE FROM collection_asset WHERE collection_id = ?1",
+                [id],
+            )?;
+        }
+        // Deepest descendants first: `collection.parent_id REFERENCES collection(id)`, so
+        // deleting an ancestor while a child row still points at it violates that FK. BFS order
+        // (`to_delete`'s own construction) always lists a parent before its children, so the
+        // reverse is exactly children-before-parents for a tree.
+        for id in to_delete.iter().rev() {
+            tx.execute("DELETE FROM collection WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn add_to_collection(&self, collection_id: i64, asset_ids: &[i64]) -> Result<(), CatalogError> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut next_position: f64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), 0) FROM collection_asset WHERE collection_id = ?1",
+            [collection_id],
+            |row| row.get(0),
+        )?;
+        for asset_id in asset_ids {
+            next_position += 1.0;
+            tx.execute(
+                "INSERT INTO collection_asset (collection_id, asset_id, position) \
+                 VALUES (?1, ?2, ?3) ON CONFLICT(collection_id, asset_id) DO NOTHING",
+                params![collection_id, asset_id, next_position],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn remove_from_collection(
+        &self,
+        collection_id: i64,
+        asset_ids: &[i64],
+    ) -> Result<(), CatalogError> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for asset_id in asset_ids {
+            tx.execute(
+                "DELETE FROM collection_asset WHERE collection_id = ?1 AND asset_id = ?2",
+                params![collection_id, asset_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn collection_assets(&self, collection_id: i64) -> Result<Vec<i64>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT asset_id FROM collection_asset WHERE collection_id = ?1 ORDER BY position ASC",
+        )?;
+        let rows = stmt
+            .query_map([collection_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn set_smart_rule(&self, collection_id: i64, filter: &Filter) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let rule = SmartRule {
+            v: 1,
+            filter: filter.clone(),
+        };
+        let rule_json = serde_json::to_string(&rule)
+            .map_err(|e| CatalogError::Io(format!("serializing smart rule: {e}")))?;
+        conn.execute(
+            "UPDATE collection SET rule_json = ?1 WHERE id = ?2",
+            params![rule_json, collection_id],
+        )?;
+        Ok(())
+    }
+
+    fn collection_filter(&self, collection_id: i64) -> Result<Option<Filter>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let rule_json: Option<String> = conn
+            .query_row(
+                "SELECT rule_json FROM collection WHERE id = ?1",
+                [collection_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        match rule_json {
+            Some(json) => {
+                let rule: SmartRule = serde_json::from_str(&json)
+                    .map_err(|e| CatalogError::Io(format!("deserializing smart rule: {e}")))?;
+                Ok(Some(rule.filter))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -677,6 +1442,701 @@ mod tests {
             store.facet_count(Some("Z8"), None).unwrap(),
             0,
             "the asset's facet bucket must move to v2 (offline), dropping out of the online sum"
+        );
+    }
+
+    #[test]
+    fn create_keyword_builds_an_id_based_materialized_path() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let events = store.create_keyword(None, "Events").unwrap();
+        let named = store.create_keyword(Some(events), "Named").unwrap();
+        let birthday = store.create_keyword(Some(named), "birthday-2026").unwrap();
+
+        assert_eq!(
+            store.keyword_by_path(&["Events"]).unwrap().unwrap().path,
+            format!("/{events}/")
+        );
+        assert_eq!(
+            store
+                .keyword_by_path(&["Events", "Named"])
+                .unwrap()
+                .unwrap()
+                .path,
+            format!("/{events}/{named}/")
+        );
+        assert_eq!(
+            store
+                .keyword_by_path(&["Events", "Named", "birthday-2026"])
+                .unwrap()
+                .unwrap()
+                .path,
+            format!("/{events}/{named}/{birthday}/")
+        );
+    }
+
+    #[test]
+    fn sibling_keywords_with_the_same_name_are_rejected_at_root_and_under_a_parent() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        store.create_keyword(None, "Events").unwrap();
+        assert!(
+            store.create_keyword(None, "Events").is_err(),
+            "two root keywords must not share a name (case-insensitively)"
+        );
+        assert!(
+            store.create_keyword(None, "events").is_err(),
+            "the unique-root-name check is case-insensitive"
+        );
+
+        let a = store.create_keyword(None, "A").unwrap();
+        store.create_keyword(Some(a), "Child").unwrap();
+        assert!(
+            store.create_keyword(Some(a), "Child").is_err(),
+            "two siblings under the same parent must not share a name"
+        );
+    }
+
+    #[test]
+    fn rename_keyword_does_not_change_its_path_or_its_childrens() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store.create_keyword(None, "Old Name").unwrap();
+        let child = store.create_keyword(Some(parent), "Child").unwrap();
+        let path_before = store.keyword_by_path(&["Old Name"]).unwrap().unwrap().path;
+
+        store.rename_keyword(parent, "New Name").unwrap();
+
+        let renamed = store.keyword_by_path(&["New Name"]).unwrap().unwrap();
+        assert_eq!(renamed.id, parent);
+        assert_eq!(
+            renamed.path, path_before,
+            "an id-based path never changes on rename"
+        );
+        assert!(
+            store
+                .keyword_by_path(&["New Name", "Child"])
+                .unwrap()
+                .is_some(),
+            "the child keyword must still resolve under the renamed parent"
+        );
+        let _ = child;
+    }
+
+    #[test]
+    fn move_keyword_rewrites_its_own_and_every_descendants_path() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let a = store.create_keyword(None, "A").unwrap();
+        let b = store.create_keyword(None, "B").unwrap();
+        let child = store.create_keyword(Some(a), "Child").unwrap();
+        let grandchild = store.create_keyword(Some(child), "Grandchild").unwrap();
+
+        store.move_keyword(child, Some(b)).unwrap();
+
+        let child_path = store
+            .keyword_by_path(&["B", "Child"])
+            .unwrap()
+            .unwrap()
+            .path;
+        assert_eq!(child_path, format!("/{b}/{child}/"));
+        let grandchild_row = store
+            .keyword_by_path(&["B", "Child", "Grandchild"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(grandchild_row.id, grandchild);
+        assert_eq!(grandchild_row.path, format!("/{b}/{child}/{grandchild}/"));
+        assert!(
+            store.keyword_by_path(&["A", "Child"]).unwrap().is_none(),
+            "the keyword must no longer resolve under its old parent"
+        );
+    }
+
+    #[test]
+    fn move_keyword_into_itself_or_a_descendant_is_rejected() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store.create_keyword(None, "Parent").unwrap();
+        let child = store.create_keyword(Some(parent), "Child").unwrap();
+        let grandchild = store.create_keyword(Some(child), "Grandchild").unwrap();
+
+        assert!(
+            matches!(
+                store.move_keyword(parent, Some(parent)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a keyword under itself must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_keyword(parent, Some(child)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a keyword under its own child must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_keyword(parent, Some(grandchild)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a keyword under its own grandchild must be rejected"
+        );
+
+        // The tree must be untouched by any of the rejected attempts.
+        assert_eq!(
+            store
+                .keyword_by_path(&["Parent", "Child"])
+                .unwrap()
+                .unwrap()
+                .id,
+            child
+        );
+        assert_eq!(
+            store
+                .keyword_by_path(&["Parent", "Child", "Grandchild"])
+                .unwrap()
+                .unwrap()
+                .id,
+            grandchild
+        );
+    }
+
+    #[test]
+    fn delete_keyword_removes_its_subtree_and_every_tag_link() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let asset_id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+
+        let parent = store.create_keyword(None, "Parent").unwrap();
+        let child = store.create_keyword(Some(parent), "Child").unwrap();
+        store.tag(&[asset_id], child).unwrap();
+
+        store.delete_keyword(parent).unwrap();
+
+        assert!(store.keyword_by_path(&["Parent"]).unwrap().is_none());
+        assert!(store
+            .keyword_by_path(&["Parent", "Child"])
+            .unwrap()
+            .is_none());
+        assert!(
+            store.keywords_for(asset_id).unwrap().is_empty(),
+            "the asset_keyword link into the deleted subtree must be gone too"
+        );
+    }
+
+    #[test]
+    fn tag_and_untag_round_trip_across_multiple_assets() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let a = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let b = store
+            .insert_asset(root_id, &new_asset("b.NEF", None), None)
+            .unwrap();
+        let keyword = store.create_keyword(None, "Tag").unwrap();
+
+        store.tag(&[a, b], keyword).unwrap();
+        assert_eq!(store.keywords_for(a).unwrap().len(), 1);
+        assert_eq!(store.keywords_for(b).unwrap().len(), 1);
+
+        // Re-tagging an already-tagged asset is a no-op, not an error.
+        store.tag(&[a], keyword).unwrap();
+        assert_eq!(store.keywords_for(a).unwrap().len(), 1);
+
+        store.untag(&[a], keyword).unwrap();
+        assert!(store.keywords_for(a).unwrap().is_empty());
+        assert_eq!(store.keywords_for(b).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keyword_by_path_returns_none_for_an_unresolvable_path() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        store.create_keyword(None, "Events").unwrap();
+        assert!(store.keyword_by_path(&["Nope"]).unwrap().is_none());
+        assert!(store
+            .keyword_by_path(&["Events", "Nope"])
+            .unwrap()
+            .is_none());
+    }
+
+    fn default_sort() -> Sort {
+        Sort {
+            field: SortField::Imported,
+            direction: SortDirection::Asc,
+        }
+    }
+
+    fn full_page() -> Page {
+        Page {
+            after: None,
+            limit: 1000,
+        }
+    }
+
+    #[test]
+    fn hunt_with_no_filter_returns_every_asset_in_the_requested_sort() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let mut a = new_asset("a.NEF", Some("Z8"));
+        a.imported_at = 1;
+        let mut b = new_asset("b.NEF", Some("Z8"));
+        b.imported_at = 2;
+        let a_id = store.insert_asset(root_id, &a, None).unwrap();
+        let b_id = store.insert_asset(root_id, &b, None).unwrap();
+
+        let ids = store
+            .hunt(&Filter::default(), default_sort(), &full_page())
+            .unwrap();
+        assert_eq!(ids, vec![a_id, b_id]);
+    }
+
+    #[test]
+    fn hunt_filters_by_rating_range_and_unrated_inclusion() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let a = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let b = store
+            .insert_asset(root_id, &new_asset("b.NEF", None), None)
+            .unwrap();
+        let c = store
+            .insert_asset(root_id, &new_asset("c.NEF", None), None)
+            .unwrap();
+        store.set_rating(&[a], Some(-1)).unwrap();
+        store.set_rating(&[b], Some(4)).unwrap();
+        // c is left unrated.
+
+        let picks_and_up = Filter {
+            rating_min: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .hunt(&picks_and_up, default_sort(), &full_page())
+                .unwrap(),
+            vec![b]
+        );
+
+        let including_unrated = Filter {
+            rating_min: Some(0),
+            include_unrated: true,
+            ..Default::default()
+        };
+        let mut ids = store
+            .hunt(&including_unrated, default_sort(), &full_page())
+            .unwrap();
+        ids.sort();
+        let mut expected = vec![b, c];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn hunt_keyword_filter_respects_subtree_flag() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let parent = store.create_keyword(None, "Events").unwrap();
+        let child = store.create_keyword(Some(parent), "Named").unwrap();
+
+        let tagged_parent = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let tagged_child = store
+            .insert_asset(root_id, &new_asset("b.NEF", None), None)
+            .unwrap();
+        store.tag(&[tagged_parent], parent).unwrap();
+        store.tag(&[tagged_child], child).unwrap();
+
+        let exact = Filter {
+            keyword_id: Some(parent),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt(&exact, default_sort(), &full_page()).unwrap(),
+            vec![tagged_parent]
+        );
+
+        let subtree = Filter {
+            keyword_id: Some(parent),
+            include_subtree: true,
+            ..Default::default()
+        };
+        let mut ids = store.hunt(&subtree, default_sort(), &full_page()).unwrap();
+        ids.sort();
+        let mut expected = vec![tagged_parent, tagged_child];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn hunt_keyset_pagination_has_no_gaps_or_duplicates() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let mut expected = Vec::new();
+        let mut imported_at_by_id = std::collections::HashMap::new();
+        for i in 0..25 {
+            let mut asset = new_asset(&format!("{i:03}.NEF"), None);
+            asset.imported_at = i;
+            let id = store.insert_asset(root_id, &asset, None).unwrap();
+            expected.push(id);
+            imported_at_by_id.insert(id, i);
+        }
+
+        let sort = default_sort();
+        let mut collected = Vec::new();
+        let mut after = None;
+        loop {
+            let page = Page { after, limit: 7 };
+            let ids = store.hunt(&Filter::default(), sort, &page).unwrap();
+            if ids.is_empty() {
+                break;
+            }
+            let last_id = *ids.last().unwrap();
+            let last_imported = imported_at_by_id[&last_id];
+            collected.extend(ids);
+            after = Some(Cursor::Imported {
+                imported_at: last_imported,
+                id: last_id,
+            });
+        }
+
+        assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn hunt_count_matches_hunt_with_an_unbounded_page() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        for i in 0..5 {
+            store
+                .insert_asset(root_id, &new_asset(&format!("{i}.NEF"), Some("Z8")), None)
+                .unwrap();
+        }
+        assert_eq!(store.hunt_count(&Filter::default()).unwrap(), 5);
+        assert_eq!(
+            store
+                .hunt(&Filter::default(), default_sort(), &full_page())
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn facets_unfiltered_reads_the_trigger_cache_and_matches_a_live_filtered_query() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let a = store
+            .insert_asset(root_id, &new_asset("a.NEF", Some("Z8")), None)
+            .unwrap();
+        let b = store
+            .insert_asset(root_id, &new_asset("b.NEF", Some("Z8")), None)
+            .unwrap();
+        store.set_rating(&[a], Some(5)).unwrap();
+
+        let unfiltered = store.facets(&Filter::default()).unwrap();
+        assert_eq!(unfiltered.total, 2);
+        assert!(unfiltered.by_model.contains(&(Some("Z8".to_string()), 2)));
+        assert!(unfiltered.by_rating.contains(&(Some(5), 1)));
+        assert!(unfiltered.by_rating.contains(&(None, 1)));
+
+        let filtered = store
+            .facets(&Filter {
+                model: Some("Z8".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(filtered.total, 2);
+        let _ = b;
+    }
+
+    #[test]
+    fn manual_collection_add_remove_and_ordering() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let a = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let b = store
+            .insert_asset(root_id, &new_asset("b.NEF", None), None)
+            .unwrap();
+        let c = store
+            .insert_asset(root_id, &new_asset("c.NEF", None), None)
+            .unwrap();
+
+        let collection_id = store
+            .create_collection(None, "Selects", CollectionKind::Manual)
+            .unwrap();
+        store.add_to_collection(collection_id, &[a, b, c]).unwrap();
+        assert_eq!(
+            store.collection_assets(collection_id).unwrap(),
+            vec![a, b, c]
+        );
+
+        store.remove_from_collection(collection_id, &[b]).unwrap();
+        assert_eq!(store.collection_assets(collection_id).unwrap(), vec![a, c]);
+
+        // Adding an already-present asset again is a no-op, not a duplicate/reorder.
+        store.add_to_collection(collection_id, &[a]).unwrap();
+        assert_eq!(store.collection_assets(collection_id).unwrap(), vec![a, c]);
+
+        let collection = store.collection(collection_id).unwrap().unwrap();
+        assert_eq!(collection.name, "Selects");
+        assert_eq!(collection.kind, CollectionKind::Manual);
+    }
+
+    #[test]
+    fn smart_collection_rule_round_trips_and_resolves_via_hunt() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let a = store
+            .insert_asset(root_id, &new_asset("a.NEF", Some("Z8")), None)
+            .unwrap();
+        let b = store
+            .insert_asset(root_id, &new_asset("b.NEF", Some("D850")), None)
+            .unwrap();
+
+        let collection_id = store
+            .create_collection(None, "Z8 shots", CollectionKind::Smart)
+            .unwrap();
+        assert!(store.collection_filter(collection_id).unwrap().is_none());
+
+        let rule = Filter {
+            model: Some("Z8".to_string()),
+            ..Default::default()
+        };
+        store.set_smart_rule(collection_id, &rule).unwrap();
+
+        let resolved = store.collection_filter(collection_id).unwrap().unwrap();
+        assert_eq!(resolved, rule);
+        assert_eq!(
+            store.hunt(&resolved, default_sort(), &full_page()).unwrap(),
+            vec![a]
+        );
+        let _ = b;
+    }
+
+    #[test]
+    fn collection_delete_cascades_to_subtree_and_membership() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let asset_id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+
+        let parent = store
+            .create_collection(None, "Parent", CollectionKind::Manual)
+            .unwrap();
+        let child = store
+            .create_collection(Some(parent), "Child", CollectionKind::Manual)
+            .unwrap();
+        store.add_to_collection(child, &[asset_id]).unwrap();
+
+        store.delete_collection(parent).unwrap();
+
+        assert!(store.collection(parent).unwrap().is_none());
+        assert!(store.collection(child).unwrap().is_none());
+        assert!(store.collection_assets(child).unwrap().is_empty());
+    }
+
+    #[test]
+    fn move_collection_into_itself_or_a_descendant_is_rejected() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store
+            .create_collection(None, "Parent", CollectionKind::Manual)
+            .unwrap();
+        let child = store
+            .create_collection(Some(parent), "Child", CollectionKind::Manual)
+            .unwrap();
+        let grandchild = store
+            .create_collection(Some(child), "Grandchild", CollectionKind::Manual)
+            .unwrap();
+
+        assert!(
+            matches!(
+                store.move_collection(parent, Some(parent)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a collection under itself must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_collection(parent, Some(child)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a collection under its own child must be rejected"
+        );
+        assert!(
+            matches!(
+                store.move_collection(parent, Some(grandchild)),
+                Err(CatalogError::WouldCreateCycle)
+            ),
+            "moving a collection under its own grandchild must be rejected"
+        );
+
+        // The tree, and the ability to delete it cleanly, must be untouched by the rejections --
+        // a would-be cycle that slipped through would make this hang instead of returning.
+        store.delete_collection(parent).unwrap();
+        assert!(store.collection(child).unwrap().is_none());
+        assert!(store.collection(grandchild).unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_keyword_into_an_existing_sibling_name_is_rejected() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let parent = store.create_keyword(None, "Parent").unwrap();
+        store.create_keyword(Some(parent), "Existing").unwrap();
+        let renaming = store.create_keyword(Some(parent), "Original").unwrap();
+
+        assert!(
+            store.rename_keyword(renaming, "Existing").is_err(),
+            "renaming onto an already-used sibling name must be rejected"
+        );
+        assert!(
+            store.rename_keyword(renaming, "existing").is_err(),
+            "the sibling-name check is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn hunt_keyset_pagination_breaks_ties_correctly_on_a_nullable_sort_field() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+
+        // Every asset shares the same rating (a tie on the sort key), so correctness here hinges
+        // entirely on the `id` tiebreaker, not the rating value itself.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let id = store
+                .insert_asset(root_id, &new_asset(&format!("{i}.NEF"), None), None)
+                .unwrap();
+            store.set_rating(&[id], Some(3)).unwrap();
+            ids.push(id);
+        }
+
+        let sort = Sort {
+            field: SortField::Rating,
+            direction: SortDirection::Asc,
+        };
+        let mut collected = Vec::new();
+        let mut after = None;
+        loop {
+            let page = Page { after, limit: 2 };
+            let page_ids = store.hunt(&Filter::default(), sort, &page).unwrap();
+            if page_ids.is_empty() {
+                break;
+            }
+            let last_id = *page_ids.last().unwrap();
+            collected.extend(page_ids);
+            after = Some(Cursor::Rating {
+                rating: Some(3),
+                id: last_id,
+            });
+        }
+
+        assert_eq!(
+            collected, ids,
+            "ties on rating must break by id, ascending, with no gaps or duplicates across pages"
+        );
+    }
+
+    /// Regression test for a CodeRabbit finding: `remove_asset` only ever deleted
+    /// `edit_history`/`edit_variant`/`preview`/`asset` rows, never `asset_keyword`/
+    /// `collection_asset` -- with `PRAGMA foreign_keys = ON` (always the case at runtime), the
+    /// `DELETE FROM asset` itself would fail with a foreign-key violation for any asset that had
+    /// ever been tagged or added to a manual collection. Fixed via `ON DELETE CASCADE` on both
+    /// tables' `asset_id` foreign key.
+    #[test]
+    fn remove_asset_succeeds_for_a_tagged_asset_in_a_manual_collection() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let asset_id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let keyword = store.create_keyword(None, "Tag").unwrap();
+        store.tag(&[asset_id], keyword).unwrap();
+        let collection_id = store
+            .create_collection(None, "Selects", CollectionKind::Manual)
+            .unwrap();
+        store.add_to_collection(collection_id, &[asset_id]).unwrap();
+
+        store.remove_asset(asset_id).unwrap();
+
+        assert!(store
+            .find_asset_by_path(root_id, "a.NEF")
+            .unwrap()
+            .is_none());
+        assert!(store.keywords_for(asset_id).unwrap().is_empty());
+        assert!(store.collection_assets(collection_id).unwrap().is_empty());
+    }
+
+    /// Regression test for a CodeRabbit finding: a smart collection's saved `Filter` can
+    /// reference a keyword by id that's since been deleted (`delete_keyword` never touches
+    /// `collection.rule_json`) -- resolving it must match nothing, not error out.
+    #[test]
+    fn hunt_with_a_deleted_keyword_in_the_filter_matches_nothing_instead_of_erroring() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let keyword = store.create_keyword(None, "Gone").unwrap();
+        store.delete_keyword(keyword).unwrap();
+
+        let subtree_filter = Filter {
+            keyword_id: Some(keyword),
+            include_subtree: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .hunt(&subtree_filter, default_sort(), &full_page())
+                .unwrap(),
+            Vec::<i64>::new()
+        );
+        assert_eq!(store.hunt_count(&subtree_filter).unwrap(), 0);
+        assert_eq!(store.facets(&subtree_filter).unwrap().total, 0);
+    }
+
+    /// Regression test for a CodeRabbit finding: `rel_path_prefix`/`filename_contains` embedded
+    /// caller text directly into a `GLOB` pattern with no escaping and only `to_lowercase()`
+    /// folding (not the NFC-then-lowercase fold `rel_path_fold` itself uses).
+    #[test]
+    fn filename_search_escapes_glob_metacharacters_and_folds_unicode_like_rel_path_fold() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        // A literal `[1]` in the filename -- without escaping, a GLOB search for the same text
+        // would instead be interpreted as a character class and match "IMG_1.NEF" too.
+        let literal_id = store
+            .insert_asset(root_id, &new_asset("IMG_[1].NEF", None), None)
+            .unwrap();
+        store
+            .insert_asset(root_id, &new_asset("IMG_1.NEF", None), None)
+            .unwrap();
+
+        let filter = Filter {
+            filename_contains: Some("[1]".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt(&filter, default_sort(), &full_page()).unwrap(),
+            vec![literal_id],
+            "a literal `[1]` in filename_contains must match only the literal filename, \
+             not be interpreted as a GLOB character class"
         );
     }
 }
