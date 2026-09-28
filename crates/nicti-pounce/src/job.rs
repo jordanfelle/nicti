@@ -49,6 +49,9 @@ pub enum JobKind {
     Import,
     Sync,
     Backup,
+    /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
+    /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
+    Decode,
 }
 
 /// Static metadata a job declares up front, before it runs -- what the scheduler needs to make an
