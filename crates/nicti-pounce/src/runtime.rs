@@ -127,6 +127,20 @@ impl Inner {
         }
     }
 
+    /// Reports every job [`crate::queue::Scheduler::take_cancelled_while_queued`] handed back as
+    /// `Cancelled` and releases its cancel-token registry entry -- see that method's own doc
+    /// comment for why nothing else ever does this for a job cancelled before a worker reached
+    /// it. A no-op for an empty list (the common case), so callers can call this unconditionally.
+    fn report_cancelled(&self, cancelled: Vec<(JobId, Progress)>) {
+        if cancelled.is_empty() {
+            return;
+        }
+        for (id, progress) in cancelled {
+            self.finish_status(id, JobState::Cancelled, progress);
+        }
+        (self.on_change)();
+    }
+
     fn lane(&self, lane: Lane) -> &LaneState {
         match lane {
             Lane::Gpu => &self.gpu,
@@ -313,13 +327,36 @@ impl Pounce {
 
 impl Drop for Pounce {
     fn drop(&mut self) {
-        // Only the last live handle (this `Arc`'s strong count reaching 1) actually owns the
-        // worker threads worth joining -- every clone shares the same `Inner`/handles, and
-        // joining from an arbitrary clone's drop would block that clone's own thread on workers
-        // a *different* still-live clone might still want running.
-        if Arc::strong_count(&self.inner) == 1 {
+        // Only the last live *handle* actually owns the worker threads worth joining -- every
+        // clone shares the same `Inner`/handles, and joining from an arbitrary clone's drop would
+        // block that clone's own thread on workers a *different* still-live clone might still
+        // want running. Checked against `gpu_handle`'s own strong count, not `inner`'s: each
+        // worker thread holds its own long-lived `Arc<Inner>` clone for as long as it runs (see
+        // `Pounce::new`'s `gpu_inner`/`cpu_inner`), so `inner`'s count never drops to 1 while any
+        // worker is still alive -- checking it would make this branch dead code, never firing the
+        // first time it's needed (found by adversarial review). `gpu_handle` is never handed to a
+        // worker thread, only cloned alongside the rest of `Pounce` on `derive(Clone)`, so its
+        // strong count tracks exactly how many `Pounce` handles are still live.
+        if Arc::strong_count(&self.gpu_handle) == 1 {
             self.shutdown();
         }
+    }
+}
+
+/// Wraps a CPU-lane [`crate::throttle::Permit`] so releasing it also wakes any worker parked on
+/// the lane's own condvar waiting for capacity -- `Throttle::Permit::drop` only notifies
+/// `Throttle`'s *own* internal condvar, which nothing in this module ever waits on (every CPU
+/// worker uses non-blocking `try_acquire`, never the blocking `acquire` that condvar is for), so
+/// without this wrapper a freed permit went unnoticed until the next `POLL_INTERVAL` backstop
+/// wakeup rather than immediately (found by adversarial review).
+struct WakingPermit<'a> {
+    _permit: crate::throttle::Permit<'a>,
+    lane_state: &'a LaneState,
+}
+
+impl Drop for WakingPermit<'_> {
+    fn drop(&mut self) {
+        self.lane_state.notify();
     }
 }
 
@@ -329,11 +366,15 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
             return;
         }
 
+        let lane_state = inner.lane(lane);
+
         let _permit = if lane == Lane::Cpu {
             match inner.cpu_throttle.try_acquire() {
-                Some(permit) => Some(permit),
+                Some(permit) => Some(WakingPermit {
+                    _permit: permit,
+                    lane_state,
+                }),
                 None => {
-                    let lane_state = inner.lane(lane);
                     let guard = lane_state.scheduler.lock().unwrap();
                     let _ = lane_state.condvar.wait_timeout(guard, POLL_INTERVAL);
                     continue;
@@ -343,12 +384,21 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
             None
         };
 
-        let lane_state = inner.lane(lane);
         let taken = {
             let mut scheduler = lane_state.scheduler.lock().unwrap();
-            match scheduler.take_next() {
-                Some(taken) => taken,
+            let taken = scheduler.take_next();
+            // Checked on every call, whether or not a job was also taken -- a job cancelled while
+            // still queued is dropped by `take_next` itself (never becomes a `Taken`), so nothing
+            // else would ever report it `Cancelled` or release its cancel-token registry entry
+            // otherwise (found by adversarial review).
+            let cancelled_while_queued = scheduler.take_cancelled_while_queued();
+            match taken {
+                Some(taken) => {
+                    inner.report_cancelled(cancelled_while_queued);
+                    taken
+                }
                 None => {
+                    inner.report_cancelled(cancelled_while_queued);
                     let _ = lane_state.condvar.wait_timeout(scheduler, POLL_INTERVAL);
                     continue;
                 }
@@ -679,6 +729,95 @@ mod tests {
         let pounce = Pounce::new(u64::MAX, 2, 1, || {});
         pounce.set_cpu_limit(100);
         assert_eq!(pounce.cpu_limit(), 2);
+        pounce.shutdown();
+    }
+
+    #[test]
+    fn cancelling_a_job_still_sitting_in_the_queue_is_reported_cancelled() {
+        // Regression test for a real bug an adversarial review caught: `Scheduler::take_next`
+        // silently drops a cancelled queued entry without ever producing a `Taken` for it, so
+        // nothing used to report it `Cancelled` (it stuck at `Queued` forever) or release its
+        // cancel-token registry entry. Saturate the single CPU worker with an unrelated job so
+        // the second submission never gets a chance to be taken before it's cancelled.
+        let pounce = Pounce::new(u64::MAX, 1, 1, || {});
+        // Both foreground priority (still the CPU lane, one single worker thread): "busy" is
+        // unconditionally in front of the queue and takes >=5ms per step, so "never-runs" is
+        // still sitting behind it in `Scheduler::foreground` (never yet popped by `take_next`) at
+        // the moment `cancel` runs immediately below -- there's no artificial delay between
+        // submitting it and cancelling it.
+        let _busy = pounce.submit(Box::new(StepJob {
+            spec: JobSpec {
+                priority: crate::job::Priority::Foreground,
+                ..cpu_spec()
+            },
+            label: "busy".into(),
+            remaining: 1000,
+            on_step: Some(Box::new(|| {
+                std::thread::sleep(Duration::from_millis(5));
+            })),
+        }));
+        let queued_id = pounce.submit(Box::new(StepJob {
+            spec: JobSpec {
+                priority: crate::job::Priority::Foreground,
+                ..cpu_spec()
+            },
+            label: "never-runs".into(),
+            remaining: 1,
+            on_step: None,
+        }));
+        pounce.cancel(queued_id);
+
+        assert!(
+            wait_until(
+                || pounce
+                    .snapshot()
+                    .into_iter()
+                    .any(|s| s.id == queued_id && s.state == JobState::Cancelled),
+                Duration::from_secs(2)
+            ),
+            "a job cancelled while still queued must be reported Cancelled, not stuck at Queued forever"
+        );
+        pounce.shutdown();
+    }
+
+    #[test]
+    fn freeing_a_cpu_permit_wakes_a_waiting_worker_promptly() {
+        // Regression test for a real bug an adversarial review caught: `Throttle::Permit::drop`
+        // only notified `Throttle`'s own internal condvar, which no worker in this module ever
+        // waits on (every CPU worker uses non-blocking `try_acquire`) -- so a freed permit went
+        // unnoticed until the next `POLL_INTERVAL` (200ms) backstop wakeup instead of promptly.
+        // With `cpu_limit=1` and a first job holding the only permit for `HOLD` while a second,
+        // fast job waits behind it, the second must finish well before one full poll interval
+        // after the first releases its permit.
+        const HOLD: Duration = Duration::from_millis(100);
+        let pounce = Pounce::new(u64::MAX, 2, 1, || {});
+        pounce.submit(Box::new(StepJob {
+            spec: cpu_spec(),
+            label: "holds-the-permit".into(),
+            remaining: 1,
+            on_step: Some(Box::new(move || std::thread::sleep(HOLD))),
+        }));
+        let fast_id = pounce.submit(Box::new(StepJob {
+            spec: cpu_spec(),
+            label: "fast".into(),
+            remaining: 1,
+            on_step: None,
+        }));
+
+        let start = Instant::now();
+        assert!(wait_until(
+            || pounce
+                .snapshot()
+                .into_iter()
+                .any(|s| s.id == fast_id && s.state == JobState::Done),
+            Duration::from_secs(2)
+        ));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < HOLD + Duration::from_millis(POLL_INTERVAL.as_millis() as u64 / 2),
+            "fast job took {elapsed:?} after the permit-holder released -- looks like it waited \
+             out a full POLL_INTERVAL backstop instead of being woken promptly"
+        );
         pounce.shutdown();
     }
 }

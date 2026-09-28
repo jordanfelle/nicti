@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 
 use crate::admission::Admission;
 use crate::cancel::{CancelToken, EditingGate};
-use crate::job::{ChunkedJob, JobId, JobSpec, Priority};
+use crate::job::{ChunkedJob, JobId, JobSpec, Priority, Progress};
 
 /// A background-ordering key, e.g. `nicti_tapetum::prefetch::priority_order`'s own
 /// nearest-to-cursor comparison.
@@ -55,6 +55,13 @@ pub struct Scheduler {
     editing_gate: EditingGate,
     admission: Admission,
     reprioritize_key: Option<ReprioritizeKey>,
+    /// Jobs [`Scheduler::take_next`] dropped because they were cancelled while still sitting in
+    /// this queue (never handed out as a [`Taken`], so [`Scheduler::finish`] never runs for them)
+    /// -- a caller must drain this after every `take_next` call and report each one `Cancelled`
+    /// itself, since nothing else ever will (found by adversarial review: a job cancelled before a
+    /// worker ever reached it used to vanish silently, stuck reporting `Queued` forever with its
+    /// cancel-token registry entry never released).
+    cancelled_while_queued: Vec<(JobId, Progress)>,
 }
 
 impl Scheduler {
@@ -69,6 +76,7 @@ impl Scheduler {
             editing_gate,
             admission: Admission::new(vram_budget_bytes),
             reprioritize_key: None,
+            cancelled_while_queued: Vec::new(),
         }
     }
 
@@ -143,7 +151,12 @@ impl Scheduler {
     pub fn take_next(&mut self) -> Option<Taken> {
         while let Some(entry) = self.foreground.front() {
             if entry.cancel.is_cancelled() {
-                self.foreground.pop_front();
+                let entry = self
+                    .foreground
+                    .pop_front()
+                    .expect("just peeked via front()");
+                self.cancelled_while_queued
+                    .push((entry.id, entry.job.progress()));
                 continue;
             }
             break;
@@ -162,8 +175,21 @@ impl Scheduler {
         }
 
         let budget = self.admission.budget();
-        self.background
-            .retain(|entry| !entry.cancel.is_cancelled() && entry.job.spec().vram_bytes <= budget);
+        let cancelled_while_queued = &mut self.cancelled_while_queued;
+        self.background.retain(|entry| {
+            if entry.cancel.is_cancelled() {
+                cancelled_while_queued.push((entry.id, entry.job.progress()));
+                return false;
+            }
+            // An over-budget (but not cancelled) background job is also dropped here, unchanged
+            // from the original spike behavior -- see this method's own doc comment above. It is
+            // *not* reported through `cancelled_while_queued` (a distinct outcome from
+            // cancellation), and today has the same "never reaches a terminal status" gap this
+            // field otherwise fixes for cancellation -- pre-existing, not introduced by this
+            // change, and not exercised by any real caller yet (no job submitted anywhere in this
+            // codebase declares a nonzero `vram_bytes`).
+            entry.job.spec().vram_bytes <= budget
+        });
 
         let remaining = self.admission.remaining();
         let pick = self
@@ -183,6 +209,14 @@ impl Scheduler {
             cancel: entry.cancel,
             priority: Priority::Background,
         })
+    }
+
+    /// Drains and returns every job cancelled while still queued since the last call to this
+    /// method -- see [`Scheduler::cancelled_while_queued`]'s own doc comment. Call this after
+    /// every [`Scheduler::take_next`] call (whether or not it returned a job), while still
+    /// holding the same lock, so nothing in between can miss a cancellation.
+    pub fn take_cancelled_while_queued(&mut self) -> Vec<(JobId, Progress)> {
+        std::mem::take(&mut self.cancelled_while_queued)
     }
 
     /// Reports the outcome of running `taken`'s chunk. Releases its VRAM reservation (if
