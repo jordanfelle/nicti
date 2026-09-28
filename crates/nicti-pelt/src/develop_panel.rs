@@ -343,10 +343,14 @@ pub fn handle_viewport_gesture(
                 // nothing to do while still dragging.
             }
             DragTarget::Rotate => {
-                let start_angle = (state.start_pointer.y - image_to_screen(rect, source, center).y)
-                    .atan2(state.start_pointer.x - image_to_screen(rect, source, center).x);
-                let cur_angle = (pointer.y - image_to_screen(rect, source, center).y)
-                    .atan2(pointer.x - image_to_screen(rect, source, center).x);
+                // Computed in *image* space (via `screen_to_image`), not raw screen pixels --
+                // `rect` can be anisotropically stretched relative to the source image (see
+                // `screen_to_image`'s own doc comment), so a screen-space angle is not generally
+                // the same as the image-space content rotation it's meant to drive.
+                let start_img = screen_to_image(rect, source, state.start_pointer);
+                let cur_img = screen_to_image(rect, source, pointer);
+                let start_angle = (start_img.1 - center.1).atan2(start_img.0 - center.0);
+                let cur_angle = (cur_img.1 - center.1).atan2(cur_img.0 - center.0);
                 let delta_deg = (cur_angle - start_angle).to_degrees();
                 let mut new_crop = state.start_crop;
                 new_crop.set_rotation(state.start_crop.rotation_degrees + delta_deg);
@@ -385,8 +389,13 @@ pub fn handle_viewport_gesture(
                 }
                 new_rect.x = new_rect.x.clamp(0.0, source.0);
                 new_rect.y = new_rect.y.clamp(0.0, source.1);
-                new_rect.width = new_rect.width.clamp(1.0, source.0 - new_rect.x);
-                new_rect.height = new_rect.height.clamp(1.0, source.1 - new_rect.y);
+                // `.max(1.0)` guards against `clamp`'s own `min > max` panic: once `new_rect.x`
+                // (or `.y`) lands within 1px of `source.0`/`.1` -- an entirely ordinary drag, not
+                // just an exact-boundary case -- `source.0 - new_rect.x` drops below the lower
+                // bound `1.0`, which `f32::clamp` panics on rather than saturating. Matches the
+                // `DragTarget::Pan` branch below, which already guards the same computation.
+                new_rect.width = new_rect.width.clamp(1.0, (source.0 - new_rect.x).max(1.0));
+                new_rect.height = new_rect.height.clamp(1.0, (source.1 - new_rect.y).max(1.0));
                 let mut new_crop = state.start_crop;
                 new_crop.x = new_rect.x;
                 new_crop.y = new_rect.y;
