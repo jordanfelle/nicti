@@ -113,6 +113,23 @@ confidence-threshold = 0.9
 allow = ["LGPL-2.1"]
 name = "rawler"
 
+# CDLA-Permissive-2.0: `webpki-root-certs` (a root-CA-bundle *data* crate, not code), reachable
+# only via `ureq`'s own `native-tls-webpki-roots` feature -- which `cargo deny check
+# --workspace --all-features` (ci.yml's own job) turns on for every optional feature of every
+# crate in the graph, even though `crates/nicti-shed` (#249/ADR-0249) requests plain `native-tls`
+# only, deliberately to avoid bundling a root-CA store at all (it rides Windows' own SChannel/CNG
+# trust store instead -- see docs/decisions/release.md). Not actually reachable by the real
+# shipped build, same "present in the resolved graph via --all-features, never linked into an
+# actual binary" shape as this file's own NCSA/libfuzzer-sys note above -- kept as a per-crate
+# exception (not a global allowlist entry) so a future crate whose *only* license is
+# CDLA-Permissive-2.0 for real *code* still fails this check, matching the same per-crate
+# reasoning the rawler exception above already documents. CDLA-Permissive-2.0 itself is a
+# permissive, attribution-only data license (no copyleft terms) — see
+# https://cdla.dev/permissive-2-0/.
+[[licenses.exceptions]]
+allow = ["CDLA-Permissive-2.0"]
+name = "webpki-root-certs"
+
 # publish = false workspace crates carry no SPDX license (nicti, whisker) -- this exempts
 # them from the license check entirely rather than failing on our own unlicensed-by-design internal
 # crates (verified: `cargo deny check licenses` passes with them Unlicensed and this set to true;

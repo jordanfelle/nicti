@@ -12,6 +12,7 @@ mod activity;
 mod app;
 mod catalog;
 mod render;
+mod update;
 mod viewport;
 
 use std::sync::Arc;
@@ -37,7 +38,7 @@ enum CatalogOpenState {
 /// (`wgpu::Limits::default()`, no optional features) -- without this, the device
 /// `GpuContext::from_device` then wraps in [`app::PeltApp::new`] would be undersized for a real
 /// full-resolution Tapetum render (ADR-0016).
-pub fn run() -> eframe::Result {
+pub fn run(version: &str) -> eframe::Result {
     let wgpu_setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
         device_descriptor: Arc::new(nicti_tapetum::gpu::device_descriptor_for),
         ..egui_wgpu::WgpuSetupCreateNew::without_display_handle()
@@ -51,9 +52,10 @@ pub fn run() -> eframe::Result {
         },
         ..Default::default()
     };
+    let version = version.to_string();
     eframe::run_native(
         "nicti",
         options,
-        Box::new(|cc| Ok(Box::new(PeltApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(PeltApp::new(cc, version)))),
     )
 }

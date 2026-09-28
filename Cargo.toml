@@ -6,7 +6,10 @@ license = "AGPL-3.0-or-later"
 
 [package]
 name = "nicti"
-version = "0.0.0"
+# #249: this is the shipped binary's real version -- every other crate in the workspace stays
+# 0.0.0 (they're internal, `publish = false`). Bumped by hand in the same commit as the release
+# tag; see docs/releasing.md.
+version = "0.1.0"
 edition = "2021"
 publish = false
 license.workspace = true

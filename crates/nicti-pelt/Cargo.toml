@@ -13,7 +13,9 @@ egui-wgpu = "0.36"
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 blake3 = "1"
+semver = "1"
 nicti-tapetum = { path = "../nicti-tapetum" }
 nicti-lair = { path = "../nicti-lair" }
 nicti-cornea = { path = "../nicti-cornea" }
 nicti-pounce = { path = "../nicti-pounce" }
+nicti-shed = { path = "../nicti-shed" }

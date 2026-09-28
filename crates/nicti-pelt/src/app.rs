@@ -17,6 +17,7 @@ use nicti_pounce::Pounce;
 use nicti_tapetum::gpu::GpuContext;
 
 use crate::render::DevelopView;
+use crate::update::UpdateChecker;
 use crate::viewport::{ViewportCallback, ViewportResources};
 use crate::{catalog, CatalogOpenState};
 
@@ -52,16 +53,18 @@ enum RootAction {
 
 pub struct PeltApp {
     view: View,
+    version: String,
     catalog_path: PathBuf,
     catalog: CatalogOpenState,
     develop: Option<DevelopView>,
     pounce: Pounce,
     telemetry: TelemetrySampler,
     import_path_input: String,
+    update: UpdateChecker,
 }
 
 impl PeltApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, version: String) -> Self {
         let render_state = cc
             .wgpu_render_state
             .as_ref()
@@ -99,20 +102,37 @@ impl PeltApp {
         );
         let telemetry = TelemetrySampler::new(default_vram_source(), TELEMETRY_MIN_INTERVAL);
 
+        let mut update = UpdateChecker::new();
+        // Startup check is best-effort and throttled to at most once per 24h
+        // (`UpdateChecker::spawn_check`'s `force: false`) -- this is never the user's first
+        // signal that an update exists, just a background nicety.
+        update.spawn_check(&version, false);
+
         Self {
             view: View::Library,
+            version,
             catalog_path,
             catalog,
             develop: Some(develop),
             pounce,
             telemetry,
             import_path_input: String::new(),
+            update,
         }
     }
 }
 
 impl eframe::App for PeltApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update.poll();
+        if self.update.is_checking() || self.update.is_applying() {
+            // Nothing else drives a repaint while a background check or apply is in flight
+            // (it's not user input), so without this a result would only ever show up once
+            // something else happens to trigger one.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(300));
+        }
+
         egui::Panel::top("view_tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
@@ -120,10 +140,51 @@ impl eframe::App for PeltApp {
                 ui.selectable_value(&mut self.view, View::Develop, "Develop");
                 ui.separator();
                 ui.label(format!("Catalog: {}", self.catalog_path.display()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!("v{}", self.version));
+                    let check_label = if self.update.is_checking() {
+                        "Checking..."
+                    } else {
+                        "Check for updates"
+                    };
+                    if ui
+                        .add_enabled(
+                            !self.update.is_checking() && !self.update.is_applying(),
+                            egui::Button::new(check_label),
+                        )
+                        .clicked()
+                    {
+                        self.update.spawn_check(&self.version, true);
+                    }
+                });
             });
         });
 
         crate::activity::show(ui, &self.pounce, &mut self.telemetry);
+
+        if let Some(new_version) = self.update.available_version().cloned() {
+            egui::Panel::top("update_banner").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Nicti {new_version} is available."));
+                    let button_label = if self.update.is_applying() {
+                        "Restarting..."
+                    } else {
+                        "Restart to update"
+                    };
+                    if ui
+                        .add_enabled(!self.update.is_applying(), egui::Button::new(button_label))
+                        .clicked()
+                    {
+                        self.update.apply();
+                    }
+                });
+            });
+        }
+        if let Some(err) = self.update.last_error() {
+            egui::Panel::top("update_error").show(ui, |ui| {
+                ui.colored_label(egui::Color32::RED, format!("Update failed: {err}"));
+            });
+        }
 
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.show_library(ui),
