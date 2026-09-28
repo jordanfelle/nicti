@@ -166,25 +166,35 @@ fn unique_partial_path(policy: &BackupPolicy, now_unix: i64) -> PathBuf {
     }
 }
 
-/// Shared retry budget for the Windows-transient-lock helpers below: 50 attempts, 100ms apart
-/// (~5s worst case per call site). The original budget (20 attempts, 25ms -- ~500ms) was not
-/// enough: two separate real Windows CI runs still failed with the identical `ERROR_ACCESS_DENIED`
-/// after exhausting it, under the heavier file-I/O contention of `nicti-lair`'s full parallel unit
-/// test suite (many tests each creating their own tempdir/catalog concurrently) rather than a
-/// single isolated operation -- raised by 10x rather than guessed at again, since guessing once
-/// already cost a full CI round-trip. Every call site this guards is a background-job step (never
-/// a hot path), so this budget being generous is cheap insurance, not a real cost.
+/// Shared retry budget for the two Windows helpers below: 50 attempts, 100ms apart (~5s worst
+/// case). **History, corrected**: three consecutive commits chased `cargo test (windows)` failing
+/// two `ninelives` tests with an identical `Io("Access is denied. (os error 5)")` under the theory
+/// that a freshly-written/renamed file was hitting a *transient* antivirus-scan lock, raising this
+/// budget each time it didn't help. It never helped because that theory was wrong: the actual
+/// failure was `snapshot_into`'s own now-deleted manual fsync step, which opened its target file
+/// read-only via `std::fs::File::open` and then called `.sync_all()` on it -- Windows'
+/// `FlushFileBuffers` (what `sync_all` calls there) requires a handle opened with write access, so
+/// that call failed with `ERROR_ACCESS_DENIED` *deterministically*, every single time, not
+/// transiently. No amount of retrying a permanently-failing call can fix it; the tell, in
+/// hindsight, was that the whole test suite kept finishing in well under a second across all three
+/// "fixes," meaning these retry loops' own guards were never actually matching and engaging at
+/// all. That step is gone now (see `snapshot_into`'s own doc comment). What's left here --
+/// `rotate`'s `fs::rename` and `verify`'s `Connection::open_with_flags`, both reopening a file
+/// `snapshot_into` (or a prior `rotate`) just finished writing -- was never actually confirmed to
+/// need retrying by any real CI failure (both are downstream of the one call that *was* broken and
+/// panicking first, so neither one was ever actually exercised on a real failure in these three
+/// runs); a genuine antivirus-scan race remains a real, if unconfirmed, possibility for a plain
+/// reopen of a fresh file specifically (unlike the deleted fsync step, neither of these opens the
+/// file in an access mode any documented Windows API restricts), and retrying is cheap insurance
+/// on a background-job-only code path either way, so both retries are kept rather than removed on
+/// the strength of "we were wrong once already."
 const RETRY_MAX_ATTEMPTS: u32 = 50;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// A freshly written or renamed file on Windows can transiently refuse even a read-only open with
-/// `ERROR_ACCESS_DENIED` (`io::ErrorKind::PermissionDenied`, "Access is denied. (os error 5)") --
-/// real-time antivirus (Windows Defender by default on GitHub's own Windows runners) scanning a
-/// just-created/just-renamed file before releasing it, not a bug in the write itself. Confirmed on
-/// CI, not a plausible-sounding guess: `cargo test (windows)` failed exactly this way, on exactly
-/// this message, at the fsync step right after `VACUUM INTO` writes a fresh `.partial` -- Linux has
-/// no equivalent lock and never reproduces it. Retries with [`RETRY_MAX_ATTEMPTS`]/[`RETRY_DELAY`]
-/// rather than failing outright.
+/// See [`RETRY_MAX_ATTEMPTS`]'s own doc comment for this whole retry family's real (and corrected)
+/// history. Guards on the typed `io::ErrorKind::PermissionDenied` (`ERROR_ACCESS_DENIED`,
+/// `os error 5`), the shape a genuine transient antivirus-scan lock on a freshly-written file
+/// would take if `rotate`'s `fs::rename` call site ever actually hits one.
 fn retry_on_transient_access_denied<T>(
     mut f: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
@@ -233,8 +243,9 @@ fn retry_rusqlite_open_on_transient_access_denied(
     Err(last_err.expect("loop only exits via return, or after at least one matching error"))
 }
 
-/// Writes a fresh, unverified snapshot of `catalog` to a new `.partial` file under `policy.dir`
-/// and fsyncs it, returning its path. Uses `catalog`'s own independent read-only reader connection
+/// Writes a fresh, unverified snapshot of `catalog` to a new `.partial` file under `policy.dir`,
+/// returning its path (see the function body's own comment for why this doesn't also do its own
+/// separate fsync). Uses `catalog`'s own independent read-only reader connection
 /// when it has a backing file (`SqliteCatalog::open_snapshot_reader`) so this never holds the
 /// catalog's shared connection mutex for the run's ~2s duration; an in-memory catalog (tests only,
 /// `catalog.path()` is `None`) has no file to reopen, so it falls back to
@@ -259,16 +270,19 @@ pub fn snapshot_into(
         catalog.vacuum_into_locked(&partial)?;
     }
 
-    // `VACUUM INTO` already fsyncs internally per SQLite's own documented behavior, but this makes
-    // the durability guarantee explicit in this module's own code rather than resting entirely on
-    // an unstated implementation detail of a pragma this crate doesn't control. Retried: see
-    // `retry_on_transient_access_denied`'s own doc comment for the real Windows race this opens
-    // the freshly-written file right into.
-    let file = retry_on_transient_access_denied(|| fs::File::open(&partial))
-        .map_err(|e| CatalogError::Io(e.to_string()))?;
-    file.sync_all()
-        .map_err(|e| CatalogError::Io(e.to_string()))?;
-
+    // No separate manual fsync here (an earlier version of this function had one, opening the
+    // freshly-written `.partial` via `std::fs::File::open` and calling `.sync_all()` on it) --
+    // deleted, not retried, once its real root cause was found: `File::open` opens read-only, and
+    // Windows' `FlushFileBuffers` (what `sync_all` calls there) requires a handle opened with
+    // write access, so that call failed with `ERROR_ACCESS_DENIED` *deterministically*, every
+    // single time, on every Windows CI run -- not the transient antivirus-scan race three
+    // consecutive commits assumed while chasing this the wrong way (raising a retry budget can't
+    // fix a permanent, unconditional failure; the giveaway, in hindsight, was that the test suite
+    // kept finishing in well under a second even with a 5-second retry budget in place, meaning
+    // the retry loop's guard was never even matching). `VACUUM INTO` already fsyncs the target
+    // internally per SQLite's own documented behavior, which is what this module actually relies
+    // on for durability -- the deleted step was redundant defense-in-depth that turned out to
+    // actively break Windows instead of adding anything real.
     Ok(partial)
 }
 

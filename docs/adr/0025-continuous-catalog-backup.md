@@ -114,36 +114,35 @@ shared connection mutex every other catalog query does for the duration of `PRAG
 consistent with every other read on this crate's `CatalogStore` trait (not a new architectural
 concern this ticket introduces), but not separately measured at 2M-row scale either.
 
-**A separate, real Windows-only failure surfaced by CI itself (not the review), after the fixes
-above landed**: `cargo test (windows)` failed two unit tests with `Io("Access is denied. (os error
-5)")` — a freshly-written or freshly-renamed file transiently refusing even a read-only open,
-`ERROR_ACCESS_DENIED`, which GitHub's Windows runners hit reliably enough on a create/rename-then-
-immediately-reopen pattern to be a known class of flake (real-time antivirus scanning a new file
-before releasing it; Linux has no equivalent lock and never reproduced it). Fixed with a small,
-bounded retry (`ninelives::retry_on_transient_access_denied` / its `rusqlite`-flavored twin) around
-every genuine production call site that reopens a file it just wrote (`snapshot_into`'s fsync,
-`verify`'s open of the `.partial`, `rotate`'s rename) — cheap insurance on a background-job-only
-code path, not a real cost. Two of this ticket's own new tests reopen a freshly-rotated backup file
-for their own assertions (mimicking a hypothetical future "restore" caller) and needed the same
-retry to stop being Windows-flaky themselves. A follow-up focused review of this fix itself (run
-before pushing, per this repo's own adversarial-review rule) caught that the `rusqlite`-flavored
-retry originally matched on the error's rendered message text (`.to_string().contains("Access is
-denied")`) — locale-dependent, and silently a no-op if SQLite's actual Windows message text turned
-out not to contain that exact substring. Fixed to match on the typed `rusqlite::ErrorCode`
-(`PermissionDenied` or `CannotOpen` — SQLite's Windows VFS doesn't consistently map a `CreateFile`
-failure to one specific code) instead, and the same review caught the test-side retry (for
-`SqliteCatalog::open`, which doesn't go through either retry helper directly) was scoped to "any
-`CatalogError` at all," which would have silently masked a genuine regression behind ~500ms of
-pointless retries instead of failing fast — narrowed to the identical typed-`ErrorCode` shape.
+**A separate, real Windows-only CI failure, and three attempts to fix it before finding the actual
+cause.** `cargo test (windows)` failed two unit tests with `Io("Access is denied. (os error 5)")`
+after the review fixes above landed. The first three fix attempts all assumed the same wrong root
+cause — a *transient* lock (real-time antivirus scanning a freshly-written file before releasing
+it) — and each one raised a bounded retry's budget when the previous one didn't help: a
+20-attempt/25ms budget, then a fix to the retry logic itself (a locale-dependent string match on
+the rusqlite side, and an overly-broad test-side retry, both caught by a second focused review),
+then a 50-attempt/100ms budget after the first budget still didn't help. None of it helped, because
+the theory was wrong: the actual failure was deterministic, not transient, and no retry budget of
+any size can fix a call that fails the same way every single time. The tell was there the whole
+time and was missed for three commits — the full test suite kept finishing in well under a second
+even with a 5-second retry budget in place, meaning the retry loops' own guards were never once
+matching.
 
-**The initial ~500ms retry budget (20 attempts, 25ms) was itself not enough**: `cargo test
-(windows)` failed the identical two tests, on the identical `ERROR_ACCESS_DENIED` message, a second
-time after that budget was already in place — not a different bug, the same transient lock lasting
-longer than assumed under the heavier file-I/O contention of running `nicti-lair`'s full parallel
-unit test suite (many tests each creating their own tempdir/catalog concurrently), rather than a
-single isolated operation. Raised to 50 attempts/100ms (~5s worst case per call site) — still cheap
-for a background-job-only code path, and this time based on two consecutive real CI data points
-rather than a single guess.
+**The real cause**: `snapshot_into` had a manual fsync step — after `VACUUM INTO` wrote the
+`.partial` file, it opened that file via `std::fs::File::open` (read-only) and called
+`.sync_all()` on it, meant as defense-in-depth on top of `VACUUM INTO`'s own documented internal
+fsync. On Windows, `sync_all()` calls `FlushFileBuffers`, which requires the handle to have been
+opened with write access — calling it on a read-only handle fails with `ERROR_ACCESS_DENIED`,
+unconditionally, every time. Linux's `fsync()` has no equivalent restriction, which is why this
+never reproduced there. Fixed by deleting the redundant manual fsync step entirely, restoring
+reliance on `VACUUM INTO`'s own internal sync (the original comment's own stated intent) rather
+than reopening the file at all. The `rotate`/`verify` retry helpers added while chasing the wrong
+theory are kept regardless (a genuine antivirus-scan race remains a real, if never actually
+confirmed by any of these three runs, possibility for a plain reopen of a fresh file — both were
+downstream of the one call that was actually broken and panicking first, so neither was ever
+exercised against a real failure) — cheap insurance on a background-job-only code path either way,
+even though the specific bug that prompted adding them turned out to be unrelated to what they
+guard against.
 
 ## What this doesn't do
 
