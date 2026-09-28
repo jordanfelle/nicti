@@ -423,12 +423,23 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
         let id = taken.id;
         {
             let mut scheduler = lane_state.scheduler.lock().unwrap();
+            // A non-terminal (`Yielded`, not cancelled) status must be written *before*
+            // `finish` re-enqueues the job, and while this same lock is still held -- once
+            // `finish` returns, another CPU-lane worker (the GPU lane only ever has one) can
+            // immediately take this same job back out, run it to a real terminal state, and
+            // call `finish_status` itself. Writing `Queued` after releasing the lock could then
+            // land after that worker's own terminal write and silently clobber it back to
+            // `Queued` forever (found by CodeRabbit's review) -- `Running`, by contrast, has no
+            // such race, since only the worker that took a job can ever write that job's own
+            // `Running` status.
+            if terminal.is_none() {
+                inner.update_state(id, JobState::Queued, progress);
+            }
             scheduler.finish(taken, outcome);
         }
 
-        match terminal {
-            Some(state) => inner.finish_status(id, state, progress),
-            None => inner.update_state(id, JobState::Queued, progress),
+        if let Some(state) = terminal {
+            inner.finish_status(id, state, progress);
         }
         (inner.on_change)();
     }
@@ -819,5 +830,42 @@ mod tests {
              out a full POLL_INTERVAL backstop instead of being woken promptly"
         );
         pounce.shutdown();
+    }
+
+    #[test]
+    fn a_yielded_jobs_queued_status_never_clobbers_a_later_workers_terminal_write() {
+        // Regression test for a real race a CodeRabbit review caught: writing a yielded job's
+        // `Queued` status *after* `Scheduler::finish` re-enqueues it (releasing the lane lock in
+        // between) left a window where a second CPU-lane worker could take that same job back
+        // out, run it to a real terminal state, and write that terminal status -- all before the
+        // first worker's now-stale `Queued` write executed, clobbering the real outcome back to
+        // `Queued` forever. Many short multi-chunk jobs across several CPU workers, run
+        // repeatedly, gives every job many chances to hit that window if the race still exists.
+        for _ in 0..20 {
+            let pounce = Pounce::new(u64::MAX, 4, 4, || {});
+            let ids: Vec<JobId> = (0..20)
+                .map(|_| {
+                    pounce.submit(Box::new(StepJob {
+                        spec: cpu_spec(),
+                        label: "quick".into(),
+                        remaining: 3,
+                        on_step: None,
+                    }))
+                })
+                .collect();
+
+            assert!(wait_until(
+                || {
+                    let snapshot = pounce.snapshot();
+                    ids.iter().all(|id| {
+                        snapshot
+                            .iter()
+                            .any(|s| s.id == *id && s.state == JobState::Done)
+                    })
+                },
+                Duration::from_secs(2)
+            ));
+            pounce.shutdown();
+        }
     }
 }

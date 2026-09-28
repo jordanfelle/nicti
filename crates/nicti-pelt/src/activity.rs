@@ -88,7 +88,14 @@ fn show_job_row(ui: &mut egui::Ui, pounce: &Pounce, status: &JobStatus) {
                 ui.add(egui::ProgressBar::new(frac).show_percentage());
             }
             None => {
-                ui.spinner();
+                // A finished/cancelled job with no total (e.g. IngestJob, whose walk is always
+                // lazy) stays in this branch forever -- `egui::Ui::spinner` requests a repaint
+                // every frame it's drawn, so spinning it for a job that will never move again
+                // would keep the app repainting continuously while Details is open, defeating
+                // the whole on_change/request_repaint design (found by CodeRabbit's review).
+                if matches!(status.state, JobState::Queued | JobState::Running) {
+                    ui.spinner();
+                }
                 ui.label(format!("{} done", status.progress.done));
             }
         }

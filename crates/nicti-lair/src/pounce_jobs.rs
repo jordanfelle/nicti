@@ -141,13 +141,27 @@ impl ChunkedJob for SyncJob {
             .sync
             .as_mut()
             .expect("SyncJob::step called again after it already reported Done");
+        let had_total = self.progress.total.is_some();
         let more = sync
             .step(self.store.as_ref())
             .map_err(|e| JobError::new(e.to_string()))?;
-        self.done_count += 1;
+        let total = sync.total_hint();
+        if total.is_some() && !had_total {
+            // Just entered the catalog-side (`Checking`) phase, the first phase with a known
+            // total -- `done_count` restarts here so it counts only this phase's own steps,
+            // rather than continuing to include however many ingest chunks (and the one
+            // `Listing` transition) already ran before it (found by CodeRabbit's review: without
+            // this, `done` was already past `total` the moment the checking phase started).
+            self.done_count = 0;
+        } else {
+            self.done_count += 1;
+        }
         self.progress = Progress {
             done: self.done_count,
-            total: sync.total_hint(),
+            // Once the phase with a known total ends (`Done`), `total_hint()` goes back to
+            // `None` -- keep the last real total instead of reverting the row to an
+            // indeterminate spinner on its very last step (also found by CodeRabbit's review).
+            total: total.or(self.progress.total),
         };
         if more {
             Ok(Step::Yield)
