@@ -214,42 +214,69 @@ jobs:
             packaging/windows/Nicti-Setup-*.exe.minisig \
             packaging/windows/Nicti-Setup-*.exe.sha256
 
-      # #267: the bleeding-edge channel. `edge` is a single moving tag/release -- delete and
-      # recreate on every main push, rather than accumulate one release per merge. `--prerelease`
-      # is what keeps this out of `/releases/latest` (see the top-of-file comment), so
-      # nicti-shed's stable auto-updater never sees it.
+      # #267: the bleeding-edge channel. `edge` is a single moving tag/release, force-moved and
+      # reused (never deleted) on every main push, rather than accumulating one release per
+      # merge. `--prerelease` is what keeps this out of `/releases/latest` (see the top-of-file
+      # comment), so nicti-shed's stable auto-updater never sees it.
       #
-      # `gh release delete --cleanup-tag` makes two separate API calls (delete release, delete
-      # tag); if the tag-delete half fails while the release-delete half succeeds, a stale `edge`
-      # git tag survives, and `gh release create edge --target "$GITHUB_SHA"` silently *ignores*
-      # `--target` whenever the tag already exists (reusing the existing tag's commit instead) --
-      # so a naive `|| true` here would ship binaries built from the current commit under a
-      # release/tag that actually still points at a stale one, with no failed step to flag it.
-      # So: force-delete the tag ref directly (independent of whether a release existed for it,
-      # and independent of whether the `gh release delete` above succeeded), then verify after
-      # creation that `edge` really points at this commit -- fail loudly rather than ship a
-      # mismatched tag/artifact binding.
+      # CodeRabbit review (PR #268) caught three real issues in an earlier delete-then-recreate
+      # approach and this rewrite addresses all three at the root instead of patching around them:
+      #   1. Deleting the old `edge` release before the new one's assets finish uploading left a
+      #      window where `edge` didn't exist at all if upload failed or was canceled mid-step.
+      #   2. GitHub doesn't guarantee run ordering -- a re-run of an older, superseded workflow
+      #      run (stale GITHUB_SHA) could still overwrite a newer edge build with an older one.
+      #   3. A partially-failed tag delete could leave `gh release create --target` silently
+      #      targeting the wrong (stale) commit, and the script had no `set -e` to stop on it.
+      # Fix: never delete the `edge` release at all -- force-move (or create, on the very first
+      # run) the `edge` tag as a single atomic ref update, then edit-in-place/clobber-upload onto
+      # the same release object. `set -euo pipefail` means any failed step here (including the
+      # stale-run guard below) stops the job instead of silently falling through.
       - name: Publish edge release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete edge --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag 2>/dev/null || true
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" >/dev/null 2>&1 || true
+          set -euo pipefail
 
-          gh release create edge \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "Nicti edge (${GITHUB_SHA:0:7})" \
-            --target "${GITHUB_SHA}" \
-            --prerelease \
-            --notes "Automatic build from the latest commit on main (${GITHUB_SHA}). Unsigned and may be unstable -- for the stable channel, see the latest versioned release instead." \
-            packaging/windows/Nicti-Setup-*.exe \
-            packaging/windows/Nicti-Setup-*.exe.minisig \
-            packaging/windows/Nicti-Setup-*.exe.sha256
+          # Guard against an out-of-order re-run: if main has advanced past this run's commit by
+          # the time it gets here, this run is stale -- publishing would move `edge` backward.
+          remote_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
+          if [[ "$remote_main_sha" != "${GITHUB_SHA}" ]]; then
+            echo "::notice::main has advanced to $remote_main_sha since this run started at ${GITHUB_SHA} -- skipping the edge publish so this stale run can't move edge backward."
+            exit 0
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" -f sha="${GITHUB_SHA}" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/edge" -f sha="${GITHUB_SHA}" >/dev/null
+          fi
 
           actual_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/edge" --jq '.object.sha')
           if [[ "$actual_sha" != "${GITHUB_SHA}" ]]; then
-            echo "::error::edge tag points at $actual_sha, not this commit (${GITHUB_SHA}) -- a stale tag from a prior run was not fully cleaned up. Re-run this job."
+            echo "::error::edge tag points at $actual_sha after the move, not this commit (${GITHUB_SHA})."
             exit 1
+          fi
+
+          notes="Automatic build from the latest commit on main (${GITHUB_SHA}). Unsigned and may be unstable -- for the stable channel, see the latest versioned release instead."
+          if gh release view edge --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit edge --repo "${GITHUB_REPOSITORY}" \
+              --title "Nicti edge (${GITHUB_SHA:0:7})" \
+              --notes "$notes" \
+              --prerelease
+            gh release upload edge --repo "${GITHUB_REPOSITORY}" --clobber \
+              packaging/windows/Nicti-Setup-*.exe \
+              packaging/windows/Nicti-Setup-*.exe.minisig \
+              packaging/windows/Nicti-Setup-*.exe.sha256
+          else
+            gh release create edge \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Nicti edge (${GITHUB_SHA:0:7})" \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --notes "$notes" \
+              packaging/windows/Nicti-Setup-*.exe \
+              packaging/windows/Nicti-Setup-*.exe.minisig \
+              packaging/windows/Nicti-Setup-*.exe.sha256
           fi

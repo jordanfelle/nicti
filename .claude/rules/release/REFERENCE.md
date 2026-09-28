@@ -37,12 +37,17 @@ Full reasoning/history: `docs/decisions/release.md`.
   `native-tls`, so it rides the OS trust store — no `webpki-roots`, which isn't on `deny.toml`'s
   allowlist). Auto-check state: `%LOCALAPPDATA%\Nicti\update.json`, at most once per 24h.
 - **Edge channel (#267)**: every push to `main` also rebuilds and republishes a single moving
-  `edge` prerelease at that commit (delete + recreate, not accumulate) — same installer/minisign
-  pipeline as a real release, just gated on `github.ref == 'refs/heads/main'` instead of a tag.
-  `--prerelease` keeps it out of `/releases/latest`, which is what `nicti-shed`'s auto-updater
-  polls, so it can never get auto-installed over a stable install. No separate `develop` branch:
-  `main` only ever advances via a reviewed, CI-passing PR merge already, so it's already the
-  "always good, frequently updated" branch a `develop` branch would otherwise exist for.
+  `edge` prerelease at that commit — same installer/minisign pipeline as a real release, gated on
+  `github.ref == 'refs/heads/main'` instead of a tag, with SignPath (Authenticode) signing
+  explicitly excluded via `&& github.ref_type == 'tag'` on all four of its steps, so edge stays
+  minisign-only even once SignPath is enabled. `--prerelease` keeps it out of
+  `/releases/latest`, which is what `nicti-shed`'s auto-updater polls, so it can never get
+  auto-installed over a stable install. No separate `develop` branch: `main` only ever advances
+  via a reviewed, CI-passing PR merge already, so it's already the "always good, frequently
+  updated" branch a `develop` branch would otherwise exist for. **The `edge` release/tag is
+  force-moved and reused, never deleted** (CodeRabbit review, PR #268, caught a delete-then-
+  recreate approach's real availability gap and stale-tag risk) — see the step's own comment in
+  `release.yml` for the three failure modes this avoids.
 - See `docs/releasing.md` for the actual cut-a-release runbook and the one-time minisign
   key-generation steps.
 
