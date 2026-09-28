@@ -29,10 +29,12 @@ pub fn verify_installer(
 mod tests {
     use super::*;
 
-    // A real minisign keypair/signature triple, generated solely to exercise this test -- see
-    // `crate::PUBLIC_KEY_BASE64`'s own doc comment. `FIXTURE_BYTES` are the exact bytes that
-    // were signed; `FIXTURE_SIGNATURE` is the resulting `.minisig` sidecar's own file contents,
-    // verbatim.
+    // A real minisign keypair/signature triple, generated solely to exercise this test -- not
+    // the production key `crate::PUBLIC_KEY_BASE64` now holds (see its own doc comment).
+    // `FIXTURE_BYTES` are the exact bytes that were signed; `FIXTURE_SIGNATURE` is the resulting
+    // `.minisig` sidecar's own file contents, verbatim.
+    const FIXTURE_PUBLIC_KEY_BASE64: &str =
+        "RWQQhGAWQ6j6RtbA5MtQbNkvNW+yqSuYR0GAJ+YBR1DbMY87J0uIxEmK";
     const FIXTURE_BYTES: &[u8] = b"fake-installer-bytes-for-test-fixture\n";
     // The trusted-comment line is itself covered by a second signature (minisig's own
     // "global signature", the final base64 blob) -- it must be reproduced byte-for-byte from
@@ -49,7 +51,7 @@ rVaUX7HkjX8VsxZT+LJoW0ebkb4nh2MWu2ox0+ZM90StlJQ3bCO9f5UFSCubcEUJ6S00IDtPoLeYabeD
 
     #[test]
     fn accepts_a_genuine_signature() {
-        verify_installer(crate::PUBLIC_KEY_BASE64, FIXTURE_BYTES, FIXTURE_SIGNATURE)
+        verify_installer(FIXTURE_PUBLIC_KEY_BASE64, FIXTURE_BYTES, FIXTURE_SIGNATURE)
             .expect("a real signature over its own real bytes must verify");
     }
 
@@ -57,7 +59,7 @@ rVaUX7HkjX8VsxZT+LJoW0ebkb4nh2MWu2ox0+ZM90StlJQ3bCO9f5UFSCubcEUJ6S00IDtPoLeYabeD
     fn rejects_tampered_bytes() {
         let mut tampered = FIXTURE_BYTES.to_vec();
         tampered[0] ^= 0xFF;
-        let result = verify_installer(crate::PUBLIC_KEY_BASE64, &tampered, FIXTURE_SIGNATURE);
+        let result = verify_installer(FIXTURE_PUBLIC_KEY_BASE64, &tampered, FIXTURE_SIGNATURE);
         assert!(
             matches!(result, Err(ShedError::Verify)),
             "a signature must never verify against bytes it wasn't signed over"

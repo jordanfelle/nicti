@@ -22,12 +22,12 @@ pub use check::{LatestRelease, ReleaseAsset};
 /// time so a compromised update server (or a MITM'd download) can't also spoof the verification
 /// key -- see `docs/decisions/release.md`.
 ///
-/// **Placeholder.** This is a throwaway keypair generated only to exercise this crate's own
-/// tests; it is NOT the production signing key. Before the first real release, generate the real
-/// keypair per `docs/releasing.md`'s one-time setup section and replace this constant with that
-/// keypair's public half. Every `nicti.exe` built before that replacement cannot verify a real
-/// release's signature (a fail-safe default: it refuses rather than trusting nothing).
-pub const PUBLIC_KEY_BASE64: &str = "RWQQhGAWQ6j6RtbA5MtQbNkvNW+yqSuYR0GAJ+YBR1DbMY87J0uIxEmK";
+/// This is the real production signing key generated per `docs/releasing.md`'s one-time setup
+/// section (private half held only in the `NICTI_UPDATE_MINISIGN_KEY_B64` GitHub Actions
+/// secret). See that doc's "Rotating this key" note before ever changing this value again --
+/// swapping it outright, rather than accepting both old and new keys through a transition
+/// window, strands any client that misses the transition release.
+pub const PUBLIC_KEY_BASE64: &str = "RWSwa641+4ZLWXvMWw1veAJCCIPzmTDy9l5KXJoEjW2aM25+IAvQyNSV";
 
 /// The GitHub repository this crate checks for releases against.
 pub const RELEASES_LATEST_URL: &str =
