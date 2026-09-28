@@ -83,7 +83,11 @@ jobs:
         shell: bash
         run: |
           if grep -q 'RWQQhGAWQ6j6RtbA5MtQbNkvNW+yqSuYR0GAJ+YBR1DbMY87J0uIxEmK' crates/nicti-shed/src/lib.rs; then
-            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            # A tag push and an explicit workflow_dispatch are both someone deliberately
+            # exercising the build/sign pipeline (the latter is docs/releasing.md's own
+            # pre-tag dry-run step) -- they should see and act on a loud failure, not have it
+            # silently downgrade to a no-op skip the way an automatic main-push edge build does.
+            if [[ "${GITHUB_REF_TYPE}" == "tag" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
               echo "::error::crates/nicti-shed/src/lib.rs still has the placeholder PUBLIC_KEY_BASE64 -- generate the real production keypair per docs/releasing.md before releasing."
               exit 1
             fi
