@@ -314,13 +314,18 @@ mod tests {
             Duration::from_millis(20),
             || {},
         );
-        // Immediately after spawn, the background thread may not have sampled yet.
+        // Poll with a generous deadline rather than one fixed sleep-then-snapshot window: a fixed
+        // 200ms window flaked on Windows CI (same root cause as the neighboring
+        // sampler_calls_on_sample_after_each_real_sample test's comment -- `cargo test` runs every
+        // test's own background sampler thread concurrently, and a loaded/virtualized runner can
+        // delay a fresh thread's first scheduling past 200ms).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut saw_sample = sampler.sample().is_some();
-        if !saw_sample {
-            thread::sleep(Duration::from_millis(200));
+        while !saw_sample && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
             saw_sample = sampler.sample().is_some();
         }
-        assert!(saw_sample, "expected a sample within 200ms of spawning");
+        assert!(saw_sample, "expected a sample within 5s of spawning");
     }
 
     #[test]

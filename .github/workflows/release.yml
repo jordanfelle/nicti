@@ -186,6 +186,9 @@ jobs:
         run: |
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
             choco install nsis -y
+            # A GitHub Actions job's process PATH isn't refreshed mid-job after an installer
+            # runs -- only steps that come after this one pick up an addition to GITHUB_PATH.
+            Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files (x86)\NSIS'
           }
 
       - name: Build installer
