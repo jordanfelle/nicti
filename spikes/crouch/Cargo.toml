@@ -26,6 +26,7 @@ bytemuck = { version = "1", features = ["derive"] }
 sysinfo = "0.37"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "cuda", "tensorrt"] }
 nicti-prowl = { path = "../../crates/nicti-prowl" }
+nicti-haw = { path = "../../crates/nicti-haw" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Foundation"] }

@@ -15,15 +15,17 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
 thiserror = "2"
+nicti-haw = { path = "../../crates/nicti-haw" }
 
-# Dev-only, for tests/ort_cross_module.rs (#179): none of these four depend on groom, so this
+# Dev-only, for tests/ort_cross_module.rs (#179/#229): none of these five depend on groom, so this
 # doesn't create a cycle. Reproduces the real cross-crate `ort` environment race that motivated
-# #179's fix -- see that test file's own doc comment.
+# #179's fix, and #229's shared-path-mismatch check -- see that test file's own doc comment.
 [dev-dependencies]
 siamese = { path = "../siamese" }
 crouch = { path = "../crouch" }
 rods = { path = "../rods" }
 litter = { path = "../litter" }
+rosette = { path = "../rosette" }
 
 [[bin]]
 name = "groom"

@@ -17,7 +17,6 @@
 //! silently underneath them without checking `Session::execution_providers` or similar.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use ort::session::Session;
 use ort::value::Tensor;
@@ -41,35 +40,12 @@ fn ort_err(e: impl std::fmt::Display) -> AiDenoiseError {
     AiDenoiseError::Ort(e.to_string())
 }
 
-/// Same reasoning as the identical copies in `spikes/groom/src/ai.rs`,
-/// `spikes/siamese/src/segment.rs`, `spikes/crouch/src/ort_contend.rs`, and
-/// `spikes/litter/src/embed.rs`: the `ort` environment is process-global and `load-dynamic`
-/// requires this to run before any other `ort` API call. Keep all five in sync (#179).
-///
-/// `EnvironmentBuilder::commit()` returning `false` is not a failure: per its own doc comment
-/// (ort 2.0.0-rc.13), `false` means "an environment has already been configured" -- `commit()`
-/// only inserts the builder into a process-global `OnceLock`, it never calls ONNX Runtime's
-/// `CreateEnv` itself, so there is no way for it to report a genuine init failure at all. A real
-/// failure (bad dylib, version mismatch) surfaces from `ort::init_from` above instead, and is
-/// already propagated by the `?`. So this proceeds either way once `init_from` succeeds, verified
-/// in `spikes/groom/tests/ort_cross_module.rs` (exercises all five crates together). **Known
-/// limitation**: `ort`'s public API exposes no way to inspect which dylib path the winning
-/// environment actually loaded, so a dylib-path mismatch across callers can't be detected here.
-/// Execution providers *can* be read back via `Environment::current()?.execution_providers()`,
-/// but that only reflects EPs set via `EnvironmentBuilder::with_execution_providers` -- this
-/// module and `crouch` request EPs per-`Session` instead (`Session::builder().
-/// with_execution_providers(...)`), which isn't visible on `Environment` at all. So even with
-/// that getter, there's no way to learn which EP a losing caller's session actually ends up
-/// using.
+/// Delegates to `nicti-haw` (#229), the shared process-wide `ort` environment init every
+/// `ort`/`load-dynamic` spike in this workspace now goes through, replacing this crate's own
+/// former copy -- see that crate's doc comment for the full rationale (a crate-local `OnceLock`
+/// can't detect two different crates requesting two different dylib paths in the same process).
 pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), AiDenoiseError> {
-    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    let result = INIT.get_or_init(|| {
-        let builder =
-            ort::init_from(dylib_path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
-        builder.commit();
-        Ok(())
-    });
-    result.clone().map_err(AiDenoiseError::Ort)
+    nicti_haw::ensure_ort_environment(dylib_path).map_err(ort_err)
 }
 
 /// A tiled ONNX denoiser: NCHW float32 input/output, dynamic spatial dims, one named input

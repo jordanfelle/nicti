@@ -25,6 +25,7 @@ ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dyn
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+nicti-haw = { path = "../../crates/nicti-haw" }
 
 [dev-dependencies]
 tempfile = "3"

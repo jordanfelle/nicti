@@ -1216,6 +1216,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
+ "nicti-haw",
  "nicti-prowl",
  "ort",
  "pollster",
@@ -2337,9 +2338,11 @@ dependencies = [
  "bytemuck",
  "crouch",
  "litter",
+ "nicti-haw",
  "ort",
  "pollster",
  "rods",
+ "rosette",
  "serde",
  "serde_json",
  "siamese",
@@ -3143,6 +3146,7 @@ dependencies = [
  "fast_image_resize",
  "image",
  "image_hasher",
+ "nicti-haw",
  "nicti-prowl",
  "ort",
  "serde",
@@ -3529,6 +3533,14 @@ dependencies = [
  "nicti-claw",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nicti-haw"
+version = "0.0.0"
+dependencies = [
+ "ort",
  "thiserror 2.0.21",
 ]
 
@@ -5076,6 +5088,7 @@ dependencies = [
  "anyhow",
  "clap",
  "image",
+ "nicti-haw",
  "nicti-prowl",
  "ort",
  "serde",
@@ -5092,6 +5105,7 @@ dependencies = [
  "clap",
  "fast_image_resize",
  "image",
+ "nicti-haw",
  "ort",
  "serde",
  "serde_json",
@@ -5405,6 +5419,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "image",
+ "nicti-haw",
  "ort",
  "pollster",
  "serde",

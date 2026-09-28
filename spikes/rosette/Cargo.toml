@@ -25,6 +25,7 @@ fast_image_resize = "6"
 image = { version = "0.25", default-features = false }
 sha2 = "0.11"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+nicti-haw = { path = "../../crates/nicti-haw" }
 
 [dev-dependencies]
 tempfile = "3"

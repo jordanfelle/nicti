@@ -27,9 +27,9 @@
 //!   against in this pass -- its `#[ignore]`d test is TBD, same "spec built, real measurement
 //!   pending real inputs" shape ADR-0033 uses for the con-shoot ground truth.
 //!
-//! All three share the same `ensure_ort_environment`/`load_session` shape as the other four
-//! `ort`/`load-dynamic` wrappers in this repo (`spikes/litter`, `spikes/groom`, `spikes/siamese`,
-//! `spikes/rods`, `spikes/crouch`) -- keep all in sync (#179).
+//! All three share the same `load_session` shape as the other `ort`/`load-dynamic` wrappers in
+//! this repo, and `ensure_ort_environment` itself now delegates to the shared `nicti-haw` crate
+//! (#229) every one of them goes through.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -80,18 +80,12 @@ fn extract_cls_token(shape: &[i64], data: &[f32]) -> Result<Vec<f32>, EmbedError
     Ok(data[0..hidden].to_vec())
 }
 
-/// Same process-global `OnceLock` pattern as the other four `ort`/`load-dynamic` copies in this
-/// repo (`spikes/litter/src/embed.rs`, `spikes/groom/src/ai.rs`, `spikes/siamese/src/segment.rs`,
-/// `spikes/rods/src/ai.rs`, `spikes/crouch/src/ort_contend.rs`). Keep all in sync (#179).
+/// Delegates to `nicti-haw` (#229), the shared process-wide `ort` environment init every
+/// `ort`/`load-dynamic` spike in this workspace now goes through, replacing this crate's own
+/// former copy -- see that crate's doc comment for the full rationale (a crate-local `OnceLock`
+/// can't detect two different crates requesting two different dylib paths in the same process).
 pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), EmbedError> {
-    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    let result = INIT.get_or_init(|| {
-        let builder =
-            ort::init_from(dylib_path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
-        builder.commit();
-        Ok(())
-    });
-    result.clone().map_err(EmbedError::Ort)
+    nicti_haw::ensure_ort_environment(dylib_path).map_err(ort_err)
 }
 
 fn load_session(model_path: &Path, ort_dylib_path: &Path) -> Result<Session, EmbedError> {
