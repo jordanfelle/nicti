@@ -334,7 +334,7 @@ CREATE INDEX idx_keyword_path ON keyword(path);
 
 CREATE TABLE asset_keyword (
     keyword_id  INTEGER NOT NULL REFERENCES keyword(id),
-    asset_id    INTEGER NOT NULL REFERENCES asset(id),
+    asset_id    INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
     PRIMARY KEY (keyword_id, asset_id)
 );
 CREATE INDEX idx_asset_keyword_asset ON asset_keyword(asset_id);
@@ -360,7 +360,7 @@ CREATE UNIQUE INDEX idx_collection_unique_root_child ON collection(name_fold) WH
 
 CREATE TABLE collection_asset (
     collection_id   INTEGER NOT NULL REFERENCES collection(id),
-    asset_id        INTEGER NOT NULL REFERENCES asset(id),
+    asset_id        INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
     position        REAL NOT NULL,
     PRIMARY KEY (collection_id, asset_id)
 );

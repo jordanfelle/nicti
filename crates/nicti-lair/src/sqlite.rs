@@ -29,6 +29,25 @@ fn fold_keyword_name(name: &str) -> String {
     composed.to_lowercase()
 }
 
+/// Escapes SQLite `GLOB` metacharacters (`*`, `?`, `[`) as one-character classes (`[*]`, `[?]`,
+/// `[[]`) so caller text used in `hunt`'s `rel_path_prefix`/`filename_contains` filters is matched
+/// literally, not as a wildcard/character-class pattern -- without this, a search for `IMG_[1]`
+/// would match `IMG_1` (character class), and a lone unmatched `[` would match nothing at all.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '*' | '?' | '[' => {
+                out.push('[');
+                out.push(ch);
+                out.push(']');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 fn row_to_keyword(row: &rusqlite::Row) -> rusqlite::Result<Keyword> {
     Ok(Keyword {
         id: row.get(0)?,
@@ -59,17 +78,27 @@ fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, Cat
 
     if let Some(keyword_id) = filter.keyword_id {
         if filter.include_subtree {
-            let path: String = conn.query_row(
-                "SELECT path FROM keyword WHERE id = ?1",
-                [keyword_id],
-                |row| row.get(0),
-            )?;
-            clauses.push(
-                "EXISTS (SELECT 1 FROM asset_keyword ak JOIN keyword k ON k.id = ak.keyword_id \
-                 WHERE ak.asset_id = a.id AND k.path GLOB ?)"
-                    .to_string(),
-            );
-            params.push(Box::new(format!("{path}*")));
+            // A saved smart-collection rule can outlive the keyword it names (`delete_keyword`
+            // doesn't touch `collection.rule_json`) -- a missing keyword must make this filter
+            // match nothing, not fail the whole query with a `QueryReturnedNoRows` error.
+            let path: Option<String> = conn
+                .query_row(
+                    "SELECT path FROM keyword WHERE id = ?1",
+                    [keyword_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match path {
+                Some(path) => {
+                    clauses.push(
+                        "EXISTS (SELECT 1 FROM asset_keyword ak JOIN keyword k ON k.id = ak.keyword_id \
+                         WHERE ak.asset_id = a.id AND k.path GLOB ?)"
+                            .to_string(),
+                    );
+                    params.push(Box::new(format!("{path}*")));
+                }
+                None => clauses.push("0".to_string()),
+            }
         } else {
             clauses.push(
                 "EXISTS (SELECT 1 FROM asset_keyword ak \
@@ -122,11 +151,17 @@ fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, Cat
     }
     if let Some(prefix) = &filter.rel_path_prefix {
         clauses.push("a.rel_path_fold GLOB ?".to_string());
-        params.push(Box::new(format!("{}*", prefix.to_lowercase())));
+        params.push(Box::new(format!(
+            "{}*",
+            glob_escape(&fold_keyword_name(prefix))
+        )));
     }
     if let Some(needle) = &filter.filename_contains {
         clauses.push("a.rel_path_fold GLOB ?".to_string());
-        params.push(Box::new(format!("*{}*", needle.to_lowercase())));
+        params.push(Box::new(format!(
+            "*{}*",
+            glob_escape(&fold_keyword_name(needle))
+        )));
     }
 
     Ok(FilterSql {
@@ -2013,6 +2048,95 @@ mod tests {
         assert_eq!(
             collected, ids,
             "ties on rating must break by id, ascending, with no gaps or duplicates across pages"
+        );
+    }
+
+    /// Regression test for a CodeRabbit finding: `remove_asset` only ever deleted
+    /// `edit_history`/`edit_variant`/`preview`/`asset` rows, never `asset_keyword`/
+    /// `collection_asset` -- with `PRAGMA foreign_keys = ON` (always the case at runtime), the
+    /// `DELETE FROM asset` itself would fail with a foreign-key violation for any asset that had
+    /// ever been tagged or added to a manual collection. Fixed via `ON DELETE CASCADE` on both
+    /// tables' `asset_id` foreign key.
+    #[test]
+    fn remove_asset_succeeds_for_a_tagged_asset_in_a_manual_collection() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let asset_id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let keyword = store.create_keyword(None, "Tag").unwrap();
+        store.tag(&[asset_id], keyword).unwrap();
+        let collection_id = store
+            .create_collection(None, "Selects", CollectionKind::Manual)
+            .unwrap();
+        store.add_to_collection(collection_id, &[asset_id]).unwrap();
+
+        store.remove_asset(asset_id).unwrap();
+
+        assert!(store
+            .find_asset_by_path(root_id, "a.NEF")
+            .unwrap()
+            .is_none());
+        assert!(store.keywords_for(asset_id).unwrap().is_empty());
+        assert!(store.collection_assets(collection_id).unwrap().is_empty());
+    }
+
+    /// Regression test for a CodeRabbit finding: a smart collection's saved `Filter` can
+    /// reference a keyword by id that's since been deleted (`delete_keyword` never touches
+    /// `collection.rule_json`) -- resolving it must match nothing, not error out.
+    #[test]
+    fn hunt_with_a_deleted_keyword_in_the_filter_matches_nothing_instead_of_erroring() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        let keyword = store.create_keyword(None, "Gone").unwrap();
+        store.delete_keyword(keyword).unwrap();
+
+        let subtree_filter = Filter {
+            keyword_id: Some(keyword),
+            include_subtree: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .hunt(&subtree_filter, default_sort(), &full_page())
+                .unwrap(),
+            Vec::<i64>::new()
+        );
+        assert_eq!(store.hunt_count(&subtree_filter).unwrap(), 0);
+        assert_eq!(store.facets(&subtree_filter).unwrap().total, 0);
+    }
+
+    /// Regression test for a CodeRabbit finding: `rel_path_prefix`/`filename_contains` embedded
+    /// caller text directly into a `GLOB` pattern with no escaping and only `to_lowercase()`
+    /// folding (not the NFC-then-lowercase fold `rel_path_fold` itself uses).
+    #[test]
+    fn filename_search_escapes_glob_metacharacters_and_folds_unicode_like_rel_path_fold() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        // A literal `[1]` in the filename -- without escaping, a GLOB search for the same text
+        // would instead be interpreted as a character class and match "IMG_1.NEF" too.
+        let literal_id = store
+            .insert_asset(root_id, &new_asset("IMG_[1].NEF", None), None)
+            .unwrap();
+        store
+            .insert_asset(root_id, &new_asset("IMG_1.NEF", None), None)
+            .unwrap();
+
+        let filter = Filter {
+            filename_contains: Some("[1]".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt(&filter, default_sort(), &full_page()).unwrap(),
+            vec![literal_id],
+            "a literal `[1]` in filename_contains must match only the literal filename, \
+             not be interpreted as a GLOB character class"
         );
     }
 }
