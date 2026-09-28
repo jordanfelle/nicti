@@ -66,18 +66,32 @@ FunctionEnd
 ; since `File` fails atomically when the destination is locked) if it never does.
 Function InstallExe
   StrCmp $IsUpdate "1" 0 do_copy
-    ; /F: force-terminate. A graceful close request can simply fail to do anything if the
-    ; process is unresponsive or mid-teardown -- this is an update overwriting the running
+    ; Kill only the nicti.exe running from *this* $INSTDIR, not every process named nicti.exe --
+    ; `taskkill /IM` matches by image name alone, which would also force-close an unrelated
+    ; portable or development copy the user happens to be running at the same time. Written out
+    ; as a small script file (into $PLUGINSDIR, NSIS's own auto-cleaned temp dir) rather than an
+    ; inline `-Command` string, since escaping PowerShell's own quoting inside NSIS's quoting
+    ; inside nsExec's quoting is exactly the kind of nesting that's easy to get subtly wrong.
+    FileOpen $3 "$PLUGINSDIR\kill-nicti.ps1" w
+    FileWrite $3 "Get-Process -Name nicti -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\nicti.exe' } | Stop-Process -Force$\r$\n"
+    FileClose $3
+    ; -Force: same reasoning the old `/F` had -- this is an update overwriting the running
     ; instance's own files, not a "please save your work" prompt; the app has nothing unsaved to
     ; lose here (ADR-0021's catalog DB is the authority, not in-memory state).
-    nsExec::ExecToStack 'taskkill /F /IM nicti.exe'
+    nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-nicti.ps1"'
     Pop $0
 
   StrCpy $2 0 ; retry counter
   do_copy:
     ClearErrors
     SetOutPath "$INSTDIR"
+    ; try: skip (rather than prompt) when the destination can't be overwritten and set the error
+    ; flag either way -- the default `on` mode doesn't reliably report a locked destination
+    ; through IfErrors in a silent install, which would otherwise make the retry loop below never
+    ; actually detect a locked file.
+    SetOverwrite try
     File "${SRCDIR}\nicti.exe"
+    SetOverwrite on
     IfErrors 0 copy_done
       StrCmp $IsUpdate "1" 0 copy_failed ; a fresh install failing isn't a lock/retry situation
       IntOp $2 $2 + 1

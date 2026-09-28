@@ -48,9 +48,31 @@ jobs:
           echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
+      # zizmor flags restoring a cache here as a poisoning vector (a malicious cache entry from
+      # an untrusted run being restored into a run with write/secrets access). Not adding
+      # `lookup-only: true` deliberately: this workflow only ever runs from a pushed tag or an
+      # explicit `workflow_dispatch`, both of which already require write access to this repo --
+      # an attacker who could poison the cache in the first place would already need the same
+      # access this workflow itself requires, so the restore isn't a real escalation path here,
+      # unlike a `pull_request`-triggered workflow accepting a cache seeded by an untrusted fork.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: false # release builds are infrequent; not worth a dedicated cache entry
+
+      # A release build must never ship nicti-shed's placeholder minisign key -- it's a real
+      # keypair generated solely to exercise that crate's own tests (see its own doc comment),
+      # and a release signed while this placeholder is still embedded would mean the client-side
+      # verification key in a real user's install doesn't actually match the CI signing key,
+      # silently breaking update verification. Fails loudly, in CI, before any build work happens
+      # -- not a runtime guard in the shipped binary, which would only ever be caught by a human
+      # looking at logs after the fact.
+      - name: Verify the production minisign key is set
+        shell: bash
+        run: |
+          if grep -q 'RWQQhGAWQ6j6RtbA5MtQbNkvNW+yqSuYR0GAJ+YBR1DbMY87J0uIxEmK' crates/nicti-shed/src/lib.rs; then
+            echo "::error::crates/nicti-shed/src/lib.rs still has the placeholder PUBLIC_KEY_BASE64 -- generate the real production keypair per docs/releasing.md before releasing."
+            exit 1
+          fi
 
       - name: Build nicti.exe
         run: cargo build --release -p nicti
@@ -59,6 +81,14 @@ jobs:
       # to #249, see the ADR) is approved. Skipped entirely until then -- v1's first releases
       # ship unsigned, relying on the minisign signature below (not Authenticode) as the actual
       # update-integrity check.
+      - name: Upload nicti.exe for signing
+        if: vars.SIGNPATH_ENABLED == 'true'
+        id: upload_nicti_exe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nicti-exe-unsigned
+          path: target/release/nicti.exe
+
       - name: Sign nicti.exe (SignPath)
         if: vars.SIGNPATH_ENABLED == 'true'
         uses: SignPath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
@@ -68,7 +98,7 @@ jobs:
           project-slug: 'nicti'
           signing-policy-slug: 'release-signing'
           artifact-configuration-slug: 'nicti-exe'
-          github-artifact-id: '' # populated once a real SignPath project exists; see the follow-up issue
+          github-artifact-id: '${{ steps.upload_nicti_exe.outputs.artifact-id }}'
           wait-for-completion: true
           output-artifact-directory: 'target/release'
 
@@ -81,11 +111,21 @@ jobs:
 
       - name: Build installer
         shell: pwsh
+        env:
+          NICTI_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          & makensis "/DVERSION=${{ steps.version.outputs.version }}" "/DSRCDIR=${{ github.workspace }}\target\release" packaging\windows\nicti.nsi
+          & makensis "/DVERSION=$env:NICTI_VERSION" "/DSRCDIR=${{ github.workspace }}\target\release" packaging\windows\nicti.nsi
 
       # SignPath also has to sign the installer itself, not just nicti.exe -- both binaries ship
       # to the user. Same gate as above.
+      - name: Upload installer for signing
+        if: vars.SIGNPATH_ENABLED == 'true'
+        id: upload_installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nicti-installer-unsigned
+          path: packaging/windows/Nicti-Setup-*.exe
+
       - name: Sign installer (SignPath)
         if: vars.SIGNPATH_ENABLED == 'true'
         uses: SignPath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
@@ -95,7 +135,7 @@ jobs:
           project-slug: 'nicti'
           signing-policy-slug: 'release-signing'
           artifact-configuration-slug: 'nicti-installer'
-          github-artifact-id: ''
+          github-artifact-id: '${{ steps.upload_installer.outputs.artifact-id }}'
           wait-for-completion: true
           output-artifact-directory: 'packaging/windows'
 
@@ -131,12 +171,14 @@ jobs:
 
       - name: Publish release
         if: github.event_name == 'push'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          NICTI_VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "Nicti ${{ steps.version.outputs.version }}" \
+            --title "Nicti ${NICTI_VERSION}" \
             --generate-notes \
             packaging/windows/Nicti-Setup-*.exe \
             packaging/windows/Nicti-Setup-*.exe.minisig \

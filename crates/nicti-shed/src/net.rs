@@ -2,12 +2,30 @@
 //! installer. `cfg(windows)`-only -- see this crate's own module doc comment for why.
 
 use std::process::Command;
+use std::time::Duration;
 
 use semver::Version;
 
 use crate::check::{self, LatestRelease};
 use crate::verify;
 use crate::{ShedError, PUBLIC_KEY_BASE64, RELEASES_LATEST_URL};
+
+/// Covers the whole request (DNS through reading the body), not just connect -- a stalled
+/// connection must not be able to block an update check or download indefinitely. `ureq`'s
+/// implicit default agent (what a bare `ureq::get` uses) has no global timeout at all.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// `ureq`'s own default body-read limit is 10MB, too small for a real installer (which bundles
+/// more than a bare `nicti.exe` as this grows -- DLLs, an uninstaller, etc.). 512MB is a generous
+/// ceiling, not a real expected size -- just far above `ureq`'s 10MB default and comfortably
+/// above anything this installer is realistically going to reach.
+const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .build()
+        .into()
+}
 
 /// Checks GitHub Releases for a version newer than `current`. Returns `Ok(None)` when already
 /// up to date -- that's the expected common case, not an error.
@@ -50,7 +68,8 @@ pub fn download_and_apply(release: &LatestRelease) -> Result<(), ShedError> {
 }
 
 fn get_string(url: &str) -> Result<String, ShedError> {
-    ureq::get(url)
+    agent()
+        .get(url)
         .header("User-Agent", "nicti-shed")
         .call()
         .map_err(|e| ShedError::Network(e.to_string()))?
@@ -60,11 +79,14 @@ fn get_string(url: &str) -> Result<String, ShedError> {
 }
 
 fn get_bytes(url: &str) -> Result<Vec<u8>, ShedError> {
-    ureq::get(url)
+    agent()
+        .get(url)
         .header("User-Agent", "nicti-shed")
         .call()
         .map_err(|e| ShedError::Network(e.to_string()))?
         .body_mut()
+        .with_config()
+        .limit(MAX_INSTALLER_BYTES)
         .read_to_vec()
         .map_err(|e| ShedError::Network(e.to_string()))
 }

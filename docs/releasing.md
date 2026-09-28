@@ -49,10 +49,16 @@ This produces:
   `NICTI_UPDATE_MINISIGN_KEY_B64` repository secret. **Never commit this file.** Delete the local
   copy once the secret is set.
 
-Rotating this key means: generate a new keypair, update the embedded public key in
-`crates/nicti-shed` in a release that still carries the *old* public key too (so already-installed
-copies can still verify the transition release), then drop the old key once enough of the install
-base has updated past it. No rotation has happened yet as of this writing.
+Rotating this key means: generate a new keypair, then have `crates/nicti-shed` accept a signature
+from *either* the old or the new public key (`verify_installer` tried against each in turn) for
+every release from the transition point on. There is no safe point to drop the old key on an
+"enough clients have updated" estimate -- a client that's still on the old key and, for whatever
+reason, misses the transition release entirely (skipped a check, was offline, auto-check was off)
+would otherwise be stuck: every later release is signed only with the new key, which its still-old
+binary can't verify, so it can never update itself again without a manual reinstall. The old key
+only gets dropped once a version is reached that the update-check flow itself no longer needs to
+support (e.g. a hard minimum-supported-version cutover, communicated well in advance), not on a
+guess about install-base coverage. No rotation has happened yet as of this writing.
 
 ## Enabling SignPath (Authenticode) signing
 
