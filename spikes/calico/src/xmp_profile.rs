@@ -27,8 +27,17 @@
 //!
 //! What calico still doesn't apply from a Look profile: `crs:Clarity2012`, the
 //! `crs:ToneCurvePV2012` point sequence, and any `crs:RGBTable`-based look (a separate
-//! `dng_rgb_table` container this module doesn't decode). [`LookProfile::unsupported_settings`]
-//! surfaces these instead of silently dropping them.
+//! `dng_rgb_table` container this module doesn't decode -- its wire format differs from
+//! `crs:LookTable`'s `dng_look_table` one, per the DNG SDK's `dng_big_table` family). When an
+//! RGBTable-based look appears *alongside* a decodable `crs:LookTable`, it's just noted in
+//! [`LookProfile::unsupported_settings`] rather than silently dropped. When it appears *instead*
+//! of a `crs:LookTable` (no look table at all, just an RGBTable one), [`parse`] returns
+//! [`LookProfileError::RgbTableLookUnsupported`] rather than the generic
+//! [`LookProfileError::NoLookTableProperty`] -- a found-but-unsupported look is a different,
+//! more actionable failure than no look at all. As of this writing no real installed Adobe Raw
+//! profile or third-party preset checked against (see ADR-0038's six confirmed profiles) uses
+//! `crs:RGBTable` instead of `crs:LookTable` -- whether it's worth decoding `dng_rgb_table` itself
+//! remains open pending a profile that actually needs it.
 
 use flate2::read::ZlibDecoder;
 use std::io::Read;
@@ -43,6 +52,12 @@ pub enum LookProfileError {
     Xml(#[from] roxmltree::Error),
     #[error("no crs:LookTable property found in this .xmp")]
     NoLookTableProperty,
+    #[error(
+        "found a crs:RGBTable-based look (id {0}) -- calico only decodes crs:LookTable's \
+         dng_look_table container, not RGBTable's separate dng_rgb_table one; unsupported, not \
+         absent"
+    )]
+    RgbTableLookUnsupported(String),
     #[error("crs:LookTable references ID {0}, but no matching crs:Table_{0} attribute exists")]
     TableIdNotFound(String),
     #[error("big-table decode failed: {0}")]
@@ -503,6 +518,10 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
     let mut name = String::from("(unnamed look)");
     let mut table_payload: Option<String> = None;
     let mut unsupported_settings = Vec::new();
+    // Captured separately from `unsupported_settings` (a display-only list) so a profile with
+    // *only* an RGBTable-based look -- no `crs:LookTable` at all -- can be told apart from one
+    // with no look at all: see the `table_id.ok_or(...)` check below.
+    let mut rgb_table_id: Option<String> = None;
 
     for node in doc.descendants() {
         for attr in node.attributes() {
@@ -522,6 +541,7 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
                 // below is kept as a defensive fallback in case some producer writes it that way
                 // instead, but this attribute case is the one that actually matches the SDK.
                 "RGBTable" => {
+                    rgb_table_id.get_or_insert_with(|| attr.value().to_string());
                     unsupported_settings.push(format!("RGBTable={}", attr.value()));
                 }
                 _ => {}
@@ -547,8 +567,19 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
 
     // A LookTable ID with no matching Table_<id> payload attribute is a distinct, more specific
     // failure than "no property at all" -- surface it as such rather than folding it into
-    // `NoLookTableProperty`.
-    let table_id = table_id.ok_or(LookProfileError::NoLookTableProperty)?;
+    // `NoLookTableProperty`. Likewise, a profile with an RGBTable-based look and no LookTable at
+    // all isn't "no look table found" -- it's a *found but unsupported* look, a more specific and
+    // more actionable failure for a caller (or a future implementer of dng_rgb_table decode) than
+    // the generic "absent" case.
+    let table_id = match table_id {
+        Some(id) => id,
+        None => {
+            if let Some(rgb_id) = rgb_table_id {
+                return Err(LookProfileError::RgbTableLookUnsupported(rgb_id));
+            }
+            return Err(LookProfileError::NoLookTableProperty);
+        }
+    };
     let payload =
         table_payload.ok_or_else(|| LookProfileError::TableIdNotFound(table_id.clone()))?;
 
@@ -992,6 +1023,20 @@ mod tests {
             .unsupported_settings
             .iter()
             .any(|s| s == "RGBTable=SOMEOTHERID"));
+    }
+
+    #[test]
+    fn rgbtable_only_look_is_a_distinct_error_not_no_look_table_property() {
+        // No crs:LookTable anywhere in this document -- only crs:RGBTable + its own crs:Table_<id>
+        // payload. This should surface as "found an unsupported RGBTable look", not the generic
+        // "no look table found at all" -- the gap #184 was filed over.
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:RGBTable="SOMERGBID" crs:Table_SOMERGBID="whatever"/></rdf:RDF></x:xmpmeta>"#;
+
+        let err = parse(xmp).expect_err("an RGBTable-only look should not decode");
+        match err {
+            LookProfileError::RgbTableLookUnsupported(id) => assert_eq!(id, "SOMERGBID"),
+            other => panic!("expected RgbTableLookUnsupported, got {other:?}"),
+        }
     }
 
     /// Local-only proof against the user's own real, installed Adobe Raw "Look" profiles -- never
