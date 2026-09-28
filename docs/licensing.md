@@ -622,6 +622,33 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 8. **cuDNN/TensorRT bundling conditions** — Nicti's installer must keep these DLLs private to its
    own process (no general shared-lib exposure) and include the NVIDIA attribution notice text.
 
+## Update (2026-09-27, [#249](https://github.com/jordanfelle/nicti/issues/249)'s installer/auto-update ticket)
+
+Three new crates enter the dependency graph via `crates/nicti-shed` (the auto-updater), all
+permissive and already clearing `deny.toml`'s existing allowlist with no new entries needed:
+
+- **`semver`** — MIT OR Apache-2.0, and already present in the resolved graph (a transitive
+  dependency elsewhere), just newly used directly.[^rel1]
+- **`minisign-verify`** — MIT.[^rel2]
+- **`ureq`** (with its `native-tls` feature, `cfg(windows)`-only) — MIT OR Apache-2.0. Chosen over
+  `reqwest`/`rustls` specifically to avoid `webpki-roots`, whose `CDLA-Permissive-2.0` license is
+  **not** on `deny.toml`'s allowlist (see `[^s7]` above) — `native-tls` uses the OS trust store
+  instead (Windows SChannel/CNG), so no new TLS-root-bundle license question is introduced for the
+  actual shipped build.[^rel3] **Gotcha found while wiring this up**: `cargo deny check
+  --workspace --all-features` (ci.yml's own job) turns on every optional feature of every crate in
+  the graph, including `ureq`'s separate `native-tls-webpki-roots` feature -- which pulls in a
+  *different* crate, `webpki-root-certs` (also `CDLA-Permissive-2.0`, a root-CA-bundle data crate,
+  not `webpki-roots` itself), even though nothing in this workspace's own Cargo.toml requests that
+  feature. Resolved the same way this file's existing NCSA/`libfuzzer-sys` note already handles an
+  identical "present in the `--all-features` graph, never actually linked into a real binary"
+  shape: a scoped `deny.toml` exception for `webpki-root-certs` specifically (see that file's own
+  comment), not a global allowlist entry.
+
+CI-side (`rsign2`, installed via `cargo install` in `.github/workflows/release.yml`, never a
+runtime dependency of the shipped binary) — MIT.[^rel4]
+
+No ML model, font, or other bundled data asset is introduced by this ticket.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23
@@ -676,3 +703,7 @@ users, as long as the cuDNN/TensorRT isolation conditions above are honored.
 [^wp1]: libwebp core BSD-3-Clause — the vendored `vendor/COPYING` file inside `libwebp-sys` v0.9.6 (`~/.cargo/registry/src/.../libwebp-sys-0.9.6/vendor/COPYING`), read directly, matching the standard Google/WebM-project 3-clause BSD text; a separate `vendor/PATENTS` file in the same directory grants a perpetual, worldwide, royalty-free WebM patent license (terminable only if the licensee brings patent litigation over these implementations) — not a copyleft or attribution-beyond-BSD obligation, but distinct from the copyright license and worth citing separately — verified 2026-09-26
 [^lgpl1]: LGPL-2.1 §3 (relicense-to-GPL option, version choice is the redistributor's, not forced to GPL-2.0) and §§5–6 (permits combining/linking with a differently-licensed work without relicensing, provided that license permits modification + reverse engineering for debugging, plus notice + one of five source-availability options — for a statically-linked executable, §6(a) specifically requires the complete "work that uses the Library," i.e. the whole combined executable, as object and/or source so the user can relink, not just the LGPL'd library's own source) — https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html and https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt (full section text, §6 read in full), cross-checked against https://opensource.org/license/lgpl-2-1/ — verified 2026-09-25. FSF's license-compatibility page confirms LGPLv2.1 is "compatible with GPLv2 and GPLv3," and separately that GPLv3-family and AGPLv3-family works can combine separate modules/source files even though neither is a whole-program relicense of the other — https://www.gnu.org/licenses/license-list.en.html — verified 2026-09-25.
 [^mz1]: mozjpeg-sys v2.2.3's own `Cargo.toml` `license = "IJG AND Zlib AND BSD-3-Clause"` field (`~/.cargo/registry/src/.../mozjpeg-sys-2.2.3/Cargo.toml`), and the `mozjpeg` crate v0.10.13's own `license = "IJG"` — both resolved via `cargo metadata`'s `license` field, cross-checked against mozjpeg's own upstream `README-mozilla.md`/`LICENSE.md` describing it as a libjpeg-turbo (BSD-3-Clause/Zlib) fork retaining IJG's original license grant — verified 2026-09-27.
+[^rel1]: `semver` v1.0.28 `license = "MIT OR Apache-2.0"` — https://crates.io/api/v1/crates/semver — verified 2026-09-27
+[^rel2]: `minisign-verify` `license = "MIT"` — https://crates.io/api/v1/crates/minisign-verify — verified 2026-09-27
+[^rel3]: `ureq` `license = "MIT OR Apache-2.0"` — https://crates.io/api/v1/crates/ureq — verified 2026-09-27
+[^rel4]: `rsign2` `license = "MIT"` — https://crates.io/api/v1/crates/rsign2 — verified 2026-09-27

@@ -23,7 +23,8 @@ Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only
 `gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033, 0034, 0035, 0108), `denoise` (0040),
-`xmp-interop` (0059), `render-graph` (0044), `develop` (0099, 0053), `jobs` (0054), `export` (0056). A new ADR adds a
+`xmp-interop` (0059), `render-graph` (0044), `develop` (0099, 0053), `jobs` (0054), `export` (0056),
+`release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
 ## Performance targets and benchmarking
@@ -208,6 +209,9 @@ terse index: crate/spike → purpose → owning topic.
   (#44/ADR-0044), which this replaces the `bench` subcommand of, is deleted — its
   `graph.rs`/`hash.rs`/`cache.rs`/`prefetch.rs` were already promoted into `crates/nicti-tapetum`/
   `crates/nicti-pawprint`, see that same REFERENCE.md.
+- **`packaging/windows/nicti.nsi`** + **`.github/workflows/release.yml`** (#249/ADR-0249) — the
+  per-user NSIS installer and its tag-triggered build/sign/publish pipeline; not a crate. See
+  [`release`](.claude/rules/release/REFERENCE.md).
 
 The root placeholder binary crate (`src/main.rs`) still exists only so CI/lint tooling has
 something real to run against; it is not the shipping v1 target's home yet.

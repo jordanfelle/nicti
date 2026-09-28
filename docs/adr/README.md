@@ -74,6 +74,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0158](0158-lrc-hash-relink-seeding.md) | — | LRC `md5`/`importHash` vs homing's relink fingerprints | Accepted |
 | [0214](0214-claw-plugin-manifest-and-kill-switch.md) | — | Claw v2 plugin manifest, disclosure UX, and kill switch (Collar/Hiss) | Proposed |
 | [0218](0218-local-only-ai.md) | — | Local-only default for AI culling/suggestion features | Accepted |
+| [0249](0249-windows-installer-and-updates.md) | — | Windows installer, code signing, and auto-update | Proposed |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in
 `docs/decisions/<topic>.md` — see `CLAUDE.md`'s Architecture decisions section for the topic map.
