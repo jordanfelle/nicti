@@ -559,6 +559,11 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
                 unsupported_settings.push("ToneCurvePV2012".to_string());
             }
             "RGBTable" => {
+                // Unlike the attribute form above, an `<crs:RGBTable>` element carries no
+                // sibling `crs:Table_<id>`-style id to capture -- but it's still evidence of an
+                // RGBTable-based look, so the same `RgbTableLookUnsupported` (vs. generic
+                // `NoLookTableProperty`) distinction applies if no `crs:LookTable` shows up either.
+                rgb_table_id.get_or_insert_with(|| "(unknown, from RGBTable element)".to_string());
                 unsupported_settings.push("RGBTable".to_string());
             }
             _ => {}
@@ -1037,6 +1042,17 @@ mod tests {
             LookProfileError::RgbTableLookUnsupported(id) => assert_eq!(id, "SOMERGBID"),
             other => panic!("expected RgbTableLookUnsupported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rgbtable_only_look_as_element_is_also_a_distinct_error() {
+        // The defensive element-tag fallback (`<crs:RGBTable>...</crs:RGBTable>`, not the
+        // attribute form the SDK actually writes) should get the same treatment: found-but-
+        // unsupported, not "no look table found at all".
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:RGBTable>whatever</crs:RGBTable></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+
+        let err = parse(xmp).expect_err("an RGBTable-only look should not decode");
+        assert!(matches!(err, LookProfileError::RgbTableLookUnsupported(_)));
     }
 
     /// Local-only proof against the user's own real, installed Adobe Raw "Look" profiles -- never
