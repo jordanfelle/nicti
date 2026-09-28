@@ -64,10 +64,24 @@ fn watch_git_head() {
     if let Ok(contents) = std::fs::read_to_string(&head) {
         if let Some(rel_ref) = contents.strip_prefix("ref:").map(str::trim) {
             let common_dir = resolve_common_dir(&git_dir);
-            println!(
-                "cargo:rerun-if-changed={}",
-                common_dir.join(rel_ref).display()
-            );
+            let ref_path = common_dir.join(rel_ref);
+            if ref_path.is_file() {
+                println!("cargo:rerun-if-changed={}", ref_path.display());
+            } else {
+                // The branch's ref can be packed (`packed-refs`) rather than a loose file --
+                // common right after a fresh clone or a `git pack-refs` (CodeRabbit review, PR
+                // #283). Cargo's own FAQ warns that watching a path that doesn't exist *and never
+                // gets created* makes it rerun the build script on every single build, so this
+                // must never point at `packed-refs` itself (a commit on a packed branch always
+                // writes a fresh *loose* ref, never edits the packed entry in place -- watching
+                // the packed file would never see that commit at all). Watch the containing
+                // `refs` directory instead: creating that loose ref file is itself a change
+                // Cargo's mtime-based watch already detects.
+                let refs_dir = common_dir.join("refs");
+                if refs_dir.is_dir() {
+                    println!("cargo:rerun-if-changed={}", refs_dir.display());
+                }
+            }
         }
     }
 }
@@ -93,8 +107,18 @@ fn find_git_dir() -> Option<std::path::PathBuf> {
         }
         if candidate.is_file() {
             let contents = std::fs::read_to_string(&candidate).ok()?;
-            let gitdir = contents.strip_prefix("gitdir:")?.trim();
-            return Some(std::path::PathBuf::from(gitdir));
+            let gitdir = std::path::PathBuf::from(contents.strip_prefix("gitdir:")?.trim());
+            // With `worktree.useRelativePaths`, the gitlink's own path is relative -- to the
+            // worktree root (`candidate`'s own parent), not whatever directory this build script
+            // happens to run from (CodeRabbit review, PR #283). An unresolved relative path here
+            // would make every `cargo:rerun-if-changed` built from it point at a nonexistent
+            // path forever, which -- per Cargo's own FAQ -- reruns this build script on every
+            // single build instead of the intended "only when the real commit changes."
+            return Some(if gitdir.is_relative() {
+                candidate.parent().unwrap_or(dir).join(gitdir)
+            } else {
+                gitdir
+            });
         }
         dir = dir.parent()?;
     }

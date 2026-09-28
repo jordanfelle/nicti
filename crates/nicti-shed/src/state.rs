@@ -4,6 +4,7 @@
 //! not pulling in a per-platform-paths dependency until a second location is actually needed.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,13 @@ use serde::{Deserialize, Serialize};
 use crate::ShedError;
 
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
+
+/// Makes each `save` call's temp filename unique on top of the process id -- the id alone isn't
+/// enough for two same-process calls racing outside `nicti-pelt`'s own `STATE_WRITE_LOCK` (this
+/// function is public; nothing stops a future caller from invoking it without that lock), where
+/// both could otherwise write through the same temp path and one `rename` could either publish
+/// the other call's bytes or fail outright (CodeRabbit review, PR #283).
+static NEXT_SAVE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Which release `nicti-shed` checks against -- see `check::RELEASES_LATEST_URL`/
 /// `check::EDGE_RELEASE_URL`. Defaults to `Stable` on any state file that predates this field
@@ -87,7 +95,8 @@ pub fn save(path: &Path, state: &UpdateState) -> Result<(), ShedError> {
         std::fs::create_dir_all(parent).map_err(ShedError::Io)?;
     }
     let json = serde_json::to_string_pretty(state).map_err(|e| ShedError::Parse(e.to_string()))?;
-    let tmp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let save_id = NEXT_SAVE_ID.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{}-{save_id}", std::process::id()));
     std::fs::write(&tmp_path, json).map_err(ShedError::Io)?;
     std::fs::rename(&tmp_path, path).map_err(ShedError::Io)
 }
