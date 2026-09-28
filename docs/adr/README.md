@@ -65,6 +65,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0103](0103-facet-count-cache.md) | 0011 | Facet-count cache for SQLite's faceted-filter gap | Accepted |
 | [0106](0106-redb-evaluation.md) | 0010 | `redb` (catalog store candidate) | Rejected |
 | [0107](0107-duckdb-as-primary-catalog-store.md) | 0012 | Reconsidering DuckDB as the v1 primary catalog store | Accepted (not adopted) |
+| [0108](0108-yolo-culling-detection-candidate.md) | — | Ultralytics YOLO as a culling/detection candidate | Accepted (deferred, no dedicated integration) |
 | [0113](0113-libsql-evaluation.md) | 0014 | libSQL (catalog store candidate) | Rejected for v1 |
 | [0115](0115-rocksdb-evaluation.md) | 0015 | RocksDB (catalog store candidate) | Rejected |
 | [0116](0116-fjall-evaluation.md) | 0016 | fjall (catalog store candidate) | Rejected |
