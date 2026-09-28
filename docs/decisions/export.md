@@ -13,10 +13,17 @@ trail.
   candidate (`wgpu` compute) was built and cross-verified against the CPU one, but real hardware
   timing wasn't reachable this pass (this sandbox's WSL exposes no NVIDIA Vulkan ICD; only
   `llvmpipe`, whose own buffer-binding limit also caps full-res GPU work below a real 45MP frame).
-- **JPEG encoder**: `jpeg-encoder` (pure Rust) for v1, not mozjpeg — mozjpeg's file size was
-  ~2.6x smaller at the same nominal "quality 90" parameter, but the two encoders' quality scales
-  aren't calibrated the same way, so this isn't yet a like-for-like comparison. mozjpeg stays
-  available behind a `native` Cargo feature for a follow-up quality-matched re-measurement.
+- **JPEG encoder**: `jpeg-encoder` (pure Rust) for v1, not mozjpeg — **settled by a
+  quality-matched comparison (#223) on one synthetic test image**. The original nominal-quality-90
+  gap (~2.6x smaller for mozjpeg) turned out to be partly a chroma-subsampling mismatch, not just
+  an uncalibrated quality scale: `jpeg-encoder`'s own default silently switches 4:2:0→4:4:4 at
+  quality ≥90, while mozjpeg's stays fixed at 4:2:0. Pinning subsampling to 4:2:0 on both sides and
+  matching quality to a target SSIM shows mozjpeg is genuinely ~1.3-1.4x smaller on that image, but
+  also ~4-4.5x slower — real, but past this ADR's own ≤1.5x-encode-time bar for a candidate to earn
+  its place. Not yet real-photo-confirmed: this pass's own two synthetic fixtures gave meaningfully
+  different SSIM ceilings at 4:2:0, so real photographic chroma content could shift the result.
+  mozjpeg stays available behind a `native` Cargo feature for a future reference-machine/real-NEF
+  re-check.
 - **Metadata**: `little_exif` for EXIF write (builds the TIFF-structured IFD itself, unlike
   `img-parts`' raw-blob EXIF support), a runtime-generated `moxcms` sRGB ICC profile embedded via
   `img-parts` (JPEG APP2 multi-segment, PNG `iCCP`), and a hand-rolled XMP JPEG-APP1/PNG-iTXt

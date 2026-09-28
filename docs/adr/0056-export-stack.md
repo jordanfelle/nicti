@@ -1,7 +1,8 @@
 # ADR-0056: Export stack
 
-- **Status:** Proposed -- pending a quality-matched JPEG-encoder comparison and a real
-  full-resolution GPU-resize measurement on the reference RTX 5080 (see Consequences)
+- **Status:** Proposed -- the JPEG-encoder choice below is now settled by a quality-matched
+  comparison (#223); still pending a real full-resolution GPU-resize measurement on the reference
+  RTX 5080 (see Consequences)
 - **Date:** 2026-09-27
 - **Ticket:** [#56](https://github.com/jordanfelle/nicti/issues/56) Research: export stack
 
@@ -65,15 +66,30 @@ follow-up once real hardware numbers exist (see Consequences).
 
 ### JPEG encoder
 
-**`jpeg-encoder` (pure Rust) for v1**, not mozjpeg. It already has a native `add_icc_profile`
-(auto-splits across APP2 segments), needs no C toolchain, and measured 22.19ms p50 at 2048x1365 --
-roughly 3x faster than mozjpeg's 70.35ms. mozjpeg's own output was ~2.6x smaller at the same
-nominal "quality 90" parameter (122KB vs. 327KB), which on its face would clear this ADR's own
-"earn its place" bar -- **but the two encoders' nominal quality numbers aren't calibrated the
-same way** (mozjpeg's default quantization tables and Huffman optimization are more perceptually
-tuned per quality unit), so this isn't yet a like-for-like comparison. The `native` feature keeps
-mozjpeg available (real, tested, `native::encode_mozjpeg`, also has a native `write_icc_profile`)
-for a follow-up quality-matched re-measurement before this component moves to Accepted.
+**`jpeg-encoder` (pure Rust) stays the v1 pick for this pass, per a quality-matched comparison
+(#223)**, not mozjpeg. The original nominal-"quality 90" comparison (122KB vs. 327KB, mozjpeg
+~2.6x smaller) turned out to have a real confound, not just an uncalibrated-quality-number one:
+`jpeg-encoder` 0.6.1's own default (`Encoder::new`) silently switches chroma subsampling from
+4:2:0 to 4:4:4 at quality >=90, while mozjpeg's libjpeg default stays fixed at 4:2:0 regardless of
+quality -- so the original comparison was partly comparing two different subsampling modes, not
+just two encoders' quantization tables. Pinning subsampling to 4:2:0 on both sides
+(`encode_jpeg_encoder_with_sampling`/`native::encode_mozjpeg_with_sampling`) and finding each
+encoder's smallest quality parameter that reaches a fixed target SSIM against the source
+(`find_matched_quality`, a linear ascending scan over quality 1-100 -- not a binary search, since
+SSIM isn't guaranteed strictly monotonic in quality) gives a genuine like-for-like result **on one
+synthetic test image**: at SSIM 0.98, mozjpeg is real but modest -- ~1.29x smaller (134KB vs.
+173KB) -- and at SSIM 0.95, ~1.44x smaller (91KB vs. 131KB), consistent across both targets on
+that same image. But mozjpeg is also consistently **~4-4.5x slower at matched quality** (measured
+104-116ms p50 vs. jpeg-encoder's 23-29ms p50), which fails this ADR's own decision rule (a
+candidate's encode time must stay <=1.5x the fastest to "earn its place"). mozjpeg's size
+advantage on this synthetic source is confirmed and no longer speculative, but it's just not large
+enough to clear the speed bar this ADR set before measuring. Two things stay open before treating
+this as final, not just the usual hardware caveat: a real-NEF re-measurement once #41's render
+pipeline exists (this pass's own two synthetic test images gave meaningfully different SSIM
+ceilings at 4:2:0, so real photographic chroma content could shift the matched-quality gap), and a
+reference-machine re-check of the *speed* ratio specifically. The `native` feature keeps mozjpeg
+available (`native::encode_mozjpeg`/`encode_mozjpeg_with_sampling`, also has a native
+`write_icc_profile`) for both follow-ups.
 
 ### Metadata (EXIF / XMP / ICC)
 
@@ -162,8 +178,10 @@ watermark math, or WGSL tap-index math -- the reviewer traced each and found no 
 
 ## Options considered
 
-- **mozjpeg as the v1 default JPEG encoder** -- rejected for v1 pending a quality-matched
-  comparison (see Decision above); kept available behind the `native` feature.
+- **mozjpeg as the v1 default JPEG encoder** -- rejected for v1: a real quality-matched comparison
+  (#223, see Decision above) confirms a genuine but modest size advantage (~1.3-1.4x smaller) that
+  doesn't clear this ADR's own <=1.5x-encode-time bar (mozjpeg measured ~4-4.5x slower at matched
+  quality); kept available behind the `native` feature.
 - **`turbojpeg`** (libjpeg-turbo bindings) as a fourth JPEG encoder candidate -- not reached this
   pass.
 - **A vendored/downloaded ICC profile file** instead of a `moxcms`-generated one -- rejected to
@@ -179,18 +197,23 @@ watermark math, or WGSL tap-index math -- the reviewer traced each and found no 
 ## What wasn't reachable this pass
 
 See `docs/research/prey-export-stack.md`'s own section -- summarized: real full-res GPU resize
-timing on the reference RTX 5080, a quality-matched JPEG-encoder comparison, `turbojpeg`, TIFF
-metadata write, text watermarking, and GPS EXIF tags.
+timing on the reference RTX 5080, `turbojpeg`, TIFF metadata write, text watermarking, and GPS
+EXIF tags. (The quality-matched JPEG-encoder comparison this section used to list is now done --
+see #223 and this ADR's own JPEG encoder section above.)
 
 ## Consequences
 
 - **Unblocks #57** (Build: export pipeline) to implement `Exporter`'s real method using this
   pass's component choices and the sketched execution shape above.
-- **Two follow-up issues filed alongside this ADR** (see the PR): a reference-machine run for the
-  real full-res GPU-resize timing and the LRC export-throughput comparison this ADR's own
-  Context section defers, and a quality-matched JPEG-encoder re-measurement to settle whether
-  mozjpeg should become the v1 default once its size advantage is confirmed at matched quality
-  rather than matched nominal parameter.
+- **One follow-up issue filed alongside this ADR** (see the PR): a reference-machine run for the
+  real full-res GPU-resize timing and the LRC export-throughput comparison this ADR's own Context
+  section defers. (The quality-matched JPEG-encoder follow-up this bullet used to list is done --
+  #223 -- and settles jpeg-encoder as the v1 pick *for the synthetic test image measured*;
+  mozjpeg's size advantage on that image doesn't clear this ADR's own <=1.5x-encode-time bar. Two
+  things stay open, not just the usual hardware note: a reference-machine re-measurement of the
+  *speed* ratio on the actual Windows target hardware, and a real-NEF re-measurement of the whole
+  comparison once #41's render pipeline exists, since this pass's own experience shows the
+  matched-quality result is sensitive to which test image is used.)
 - **Requires #42** (color management/soft-proofing) before export can offer a real P3/AdobeRGB
   output gamut -- this pass's ICC embedding path is format-agnostic (any profile bytes work), but
   only ever generates a fixed sRGB profile as its own placeholder.
