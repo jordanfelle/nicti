@@ -16,11 +16,14 @@
 
 use std::sync::Arc;
 
+use crate::camera_profiles::{self, ProfileEntry};
+use nicti_calico::dcp::DcpProfile;
+use nicti_calico::profile::ProfileSolution;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::coat::{
-    self, CropParams, ExposureParams, HslParams, NoiseReductionParams, SharpenParams,
-    ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CameraProfileParams, CropParams, ExposureParams, HslParams, NoiseReductionParams,
+    SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{Extent, FrameTexture};
@@ -206,6 +209,14 @@ pub struct DevelopView {
     /// When true, `render()` renders with every stage at its default instead of `document`'s own
     /// values -- the before/after toggle.
     pub show_before: bool,
+    /// DCP profiles available for the current frame's camera (#42), rediscovered on every
+    /// `load_real_frame`. Empty for the synthetic frame or a camera with no installed profiles.
+    profile_choices: Vec<ProfileEntry>,
+    /// The parsed profile the document's `CameraProfileParams` refers to. Kept out of the
+    /// document itself (it is large and not JSON); the document holds only its identity.
+    active_profile: Option<Arc<DcpProfile>>,
+    /// The last profile load failure, for the picker to show.
+    pub profile_error: Option<String>,
 }
 
 impl DevelopView {
@@ -233,6 +244,46 @@ impl DevelopView {
             crop_kernel,
             renderer,
             show_before: false,
+            profile_choices: Vec::new(),
+            active_profile: None,
+            profile_error: None,
+        }
+    }
+
+    /// The DCP profiles installed for the current frame's camera.
+    pub fn profile_choices(&self) -> &[ProfileEntry] {
+        &self.profile_choices
+    }
+
+    /// The document's currently selected camera profile (`name: None` = none).
+    pub fn camera_profile(&self) -> CameraProfileParams {
+        self.stage_params(WORKING_SPACE)
+    }
+
+    /// Selects `entry` (or clears the selection with `None`). Loads and parses the file; on
+    /// failure leaves the previous selection untouched and records the reason in
+    /// [`Self::profile_error`].
+    pub fn select_camera_profile(&mut self, entry: Option<&ProfileEntry>) {
+        self.profile_error = None;
+        let Some(entry) = entry else {
+            self.active_profile = None;
+            self.reset_stage(WORKING_SPACE);
+            return;
+        };
+        let needle = camera_profiles::camera_needle(&self.frame.make, &self.frame.model);
+        match camera_profiles::load(&entry.path, Some(&needle)) {
+            Ok(loaded) => {
+                self.set_stage_params(
+                    WORKING_SPACE,
+                    &CameraProfileParams {
+                        name: Some(loaded.profile.name.clone()),
+                        path: Some(loaded.path.display().to_string()),
+                        content_hash: Some(loaded.content_hash),
+                    },
+                );
+                self.active_profile = Some(loaded.profile);
+            }
+            Err(e) => self.profile_error = Some(e),
         }
     }
 
@@ -304,12 +355,31 @@ impl DevelopView {
         let transform = geometry::affine_for_crop(rect, crop.rotation_degrees);
         self.crop_kernel.set_transform(transform);
 
-        let matrix =
-            color::camera_to_working_space_matrix(self.frame.cam_mul, &self.frame.cam_xyz, &wb);
+        // A selected DCP profile (#42) replaces the plain LibRaw matrix with its own
+        // illuminant-interpolated matrix (WB folded in per the DNG ForwardMatrix contract) and
+        // adds the HueSatMap / baseline exposure / LookTable stages. `doc` is empty under
+        // `show_before`, so the before view is always the plain matrix.
+        let chosen: CameraProfileParams = Self::resolve(doc, WORKING_SPACE);
+        let solution: Option<Arc<ProfileSolution>> =
+            match (&chosen.content_hash, &self.active_profile) {
+                (Some(_), Some(profile)) => {
+                    let gains =
+                        color::wb_gains_with_params(self.frame.cam_mul, &self.frame.cam_xyz, &wb);
+                    Some(Arc::new(profile.solve(gains.map(f64::from))))
+                }
+                _ => None,
+            };
+        let matrix = match &solution {
+            Some(s) => s.camera_to_working,
+            None => {
+                color::camera_to_working_space_matrix(self.frame.cam_mul, &self.frame.cam_xyz, &wb)
+            }
+        };
         self.live_kernel.set_params(
             &self.gpu,
             &LiveParams {
                 working_space_matrix: matrix,
+                camera_profile: solution,
                 exposure,
                 tone,
                 tone_curve,
@@ -407,6 +477,9 @@ impl DevelopView {
         self.frame = frame;
         self.document = EditDocument::default();
         self.show_before = false;
+        self.active_profile = None;
+        self.profile_error = None;
+        self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
         self.graph
             .set_own_hash(DECODE, identity)
             .expect("DECODE is always present -- build_graph always adds it");
@@ -480,8 +553,6 @@ impl DevelopView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nicti_tapetum::gpu::{GpuContext, GpuPreference};
-
     /// Regression test for a real data-loss bug caught in this ticket's own adversarial review:
     /// an earlier version of the Loupe view (#31 phase 3) would call `load_real_frame`
     /// unconditionally, silently discarding whatever edits were open on the Develop tab the
@@ -490,11 +561,10 @@ mod tests {
     /// reflects `document`'s real state, not just that it compiles.
     #[test]
     fn has_edits_reflects_the_document_s_real_state() {
-        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
-            eprintln!("no wgpu adapter available in this environment, skipping");
+        let Some(gpu) = crate::test_gpu::shared() else {
             return;
         };
-        let mut view = DevelopView::new(Arc::new(gpu));
+        let mut view = DevelopView::new(Arc::clone(&gpu));
         assert!(!view.has_edits(), "a fresh DevelopView has no edits yet");
 
         let mut exposure: ExposureParams = view.stage_params(EXPOSURE);
@@ -504,5 +574,106 @@ mod tests {
 
         view.reset_stage(EXPOSURE);
         assert!(!view.has_edits(), "the only edit was just reset away");
+    }
+
+    /// Selecting a camera profile must (a) record its identity in the edit document, (b) change
+    /// the rendered pixels, (c) round-trip cleanly back to the plain matrix when cleared, and (d)
+    /// re-render when a *different* profile is selected -- the live output cache is keyed on the
+    /// profile's content hash, so a stale hit would show the old profile's pixels.
+    #[test]
+    fn selecting_a_camera_profile_changes_the_render_and_clearing_restores_it() {
+        use nicti_tapetum::frame::read_frame;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+
+        // The synthetic frame is make "Nicti", model "Synthetic".
+        let dir = tempfile::tempdir().unwrap();
+        let write = |file: &str, scale: f32| {
+            let path = dir.path().join(file);
+            std::fs::write(
+                &path,
+                nicti_calico::dcp::testing::synthetic_dcp_bytes(
+                    "NICTI SYNTHETIC",
+                    file,
+                    Some(scale),
+                    None,
+                    true,
+                ),
+            )
+            .unwrap();
+            ProfileEntry {
+                name: file.to_string(),
+                path,
+            }
+        };
+        let bright = write("Bright", 1.6);
+        let dark = write("Dark", 0.6);
+
+        let pixels = |view: &mut DevelopView| {
+            let frame = view.render();
+            read_frame(&gpu, &frame)
+        };
+        let plain = pixels(&mut view);
+
+        view.select_camera_profile(Some(&bright));
+        assert!(view.profile_error.is_none(), "{:?}", view.profile_error);
+        let chosen = view.camera_profile();
+        assert_eq!(chosen.name.as_deref(), Some("Bright"));
+        assert_eq!(chosen.content_hash.as_ref().map(String::len), Some(64));
+        assert!(view.has_edits());
+        let with_bright = pixels(&mut view);
+        assert_ne!(plain, with_bright, "the profile should change the render");
+
+        view.select_camera_profile(Some(&dark));
+        let with_dark = pixels(&mut view);
+        assert_ne!(
+            with_bright, with_dark,
+            "a different profile must not reuse cached output"
+        );
+
+        // The before/after toggle shows the plain matrix regardless of the selection.
+        view.show_before = true;
+        assert_eq!(pixels(&mut view), plain);
+        view.show_before = false;
+
+        view.select_camera_profile(None);
+        assert!(
+            !view.has_edits(),
+            "clearing the profile removes its document entry"
+        );
+        assert_eq!(
+            pixels(&mut view),
+            plain,
+            "clearing must restore the plain result"
+        );
+    }
+
+    #[test]
+    fn a_profile_for_another_camera_is_rejected_and_leaves_the_selection_alone() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Wrong.dcp");
+        std::fs::write(
+            &path,
+            nicti_calico::dcp::testing::synthetic_dcp_bytes("NIKON Z 8", "Wrong", None, None, true),
+        )
+        .unwrap();
+        view.select_camera_profile(Some(&ProfileEntry {
+            name: "Wrong".into(),
+            path,
+        }));
+        assert!(view
+            .profile_error
+            .as_deref()
+            .is_some_and(|e| e.contains("not")));
+        assert!(
+            !view.has_edits(),
+            "a rejected profile must not touch the document"
+        );
     }
 }

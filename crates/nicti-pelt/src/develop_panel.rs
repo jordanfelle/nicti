@@ -66,6 +66,8 @@ pub fn show(
 
     ui.separator();
     ui.collapsing("Basic", |ui| {
+        show_camera_profile_picker(ui, develop);
+
         let mut wb: WbParams = develop.stage_params(WB);
         let mut temp = wb.temp_k.unwrap_or(5500.0);
         ui.horizontal(|ui| {
@@ -599,4 +601,41 @@ fn draw_curve_preview(ui: &mut egui::Ui, curve: &ToneCurveParams) {
         points,
         egui::Stroke::new(1.5, egui::Color32::WHITE),
     ));
+}
+
+/// The DCP camera-profile picker (#42): lists the installed Adobe profiles for this frame's
+/// camera, plus "Matrix only" (the plain LibRaw color matrix). Hidden when none are installed.
+fn show_camera_profile_picker(ui: &mut egui::Ui, develop: &mut DevelopView) {
+    let choices = develop.profile_choices().to_vec();
+    if choices.is_empty() {
+        return;
+    }
+    let current = develop.camera_profile();
+    let mut pick: Option<Option<usize>> = None;
+    ui.horizontal(|ui| {
+        ui.label("Profile");
+        egui::ComboBox::from_id_salt("camera_profile")
+            .selected_text(current.name.as_deref().unwrap_or("Matrix only"))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(current.name.is_none(), "Matrix only (no profile)")
+                    .clicked()
+                {
+                    pick = Some(None);
+                }
+                for (i, entry) in choices.iter().enumerate() {
+                    let selected =
+                        current.path.as_deref() == Some(entry.path.display().to_string().as_str());
+                    if ui.selectable_label(selected, &entry.name).clicked() {
+                        pick = Some(Some(i));
+                    }
+                }
+            });
+    });
+    if let Some(pick) = pick {
+        develop.select_camera_profile(pick.map(|i| &choices[i]));
+    }
+    if let Some(err) = &develop.profile_error {
+        ui.colored_label(ui.visuals().error_fg_color, err);
+    }
 }

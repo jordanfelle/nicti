@@ -121,3 +121,15 @@ Known limits, all recorded in ADR-0042: no black-point compensation (`moxcms` 0.
 implement it), the T0/T2 previews and grid thumbnails are not color-managed, a non-built-in
 LUT-based monitor profile carries interpolation error near its gamut boundary, Windows code is type-checked
 but not run, and a real wide-gamut monitor check is still outstanding.
+
+## DCP camera profiles in production (#42, ADR-0038 amendment)
+
+Promoted `dcp.rs`/`cct.rs`/`huesatmap.rs` from `spikes/calico` into `nicti-calico` and added
+`profile.rs`. Testing against real Adobe Z 8 profiles found the spike had two bugs: real files
+start `IIRC` (magic 0x4352) and the LookTable tag ids are 50981/50982. `DcpProfile::solve` turns a
+profile plus the frame's WB gains into one folded matrix and the blended tables; the live suffix
+applies HueSatMap -> baseline exposure -> LookTable after the matrix. The selected profile is
+stored as `CameraProfileParams` on `nicti.working_space` (content hash in the cache key). Default
+stays "Matrix only". `ProfileToneCurve` and Look `.xmp` profiles are not applied yet. See ADR-0042's
+"Camera profiles" section.
+

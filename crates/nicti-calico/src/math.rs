@@ -8,6 +8,19 @@ pub(crate) type Vec3 = [f64; 3];
 /// Row-major 3x3.
 pub(crate) type Mat3 = [[f64; 3]; 3];
 
+#[cfg(test)]
+pub(crate) const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+pub(crate) fn mat_add_scaled(a: &Mat3, b: &Mat3, weight_b: f64) -> Mat3 {
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = a[i][j] * (1.0 - weight_b) + b[i][j] * weight_b;
+        }
+    }
+    out
+}
+
 pub(crate) fn mat_vec_mul(m: &Mat3, v: Vec3) -> Vec3 {
     [
         m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],

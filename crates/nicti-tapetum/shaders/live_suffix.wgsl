@@ -3,9 +3,10 @@
 // exposure, Basic-panel tone (contrast/highlights/shadows/whites/blacks), #46's Tone Curve, #46's
 // 8-band HSL, and vibrance -- exactly one dispatch regardless of how many of these params changed.
 // Output stays in linear ProPhoto RGB (the working space); no display/export color management
-// here (#42's scope, see color.rs's own doc comment on the deliberate simplification vs. the
-// original design sketch: no DCP HueSatMap/LookTable bindings are reserved -- #46's own HSL below
-// is the user-facing HSL panel, a different thing from #42's profile-driven HueSatMap).
+// here (that lives in nicti-pelt's display pass, ADR-0042). #42 adds the DCP camera profile's
+// HueSatMap -> baseline exposure -> LookTable stages right after the camera->working matrix (the
+// ADR-0038 stage order); each is skipped, costing nothing, when the profile lacks it. #46's own
+// HSL below is the user-facing HSL panel, a different thing from the profile-driven HueSatMap.
 //
 // #46's Sharpening/Noise Reduction are a separate pass (`detail_blur.wgsl`/`detail_combine.wgsl`,
 // see `stages.rs::LiveSuffixKernel::encode`'s own doc comment) -- unlike everything in this file,
@@ -25,11 +26,21 @@ struct Uniforms {
     curve_lut: array<vec4<f32>, 64>,
     // HSL panel's 8 bands, one vec4 each: hue, saturation, luminance, unused.
     hsl_bands: array<vec4<f32>, 8>,
+    // DCP camera profile (#42): x = HueSatMap enabled, y = LookTable enabled, z = HueSatMap uses
+    // sRGB value encoding, w = LookTable uses sRGB value encoding (all 0/1).
+    profile0: vec4<f32>,
+    // x = baseline-exposure multiplier (2^BaselineExposureOffset; 1.0 with no profile).
+    profile1: vec4<f32>,
 }
 
 @group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u: Uniforms;
+// DCP tables (#42): 3D textures, width = saturation, height = hue (wraps), depth = value, texel =
+// (hue shift deg, sat scale, val scale). 1x1x1 dummies are bound when the profile lacks them.
+@group(0) @binding(3) var hue_sat_map: texture_3d<f32>;
+@group(0) @binding(4) var look_table: texture_3d<f32>;
+@group(0) @binding(5) var profile_sampler: sampler;
 
 const PI: f32 = 3.14159265358979;
 
@@ -205,6 +216,98 @@ fn apply_vibrance(rgb: vec3<f32>, vibrance: f32) -> vec3<f32> {
     return vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * (1.0 + boost);
 }
 
+// DNG-spec HSV (hue in degrees). Unclamped in v: linear ProPhoto values above 1 are legitimate
+// here (saturated colors before the tone stages bring them down).
+fn dcp_rgb_to_hsv(rgb: vec3<f32>) -> vec3<f32> {
+    let max_c = max(rgb.r, max(rgb.g, rgb.b));
+    let min_c = min(rgb.r, min(rgb.g, rgb.b));
+    let delta = max_c - min_c;
+    var h: f32 = 0.0;
+    if (delta > 1e-6) {
+        if (max_c == rgb.r) {
+            h = 60.0 * (((rgb.g - rgb.b) / delta) % 6.0);
+        } else if (max_c == rgb.g) {
+            h = 60.0 * ((rgb.b - rgb.r) / delta + 2.0);
+        } else {
+            h = 60.0 * ((rgb.r - rgb.g) / delta + 4.0);
+        }
+    }
+    if (h < 0.0) {
+        h = h + 360.0;
+    }
+    let s = select(0.0, delta / max_c, max_c > 0.0);
+    return vec3<f32>(h, s, max_c);
+}
+
+fn dcp_hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
+    // Wrap into [0, 360): hue + a table shift can cross the seam, and WGSL's `%` keeps the
+    // dividend's sign, so an unwrapped negative hue would pick the wrong sector below.
+    let h = hsv.x - 360.0 * floor(hsv.x / 360.0);
+    let s = clamp(hsv.y, 0.0, 1.0);
+    let v = hsv.z;
+    let c = v * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - abs((hp % 2.0) - 1.0));
+    var rgb1: vec3<f32>;
+    let sector = i32(hp);
+    if (sector == 0) {
+        rgb1 = vec3<f32>(c, x, 0.0);
+    } else if (sector == 1) {
+        rgb1 = vec3<f32>(x, c, 0.0);
+    } else if (sector == 2) {
+        rgb1 = vec3<f32>(0.0, c, x);
+    } else if (sector == 3) {
+        rgb1 = vec3<f32>(0.0, x, c);
+    } else if (sector == 4) {
+        rgb1 = vec3<f32>(x, 0.0, c);
+    } else {
+        rgb1 = vec3<f32>(c, 0.0, x);
+    }
+    let m = v - c;
+    return rgb1 + vec3<f32>(m, m, m);
+}
+
+fn dcp_srgb_oetf(c: f32) -> f32 {
+    let v = max(c, 0.0);
+    if (v <= 0.0031308) {
+        return v * 12.92;
+    }
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+fn dcp_srgb_eotf(c: f32) -> f32 {
+    let v = max(c, 0.0);
+    if (v <= 0.04045) {
+        return v / 12.92;
+    }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+// One HueSatMap/LookTable (DNG SDK RefBaselineHueSatMap): hue and saturation come from the
+// *unencoded* linear RGB; only the value coordinate goes through the table's encoding (sRGB when
+// `srgb_value`), for both the lookup and the returned scale, then decoded back. Trilinear
+// filtering treats texel i's center as (i+0.5)/N, so coordinates are remapped (hue tiles: i/N;
+// sat/value span edge to edge: i/(N-1)). The hardware lerps the hue shift linearly rather than
+// along the shortest arc -- an accepted approximation (the CPU reference in nicti-calico differs
+// only across the 0/360 seam).
+fn dcp_apply_table(rgb: vec3<f32>, tex: texture_3d<f32>, srgb_value: bool) -> vec3<f32> {
+    let hsv = dcp_rgb_to_hsv(rgb);
+    var v_enc = max(hsv.z, 0.0);
+    if (srgb_value) {
+        v_enc = dcp_srgb_oetf(hsv.z);
+    }
+    let dims = vec3<f32>(textureDimensions(tex));
+    let cu = select((hsv.y * (dims.x - 1.0) + 0.5) / dims.x, 0.5, dims.x <= 1.0);
+    let cv = hsv.x / 360.0 + 0.5 / dims.y;
+    let cw = select((clamp(v_enc, 0.0, 1.0) * (dims.z - 1.0) + 0.5) / dims.z, 0.5, dims.z <= 1.0);
+    let adj = textureSampleLevel(tex, profile_sampler, vec3<f32>(cu, cv, cw), 0.0).xyz;
+    var v_out = v_enc * adj.z;
+    if (srgb_value) {
+        v_out = dcp_srgb_eotf(v_out);
+    }
+    return dcp_hsv_to_rgb(vec3<f32>(hsv.x + adj.x, clamp(hsv.y * adj.y, 0.0, 1.0), v_out));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -214,6 +317,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)));
     let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
     var rgb = m * px.rgb;
+    // DCP camera profile (ADR-0038 order): HueSatMap -> baseline exposure -> LookTable.
+    if (u.profile0.x > 0.5) {
+        rgb = dcp_apply_table(rgb, hue_sat_map, u.profile0.z > 0.5);
+    }
+    rgb = rgb * u.profile1.x;
+    if (u.profile0.y > 0.5) {
+        rgb = dcp_apply_table(rgb, look_table, u.profile0.w > 0.5);
+    }
     rgb = rgb * u.tone0.x;
     rgb = apply_tone(rgb, u.tone0.y, u.tone0.z, u.tone0.w, u.tone1.x, u.tone1.y);
     rgb = apply_tone_curve(rgb);

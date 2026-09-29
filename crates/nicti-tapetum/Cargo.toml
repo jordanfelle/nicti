@@ -7,6 +7,7 @@ publish = false
 description = "Render stage extension point (ADR-0019 §8) plus Tapetum's (#44/#45) stage-cached render graph: a DAG of stage nodes with a blake3 cache key chained from upstream (graph.rs), byte-budgeted VRAM/RAM/disk cache tiers (cache.rs), nearest-to-cursor bake prioritization (prefetch.rs), a shared wgpu GpuContext (gpu.rs) and GPU-resident RGBA16F frame textures (frame.rs), the real RenderStage execution trait + graph-driven Renderer (renderer.rs), and the concrete decode/live-suffix/geometry stages wired to a real nicti-cornea LinearFrame (color.rs/geometry.rs/stages.rs)."
 
 [dependencies]
+nicti-calico = { path = "../nicti-calico" }
 nicti-claw = { path = "../nicti-claw" }
 nicti-cornea = { path = "../nicti-cornea" }
 nicti-pawprint = { path = "../nicti-pawprint" }

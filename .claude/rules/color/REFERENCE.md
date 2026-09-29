@@ -68,11 +68,20 @@ Full reasoning/history: `docs/decisions/color.md`.
   `color_mgmt.rs` (Color menu, Shift+S gamut warning, follows the window across monitors),
   `viewport.rs` `set_display_transform`, `display.wgsl` (proof stage, then mode 0/1). **No BPC**
   (`moxcms` 0.9 lacks it). Preview tiers/thumbnails are unmanaged. Working space still ProPhoto
-  (#149). DCP HueSatMap/LookTable promotion is the second PR of #42.
+  (#149).
+- **DCP camera profiles in the live suffix (#42)** — `nicti-calico` `dcp.rs`/`cct.rs`/
+  `huesatmap.rs` promoted from `spikes/calico`; `profile.rs` `DcpProfile::solve(wb_gains)` →
+  `ProfileSolution` (folded matrix, blended HueSatMap, LookTable, baseline exposure) with an
+  `apply_cpu` reference. **Real Adobe files start `IIRC` (magic 0x4352) and use LookTable tags
+  50981/50982** — the spike had both wrong. Matched to a frame via `UniqueCameraModel`. Tapetum:
+  `live_suffix.wgsl` bindings 3/4/5, `LiveParams.camera_profile`, tables re-uploaded only on
+  fingerprint change. Selection = `coat::CameraProfileParams` on `nicti.working_space` (blake3 of
+  the file → cache key; none = `{}`). `nicti-pelt` `camera_profiles.rs` discovers the user's own
+  profiles; **default is Matrix only**. Not applied yet: `ProfileToneCurve`, Look `.xmp`.
 
 ## Package contents
 
-- **`spikes/calico`** (#38/ADR-0038's color-pipeline research) — a from-scratch DNG-spec Camera
+- **`spikes/calico`** (#38/ADR-0038's color-pipeline research; DCP parser/CCT/HueSatMap promoted to `crates/nicti-calico` by #42, this spike stays for its `xmp_profile.rs`, tone curve, ΔE tooling and CLI) — a from-scratch DNG-spec Camera
   Profile (`.dcp`) tag reader over a hand-rolled TIFF/IFD parser, DNG-spec CCT-based
   dual-illuminant matrix interpolation, three working-space candidates (ProPhoto/Rec.2020/ACEScg),
   a HueSatMap/LookTable trilinear HSV implementation with hue-wrap-aware interpolation, a

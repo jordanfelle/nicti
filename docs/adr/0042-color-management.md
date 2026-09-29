@@ -76,6 +76,39 @@ sRGB and surfaces the reason in the Color menu (ADR-0101).
 **Export** consumes `OutputSpace::from_working`/`encode` and `icc::profile_bytes`; wiring them
 into the encoders is #57. TIFF ICC embedding stays deferred with ADR-0056.
 
+## Camera profiles (DCP) in the live suffix
+
+The other half of #42 (ADR-0038's stage order). `nicti-calico` gained `dcp.rs`/`cct.rs`/
+`huesatmap.rs` (promoted from `spikes/calico`) and `profile.rs`: `DcpProfile::solve(wb_gains)`
+returns a `ProfileSolution` -- one folded camera -> linear ProPhoto matrix (the ForwardMatrix
+branch folds the white-balance gains in as a diagonal, the ColorMatrix branch's Bradford step does
+the balancing itself), the illuminant-blended HueSatMap, the LookTable, and `2^BaselineExposure`.
+Blending the two illuminants' HueSatMaps is done on the CPU into one table per render (trilinear
+sampling is linear in the table, so this equals blending the samples), and the kernel re-uploads a
+table only when its content fingerprint changes. `apply_cpu` is the reference the GPU is tested
+against.
+
+`live_suffix.wgsl` applies, after the camera matrix: HueSatMap -> baseline exposure -> LookTable,
+then the existing user-exposure/tone/... chain. Hue and saturation are taken from the unencoded
+linear RGB; only the value coordinate goes through the table's encoding (Adobe's reference
+implementation), unclamped above 1. Bindings 3/4/5 (two 3D tables, one sampler) are always bound
+-- 1x1x1 dummies when absent -- because the auto-derived bind-group layout includes any binding the
+shader references. The hardware lerps the hue shift linearly rather than along the shortest arc, an
+accepted approximation (parity tolerance 0.015).
+
+**Selection and the cache key.** The choice lives on the `nicti.working_space` stage as
+`coat::CameraProfileParams { name, path, content_hash }` (blake3 of the file), so it flows into
+that node's hash and therefore the live-output cache key; no profile serializes to the stage's
+historical `{}`, leaving existing documents' hashes unchanged. `nicti-pelt` discovers the user's
+own Adobe profiles at runtime (`camera_profiles.rs`; never bundled, ADR-0018), matches them to the
+frame by `<MAKE> <MODEL>` file-name prefix, re-checks the file's `UniqueCameraModel`, and offers
+them in the Develop panel's Basic section. **Default is "Matrix only"** -- silently changing every
+photo's look on load is a decision for the reference-machine ΔE pass (#149), not this PR.
+
+**Not done here:** `ProfileToneCurve` and the Look `.xmp` profiles (`xmp_profile.rs` stays in the
+spike), per-photo persistence of the choice (edits are not yet catalog-persisted), and the working
+space pick (#149).
+
 ## Consequences
 
 - **The 3D LUT is only for LUT-based monitor profiles**, where colors near the monitor's gamut

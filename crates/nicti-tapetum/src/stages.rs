@@ -12,7 +12,12 @@
 //! (or not) based on state the caller already computed to build the `RenderRequest` in the first
 //! place -- the caller has the current params in hand regardless.
 
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
+use nicti_calico::dcp::TableEncoding;
+use nicti_calico::huesatmap::HueSatMap;
+use nicti_calico::profile::{fingerprint, ProfileSolution};
 use nicti_claw::Module;
 use nicti_cornea::LinearFrame;
 use serde_json::{json, Value};
@@ -126,14 +131,16 @@ pub fn exposure_stage() -> BasicStage {
         default_params: || coat::default_value::<ExposureParams>(),
     }
 }
-/// Fixed to linear ProPhoto RGB for now -- no adjustable params yet. Kept as its own graph node
+/// Fixed to linear ProPhoto RGB for now. Its only param is the selected DCP camera profile (#42,
+/// `coat::CameraProfileParams`), whose content hash makes a profile switch invalidate the live
+/// output; the default (no profile) serializes to the historical `{}`. Kept as its own graph node
 /// (matching the stage id ADR-0044 names) so a future working-space choice slots in without
 /// restructuring the pipeline.
 pub fn working_space_stage() -> BasicStage {
     BasicStage {
         id: WORKING_SPACE,
         kind: StageKind::Live,
-        default_params: || json!({}),
+        default_params: || coat::default_value::<coat::CameraProfileParams>(),
     }
 }
 pub fn tone_stage() -> BasicStage {
@@ -416,6 +423,11 @@ struct LiveUniforms {
     curve_lut: [[f32; 4]; CURVE_LUT_GROUPS],
     /// #46's 8-band HSL panel, one vec4 (hue, saturation, luminance, unused) per band.
     hsl_bands: [[f32; 4]; HSL_BAND_COUNT],
+    /// DCP camera profile (#42): HueSatMap enabled, LookTable enabled, HueSatMap sRGB value
+    /// encoding, LookTable sRGB value encoding (all 0/1).
+    profile0: [f32; 4],
+    /// Baseline-exposure multiplier (`2^BaselineExposureOffset`, `1.0` with no profile), yzw unused.
+    profile1: [f32; 4],
 }
 
 #[repr(C)]
@@ -448,6 +460,11 @@ pub struct LiveParams {
     pub hsl: HslParams,
     pub sharpen: SharpenParams,
     pub noise_reduction: NoiseReductionParams,
+    /// A solved DCP camera profile (`nicti_calico::profile::ProfileSolution`, #42): its
+    /// HueSatMap / baseline exposure / LookTable run right after the camera->working matrix.
+    /// The caller is responsible for putting the solution's `camera_to_working` into
+    /// `working_space_matrix` -- this field carries only the tables. `None` = no profile.
+    pub camera_profile: Option<Arc<ProfileSolution>>,
     /// Render extent's long edge divided by the source frame's own long edge -- lets Sharpening/
     /// Noise Reduction's blur radii scale with actual output resolution (a screen-res preview and
     /// a full-res export should sharpen the same image *content*, not the same pixel count). `1.0`
@@ -466,6 +483,7 @@ impl Default for LiveParams {
             hsl: HslParams::default(),
             sharpen: SharpenParams::default(),
             noise_reduction: NoiseReductionParams::default(),
+            camera_profile: None,
             pixel_scale: 1.0,
         }
     }
@@ -546,6 +564,68 @@ pub struct LiveSuffixKernel {
     sharpen_v_buf: wgpu::Buffer,
     combine_buf: wgpu::Buffer,
     detail_state: std::sync::Mutex<DetailState>,
+    /// The DCP tables currently bound (1x1x1 dummies when a profile lacks them) and a fingerprint
+    /// of each so `set_params` only re-uploads when content actually changed.
+    profile_tables: std::sync::Mutex<ProfileTables>,
+    profile_sampler: wgpu::Sampler,
+}
+
+struct ProfileTables {
+    hue_sat_view: wgpu::TextureView,
+    look_view: wgpu::TextureView,
+    hue_sat_fp: Option<u64>,
+    look_fp: Option<u64>,
+}
+
+/// A 3D table texture: width = saturation, height = hue, depth = value (the DNG SDK's on-disk
+/// order, value outermost / hue middle / saturation innermost, uploads with no transpose).
+fn upload_table(gpu: &GpuContext, map: &HueSatMap) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: map.sat_divisions as u32,
+        height: map.hue_divisions as u32,
+        depth_or_array_layers: map.val_divisions as u32,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dcp table"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let texels: Vec<u16> = map
+        .data
+        .iter()
+        .flat_map(|e| [e[0], e[1], e[2], 0.0].map(|v| half::f16::from_f32(v).to_bits()))
+        .collect();
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        bytemuck::cast_slice(&texels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(map.sat_divisions as u32 * 8), // 4 x f16
+            rows_per_image: Some(map.hue_divisions as u32),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// The bound-but-unused table when a profile has no HueSatMap/LookTable: the auto-derived bind
+/// group layout includes bindings 3/4 whenever the shader references them, so they must always be
+/// supplied. Never sampled (`profile0` flags gate every read).
+fn dummy_table(gpu: &GpuContext) -> wgpu::TextureView {
+    upload_table(
+        gpu,
+        &HueSatMap {
+            hue_divisions: 1,
+            sat_divisions: 1,
+            val_divisions: 1,
+            data: vec![[0.0, 1.0, 1.0]],
+        },
+    )
 }
 
 fn make_uniform_buffer(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
@@ -595,6 +675,21 @@ impl LiveSuffixKernel {
                 std::mem::size_of::<CombineUniforms>() as u64,
             ),
             detail_state: std::sync::Mutex::new(DetailState::default()),
+            profile_tables: std::sync::Mutex::new(ProfileTables {
+                hue_sat_view: dummy_table(gpu),
+                look_view: dummy_table(gpu),
+                hue_sat_fp: None,
+                look_fp: None,
+            }),
+            profile_sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("dcp table sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge, // saturation
+                address_mode_v: wgpu::AddressMode::Repeat,      // hue wraps
+                address_mode_w: wgpu::AddressMode::ClampToEdge, // value
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         }
     }
 
@@ -622,7 +717,40 @@ impl LiveSuffixKernel {
             ],
             curve_lut: pack_lut(&lut),
             hsl_bands: pack_hsl(&params.hsl),
+            profile0: [0.0; 4],
+            profile1: [1.0, 0.0, 0.0, 0.0],
         };
+        let mut u = u;
+        {
+            let mut tables = self.profile_tables.lock().unwrap();
+            let srgb = |e: TableEncoding| f32::from(e == TableEncoding::Srgb);
+            let (hsm, look) = match &params.camera_profile {
+                Some(p) => (p.hue_sat_map.as_ref(), p.look_table.as_ref()),
+                None => (None, None),
+            };
+            // Re-upload a table only when its content changed (a WB drag re-blends the HueSatMap
+            // every frame, but an unchanged blend costs nothing).
+            let hsm_fp = hsm.map(fingerprint);
+            if hsm_fp != tables.hue_sat_fp {
+                tables.hue_sat_view =
+                    hsm.map_or_else(|| dummy_table(gpu), |m| upload_table(gpu, m));
+                tables.hue_sat_fp = hsm_fp;
+            }
+            let look_fp = look.map(fingerprint);
+            if look_fp != tables.look_fp {
+                tables.look_view = look.map_or_else(|| dummy_table(gpu), |m| upload_table(gpu, m));
+                tables.look_fp = look_fp;
+            }
+            if let Some(p) = &params.camera_profile {
+                u.profile0 = [
+                    f32::from(hsm.is_some()),
+                    f32::from(look.is_some()),
+                    srgb(p.hue_sat_encoding),
+                    srgb(p.look_encoding),
+                ];
+                u.profile1[0] = p.baseline_exposure_multiplier;
+            }
+        }
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
@@ -641,6 +769,7 @@ impl LiveSuffixKernel {
         output: &FrameTexture,
     ) {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
+        let tables = self.profile_tables.lock().unwrap();
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live_suffix bind group"),
             layout: &bind_group_layout,
@@ -657,8 +786,21 @@ impl LiveSuffixKernel {
                     binding: 2,
                     resource: self.uniform_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&tables.hue_sat_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&tables.look_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.profile_sampler),
+                },
             ],
         });
+        drop(tables);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("live_suffix"),
             timestamp_writes: None,
@@ -1264,6 +1406,167 @@ mod tests {
         exec.encode(&gpu, &mut encoder, None, &output);
     }
 
+    /// A synthetic camera profile with smooth, non-trivial HueSatMap and sRGB-encoded LookTable
+    /// plus a baseline exposure offset, so every profile stage visibly changes the output.
+    fn synthetic_profile() -> nicti_calico::dcp::DcpProfile {
+        use nicti_calico::dcp::{DcpProfile, TableEncoding};
+        let d50 = [0.9642, 1.0, 0.8249];
+        let fm = [[d50[0], 0.0, 0.0], [0.0, d50[1], 0.0], [0.0, 0.0, d50[2]]];
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let smooth = |hue_div: usize, sat_div: usize, val_div: usize, amp: f32| {
+            let mut data = Vec::new();
+            for v in 0..val_div {
+                for h in 0..hue_div {
+                    for sa in 0..sat_div {
+                        let ang = h as f32 / hue_div as f32 * std::f32::consts::TAU;
+                        data.push([
+                            amp * ang.sin(),
+                            0.85 + 0.1 * sa as f32 / sat_div as f32,
+                            1.0 + 0.15 * (v as f32 / val_div as f32) * ang.cos().abs(),
+                        ]);
+                    }
+                }
+            }
+            HueSatMap {
+                hue_divisions: hue_div,
+                sat_divisions: sat_div,
+                val_divisions: val_div,
+                data,
+            }
+        };
+        DcpProfile {
+            name: "synthetic".into(),
+            unique_camera_model: "TEST".into(),
+            illuminant1_cct: 2856.0,
+            illuminant2_cct: 6504.0,
+            color_matrix1: identity,
+            color_matrix2: identity,
+            forward_matrix1: Some(fm),
+            forward_matrix2: Some(fm),
+            hue_sat_map1: Some(smooth(12, 4, 3, 12.0)),
+            hue_sat_map2: Some(smooth(12, 4, 3, 6.0)),
+            look_table: Some(smooth(9, 3, 4, 8.0)),
+            tone_curve_points: None,
+            baseline_exposure_offset: -0.3,
+            hue_sat_map_encoding: TableEncoding::Linear,
+            look_table_encoding: TableEncoding::Srgb,
+        }
+    }
+
+    #[test]
+    fn live_suffix_with_a_camera_profile_matches_the_cpu_reference() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 4,
+            height: 2,
+        };
+        // Camera-space samples with real chroma (a saturated red, green, blue, skin-ish, neutral).
+        let input_data = vec![
+            [0.55, 0.08, 0.06, 1.0],
+            [0.10, 0.50, 0.09, 1.0],
+            [0.07, 0.10, 0.60, 1.0],
+            [0.45, 0.30, 0.20, 1.0],
+            [0.30, 0.30, 0.30, 1.0],
+            [0.50, 0.42, 0.05, 1.0],
+            [0.05, 0.40, 0.45, 1.0],
+            [0.35, 0.12, 0.40, 1.0],
+        ];
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let output = FrameTexture::new(&gpu, extent);
+
+        let gains = [1.8f64, 1.0, 1.3];
+        let solution = Arc::new(synthetic_profile().solve(gains));
+        let params = LiveParams {
+            working_space_matrix: solution.camera_to_working,
+            camera_profile: Some(solution.clone()),
+            ..Default::default()
+        };
+        let kernel = LiveSuffixKernel::new(&gpu);
+        kernel.set_params(&gpu, &params);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(&gpu, &mut encoder, &input, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let actual = crate::test_util::read_frame(&gpu, &output);
+
+        // A second render with the profile's tables stripped: the profile stages must visibly
+        // matter, or this test proves nothing.
+        let mut stripped = (*solution).clone();
+        stripped.hue_sat_map = None;
+        stripped.look_table = None;
+        stripped.baseline_exposure_multiplier = 1.0;
+        let mut biggest_effect = 0.0f32;
+
+        let tone = ToneParams::default();
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        for (i, px) in input_data.iter().enumerate() {
+            let mut rgb = solution.apply_cpu([px[0], px[1], px[2]]);
+            let plain = stripped.apply_cpu([px[0], px[1], px[2]]);
+            for c in 0..3 {
+                biggest_effect = biggest_effect.max((rgb[c] - plain[c]).abs());
+            }
+            rgb = color::apply_tone(rgb, &tone);
+            rgb = color::apply_tone_curve(rgb, &lut);
+            rgb = color::apply_vibrance(rgb, 0.0);
+            rgb = color::apply_hsl(rgb, &hsl);
+            for c in 0..3 {
+                assert!(
+                    (actual[i][c] - rgb[c]).abs() < 0.015,
+                    "pixel {i} channel {c}: gpu={} cpu={} (input {px:?})",
+                    actual[i][c],
+                    rgb[c]
+                );
+            }
+        }
+        assert!(
+            biggest_effect > 0.02,
+            "the profile barely changed the output ({biggest_effect}); the test is vacuous"
+        );
+    }
+
+    #[test]
+    fn changing_the_profile_tables_re_uploads_them_and_dropping_the_profile_restores_the_matrix_only_result(
+    ) {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 1,
+            height: 1,
+        };
+        let input = crate::test_util::upload_frame(&gpu, extent, &[[0.5, 0.2, 0.1, 1.0]]);
+        let output = FrameTexture::new(&gpu, extent);
+        let kernel = LiveSuffixKernel::new(&gpu);
+        let render = |params: &LiveParams| {
+            kernel.set_params(&gpu, params);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(&gpu, &output)[0]
+        };
+        let solution = Arc::new(synthetic_profile().solve([1.5, 1.0, 1.2]));
+        let matrix = solution.camera_to_working;
+        let none = LiveParams {
+            working_space_matrix: matrix,
+            ..Default::default()
+        };
+        let with = LiveParams {
+            working_space_matrix: matrix,
+            camera_profile: Some(solution.clone()),
+            ..Default::default()
+        };
+        let before = render(&none);
+        let profiled = render(&with);
+        let after = render(&none);
+        assert_ne!(before, profiled, "profile should change the pixel");
+        assert_eq!(
+            before, after,
+            "dropping the profile must restore the plain result"
+        );
+    }
+
     #[test]
     fn live_suffix_gpu_matches_cpu_reference() {
         let Some(gpu) = test_gpu() else { return };
@@ -1572,6 +1875,7 @@ mod tests {
                 hsl,
                 sharpen,
                 noise_reduction,
+                camera_profile: None,
                 pixel_scale: 1.0,
             },
         );

@@ -26,6 +26,11 @@ pub(crate) fn working_to_xyz_d50() -> Mat3 {
     primaries_to_xyz(PROPHOTO, D50)
 }
 
+/// XYZ(D50) -> linear ProPhoto (D50): the inverse of [`working_to_xyz_d50`].
+pub(crate) fn working_from_xyz_d50() -> Mat3 {
+    mat_invert(&working_to_xyz_d50())
+}
+
 /// A delivery/proofing color space the pipeline can convert to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputSpace {

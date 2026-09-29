@@ -470,7 +470,7 @@ mod tests {
     use super::*;
     use nicti_calico::transform::DisplayProfile;
     use nicti_tapetum::frame::Extent;
-    use nicti_tapetum::gpu::{GpuContext, GpuPreference};
+    use nicti_tapetum::gpu::GpuContext;
 
     /// Regression test for a real bug caught in an earlier PR's own adversarial review: an
     /// earlier version of `display.wgsl`'s `Uniforms` struct trailed with a `_pad: vec3<u32>`,
@@ -486,8 +486,7 @@ mod tests {
     /// WGSL struct fails here instead of only in a live app.
     #[test]
     fn bind_group_creation_matches_the_shaders_reflected_uniform_layout() {
-        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
-            eprintln!("no wgpu adapter available in this environment, skipping");
+        let Some(gpu) = crate::test_gpu::shared() else {
             return;
         };
 
@@ -731,12 +730,8 @@ mod tests {
         }
     }
 
-    fn gpu_or_skip() -> Option<GpuContext> {
-        let gpu = GpuContext::new(GpuPreference::Auto).ok();
-        if gpu.is_none() {
-            eprintln!("no wgpu adapter available in this environment, skipping");
-        }
-        gpu
+    fn gpu_or_skip() -> Option<Arc<GpuContext>> {
+        crate::test_gpu::shared()
     }
 
     #[test]
