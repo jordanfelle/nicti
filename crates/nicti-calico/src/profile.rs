@@ -166,8 +166,26 @@ impl DcpProfile {
                 }
                 mat_mul(&xyz_to_working, &mat_mul(&m, &wb))
             }
-            // The ColorMatrix fallback expects raw input; its Bradford step does the WB.
-            CameraToXyz::Raw(m) => mat_mul(&xyz_to_working, &m),
+            // The ColorMatrix fallback expects raw input; its Bradford step does the WB. Its
+            // absolute scale drifts with the solved illuminant (~0.35 EV between A and D65 on a
+            // real profile), unlike the ForwardMatrix branch, which maps a neutral to Y =
+            // (green channel). Normalize the same way: scale so the camera neutral (green = 1)
+            // lands at Y = 1.
+            CameraToXyz::Raw(m) => {
+                let white = mat_vec_mul(&m, neutral.map(|n| n / neutral[1].max(1e-12)));
+                let scale = if white[1].is_finite() && white[1] > 1e-6 {
+                    1.0 / white[1]
+                } else {
+                    1.0
+                };
+                let mut scaled = m;
+                for row in &mut scaled {
+                    for v in row.iter_mut() {
+                        *v *= scale;
+                    }
+                }
+                mat_mul(&xyz_to_working, &scaled)
+            }
         };
 
         let hue_sat_map = match (&self.hue_sat_map1, &self.hue_sat_map2) {
@@ -319,6 +337,44 @@ mod tests {
                 (c - 1.0).abs() < 2e-3,
                 "expected neutral white, got {out:?}"
             );
+        }
+    }
+
+    #[test]
+    fn both_matrix_branches_render_a_neutral_at_the_same_brightness() {
+        // A ColorMatrix-only profile (no ForwardMatrix) must not drift in brightness with the
+        // solved illuminant the way the raw Bradford-adapted matrix does.
+        let gains = [1.7, 1.0, 1.4];
+        let raw = [1.0 / 1.7, 1.0, 1.0 / 1.4]; // a neutral patch, green = 1
+        let forward = synthetic_profile().solve(gains).apply_cpu(raw);
+        let mut cm_only = synthetic_profile();
+        cm_only.forward_matrix1 = None;
+        cm_only.forward_matrix2 = None;
+        let no_forward = cm_only.solve(gains).apply_cpu(raw);
+        for c in 0..3 {
+            assert!(
+                (forward[c] - no_forward[c]).abs() < 0.05,
+                "forward {forward:?} vs color-matrix-only {no_forward:?}"
+            );
+        }
+        // And across illuminants: warmer gains must not change a neutral's luminance either.
+        for g in [[1.2, 1.0, 2.2], [2.4, 1.0, 1.1]] {
+            let n = g.map(|x| (1.0 / x) as f32);
+            let out = cm_only.solve(g).apply_cpu(n);
+            let luma = 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2];
+            assert!((luma - 1.0).abs() < 0.08, "gains {g:?}: luma {luma}");
+        }
+    }
+
+    #[test]
+    fn a_single_illuminant_forward_matrix_is_used_not_discarded() {
+        let mut p = synthetic_profile();
+        p.forward_matrix2 = None; // ForwardMatrix1 only
+        let gains = [1.5, 1.0, 1.3];
+        let sol = p.solve(gains);
+        let out = sol.apply_cpu(gains.map(|g| (1.0 / g) as f32));
+        for c in out {
+            assert!((c - 1.0).abs() < 2e-3, "{out:?}");
         }
     }
 

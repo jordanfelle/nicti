@@ -35,16 +35,31 @@ pub struct LoadedProfile {
     pub content_hash: String,
 }
 
-/// The upper-cased `"<MAKE> <MODEL>"` needle Adobe's file names start with. LibRaw reports
-/// `make = "Nikon"`, `model = "Z 8"`; some cameras already include the make in the model.
-pub fn camera_needle(make: &str, model: &str) -> String {
-    let make_word = make.split_whitespace().next().unwrap_or("").to_uppercase();
-    let model_up = model.trim().to_uppercase();
+/// The upper-cased camera names Adobe's files may start with, most specific first. LibRaw
+/// reports `make = "Nikon"`, `model = "Z 8"`; some cameras already put the make in the model, some
+/// have a multi-word make Adobe spells out (`OM Digital Solutions OM-1`), and LibRaw spells
+/// `Z 6_2` where Adobe writes `Z 6 2`.
+pub fn camera_needles(make: &str, model: &str) -> Vec<String> {
+    let model_up = model.trim().replace('_', " ").to_uppercase();
+    let make_up = make.trim().to_uppercase();
+    let make_word = make_up.split_whitespace().next().unwrap_or("").to_string();
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |n: String| {
+        if !n.is_empty() && !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    // The model alone if it already carries the make ("NIKON Z 8"), plus the make-prefixed forms:
+    // first word ("NIKON Z 8") and the full make ("OM DIGITAL SOLUTIONS OM-1"). Extra candidates
+    // are harmless -- a needle only matches a file whose name actually starts with it.
     if make_word.is_empty() || model_up.starts_with(&make_word) {
-        model_up
-    } else {
-        format!("{make_word} {model_up}")
+        push(model_up.clone());
     }
+    if !make_word.is_empty() {
+        push(format!("{make_word} {model_up}"));
+        push(format!("{make_up} {model_up}"));
+    }
+    out
 }
 
 /// Roots searched: `NICTI_DCP_DIR` if set, else Adobe's Windows locations.
@@ -70,24 +85,32 @@ pub fn discover(make: &str, model: &str) -> Vec<ProfileEntry> {
 /// Profiles for the camera under `roots`. Sorted, `Adobe Standard` first (the conventional
 /// default), the rest alphabetical.
 pub fn discover_in(roots: &[PathBuf], make: &str, model: &str) -> Vec<ProfileEntry> {
-    let needle = camera_needle(make, model);
-    if needle.is_empty() {
+    let needles = camera_needles(make, model);
+    if needles.is_empty() {
         return Vec::new();
     }
     let mut found = Vec::new();
-    let mut visited = 0usize;
     for root in roots {
-        walk(root, 0, &needle, &mut found, &mut visited);
+        // The visit cap is per root, as documented, so a huge root can't starve the others.
+        let mut visited = 0usize;
+        walk(root, 0, &needles, &mut found, &mut visited);
     }
     found.sort_by(|a: &ProfileEntry, b: &ProfileEntry| {
         let rank = |e: &ProfileEntry| u8::from(e.name != "Adobe Standard");
         rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
     });
-    found.dedup_by(|a, b| a.path == b.path);
+    // The same profile installed under both PROGRAMDATA and APPDATA would list twice.
+    found.dedup_by(|a, b| a.path == b.path || a.name.eq_ignore_ascii_case(&b.name));
     found
 }
 
-fn walk(dir: &Path, depth: usize, needle: &str, out: &mut Vec<ProfileEntry>, visited: &mut usize) {
+fn walk(
+    dir: &Path,
+    depth: usize,
+    needles: &[String],
+    out: &mut Vec<ProfileEntry>,
+    visited: &mut usize,
+) {
     if depth > MAX_DEPTH {
         return;
     }
@@ -102,25 +125,29 @@ fn walk(dir: &Path, depth: usize, needle: &str, out: &mut Vec<ProfileEntry>, vis
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
-            walk(&path, depth + 1, needle, out, visited);
+            walk(&path, depth + 1, needles, out, visited);
         } else if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("dcp"))
         {
-            if let Some(name) = profile_name_for(&path, needle) {
+            if let Some(name) = needles.iter().find_map(|n| profile_name_for(&path, n)) {
                 out.push(ProfileEntry { name, path });
             }
         }
     }
 }
 
-/// `Some(profile name)` if `path`'s file name is `<needle> <profile name>.dcp` -- the model must
-/// be followed by a space, so `Z 8` does not match `Z 80 ...`.
+/// `Some(profile name)` if `path`'s file name is `<needle> <profile name>.dcp`.
+///
+/// Adobe's profile names all begin `Adobe ` (`Adobe Standard`) or `Camera ` (`Camera Landscape`),
+/// and requiring that is what stops a short model from claiming a longer one's files: `Z 6` must
+/// not list `NIKON Z 6 2 Camera Flat` (the Z 6II), `EOS 5D` must not list `EOS 5D Mark II ...`,
+/// `EOS R5` must not list the `R5 C`, and `Z 8` must not list `Z 80 ...`.
 fn profile_name_for(path: &Path, needle: &str) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let up = stem.to_uppercase();
-    let rest = up.strip_prefix(needle)?;
-    if !rest.starts_with(' ') {
+    let rest = up.strip_prefix(needle)?.strip_prefix(' ')?;
+    if !(rest.starts_with("ADOBE ") || rest.starts_with("CAMERA ")) {
         return None;
     }
     // Slice the original-case stem by the same byte length (ASCII prefix, so lengths agree).
@@ -128,9 +155,9 @@ fn profile_name_for(path: &Path, needle: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// Reads, size-checks, parses and hashes a `.dcp`. `camera_model_needle`, if given, must match
+/// Reads, size-checks, parses and hashes a `.dcp`. `camera_needles`, if given, must include
 /// the profile's `UniqueCameraModel` (case-insensitively) when that tag is present.
-pub fn load(path: &Path, camera_needle: Option<&str>) -> Result<LoadedProfile, String> {
+pub fn load(path: &Path, camera_needles: Option<&[String]>) -> Result<LoadedProfile, String> {
     let len = std::fs::metadata(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .len();
@@ -142,13 +169,18 @@ pub fn load(path: &Path, camera_needle: Option<&str>) -> Result<LoadedProfile, S
     }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let profile = DcpProfile::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    if let Some(needle) = camera_needle {
-        let ucm = profile.unique_camera_model.to_uppercase();
-        if !ucm.is_empty() && ucm != needle {
+    if let Some(needles) = camera_needles {
+        let ucm = profile
+            .unique_camera_model
+            .trim()
+            .replace('_', " ")
+            .to_uppercase();
+        if !ucm.is_empty() && !needles.contains(&ucm) {
             return Err(format!(
-                "{} is for a {} camera, not {needle}",
+                "{} is for a {} camera, not {}",
                 path.display(),
-                profile.unique_camera_model
+                profile.unique_camera_model,
+                needles.first().map_or("this", String::as_str)
             ));
         }
     }
@@ -164,10 +196,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needle_combines_make_and_model_unless_the_model_already_has_it() {
-        assert_eq!(camera_needle("Nikon", "Z 8"), "NIKON Z 8");
-        assert_eq!(camera_needle("NIKON CORPORATION", "NIKON Z 8"), "NIKON Z 8");
-        assert_eq!(camera_needle("", "Z 8"), "Z 8");
+    fn needles_combine_make_and_model_unless_the_model_already_has_it() {
+        assert_eq!(camera_needles("Nikon", "Z 8"), ["NIKON Z 8"]);
+        assert_eq!(
+            camera_needles("NIKON CORPORATION", "NIKON Z 8")[0],
+            "NIKON Z 8"
+        );
+        assert_eq!(camera_needles("", "Z 8"), ["Z 8"]);
+    }
+
+    #[test]
+    fn needles_cover_multi_word_makes_and_libraws_underscore_models() {
+        let om = camera_needles("OM Digital Solutions", "OM-1");
+        assert!(
+            om.contains(&"OM DIGITAL SOLUTIONS OM-1".to_string()),
+            "{om:?}"
+        );
+        assert_eq!(camera_needles("Nikon", "Z 6_2"), ["NIKON Z 6 2"]);
+    }
+
+    #[test]
+    fn a_short_model_does_not_claim_a_longer_models_profiles() {
+        let p = |f: &str, needle: &str| profile_name_for(Path::new(f), needle).is_some();
+        // Nikon Z 6 vs Z 6II (Adobe writes "Z 6 2"); Canon 5D vs 5D Mark II; R5 vs R5 C.
+        assert!(!p("NIKON Z 6 2 Camera Flat.dcp", "NIKON Z 6"));
+        assert!(p("NIKON Z 6 Camera Flat.dcp", "NIKON Z 6"));
+        assert!(!p(
+            "CANON EOS 5D Mark II Adobe Standard.dcp",
+            "CANON EOS 5D"
+        ));
+        assert!(p("CANON EOS 5D Adobe Standard.dcp", "CANON EOS 5D"));
+        assert!(!p("CANON EOS R5 C Adobe Standard.dcp", "CANON EOS R5"));
+        assert!(p("CANON EOS R5 Adobe Standard.dcp", "CANON EOS R5"));
     }
 
     #[test]
@@ -183,6 +243,7 @@ mod tests {
         );
         assert!(p("NIKON Z 80 Adobe Standard.dcp").is_none());
         assert!(p("NIKON Z 8.dcp").is_none());
+        assert!(p("NIKON Z 8 Something Else.dcp").is_none());
         assert!(p("CANON EOS R5 Adobe Standard.dcp").is_none());
     }
 
@@ -199,6 +260,7 @@ mod tests {
         touch("Adobe Standard/NIKON Z 8 Adobe Standard.dcp");
         touch("Adobe Standard/NIKON Z 7 Adobe Standard.dcp");
         touch("Adobe Standard/NIKON Z 80 Adobe Standard.dcp");
+        touch("Camera/Nikon Z 8/NIKON Z 8 Camera Flat.dcp"); // same profile listed twice
         touch("Adobe Standard/readme.txt");
         let found = discover_in(&[dir.path().to_path_buf()], "Nikon", "Z 8");
         let names: Vec<_> = found.iter().map(|e| e.name.as_str()).collect();
@@ -229,10 +291,25 @@ mod tests {
         let found = discover_in(&[PathBuf::from(dir)], "Nikon", "Z 8");
         assert_eq!(found[0].name, "Adobe Standard");
         assert!(found.len() >= 4, "found only {found:?}");
-        let loaded = load(&found[0].path, Some("NIKON Z 8")).unwrap();
+        let loaded = load(&found[0].path, Some(&["NIKON Z 8".to_string()])).unwrap();
         assert_eq!(loaded.content_hash.len(), 64);
         assert!(loaded.profile.hue_sat_map1.is_some());
+        // A short model must not claim a longer one's files (Z 6 vs Z 6II's "Z 6 2 ..."; 5D vs
+        // 5D Mark II): every listed profile must actually load for that camera.
+        let root = [PathBuf::from(
+            std::env::var("NICTI_DCP_DIR")
+                .unwrap_or_else(|_| "/mnt/c/ProgramData/Adobe/CameraRaw/CameraProfiles".into()),
+        )];
+        for (make, model) in [("Nikon", "Z 6"), ("Canon", "EOS 5D"), ("Canon", "EOS R5")] {
+            let needles = camera_needles(make, model);
+            for entry in discover_in(&root, make, model) {
+                assert!(
+                    load(&entry.path, Some(&needles)).is_ok(),
+                    "{make} {model} listed a profile for another camera: {entry:?}"
+                );
+            }
+        }
         // The same file must be rejected for a different camera.
-        assert!(load(&found[0].path, Some("NIKON Z 7")).is_err());
+        assert!(load(&found[0].path, Some(&["NIKON Z 7".to_string()])).is_err());
     }
 }

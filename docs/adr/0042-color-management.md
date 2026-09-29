@@ -93,19 +93,39 @@ then the existing user-exposure/tone/... chain. Hue and saturation are taken fro
 linear RGB; only the value coordinate goes through the table's encoding (Adobe's reference
 implementation), unclamped above 1. Bindings 3/4/5 (two 3D tables, one sampler) are always bound
 -- 1x1x1 dummies when absent -- because the auto-derived bind-group layout includes any binding the
-shader references. The hardware lerps the hue shift linearly rather than along the shortest arc, an
-accepted approximation (parity tolerance 0.015).
+shader references. The hardware lerps the hue shift linearly rather than along the shortest arc; the
+CPU reference (`apply_cpu`) takes the shortest arc, so the two differ wherever adjacent table
+entries' shifts differ by more than 180 degrees (most Adobe "Camera *" tables have ~350-degree
+adjacent differences). Measured on seven real profiles this changed 0 of 4096 sampled pixels by more
+than 0.015, so it is accepted; the DNG SDK's own reference blends shifts linearly, so the GPU is the
+one matching Adobe.
+
+**User Exposure and baseline exposure are one stage** (Adobe's `dng_render`), applied *before* the
+LookTable: `rgb *= profile.baseline * user_exposure`, then the LookTable. With no profile this is
+just the user exposure, as before. The ColorMatrix (no-ForwardMatrix) branch is normalized so a
+neutral lands at the same brightness as the ForwardMatrix branch (unnormalized it drifted ~0.35 EV
+between illuminants A and D65 on a real profile), and a ForwardMatrix present for only one
+illuminant is used as-is rather than discarded.
 
 **Selection and the cache key.** The choice lives on the `nicti.working_space` stage as
 `coat::CameraProfileParams { name, path, content_hash }` (blake3 of the file), so it flows into
 that node's hash and therefore the live-output cache key; no profile serializes to the stage's
 historical `{}`, leaving existing documents' hashes unchanged. `nicti-pelt` discovers the user's
 own Adobe profiles at runtime (`camera_profiles.rs`; never bundled, ADR-0018), matches them to the
-frame by `<MAKE> <MODEL>` file-name prefix, re-checks the file's `UniqueCameraModel`, and offers
+frame by `<MAKE> <MODEL>` file-name prefix (the rest of the name must begin `Adobe ` or `Camera `,
+so `Z 6` doesn't claim the Z 6II's `Z 6 2 ...` files; LibRaw's `Z 6_2` and multi-word makes like
+`OM Digital Solutions` are normalized) and re-checks the file's `UniqueCameraModel`, and offers
 them in the Develop panel's Basic section. **Default is "Matrix only"** -- silently changing every
 photo's look on load is a decision for the reference-machine ΔE pass (#149), not this PR.
 
-**Not done here:** `ProfileToneCurve` and the Look `.xmp` profiles (`xmp_profile.rs` stays in the
+**Hostile `.dcp` files** are bounded: only the 17 tags the parser reads are decoded, total decoded
+bytes are budgeted against the file size (entries may legally overlap, so an unbudgeted parse
+multiplied memory ~1 GB per MB), table axes are capped at 256 (3D texture limits are 2048 on common
+adapters), a singular ColorMatrix is refused at parse time, and the CCT solver degrades rather than
+panics on a matrix pair that is singular only when blended.
+
+**Not done here:** `ProfileToneCurve`, `DefaultBlackRender` (most Adobe "Camera *" profiles carry
+one or both, so those profiles render close to, but not exactly, Adobe's look) and the Look `.xmp` profiles (`xmp_profile.rs` stays in the
 spike), per-photo persistence of the choice (edits are not yet catalog-persisted), and the working
 space pick (#149).
 

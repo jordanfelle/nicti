@@ -321,11 +321,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (u.profile0.x > 0.5) {
         rgb = dcp_apply_table(rgb, hue_sat_map, u.profile0.z > 0.5);
     }
-    rgb = rgb * u.profile1.x;
+    // Baseline exposure and the user's Exposure slider are one stage (Adobe's `dng_render`): the
+    // LookTable must see the exposed image. With no profile this is just the user exposure.
+    rgb = rgb * (u.profile1.x * u.tone0.x);
     if (u.profile0.y > 0.5) {
         rgb = dcp_apply_table(rgb, look_table, u.profile0.w > 0.5);
     }
-    rgb = rgb * u.tone0.x;
     rgb = apply_tone(rgb, u.tone0.y, u.tone0.z, u.tone0.w, u.tone1.x, u.tone1.y);
     rgb = apply_tone_curve(rgb);
     rgb = apply_vibrance(rgb, u.tone1.z);

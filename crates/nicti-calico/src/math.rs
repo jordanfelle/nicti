@@ -39,15 +39,18 @@ pub(crate) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
     out
 }
 
-/// Cramer's-rule inverse. Panics on a singular matrix: every matrix inverted here is built from
-/// fixed primaries, so a singular one is a programming error worth surfacing loudly.
-pub(crate) fn mat_invert(m: &Mat3) -> Mat3 {
+/// Cramer's-rule inverse, or `None` for a singular / non-finite matrix. Use this for any matrix
+/// that comes from a file (a camera profile's `ColorMatrix`), where a bad value is input, not a
+/// programming error.
+pub(crate) fn mat_try_invert(m: &Mat3) -> Option<Mat3> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    assert!(det.abs() > 1e-12, "matrix is singular (det={det})");
+    if !det.is_finite() || det.abs() <= 1e-12 {
+        return None;
+    }
     let d = 1.0 / det;
-    [
+    let inv = [
         [
             (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * d,
             (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * d,
@@ -63,7 +66,14 @@ pub(crate) fn mat_invert(m: &Mat3) -> Mat3 {
             (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * d,
             (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * d,
         ],
-    ]
+    ];
+    inv.iter().flatten().all(|v| v.is_finite()).then_some(inv)
+}
+
+/// [`mat_try_invert`] for matrices built from fixed constants (primaries), where a singular one
+/// is a programming error worth surfacing loudly.
+pub(crate) fn mat_invert(m: &Mat3) -> Mat3 {
+    mat_try_invert(m).expect("matrix is singular")
 }
 
 const BRADFORD: Mat3 = [

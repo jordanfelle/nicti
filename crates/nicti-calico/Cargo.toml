@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Color management (#42/ADR-0042): output spaces, ICC profiles, display/proof transform, plus the ColorProfile extension point (ADR-0019 §8). DCP camera-profile parsing is #38's, promoted in a follow-up PR of #42."
+description = "Color management (#42/ADR-0042): output spaces, ICC profiles, the display/proof transform, and DCP camera-profile parsing and solving (ADR-0038), plus the ColorProfile extension point (ADR-0019 §8)."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }

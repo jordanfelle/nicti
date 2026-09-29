@@ -27,9 +27,25 @@ pub enum DcpError {
     MissingTag(u16, &'static str),
     #[error("tag {0:#06x}: expected {1} values, found {2}")]
     WrongCount(u16, usize, usize),
+    #[error("malformed profile: {0}")]
+    Malformed(&'static str),
 }
 
 // DNG spec Camera Profile tag IDs.
+/// Every tag [`DcpProfile::parse`] reads. `read_ifd` decodes only these: a hostile file can list
+/// tens of thousands of entries, and decoding each unknown one would copy its value bytes for
+/// nothing.
+const KNOWN_TAGS: [u16; 17] = [
+    50708, 50721, 50722, 50778, 50779, 50936, 50937, 50938, 50939, 50940, 50964, 50965, 50981,
+    50982, 51107, 51108, 51109,
+];
+
+/// Largest axis / total cell count accepted for a HueSatMap or LookTable. Real tables are at most
+/// 90x30x1 or 90x16x16; the bound keeps the 3D texture within every adapter's limit (2048) and
+/// the upload small.
+const MAX_TABLE_AXIS: usize = 256;
+const MAX_TABLE_CELLS: usize = 1 << 20;
+
 const TAG_PROFILE_NAME: u16 = 50936;
 const TAG_CALIBRATION_ILLUMINANT1: u16 = 50778;
 const TAG_CALIBRATION_ILLUMINANT2: u16 = 50779;
@@ -72,6 +88,15 @@ fn table_encoding(tags: &HashMap<u16, TagValue>, tag: u16) -> TableEncoding {
 pub fn light_source_to_cct(value: u16) -> f64 {
     match value {
         1 => 5500.0,  // Daylight
+        3 => 2850.0,  // Tungsten (incandescent)
+        4 => 5500.0,  // Flash
+        9 => 5500.0,  // Fine weather
+        10 => 6500.0, // Cloudy
+        11 => 7500.0, // Shade
+        12 => 6500.0, // Daylight fluorescent (D 5700-7100K)
+        13 => 5000.0, // Day white fluorescent (N 4600-5500K)
+        14 => 4150.0, // Cool white fluorescent (W 3800-4500K)
+        15 => 3500.0, // White fluorescent (WW 3250-3800K)
         17 => 2856.0, // Standard Light A
         18 => 4874.0, // Standard Light B
         19 => 6774.0, // Standard Light C
@@ -173,6 +198,11 @@ fn read_ifd(data: &[u8]) -> Result<HashMap<u16, TagValue>, DcpError> {
     let entry_count = read_u16(&mut cursor, little_endian)?;
 
     let mut tags = HashMap::new();
+    // Entries may legally overlap in a corrupt or hostile file (many tags pointing at one big
+    // blob), so total decoded bytes are budgeted against the file size, not just each entry
+    // against it -- otherwise N entries x one large region allocates N copies.
+    let budget = data.len().saturating_mul(2).saturating_add(64 * 1024);
+    let mut decoded_bytes = 0usize;
     for _ in 0..entry_count {
         let tag = read_u16(&mut cursor, little_endian)?;
         let type_raw = read_u16(&mut cursor, little_endian)?;
@@ -182,8 +212,18 @@ fn read_ifd(data: &[u8]) -> Result<HashMap<u16, TagValue>, DcpError> {
             cursor.seek(SeekFrom::Start(value_offset_pos + 4))?;
             continue;
         };
+        if !KNOWN_TAGS.contains(&tag) {
+            cursor.seek(SeekFrom::Start(value_offset_pos + 4))?;
+            continue;
+        }
 
-        let total_bytes = ty.size() * count;
+        let total_bytes = ty.size().saturating_mul(count);
+        decoded_bytes = decoded_bytes.saturating_add(total_bytes);
+        if decoded_bytes > budget {
+            return Err(DcpError::Malformed(
+                "tag values overlap or exceed the file size",
+            ));
+        }
         let value_bytes = if total_bytes <= 4 {
             let mut buf = [0u8; 4];
             cursor.read_exact(&mut buf)?;
@@ -191,7 +231,7 @@ fn read_ifd(data: &[u8]) -> Result<HashMap<u16, TagValue>, DcpError> {
         } else {
             let offset = read_u32(&mut cursor, little_endian)?;
             let start = offset as usize;
-            let end = start + total_bytes;
+            let end = start.saturating_add(total_bytes);
             if end > data.len() {
                 cursor.seek(SeekFrom::Start(value_offset_pos + 4))?;
                 continue;
@@ -382,6 +422,17 @@ impl DcpProfile {
             if hue_div == 0 || sat_div == 0 {
                 return None;
             }
+            // Bound each axis and the total: also keeps the GPU 3D texture within adapter limits.
+            if hue_div > MAX_TABLE_AXIS
+                || sat_div > MAX_TABLE_AXIS
+                || val_div > MAX_TABLE_AXIS
+                || hue_div
+                    .saturating_mul(sat_div)
+                    .saturating_mul(val_div.max(1))
+                    > MAX_TABLE_CELLS
+            {
+                return None;
+            }
             let TagValue::Floats(values) = tags.get(&data_tag)? else {
                 return None;
             };
@@ -435,6 +486,14 @@ impl DcpProfile {
         // rely on struct-literal fields evaluating in source order, an easy-to-break invariant).
         let color_matrix1 = matrix3(TAG_COLOR_MATRIX1)?;
         let color_matrix2 = matrix3(TAG_COLOR_MATRIX2).unwrap_or(color_matrix1);
+        // Both are inverted at solve time; a singular or non-finite one (a zero denominator
+        // decodes to 0.0) is a corrupt profile, refused here rather than crashing a render.
+        if crate::math::mat_try_invert(&color_matrix1).is_none()
+            || crate::math::mat_try_invert(&color_matrix2).is_none()
+        {
+            return Err(DcpError::Malformed("ColorMatrix is singular or not finite"));
+        }
+        let finite = |m: Option<Mat3>| m.filter(|m| m.iter().flatten().all(|v| v.is_finite()));
 
         let unique_camera_model = match tags.get(&TAG_UNIQUE_CAMERA_MODEL) {
             Some(TagValue::Ascii(s)) => s.clone(),
@@ -448,8 +507,8 @@ impl DcpProfile {
             illuminant2_cct: illuminant2,
             color_matrix1,
             color_matrix2,
-            forward_matrix1: optional_matrix3(TAG_FORWARD_MATRIX1),
-            forward_matrix2: optional_matrix3(TAG_FORWARD_MATRIX2),
+            forward_matrix1: finite(optional_matrix3(TAG_FORWARD_MATRIX1)),
+            forward_matrix2: finite(optional_matrix3(TAG_FORWARD_MATRIX2)),
             hue_sat_map1: hue_sat_map(TAG_PROFILE_HUE_SAT_MAP_DIMS, TAG_PROFILE_HUE_SAT_MAP_DATA1),
             hue_sat_map2: hue_sat_map(TAG_PROFILE_HUE_SAT_MAP_DIMS, TAG_PROFILE_HUE_SAT_MAP_DATA2),
             look_table: hue_sat_map(TAG_PROFILE_LOOK_TABLE_DIMS, TAG_PROFILE_LOOK_TABLE_DATA),
@@ -479,6 +538,25 @@ pub mod testing {
         look_value_scale: Option<f32>,
         real_magic: bool,
     ) -> Vec<u8> {
+        synthetic_dcp_with_matrix(
+            model,
+            name,
+            hue_sat_value_scale,
+            look_value_scale,
+            real_magic,
+            [1, 0, 0, 0, 1, 0, 0, 0, 1],
+        )
+    }
+
+    /// As [`synthetic_dcp_bytes`] with an explicit `ColorMatrix1` (row-major numerators over 1).
+    pub fn synthetic_dcp_with_matrix(
+        model: &str,
+        name: &str,
+        hue_sat_value_scale: Option<f32>,
+        look_value_scale: Option<f32>,
+        real_magic: bool,
+        color_matrix: [i32; 9],
+    ) -> Vec<u8> {
         // (tag, tiff type, count, payload)
         let mut entries: Vec<(u16, u16, u32, Vec<u8>)> = Vec::new();
         let ascii = |s: &str| {
@@ -502,7 +580,7 @@ pub mod testing {
             1,
             17u16.to_le_bytes().to_vec(),
         ));
-        let identity: Vec<u8> = [1, 0, 0, 0, 1, 0, 0, 0, 1i32]
+        let identity: Vec<u8> = color_matrix
             .iter()
             .flat_map(|n| [n.to_le_bytes(), 1i32.to_le_bytes()].concat())
             .collect();
@@ -525,6 +603,13 @@ pub mod testing {
                 floats(&[0.0, 1.0, scale]),
             ));
         }
+        assemble(entries, real_magic)
+    }
+
+    /// Lays out `(tag, tiff type, count, payload)` entries as a little-endian TIFF-structured file
+    /// (values of 4 bytes or fewer inline, the rest external). Exposed so tests can craft
+    /// deliberately malformed files.
+    pub fn assemble(mut entries: Vec<(u16, u16, u32, Vec<u8>)>, real_magic: bool) -> Vec<u8> {
         entries.sort_by_key(|e| e.0);
 
         let mut buf = Vec::new();
@@ -648,6 +733,98 @@ mod tests {
         for n in 0..good.len() {
             let _ = DcpProfile::parse(&good[..n]);
         }
+    }
+
+    #[test]
+    fn overlapping_tag_values_cannot_amplify_memory() {
+        // Six known float tags all claiming the same 1 MiB blob: 6 MiB of decoded values from a
+        // ~1 MiB file. Each entry passes the "within the file" check on its own.
+        let blob = vec![0u8; 1 << 20];
+        let count = (blob.len() / 4) as u32;
+        let external_base = 8 + 2 + 6 * 12 + 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&0x4352u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&6u16.to_le_bytes());
+        for tag in [50938u16, 50939, 50940, 50964, 50965, 50982] {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&11u16.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(&(external_base as u32).to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&blob);
+        assert!(matches!(
+            DcpProfile::parse(&bytes),
+            Err(DcpError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_tags_are_never_decoded() {
+        // Ten thousand unknown-tag entries pointing at one big blob: skipped, so parsing a file
+        // that is otherwise a valid profile still succeeds and stays cheap.
+        let good = testing::synthetic_dcp_bytes("X", "T", None, None, true);
+        assert!(DcpProfile::parse(&good).is_ok());
+        let mut entries = vec![(50721u16, 10u16, 9u32, vec![0u8; 72])];
+        entries.clear();
+        let blob_tag = |t: u16| (t, 11u16, 1u32, 1.0f32.to_le_bytes().to_vec());
+        for t in 1000..1100u16 {
+            entries.push(blob_tag(t));
+        }
+        // No ColorMatrix1 -> MissingTag, not an allocation blow-up.
+        let bytes = testing::assemble(entries, true);
+        assert!(matches!(
+            DcpProfile::parse(&bytes),
+            Err(DcpError::MissingTag(..))
+        ));
+    }
+
+    #[test]
+    fn a_singular_or_zero_color_matrix_is_refused_not_a_later_panic() {
+        for m in [
+            [0; 9],
+            [1, 0, 0, 0, 1, 0, 0, 0, 0],
+            [1, 2, 3, 2, 4, 6, 1, 1, 1],
+        ] {
+            let bytes = testing::synthetic_dcp_with_matrix("X", "T", None, None, true, m);
+            assert!(
+                matches!(DcpProfile::parse(&bytes), Err(DcpError::Malformed(_))),
+                "matrix {m:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_table_axes_are_dropped() {
+        // 1 x 4096 x 1: tiny file, but a 4096-wide 3D texture exceeds common adapter limits.
+        let dims: Vec<u8> = [1u32, 4096, 1]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let data: Vec<u8> = (0..4096 * 3).flat_map(|_| 1.0f32.to_le_bytes()).collect();
+        let base = testing::synthetic_dcp_bytes("X", "T", None, None, true);
+        assert!(DcpProfile::parse(&base).is_ok());
+        let mut entries = vec![
+            (
+                50721u16,
+                10u16,
+                9u32,
+                [1, 0, 0, 0, 1, 0, 0, 0, 1i32]
+                    .iter()
+                    .flat_map(|n| [n.to_le_bytes(), 1i32.to_le_bytes()].concat())
+                    .collect(),
+            ),
+            (50937, 4, 3, dims),
+            (50938, 11, 4096 * 3, data),
+        ];
+        entries.sort_by_key(|e| e.0);
+        let p = DcpProfile::parse(&testing::assemble(entries, true)).unwrap();
+        assert!(
+            p.hue_sat_map1.is_none(),
+            "an oversized table must be dropped"
+        );
     }
 
     #[test]

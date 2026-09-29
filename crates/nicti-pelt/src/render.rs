@@ -212,6 +212,9 @@ pub struct DevelopView {
     /// DCP profiles available for the current frame's camera (#42), rediscovered on every
     /// `load_real_frame`. Empty for the synthetic frame or a camera with no installed profiles.
     profile_choices: Vec<ProfileEntry>,
+    /// The camera the choices were discovered for, so navigating between photos from the same
+    /// camera doesn't re-walk the profile folders (thousands of files) on every cursor move.
+    profiles_for: Option<Vec<String>>,
     /// The parsed profile the document's `CameraProfileParams` refers to. Kept out of the
     /// document itself (it is large and not JSON); the document holds only its identity.
     active_profile: Option<Arc<DcpProfile>>,
@@ -245,6 +248,7 @@ impl DevelopView {
             renderer,
             show_before: false,
             profile_choices: Vec::new(),
+            profiles_for: None,
             active_profile: None,
             profile_error: None,
         }
@@ -270,8 +274,8 @@ impl DevelopView {
             self.reset_stage(WORKING_SPACE);
             return;
         };
-        let needle = camera_profiles::camera_needle(&self.frame.make, &self.frame.model);
-        match camera_profiles::load(&entry.path, Some(&needle)) {
+        let needles = camera_profiles::camera_needles(&self.frame.make, &self.frame.model);
+        match camera_profiles::load(&entry.path, Some(&needles)) {
             Ok(loaded) => {
                 self.set_stage_params(
                     WORKING_SPACE,
@@ -479,7 +483,11 @@ impl DevelopView {
         self.show_before = false;
         self.active_profile = None;
         self.profile_error = None;
-        self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
+        let needles = camera_profiles::camera_needles(&self.frame.make, &self.frame.model);
+        if self.profiles_for.as_ref() != Some(&needles) {
+            self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
+            self.profiles_for = Some(needles);
+        }
         self.graph
             .set_own_hash(DECODE, identity)
             .expect("DECODE is always present -- build_graph always adds it");

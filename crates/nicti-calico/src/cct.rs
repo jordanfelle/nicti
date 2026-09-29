@@ -10,7 +10,7 @@
 //! with McCamy's published approximation in place of Adobe's own CCT solver.
 
 use crate::math::{
-    bradford_adapt, mat_add_scaled, mat_invert, mat_vec_mul, xyz_from_xy, Mat3, Vec3,
+    bradford_adapt, mat_add_scaled, mat_try_invert, mat_vec_mul, xyz_from_xy, Mat3, Vec3,
 };
 
 /// DNG's `CalibrationIlluminant` interpolation weight for illuminant 1 (spec section 6.3.7):
@@ -80,7 +80,11 @@ pub fn solve_camera_to_xyz(
     for _ in 0..16 {
         let g = interpolation_weight(cct, illum1.cct, illum2.cct);
         let color_matrix = mat_add_scaled(&illum2.color_matrix, &illum1.color_matrix, g);
-        let inv = mat_invert(&color_matrix);
+        // A profile file can carry a matrix that is singular only at some interpolation weight;
+        // stop searching rather than panic (the final matrix below falls back the same way).
+        let Some(inv) = mat_try_invert(&color_matrix) else {
+            break;
+        };
         let xyz = mat_vec_mul(&inv, neutral_camera);
         let sum = xyz[0] + xyz[1] + xyz[2];
         if sum.abs() < 1e-12 {
@@ -96,11 +100,26 @@ pub fn solve_camera_to_xyz(
         cct = new_cct;
     }
     let g = interpolation_weight(cct, illum1.cct, illum2.cct);
-    let matrix = match (illum1.forward_matrix, illum2.forward_matrix) {
-        (Some(f1), Some(f2)) => CameraToXyz::WhiteBalanced(mat_add_scaled(&f2, &f1, g)),
-        _ => {
+    // A profile with a ForwardMatrix for only one illuminant (the common single-illuminant shape:
+    // ColorMatrix1 + ForwardMatrix1) uses it as-is -- DNG's ForwardMatrix branch, not the
+    // ColorMatrix fallback -- since there is nothing to interpolate.
+    let forward = match (illum1.forward_matrix, illum2.forward_matrix) {
+        (Some(f1), Some(f2)) => Some(mat_add_scaled(&f2, &f1, g)),
+        (Some(f), None) | (None, Some(f)) => Some(f),
+        (None, None) => None,
+    };
+    let matrix = match forward {
+        Some(f) => CameraToXyz::WhiteBalanced(f),
+        None => {
             let color_matrix = mat_add_scaled(&illum2.color_matrix, &illum1.color_matrix, g);
-            let inv = mat_invert(&color_matrix);
+            let Some(inv) = mat_try_invert(&color_matrix) else {
+                // Degenerate interpolated ColorMatrix: an identity camera->XYZ is a visibly wrong
+                // but harmless rendering, unlike a crash on the UI thread.
+                return (
+                    cct,
+                    CameraToXyz::Raw([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                );
+            };
             // Bradford-adapt from the *actual solved* chromaticity (last_xy), not a re-derived
             // Planckian-locus point for the final CCT -- the latter drops the tint (Duv) of the
             // real neutral, which `last_xy` (from the converged iteration) already captures.
@@ -180,5 +199,26 @@ mod tests {
         };
         let xyz = mat_vec_mul(&m, [1.0, 1.0, 1.0]);
         assert!(xyz[1] > 0.0);
+    }
+
+    #[test]
+    fn a_matrix_pair_that_is_singular_when_blended_degrades_instead_of_panicking() {
+        // Individually invertible ColorMatrices whose blend is the zero matrix at weight 0.5:
+        // identity and its negation, with illuminants whose mired-midpoint CCT lands on the
+        // search's start. Whatever the search does, it must not panic.
+        let neg = [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
+        for cct in [3000.0, 4000.0, 5000.0, 6500.0] {
+            let a = Illuminant {
+                cct: cct - 1000.0,
+                color_matrix: crate::math::IDENTITY,
+                forward_matrix: None,
+            };
+            let b = Illuminant {
+                cct: cct + 1000.0,
+                color_matrix: neg,
+                forward_matrix: None,
+            };
+            let _ = solve_camera_to_xyz([0.5, 1.0, 0.6], &a, &b);
+        }
     }
 }

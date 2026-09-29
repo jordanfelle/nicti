@@ -580,6 +580,23 @@ struct ProfileTables {
 /// A 3D table texture: width = saturation, height = hue, depth = value (the DNG SDK's on-disk
 /// order, value outermost / hue middle / saturation innermost, uploads with no transpose).
 fn upload_table(gpu: &GpuContext, map: &HueSatMap) -> wgpu::TextureView {
+    // A table larger than the adapter's 3D-texture limit would be a wgpu validation panic on the
+    // render thread. `nicti-calico` already bounds table axes at parse time; this is the
+    // belt-and-braces check against the actual device (an unusable table degrades to the no-op
+    // dummy rather than crashing).
+    let max_dim = gpu.device.limits().max_texture_dimension_3d as usize;
+    let unusable = map.sat_divisions == 0
+        || map.hue_divisions == 0
+        || map.val_divisions == 0
+        || map
+            .sat_divisions
+            .max(map.hue_divisions)
+            .max(map.val_divisions)
+            > max_dim
+        || map.data.len() != map.sat_divisions * map.hue_divisions * map.val_divisions;
+    if unusable {
+        return dummy_table(gpu);
+    }
     let size = wgpu::Extent3d {
         width: map.sat_divisions as u32,
         height: map.hue_divisions as u32,
