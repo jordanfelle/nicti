@@ -1,12 +1,15 @@
 // Fullscreen-triangle blit from a Tapetum `FrameTexture` (linear ProPhoto RGB, Rgba16Float) to
-// egui's own render-pass color target. Two display modes (ADR-0042, `nicti_calico::transform::
-// DisplayTransform`): mode 0 is the exact matrix + transfer-function path (matches
-// `nicti_tapetum::geometry::output_encode`'s CPU reference for sRGB); mode 1 is a baked 3D LUT for
-// a real monitor ICC profile and/or soft-proofing, with an optional gamut-warning tint. Either
-// way the result is display-*encoded*; when the target itself is an `*Srgb` format the hardware
-// applies the sRGB OETF on write, so the shader undoes it first (`target_srgb`) rather than
-// double-gamma the image. The flags are 0/1 `u32`s rather than `bool`s -- WGSL uniform buffers
-// don't guarantee a `bool`'s host-side layout, `u32` does.
+// egui's own render-pass color target, color-managed (ADR-0042, `nicti_calico::transform::
+// DisplayTransform`). Two stages: an optional analytic soft-proof (clip in the proof space's
+// linear RGB, exact out-of-gamut flag), then the display -- mode 0: exact matrix + built-in
+// transfer function (within one 8-bit code of `nicti_tapetum::geometry::output_encode`'s CPU
+// reference for sRGB, not bit-identical); mode 2: matrix + per-channel encode table for a
+// matrix/TRC monitor profile; mode 1: baked 3D LUT, only for a LUT-based monitor profile. An
+// optional gamut-warning tint follows. Either way the result is display-*encoded*; when the
+// target itself is an `*Srgb` format the hardware applies the sRGB OETF on write, so the shader
+// undoes it first (`target_srgb`) rather than double-gamma the image. The flags are 0/1 `u32`s
+// rather than `bool`s -- WGSL uniform buffers don't guarantee a `bool`'s host-side layout, `u32`
+// does.
 //
 // #31 phase 3: `view_scale`/`view_offset` map screen UV to texture UV (both default `(1,1)`/
 // `(0,0)`, reproducing the old always-1:1-stretch behavior exactly for the Develop tab, which
@@ -43,7 +46,8 @@ struct Uniforms {
     // 1 when the render target is an `*Srgb` format: hardware then applies the sRGB OETF on
     // write, so the shader hands it linear values (`srgb_eotf` of the display-encoded result).
     target_srgb: u32,
-    // 0 = exact matrix + transfer function (`col0..2`, `trc`), 1 = baked 3D LUT (ADR-0042).
+    // 0 = exact matrix + built-in transfer function (`col0..2`, `trc`), 1 = baked 3D LUT,
+    // 2 = matrix (`col0..2`) + per-channel encode table (a matrix/TRC monitor profile) (ADR-0042).
     mode: u32,
     // Mode 0 transfer function: 0 = sRGB curve (sRGB, Display P3), 1 = Adobe RGB gamma 563/256.
     trc: u32,
@@ -67,6 +71,10 @@ struct Uniforms {
 // output. A 1^3 dummy is bound in mode 0.
 @group(0) @binding(3) var lut_tex: texture_3d<f32>;
 @group(0) @binding(4) var lut_sampler: sampler;
+// ADR-0042 monitor encode table (mode 2 only): N x 1, texel i = per-channel encoded value at
+// linear L = (i / (N-1))^2, i.e. indexed by sqrt(L) so the steep near-black part is sampled
+// densely. A 1x1 dummy is bound otherwise.
+@group(0) @binding(5) var trc_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -150,6 +158,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let shaped = pow(clamp(working, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / PROPHOTO_GAMMA));
         let coord = shaped * ((n - 1.0) / n) + vec3<f32>(0.5 / n);
         encoded = textureSampleLevel(lut_tex, lut_sampler, coord, 0.0).rgb;
+    } else if (u.mode == 2u) {
+        let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
+        let linear_out = clamp(m * working, vec3<f32>(0.0), vec3<f32>(1.0));
+        // Index by sqrt(L), texel-centered, per channel.
+        let tn = f32(textureDimensions(trc_tex).x);
+        let x = sqrt(linear_out) * ((tn - 1.0) / tn) + vec3<f32>(0.5 / tn);
+        encoded = vec3<f32>(
+            textureSampleLevel(trc_tex, lut_sampler, vec2<f32>(x.x, 0.5), 0.0).r,
+            textureSampleLevel(trc_tex, lut_sampler, vec2<f32>(x.y, 0.5), 0.0).g,
+            textureSampleLevel(trc_tex, lut_sampler, vec2<f32>(x.z, 0.5), 0.0).b,
+        );
     } else {
         let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
         let linear_out = m * working;

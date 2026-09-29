@@ -12,7 +12,7 @@ use bytemuck::{Pod, Zeroable};
 use egui_wgpu::{CallbackResources, CallbackTrait};
 use half::f16;
 use nicti_calico::space::OutputSpace;
-use nicti_calico::transform::{DisplayKind, DisplayTransform, Lut3d};
+use nicti_calico::transform::{DisplayKind, DisplayTransform, Lut3d, MatrixTrc};
 use nicti_tapetum::frame::FrameTexture;
 
 const DISPLAY_WGSL: &str = include_str!("../shaders/display.wgsl");
@@ -68,6 +68,8 @@ pub struct ViewportResources {
     /// The display/proof LUT (ADR-0042): a 1^3 dummy in mode 0, else `LUT_SIZE`^3 Rgba16Float.
     lut_view: wgpu::TextureView,
     lut_sampler: wgpu::Sampler,
+    /// Encode table for a matrix/TRC monitor (mode 2): a 1x1 dummy otherwise.
+    trc_view: wgpu::TextureView,
     bind_group: Option<wgpu::BindGroup>,
     target_srgb: bool,
 }
@@ -149,6 +151,7 @@ impl ViewportResources {
             sampler,
             lut_view: dummy_lut_view(device),
             lut_sampler,
+            trc_view: dummy_trc_view(device),
             bind_group: None,
             target_srgb,
         };
@@ -171,8 +174,12 @@ impl ViewportResources {
         u.view_offset = self.uniforms.view_offset;
         self.uniforms = u;
         self.lut_view = match &transform.kind {
-            DisplayKind::Space(_) => dummy_lut_view(device),
             DisplayKind::Lut(lut) => upload_lut(device, queue, lut),
+            _ => dummy_lut_view(device),
+        };
+        self.trc_view = match &transform.kind {
+            DisplayKind::MatrixTrc(m) => upload_trc(device, queue, m),
+            _ => dummy_trc_view(device),
         };
     }
 }
@@ -183,10 +190,12 @@ fn uniforms_for(
     gamut_warn: bool,
     target_srgb: bool,
 ) -> DisplayUniforms {
-    // In LUT mode the display matrix is unused; keep sRGB's so the struct is always well-formed.
-    let (space, mode) = match &transform.kind {
-        DisplayKind::Space(s) => (*s, 0),
-        DisplayKind::Lut(_) => (OutputSpace::Srgb, 1),
+    // The display matrix: the built-in space's, the monitor's own (mode 2), or (unused in LUT
+    // mode) sRGB's so the struct is always well-formed.
+    let (space, mode, matrix) = match &transform.kind {
+        DisplayKind::Space(s) => (*s, 0, s.from_working_f32()),
+        DisplayKind::MatrixTrc(m) => (OutputSpace::Srgb, 2, m.from_working),
+        DisplayKind::Lut(_) => (OutputSpace::Srgb, 1, OutputSpace::Srgb.from_working_f32()),
     };
     let cols = |m: [[f32; 3]; 3]| {
         [
@@ -195,7 +204,7 @@ fn uniforms_for(
             [m[0][2], m[1][2], m[2][2], 0.0],
         ]
     };
-    let [col0, col1, col2] = cols(space.from_working_f32());
+    let [col0, col1, col2] = cols(matrix);
     // Identity when not proofing (never read: `proof_enabled` is 0).
     let (p, q) = match transform.proof {
         Some(ps) => (ps.from_working_f32(), ps.to_working_f32()),
@@ -217,11 +226,69 @@ fn uniforms_for(
         view_offset: [0.0, 0.0],
         target_srgb: target_srgb as u32,
         mode,
-        trc: (space == OutputSpace::AdobeRgb) as u32,
+        trc: (mode == 0 && space == OutputSpace::AdobeRgb) as u32,
         gamut_warn: (gamut_warn && transform.proof.is_some()) as u32,
         proof_enabled: transform.proof.is_some() as u32,
         _pad: [0; 3],
     }
+}
+
+fn dummy_trc_view(device: &wgpu::Device) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("nicti-pelt display encode table (dummy)"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn upload_trc(device: &wgpu::Device, queue: &wgpu::Queue, m: &MatrixTrc) -> wgpu::TextureView {
+    let n = m.encode[0].len() as u32;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("nicti-pelt display encode table"),
+        size: wgpu::Extent3d {
+            width: n,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let texels: Vec<u16> = (0..n as usize)
+        .flat_map(|i| {
+            [m.encode[0][i], m.encode[1][i], m.encode[2][i], 1.0]
+                .map(|v| f16::from_f32(v).to_bits())
+        })
+        .collect();
+    queue.write_texture(
+        texture.as_image_copy(),
+        bytemuck::cast_slice(&texels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(n * 8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: n,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 fn dummy_lut_view(device: &wgpu::Device) -> wgpu::TextureView {
@@ -370,6 +437,10 @@ impl CallbackTrait for ViewportCallback {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&res.lut_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&res.trc_view),
+                },
             ],
         }));
 
@@ -460,6 +531,10 @@ mod tests {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&resources.lut_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&resources.trc_view),
+                },
             ],
         }));
 
@@ -547,6 +622,10 @@ mod tests {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&resources.lut_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&resources.trc_view),
                 },
             ],
         });
@@ -692,14 +771,40 @@ mod tests {
         }
     }
 
+    fn p3_gamma22() -> nicti_calico::transform::ColorProfile {
+        use nicti_calico::transform::{ColorProfile, ToneReprCurve};
+        let mut p = ColorProfile::new_display_p3();
+        p.cicp = None; // or moxcms would use its sRGB transfer instead of our curve
+        let curve = ToneReprCurve::Parametric(vec![2.2]);
+        p.red_trc = Some(curve.clone());
+        p.green_trc = Some(curve.clone());
+        p.blue_trc = Some(curve);
+        p
+    }
+
     #[test]
-    fn lut_mode_for_a_non_builtin_monitor_matches_the_cpu_reference() {
+    fn matrix_trc_monitor_matches_the_cpu_reference() {
         let Some(gpu) = gpu_or_skip() else { return };
-        let monitor =
-            DisplayProfile::Icc(Arc::new(nicti_calico::transform::ColorProfile::new_bt2020()));
+        let monitor = DisplayProfile::Icc(Arc::new(p3_gamma22()));
         for proof in [None, Some(OutputSpace::AdobeRgb)] {
             let t = DisplayTransform::build(&monitor, proof).unwrap();
-            assert!(matches!(t.kind, DisplayKind::Lut(_)));
+            assert!(matches!(t.kind, DisplayKind::MatrixTrc(_)));
+            let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+            res.set_display_transform(&gpu.device, &gpu.queue, &t, proof.is_some());
+            assert_matches_cpu(
+                &render_row(&gpu, &mut res, &test_pixels()),
+                &t,
+                proof.is_some(),
+            );
+        }
+    }
+
+    #[test]
+    fn baked_lut_monitor_matches_the_cpu_reference() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let profile = nicti_calico::transform::ColorProfile::new_bt2020();
+        for proof in [None, Some(OutputSpace::AdobeRgb)] {
+            let t = DisplayTransform::with_lut(&profile, proof).unwrap();
             let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
             res.set_display_transform(&gpu.device, &gpu.queue, &t, proof.is_some());
             assert_matches_cpu(
@@ -769,14 +874,17 @@ mod tests {
 
     #[test]
     fn calico_srgb_matrix_agrees_with_tapetums_cpu_reference() {
-        // Two independently derived ProPhoto -> linear sRGB matrices must agree, or the display
-        // and `geometry::output_encode`'s CPU reference would disagree on every pixel.
+        // Two independently derived ProPhoto -> linear sRGB matrices (calico from primaries +
+        // Bradford, tapetum from a published D65 matrix). They differ by ~3e-4, which moves ~1.6%
+        // of pixels by one 8-bit code -- so the display is *not* bit-identical to
+        // `geometry::output_encode`'s CPU reference, only within a code. This bound pins the gap
+        // so it can't silently grow; making calico the single source is a follow-up.
         let ours = OutputSpace::Srgb.from_working_f32();
         let theirs = nicti_tapetum::color::prophoto_to_srgb_linear_matrix();
         for i in 0..3 {
             for j in 0..3 {
                 assert!(
-                    (ours[i][j] - theirs[i][j]).abs() < 2e-3,
+                    (ours[i][j] - theirs[i][j]).abs() < 5e-4,
                     "[{i}][{j}] calico {} vs tapetum {}",
                     ours[i][j],
                     theirs[i][j]

@@ -18,12 +18,12 @@
 //!    ([`crate::space::PROPHOTO_GAMMA`], matching `moxcms`'s ProPhoto profile).
 
 use crate::icc::{color_profile, working_profile};
-use crate::math::mat_vec_mul;
+use crate::math::{mat_invert, mat_mul, mat_vec_mul};
 use crate::space::{OutputSpace, PROPHOTO_GAMMA};
 use moxcms::{CmsError, Layout, RenderingIntent, TransformOptions};
 
 /// Re-exported so callers can build a [`DisplayProfile::Icc`] without their own `moxcms` edge.
-pub use moxcms::ColorProfile;
+pub use moxcms::{ColorProfile, ToneReprCurve};
 use std::sync::Arc;
 
 /// Edge length of the baked monitor LUT.
@@ -50,10 +50,28 @@ pub struct Lut3d {
     pub rgba: Vec<f32>,
 }
 
+/// Encode-table length for [`MatrixTrc`]; indexed by `sqrt(linear)` so the steep near-black part
+/// of a gamma curve gets dense sampling.
+pub const TRC_TABLE_SIZE: usize = 1024;
+
+/// A matrix/TRC monitor profile evaluated analytically: linear working -> monitor linear RGB by
+/// one 3x3, clip to [0, 1], then a per-channel encode table. Exact where a 3D LUT is not (a LUT
+/// indexed by the wide ProPhoto cube clips nodes along a narrower monitor's gamut boundary and
+/// smears that error into in-gamut colors -- measured 14-20/255 for a P3 gamma-2.2 monitor).
+#[derive(Debug, Clone)]
+pub struct MatrixTrc {
+    /// Linear ProPhoto (D50) -> the monitor's linear RGB.
+    pub from_working: [[f32; 3]; 3],
+    /// `encode[c][i]` = encoded value of channel `c` at linear `L = (i / (N-1))²`.
+    pub encode: [Vec<f32>; 3],
+}
+
 #[derive(Debug, Clone)]
 pub enum DisplayKind {
     /// Exact matrix + transfer function for a built-in space.
     Space(OutputSpace),
+    /// Analytic matrix + per-channel curve extracted from a matrix/TRC monitor profile.
+    MatrixTrc(MatrixTrc),
     /// Baked LUT for a monitor profile that is not a built-in space.
     Lut(Lut3d),
 }
@@ -80,12 +98,24 @@ impl DisplayTransform {
             DisplayProfile::Space(s) => DisplayKind::Space(*s),
             // A monitor profile that is just one of the built-in spaces (Windows' stock
             // "sRGB IEC61966-2.1" is the usual case) takes the exact path.
-            DisplayProfile::Icc(p) => match equivalent_space(p) {
-                Some(s) => DisplayKind::Space(s),
-                None => DisplayKind::Lut(bake_lut(p)?),
+            DisplayProfile::Icc(p) => match (equivalent_space(p), matrix_trc(p)) {
+                (Some(s), _) => DisplayKind::Space(s),
+                (None, Some(m)) => DisplayKind::MatrixTrc(m),
+                // Not a matrix/TRC profile (LUT-based): the 3D LUT is the only option.
+                (None, None) => DisplayKind::Lut(bake_lut(p)?),
             },
         };
         Ok(Self { proof, kind })
+    }
+
+    /// Forces the baked-LUT display path for `profile` (what [`Self::build`] falls back to for a
+    /// profile that is neither a built-in space nor matrix/TRC). Exposed so that path stays
+    /// testable end to end.
+    pub fn with_lut(profile: &ColorProfile, proof: Option<OutputSpace>) -> Result<Self, CmsError> {
+        Ok(Self {
+            proof,
+            kind: DisplayKind::Lut(bake_lut(profile)?),
+        })
     }
 
     /// CPU reference for the display shader: linear ProPhoto -> display-encoded RGB plus the
@@ -106,9 +136,112 @@ impl DisplayTransform {
                 let v = mat_vec_mul(&space.from_working(), w.map(f64::from));
                 v.map(|c| space.encode(c as f32))
             }
+            DisplayKind::MatrixTrc(m) => m.apply(w),
             DisplayKind::Lut(lut) => lut.sample(w),
         };
         (out, flagged)
+    }
+}
+
+/// Decodes a profile TRC (encoded -> linear) per the ICC `curv`/`para` semantics.
+fn decode_fn(curve: &ToneReprCurve) -> Option<Box<dyn Fn(f64) -> f64>> {
+    match curve {
+        ToneReprCurve::Lut(t) if t.is_empty() => Some(Box::new(|x| x)),
+        // A single-entry `curv` is a u8Fixed8 gamma.
+        ToneReprCurve::Lut(t) if t.len() == 1 => {
+            let g = f64::from(t[0]) / 256.0;
+            Some(Box::new(move |x| x.powf(g)))
+        }
+        ToneReprCurve::Lut(t) => {
+            let t: Vec<f64> = t.iter().map(|&v| f64::from(v) / 65535.0).collect();
+            Some(Box::new(move |x| {
+                let pos = x.clamp(0.0, 1.0) * (t.len() - 1) as f64;
+                let i = (pos.floor() as usize).min(t.len() - 2);
+                t[i] + (t[i + 1] - t[i]) * (pos - i as f64)
+            }))
+        }
+        ToneReprCurve::Parametric(p) => {
+            let c = moxcms::ParametricCurve::new(p)?;
+            Some(Box::new(move |x| f64::from(c.eval(x as f32))))
+        }
+    }
+}
+
+/// Extracts a [`MatrixTrc`] from a matrix/TRC profile (all three colorants and TRCs present and
+/// monotonic), else `None`.
+fn matrix_trc(profile: &ColorProfile) -> Option<MatrixTrc> {
+    let (r, g, b) = (
+        profile.red_colorant,
+        profile.green_colorant,
+        profile.blue_colorant,
+    );
+    let decoders = [
+        decode_fn(profile.red_trc.as_ref()?)?,
+        decode_fn(profile.green_trc.as_ref()?)?,
+        decode_fn(profile.blue_trc.as_ref()?)?,
+    ];
+    // Colorants are XYZ under the D50 PCS: columns of the profile's RGB -> XYZ(D50) matrix.
+    let to_xyz = [[r.x, g.x, b.x], [r.y, g.y, b.y], [r.z, g.z, b.z]];
+    if to_xyz.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let det = to_xyz[0][0] * (to_xyz[1][1] * to_xyz[2][2] - to_xyz[1][2] * to_xyz[2][1])
+        - to_xyz[0][1] * (to_xyz[1][0] * to_xyz[2][2] - to_xyz[1][2] * to_xyz[2][0])
+        + to_xyz[0][2] * (to_xyz[1][0] * to_xyz[2][1] - to_xyz[1][1] * to_xyz[2][0]);
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let from_working = mat_mul(&mat_invert(&to_xyz), &crate::space::working_to_xyz_d50())
+        .map(|row| row.map(|v| v as f32));
+
+    let mut encode: [Vec<f32>; 3] = Default::default();
+    for (c, decode) in decoders.iter().enumerate() {
+        // Monotonic non-decreasing check, then invert by bisection: encode(L) = e with decode(e)=L.
+        let mut prev = decode(0.0);
+        for i in 1..=64 {
+            let d = decode(f64::from(i) / 64.0);
+            if d < prev - 1e-6 {
+                return None;
+            }
+            prev = d;
+        }
+        let (lo_l, hi_l) = (decode(0.0), decode(1.0));
+        encode[c] = (0..TRC_TABLE_SIZE)
+            .map(|i| {
+                let u = i as f64 / (TRC_TABLE_SIZE - 1) as f64;
+                let l = (u * u).clamp(lo_l, hi_l);
+                let (mut lo, mut hi) = (0.0f64, 1.0f64);
+                for _ in 0..40 {
+                    let mid = 0.5 * (lo + hi);
+                    if decode(mid) < l {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                (0.5 * (lo + hi)) as f32
+            })
+            .collect();
+    }
+    Some(MatrixTrc {
+        from_working,
+        encode,
+    })
+}
+
+impl MatrixTrc {
+    /// CPU reference for the shader's mode 2: matrix, clip, sqrt-indexed encode table.
+    pub fn apply(&self, working_linear: [f32; 3]) -> [f32; 3] {
+        let m = self.from_working.map(|r| r.map(f64::from));
+        let v = mat_vec_mul(&m, working_linear.map(f64::from));
+        let mut out = [0.0f32; 3];
+        for c in 0..3 {
+            let u = v[c].clamp(0.0, 1.0).sqrt() * (TRC_TABLE_SIZE - 1) as f64;
+            let i = (u.floor() as usize).min(TRC_TABLE_SIZE - 2);
+            let t = &self.encode[c];
+            out[c] = t[i] + (t[i + 1] - t[i]) * (u - i as f64) as f32;
+        }
+        out
     }
 }
 
@@ -253,40 +386,75 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_different_monitor_profile_bakes_a_lut() {
-        let t = DisplayTransform::build(
-            &DisplayProfile::Icc(Arc::new(ColorProfile::new_bt2020())),
-            None,
-        )
-        .unwrap();
-        assert!(matches!(t.kind, DisplayKind::Lut(_)));
+    fn p3_gamma22() -> ColorProfile {
+        let mut p = ColorProfile::new_display_p3();
+        // Drop the stale CICP tag, or moxcms would use its sRGB transfer instead of our curve.
+        p.cicp = None;
+        let curve = ToneReprCurve::Parametric(vec![2.2]);
+        p.red_trc = Some(curve.clone());
+        p.green_trc = Some(curve.clone());
+        p.blue_trc = Some(curve);
+        p
     }
 
     #[test]
-    fn lut_tracks_moxcms_for_a_non_builtin_monitor() {
-        // The LUT must agree with a direct moxcms evaluation for an in-gamut color of the
-        // monitor (BT.2020 here); interpolation error stays within a couple of 8-bit steps.
-        let display = ColorProfile::new_bt2020();
-        let t =
-            DisplayTransform::build(&DisplayProfile::Icc(Arc::new(display.clone())), None).unwrap();
-        let src = [0.25f32, 0.4, 0.55]; // ProPhoto-encoded (gamma 1.8), well inside BT.2020
-        let mut want = [0.0f32; 3];
-        working_profile()
-            .create_transform_f32(
-                Layout::Rgb,
-                &display,
-                Layout::Rgb,
-                TransformOptions::default(),
-            )
-            .unwrap()
-            .transform(&src, &mut want)
-            .unwrap();
-        let lin = src.map(|c| f64::from(c).powf(PROPHOTO_GAMMA) as f32);
-        let (got, _) = t.apply(lin);
-        for (g, w) in got.iter().zip(want) {
-            assert!((g - w).abs() < 0.01, "lut {got:?} vs moxcms {want:?}");
+    fn a_matrix_trc_monitor_that_is_not_builtin_uses_the_analytic_path() {
+        for profile in [p3_gamma22(), ColorProfile::new_bt2020()] {
+            let t = DisplayTransform::build(&DisplayProfile::Icc(Arc::new(profile)), None).unwrap();
+            assert!(matches!(t.kind, DisplayKind::MatrixTrc(_)));
         }
+    }
+
+    #[test]
+    fn matrix_trc_tracks_moxcms_over_the_whole_working_cube() {
+        // The review's counter-example: a P3 gamma-2.2 monitor. Compare against a direct moxcms
+        // transform on a dense grid of ProPhoto-encoded colors, *including* the many that fall
+        // outside the monitor's gamut (both clip), so boundary behaviour is covered.
+        for display in [p3_gamma22(), ColorProfile::new_bt2020()] {
+            let t = DisplayTransform::build(&DisplayProfile::Icc(Arc::new(display.clone())), None)
+                .unwrap();
+            let mut src = Vec::new();
+            let n = 21;
+            for r in 0..n {
+                for g in 0..n {
+                    for b in 0..n {
+                        src.extend([r, g, b].map(|v| v as f32 / (n - 1) as f32));
+                    }
+                }
+            }
+            let mut want = vec![0.0f32; src.len()];
+            working_profile()
+                .create_transform_f32(
+                    Layout::Rgb,
+                    &display,
+                    Layout::Rgb,
+                    TransformOptions {
+                        rendering_intent: RenderingIntent::RelativeColorimetric,
+                        ..TransformOptions::default()
+                    },
+                )
+                .unwrap()
+                .transform(&src, &mut want)
+                .unwrap();
+            let mut worst = 0.0f32;
+            for (s, w) in src.as_chunks::<3>().0.iter().zip(want.as_chunks::<3>().0) {
+                let lin = s.map(|c| f64::from(c).powf(PROPHOTO_GAMMA) as f32);
+                let (got, _) = t.apply(lin);
+                for (g, w) in got.iter().zip(w) {
+                    worst = worst.max((g - w).abs());
+                }
+            }
+            eprintln!("matrix/TRC worst error: {} /255", worst * 255.0);
+            assert!(worst < 2.5 / 255.0, "worst {} /255", worst * 255.0);
+        }
+    }
+
+    #[test]
+    fn a_lut_based_monitor_profile_falls_back_to_the_3d_lut() {
+        // Strip the TRCs so it no longer looks like a matrix/TRC profile.
+        let mut p = ColorProfile::new_display_p3();
+        p.red_trc = None;
+        assert!(matrix_trc(&p).is_none());
     }
 
     fn proofed(display: OutputSpace, proof: OutputSpace) -> DisplayTransform {

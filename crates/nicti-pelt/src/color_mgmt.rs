@@ -8,7 +8,7 @@
 
 use nicti_calico::display_profile;
 use nicti_calico::space::OutputSpace;
-use nicti_calico::transform::{DisplayProfile, DisplayTransform};
+use nicti_calico::transform::{DisplayKind, DisplayProfile, DisplayTransform};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::viewport::ViewportResources;
@@ -16,6 +16,10 @@ use crate::viewport::ViewportResources;
 pub struct ColorManagement {
     display: DisplayProfile,
     /// Why the display profile fell back to sRGB, if it did -- shown in the menu.
+    /// The baked display half of the transform for `display`. Building it probes the profile and
+    /// may bake a LUT (6-90 ms), so it is cached and only rebuilt when the monitor profile
+    /// changes -- toggling proofing or the gamut warning just swaps the cheap proof half.
+    display_kind: Option<DisplayKind>,
     display_note: Option<String>,
     /// Last-seen monitor of the window, to detect a move to another monitor.
     monitor: Option<isize>,
@@ -38,6 +42,7 @@ impl ColorManagement {
     pub fn new() -> Self {
         Self {
             display: DisplayProfile::Space(OutputSpace::Srgb),
+            display_kind: None,
             display_note: None,
             monitor: None,
             soft_proof: false,
@@ -49,9 +54,21 @@ impl ColorManagement {
     }
 
     /// The transform for the current settings. Pure (no GPU), so it is unit-tested directly.
-    fn build_transform(&self) -> Result<DisplayTransform, String> {
-        let proof = self.soft_proof.then_some(self.proof_space);
-        DisplayTransform::build(&self.display, proof).map_err(|e| e.to_string())
+    fn build_transform(&mut self) -> Result<DisplayTransform, String> {
+        let kind = match &self.display_kind {
+            Some(k) => k.clone(),
+            None => {
+                let k = DisplayTransform::build(&self.display, None)
+                    .map_err(|e| e.to_string())?
+                    .kind;
+                self.display_kind = Some(k.clone());
+                k
+            }
+        };
+        Ok(DisplayTransform {
+            proof: self.soft_proof.then_some(self.proof_space),
+            kind,
+        })
     }
 
     /// The gamut overlay only means something while proofing.
@@ -122,6 +139,7 @@ impl ColorManagement {
         if monitor != self.monitor || (self.monitor.is_none() && self.dirty) {
             let (profile, note) = display_profile::resolve(hwnd);
             self.display = profile;
+            self.display_kind = None;
             self.display_note = note;
             self.monitor = monitor;
             self.dirty = true;
@@ -169,7 +187,7 @@ mod tests {
 
     #[test]
     fn default_is_a_direct_srgb_transform() {
-        let cm = ColorManagement::new();
+        let mut cm = ColorManagement::new();
         let t = cm.build_transform().unwrap();
         assert!(t.proof.is_none());
         assert!(matches!(t.kind, DisplayKind::Space(OutputSpace::Srgb)));

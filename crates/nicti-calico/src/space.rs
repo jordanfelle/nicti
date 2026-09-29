@@ -21,6 +21,11 @@ pub const ADOBE_RGB_GAMMA: f64 = 563.0 / 256.0;
 /// uses it so the shaped working space matches `moxcms`'s `new_pro_photo_rgb()` source profile.
 pub const PROPHOTO_GAMMA: f64 = 1.8;
 
+/// Linear ProPhoto (D50) -> XYZ(D50), for building matrices from a foreign profile's colorants.
+pub(crate) fn working_to_xyz_d50() -> Mat3 {
+    primaries_to_xyz(PROPHOTO, D50)
+}
+
 /// A delivery/proofing color space the pipeline can convert to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputSpace {

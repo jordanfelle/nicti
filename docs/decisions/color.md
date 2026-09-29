@@ -102,8 +102,9 @@ own matrices), `transform.rs` (`DisplayTransform { proof, kind }`) and `display_
 
 Soft-proofing is analytic: working -> proof-space linear RGB -> clamp [0,1] -> back, with an exact
 out-of-gamut flag (`GAMUT_EPS` = 0.002). The display stage is an exact matrix + transfer function
-(default, fallback, and any monitor profile equivalent to a built-in space), or a 33^3 `Rgba16Float`
-LUT baked by `moxcms` for a genuinely different monitor profile. It is display-only and lives
+(default, fallback, and any monitor profile equivalent to a built-in space), or, for a different monitor profile, an analytic matrix + encode table extracted from its
+colorants and TRCs (`MatrixTrc`, worst 0.8/255 for a P3 gamma-2.2 panel), with a 33^3 `Rgba16Float`
+LUT baked by `moxcms` only for LUT-based profiles. It is display-only and lives
 outside the render graph, so a monitor change or proofing toggle costs zero bake work. `nicti-pelt`
 wires it in (`color_mgmt.rs`, `viewport.rs::set_display_transform`, `display.wgsl`), including
 Shift+S gamut warning and re-resolving the profile when the window moves monitors.
@@ -118,5 +119,5 @@ matrix profiles), so it was removed.
 
 Known limits, all recorded in ADR-0042: no black-point compensation (`moxcms` 0.9 doesn't
 implement it), the T0/T2 previews and grid thumbnails are not color-managed, a non-built-in
-monitor's LUT carries interpolation error near its gamut boundary, Windows code is type-checked
+LUT-based monitor profile carries interpolation error near its gamut boundary, Windows code is type-checked
 but not run, and a real wide-gamut monitor check is still outstanding.
