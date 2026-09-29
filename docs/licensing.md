@@ -423,6 +423,14 @@ scope for this pass** (see the research doc) — same class of gap ADR-0059 alre
 DNG/TIFF: no crate in this workspace builds arbitrary TIFF tags, so embedding any of the three
 into a TIFF export needs a dedicated writer this spike didn't build.
 
+**Update (2026-09-29, [#42](https://github.com/jordanfelle/nicti/issues/42), color management,
+`docs/adr/0042-color-management.md`):** no new crates in `Cargo.lock` -- `moxcms` v0.9.1 (`BSD-3-Clause
+OR Apache-2.0`, reviewed above) is now a real production dependency of `nicti-calico` (display/
+export ICC profiles, generated at runtime, nothing vendored), and `nicti-pelt` gains direct edges
+to already-vetted crates: `half` (also `nicti-tapetum`'s), `raw-window-handle` (`MIT OR Apache-2.0
+OR Zlib`, reviewed above), and `nicti-calico` gains `windows` (already `nicti-pounce`'s) for the
+Windows display-profile lookup. Little CMS 2 stays approved-but-unused.
+
 **Update (2026-09-27, [#53](https://github.com/jordanfelle/nicti/issues/53)'s `purr` spike,
 `docs/adr/0053-ai-auto-tone.md`):** `candle-core`/`candle-nn` v0.11.0 (`MIT OR Apache-2.0`), the
 CPU-only training/inference framework ADR-0053 chose over PyTorch+ONNX per ADR-0218's local-only

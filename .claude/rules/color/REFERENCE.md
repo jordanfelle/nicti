@@ -3,6 +3,9 @@ paths:
   - "spikes/calico/**"
   - "spikes/retina/**"
   - "crates/nicti-calico/**"
+  - "crates/nicti-pelt/src/color_mgmt.rs"
+  - "crates/nicti-pelt/src/viewport.rs"
+  - "crates/nicti-pelt/shaders/display.wgsl"
 ---
 
 # Color Pipeline — Quick Reference
@@ -52,6 +55,20 @@ Full reasoning/history: `docs/decisions/color.md`.
   matrix WB approximation (`color::wb_gains_for_temp_tint`) rather than this crate's dual-
   illuminant DNG solve until a DCP profile is actually loaded. See
   [`render-graph`](../render-graph/REFERENCE.md)'s own package-contents entry for #46's stages.
+- **Color management (#42)** — `docs/adr/0042`: **Accepted**. `nicti-calico` owns it: `space.rs`
+  (`OutputSpace` sRGB/Display P3/Adobe RGB; matrices from primaries + Bradford to D50, from linear
+  ProPhoto), `icc.rs` (runtime `moxcms` profiles, never vendored), `transform.rs`
+  (`DisplayTransform { proof, kind }`: **proof is analytic** — matrix to proof space, clamp, back;
+  exact gamut flag, no intent choice; **display** is `Space` exact matrix+TRC; `MatrixTrc` analytic
+  matrix + sqrt-indexed encode table for a matrix/TRC monitor ICC that isn't a built-in space;
+  33³ RGBA16F `Lut` only for a LUT-based monitor ICC), `display_profile.rs` (Windows
+  `GetICMProfileW`, degrades to sRGB). **Do not put proofing — or a matrix/TRC monitor — into a LUT**: moxcms clamps node
+  output, and interpolating across the clipped nodes cost ~9-20/255 in-gamut error (review).
+  **Display-only, outside the render graph** — no cache-key involvement. `nicti-pelt`:
+  `color_mgmt.rs` (Color menu, Shift+S gamut warning, follows the window across monitors),
+  `viewport.rs` `set_display_transform`, `display.wgsl` (proof stage, then mode 0/1). **No BPC**
+  (`moxcms` 0.9 lacks it). Preview tiers/thumbnails are unmanaged. Working space still ProPhoto
+  (#149). DCP HueSatMap/LookTable promotion is the second PR of #42.
 
 ## Package contents
 
