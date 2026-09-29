@@ -54,6 +54,9 @@ pub enum JobKind {
     /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
     /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
     Decode,
+    /// Preview-tier work (#301) -- generating a T2 for the Larder, or compacting its pack file.
+    /// CPU/disk-bound, CPU lane.
+    Preview,
 }
 
 /// Static metadata a job declares up front, before it runs -- what the scheduler needs to make an

@@ -170,8 +170,8 @@ terse index: crate/spike → purpose → owning topic.
   see the `catalog-engine` topic's own "Package contents" section (also covers **#25**'s
   `ninelives.rs`/`BackupJob`), not duplicated here. **#26** adds `carry.rs`
   (`Carry`/`resume_open_moves`, verified folder move) + `pounce_jobs::MoveJob`, wired into
-  `nicti-pelt`'s Library view. **#27** adds `larder.rs` (`Larder`, the
-  byte-capped LRU T2 preview cache + manual purge) — see the `preview-tiers` topic.
+  `nicti-pelt`'s Library view. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
+  **#301** wires it into the loupe via `nicti-pelt`'s `t2.rs`) — see `preview-tiers`.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,

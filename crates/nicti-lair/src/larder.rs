@@ -94,6 +94,11 @@ pub struct Larder {
     file_len: u64,
     live_bytes: u64,
     next_seq: i64,
+    /// Whether `put`/`set_cap` compact inline once past the dead-byte threshold. On by default;
+    /// a caller that would rather run [`Larder::compact`] as its own background job (#301: a
+    /// Pounce job, so a multi-GiB rewrite never stalls whichever thread happened to trigger it)
+    /// turns it off with [`Larder::set_auto_compact`] and polls [`Larder::compaction_due`].
+    auto_compact: bool,
     /// Held for the life of the `Larder`: the in-memory counters assume a single owner.
     _lock: File,
 }
@@ -230,6 +235,7 @@ impl Larder {
             file_len,
             live_bytes: live_bytes as u64,
             next_seq,
+            auto_compact: true,
             _lock: lock,
         };
         // A smaller cap than the previous session's takes effect immediately.
@@ -484,9 +490,21 @@ impl Larder {
         Ok(())
     }
 
-    fn compact_if_worthwhile(&mut self) -> Result<(), CatalogError> {
+    /// Whether dead bytes have passed the same threshold `put` auto-compacts at.
+    pub fn compaction_due(&self) -> bool {
         let dead = self.file_len.saturating_sub(self.live_bytes);
-        if dead > self.cfg.compact_min_dead_bytes && dead > self.live_bytes {
+        dead > self.cfg.compact_min_dead_bytes && dead > self.live_bytes
+    }
+
+    /// Turns inline auto-compaction on or off (on by default). With it off, nothing compacts
+    /// until the caller runs [`Larder::compact`] itself, typically when [`Larder::compaction_due`]
+    /// says so.
+    pub fn set_auto_compact(&mut self, enabled: bool) {
+        self.auto_compact = enabled;
+    }
+
+    fn compact_if_worthwhile(&mut self) -> Result<(), CatalogError> {
+        if self.auto_compact && self.compaction_due() {
             self.compact()?;
         }
         Ok(())
@@ -784,6 +802,40 @@ mod tests {
             s.file_bytes
         );
         assert!(l.generation > 0, "churn must have triggered compaction");
+    }
+
+    #[test]
+    fn disabling_auto_compact_defers_compaction_to_an_explicit_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(
+            dir.path(),
+            LarderConfig {
+                cap_bytes: 100,
+                compact_min_dead_bytes: 50,
+            },
+        )
+        .unwrap();
+        l.set_auto_compact(false);
+        assert!(!l.compaction_due());
+        for round in 0..200u32 {
+            l.put(key((round % 7) as i64), &[round as u8; 20]).unwrap();
+        }
+        assert_eq!(
+            l.generation, 0,
+            "no compaction may run while auto-compact is off"
+        );
+        assert!(
+            l.compaction_due(),
+            "churn must have pushed dead bytes past the threshold"
+        );
+
+        l.compact().unwrap();
+        assert!(!l.compaction_due());
+        assert_eq!(l.stats().unwrap().file_bytes, l.stats().unwrap().live_bytes);
+        assert!(
+            l.get(key(6)).unwrap().is_some(),
+            "live payloads survive the explicit compact"
+        );
     }
 
     #[test]
