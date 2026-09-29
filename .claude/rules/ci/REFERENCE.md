@@ -36,17 +36,16 @@ eight of `den`'s bundled native engines from scratch, which outweighed the ~1.5G
 saving. `spikes/**` is excluded from Renovate (`renovate.json`) since every spike is throwaway and
 generates bump-PR churn nobody will act on before it's deleted or promoted.
 
-**CodeQL's `rust` analysis (`.github/workflows/codeql.yml`) is scoped to the shipping crates
-only (#127)**: before `codeql-action/init` runs, a CI-only step rewrites the checked-out
-`Cargo.toml`'s workspace `members` to `[".", "crates/*"]` (never committed — the real file on disk
-is untouched) and the `init` step's inline `config.paths-ignore` excludes `spikes/**`/`bench/**`/
-`docs/**`. Without this, the extractor's own manifest-loading phase built every workspace member
-to resolve its crate graph — including, at the time this was measured, running `spikes/den`'s
-bundled DuckDB/RocksDB/libSQL C/C++ build scripts from scratch — which measured 18m34s of a
-35m51s total run on #126's PR, almost entirely spent on code that never ships. CodeQL isn't a
-required check, so this was pure runner-time waste, not a merge blocker.
+**CodeQL was removed (#281)**: `.github/workflows/codeql.yml` (Analyze rust/actions on push,
+PR and weekly) is deleted. It was never a required check, had zero open alerts, and its `rust` job
+was the slowest thing on every PR (over its 10m budget on consecutive main runs, #281) -- largely
+because the extractor's LoadManifest phase builds the whole crate graph, including `nicti-pelt`'s
+LibRaw C++ (needs `submodules: true`). Re-add a scheduled-only scan if a real need appears; the
+scoping trick that used to live here (a CI-only `Cargo.toml` `members` rewrite to
+`[".", "crates/*"]` plus `paths-ignore` for `spikes/**`/`bench/**`/`docs/**`, #127) is in git
+history at `codeql.yml`.
 
-**A duration watcher (#160) files a `ci-slow` GitHub issue when a `CI`/`CodeQL Advanced` job
+**A duration watcher (#160) files a `ci-slow` GitHub issue when a `CI` job
 runs over its budget in `.github/ci-budgets.json` on two consecutive main-branch runs** (one slow
 run alone is treated as noise, e.g. a cold cache right after a `Cargo.lock` bump) — see
 `.github/scripts/ci_duration_watch.py` and `.github/workflows/ci-duration-watch.yml`. A PR that
@@ -59,9 +58,7 @@ depends on `nicti-cornea` with the `libraw` feature always on (the shipped app m
 decode real NEFs), unlike `nicti-cornea`/`retina`/`knead` themselves, which stay path-gated
 research/optional targets. Every job whose graph includes `nicti-pelt`/`nicti` needs
 `submodules: true` as a result: `clippy`/`test` (linux+windows), `build-windows`,
-`release.yml`'s Windows build, and CodeQL's `rust` job (its own LoadManifest phase runs
-`build.rs` while resolving the crate graph, same mechanism as this file's own `#127` note above
-for a from-scratch spike compile). `decode-linux`/`decode-windows` still exist for their own
+and `release.yml`'s Windows build. `decode-linux`/`decode-windows` still exist for their own
 direct-target coverage of `nicti-cornea`/`retina`/`knead` (excluded as direct targets elsewhere),
 but no longer avoid the LibRaw C++ compile itself — a decode-path-touching PR now pays that cost
 twice per platform (once transitively via `nicti-pelt` in the always-on jobs, once directly here).

@@ -294,6 +294,6 @@ exact gap produced a false-negative "clean" local result once on a real PR whose
 
 GitHub Actions, GitHub-hosted runners only (no self-hosted infra); Windows is the required
 (blocking) platform (#17), not Linux. Full gotchas (required-check-gate history #166, the
-now-deleted GUI-framework spikes' path-gating #127/#232, CodeQL scoping #127, the CI-duration
+now-deleted GUI-framework spikes' path-gating #127/#232, the removed CodeQL workflow #281, the CI-duration
 watcher #160) moved to [`ci`](.claude/rules/ci/REFERENCE.md) (#34's own PR, to keep this file under
 its line-count gate) — read that before touching `.github/**` or a CI-adjacent spike.

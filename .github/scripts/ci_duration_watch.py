@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CI duration watch (#160).
 
-Runs after every main-branch completion of the `CI`/`CodeQL Advanced` workflows (see
+Runs after every main-branch completion of the `CI` workflow (see
 .github/workflows/ci-duration-watch.yml). Compares each successful job's wall-clock duration
 against the per-job budget in .github/ci-budgets.json, and -- only once a job is over budget on
 two consecutive main runs of the same workflow, to avoid a single cold-cache run (e.g. right

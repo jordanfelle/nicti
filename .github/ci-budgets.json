@@ -12,9 +12,5 @@
     "cargo build (windows, v1 target)": 12,
     "decode (linux)": 6,
     "decode (windows)": 10
-  },
-  "CodeQL Advanced": {
-    "Analyze (rust)": 10,
-    "Analyze (actions)": 3
   }
 }
