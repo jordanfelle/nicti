@@ -100,10 +100,14 @@ pub struct PeltApp {
     /// no per-session setup.
     decoder: Arc<dyn RawDecoder + Send + Sync>,
     loupe: Option<LoupeSession>,
-    /// Which asset id's decoded frame is currently loaded into `develop` -- so the loupe doesn't
+    /// Which asset id *and identity* is currently loaded into `develop` -- so the loupe doesn't
     /// re-`load_real_frame` (which resets the in-memory edit document) every single frame just
-    /// because the cursor hasn't moved.
-    loupe_loaded_asset: Option<i64>,
+    /// because the cursor hasn't moved. The identity half matters, not just the id: `insert_asset`
+    /// upserts an existing `(root_id, rel_path)` row in place on a re-ingest, so the same asset id
+    /// can get a new `asset_cache_key` without ever changing rows -- comparing on id alone would
+    /// leave Develop showing a stale decode (and any edits pinned to it) forever after a re-ingest
+    /// produced fresher content for the same id (caught by CodeRabbit's review).
+    loupe_loaded_asset: Option<(i64, blake3::Hash)>,
     /// `false` = "Fit" (aspect-correct, the default on every fresh cursor move), `true` = "100%"
     /// (1:1 pixel zoom for focus-checking, #31's own ticket title). Toggled by Space.
     loupe_zoomed: bool,
@@ -644,39 +648,49 @@ impl PeltApp {
 
         match frame {
             Some(frame) => {
-                if self.loupe_loaded_asset != Some(asset_id) {
+                // Compare on (asset id, identity), not just the id: `insert_asset` upserts an
+                // existing `(root_id, rel_path)` row in place on a re-ingest, so a re-imported
+                // file can get a fresh `asset_cache_key` without ever changing its asset id --
+                // comparing on id alone would skip `load_real_frame` forever after that, leaving
+                // Develop stuck showing the stale pre-reingest decode (caught by CodeRabbit).
+                let current_asset = store.get_asset(asset_id).ok().flatten();
+                let current_identity = current_asset.as_ref().map(asset_cache_key);
+                let already_loaded = current_identity
+                    .is_some_and(|identity| self.loupe_loaded_asset == Some((asset_id, identity)));
+
+                if !already_loaded {
                     // Adversarial review caught a real data-loss path here: `develop` is one
                     // instance shared with the Develop tab, and switching Loupe to a different
-                    // photo than whatever Develop currently has loaded would otherwise silently
-                    // discard any unsaved edits on it the instant this decode landed -- no
-                    // warning, no user action beyond having navigated in a different tab. Refuse
-                    // to swap (and don't paint a viewport this frame) until the user explicitly
-                    // says to discard those edits.
+                    // photo (or a fresher revision of the same one) than whatever Develop
+                    // currently has loaded would otherwise silently discard any unsaved edits on
+                    // it the instant this decode landed -- no warning, no user action beyond
+                    // having navigated in a different tab. Refuse to swap (and don't paint a
+                    // viewport this frame) until the user explicitly says to discard those edits.
                     let develop_has_unsaved_edits =
                         self.develop.as_ref().is_some_and(DevelopView::has_edits);
                     if develop_has_unsaved_edits {
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Develop has unsaved edits open for a different photo.",
+                            "Develop has unsaved edits for a different photo or source revision.",
                         );
                         if ui
                             .button("Discard those edits and view this photo")
                             .clicked()
                         {
-                            if let (Some(develop), Ok(Some(asset))) =
-                                (self.develop.as_mut(), store.get_asset(asset_id))
+                            if let (Some(develop), Some(asset)) =
+                                (self.develop.as_mut(), &current_asset)
                             {
-                                develop.load_real_frame(frame, asset_cache_key(&asset));
-                                self.loupe_loaded_asset = Some(asset_id);
+                                let identity = asset_cache_key(asset);
+                                develop.load_real_frame(frame, identity);
+                                self.loupe_loaded_asset = Some((asset_id, identity));
                             }
                         }
                         return;
                     }
-                    if let (Some(develop), Ok(Some(asset))) =
-                        (self.develop.as_mut(), store.get_asset(asset_id))
-                    {
-                        develop.load_real_frame(frame, asset_cache_key(&asset));
-                        self.loupe_loaded_asset = Some(asset_id);
+                    if let (Some(develop), Some(asset)) = (self.develop.as_mut(), &current_asset) {
+                        let identity = asset_cache_key(asset);
+                        develop.load_real_frame(frame, identity);
+                        self.loupe_loaded_asset = Some((asset_id, identity));
                     }
                 }
                 self.paint_loupe_viewport(ui);
@@ -699,23 +713,30 @@ impl PeltApp {
         let available = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
         let rect_size = (rect.width(), rect.height());
+        // `rect`/`drag_delta()` are egui logical points, not device pixels -- "100%" needs actual
+        // physical pixels for one texel to map to one *physical* pixel (this ticket's own
+        // "focus-checking" goal), or a HiDPI display (e.g. 150% OS scaling) would show the image
+        // magnified past true 1:1 (caught by CodeRabbit's review). "Fit" is unaffected -- it only
+        // ever uses an aspect *ratio*, which `pixels_per_point` doesn't change.
+        let ppp = ui.ctx().pixels_per_point();
+        let rect_size_px = (rect_size.0 * ppp, rect_size.1 * ppp);
 
         let scale = if self.loupe_zoomed {
-            one_to_one_scale(rect_size, tex_extent)
+            one_to_one_scale(rect_size_px, tex_extent)
         } else {
             fit_scale(rect_size, tex_extent)
         };
 
         if self.loupe_zoomed && response.dragged() {
             let delta = response.drag_delta();
-            // Screen-pixel drag -> texture-UV delta: dividing by the screen extent the current
-            // scale maps to (rect size / scale) keeps the drag 1:1 with the cursor regardless of
-            // the actual zoom factor.
+            // Screen-pixel drag -> texture-UV delta: dividing by the physical-pixel screen extent
+            // the current scale maps to (rect size / scale) keeps the drag 1:1 with the cursor
+            // regardless of the actual zoom factor or display scaling.
             if scale[0] > 0.0 {
-                self.loupe_pan[0] -= delta.x / (rect_size.0 / scale[0]);
+                self.loupe_pan[0] -= (delta.x * ppp) / (rect_size_px.0 / scale[0]);
             }
             if scale[1] > 0.0 {
-                self.loupe_pan[1] -= delta.y / (rect_size.1 / scale[1]);
+                self.loupe_pan[1] -= (delta.y * ppp) / (rect_size_px.1 / scale[1]);
             }
         }
         let offset = if self.loupe_zoomed {
