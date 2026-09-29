@@ -3,6 +3,7 @@ paths:
   - "spikes/pupil/**"
   - "bench/lrc/auto-tone.ahk"
   - "docs/adr/0099-classic-auto-tone.md"
+  - "docs/adr/0101-auto-op-graceful-degradation.md"
   - "crates/nicti-tapetum/src/perk.rs"
 ---
 
@@ -14,6 +15,11 @@ Full reasoning/history: `docs/decisions/develop.md`.
   (reference-machine run — no LRC install and `spikes/retina` can't build in this sandbox).
   Candidate A (percentile heuristic) vs. candidate B (ridge-regression fit); decision rule
   (Exposure MAE ≤ 0.15 EV, other sliders MAE ≤ 8 / p95 ≤ 20) fixed before real data exists.
+- **Auto-op graceful degradation (#101)** — `docs/adr/0101-auto-op-graceful-degradation.md`:
+  **Accepted**. `AutoOutcome<T>` = Confident | LowConfidence | NoResult (3 states, no float score).
+  Straighten: low-confidence is skipped + hint. Tone: always applies, low-confidence gets a marker.
+  Never modal; batch = one summary. No-op/unchanged/skipped invocation → no history step, redo kept
+  (general `History` invariant; via `apply_batch`, `control: None`, never coalesces). Build: #311 (signal + UI), #312 (History guard).
 - **AI auto-tone (#53)** — `docs/adr/0053-ai-auto-tone.md`: **finding is "ridge is enough," not an
   ML model.** Trained B0 (mean)/B1 (ridge)/M1 (MLP, histogram)/M2 (MLP, histogram+thumbnail) on
   5,000 real picked/rated keepers from the user's own catalog (no reference-machine deferral — the

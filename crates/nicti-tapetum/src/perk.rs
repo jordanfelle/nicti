@@ -32,6 +32,9 @@ const CLIP_POINT_SCALE: f64 = 2000.0;
 /// `histogram` must be built from a **default-params render** (WB/exposure/tone all at their
 /// stage defaults) -- the same thing ADR-0099 analyzes; running this against an already-edited
 /// render would have Auto chase the user's own prior edits instead of the original image.
+///
+/// **Degradation contract (ADR-0101)**: this always yields a value today; #311 wraps it in
+/// `AutoOutcome`, flagging degenerate histograms as `LowConfidence` (still applied, with a marker).
 pub fn estimate(histogram: &Histogram) -> (ExposureParams, ToneParams) {
     let median = histogram.luma_percentile(50.0) as f64;
     let exposure_stops = (MID_GRAY / median.max(1e-4)).log2().clamp(-5.0, 5.0);
