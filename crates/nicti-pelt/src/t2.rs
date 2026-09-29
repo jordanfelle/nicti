@@ -28,14 +28,18 @@ use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progr
 pub type SharedLarder = Arc<Mutex<Larder>>;
 
 /// Non-blocking lock. `None` means a `put`/compaction holds it right now. A poisoned lock (a job
-/// panicked while holding it) is recovered rather than treated as permanently busy. That isn't a
-/// guarantee the Larder is healthy afterwards -- a panic inside `put` could leave its transaction
-/// open, making every later `put` fail -- but such failures surface as `T2Outcome::Failed` per
-/// asset (see `T2Job::run`), not a retry storm, and the loupe still works from T0.
+/// panicked while holding it) is repaired via `Larder::recover_after_panic` and un-poisoned, so a
+/// single panic can't disable the cache for the rest of the session.
 pub fn try_lock_larder(larder: &SharedLarder) -> Option<MutexGuard<'_, Larder>> {
     match larder.try_lock() {
         Ok(guard) => Some(guard),
-        Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(TryLockError::Poisoned(p)) => {
+            let mut guard = p.into_inner();
+            // A panic inside `put` can leave its transaction open, wedging every later `put`.
+            guard.recover_after_panic();
+            larder.clear_poison();
+            Some(guard)
+        }
         Err(TryLockError::WouldBlock) => None,
     }
 }

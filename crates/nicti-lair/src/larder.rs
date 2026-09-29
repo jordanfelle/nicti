@@ -490,6 +490,15 @@ impl Larder {
         Ok(())
     }
 
+    /// Repairs the Larder after a panic unwound through one of its methods while a caller held it
+    /// (a poisoned `Mutex`): rolls back any transaction the panic left open -- otherwise every
+    /// later `put` fails at `BEGIN` -- and resyncs the in-memory counters from ground truth.
+    /// Harmless when nothing is wrong (`ROLLBACK` with no open transaction is ignored).
+    pub fn recover_after_panic(&mut self) {
+        let _ = self.conn.execute_batch("ROLLBACK");
+        self.resync_counters();
+    }
+
     /// Whether dead bytes have passed the same threshold `put` auto-compacts at.
     pub fn compaction_due(&self) -> bool {
         let dead = self.file_len.saturating_sub(self.live_bytes);
@@ -802,6 +811,21 @@ mod tests {
             s.file_bytes
         );
         assert!(l.generation > 0, "churn must have triggered compaction");
+    }
+
+    #[test]
+    fn recover_after_panic_rolls_back_a_wedged_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        assert!(l.put(key(1), b"before").unwrap());
+        // What a panic inside `put` between BEGIN and COMMIT leaves behind.
+        l.conn.execute_batch("BEGIN").unwrap();
+        assert!(l.put(key(2), b"wedged").is_err());
+
+        l.recover_after_panic();
+        assert!(l.put(key(2), b"after").unwrap());
+        assert_eq!(l.get(key(1)).unwrap().unwrap(), b"before");
+        assert_eq!(l.get(key(2)).unwrap().unwrap(), b"after");
     }
 
     #[test]
