@@ -49,7 +49,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0037](0037-raw-decoder.md) | 0019 | RAW decoder | Accepted |
 | [0038](0038-color-pipeline.md) | 0021 | Color pipeline | Proposed |
 | [0040](0040-demosaic-and-denoise.md) | — | Demosaic and noise reduction | Proposed |
-| [0042](0042-color-management.md) | 0038 | Color management | Accepted |
+| [0042](0042-color-management.md) | — | Color management | Accepted |
 | [0044](0044-stage-cached-render-graph.md) | — | Stage-cached render graph (Tapetum) | Proposed |
 | [0047](0047-crop-straighten-autolevel.md) | — | Crop, straighten, and auto-level | Accepted |
 | [0048](0048-masking.md) | 0024 | Masking | Proposed |
