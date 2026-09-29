@@ -60,7 +60,9 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   new generation in one SQLite transaction, then deleting the old file: a crash leaves either
   generation fully consistent, and nothing renames over an open file (Windows would refuse).
   Auto-compaction triggers once dead bytes exceed both a floor and the live bytes, bounding the
-  pack file to roughly `2 * cap + floor`. Every payload carries a blake3 checksum in its index row;
+  pack file to roughly `2 * cap + floor` (once a compaction succeeds -- it is best-effort, so a
+  failed attempt can leave the file above that until the next one). Every payload carries a
+  blake3 checksum in its index row;
   a checksum failure, short read, stale `render_hash`, or a row pointing past the end of the pack
   file (crash before the OS flushed the tail) is dropped and reported as a miss, since the cache
   is fully regenerable. A payload larger than the whole cap is rejected without evicting anything.

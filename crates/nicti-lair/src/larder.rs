@@ -268,7 +268,14 @@ impl Larder {
         self.conn.execute_batch("BEGIN")?;
         let stored = self.put_in_tx(key, bytes);
         match stored {
-            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Ok(()) => {
+                if let Err(e) = self.conn.execute_batch("COMMIT") {
+                    // A failed COMMIT can leave the transaction open; close it and resync.
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    self.resync_counters();
+                    return Err(e.into());
+                }
+            }
             Err(e) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
                 // The in-memory counters may have moved past what the rollback kept.
@@ -376,14 +383,15 @@ impl Larder {
     }
 
     /// Manual purge: drops every cached payload for one asset (e.g. after its source file was
-    /// replaced). Returns the live bytes freed.
+    /// replaced). Returns the live bytes freed. Disk space is reclaimed by the next compaction
+    /// (automatic past the dead-byte threshold, or call [`Larder::compact`] after a batch).
     pub fn purge_asset(&mut self, asset_id: i64) -> Result<u64, CatalogError> {
-        self.purge_where("asset_id = ?1", asset_id.into())
+        self.purge_where("asset_id = ?1", asset_id.into(), false)
     }
 
     /// Manual purge: drops every payload of one tier. Returns the live bytes freed.
     pub fn purge_tier(&mut self, tier: LarderTier) -> Result<u64, CatalogError> {
-        self.purge_where("tier = ?1", tier.as_str().to_string().into())
+        self.purge_where("tier = ?1", tier.as_str().to_string().into(), true)
     }
 
     /// Manual purge: empties the cache and reclaims its disk space immediately (by starting a
@@ -478,6 +486,7 @@ impl Larder {
         &mut self,
         predicate: &str,
         arg: rusqlite::types::Value,
+        reclaim_now: bool,
     ) -> Result<u64, CatalogError> {
         let freed: i64 = self.conn.query_row(
             &format!("SELECT COALESCE(SUM(len), 0) FROM entry WHERE {predicate}"),
@@ -489,10 +498,14 @@ impl Larder {
             params![arg],
         )?;
         self.live_bytes = self.live_bytes.saturating_sub(freed as u64);
-        // A manual purge is asked to give space back, so reclaim it now instead of waiting for
-        // the dead-byte floor. Best-effort: the rows are already gone either way.
-        if freed > 0 {
+        // Compaction rewrites every live entry, so a bulk purge (a whole tier) reclaims now, while
+        // a per-asset purge only compacts once dead bytes cross the usual threshold -- purging
+        // many assets in a row must not rewrite the pack each time (call `compact` after a batch
+        // to reclaim immediately). Best-effort: the rows are already gone either way.
+        if reclaim_now && freed > 0 {
             let _ = self.compact();
+        } else {
+            let _ = self.compact_if_worthwhile();
         }
         Ok(freed as u64)
     }
@@ -794,14 +807,44 @@ mod tests {
     }
 
     #[test]
-    fn manual_purge_of_one_asset_reclaims_disk_immediately() {
+    fn purging_one_asset_leaves_dead_bytes_until_compact() {
         let dir = tempfile::tempdir().unwrap();
         let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
         l.put(key(1), &[1; 40]).unwrap();
         l.put(key(2), &[2; 40]).unwrap();
         l.purge_asset(1).unwrap();
+        assert_eq!(l.stats().unwrap().file_bytes, 80, "no rewrite per purge");
+        l.compact().unwrap();
         assert_eq!(l.stats().unwrap().file_bytes, 40);
         assert_eq!(l.get(key(2)).unwrap(), Some(vec![2; 40]));
+    }
+
+    #[test]
+    fn purge_tier_reclaims_disk_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put(key(1), &[1; 40]).unwrap();
+        l.put(key(2), &[2; 40]).unwrap();
+        l.purge_tier(LarderTier::T2).unwrap();
+        assert_eq!(l.stats().unwrap().file_bytes, 0);
+    }
+
+    #[test]
+    fn purging_an_asset_compacts_once_dead_bytes_cross_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(
+            dir.path(),
+            LarderConfig {
+                cap_bytes: 1000,
+                compact_min_dead_bytes: 10,
+            },
+        )
+        .unwrap();
+        l.put(key(1), &[1; 90]).unwrap();
+        l.put(key(2), &[2; 10]).unwrap();
+        l.purge_asset(1).unwrap(); // dead 90 > floor 10 and > live 10
+        assert_eq!(l.stats().unwrap().file_bytes, 10);
+        assert_eq!(l.get(key(2)).unwrap(), Some(vec![2; 10]));
     }
 
     #[test]
