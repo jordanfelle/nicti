@@ -11,12 +11,13 @@
 //! auto-compaction off, see `LoupeSession::with_larder`).
 
 use std::io::Cursor;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, ImageDecoder, ImageReader};
 use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 use nicti_lair::larder::{Larder, LarderConfig, LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
@@ -25,6 +26,17 @@ use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progr
 /// The larder shared between the loupe session (reads, on the UI thread) and the T2/compaction
 /// jobs (writes, on Pounce workers). `Larder`'s methods take `&mut self`, so one mutex guards it.
 pub type SharedLarder = Arc<Mutex<Larder>>;
+
+/// Non-blocking lock. `None` means a `put`/compaction holds it right now; a poisoned lock (a job
+/// panicked mid-`put`) is recovered rather than treated as permanently busy -- the Larder is
+/// self-healing (checksums, dropped bad rows), so its state after a panic is safe to keep using.
+pub fn try_lock_larder(larder: &SharedLarder) -> Option<MutexGuard<'_, Larder>> {
+    match larder.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
 
 /// ADR-0029: T2's long edge, in pixels. Sources already smaller are never upscaled.
 pub const T2_LONG_EDGE: u32 = 3840;
@@ -56,9 +68,10 @@ pub fn larder_dir_for(catalog_path: &Path) -> PathBuf {
 
 /// Opens (creating if needed) the Larder beside `catalog_path`, or `None` if it can't be opened.
 pub fn open_larder(catalog_path: &Path) -> Option<SharedLarder> {
-    Larder::open(&larder_dir_for(catalog_path), LarderConfig::default())
-        .ok()
-        .map(|l| Arc::new(Mutex::new(l)))
+    let mut larder = Larder::open(&larder_dir_for(catalog_path), LarderConfig::default()).ok()?;
+    // Compaction runs as a Pounce `CompactJob` (see `loupe::poll_t2`), never inline in `put`.
+    larder.set_auto_compact(false);
+    Some(Arc::new(Mutex::new(larder)))
 }
 
 fn is_plain_jpeg(path: &Path) -> bool {
@@ -86,11 +99,15 @@ fn pick_embedded(mut found: Vec<EmbeddedJpeg>) -> Option<EmbeddedJpeg> {
 
 /// Decodes `jpeg`, downscales to [`T2_LONG_EDGE`] (never upscaling) and re-encodes as JPEG.
 fn resize_and_encode(jpeg: &[u8]) -> Result<Vec<u8>, String> {
-    let decoded = ImageReader::new(Cursor::new(jpeg))
+    let mut decoder = ImageReader::new(Cursor::new(jpeg))
         .with_guessed_format()
         .map_err(|e| e.to_string())?
-        .decode()
+        .into_decoder()
         .map_err(|e| e.to_string())?;
+    // A portrait phone JPEG carries its rotation as an EXIF tag, not in the pixels.
+    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    let mut decoded = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    decoded.apply_orientation(orientation);
     let (w, h) = (decoded.width(), decoded.height());
     if w == 0 || h == 0 {
         return Err("decoded image has a zero dimension".into());
@@ -113,6 +130,12 @@ fn resize_and_encode(jpeg: &[u8]) -> Result<Vec<u8>, String> {
 /// Produces one asset's T2 payload from its source file -- no RAW decode involved.
 pub fn generate_t2(path: &Path) -> Result<Vec<u8>, String> {
     if is_plain_jpeg(path) {
+        let len = std::fs::metadata(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .len();
+        if len > MAX_EMBEDDED_JPEG_BYTES {
+            return Err(format!("{}: JPEG too large ({len} bytes)", path.display()));
+        }
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         return resize_and_encode(&bytes);
     }
@@ -127,9 +150,23 @@ pub fn generate_t2(path: &Path) -> Result<Vec<u8>, String> {
     resize_and_encode(&bytes)
 }
 
-/// A T2 job's outcome. `Err` (a file with no embedded preview, a corrupt JPEG) is a normal result
-/// to store, not a job failure -- same reasoning as `decode_job::DecodeResult`.
-pub type T2Result = Result<(), String>;
+/// A T2 job's outcome, stored in its slot rather than returned as a job error -- same reasoning as
+/// `decode_job::DecodeResult`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum T2Outcome {
+    /// Stored (or already present).
+    Stored,
+    /// Nothing stored, but nothing is wrong with the asset: the file is unreachable (an unmounted
+    /// archive drive), the Larder was busy, or a `put` hit a transient error (disk full). Not
+    /// recorded as a failure, so the next prefetch of this asset simply tries again.
+    Retry(String),
+    /// This asset can't produce a T2 (no embedded preview, corrupt JPEG, panic). Remembered per
+    /// asset identity so it isn't re-read on every cursor move.
+    Failed(String),
+}
+
+/// A compaction's outcome.
+pub type CompactResult = Result<(), String>;
 
 pub struct T2Job {
     larder: SharedLarder,
@@ -139,7 +176,7 @@ pub struct T2Job {
     label: String,
     image_index: usize,
     done: bool,
-    result: ReportSlot<T2Result>,
+    result: ReportSlot<T2Outcome>,
 }
 
 impl T2Job {
@@ -149,7 +186,7 @@ impl T2Job {
         asset_id: i64,
         render_hash: String,
         image_index: usize,
-    ) -> (Self, ReportSlot<T2Result>) {
+    ) -> (Self, ReportSlot<T2Outcome>) {
         let result = Arc::new(Mutex::new(None));
         let label = format!("Preview: {}", path.display());
         let job = T2Job {
@@ -173,25 +210,36 @@ impl T2Job {
         }
     }
 
-    fn run(&self) -> T2Result {
-        // Another path (a second session, an earlier job that finished after this was queued) may
-        // have stored it already.
-        if self
-            .larder
-            .lock()
-            .map_err(|_| "larder lock poisoned".to_string())?
-            .contains(self.key())
-            .unwrap_or(false)
-        {
-            return Ok(());
+    fn run(&self) -> T2Outcome {
+        // Reachability first, on this worker rather than the UI thread: `metadata` on a hung
+        // network/unmounted drive can block for the OS timeout.
+        if std::fs::metadata(&self.path).is_err() {
+            return T2Outcome::Retry("source file unreachable".into());
         }
-        let payload = generate_t2(&self.path)?;
-        self.larder
-            .lock()
-            .map_err(|_| "larder lock poisoned".to_string())?
-            .put(self.key(), &payload)
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        // Never block on the Larder lock: a compaction holds it for the whole rewrite, and a
+        // worker parked here is a worker a foreground decode can't use. Busy = try again later.
+        {
+            let Some(larder) = try_lock_larder(&self.larder) else {
+                return T2Outcome::Retry("larder busy".into());
+            };
+            // Another path (a second session, an earlier job that finished after this was queued)
+            // may have stored it already.
+            if larder.contains(self.key()).unwrap_or(false) {
+                return T2Outcome::Stored;
+            }
+        }
+        let payload = match generate_t2(&self.path) {
+            Ok(payload) => payload,
+            Err(e) => return T2Outcome::Failed(e),
+        };
+        let Some(mut larder) = try_lock_larder(&self.larder) else {
+            return T2Outcome::Retry("larder busy".into());
+        };
+        match larder.put(self.key(), &payload) {
+            Ok(true) => T2Outcome::Stored,
+            Ok(false) => T2Outcome::Failed("T2 larger than the whole cache cap".into()),
+            Err(e) => T2Outcome::Retry(e.to_string()),
+        }
     }
 }
 
@@ -219,7 +267,10 @@ impl ChunkedJob for T2Job {
 
     /// Never returns `Err`: a failure is stored inside the slot so the poller always sees it.
     fn step(&mut self) -> Result<Step, JobError> {
-        let outcome = self.run();
+        // Pounce doesn't catch panics, and a hostile file must not be able to wedge this asset's
+        // slot (and a worker thread) for the rest of the session.
+        let outcome = catch_unwind(AssertUnwindSafe(|| self.run()))
+            .unwrap_or_else(|_| T2Outcome::Failed("T2 generation panicked".into()));
         *self.result.lock().unwrap() = Some(outcome);
         self.done = true;
         Ok(Step::Done)
@@ -230,11 +281,11 @@ impl ChunkedJob for T2Job {
 pub struct CompactJob {
     larder: SharedLarder,
     done: bool,
-    result: ReportSlot<T2Result>,
+    result: ReportSlot<CompactResult>,
 }
 
 impl CompactJob {
-    pub fn new(larder: SharedLarder) -> (Self, ReportSlot<T2Result>) {
+    pub fn new(larder: SharedLarder) -> (Self, ReportSlot<CompactResult>) {
         let result = Arc::new(Mutex::new(None));
         (
             CompactJob {
@@ -271,10 +322,12 @@ impl ChunkedJob for CompactJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let outcome = match self.larder.lock() {
-            Ok(mut larder) => larder.compact().map_err(|e| e.to_string()),
-            Err(_) => Err("larder lock poisoned".to_string()),
-        };
+        // The one place that *should* block on the lock: compaction is the long holder.
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let mut larder = self.larder.lock().unwrap_or_else(|e| e.into_inner());
+            larder.compact().map_err(|e| e.to_string())
+        }))
+        .unwrap_or_else(|_| Err("compaction panicked".to_string()));
         *self.result.lock().unwrap() = Some(outcome);
         self.done = true;
         Ok(Step::Done)
@@ -394,7 +447,7 @@ mod tests {
 
         let (mut job, slot) = T2Job::new(larder.clone(), src, 7, "embedded:x".into(), 0);
         assert!(matches!(job.step(), Ok(Step::Done)));
-        assert_eq!(slot.lock().unwrap().take(), Some(Ok(())));
+        assert_eq!(slot.lock().unwrap().take(), Some(T2Outcome::Stored));
 
         let key = LarderKey {
             asset_id: 7,
@@ -423,7 +476,44 @@ mod tests {
             0,
         );
         assert!(matches!(job.step(), Ok(Step::Done)));
-        assert!(slot.lock().unwrap().take().unwrap().is_err());
+        // A missing source is an unreachable file (retry later), not a permanent failure.
+        assert!(matches!(
+            slot.lock().unwrap().take(),
+            Some(T2Outcome::Retry(_))
+        ));
+    }
+
+    #[test]
+    fn t2_job_retries_instead_of_blocking_when_the_larder_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.NEF");
+        std::fs::write(&src, tiff_with_jpeg(&jpeg_of(800, 600))).unwrap();
+        let larder = open_larder(&dir.path().join("larder"));
+
+        let (mut job, slot) = T2Job::new(larder.clone(), src, 7, "embedded:x".into(), 0);
+        // Simulates a running compaction holding the lock: the job must not park a worker on it.
+        let held = larder.lock().unwrap();
+        assert!(matches!(job.step(), Ok(Step::Done)));
+        drop(held);
+        assert!(matches!(
+            slot.lock().unwrap().take(),
+            Some(T2Outcome::Retry(_))
+        ));
+        assert_eq!(larder.lock().unwrap().stats().unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn a_corrupt_embedded_jpeg_is_a_permanent_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.NEF");
+        std::fs::write(&src, tiff_with_jpeg(b"not really a jpeg")).unwrap();
+        let larder = open_larder(&dir.path().join("larder"));
+        let (mut job, slot) = T2Job::new(larder, src, 1, "embedded:x".into(), 0);
+        assert!(matches!(job.step(), Ok(Step::Done)));
+        assert!(matches!(
+            slot.lock().unwrap().take(),
+            Some(T2Outcome::Failed(_))
+        ));
     }
 
     #[test]

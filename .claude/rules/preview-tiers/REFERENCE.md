@@ -40,8 +40,8 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   `generate_t2`): embedded `JpgFromRaw` (or a plain JPEG's own file) → 3840px long edge → JPEG q85,
   no RAW decode; `LoupeSession::with_larder` queues one per prefetch-window asset the Larder lacks
   (`render_hash` = `embedded:<asset identity>`, so a re-ingest invalidates it). Unreachable files
-  (unmounted archive drive) skipped quietly; unfixable ones fail once per identity. Compaction is a
-  Pounce `CompactJob` (`Larder::set_auto_compact(false)` + `compaction_due`), not inline in `put`.
+  (unmounted archive drive) / busy Larder = quiet `Retry`; unfixable ones `Failed` once per identity. Compaction is a
+  Pounce `CompactJob` (`open_larder` sets `set_auto_compact(false)`; `compaction_due`), not inline in `put`.
   UI reads use `try_lock` (busy = miss). `app.rs` upgrades T0 → T2 as the pre-decode fallback.
 
 ## Package contents

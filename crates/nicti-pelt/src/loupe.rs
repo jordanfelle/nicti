@@ -19,7 +19,7 @@ use nicti_pounce::{JobId, Pounce};
 use nicti_tapetum::cache::Tier;
 
 use crate::decode_job::{DecodeJob, DecodeResult};
-use crate::t2::{self, CompactJob, SharedLarder, T2Job, T2Result};
+use crate::t2::{self, try_lock_larder, CompactJob, CompactResult, SharedLarder, T2Job, T2Outcome};
 
 /// How many neighbors on each side of the cursor to keep decoded ahead of navigation -- #31's
 /// own "directional prefetch" target. One each side (cursor-1, cursor, cursor+1) is the minimum
@@ -56,7 +56,11 @@ struct Inflight {
 /// An in-flight T2 generation (#301), tracked like [`Inflight`] but resolving to `()`.
 struct T2Inflight {
     job_id: JobId,
-    slot: ReportSlot<T2Result>,
+    /// The asset's identity *at submit time* -- what a failure is recorded against, so a re-ingest
+    /// that lands before the next `poll` can't cause the old revision's failure to be pinned on
+    /// the new one (same discipline as `Inflight::cache_key` on the decode path).
+    identity: blake3::Hash,
+    slot: ReportSlot<T2Outcome>,
 }
 
 /// The T2 side of a session (#301): the shared Larder plus the bookkeeping for its background
@@ -69,7 +73,8 @@ struct T2State {
     /// preview, corrupt JPEG): not retried until a re-ingest changes the identity, or the session
     /// is rebuilt, so a file that can never produce a T2 isn't re-read on every cursor move.
     failed: HashMap<i64, blake3::Hash>,
-    compaction: Option<T2Inflight>,
+    /// The in-flight `CompactJob`'s slot -- at most one at a time.
+    compaction: Option<ReportSlot<CompactResult>>,
 }
 
 pub struct LoupeSession {
@@ -109,12 +114,11 @@ impl LoupeSession {
 
     /// Attaches the T2 preview cache (#301): from now on every prefetch window also queues T2
     /// generation into `larder` for assets it doesn't hold yet, and [`Self::current_t2`] reads
-    /// from it. Turns the Larder's inline auto-compaction off -- compaction runs as a `CompactJob`
-    /// on Pounce instead (see `poll`), so a large pack rewrite never blocks a `put`.
+    /// from it. The caller is expected to have turned the Larder's inline auto-compaction off
+    /// (`t2::open_larder` does) -- compaction runs as a `CompactJob` on Pounce instead (see `poll`),
+    /// so a large pack rewrite never blocks a `put`. Deliberately doesn't touch the Larder's lock
+    /// itself: this runs on the UI thread, and a running `CompactJob` can hold it for minutes.
     pub fn with_larder(mut self, larder: SharedLarder) -> Self {
-        if let Ok(mut l) = larder.lock() {
-            l.set_auto_compact(false);
-        }
         self.t2 = Some(T2State {
             larder,
             inflight: HashMap::new(),
@@ -252,7 +256,7 @@ impl LoupeSession {
         // flight holds the mutex for as long as it takes. When the Larder is busy we can't tell
         // whether it holds this asset, so queue the job anyway -- `T2Job::run` re-checks
         // `contains` on its own worker thread and returns at once if the T2 is already there.
-        if let Ok(larder) = t2.larder.try_lock() {
+        if let Some(larder) = try_lock_larder(&t2.larder) {
             if larder.contains(key).unwrap_or(false) {
                 return Ok(());
             }
@@ -260,16 +264,21 @@ impl LoupeSession {
         let Some(root_path) = store.get_root_path(asset.root_id)? else {
             return Ok(());
         };
+        // Whether the file is reachable (an unmounted archive drive, a hung network share) is
+        // checked by the job on its worker thread, not here -- `metadata` on a dead share can
+        // block for the OS timeout, and this runs on the UI thread on every cursor move. An
+        // unreachable asset is a quiet `Retry`, not a recorded failure.
         let path = PathBuf::from(root_path).join(&asset.rel_path);
-        // An asset on an unmounted archive drive (or otherwise unreachable) is skipped quietly
-        // rather than queued to fail: it isn't an error, and nothing is recorded, so it's picked
-        // up again as soon as the drive is back.
-        if std::fs::metadata(&path).is_err() {
-            return Ok(());
-        }
         let (job, slot) = T2Job::new(t2.larder.clone(), path, asset_id, render_hash, index);
         let job_id = pounce.submit(Box::new(job));
-        t2.inflight.insert(asset_id, T2Inflight { job_id, slot });
+        t2.inflight.insert(
+            asset_id,
+            T2Inflight {
+                job_id,
+                identity,
+                slot,
+            },
+        );
         Ok(())
     }
 
@@ -282,7 +291,7 @@ impl LoupeSession {
     /// naturally gets resubmitted by the next `set_cursor` that includes it, since it's neither
     /// cached nor (after this) in flight.
     pub fn poll(&mut self, store: &dyn CatalogStore, pounce: &Pounce) {
-        self.poll_t2(store, pounce);
+        self.poll_t2(pounce);
         let mut finished = Vec::new();
         for (&asset_id, inflight) in &self.inflight {
             if let Some(result) = inflight.slot.lock().unwrap().take() {
@@ -317,42 +326,37 @@ impl LoupeSession {
     /// Folds finished T2 jobs (#301) into the session: a failure is remembered against the
     /// asset's identity at submit time so it isn't retried until a re-ingest; a success may push
     /// the Larder past its compaction threshold, which queues one `CompactJob` (never two at once).
-    fn poll_t2(&mut self, store: &dyn CatalogStore, pounce: &Pounce) {
+    fn poll_t2(&mut self, pounce: &Pounce) {
         let Some(t2) = self.t2.as_mut() else {
             return;
         };
         let mut finished = Vec::new();
         for (&asset_id, inflight) in &t2.inflight {
-            if let Some(result) = inflight.slot.lock().unwrap().take() {
-                finished.push((asset_id, result));
+            if let Some(outcome) = inflight.slot.lock().unwrap().take() {
+                finished.push((asset_id, inflight.identity, outcome));
             }
         }
-        for (asset_id, result) in finished {
+        for (asset_id, identity, outcome) in finished {
             t2.inflight.remove(&asset_id);
-            if result.is_err() {
-                // Same identity discipline as decode errors: only record the failure if the
-                // asset still has the identity it had when polled -- a re-ingest that already
-                // superseded it gets a fresh attempt instead.
-                if let Ok(Some(asset)) = store.get_asset(asset_id) {
-                    t2.failed.insert(asset_id, asset_cache_key(&asset));
-                }
+            // `Retry` (unreachable file, busy Larder, transient `put` error) records nothing: the
+            // next prefetch of this asset just tries again.
+            if matches!(outcome, T2Outcome::Failed(_)) {
+                t2.failed.insert(asset_id, identity);
             }
         }
-        if let Some(compaction) = &t2.compaction {
-            if compaction.slot.lock().unwrap().take().is_some() {
+        if let Some(slot) = &t2.compaction {
+            if slot.lock().unwrap().take().is_some() {
                 t2.compaction = None;
             }
         }
         if t2.compaction.is_none() {
-            let due = t2
-                .larder
-                .try_lock()
+            let due = try_lock_larder(&t2.larder)
                 .map(|larder| larder.compaction_due())
                 .unwrap_or(false);
             if due {
                 let (job, slot) = CompactJob::new(t2.larder.clone());
-                let job_id = pounce.submit(Box::new(job));
-                t2.compaction = Some(T2Inflight { job_id, slot });
+                pounce.submit(Box::new(job));
+                t2.compaction = Some(slot);
             }
         }
     }
@@ -371,7 +375,7 @@ impl LoupeSession {
             tier: LarderTier::T2,
             render_hash: &render_hash,
         };
-        t2.larder.try_lock().ok()?.get(key).ok()?
+        try_lock_larder(&t2.larder)?.get(key).ok()?
     }
 
     /// The current image's decoded frame, if its decode has completed and is still cached --
@@ -953,6 +957,11 @@ mod tests {
             session.poll(&store, &pounce);
             session.current_t2(&store).is_some()
         });
+        // Let the first generation fully settle (its slot resolves just after the entry lands).
+        wait_for(|| {
+            session.poll(&store, &pounce);
+            session.t2.as_ref().unwrap().inflight.is_empty()
+        });
         let live_before = larder.lock().unwrap().stats().unwrap().live_bytes;
 
         // Re-requesting the window must not queue another job for an asset the Larder holds.
@@ -977,11 +986,13 @@ mod tests {
             LoupeSession::new(ids, counting_decoder(), u64::MAX).with_larder(larder.clone());
 
         session.set_cursor(0, &store, &pounce).unwrap();
+        // The job (not the UI thread) discovers the file is unreachable, and resolves as a quiet
+        // retry rather than a failure.
+        wait_for(|| {
+            session.poll(&store, &pounce);
+            session.t2.as_ref().unwrap().inflight.is_empty()
+        });
         let t2 = session.t2.as_ref().unwrap();
-        assert!(
-            t2.inflight.is_empty(),
-            "no job may be queued for a missing file"
-        );
         assert!(t2.failed.is_empty(), "skipping isn't a failure");
         assert_eq!(larder.lock().unwrap().stats().unwrap().entry_count, 0);
     }
@@ -1055,6 +1066,7 @@ mod tests {
             .unwrap(),
         ));
         let (store, ids, pounce) = setup(1);
+        larder.lock().unwrap().set_auto_compact(false);
         let mut session =
             LoupeSession::new(ids, counting_decoder(), u64::MAX).with_larder(larder.clone());
 

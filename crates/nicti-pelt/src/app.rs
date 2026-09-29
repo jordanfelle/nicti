@@ -133,6 +133,9 @@ pub struct PeltApp {
     /// opened (read-only location, another instance holding its lock) -- the loupe then falls back
     /// to T0 alone, exactly as before.
     larder: Option<SharedLarder>,
+    /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
+    /// re-read and re-decode them every frame.
+    loupe_t2_undecodable: Option<i64>,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -234,6 +237,7 @@ impl PeltApp {
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
             larder,
+            loupe_t2_undecodable: None,
         }
     }
 
@@ -950,12 +954,12 @@ impl PeltApp {
             self.loupe_preview = None;
         }
         let has_t2 = matches!(&self.loupe_preview, Some((_, true, _)));
-        if !has_t2 {
-            let t2_bytes = self.loupe.as_mut().and_then(|l| l.current_t2(store));
-            if let Some(texture) = t2_bytes
-                .and_then(|bytes| preview_texture(ui.ctx(), format!("loupe-t2-{asset_id}"), &bytes))
-            {
-                self.loupe_preview = Some((asset_id, true, texture));
+        if !has_t2 && self.loupe_t2_undecodable != Some(asset_id) {
+            if let Some(bytes) = self.loupe.as_mut().and_then(|l| l.current_t2(store)) {
+                match preview_texture(ui.ctx(), format!("loupe-t2-{asset_id}"), &bytes) {
+                    Some(texture) => self.loupe_preview = Some((asset_id, true, texture)),
+                    None => self.loupe_t2_undecodable = Some(asset_id),
+                }
             }
         }
         if self.loupe_preview.is_none() {

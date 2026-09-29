@@ -76,14 +76,17 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   `Arc<Mutex<Larder>>`; `LoupeSession::with_larder` queues one for every asset in the prefetch
   window the Larder doesn't hold. The `render_hash` is `embedded:<hex of the asset's identity>`
   (`loupe::asset_cache_key`), not a bare sentinel, so a re-ingest that changes a file's content
-  turns its old T2 into a miss instead of serving stale pixels. Assets whose file isn't reachable
-  (an unmounted archive drive) are skipped quietly -- no job, no recorded error -- and picked up
-  once the drive is back; a file that can't yield a T2 (no embedded preview, corrupt JPEG) is
-  recorded against its identity and not retried until a re-ingest. Compaction no longer runs
-  inline in `put`: attaching a Larder turns `Larder::set_auto_compact` off, and `poll` queues a
-  single `CompactJob` whenever `Larder::compaction_due` says so, so a multi-GiB pack rewrite never
-  stalls a `put`. UI-thread reads (`LoupeSession::current_t2`) use `try_lock` and treat a busy
-  Larder as a miss for that frame. `app.rs` shows the T2 (upgrading from T0, never downgrading)
+  turns its old T2 into a miss instead of serving stale pixels. Each job resolves to `Stored`, `Retry` or
+  `Failed`: an asset whose file isn't reachable (an unmounted archive drive -- checked on the
+  worker, since `metadata` on a dead share can block for the OS timeout), a busy Larder (jobs
+  `try_lock`, never park a worker behind a compaction), or a transient `put` error is a quiet
+  `Retry` -- nothing recorded, picked up on the next prefetch; a file that can't yield a T2 (no
+  embedded preview, corrupt JPEG, a panic caught in `step`) is `Failed`, recorded against the
+  identity it had *at submit time* and not retried until a re-ingest. EXIF orientation is applied.
+  Compaction no longer runs inline in `put`: `t2::open_larder` turns `Larder::set_auto_compact`
+  off, and `poll` queues a single `CompactJob` whenever `Larder::compaction_due` says so, so a
+  multi-GiB pack rewrite never stalls a `put`. UI-thread reads (`LoupeSession::current_t2`) use
+  `try_lock` and treat a busy Larder as a miss for that frame. `app.rs` shows the T2 (upgrading from T0, never downgrading)
   as the fallback while the full RAW decode is still in flight. The Larder lives beside the
   catalog file (`<catalog>.larder/`), opened best-effort -- if it can't be opened the loupe just
   falls back to T0 as before. Not built here: the settings/purge UI (#302).
