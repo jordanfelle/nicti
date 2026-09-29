@@ -57,7 +57,7 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   startup or on exit, by design. Runs as a 4-chunk Pounce job (`pounce_jobs::BackupJob`, new
   `JobKind::Backup`).
 - **Verified folder move (#26, landed)**: `docs/adr/0026`, "Carry". Re-scoped from "RAW backup to
-  TBD target" to LRC-style move-a-folder-to-another-drive. Copy each file to `.partial`, BLAKE3 as
+  TBD target" to LRC-style move-a-folder-to-another-drive. Copy each file to `.nicti-partial`, BLAKE3 as
   read, `sync_all`, re-read+re-hash the destination, rename in; one transaction re-points the
   `root` row (assets/edits/keywords follow, ids unchanged) and records `asset.content_hash`;
   source deleted only after commit. `fs::rename` fast path on the same volume. `root_move` journal

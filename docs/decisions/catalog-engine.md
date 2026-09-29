@@ -209,7 +209,7 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
 
 Full ADR: `docs/adr/0026-verified-folder-move.md`. #26 was filed as a RAW backup to a TBD target;
 the user's actual workflow is dragging a folder to another drive in LRC, so it was re-scoped to a
-checksum-verified folder move (`crates/nicti-lair/src/carry.rs`). Files are copied to `.partial`,
+checksum-verified folder move (`crates/nicti-lair/src/carry.rs`). Files are copied to `.nicti-partial`,
 BLAKE3-hashed while read, `sync_all`'d, then re-read from the destination and re-hashed before
 being renamed into place. One catalog transaction re-points the `root` row and records each
 cataloged asset's full-file hash in the new `asset.content_hash`; only then is the source deleted

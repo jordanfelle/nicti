@@ -413,16 +413,21 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
     if resumed.is_empty() {
         return None;
     }
-    let stuck = resumed
+    let stuck: Vec<&str> = resumed
         .iter()
-        .filter(|r| matches!(r, Resumed::Stuck { .. }))
-        .count();
-    Some(if stuck > 0 {
-        format!(
-            "{stuck} interrupted folder move(s) need attention: neither location has the folder."
-        )
-    } else {
+        .filter_map(|r| match r {
+            Resumed::Stuck { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    Some(if stuck.is_empty() {
         format!("Recovered {} interrupted folder move(s).", resumed.len())
+    } else {
+        format!(
+            "{} interrupted folder move(s) need attention: {}",
+            stuck.len(),
+            stuck.join("; ")
+        )
     })
 }
 

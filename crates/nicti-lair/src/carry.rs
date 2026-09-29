@@ -402,6 +402,11 @@ impl Carry {
                     Err(msg) => return Some(self.abort_failed(msg)),
                 },
                 None => {
+                    // Durability barrier: the renames into place must survive a power cut
+                    // before the commit lets cleanup start deleting source files.
+                    if let Err(e) = sync_dirs(&self.dest, &dirs) {
+                        return Some(self.abort_failed(format!("syncing destination: {e}")));
+                    }
                     self.phase = Phase::Commit {
                         done,
                         dirs,
@@ -900,6 +905,26 @@ fn hash_file(p: &Path) -> Option<String> {
         }
         h.update(&buf[..n]);
     }
+}
+
+/// fsyncs `dest` and every directory under it, so the directory entries created by the renames
+/// into place are durable (a file's own `sync_all` doesn't persist its directory entry on POSIX).
+/// Windows can't open a directory as a plain `File`; NTFS journals metadata, so this is a no-op
+/// there (documented limit).
+fn sync_dirs(dest: &Path, dirs: &[PathBuf]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        for d in dirs
+            .iter()
+            .map(|d| dest.join(d))
+            .chain(std::iter::once(dest.to_path_buf()))
+        {
+            File::open(&d)?.sync_all()?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (dest, dirs);
+    Ok(())
 }
 
 fn dir_is_empty(p: &Path) -> bool {
