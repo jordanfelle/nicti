@@ -110,12 +110,8 @@ pub fn lens_stage() -> BasicStage {
         default_params: || json!({}),
     }
 }
-pub fn heal_stage() -> BasicStage {
-    BasicStage {
-        id: HEAL,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
-    }
+pub fn heal_stage() -> crate::heal::HealStage {
+    crate::heal::HealStage
 }
 pub fn wb_stage() -> BasicStage {
     BasicStage {

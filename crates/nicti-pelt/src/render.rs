@@ -22,14 +22,15 @@ use nicti_calico::profile::ProfileSolution;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::coat::{
-    self, CameraProfileParams, CropParams, ExposureParams, HslParams, NoiseReductionParams,
-    SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
+    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, output_encode};
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::heal::{HealExec, HealKernel};
 use nicti_tapetum::histogram::{self, Histogram};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
@@ -205,6 +206,7 @@ pub struct DevelopView {
     decode_kernel: DecodeKernel,
     live_kernel: LiveSuffixKernel,
     crop_kernel: CropKernel,
+    heal_kernel: HealKernel,
     renderer: Renderer,
     /// When true, `render()` renders with every stage at its default instead of `document`'s own
     /// values -- the before/after toggle.
@@ -233,6 +235,7 @@ impl DevelopView {
         let live_kernel = LiveSuffixKernel::new(&gpu);
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
+        let heal_kernel = HealKernel::new(&gpu);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
 
         Self {
@@ -245,6 +248,7 @@ impl DevelopView {
             decode_kernel,
             live_kernel,
             crop_kernel,
+            heal_kernel,
             renderer,
             show_before: false,
             profile_choices: Vec::new(),
@@ -399,13 +403,18 @@ impl DevelopView {
             kernel: &self.decode_kernel,
             frame: &self.frame,
         };
+        let heal: HealParams = Self::resolve(doc, HEAL);
+        let heal_exec = HealExec {
+            kernel: &self.heal_kernel,
+            params: &heal,
+        };
         let passthrough = PassthroughExec;
         let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
             (DECODE, &decode_exec),
             (DEMOSAIC, &passthrough),
             (DENOISE, &passthrough),
             (LENS, &passthrough),
-            (HEAL, &passthrough),
+            (HEAL, &heal_exec),
         ];
         let req = RenderRequest {
             graph: &self.graph,

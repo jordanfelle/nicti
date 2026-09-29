@@ -238,6 +238,123 @@ impl CropParams {
     }
 }
 
+/// What a heal [`Spot`] does to its destination circle (#51, ADR-0050).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpotKind {
+    /// Feathered patch copy from `source_offset` (`heal::clone_stamp`).
+    Clone,
+    /// Gradient-domain (Poisson) blend from `source_offset` (`heal::spot_heal`).
+    Heal,
+    /// AI object removal: no `source_offset`; filled from a pre-inpainted patch produced from
+    /// `mask_recipe` (a MobileSAM prompt, then LaMa) -- see [`HealParams`] and `heal::RemovalPatch`.
+    Remove,
+}
+
+/// A model-based mask recipe (never derived pixels) for a [`SpotKind::Remove`] spot -- ADR-0021's
+/// "the recipe, not the pixels" rule for AI masks. `params` carries the MobileSAM prompt (see
+/// `nicti_groom::sam::Prompt`'s JSON shape); `model_version` pins the checkpoint so a model upgrade
+/// is an explicit re-run, never a silent change to an old edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaskRecipe {
+    pub model_id: String,
+    pub model_version: String,
+    pub params: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+/// One clone/heal/remove operation, in *source-image* pixel space (like [`CropParams`]).
+/// `center`/`radius` describe the destination circle; `source_offset` (Clone/Heal only) is the
+/// vector from `center` to the source patch's own center. Every `Option` field uses
+/// `skip_serializing_if`, because `nicti_pawprint::hash_value` refuses JSON `null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Spot {
+    pub kind: SpotKind,
+    pub center: (f32, f32),
+    pub radius: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<(f32, f32)>,
+    #[serde(default)]
+    pub feather: f32,
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_recipe: Option<MaskRecipe>,
+}
+
+fn default_opacity() -> f32 {
+    1.0
+}
+
+impl Spot {
+    pub fn clone_spot(
+        center: (f32, f32),
+        radius: f32,
+        source_offset: (f32, f32),
+        feather: f32,
+    ) -> Self {
+        Self {
+            kind: SpotKind::Clone,
+            center,
+            radius,
+            source_offset: Some(source_offset),
+            feather,
+            opacity: 1.0,
+            mask_recipe: None,
+        }
+    }
+
+    pub fn heal_spot(
+        center: (f32, f32),
+        radius: f32,
+        source_offset: (f32, f32),
+        feather: f32,
+    ) -> Self {
+        Self {
+            kind: SpotKind::Heal,
+            center,
+            radius,
+            source_offset: Some(source_offset),
+            feather,
+            opacity: 1.0,
+            mask_recipe: None,
+        }
+    }
+
+    pub fn remove_spot(
+        center: (f32, f32),
+        radius: f32,
+        feather: f32,
+        mask_recipe: MaskRecipe,
+    ) -> Self {
+        Self {
+            kind: SpotKind::Remove,
+            center,
+            radius,
+            source_offset: None,
+            feather,
+            opacity: 1.0,
+            mask_recipe: Some(mask_recipe),
+        }
+    }
+}
+
+/// Heal/remove stage (#51): an ordered list of spots, applied in list order -- order matters here
+/// (two overlapping spots give a different result depending on which is applied last), unlike
+/// ADR-0021's order-free `stages` map.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealParams {
+    pub spots: Vec<Spot>,
+}
+
+impl HealParams {
+    pub fn is_noop(&self) -> bool {
+        self.spots.is_empty()
+    }
+}
+
 /// Parses a stage's raw JSON params into a typed struct, falling back to `T::default()` on any
 /// deserialization failure (a schema this build genuinely can't parse) rather than propagating an
 /// error -- consistent with `nicti_claw::Registry::get`'s own "no recognized module -> `None`,
