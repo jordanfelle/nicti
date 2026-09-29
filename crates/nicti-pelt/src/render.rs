@@ -365,7 +365,8 @@ impl DevelopView {
     /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
     /// histograms it, and writes `nicti_tapetum::perk::estimate`'s Exposure/Basic-tone output into
     /// `document` -- see `perk.rs`'s own doc comment for why this is provisional (candidate A,
-    /// pending #202).
+    /// pending #202). Per ADR-0101 an unchanged result must not create a history step (#312), and
+    /// a low-confidence result is applied with a marker (#311).
     pub fn apply_auto_tone(&mut self) {
         let was_before = self.show_before;
         self.show_before = true;
@@ -442,7 +443,8 @@ impl DevelopView {
     /// it to whatever `rotation_degrees` already held would double-apply any rotation the user had
     /// already dialed in. A no-op (leaves `rotation_degrees` untouched) if no confident line was
     /// detected -- see `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment for when
-    /// that happens.
+    /// that happens. Per ADR-0101 (#311) this will also surface a non-modal hint (distinct
+    /// wording for no-result vs. low-confidence) and skip, not apply, a low-confidence angle.
     pub fn apply_auto_straighten(&mut self) {
         let had_crop = self.document.stages.remove(CROP);
         let was_before = self.show_before;

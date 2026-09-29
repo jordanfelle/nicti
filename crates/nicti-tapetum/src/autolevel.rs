@@ -102,6 +102,10 @@ fn downscale_to_gray(pixels: &[[f32; 4]], width: u32, height: u32) -> GrayImage 
 /// such harness exists anywhere in this crate for a genuinely photographic image; `bench/knead`'s
 /// own real-NEF goldens are #45's scope, not this one). Real-photo quality/threshold tuning is
 /// deliberately left as a follow-up rather than blocking this ticket on it.
+///
+/// **Degradation contract (ADR-0101)**: the bare `Option` here has no confidence signal; #311
+/// replaces it with `AutoOutcome` (`Confident` / `LowConfidence` / `NoResult`), and a low-confidence
+/// straighten is skipped rather than applied.
 pub fn detect_level_angle(pixels: &[[f32; 4]], width: u32, height: u32) -> Option<f32> {
     if width == 0 || height == 0 || pixels.len() != (width as usize * height as usize) {
         return None;

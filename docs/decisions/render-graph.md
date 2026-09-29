@@ -151,3 +151,5 @@ canvas doesn't resize to the crop rect (deliberate, matches real editor UX -- se
 "Crop rectangle scope" section), while the already-existing `tile::TiledRender`/`MemorySink`
 full-res export path (landed in #45 PR4) already supports an arbitrary decoupled output extent, so
 crop *does* actually resize the framing at export time.
+
+- **Auto-level degradation (#101, cross-ref)**: `docs/adr/0101-auto-op-graceful-degradation.md` (full text in `develop.md`) defines what `detect_level_angle` returning no or weak evidence must do: `NoResult` shows a hint, `LowConfidence` is skipped with a distinct hint, neither creates a history step. Implementation: #311.

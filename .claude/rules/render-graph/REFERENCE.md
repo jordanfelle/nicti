@@ -190,7 +190,8 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   `tile::TiledRender`/`MemorySink` full-res export path already supports an arbitrary output
   extent, so the crop rect *is* honored end-to-end at export time. Two follow-ups filed: #272
   (live-preview canvas resize) and #273 (real-photo Canny/Hough threshold tuning,
-  `needs-physical-testing`).
+  `needs-physical-testing`). Failure/low-confidence behavior of auto-level: ADR-0101 (see the
+  `develop` topic) — a low-confidence angle is skipped with a hint, not applied.
 
 ## Package contents
 

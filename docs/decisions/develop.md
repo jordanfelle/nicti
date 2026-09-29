@@ -84,3 +84,9 @@ from #99's classic auto-tone, not built on its output.
 - **Decision rule is looser than #99's** — a user's own edits are noisier than LRC's own
   algorithmic Auto Settings — and requires the best ML model to beat the ridge baseline by ≥15% on
   mean range-normalized MAE, not just clear an absolute per-slider bound alone.
+
+## Auto-op graceful degradation
+
+Covers #101 (ADR-0101): what an automatic, non-interactive develop op (auto-straighten #47, auto-tone #99) does on failure or low confidence.
+
+- **Auto-op graceful degradation (#101)**: `docs/adr/0101-auto-op-graceful-degradation.md` — **Accepted**. Shared `AutoOutcome<T>` (`Confident`/`LowConfidence`/`NoResult` + `AutoReason`), a discrete signal rather than a float score since thresholds are untuned (#273) and calibration does not carry across degradation types (ADR-0034). Straighten skips on low confidence (a wrong rotation is worse than none) and shows a non-modal hint; tone always applies, marking low confidence. Never a modal dialog; batch/sync (#52) shows a single summary with a jump-to-skipped filter. An unchanged, `NoResult`, or skipped invocation creates no history step and keeps redo (a general `History` invariant, #312); an applied result is one entry via `apply_batch`. Partial decode → `NoResult(DecodeIncomplete)`. Implementation: #311, #312 (no-op compares effective params, absent == stage default; `compact` drops net-zero runs; `apply_batch` uses `control: None`, so it never coalesces).

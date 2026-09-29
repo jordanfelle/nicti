@@ -114,6 +114,9 @@ impl History {
         self.push_delta(batch_id, changes, None, now_ms());
     }
 
+    // ADR-0101 rule 6 (#312): a delta whose every change has `before == after` should append no
+    // step and leave the redo tail alone (absent entry == stage default), and `compact` should drop
+    // a merged run that nets to before == after; neither is implemented here yet.
     fn push_delta(
         &mut self,
         batch_id: Uuid,
