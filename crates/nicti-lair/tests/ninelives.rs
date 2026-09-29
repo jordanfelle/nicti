@@ -123,10 +123,21 @@ fn run_backup_reports_live_corruption_without_touching_existing_backups() {
     // corruption happening to a file a running app already has open, not a corrupt file being
     // freshly opened) -- crude, but it's the only way to make a real `PRAGMA quick_check` fail
     // short of vendoring a purpose-built corrupt fixture.
+    //
+    // Smash the header of *every* page after the first (page 1 holds the database header and
+    // `sqlite_master`, left intact so the file still opens). An earlier version overwrote 1 KB at
+    // the file's midpoint, which only corrupted anything if that spot happened to land inside a
+    // page `quick_check` inspects -- schema V7's extra (empty) index pages moved the midpoint into
+    // unused space and the test stopped detecting anything. Every non-first page's type byte
+    // becoming 0xFF is an invalid page whatever the layout is.
     let mut bytes = std::fs::read(&catalog_path).unwrap();
-    let corrupt_from = bytes.len() / 2;
-    for b in bytes.iter_mut().skip(corrupt_from).take(1024) {
-        *b = 0xFF;
+    let page_size = match u16::from_be_bytes([bytes[16], bytes[17]]) {
+        1 => 65_536,
+        n => n as usize,
+    };
+    for page_start in (page_size..bytes.len()).step_by(page_size) {
+        let end = (page_start + 64).min(bytes.len());
+        bytes[page_start..end].fill(0xFF);
     }
     std::fs::write(&catalog_path, &bytes).unwrap();
 

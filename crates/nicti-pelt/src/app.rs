@@ -1,6 +1,6 @@
-//! The `eframe::App` shell: top-level view routing (library/loupe/develop, each a placeholder
-//! panel beyond Develop's real Tapetum viewport -- grid virtualization is #30, loupe is #31,
-//! culling UX is #32, the filter bar is #242) and the wgpu device Tapetum's `GpuContext` shares
+//! The `eframe::App` shell: top-level view routing (library/loupe/develop -- the Library view's
+//! virtualized grid is #30 (`crate::grid`), the loupe is #31; culling UX is #32 and the filter
+//! bar is #242, both still to come) and the wgpu device Tapetum's `GpuContext` shares
 //! with eframe (ADR-0016). Also owns Pounce (#55): the job runtime plus the activity panel
 //! (`crate::activity`) that reads it, and the Library view's Import/Sync buttons that submit real
 //! jobs to it. Also polls Nine Lives (#25) on a slow timer and submits a `BackupJob` when it says
@@ -15,7 +15,9 @@ use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, SyncJob};
-use nicti_lair::{CatalogError, CatalogStore, PreviewTier, SqliteCatalog};
+use nicti_lair::{
+    CatalogError, CatalogStore, Filter, PreviewTier, Sort, SortDirection, SortField, SqliteCatalog,
+};
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
 use nicti_pounce::{JobKind, JobState, Pounce};
@@ -23,6 +25,7 @@ use nicti_tapetum::gpu::GpuContext;
 
 use nicti_shed::state::Channel as UpdateChannel;
 
+use crate::grid::{self, GridSession};
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
@@ -47,6 +50,13 @@ const PLACEHOLDER_VOLUME_IDENTITY_KEY: &str = "nicti-pelt-local-placeholder";
 /// against actual machine RAM, matching `PLACEHOLDER_VRAM_BUDGET_BYTES`'s own "not measured yet"
 /// status.
 const PLACEHOLDER_LOUPE_CACHE_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// VRAM budget for the library grid's thumbnail textures (#30) -- a placeholder like the two
+/// above. ~4.2 GiB would hold every 256px thumbnail of a 1M-asset catalog; 512 MiB holds ~8k, far
+/// more than the few hundred a screen plus overscan ever shows, and stays flat as the catalog grows.
+const PLACEHOLDER_GRID_TEXTURE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+/// How often the grid re-reads its id snapshot while an import is running, so new assets appear
+/// as they land instead of only when the whole import finishes.
+const GRID_LIVE_RELOAD_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -136,6 +146,21 @@ pub struct PeltApp {
     /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
     /// re-read and re-decode them every frame.
     loupe_t2_undecodable: Option<i64>,
+    /// The Library view's virtualized grid (#30). Created lazily on first show, once the catalog
+    /// is known to be open.
+    grid: Option<GridSession>,
+    grid_view: grid::ViewState,
+    /// The grid's root selector: `None` = every folder.
+    grid_root: Option<i64>,
+    grid_sort: Sort,
+    /// Whether an import/sync/move was running last frame -- the busy -> idle edge is what
+    /// triggers a full grid refresh (new assets, replaced previews).
+    grid_was_busy: bool,
+    grid_last_live_reload: Option<Instant>,
+    /// `true` while the current `LoupeSession` was built from the grid's own id list, so its
+    /// cursor is an index into the grid and can be mirrored back onto the grid selection. A loupe
+    /// opened from the folder box (`open_in_loupe`) has its own list and must not touch the grid.
+    loupe_from_grid: bool,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -238,6 +263,13 @@ impl PeltApp {
             loupe_preview: None,
             larder,
             loupe_t2_undecodable: None,
+            grid: None,
+            grid_view: grid::ViewState::default(),
+            grid_root: None,
+            grid_sort: grid::DEFAULT_SORT,
+            grid_was_busy: false,
+            grid_last_live_reload: None,
+            loupe_from_grid: false,
         }
     }
 
@@ -326,6 +358,34 @@ impl PeltApp {
                 self.last_move_summary = Some(summarize_move(&outcome));
                 self.pending_move_result = None;
             }
+        }
+    }
+
+    /// Keeps the grid's snapshot in step with catalog-changing jobs (#30), whichever view is
+    /// showing: re-reads the ids every `GRID_LIVE_RELOAD_INTERVAL` while an import/sync/move runs
+    /// (so new assets appear as they land), and does a full refresh -- ids *and* thumbnails, since
+    /// a rescan can replace previews -- on the busy -> idle edge. Also stops thumbnail decoding
+    /// when the Library view isn't the one on screen.
+    fn drive_grid(&mut self, ui: &egui::Ui) {
+        let busy = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
+        let was_busy = std::mem::replace(&mut self.grid_was_busy, busy);
+        let Some(grid) = self.grid.as_mut() else {
+            return;
+        };
+        if was_busy && !busy {
+            grid.refresh(&self.pounce);
+        } else if busy {
+            let due = self
+                .grid_last_live_reload
+                .is_none_or(|t| t.elapsed() >= GRID_LIVE_RELOAD_INTERVAL);
+            if due {
+                grid.reload(&self.pounce);
+                self.grid_last_live_reload = Some(Instant::now());
+            }
+            ui.ctx().request_repaint_after(GRID_LIVE_RELOAD_INTERVAL);
+        }
+        if self.view != View::Library {
+            grid.pause(&self.pounce);
         }
     }
 
@@ -451,6 +511,7 @@ impl eframe::App for PeltApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_backup();
         self.poll_move();
+        self.drive_grid(ui);
         self.update.poll();
         if self.update.is_checking() || self.update.is_applying() {
             // Nothing else drives a repaint while a background check or apply is in flight
@@ -593,22 +654,98 @@ impl eframe::App for PeltApp {
 }
 
 impl PeltApp {
+    /// #30: the Library view -- a root/sort toolbar, the import/sync/move controls (collapsible,
+    /// so a big catalog can have the whole window), and the virtualized thumbnail grid.
     fn show_library(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Library");
+        let store = match &self.catalog {
+            CatalogOpenState::Open(store) => store.clone(),
+            CatalogOpenState::Error(_) => {
+                ui.heading("Library");
+                self.show_library_controls(ui);
+                return;
+            }
+        };
+        if self.grid.is_none() {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+            self.grid = Some(GridSession::new(
+                dyn_store,
+                PLACEHOLDER_GRID_TEXTURE_BUDGET_BYTES,
+            ));
+        }
+
+        ui.horizontal(|ui| {
+            ui.heading("Library");
+            if let Some(grid) = &self.grid {
+                if grid.is_loaded() {
+                    ui.label(format!("{} image(s)", grid.len()));
+                }
+                if grid.is_loading() {
+                    ui.spinner();
+                }
+            }
+        });
+
+        let roots = store.list_roots().unwrap_or_default();
+        let mut root_sel = self.grid_root;
+        let mut sort = self.grid_sort;
+        ui.horizontal(|ui| {
+            let root_label = root_sel
+                .and_then(|id| roots.iter().find(|r| r.id == id))
+                .map_or("All folders", |r| r.path.as_str());
+            egui::ComboBox::from_id_salt("grid_root")
+                .selected_text(root_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut root_sel, None, "All folders");
+                    for root in &roots {
+                        ui.selectable_value(&mut root_sel, Some(root.id), &root.path);
+                    }
+                });
+            egui::ComboBox::from_id_salt("grid_sort_field")
+                .selected_text(match sort.field {
+                    SortField::Captured => "Capture time",
+                    SortField::Imported => "Import time",
+                    SortField::Filename => "Filename",
+                    SortField::Rating => "Rating",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut sort.field, SortField::Captured, "Capture time");
+                    ui.selectable_value(&mut sort.field, SortField::Imported, "Import time");
+                    ui.selectable_value(&mut sort.field, SortField::Filename, "Filename");
+                    ui.selectable_value(&mut sort.field, SortField::Rating, "Rating");
+                });
+            ui.selectable_value(&mut sort.direction, SortDirection::Asc, "Ascending");
+            ui.selectable_value(&mut sort.direction, SortDirection::Desc, "Descending");
+        });
+        self.grid_root = root_sel;
+        self.grid_sort = sort;
+        let filter = Filter {
+            root_id: root_sel,
+            ..Default::default()
+        };
+        if let Some(grid) = self.grid.as_mut() {
+            grid.set_query(filter, sort, &self.pounce);
+        }
+
+        egui::CollapsingHeader::new("Folders: import, sync, move")
+            .id_salt("nicti_pelt_library_folders")
+            .default_open(true)
+            .show(ui, |ui| self.show_library_controls(ui));
+        ui.separator();
+
+        let outcome = match self.grid.as_mut() {
+            Some(grid) => grid::view::show(ui, grid, &mut self.grid_view, &self.pounce),
+            None => grid::view::GridOutcome::default(),
+        };
+        if let Some(index) = outcome.open {
+            self.open_from_grid(&store, index);
+        }
+    }
+
+    /// The import/sync/move controls and their status lines -- everything the Library view had
+    /// before the grid (#30) except the asset count, which the grid's own snapshot now supplies.
+    fn show_library_controls(&mut self, ui: &mut egui::Ui) {
         match &self.catalog {
             CatalogOpenState::Open(store) => {
-                match store.asset_count() {
-                    Ok(count) => {
-                        ui.label(format!("{count} asset(s) in this catalog."));
-                    }
-                    Err(e) => {
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            format!("Failed to query catalog: {e}"),
-                        );
-                    }
-                }
-
                 let store = store.clone();
                 ui.horizontal(|ui| {
                     ui.label("Folder:");
@@ -676,7 +813,7 @@ impl PeltApp {
         if let Some(summary) = &self.last_move_summary {
             ui.label(summary);
         }
-        ui.label("Grid virtualization at scale lands in #30. Filter bar lands in #242.");
+        ui.label("Filter bar lands in #242.");
     }
 
     /// Registers `self.import_path_input` as a root under the placeholder volume (see this
@@ -733,6 +870,37 @@ impl PeltApp {
             return;
         };
         let ids: Vec<i64> = assets.iter().map(|a| a.id).collect();
+        self.start_loupe(store, ids, 0, false);
+    }
+
+    /// Opens the loupe on the grid's current ordering (#30), starting at `index` -- so Left/Right
+    /// in the loupe walk the same sequence the grid shows, in its sort and filter.
+    fn open_from_grid(&mut self, store: &Arc<SqliteCatalog>, index: usize) {
+        if self.job_active(&[JobKind::Move]) {
+            self.last_move_summary =
+                Some("A folder move is running; wait for it to finish first.".into());
+            return;
+        }
+        let Some(grid) = self.grid.as_ref() else {
+            return;
+        };
+        if index >= grid.len() {
+            return;
+        }
+        let ids = grid.ids().to_vec();
+        self.start_loupe(store, ids, index, true);
+    }
+
+    /// Builds a fresh `LoupeSession` over `ids` at `cursor` and switches to the Loupe view.
+    /// `from_grid` records that `ids` is the grid's own list, so the loupe's cursor can be
+    /// mirrored back onto the grid selection (see `show_loupe`).
+    fn start_loupe(
+        &mut self,
+        store: &Arc<SqliteCatalog>,
+        ids: Vec<i64>,
+        cursor: usize,
+        from_grid: bool,
+    ) {
         // A prior session's in-flight decodes are for a now-abandoned folder -- cancel them
         // rather than let them keep running to a result nothing will ever look at.
         if let Some(mut old) = self.loupe.take() {
@@ -746,8 +914,9 @@ impl PeltApp {
         if let Some(larder) = &self.larder {
             session = session.with_larder(larder.clone());
         }
-        let _ = session.set_cursor(0, store.as_ref(), &self.pounce);
+        let _ = session.set_cursor(cursor, store.as_ref(), &self.pounce);
         self.loupe = Some(session);
+        self.loupe_from_grid = from_grid;
         // Deliberately NOT resetting `loupe_loaded_asset` here: it tracks which asset id is
         // currently loaded into the shared `develop` view, independent of which `LoupeSession`
         // object exists -- if the new session's first asset happens to be the same one already
@@ -814,6 +983,20 @@ impl PeltApp {
         let cursor_label = format!("{} / {}", loupe.cursor() + 1, loupe.len());
         let error_label = loupe.current_error(store.as_ref()).map(str::to_string);
         let cursor = loupe.cursor();
+
+        // Keep the grid selection on whatever the loupe is showing, so switching back to the
+        // Library lands on (and scrolls to) the photo the user just walked to.
+        // By asset id, not index: the loupe's id list was frozen when it opened, while the grid's
+        // has since been reloaded (an import adding assets, a refresh), so index `i` in one is
+        // not index `i` in the other.
+        if self.loupe_from_grid {
+            if let Some(grid) = self.grid.as_mut() {
+                if grid.cursor_id() != Some(asset_id) {
+                    grid.select_asset(asset_id);
+                    self.grid_view.reveal_cursor();
+                }
+            }
+        }
 
         let mut retry_clicked = false;
         ui.horizontal(|ui| {

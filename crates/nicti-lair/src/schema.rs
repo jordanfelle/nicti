@@ -386,6 +386,38 @@ CREATE TABLE root_move (
 );
 "#;
 
+/// #30 (v7): sort indexes for the virtualized grid. `hunt` orders by `COALESCE(captured_at, '')`
+/// and `COALESCE(rating, -1000)` (see `SqliteCatalog::hunt`), which the plain `idx_asset_captured`
+/// can't serve -- SQLite only uses an index for an ORDER BY whose expression matches the index
+/// expression exactly, so each page re-sorted the whole result set through a temp B-tree. These
+/// expression indexes match `hunt`'s ORDER BY terms verbatim; the two plain-column sorts
+/// (`imported_at`, `rel_path_fold`) had no index at all. `id` is the trailing tie-breaker, the
+/// same as `hunt`'s own `ORDER BY ..., a.id`. `idx_asset_captured` is deliberately KEPT: the
+/// expression index can't serve `Filter::captured_after/before`, which compare the raw
+/// `captured_at` column (a date-range filter would otherwise scan `asset`).
+///
+/// Each sort gets a second, `root_id`-leading copy: with `Filter::root_id` set (the Library
+/// view's root selector) the planner otherwise picks `idx_asset_root_fold` for the equality and
+/// then sorts the whole root through a temp B-tree, which is the same 1M-row re-sort for the
+/// common case of one big root. The `(root_id, rel_path_fold, id)` copy also replaces
+/// `idx_asset_root_fold` (same leading columns, so `rel_path_prefix` GLOB scans are served
+/// identically). Cost: 8 new sort indexes (net +7 after dropping `idx_asset_root_fold`) -- roughly
+/// +40 MB each at 1M assets and a few extra b-tree inserts per ingested file, accepted for
+/// O(index-scan) grid snapshots.
+const MIGRATION_V7: &str = r#"
+DROP INDEX idx_asset_root_fold;
+
+CREATE INDEX idx_asset_sort_captured ON asset(COALESCE(captured_at, ''), id);
+CREATE INDEX idx_asset_sort_rating ON asset(COALESCE(rating, -1000), id);
+CREATE INDEX idx_asset_sort_imported ON asset(imported_at, id);
+CREATE INDEX idx_asset_sort_filename ON asset(rel_path_fold, id);
+
+CREATE INDEX idx_asset_root_sort_captured ON asset(root_id, COALESCE(captured_at, ''), id);
+CREATE INDEX idx_asset_root_sort_rating ON asset(root_id, COALESCE(rating, -1000), id);
+CREATE INDEX idx_asset_root_sort_imported ON asset(root_id, imported_at, id);
+CREATE INDEX idx_asset_root_sort_filename ON asset(root_id, rel_path_fold, id);
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -397,6 +429,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V4,
     MIGRATION_V5,
     MIGRATION_V6,
+    MIGRATION_V7,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call

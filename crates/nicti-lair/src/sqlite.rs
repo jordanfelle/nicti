@@ -99,6 +99,19 @@ struct FilterSql {
     params: Vec<Box<dyn ToSql>>,
 }
 
+/// The ORDER BY / keyset-comparison expression for a `SortField`. These must match the
+/// `idx_asset_sort_*` expression indexes (schema V7) term-for-term, or SQLite falls back to a
+/// temp B-tree sort of the whole result set -- change one, change the other, and the
+/// `hunt_sort_uses_an_index` test will say if they drift.
+fn sort_column_sql(field: SortField) -> &'static str {
+    match field {
+        SortField::Captured => "COALESCE(a.captured_at, '')",
+        SortField::Imported => "a.imported_at",
+        SortField::Filename => "a.rel_path_fold",
+        SortField::Rating => "COALESCE(a.rating, -1000)",
+    }
+}
+
 fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, CatalogError> {
     let mut clauses: Vec<String> = vec!["v.online = 1".to_string()];
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
@@ -289,6 +302,68 @@ impl SqliteCatalog {
             conn: Mutex::new(conn),
             path,
         })
+    }
+
+    /// Inserts `n` synthetic assets under `root_id` in one transaction -- for scale tests and
+    /// benchmarks (#30's 1M-asset grid snapshot) only, hence `doc(hidden)`; real assets always go
+    /// through `insert_asset`/Scruff. Rows get distinct filenames, spread capture times (with
+    /// ties and NULLs), import times and ratings, so every `SortField` has real work to do. If
+    /// `previews` is `Some((preview, k))`, the first `k` assets also get a copy of `preview` as
+    /// their T0 (giving every asset one would make a 1M-row catalog hundreds of GB).
+    #[doc(hidden)]
+    pub fn bulk_seed(
+        &self,
+        root_id: i64,
+        n: usize,
+        previews: Option<(&Preview, usize)>,
+    ) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO asset (root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
+                 captured_at, rating, imported_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?;
+            let mut insert_preview = tx.prepare(
+                "INSERT INTO preview (asset_id, tier, width, height, bytes) VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for i in 0..n {
+                let name = format!("{:07}.NEF", (i * 7919) % n.max(1));
+                // Every fifth asset has no capture time; the rest collide in groups of three.
+                let captured = (i % 5 != 0).then(|| {
+                    format!(
+                        "2026:01:01 {:02}:{:02}:{:02}",
+                        (i / 3600) % 24,
+                        (i / 60) % 60,
+                        (i / 3) % 60
+                    )
+                });
+                let rating = (i % 4 != 0).then_some((i % 6) as i64 - 1);
+                insert.execute(params![
+                    root_id,
+                    name,
+                    name.to_lowercase(),
+                    1000i64,
+                    0i64,
+                    captured,
+                    rating,
+                    (i % 100_000) as i64
+                ])?;
+                if let Some((preview, k)) = previews {
+                    if i < k {
+                        insert_preview.execute(params![
+                            tx.last_insert_rowid(),
+                            PreviewTier::T0.as_str(),
+                            preview.width,
+                            preview.height,
+                            preview.bytes
+                        ])?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// This catalog's own file path, `None` for an in-memory catalog (tests only).
@@ -835,6 +910,44 @@ impl CatalogStore for SqliteCatalog {
             .optional()?)
     }
 
+    fn get_previews(
+        &self,
+        asset_ids: &[i64],
+        tier: PreviewTier,
+    ) -> Result<Vec<(i64, Preview)>, CatalogError> {
+        // SQLite's default bound-parameter cap is 32766 (999 on very old builds); chunk well
+        // under either so an arbitrarily long caller slice can't trip it.
+        const CHUNK: usize = 500;
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::with_capacity(asset_ids.len());
+        for chunk in asset_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT asset_id, width, height, bytes FROM preview \
+                 WHERE tier = ? AND asset_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut params: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
+            let tier_str = tier.as_str();
+            params.push(&tier_str);
+            params.extend(chunk.iter().map(|id| id as &dyn ToSql));
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    Preview {
+                        width: row.get::<_, Option<i64>>(1)?.map(|w| w as u32),
+                        height: row.get::<_, Option<i64>>(2)?.map(|h| h as u32),
+                        bytes: row.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
     fn clear_preview(&self, asset_id: i64, tier: PreviewTier) -> Result<(), CatalogError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1121,12 +1234,7 @@ impl CatalogStore for SqliteCatalog {
         let mut where_parts = vec![filter_sql.where_clause];
         let mut all_params: Vec<Box<dyn ToSql>> = filter_sql.params;
 
-        let sort_column = match sort.field {
-            SortField::Captured => "COALESCE(a.captured_at, '')",
-            SortField::Imported => "a.imported_at",
-            SortField::Filename => "a.rel_path_fold",
-            SortField::Rating => "COALESCE(a.rating, -1000)",
-        };
+        let sort_column = sort_column_sql(sort.field);
         let (cmp, order) = match sort.direction {
             SortDirection::Asc => (">", "ASC"),
             SortDirection::Desc => ("<", "DESC"),
@@ -1171,6 +1279,46 @@ impl CatalogStore for SqliteCatalog {
             .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError> {
+        // A file-backed catalog scans on its own read-only connection (WAL: a consistent snapshot,
+        // never blocking a writer): this runs for ~0.2-1 s at 1M rows, and holding the shared
+        // mutex that long would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
+        // for the duration. An in-memory catalog (tests) has no second connection to open.
+        let reader = if self.path.is_some() {
+            Some(self.open_snapshot_reader()?)
+        } else {
+            None
+        };
+        let guard;
+        let conn: &Connection = match &reader {
+            Some(reader) => reader,
+            None => {
+                guard = self.conn.lock().unwrap();
+                &guard
+            }
+        };
+        let filter_sql = build_filter_sql(conn, filter)?;
+        let sort_column = sort_column_sql(sort.field);
+        let order = match sort.direction {
+            SortDirection::Asc => "ASC",
+            SortDirection::Desc => "DESC",
+        };
+        let sql = format!(
+            "SELECT a.id FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE {} \
+             ORDER BY {sort_column} {order}, a.id {order}",
+            filter_sql.where_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
+        let ids = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError> {
@@ -2187,6 +2335,258 @@ mod tests {
         }
 
         assert_eq!(collected, expected);
+    }
+
+    const ALL_SORT_FIELDS: [SortField; 4] = [
+        SortField::Captured,
+        SortField::Imported,
+        SortField::Filename,
+        SortField::Rating,
+    ];
+    const BOTH_DIRECTIONS: [SortDirection; 2] = [SortDirection::Asc, SortDirection::Desc];
+
+    /// Seeds a spread of values (with ties and NULLs on the nullable sort fields) so every
+    /// `SortField` has something non-trivial to order.
+    fn seed_for_sorting(store: &SqliteCatalog, n: i64) -> i64 {
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        for i in 0..n {
+            let mut asset = new_asset(&format!("f{:03}.NEF", (i * 7) % n), None);
+            asset.imported_at = i % 5;
+            // Every third asset has no capture time; the rest collide in pairs.
+            asset.captured_at = (i % 3 != 0).then(|| format!("2026:01:01 00:00:{:02}", i / 2));
+            let id = store.insert_asset(root_id, &asset, None).unwrap();
+            if i % 4 != 0 {
+                store.set_rating(&[id], Some(i % 6 - 1)).unwrap();
+            }
+        }
+        root_id
+    }
+
+    #[test]
+    fn hunt_ids_matches_paging_through_hunt_for_every_sort() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 40);
+
+        for field in ALL_SORT_FIELDS {
+            for direction in BOTH_DIRECTIONS {
+                let sort = Sort { field, direction };
+                let all = store.hunt_ids(&Filter::default(), sort).unwrap();
+                assert_eq!(all.len(), 40, "{field:?} {direction:?}");
+
+                // Reference: page through `hunt` with the sort's own cursor type.
+                let mut paged = Vec::new();
+                let mut after = None;
+                loop {
+                    let ids = store
+                        .hunt(&Filter::default(), sort, &Page { after, limit: 9 })
+                        .unwrap();
+                    let Some(&last_id) = ids.last() else { break };
+                    let last = store.get_asset(last_id).unwrap().unwrap();
+                    after = Some(match field {
+                        SortField::Captured => Cursor::Captured {
+                            captured_at: last.captured_at.clone(),
+                            id: last_id,
+                        },
+                        SortField::Imported => Cursor::Imported {
+                            imported_at: last.imported_at,
+                            id: last_id,
+                        },
+                        SortField::Filename => Cursor::Filename {
+                            rel_path_fold: last.rel_path_fold.clone(),
+                            id: last_id,
+                        },
+                        SortField::Rating => Cursor::Rating {
+                            rating: last.rating,
+                            id: last_id,
+                        },
+                    });
+                    paged.extend(ids);
+                }
+                assert_eq!(all, paged, "{field:?} {direction:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hunt_ids_respects_the_filter_and_offline_volumes() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let root_id = seed_for_sorting(&store, 12);
+        let filter = Filter {
+            root_id: Some(root_id),
+            ..Default::default()
+        };
+        let sort = default_sort();
+        assert_eq!(store.hunt_ids(&filter, sort).unwrap().len(), 12);
+        assert_eq!(
+            store.hunt_ids(&filter, sort).unwrap().len() as u64,
+            store.hunt_count(&filter).unwrap()
+        );
+
+        let other = store.upsert_volume("other", None, None, 0).unwrap();
+        let other_root = store.ensure_root(other, "").unwrap();
+        store
+            .insert_asset(other_root, &new_asset("elsewhere.NEF", None), None)
+            .unwrap();
+        assert_eq!(store.hunt_ids(&filter, sort).unwrap().len(), 12);
+        assert_eq!(store.hunt_ids(&Filter::default(), sort).unwrap().len(), 13);
+    }
+
+    /// Every sort `hunt`/`hunt_ids` can issue must be served by an index in order -- a
+    /// `TEMP B-TREE` in the plan means each page re-sorts the whole result set, which is what made
+    /// the grid unusable at 1M rows before schema V7.
+    #[test]
+    fn hunt_sort_uses_an_index() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let root_id = seed_for_sorting(&store, 200);
+        // Deliberately no `ANALYZE`: the catalog never runs it (Nine Lives' "no optimize catalog"
+        // rule, `ninelives.rs`), so production plans are the stats-free ones. With stats on a
+        // catalog whose `root`/`volume` hold a single row each, SQLite prefers to scan those as
+        // outer loops and re-sorts `asset` -- not something this crate can control, but a reason
+        // never to add an `ANALYZE`/`PRAGMA optimize` here without re-running this test with it.
+
+        let filters = [
+            Filter::default(),
+            Filter {
+                root_id: Some(root_id),
+                ..Default::default()
+            },
+        ];
+        for filter in &filters {
+            for field in ALL_SORT_FIELDS {
+                for direction in BOTH_DIRECTIONS {
+                    let conn = store.conn.lock().unwrap();
+                    let filter_sql = build_filter_sql(&conn, filter).unwrap();
+                    let order = match direction {
+                        SortDirection::Asc => "ASC",
+                        SortDirection::Desc => "DESC",
+                    };
+                    let col = sort_column_sql(field);
+                    let sql = format!(
+                        "EXPLAIN QUERY PLAN SELECT a.id FROM asset a \
+                         JOIN root r ON r.id = a.root_id \
+                         JOIN volume v ON v.id = r.volume_id \
+                         WHERE {} ORDER BY {col} {order}, a.id {order}",
+                        filter_sql.where_clause
+                    );
+                    let param_refs: Vec<&dyn ToSql> =
+                        filter_sql.params.iter().map(|p| p.as_ref()).collect();
+                    let mut stmt = conn.prepare(&sql).unwrap();
+                    let plan: Vec<String> = stmt
+                        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(3))
+                        .unwrap()
+                        .collect::<Result<_, _>>()
+                        .unwrap();
+                    assert!(
+                        !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                        "{field:?} {direction:?} filter={filter:?} sorts through a temp b-tree:\n{}",
+                        plan.join("\n")
+                    );
+                }
+            }
+        }
+    }
+
+    /// V7 kept `idx_asset_captured` on purpose: the sort indexes are expressions and can't serve
+    /// a raw `captured_at >= ?` range, so dropping it would turn every date filter into a scan.
+    #[test]
+    fn a_capture_date_range_filter_still_uses_an_index() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 200);
+        let filter = Filter {
+            captured_after: Some("2026:01:01 00:00:10".to_string()),
+            captured_before: Some("2026:01:01 00:00:50".to_string()),
+            ..Default::default()
+        };
+        let conn = store.conn.lock().unwrap();
+        let filter_sql = build_filter_sql(&conn, &filter).unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT a.id FROM asset a \
+             JOIN root r ON r.id = a.root_id JOIN volume v ON v.id = r.volume_id WHERE {}",
+            filter_sql.where_clause
+        );
+        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|l| l.contains("USING INDEX idx_asset_captured")
+                    || l.contains("USING COVERING INDEX idx_asset_captured")),
+            "a capture-date range should be served by idx_asset_captured:\n{}",
+            plan.join("\n")
+        );
+    }
+
+    /// The snapshot scan runs for up to a second at 1M rows; if it held the shared connection
+    /// mutex, every UI-thread catalog call would freeze meanwhile.
+    #[test]
+    fn hunt_ids_on_a_file_backed_catalog_does_not_take_the_shared_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(SqliteCatalog::open(&dir.path().join("c.db")).unwrap());
+        seed_for_sorting(&store, 20);
+
+        // Hold the shared connection for the whole call: a `hunt_ids` that needs it can't finish.
+        let held = store.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let ids = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+                tx.send(ids.len()).unwrap();
+            })
+        };
+        let got = rx.recv_timeout(std::time::Duration::from_secs(30));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(got, Ok(20), "hunt_ids blocked on the shared connection");
+    }
+
+    #[test]
+    fn get_previews_matches_get_preview_per_id_and_omits_missing() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        // More than one internal chunk (500), with every 3rd asset lacking a preview.
+        let mut ids = Vec::new();
+        for i in 0..1100u32 {
+            let preview = (i % 3 != 0).then(|| Preview {
+                width: Some(640),
+                height: Some(424),
+                bytes: i.to_le_bytes().to_vec(),
+            });
+            let id = store
+                .insert_asset(
+                    root_id,
+                    &new_asset(&format!("{i}.NEF"), None),
+                    preview.as_ref(),
+                )
+                .unwrap();
+            ids.push(id);
+        }
+
+        let mut batch = store.get_previews(&ids, PreviewTier::T0).unwrap();
+        batch.sort_by_key(|(id, _)| *id);
+        let mut expected = Vec::new();
+        for &id in &ids {
+            if let Some(p) = store.get_preview(id, PreviewTier::T0).unwrap() {
+                expected.push((id, p));
+            }
+        }
+        expected.sort_by_key(|(id, _)| *id);
+
+        assert_eq!(batch.len(), expected.len());
+        for ((bid, bp), (eid, ep)) in batch.iter().zip(&expected) {
+            assert_eq!(bid, eid);
+            assert_eq!(
+                (bp.width, bp.height, &bp.bytes),
+                (ep.width, ep.height, &ep.bytes)
+            );
+        }
+        assert!(store.get_previews(&[], PreviewTier::T0).unwrap().is_empty());
     }
 
     #[test]

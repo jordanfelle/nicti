@@ -5,14 +5,15 @@
 //! tapetum lucidum, matching this repo's feline naming convention (see `CLAUDE.md`) -- not the
 //! `nicti-ui` name #241 was filed under.
 //!
-//! Explicitly out of scope here (each has, or will have, its own ticket): grid virtualization at
-//! scale (#30), culling UX (#32), the filter bar (#242).
+//! The Library view's virtualized thumbnail grid is `grid` (#30). Explicitly out of scope here
+//! (each has, or will have, its own ticket): culling UX (#32), the filter bar (#242).
 
 mod activity;
 mod app;
 mod catalog;
 mod decode_job;
 mod develop_panel;
+mod grid;
 mod loupe;
 mod render;
 mod t2;

@@ -57,6 +57,12 @@ pub enum JobKind {
     /// Preview-tier work (#301) -- generating a T2 for the Larder, or compacting its pack file.
     /// CPU/disk-bound, CPU lane.
     Preview,
+    /// A batch of library-grid thumbnails (#30) -- reads stored T0 previews and downsizes them.
+    /// CPU-only, CPU lane. Its own kind (not `Preview`) because the activity panel folds these
+    /// into a single summary line: a fast scroll can queue hundreds of batches.
+    Thumbnail,
+    /// The library grid's ordered id snapshot (#30) -- one index-ordered catalog scan. CPU lane.
+    Snapshot,
 }
 
 /// Static metadata a job declares up front, before it runs -- what the scheduler needs to make an
