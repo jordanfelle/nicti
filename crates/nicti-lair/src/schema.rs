@@ -367,6 +367,24 @@ CREATE TABLE collection_asset (
 CREATE INDEX idx_collection_asset_position ON collection_asset(collection_id, position);
 "#;
 
+/// #26 (v6): verified folder move. `asset.content_hash` is the full-file BLAKE3 (hex) a move
+/// records for each cataloged asset it carried (`fingerprint` is only a partial hash, see
+/// `scruff::partial_hash`); NULL for assets never moved. `root_move` is the crash-recovery
+/// journal (ADR-0026): one row per in-flight move, `copying` until the catalog commit,
+/// `committed` until the source deletion finishes. At most one open move per root.
+const MIGRATION_V6: &str = r#"
+ALTER TABLE asset ADD COLUMN content_hash TEXT;
+
+CREATE TABLE root_move (
+    id          INTEGER PRIMARY KEY,
+    root_id     INTEGER NOT NULL UNIQUE REFERENCES root(id),
+    src_path    TEXT NOT NULL,
+    dest_path   TEXT NOT NULL,
+    state       TEXT NOT NULL CHECK (state IN ('copying', 'committed')),
+    started_at  INTEGER NOT NULL
+);
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -377,6 +395,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V3,
     MIGRATION_V4,
     MIGRATION_V5,
+    MIGRATION_V6,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call

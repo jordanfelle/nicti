@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
+use crate::carry::{Carry, CarryOptions, CarryOutcome};
 use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
 use crate::scruff::{Ingest, IngestReport};
@@ -342,6 +343,67 @@ impl ChunkedJob for BackupJob {
                 };
                 Ok(self.finish(BackupOutcome::Verified(final_path), pruned))
             }
+        }
+    }
+}
+
+/// Verified folder move (#26): steps [`Carry`] one chunk (a slice of one file's copy or verify
+/// read, or a phase transition) per call. Never returns `Err` -- every failure is a
+/// [`CarryOutcome`] in the report slot, same reasoning as [`BackupJob`]. Cancelling drops the
+/// job, and `Carry`'s `Drop` discards the half-built destination if nothing was committed yet.
+pub struct MoveJob {
+    carry: Carry,
+    progress: Progress,
+    result: ReportSlot<CarryOutcome>,
+}
+
+impl MoveJob {
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        root_id: i64,
+        dest_parent: &Path,
+        opts: CarryOptions,
+        now_unix: i64,
+    ) -> (Self, ReportSlot<CarryOutcome>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = MoveJob {
+            carry: Carry::new(store, root_id, dest_parent, opts, now_unix),
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for MoveJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Move,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.carry.label()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let outcome = self.carry.step();
+        let (done, total) = self.carry.progress();
+        self.progress = Progress { done, total };
+        match outcome {
+            Some(o) => {
+                *self.result.lock().unwrap() = Some(o);
+                Ok(Step::Done)
+            }
+            None => Ok(Step::Yield),
         }
     }
 }

@@ -11,9 +11,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nicti_cornea::{LibRawDecoder, RawDecoder};
+use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
-use nicti_lair::pounce_jobs::{BackupJob, IngestJob, ReportSlot, SyncJob};
+use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, SyncJob};
 use nicti_lair::{CatalogError, CatalogStore, PreviewTier, SqliteCatalog};
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
@@ -95,6 +96,11 @@ pub struct PeltApp {
     /// later scheduled attempt until the catalog happened to change again.
     pending_backup_changes: Option<u64>,
     last_backup_summary: Option<String>,
+    /// Destination *parent* folder typed for a verified folder move (#26).
+    move_dest_input: String,
+    /// The in-flight `MoveJob`'s result slot, folded into `last_move_summary` once it resolves.
+    pending_move_result: Option<ReportSlot<CarryOutcome>>,
+    last_move_summary: Option<String>,
     /// The real RAW decoder every `LoupeSession` (#31) this app creates shares -- constructed
     /// once here rather than per-session, since `LibRawDecoder` is a stateless unit struct with
     /// no per-session setup.
@@ -159,6 +165,13 @@ impl PeltApp {
             Err(e) => (CatalogOpenState::Error(e.to_string()), None),
         };
 
+        // A crash mid-move (#26) leaves a `root_move` journal row: finish or roll it back before
+        // anything else touches that root.
+        let last_move_summary = match &catalog {
+            CatalogOpenState::Open(store) => summarize_resumed(&carry::resume_open_moves(&**store)),
+            CatalogOpenState::Error(_) => None,
+        };
+
         let egui_ctx = cc.egui_ctx.clone();
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -200,6 +213,9 @@ impl PeltApp {
             pending_backup_result: None,
             pending_backup_changes: None,
             last_backup_summary: None,
+            move_dest_input: String::new(),
+            pending_move_result: None,
+            last_move_summary,
             decoder: Arc::new(LibRawDecoder),
             loupe: None,
             loupe_loaded_asset: None,
@@ -286,6 +302,51 @@ impl PeltApp {
     }
 }
 
+impl PeltApp {
+    /// Folds a finished `MoveJob`'s report into `last_move_summary` (#26).
+    fn poll_move(&mut self) {
+        if let Some(slot) = self.pending_move_result.clone() {
+            if let Some(outcome) = slot.lock().unwrap().take() {
+                self.last_move_summary = Some(summarize_move(&outcome));
+                self.pending_move_result = None;
+            }
+        }
+    }
+
+    fn job_active(&self, kinds: &[JobKind]) -> bool {
+        self.pounce.snapshot().into_iter().any(|s| {
+            kinds.contains(&s.kind) && matches!(s.state, JobState::Queued | JobState::Running)
+        })
+    }
+
+    /// Submits a verified move (#26) of `root_id` into the folder typed in `move_dest_input`.
+    /// Refused up front while an import/sync/other move is running -- a scan walking the root
+    /// while it's being copied and deleted would race the move.
+    fn submit_move(&mut self, store: &Arc<SqliteCatalog>, root_id: i64) {
+        let dest = PathBuf::from(self.move_dest_input.trim());
+        if dest.as_os_str().is_empty() {
+            self.last_move_summary = Some("Type a destination folder first.".into());
+            return;
+        }
+        if self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]) {
+            self.last_move_summary =
+                Some("Wait for the running import/sync/move to finish first.".into());
+            return;
+        }
+        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+        let (job, result) = MoveJob::new(
+            dyn_store,
+            root_id,
+            &dest,
+            CarryOptions::default(),
+            now_unix(),
+        );
+        self.pounce.submit(Box::new(job));
+        self.pending_move_result = Some(result);
+        self.last_move_summary = Some("Moving\u{2026}".into());
+    }
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -312,9 +373,63 @@ fn summarize_backup(report: &BackupReport) -> String {
     }
 }
 
+/// One line for the Library view once a `MoveJob`'s report is ready (#26).
+fn summarize_move(outcome: &CarryOutcome) -> String {
+    match outcome {
+        CarryOutcome::Moved {
+            files,
+            bytes,
+            renamed,
+            leftover_count,
+            ..
+        } => {
+            let how = if *renamed {
+                "renamed in place".to_string()
+            } else {
+                format!(
+                    "{files} file(s), {} MiB copied and verified",
+                    bytes / (1024 * 1024)
+                )
+            };
+            if *leftover_count > 0 {
+                format!(
+                    "Folder moved ({how}); {leftover_count} file(s) couldn't be removed from the original location."
+                )
+            } else {
+                format!("Folder moved ({how}).")
+            }
+        }
+        CarryOutcome::Refused(why) => format!("Move refused: {why}"),
+        CarryOutcome::VerifyFailed { path } => format!(
+            "Move stopped: a copy of {} didn't match its original. Nothing was changed.",
+            path.display()
+        ),
+        CarryOutcome::Failed(msg) => format!("Move failed: {msg}"),
+    }
+}
+
+/// Startup crash-recovery note, `None` if there was nothing to recover.
+fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
+    if resumed.is_empty() {
+        return None;
+    }
+    let stuck = resumed
+        .iter()
+        .filter(|r| matches!(r, Resumed::Stuck { .. }))
+        .count();
+    Some(if stuck > 0 {
+        format!(
+            "{stuck} interrupted folder move(s) need attention: neither location has the folder."
+        )
+    } else {
+        format!("Recovered {} interrupted folder move(s).", resumed.len())
+    })
+}
+
 impl eframe::App for PeltApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_backup();
+        self.poll_move();
         self.update.poll();
         if self.update.is_checking() || self.update.is_applying() {
             // Nothing else drives a repaint while a background check or apply is in flight
@@ -490,6 +605,39 @@ impl PeltApp {
                         self.open_in_loupe(&store);
                     }
                 });
+
+                // #26: verified folder move. Copies and hash-verifies every file, re-points the
+                // catalog, then removes the original -- edits/ratings/keywords follow the folder.
+                ui.separator();
+                ui.label(
+                    "Move a folder to another drive (verified copy, then the original is removed):",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Move into:");
+                    ui.text_edit_singleline(&mut self.move_dest_input);
+                });
+                let mut move_root = None;
+                match store.list_roots() {
+                    Ok(roots) => {
+                        for root in roots {
+                            ui.horizontal(|ui| {
+                                ui.label(&root.path);
+                                if ui.button("Move").clicked() {
+                                    move_root = Some(root.id);
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            format!("Failed to list folders: {e}"),
+                        );
+                    }
+                }
+                if let Some(root_id) = move_root {
+                    self.submit_move(&store, root_id);
+                }
             }
             CatalogOpenState::Error(msg) => {
                 ui.colored_label(
@@ -504,6 +652,9 @@ impl PeltApp {
         if let Some(summary) = &self.last_backup_summary {
             ui.label(summary);
         }
+        if let Some(summary) = &self.last_move_summary {
+            ui.label(summary);
+        }
         ui.label("Grid virtualization at scale lands in #30. Filter bar lands in #242.");
     }
 
@@ -516,6 +667,11 @@ impl PeltApp {
     fn submit_root_job(&mut self, store: &Arc<SqliteCatalog>, action: RootAction) {
         let path = PathBuf::from(self.import_path_input.trim());
         if path.as_os_str().is_empty() {
+            return;
+        }
+        if self.job_active(&[JobKind::Move]) {
+            self.last_move_summary =
+                Some("A folder move is running; import/sync waits until it finishes.".into());
             return;
         }
         let Ok(root_id) = register_root(store.as_ref(), &path) else {

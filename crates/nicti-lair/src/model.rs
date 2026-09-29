@@ -89,3 +89,33 @@ pub struct Keyword {
     pub name: String,
     pub path: String,
 }
+
+/// A registered folder (`root` row). `path` is the root's `rel_path` -- today an absolute path,
+/// since every root sits under the shell's placeholder volume (see `nicti-pelt`'s
+/// `register_root`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Root {
+    pub id: i64,
+    pub volume_id: i64,
+    pub path: String,
+    pub archived: bool,
+}
+
+/// Journal state of an in-flight verified folder move (#26, ADR-0026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveState {
+    /// Files are being copied/verified; the catalog still points at the source.
+    Copying,
+    /// The catalog already points at the destination; only source cleanup remains.
+    Committed,
+}
+
+/// One open `root_move` journal row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootMove {
+    pub id: i64,
+    pub root_id: i64,
+    pub src_path: String,
+    pub dest_path: String,
+    pub state: MoveState,
+}
