@@ -332,6 +332,16 @@ impl Larder {
         if let Ok(meta) = self.pack.metadata() {
             self.file_len = meta.len();
         }
+        // A rolled-back `bump_seq` also rolled back its persisted high-water mark; resume from
+        // the committed one (always ahead of every committed seq) so a restart can't resume below
+        // rows written after this point.
+        if let Ok(mark) = self.conn.query_row(
+            "SELECT COALESCE((SELECT value FROM meta WHERE key = 'next_seq'), 0)",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            self.next_seq = mark;
+        }
     }
 
     /// Returns the cached payload and marks it most-recently-used. A stored entry with a
@@ -797,6 +807,27 @@ mod tests {
         assert!(l.get(key(1)).unwrap().is_none());
         assert!(l.get(key(2)).unwrap().is_some());
         assert!(l.get(key(3)).unwrap().is_some());
+    }
+
+    #[test]
+    fn resync_after_a_rolled_back_put_restores_next_seq_to_the_committed_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put(key(1), &[1; 10]).unwrap();
+        let committed_mark = l.next_seq.max(256); // seq 0 persisted a mark of 256
+        l.conn.execute_batch("BEGIN").unwrap();
+        l.next_seq = 256; // next bump crosses a boundary and writes mark 512 inside the tx
+        l.bump_seq().unwrap();
+        l.conn.execute_batch("ROLLBACK").unwrap();
+        l.resync_counters();
+        assert_eq!(l.next_seq, committed_mark);
+        drop(l);
+        let l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        let max_seq: i64 = l
+            .conn
+            .query_row("SELECT MAX(seq) FROM entry", [], |r| r.get(0))
+            .unwrap();
+        assert!(l.next_seq > max_seq);
     }
 
     #[test]
