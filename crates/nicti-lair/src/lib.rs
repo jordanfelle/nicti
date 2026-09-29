@@ -185,6 +185,17 @@ pub trait CatalogStore: Module {
         tier: PreviewTier,
     ) -> Result<Option<Preview>, CatalogError>;
 
+    /// Batch form of `get_preview`: the stored `tier` preview of every listed asset that has
+    /// one, under a single lock acquisition (the grid's thumbnail jobs read ~64 at a time; one
+    /// `get_preview` per cell would contend with ingest writes once per cell). Assets with no
+    /// stored preview are simply absent from the result; order is unspecified, callers match on
+    /// the returned id.
+    fn get_previews(
+        &self,
+        asset_ids: &[i64],
+        tier: PreviewTier,
+    ) -> Result<Vec<(i64, Preview)>, CatalogError>;
+
     /// Removes a stored preview, if one exists. Ingest calls this on a rescan whose file no
     /// longer yields an extractable preview (an in-place edit that removed the embedded JPEG, a
     /// truncated/corrupted rewrite) — a no-op the rest of the time (nothing stored, nothing to
@@ -280,6 +291,13 @@ pub trait CatalogStore: Module {
     /// sort-key + id back in, never an `OFFSET` — O(n) at 2M rows per ADR-0067). Always scoped to
     /// online volumes only, the same as `facet_count`.
     fn hunt(&self, filter: &Filter, sort: Sort, page: &Page) -> Result<Vec<i64>, CatalogError>;
+
+    /// Every id a `hunt` with this `Filter`/`Sort` would return, in the same order, in one
+    /// index-ordered scan -- the random-access snapshot the virtualized grid (#30) indexes into
+    /// (row `i` is just `ids[i]`), since keyset `hunt` pages can't answer "rows 700,000..700,050"
+    /// for a scrollbar drag. Ids only: 8 bytes each, ~8 MB at 1M assets. Same online-volume
+    /// scoping as `hunt`.
+    fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError>;
 
     /// The total row count a `hunt` call with this `Filter` would match, ignoring `Page`.
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError>;

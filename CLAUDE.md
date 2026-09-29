@@ -182,7 +182,7 @@ terse index: crate/spike → purpose → owning topic.
   `nicti_pelt::run()` shim; its `windows_subsystem` attr hides the console in release, #298). **#31 (loupe, landed)**: real NEF loading, directional prefetch, and
   Fit/100% zoom — see [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)'s own
   "Package contents" section for `render.rs`/`decode_job.rs`/`loupe.rs`/`viewport.rs`/`app.rs`'s
-  actual module breakdown, also covering `activity.rs` (#55, #70) and
+  actual module breakdown, also covering `activity.rs` (#55, #70), `grid/` (#30) and
   [`jobs`](.claude/rules/jobs/REFERENCE.md) for Pounce.
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)

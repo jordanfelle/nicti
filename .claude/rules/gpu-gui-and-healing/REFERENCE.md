@@ -114,6 +114,31 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     always-1:1-stretch mapping exactly. Known non-blocking follow-ups: #294 (unclamped 100% pan),
     #295 (a rare cache-eviction flicker back to the T0 fallback), #296 (NaN/Inf on a zero-dimension
     rect or corrupt asset in `fit_scale`/`one_to_one_scale`).
+  - **#30 (virtualized library grid, landed) module breakdown**: `grid/layout.rs`'s `GridLayout`/
+    `batches_for` — pure geometry (columns, visible index range, fixed 64-id thumbnail batches),
+    no egui. `grid/jobs.rs` — `SnapshotJob` (one `CatalogStore::hunt_ids` scan on the CPU lane, so
+    a 1M-row read never blocks the UI thread; `JobKind::Snapshot`) and `ThumbBatchJob` (8 T0
+    previews per `step()`, `get_previews` batch read + JPEG decode + downsize to 256px,
+    `JobKind::Thumbnail`; results accumulate in a `ThumbSlot` so cells fill before the batch ends,
+    and `Drop` marks the slot done so a cancelled job never strands a poller). `grid/session.rs`'s
+    `GridSession` — the id snapshot (8 MB at 1M), a byte-budgeted `Tier<TextureHandle>` (256px
+    thumbnails, keyed by asset id; `refresh` drops it after ingest/sync/move since a rescan can
+    replace previews), `request_visible` (queues the visible batches ± 2, cancels ones > 4 batches
+    away, reprioritizes only when the window moved), `poll` (applies only the latest snapshot
+    generation; uploads ≤ 32 textures/frame), `pause` (cancels batches while another view is
+    showing), `set_query`/`reload`/`refresh`. `grid/view.rs` — `ScrollArea::show_rows` drawing plus
+    arrow/Page/Home/End navigation, Enter/double-click to open; `app.rs`'s `show_library`
+    (root + sort toolbar, collapsible import/sync/move controls), `open_from_grid` (loupe over the
+    grid's own ordering; `loupe_from_grid` mirrors the loupe cursor back onto the grid) and
+    `drive_grid` (live snapshot reload while an import runs, full refresh on the busy → idle edge).
+    `activity.rs` folds Thumbnail/Snapshot jobs into one line. Catalog side (`nicti-lair`, schema
+    V7): expression indexes `idx_asset_sort_*` + `idx_asset_root_sort_*` matching `hunt`'s ORDER BY
+    term-for-term (`sort_column_sql`) so no sort needs a temp B-tree — **never add `ANALYZE`/
+    `PRAGMA optimize`** without re-running `hunt_sort_uses_an_index` (with stats, a one-root
+    catalog flips to scanning `root`/`volume` outer and re-sorts). Measured, 1M synthetic assets,
+    release build (`cargo test -p nicti-lair --release --test scale -- --ignored --nocapture`):
+    `hunt_ids` 37–270 ms (filename across all roots 1.1 s), first keyset page 0.19 ms,
+    `get_previews` 64 × ~138 KB 6 ms. Not measured: real-machine grid frame time (#233).
 - **`spikes/groom`** (#50/ADR-0050) — healing/removal research: CPU clone-stamp/Poisson-heal +
   auto-source-pick reference, a `wgpu` compute-shader Poisson twin proven correct against it,
   `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox,

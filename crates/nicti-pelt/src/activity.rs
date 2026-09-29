@@ -8,7 +8,7 @@
 //! `CollapsingHeader` already persists per-id.
 
 use nicti_pounce::telemetry::TelemetrySampler;
-use nicti_pounce::{hackles, JobState, JobStatus, Pounce};
+use nicti_pounce::{hackles, JobKind, JobState, JobStatus, Pounce};
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -144,7 +144,27 @@ pub fn show(
                     ui.label("No jobs yet.");
                     return;
                 }
-                for status in &statuses {
+                // The library grid (#30) queues one job per ~64 thumbnails, hundreds while
+                // scrolling fast -- one summary line instead of a row each. (The counts above
+                // already include them, and `Cancel` on a batch is meaningless: the grid
+                // re-queues whatever is on screen.)
+                let is_grid_job =
+                    |s: &JobStatus| matches!(s.kind, JobKind::Thumbnail | JobKind::Snapshot);
+                let grid_active = statuses
+                    .iter()
+                    .filter(|s| {
+                        is_grid_job(s) && matches!(s.state, JobState::Queued | JobState::Running)
+                    })
+                    .count();
+                if grid_active > 0 {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Library thumbnails: {grid_active} batch(es) active"
+                        ));
+                    });
+                }
+                for status in statuses.iter().filter(|s| !is_grid_job(s)) {
                     show_job_row(ui, pounce, status);
                 }
             });
