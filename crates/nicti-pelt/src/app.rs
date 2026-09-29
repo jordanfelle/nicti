@@ -25,6 +25,7 @@ use nicti_shed::state::Channel as UpdateChannel;
 
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::render::DevelopView;
+use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
 use crate::viewport::{fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::{catalog, CatalogOpenState};
@@ -121,11 +122,20 @@ pub struct PeltApp {
     /// mode -- reset to `[0.0, 0.0]` on every cursor move, matching a fresh image's own natural
     /// centered view rather than wherever the previous image happened to be panned to.
     loupe_pan: [f32; 2],
-    /// The current asset's T0 embedded-preview texture, decoded once per asset id and cached here
-    /// -- the instant fallback shown while a real decode is still in flight. `None` once the real
-    /// decode lands (nothing clears it eagerly; it's simply not looked at once `current_frame`
-    /// starts returning `Some`, and gets replaced the next time a *different* asset needs it).
-    loupe_t0: Option<(i64, egui::TextureHandle)>,
+    /// The current asset's fallback-preview texture, decoded once and cached here -- shown while a
+    /// real decode is still in flight. The `bool` is whether it's the T2 screen-resolution preview
+    /// (#301, from the Larder) rather than the T0 grid thumbnail: T0 shows instantly, then upgrades
+    /// to T2 the moment the Larder has one, and never downgrades. `None` once the real decode
+    /// lands (nothing clears it eagerly; it's simply not looked at once `current_frame` starts
+    /// returning `Some`, and gets replaced the next time a *different* asset needs it).
+    loupe_preview: Option<(i64, bool, egui::TextureHandle)>,
+    /// The T2 preview cache (#301), shared with every `LoupeSession`. `None` if it couldn't be
+    /// opened (read-only location, another instance holding its lock) -- the loupe then falls back
+    /// to T0 alone, exactly as before.
+    larder: Option<SharedLarder>,
+    /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
+    /// re-read and re-decode them every frame.
+    loupe_t2_undecodable: Option<i64>,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -164,6 +174,10 @@ impl PeltApp {
             }
             Err(e) => (CatalogOpenState::Error(e.to_string()), None),
         };
+
+        // The T2 preview cache (#301) lives beside the catalog. Failing to open it (read-only
+        // location, another instance holding its lock) only costs the T2 upgrade, never the loupe.
+        let larder = t2::open_larder(&catalog_path);
 
         // A crash mid-move (#26) leaves a `root_move` journal row: finish or roll it back before
         // anything else touches that root.
@@ -221,7 +235,9 @@ impl PeltApp {
             loupe_loaded_asset: None,
             loupe_zoomed: false,
             loupe_pan: [0.0, 0.0],
-            loupe_t0: None,
+            loupe_preview: None,
+            larder,
+            loupe_t2_undecodable: None,
         }
     }
 
@@ -727,6 +743,9 @@ impl PeltApp {
             self.decoder.clone(),
             PLACEHOLDER_LOUPE_CACHE_BUDGET_BYTES,
         );
+        if let Some(larder) = &self.larder {
+            session = session.with_larder(larder.clone());
+        }
         let _ = session.set_cursor(0, store.as_ref(), &self.pounce);
         self.loupe = Some(session);
         // Deliberately NOT resetting `loupe_loaded_asset` here: it tracks which asset id is
@@ -738,7 +757,8 @@ impl PeltApp {
         // already-loaded check should skip reloading it, not discard those edits for no reason.
         self.loupe_zoomed = false;
         self.loupe_pan = [0.0, 0.0];
-        self.loupe_t0 = None;
+        self.loupe_preview = None;
+        self.loupe_t2_undecodable = None;
         self.view = View::Loupe;
     }
 
@@ -760,7 +780,7 @@ impl PeltApp {
             return;
         };
 
-        loupe.poll(store.as_ref());
+        loupe.poll(store.as_ref(), &self.pounce);
 
         if loupe.is_empty() {
             ui.heading("Loupe");
@@ -921,43 +941,55 @@ impl PeltApp {
         ));
     }
 
-    /// The instant fallback while a real decode is still in flight: JPEG-decodes the asset's T0
-    /// embedded preview (extracted at import time, `nicti_lair::scruff::Ingest`) and shows it,
-    /// caching the resulting texture per asset id so it's only decoded once, not every frame.
+    /// The instant fallback while a real decode is still in flight: shows the asset's T2 preview
+    /// from the Larder when one is cached (#301), else its T0 embedded preview (extracted at
+    /// import time, `nicti_lair::scruff::Ingest`). The texture is cached per asset, so each tier
+    /// is decoded once, not every frame; a T0 texture upgrades to T2 the moment one exists.
     fn show_loupe_t0_fallback(
         &mut self,
         ui: &mut egui::Ui,
         store: &dyn CatalogStore,
         asset_id: i64,
     ) {
-        if self.loupe_t0.as_ref().map(|(id, _)| *id) != Some(asset_id) {
-            self.loupe_t0 = None;
+        if self.loupe_preview.as_ref().map(|(id, _, _)| *id) != Some(asset_id) {
+            self.loupe_preview = None;
+        }
+        let has_t2 = matches!(&self.loupe_preview, Some((_, true, _)));
+        if !has_t2 && self.loupe_t2_undecodable != Some(asset_id) {
+            if let Some(bytes) = self.loupe.as_mut().and_then(|l| l.current_t2(store)) {
+                match preview_texture(ui.ctx(), format!("loupe-t2-{asset_id}"), &bytes) {
+                    Some(texture) => self.loupe_preview = Some((asset_id, true, texture)),
+                    None => self.loupe_t2_undecodable = Some(asset_id),
+                }
+            }
+        }
+        if self.loupe_preview.is_none() {
             if let Ok(Some(preview)) = store.get_preview(asset_id, PreviewTier::T0) {
-                if let Ok(decoded) = image::load_from_memory(&preview.bytes) {
-                    let rgba = decoded.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        [w as usize, h as usize],
-                        rgba.as_raw(),
-                    );
-                    let texture = ui.ctx().load_texture(
-                        format!("loupe-t0-{asset_id}"),
-                        color_image,
-                        egui::TextureOptions::default(),
-                    );
-                    self.loupe_t0 = Some((asset_id, texture));
+                if let Some(texture) =
+                    preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &preview.bytes)
+                {
+                    self.loupe_preview = Some((asset_id, false, texture));
                 }
             }
         }
 
         ui.label("Decoding full-resolution image...");
-        if let Some((_, texture)) = &self.loupe_t0 {
+        if let Some((_, _, texture)) = &self.loupe_preview {
             let available = ui.available_size();
             ui.centered_and_justified(|ui| {
                 ui.add(egui::Image::new((texture.id(), texture.size_vec2())).max_size(available));
             });
         }
     }
+}
+
+/// JPEG-decodes `bytes` into an egui texture, `None` if they aren't a decodable image.
+fn preview_texture(ctx: &egui::Context, name: String, bytes: &[u8]) -> Option<egui::TextureHandle> {
+    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let color_image =
+        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+    Some(ctx.load_texture(name, color_image, egui::TextureOptions::default()))
 }
 
 /// Registers `path` as a root under the fixed placeholder volume this shell uses (see

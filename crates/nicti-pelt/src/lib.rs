@@ -15,6 +15,7 @@ mod decode_job;
 mod develop_panel;
 mod loupe;
 mod render;
+mod t2;
 mod update;
 mod viewport;
 
