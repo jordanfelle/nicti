@@ -50,7 +50,15 @@ copy, only then let go of the original, with the catalog following the folder.
    present + destination absent rolls back, both present is reported as needing attention (the
    source path may have been recreated after the rename landed; found in adversarial review, the
    old rule deleted the moved folder); a `committed` row finishes cleanup, deleting only source
-   files whose bytes match the destination's.
+   files whose bytes match the destination's. Two more guards from the second review round: a `copying` rollback refuses (reports
+   "needs attention") when the destination holds files the source no longer has -- a power cut can
+   lose the WAL-only commit while the source deletions persisted, and deleting `dest` would then
+   delete the only copy; and a `renaming` row never re-points the catalog at an *empty* destination.
+   Cleanup is one source file per step (each is re-hashed) and skips files whose verified copy is
+   gone from the destination. Dropping a job right after a landed rename commits the catalog.
+   Known limits: destination folders that are themselves registered roots are refused (their
+   contents would be re-imported as duplicates); a pre-existing *empty* destination folder is
+   removed and recreated on rollback.
 8. **Cancel / panic:** Pounce cancels by dropping the job, so `Carry`'s `Drop` discards the
    half-built destination (copy path only) and closes the journal; if the commit already happened it
    finishes the hash-matched source cleanup instead. `MoveJob`'s `Drop` fills the report slot so the
