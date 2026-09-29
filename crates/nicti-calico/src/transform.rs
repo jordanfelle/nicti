@@ -161,6 +161,9 @@ fn decode_fn(curve: &ToneReprCurve) -> Option<Box<dyn Fn(f64) -> f64>> {
             }))
         }
         ToneReprCurve::Parametric(p) => {
+            if p.is_empty() {
+                return None;
+            }
             let c = moxcms::ParametricCurve::new(p)?;
             Some(Box::new(move |x| f64::from(c.eval(x as f32))))
         }
@@ -170,6 +173,24 @@ fn decode_fn(curve: &ToneReprCurve) -> Option<Box<dyn Fn(f64) -> f64>> {
 /// Extracts a [`MatrixTrc`] from a matrix/TRC profile (all three colorants and TRCs present and
 /// monotonic), else `None`.
 fn matrix_trc(profile: &ColorProfile) -> Option<MatrixTrc> {
+    // ICC says a B2A/A2B LUT wins over matrix/TRC tags (and moxcms follows that), so a profile
+    // that carries one is LUT-based no matter what else it has.
+    let has_lut = [
+        &profile.lut_a_to_b_perceptual,
+        &profile.lut_a_to_b_colorimetric,
+        &profile.lut_a_to_b_saturation,
+        &profile.lut_b_to_a_perceptual,
+        &profile.lut_b_to_a_colorimetric,
+        &profile.lut_b_to_a_saturation,
+    ]
+    .iter()
+    .any(|l| l.is_some());
+    if has_lut
+        || profile.color_space != moxcms::DataColorSpace::Rgb
+        || profile.pcs != moxcms::DataColorSpace::Xyz
+    {
+        return None;
+    }
     let (r, g, b) = (
         profile.red_colorant,
         profile.green_colorant,
@@ -198,9 +219,14 @@ fn matrix_trc(profile: &ColorProfile) -> Option<MatrixTrc> {
     for (c, decode) in decoders.iter().enumerate() {
         // Monotonic non-decreasing check, then invert by bisection: encode(L) = e with decode(e)=L.
         let mut prev = decode(0.0);
+        if !prev.is_finite() {
+            return None;
+        }
         for i in 1..=64 {
             let d = decode(f64::from(i) / 64.0);
-            if d < prev - 1e-6 {
+            // Non-finite (e.g. a negative base under a fractional exponent) or decreasing: not a
+            // usable TRC.
+            if !d.is_finite() || d < prev - 1e-6 {
                 return None;
             }
             prev = d;
@@ -209,7 +235,7 @@ fn matrix_trc(profile: &ColorProfile) -> Option<MatrixTrc> {
         encode[c] = (0..TRC_TABLE_SIZE)
             .map(|i| {
                 let u = i as f64 / (TRC_TABLE_SIZE - 1) as f64;
-                let l = (u * u).clamp(lo_l, hi_l);
+                let l = (u * u).max(lo_l).min(hi_l);
                 let (mut lo, mut hi) = (0.0f64, 1.0f64);
                 for _ in 0..40 {
                     let mid = 0.5 * (lo + hi);
@@ -265,6 +291,7 @@ fn bake_lut(display_profile: &ColorProfile) -> Result<Lut3d, CmsError> {
             Layout::Rgb,
             TransformOptions {
                 rendering_intent: RenderingIntent::RelativeColorimetric,
+                allow_use_cicp_transfer: false,
                 ..TransformOptions::default()
             },
         )?
@@ -295,6 +322,9 @@ fn equivalent_space(profile: &ColorProfile) -> Option<OutputSpace> {
     }
     let opts = TransformOptions {
         rendering_intent: RenderingIntent::RelativeColorimetric,
+        // Judge the profile by its own ICC tags, the same model `matrix_trc` uses; a stale CICP
+        // tag must not make moxcms substitute an sRGB curve for the tagged TRC.
+        allow_use_cicp_transfer: false,
         ..TransformOptions::default()
     };
     let run = |dst: &ColorProfile| -> Option<Vec<f32>> {
@@ -430,6 +460,7 @@ mod tests {
                     Layout::Rgb,
                     TransformOptions {
                         rendering_intent: RenderingIntent::RelativeColorimetric,
+                        allow_use_cicp_transfer: false,
                         ..TransformOptions::default()
                     },
                 )
@@ -455,6 +486,80 @@ mod tests {
         let mut p = ColorProfile::new_display_p3();
         p.red_trc = None;
         assert!(matrix_trc(&p).is_none());
+    }
+
+    fn p3_with_gammas(gammas: [f32; 3]) -> ColorProfile {
+        let mut p = ColorProfile::new_display_p3();
+        p.cicp = None;
+        p.red_trc = Some(ToneReprCurve::Parametric(vec![gammas[0]]));
+        p.green_trc = Some(ToneReprCurve::Parametric(vec![gammas[1]]));
+        p.blue_trc = Some(ToneReprCurve::Parametric(vec![gammas[2]]));
+        p
+    }
+
+    #[test]
+    fn matrix_trc_applies_each_channels_own_curve() {
+        // Different gamma per channel, so a channel mix-up in the tables (or the shader that
+        // mirrors this) cannot pass. Compared against exact math, not moxcms (which quantises
+        // near black).
+        let gammas = [1.8f32, 2.2, 2.6];
+        let t =
+            DisplayTransform::build(&DisplayProfile::Icc(Arc::new(p3_with_gammas(gammas))), None)
+                .unwrap();
+        let DisplayKind::MatrixTrc(m) = &t.kind else {
+            panic!("expected the analytic path");
+        };
+        for w in [[0.3f32, 0.4, 0.2], [0.05, 0.05, 0.05], [0.6, 0.1, 0.4]] {
+            let (got, _) = t.apply(w);
+            let lin = mat_vec_mul(&m.from_working.map(|r| r.map(f64::from)), w.map(f64::from));
+            for c in 0..3 {
+                let want = lin[c].clamp(0.0, 1.0).powf(1.0 / f64::from(gammas[c])) as f32;
+                assert!(
+                    (got[c] - want).abs() < 1.5 / 255.0,
+                    "channel {c} for {w:?}: got {got:?}, want gamma {} -> {want}",
+                    gammas[c]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_cicp_tag_does_not_override_the_tagged_curve() {
+        // P3 with a 2.2 TRC but the built-in P3's sRGB-transfer CICP still attached: the ICC
+        // tags are the model, so this must not snap to the sRGB-curve Display P3.
+        let mut p = p3_gamma22();
+        p.cicp = ColorProfile::new_display_p3().cicp;
+        assert!(p.cicp.is_some());
+        let t = DisplayTransform::build(&DisplayProfile::Icc(Arc::new(p)), None).unwrap();
+        assert!(
+            matches!(t.kind, DisplayKind::MatrixTrc(_)),
+            "snapped to {:?}",
+            match t.kind {
+                DisplayKind::Space(s) => format!("{s:?}"),
+                _ => "other".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_curve_degrades_instead_of_panicking() {
+        // A `para` type-1 curve with a negative `a` decodes to NaN at 1.0; an empty parametric
+        // vec must not index out of bounds. Neither may take the app down.
+        for curve in [
+            ToneReprCurve::Parametric(vec![2.2, -1.0, 0.5]),
+            ToneReprCurve::Parametric(vec![]),
+            ToneReprCurve::Parametric(vec![f32::NAN]),
+        ] {
+            let mut p = p3_gamma22();
+            p.red_trc = Some(curve.clone());
+            assert!(matrix_trc(&p).is_none());
+            // (`build` itself is not called for the empty vec: a parsed profile can't produce
+            // one, and moxcms' own LUT fallback indexes it. `ColorManagement` also wraps `build`
+            // in `catch_unwind` as a last-resort net for a crashing profile.)
+            if !matches!(&curve, ToneReprCurve::Parametric(v) if v.is_empty()) {
+                let _ = DisplayTransform::build(&DisplayProfile::Icc(Arc::new(p)), None);
+            }
+        }
     }
 
     fn proofed(display: OutputSpace, proof: OutputSpace) -> DisplayTransform {

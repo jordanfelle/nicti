@@ -771,21 +771,21 @@ mod tests {
         }
     }
 
-    fn p3_gamma22() -> nicti_calico::transform::ColorProfile {
+    fn p3_per_channel_gamma() -> nicti_calico::transform::ColorProfile {
         use nicti_calico::transform::{ColorProfile, ToneReprCurve};
         let mut p = ColorProfile::new_display_p3();
         p.cicp = None; // or moxcms would use its sRGB transfer instead of our curve
-        let curve = ToneReprCurve::Parametric(vec![2.2]);
-        p.red_trc = Some(curve.clone());
-        p.green_trc = Some(curve.clone());
-        p.blue_trc = Some(curve);
+                       // Different gamma per channel so a channel mix-up in the encode table can't pass.
+        p.red_trc = Some(ToneReprCurve::Parametric(vec![1.8]));
+        p.green_trc = Some(ToneReprCurve::Parametric(vec![2.2]));
+        p.blue_trc = Some(ToneReprCurve::Parametric(vec![2.6]));
         p
     }
 
     #[test]
     fn matrix_trc_monitor_matches_the_cpu_reference() {
         let Some(gpu) = gpu_or_skip() else { return };
-        let monitor = DisplayProfile::Icc(Arc::new(p3_gamma22()));
+        let monitor = DisplayProfile::Icc(Arc::new(p3_per_channel_gamma()));
         for proof in [None, Some(OutputSpace::AdobeRgb)] {
             let t = DisplayTransform::build(&monitor, proof).unwrap();
             assert!(matches!(t.kind, DisplayKind::MatrixTrc(_)));

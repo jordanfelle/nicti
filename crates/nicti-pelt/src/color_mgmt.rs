@@ -15,11 +15,11 @@ use crate::viewport::ViewportResources;
 
 pub struct ColorManagement {
     display: DisplayProfile,
-    /// Why the display profile fell back to sRGB, if it did -- shown in the menu.
     /// The baked display half of the transform for `display`. Building it probes the profile and
     /// may bake a LUT (6-90 ms), so it is cached and only rebuilt when the monitor profile
     /// changes -- toggling proofing or the gamut warning just swaps the cheap proof half.
     display_kind: Option<DisplayKind>,
+    /// Why the display profile fell back to sRGB, if it did -- shown in the menu.
     display_note: Option<String>,
     /// Last-seen monitor of the window, to detect a move to another monitor.
     monitor: Option<isize>,
@@ -58,7 +58,11 @@ impl ColorManagement {
         let kind = match &self.display_kind {
             Some(k) => k.clone(),
             None => {
-                let k = DisplayTransform::build(&self.display, None)
+                // A hostile or corrupt monitor profile must degrade to sRGB, not take down the UI
+                // thread: `moxcms` indexes/unwraps on some malformed inputs.
+                let display = self.display.clone();
+                let k = std::panic::catch_unwind(move || DisplayTransform::build(&display, None))
+                    .map_err(|_| "the color engine crashed on this profile".to_string())?
                     .map_err(|e| e.to_string())?
                     .kind;
                 self.display_kind = Some(k.clone());
