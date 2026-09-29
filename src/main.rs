@@ -1,3 +1,7 @@
+// Release builds use the Windows GUI subsystem so launching doesn't open a stray console window
+// behind the app (#298). Debug builds keep the console for logs/panics.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() -> nicti_pelt::Result {
     // `nicti-pelt` is a lib crate (its own `CARGO_PKG_VERSION` would read "0.0.0"), so the real
     // shipped version lives on the root `nicti` binary crate and is threaded in here (#249).
