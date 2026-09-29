@@ -106,8 +106,9 @@ terse index: crate/spike → purpose → owning topic.
   #70's build (bottleneck indicator) — see [`jobs`](.claude/rules/jobs/REFERENCE.md).
 - **`crates/nicti-calico`** (#42, landed) — color management: output spaces, runtime ICC profiles,
   the display/proof transform, Windows monitor-profile lookup; see [`color`](.claude/rules/color/REFERENCE.md).
-  Also the `ColorProfile` extension point (DCP camera-profile parsing is #38's, promoted by #42's
-  second PR)
+  Also the DCP camera-profile machinery (`dcp.rs`/`cct.rs`/`huesatmap.rs`/`profile.rs`, promoted from
+  `spikes/calico`) and the `ColorProfile` extension point. `nicti-pelt`'s `camera_profiles.rs`
+  discovers/loads the user's Adobe `.dcp` files for the Develop panel
 - **`crates/nicti-iris`/`nicti-stalk`/`nicti-preen`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `LensCorrection` (#39),

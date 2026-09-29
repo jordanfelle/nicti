@@ -3661,9 +3661,11 @@ dependencies = [
 name = "nicti-calico"
 version = "0.0.0"
 dependencies = [
+ "byteorder",
  "moxcms 0.9.1",
  "nicti-claw",
  "serde_json",
+ "thiserror 2.0.21",
  "windows 0.62.2",
 ]
 
@@ -3822,6 +3824,7 @@ dependencies = [
  "half",
  "image",
  "imageproc",
+ "nicti-calico",
  "nicti-claw",
  "nicti-cornea",
  "nicti-pawprint",

@@ -27,6 +27,25 @@ pub struct WbParams {
     pub tint: f32,
 }
 
+/// The selected DCP camera profile (#42), stored on the `nicti.working_space` stage so it flows
+/// into that node's hash and therefore Tapetum's live-output cache key. `content_hash` (blake3 hex
+/// of the `.dcp` bytes) is the part that matters for invalidation: two different files with the
+/// same name must not share cached output. All-`None` (serialized as `{}`, the stage's historical
+/// empty params) means no profile -- the plain LibRaw camera matrix.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CameraProfileParams {
+    /// Human-readable profile name (the `.dcp`'s `ProfileName`), for the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Where the `.dcp` was loaded from, so a session can reload it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// blake3 hex of the `.dcp` file's bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+}
+
 /// Basic-panel exposure, in stops. PV2012 range -5.0..=5.0. 0.0 is a no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -236,6 +255,15 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_camera_profile_serializes_to_the_historical_empty_params() {
+        // Keeps existing documents' `nicti.working_space` hash (and so every cache key) unchanged.
+        assert_eq!(
+            default_value::<CameraProfileParams>(),
+            serde_json::json!({})
+        );
+    }
 
     #[test]
     fn parse_falls_back_to_default_on_missing_entry() {

@@ -10,6 +10,7 @@
 
 mod activity;
 mod app;
+mod camera_profiles;
 mod catalog;
 mod color_mgmt;
 mod decode_job;
@@ -18,6 +19,8 @@ mod grid;
 mod loupe;
 mod render;
 mod t2;
+#[cfg(test)]
+mod test_gpu;
 mod update;
 mod viewport;
 

@@ -274,3 +274,12 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   independently); `sim.rs`'s finding is captured in this file's own "Bake-scheduler sim" bullet
   above. See `docs/research/loaf-render-graph.md` for the original research writeup (kept, not
   deleted, as the historical record).
+- **Live suffix now also binds a DCP camera profile (#42)**: `live_suffix.wgsl` bindings 3/4 are the
+  HueSatMap/LookTable 3D textures and 5 the sampler, **always bound** (1x1x1 dummies when absent —
+  the auto-derived bind-group layout includes any binding the shader references), with
+  `LiveUniforms.profile0/profile1` flags + baseline-exposure multiplier;
+  `LiveParams.camera_profile: Option<Arc<ProfileSolution>>` carries the tables (the caller puts the
+  solution's `camera_to_working` into `working_space_matrix`); `set_params` re-uploads a table only
+  when its fingerprint changed. The choice enters the cache key via `nicti.working_space`'s
+  `CameraProfileParams.content_hash`. See the `color` topic.
+

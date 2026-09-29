@@ -423,6 +423,13 @@ scope for this pass** (see the research doc) — same class of gap ADR-0059 alre
 DNG/TIFF: no crate in this workspace builds arbitrary TIFF tags, so embedding any of the three
 into a TIFF export needs a dedicated writer this spike didn't build.
 
+**Update (2026-09-29, [#42](https://github.com/jordanfelle/nicti/issues/42), DCP camera profiles):**
+no new crates in `Cargo.lock`. `nicti-calico` now depends directly on `thiserror` and `byteorder`
+(both already in the lock via `spikes/calico`, reviewed above), `nicti-tapetum` on `nicti-calico`,
+and `nicti-pelt` on `blake3` (already its dependency). No Adobe profile data is bundled or
+committed (ADR-0018): tests build synthetic profiles byte by byte, and the real-file tests are
+`#[ignore]`d and read the user's own install.
+
 **Update (2026-09-29, [#42](https://github.com/jordanfelle/nicti/issues/42), color management,
 `docs/adr/0042-color-management.md`):** no new crates in `Cargo.lock` -- `moxcms` v0.9.1 (`BSD-3-Clause
 OR Apache-2.0`, reviewed above) is now a real production dependency of `nicti-calico` (display/

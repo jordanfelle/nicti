@@ -540,14 +540,21 @@ mod tests {
         (store, ids, pounce)
     }
 
+    /// Polls `cond` until it holds. The deadline is generous on purpose: it costs nothing when
+    /// things are fast (this returns the moment `cond` is true), and a fixed 2 s budget flaked
+    /// (#314) whenever a loaded CI runner decoded JPEGs in an unoptimized build slower than that.
     fn wait_for<F: FnMut() -> bool>(mut cond: F) {
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
             if cond() {
                 return;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "condition never became true within 60 s"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("condition never became true");
     }
 
     #[test]

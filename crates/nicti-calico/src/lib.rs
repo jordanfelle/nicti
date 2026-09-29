@@ -13,9 +13,13 @@
 //! (color-matrix, HueSatMap 3D LUT, tone curve) is #38's research, promoted here by the second
 //! PR of #42.
 
+pub mod cct;
+pub mod dcp;
 pub mod display_profile;
+pub mod huesatmap;
 pub mod icc;
 mod math;
+pub mod profile;
 pub mod space;
 pub mod transform;
 

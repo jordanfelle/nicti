@@ -220,3 +220,25 @@ known to visibly affect. See `dcp.rs`'s `hue_sat_map` closure for the full note.
   rendering for T0-T2 preview tiers) stays exactly as unsolved as ADR-0029 left it — not this
   ADR's problem to fix, restated here only so it isn't mistaken for a regression this ADR
   introduced.
+
+## Amendment (2026-09-29, #42): promoted into production; two bugs a real file exposed
+
+The DCP parser, CCT solver and HueSatMap sampler were promoted from `spikes/calico` into
+`crates/nicti-calico` (`dcp.rs`/`cct.rs`/`huesatmap.rs`), with the stage order above wired into
+Tapetum's live suffix (`live_suffix.wgsl`, see ADR-0042). Testing against real Adobe Z 8 profiles
+-- which the spike never had -- found two bugs that made it reject or silently mis-read every real
+file:
+
+- **Real `.dcp` files start `IIRC`** (TIFF magic `0x4352`, not `42`); the spike returned `NotTiff`.
+- **The LookTable tag ids are 50981/50982** (`ProfileLookTableDims`/`Data`), not the spike's
+  51958/51959, which silently found no LookTable.
+
+Both are fixed and pinned by a synthetic-builder regression test and an `#[ignore]`d test against
+the user's installed profiles. `UniqueCameraModel` (tag 50708) is now parsed, and is how the app
+matches a profile to a frame's camera. Real profiles observed: "Adobe Standard" carries dual
+illuminants (A / D65), ForwardMatrix1/2, a 90x30x1 HueSatMap in both slots and a 36x8x16 LookTable
+(linear encoding); "Camera Landscape" carries only a 90x16x16 sRGB-encoded LookTable, a 127-point
+`ProfileToneCurve` (**not yet applied** -- Tapetum's tone stage is its own) and a -0.2 EV
+`BaselineExposureOffset`. The status of this ADR is unchanged (still Proposed): the ΔE-against-LRC
+measurement is the reference-machine run tracked by #149.
+
