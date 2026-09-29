@@ -181,7 +181,8 @@ pub fn wb_gains_with_params(cam_mul: [f32; 4], cam_xyz: &[f32; 12], wb: &WbParam
 /// Bradford-free XYZ(D50) -> linear ProPhoto RGB, the standard published matrix (ProPhoto RGB's
 /// own native white point is D50, so no chromatic-adaptation step is needed here -- a real
 /// illuminant-dependent adaptation, e.g. for a strongly non-D50 as-shot white balance, is #42's
-/// DCP-profile scope, not this pipeline-proving slice's).
+/// DCP-profile scope (its second PR), not this pipeline-proving slice's; #42's display/output
+/// color management lives in `nicti-calico`, outside this crate).
 pub const XYZ_D50_TO_PROPHOTO: Mat3 = [
     [1.3459433, -0.2556075, -0.0511118],
     [-0.5445989, 1.5081673, 0.0205351],

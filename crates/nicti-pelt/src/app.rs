@@ -25,6 +25,7 @@ use nicti_tapetum::gpu::GpuContext;
 
 use nicti_shed::state::Channel as UpdateChannel;
 
+use crate::color_mgmt::ColorManagement;
 use crate::grid::{self, GridSession};
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::render::DevelopView;
@@ -76,6 +77,8 @@ enum RootAction {
 
 pub struct PeltApp {
     view: View,
+    /// Display ICC profile, soft-proofing and gamut warning (#42, ADR-0042).
+    color: ColorManagement,
     version: String,
     catalog_path: PathBuf,
     catalog: CatalogOpenState,
@@ -237,6 +240,7 @@ impl PeltApp {
 
         Self {
             view: View::Library,
+            color: ColorManagement::new(),
             version,
             catalog_path,
             catalog,
@@ -508,7 +512,9 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
 }
 
 impl eframe::App for PeltApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.color.handle_shortcuts(ui.ctx());
+        self.color.sync(frame);
         self.poll_backup();
         self.poll_move();
         self.drive_grid(ui);
@@ -526,6 +532,8 @@ impl eframe::App for PeltApp {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
                 ui.selectable_value(&mut self.view, View::Loupe, "Loupe");
                 ui.selectable_value(&mut self.view, View::Develop, "Develop");
+                ui.separator();
+                self.color.show_menu(ui);
                 ui.separator();
                 ui.label(format!("Catalog: {}", self.catalog_path.display()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

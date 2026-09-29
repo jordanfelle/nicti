@@ -3661,8 +3661,10 @@ dependencies = [
 name = "nicti-calico"
 version = "0.0.0"
 dependencies = [
+ "moxcms 0.9.1",
  "nicti-claw",
  "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3741,7 +3743,9 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
+ "half",
  "image",
+ "nicti-calico",
  "nicti-claw",
  "nicti-cornea",
  "nicti-lair",
@@ -3749,6 +3753,7 @@ dependencies = [
  "nicti-pounce",
  "nicti-shed",
  "nicti-tapetum",
+ "raw-window-handle",
  "semver",
  "serde",
  "serde_json",

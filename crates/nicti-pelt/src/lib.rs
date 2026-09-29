@@ -11,6 +11,7 @@
 mod activity;
 mod app;
 mod catalog;
+mod color_mgmt;
 mod decode_job;
 mod develop_panel;
 mod grid;

@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::{CallbackResources, CallbackTrait};
-use nicti_tapetum::color;
+use half::f16;
+use nicti_calico::space::OutputSpace;
+use nicti_calico::transform::{DisplayTransform, Lut3d};
 use nicti_tapetum::frame::FrameTexture;
 
 const DISPLAY_WGSL: &str = include_str!("../shaders/display.wgsl");
@@ -27,13 +29,20 @@ struct DisplayUniforms {
     /// 8-byte-aligned offset here without one).
     view_scale: [f32; 2],
     view_offset: [f32; 2],
-    apply_oetf: u32,
-    _pad: [u32; 3],
+    /// 1 when the render target is an `*Srgb` format (see `display.wgsl`'s `target_srgb`).
+    target_srgb: u32,
+    /// 0 = exact matrix + transfer function, 1 = baked 3D LUT (`display.wgsl`'s `mode`).
+    mode: u32,
+    /// Mode 0 transfer function: 0 = sRGB curve, 1 = Adobe RGB gamma.
+    trc: u32,
+    /// 1 = tint out-of-proof-gamut pixels (LUT alpha).
+    gamut_warn: u32,
 }
 
 /// Built once against eframe's shared device (`PeltApp::new`), then reused every frame. The
-/// working-space -> sRGB matrix and whether to apply the OETF in-shader are both fixed at
-/// construction (the matrix never changes -- the working space is always linear ProPhoto, see
+/// display transform (ADR-0042) starts as exact sRGB and is swapped via
+/// [`Self::set_display_transform`] when the monitor profile or proofing changes -- display-only,
+/// so it never touches Tapetum's caches (the working space is always linear ProPhoto, see
 /// `nicti_tapetum::color`'s own doc comment; the target format doesn't change after the window is
 /// created); `view_scale`/`view_offset` (#31 phase 3) default to `[1,1]`/`[0,0]` here and are
 /// overwritten by whatever the current `ViewportCallback` carries on every `prepare` call, so a
@@ -45,7 +54,11 @@ pub struct ViewportResources {
     uniform_buf: wgpu::Buffer,
     uniforms: DisplayUniforms,
     sampler: wgpu::Sampler,
+    /// The display/proof LUT (ADR-0042): a 1^3 dummy in mode 0, else `LUT_SIZE`^3 Rgba16Float.
+    lut_view: wgpu::TextureView,
+    lut_sampler: wgpu::Sampler,
     bind_group: Option<wgpu::BindGroup>,
+    target_srgb: bool,
 }
 
 impl ViewportResources {
@@ -100,29 +113,141 @@ impl ViewportResources {
         });
 
         // A target format's own `*Srgb` variant already applies the sRGB OETF on write -- the
-        // shader must skip applying it a second time (double-gamma), matching
-        // `nicti_tapetum::geometry::output_encode`'s CPU reference only when the target format
-        // itself is non-sRGB.
-        let apply_oetf = !target_format.is_srgb();
-        let matrix = color::prophoto_to_srgb_linear_matrix();
-        let uniforms = DisplayUniforms {
-            col0: [matrix[0][0], matrix[1][0], matrix[2][0], 0.0],
-            col1: [matrix[0][1], matrix[1][1], matrix[2][1], 0.0],
-            col2: [matrix[0][2], matrix[1][2], matrix[2][2], 0.0],
-            view_scale: [1.0, 1.0],
-            view_offset: [0.0, 0.0],
-            apply_oetf: apply_oetf as u32,
-            _pad: [0; 3],
-        };
+        // shader hands it linear values in that case (double-gamma otherwise), matching
+        // `nicti_tapetum::geometry::output_encode`'s CPU reference.
+        let target_srgb = target_format.is_srgb();
+        let lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("nicti-pelt display LUT sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let uniforms = uniforms_for(
+            &DisplayTransform::Direct(OutputSpace::Srgb),
+            false,
+            target_srgb,
+        );
 
-        Self {
+        let mut this = Self {
             pipeline,
             uniform_buf,
             uniforms,
             sampler,
+            lut_view: dummy_lut_view(device),
+            lut_sampler,
             bind_group: None,
-        }
+            target_srgb,
+        };
+        this.uniforms = uniforms;
+        this
     }
+
+    /// Swaps in a new display/proof transform (ADR-0042). Display-only: nothing here touches
+    /// Tapetum's render graph or caches, so a monitor change or a proofing toggle costs no bake
+    /// work. `view_scale`/`view_offset` are preserved (they are overwritten per-frame anyway).
+    pub fn set_display_transform(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        transform: &DisplayTransform,
+        gamut_warn: bool,
+    ) {
+        let mut u = uniforms_for(transform, gamut_warn, self.target_srgb);
+        u.view_scale = self.uniforms.view_scale;
+        u.view_offset = self.uniforms.view_offset;
+        self.uniforms = u;
+        self.lut_view = match transform {
+            DisplayTransform::Direct(_) => dummy_lut_view(device),
+            DisplayTransform::Lut(lut) => upload_lut(device, queue, lut),
+        };
+    }
+}
+
+/// Uniforms for `transform`. Pure (no GPU) so the mapping is unit-testable.
+fn uniforms_for(
+    transform: &DisplayTransform,
+    gamut_warn: bool,
+    target_srgb: bool,
+) -> DisplayUniforms {
+    // In LUT mode the matrix is unused; keep sRGB's so the struct is never uninitialised-looking.
+    let (space, mode) = match transform {
+        DisplayTransform::Direct(s) => (*s, 0),
+        DisplayTransform::Lut(_) => (OutputSpace::Srgb, 1),
+    };
+    let m = space.from_working_f32();
+    DisplayUniforms {
+        col0: [m[0][0], m[1][0], m[2][0], 0.0],
+        col1: [m[0][1], m[1][1], m[2][1], 0.0],
+        col2: [m[0][2], m[1][2], m[2][2], 0.0],
+        view_scale: [1.0, 1.0],
+        view_offset: [0.0, 0.0],
+        target_srgb: target_srgb as u32,
+        mode,
+        trc: (space == OutputSpace::AdobeRgb) as u32,
+        gamut_warn: (gamut_warn && mode == 1) as u32,
+    }
+}
+
+fn dummy_lut_view(device: &wgpu::Device) -> wgpu::TextureView {
+    // A bound-but-unused 1^3 texture: the bind group layout is auto-derived from the shader, so
+    // binding 3 must always be satisfiable even in mode 0. Never written; contents are unread.
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("nicti-pelt display LUT (dummy)"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn upload_lut(device: &wgpu::Device, queue: &wgpu::Queue, lut: &Lut3d) -> wgpu::TextureView {
+    let n = lut.size as u32;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("nicti-pelt display LUT"),
+        size: wgpu::Extent3d {
+            width: n,
+            height: n,
+            depth_or_array_layers: n,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let texels: Vec<u16> = lut
+        .rgba
+        .iter()
+        .map(|&v| f16::from_f32(v).to_bits())
+        .collect();
+    queue.write_texture(
+        texture.as_image_copy(),
+        bytemuck::cast_slice(&texels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(n * 8),
+            rows_per_image: Some(n),
+        },
+        wgpu::Extent3d {
+            width: n,
+            height: n,
+            depth_or_array_layers: n,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// One frame's paint: which `FrameTexture` to display, and (#31 phase 3) at what screen-UV-to-
@@ -203,6 +328,14 @@ impl CallbackTrait for ViewportCallback {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: res.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&res.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&res.lut_sampler),
                 },
             ],
         }));
@@ -285,6 +418,14 @@ mod tests {
                     binding: 2,
                     resource: resources.uniform_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&resources.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&resources.lut_sampler),
+                },
             ],
         }));
 
@@ -295,6 +436,240 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll failed");
         assert!(resources.bind_group.is_some());
+    }
+
+    /// Draws `pixels` (linear working-space RGB, one row) through the real display pipeline into a
+    /// non-sRGB `Rgba8Unorm` target and reads the bytes back.
+    fn render_row(
+        gpu: &GpuContext,
+        resources: &mut ViewportResources,
+        pixels: &[[f32; 3]],
+    ) -> Vec<[u8; 4]> {
+        let w = pixels.len() as u32;
+        assert_eq!(w * 4 % 256, 0, "row bytes must satisfy copy alignment");
+        let frame = Arc::new(FrameTexture::new(
+            gpu,
+            Extent {
+                width: w,
+                height: 1,
+            },
+        ));
+        let texels: Vec<u16> = pixels
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 1.0])
+            .map(|v| f16::from_f32(v).to_bits())
+            .collect();
+        gpu.queue.write_texture(
+            frame.texture.as_image_copy(),
+            bytemuck::cast_slice(&texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 8),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.write_buffer(
+            &resources.uniform_buf,
+            0,
+            bytemuck::bytes_of(&resources.uniforms),
+        );
+        let layout = resources.pipeline.get_bind_group_layout(0);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&frame.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&resources.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: resources.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&resources.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&resources.lut_sampler),
+                },
+            ],
+        });
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test readback"),
+            size: u64::from(w * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("test pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&resources.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map failed"));
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+        let data = slice.get_mapped_range().expect("mapped range");
+        data.as_chunks::<4>().0.to_vec()
+    }
+
+    /// 64 spread-out linear working-space test colors: neutrals plus saturated ramps.
+    fn test_pixels() -> Vec<[f32; 3]> {
+        (0..64)
+            .map(|i| {
+                let t = i as f32 / 63.0;
+                match i % 4 {
+                    0 => [t * t, t * t, t * t],
+                    1 => [t * 0.6, 0.2 + t * 0.3, 0.1],
+                    2 => [0.05, t * 0.7, 0.3 + t * 0.2],
+                    _ => [t * 0.4 + 0.1, 0.05, t * 0.5],
+                }
+            })
+            .collect()
+    }
+
+    fn assert_matches_cpu(gpu_px: &[[u8; 4]], transform: &DisplayTransform, gamut_warn: bool) {
+        let warn = [0.9f32, 0.1, 0.55];
+        for (i, (got, src)) in gpu_px.iter().zip(test_pixels()).enumerate() {
+            let (cpu, flagged) = transform.apply(src);
+            let want = if gamut_warn && flagged { warn } else { cpu };
+            for c in 0..3 {
+                let w = (want[c].clamp(0.0, 1.0) * 255.0).round();
+                assert!(
+                    (f32::from(got[c]) - w).abs() <= 3.0,
+                    "pixel {i} channel {c}: gpu {got:?} vs cpu {want:?} (flagged {flagged})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_mode_matches_the_cpu_reference_for_every_space() {
+        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
+            eprintln!("no wgpu adapter available in this environment, skipping");
+            return;
+        };
+        for space in OutputSpace::ALL {
+            let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+            let t = DisplayTransform::Direct(space);
+            res.set_display_transform(&gpu.device, &gpu.queue, &t, false);
+            assert_matches_cpu(&render_row(&gpu, &mut res, &test_pixels()), &t, false);
+        }
+    }
+
+    #[test]
+    fn lut_mode_with_gamut_warning_matches_the_cpu_reference() {
+        use nicti_calico::transform::{DisplayProfile, ProofSettings, RenderingIntent};
+        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
+            eprintln!("no wgpu adapter available in this environment, skipping");
+            return;
+        };
+        let t = DisplayTransform::build(
+            &DisplayProfile::Space(OutputSpace::DisplayP3),
+            Some(ProofSettings {
+                space: OutputSpace::Srgb,
+                intent: RenderingIntent::RelativeColorimetric,
+            }),
+        )
+        .unwrap();
+        let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        for gamut_warn in [false, true] {
+            res.set_display_transform(&gpu.device, &gpu.queue, &t, gamut_warn);
+            assert_matches_cpu(&render_row(&gpu, &mut res, &test_pixels()), &t, gamut_warn);
+        }
+    }
+
+    #[test]
+    fn uniforms_select_the_right_mode_and_transfer_function() {
+        let d = uniforms_for(
+            &DisplayTransform::Direct(OutputSpace::AdobeRgb),
+            true,
+            false,
+        );
+        assert_eq!((d.mode, d.trc, d.gamut_warn), (0, 1, 0));
+        let s = uniforms_for(&DisplayTransform::Direct(OutputSpace::Srgb), false, true);
+        assert_eq!((s.mode, s.trc, s.target_srgb), (0, 0, 1));
+    }
+
+    #[test]
+    fn calico_srgb_matrix_agrees_with_tapetums_cpu_reference() {
+        // Two independently derived ProPhoto -> linear sRGB matrices must agree, or the display
+        // and `geometry::output_encode`'s CPU reference would disagree on every pixel.
+        let ours = OutputSpace::Srgb.from_working_f32();
+        let theirs = nicti_tapetum::color::prophoto_to_srgb_linear_matrix();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (ours[i][j] - theirs[i][j]).abs() < 2e-3,
+                    "[{i}][{j}] calico {} vs tapetum {}",
+                    ours[i][j],
+                    theirs[i][j]
+                );
+            }
+        }
     }
 
     #[test]
