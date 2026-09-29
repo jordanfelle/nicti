@@ -1282,8 +1282,24 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
-        let filter_sql = build_filter_sql(&conn, filter)?;
+        // A file-backed catalog scans on its own read-only connection (WAL: a consistent snapshot,
+        // never blocking a writer): this runs for ~0.2-1 s at 1M rows, and holding the shared
+        // mutex that long would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
+        // for the duration. An in-memory catalog (tests) has no second connection to open.
+        let reader = if self.path.is_some() {
+            Some(self.open_snapshot_reader()?)
+        } else {
+            None
+        };
+        let guard;
+        let conn: &Connection = match &reader {
+            Some(reader) => reader,
+            None => {
+                guard = self.conn.lock().unwrap();
+                &guard
+            }
+        };
+        let filter_sql = build_filter_sql(conn, filter)?;
         let sort_column = sort_column_sql(sort.field);
         let order = match sort.direction {
             SortDirection::Asc => "ASC",
@@ -2469,6 +2485,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// V7 kept `idx_asset_captured` on purpose: the sort indexes are expressions and can't serve
+    /// a raw `captured_at >= ?` range, so dropping it would turn every date filter into a scan.
+    #[test]
+    fn a_capture_date_range_filter_still_uses_an_index() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 200);
+        let filter = Filter {
+            captured_after: Some("2026:01:01 00:00:10".to_string()),
+            captured_before: Some("2026:01:01 00:00:50".to_string()),
+            ..Default::default()
+        };
+        let conn = store.conn.lock().unwrap();
+        let filter_sql = build_filter_sql(&conn, &filter).unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT a.id FROM asset a \
+             JOIN root r ON r.id = a.root_id JOIN volume v ON v.id = r.volume_id WHERE {}",
+            filter_sql.where_clause
+        );
+        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|l| l.contains("USING INDEX idx_asset_captured")
+                    || l.contains("USING COVERING INDEX idx_asset_captured")),
+            "a capture-date range should be served by idx_asset_captured:\n{}",
+            plan.join("\n")
+        );
+    }
+
+    /// The snapshot scan runs for up to a second at 1M rows; if it held the shared connection
+    /// mutex, every UI-thread catalog call would freeze meanwhile.
+    #[test]
+    fn hunt_ids_on_a_file_backed_catalog_does_not_take_the_shared_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(SqliteCatalog::open(&dir.path().join("c.db")).unwrap());
+        seed_for_sorting(&store, 20);
+
+        // Hold the shared connection for the whole call: a `hunt_ids` that needs it can't finish.
+        let held = store.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let ids = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+                tx.send(ids.len()).unwrap();
+            })
+        };
+        let got = rx.recv_timeout(std::time::Duration::from_secs(30));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(got, Ok(20), "hunt_ids blocked on the shared connection");
     }
 
     #[test]

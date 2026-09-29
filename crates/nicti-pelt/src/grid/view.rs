@@ -118,10 +118,16 @@ pub fn show(
         ui.colored_label(Color32::RED, format!("Couldn't read the catalog: {err}"));
     }
     if !session.is_loaded() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Reading catalog...");
-        });
+        if session.is_loading() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Reading catalog...");
+            });
+        } else if ui.button("Retry").clicked() {
+            // The first read failed (the error is shown above): don't pretend the library is
+            // empty, and don't resubmit on its own every frame -- ask again on request.
+            session.reload(pounce);
+        }
         return outcome;
     }
     let total = session.len();

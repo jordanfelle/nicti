@@ -186,8 +186,8 @@ pub trait CatalogStore: Module {
     ) -> Result<Option<Preview>, CatalogError>;
 
     /// Batch form of `get_preview`: the stored `tier` preview of every listed asset that has
-    /// one, under a single lock acquisition (the grid's thumbnail jobs read ~64 at a time; one
-    /// `get_preview` per cell would contend with ingest writes once per cell). Assets with no
+    /// one, under a single lock acquisition (the grid's thumbnail jobs read a handful per step;
+    /// one `get_preview` per cell would contend with ingest writes once per cell). Assets with no
     /// stored preview are simply absent from the result; order is unspecified, callers match on
     /// the returned id.
     fn get_previews(

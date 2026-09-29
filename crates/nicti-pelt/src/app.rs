@@ -986,10 +986,13 @@ impl PeltApp {
 
         // Keep the grid selection on whatever the loupe is showing, so switching back to the
         // Library lands on (and scrolls to) the photo the user just walked to.
+        // By asset id, not index: the loupe's id list was frozen when it opened, while the grid's
+        // has since been reloaded (an import adding assets, a refresh), so index `i` in one is
+        // not index `i` in the other.
         if self.loupe_from_grid {
             if let Some(grid) = self.grid.as_mut() {
-                if grid.cursor() != Some(cursor) {
-                    grid.set_cursor(Some(cursor));
+                if grid.cursor_id() != Some(asset_id) {
+                    grid.select_asset(asset_id);
                     self.grid_view.reveal_cursor();
                 }
             }

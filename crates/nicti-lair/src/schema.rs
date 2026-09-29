@@ -392,19 +392,19 @@ CREATE TABLE root_move (
 /// expression exactly, so each page re-sorted the whole result set through a temp B-tree. These
 /// expression indexes match `hunt`'s ORDER BY terms verbatim; the two plain-column sorts
 /// (`imported_at`, `rel_path_fold`) had no index at all. `id` is the trailing tie-breaker, the
-/// same as `hunt`'s own `ORDER BY ..., a.id`. `idx_asset_captured` is dropped: the expression
-/// index supersedes it for every sort `hunt` issues, and it would otherwise cost an extra write
-/// per ingested asset for nothing.
+/// same as `hunt`'s own `ORDER BY ..., a.id`. `idx_asset_captured` is deliberately KEPT: the
+/// expression index can't serve `Filter::captured_after/before`, which compare the raw
+/// `captured_at` column (a date-range filter would otherwise scan `asset`).
 ///
 /// Each sort gets a second, `root_id`-leading copy: with `Filter::root_id` set (the Library
 /// view's root selector) the planner otherwise picks `idx_asset_root_fold` for the equality and
 /// then sorts the whole root through a temp B-tree, which is the same 1M-row re-sort for the
 /// common case of one big root. The `(root_id, rel_path_fold, id)` copy also replaces
 /// `idx_asset_root_fold` (same leading columns, so `rel_path_prefix` GLOB scans are served
-/// identically). Cost: 8 sort indexes instead of the old 2 -- roughly +40 MB each at 1M assets and
-/// a few extra b-tree inserts per ingested file, accepted for O(index-scan) grid snapshots.
+/// identically). Cost: 8 new sort indexes (net +7 after dropping `idx_asset_root_fold`) -- roughly
+/// +40 MB each at 1M assets and a few extra b-tree inserts per ingested file, accepted for
+/// O(index-scan) grid snapshots.
 const MIGRATION_V7: &str = r#"
-DROP INDEX idx_asset_captured;
 DROP INDEX idx_asset_root_fold;
 
 CREATE INDEX idx_asset_sort_captured ON asset(COALESCE(captured_at, ''), id);

@@ -10,15 +10,21 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use egui::{TextureHandle, TextureOptions};
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_lair::{CatalogStore, Filter, Sort, SortDirection, SortField};
-use nicti_pounce::{JobId, Pounce};
+use nicti_pounce::{JobId, JobKind, Pounce};
 use nicti_tapetum::cache::Tier;
 
-use super::jobs::{SnapshotJob, SnapshotResult, ThumbBatchJob, ThumbImage, ThumbSlot};
+use super::jobs::{SnapshotJob, SnapshotResult, ThumbBatchJob, ThumbError, ThumbImage, ThumbSlot};
 use super::layout::{batch_indices, batches_for};
+
+/// How long a cell whose thumbnail hit a *transient* catalog error waits before being asked for
+/// again -- long enough that a persistent error can't turn `request_visible` (called every frame)
+/// into a hot resubmit loop.
+const TRANSIENT_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// Batches requested beyond the visible ones on each side, so a normal scroll finds thumbnails
 /// already decoded.
@@ -35,12 +41,12 @@ pub const DEFAULT_SORT: Sort = Sort {
     direction: SortDirection::Asc,
 };
 
+/// At most one snapshot is ever pending: `request_snapshot` cancels and drops the previous
+/// job's slot before submitting the next, so a slower, older snapshot (an earlier sort or filter)
+/// can never land after -- and overwrite -- a newer one; nothing holds its slot to apply it.
 struct PendingSnapshot {
     job_id: JobId,
     slot: ReportSlot<SnapshotResult>,
-    /// Which `request_snapshot` this answers. Only the latest generation is applied: a slower,
-    /// older snapshot (an earlier sort or filter) finishing after a newer one must not overwrite it.
-    generation: u64,
 }
 
 struct InflightBatch {
@@ -54,18 +60,28 @@ pub struct GridSession {
     sort: Sort,
     ids: Vec<i64>,
     /// `true` once a snapshot has ever been applied, so the view can tell "still loading" from
-    /// "loaded, and empty".
+    /// "loaded, and empty" -- and stays `false` if the first read failed.
     loaded: bool,
-    generation: u64,
+    /// Whether a snapshot for the current filter/sort has ever been requested. Gates
+    /// `set_query`'s no-op, so a *failed* first snapshot isn't resubmitted every frame the
+    /// toolbar calls it; the view's Retry button is the way to ask again.
+    requested: bool,
     pending_snapshot: Option<PendingSnapshot>,
     last_error: Option<String>,
     textures: Tier<TextureHandle>,
-    /// Assets whose thumbnail failed (no stored preview, corrupt JPEG) -- not re-requested until
-    /// [`Self::refresh`], so a cell that can never render isn't re-read on every scroll.
+    /// Assets whose thumbnail can never render (no stored preview, corrupt JPEG) -- not
+    /// re-requested until [`Self::refresh`], so such a cell isn't re-read on every scroll.
     failed: HashSet<i64>,
+    /// Assets whose thumbnail hit a transient catalog error, and when: skipped until
+    /// [`TRANSIENT_RETRY_AFTER`] has passed, then asked for again.
+    transient_failed: HashMap<i64, Instant>,
     inflight: HashMap<usize, InflightBatch>,
     pending_uploads: VecDeque<(i64, ThumbImage)>,
+    /// The selection, tracked by asset id (`cursor_id`) with its current index (`cursor`) as a
+    /// cache: a snapshot change (an import adding assets, a new sort) moves indices, and the
+    /// selection must stay on the same photo, not the same slot.
     cursor: Option<usize>,
+    cursor_id: Option<i64>,
     last_window: Option<Range<usize>>,
 }
 
@@ -84,7 +100,7 @@ impl GridSession {
             sort: DEFAULT_SORT,
             ids: Vec::new(),
             loaded: false,
-            generation: 0,
+            requested: false,
             pending_snapshot: None,
             last_error: None,
             textures: Tier::new(texture_budget_bytes, |t: &TextureHandle| {
@@ -92,9 +108,11 @@ impl GridSession {
                 (w * h * 4) as u64
             }),
             failed: HashSet::new(),
+            transient_failed: HashMap::new(),
             inflight: HashMap::new(),
             pending_uploads: VecDeque::new(),
             cursor: None,
+            cursor_id: None,
             last_window: None,
         }
     }
@@ -127,21 +145,39 @@ impl GridSession {
         self.cursor
     }
 
-    pub fn set_cursor(&mut self, cursor: Option<usize>) {
-        self.cursor = cursor.map(|c| c.min(self.ids.len().saturating_sub(1)));
-        if self.ids.is_empty() {
-            self.cursor = None;
-        }
+    /// The selected asset's id -- what actually identifies the selection across snapshot changes.
+    pub fn cursor_id(&self) -> Option<i64> {
+        self.cursor_id
     }
 
-    /// Changes what the grid shows. A no-op if nothing changed; otherwise reads a fresh id
-    /// snapshot in the background. The previous ids stay on screen (and keep their thumbnails)
-    /// until the new snapshot lands, so a sort change never blanks the grid.
+    /// Selects by grid index (clamped); `None` clears the selection.
+    pub fn set_cursor(&mut self, cursor: Option<usize>) {
+        let index = cursor
+            .filter(|_| !self.ids.is_empty())
+            .map(|c| c.min(self.ids.len() - 1));
+        self.cursor = index;
+        self.cursor_id = index.map(|i| self.ids[i]);
+    }
+
+    /// Selects `asset_id` wherever it is in the current snapshot -- for mirroring a selection made
+    /// elsewhere (the loupe, whose own id list is frozen at open time and so can't be trusted to
+    /// share indices with this one). An id the snapshot doesn't hold is still remembered: the
+    /// selection resolves as soon as a snapshot that has it lands. A no-op when already selected,
+    /// so calling it every frame doesn't rescan the id list.
+    pub fn select_asset(&mut self, asset_id: i64) {
+        if self.cursor_id == Some(asset_id) {
+            return;
+        }
+        self.cursor_id = Some(asset_id);
+        self.cursor = self.ids.iter().position(|&id| id == asset_id);
+    }
+
+    /// Changes what the grid shows. A no-op if nothing changed (and it has been requested at
+    /// least once); otherwise reads a fresh id snapshot in the background. The previous ids stay
+    /// on screen (and keep their thumbnails) until the new snapshot lands, so a sort change never
+    /// blanks the grid.
     pub fn set_query(&mut self, filter: Filter, sort: Sort, pounce: &Pounce) {
-        if filter == self.filter
-            && sort == self.sort
-            && (self.loaded || self.pending_snapshot.is_some())
-        {
+        if self.requested && filter == self.filter && sort == self.sort {
             return;
         }
         self.filter = filter;
@@ -166,22 +202,22 @@ impl GridSession {
             (w * h * 4) as u64
         });
         self.failed.clear();
+        self.transient_failed.clear();
         self.pending_uploads.clear();
+        // Batches already running were decoding the *old* previews; letting them finish would
+        // push those results into the fresh cache. `request_visible` re-queues what's on screen.
+        self.cancel_batches(pounce);
         self.request_snapshot(pounce);
     }
 
     fn request_snapshot(&mut self, pounce: &Pounce) {
-        self.generation += 1;
+        self.requested = true;
         if let Some(old) = self.pending_snapshot.take() {
             pounce.cancel(old.job_id);
         }
         let (job, slot) = SnapshotJob::new(self.store.clone(), self.filter.clone(), self.sort);
         let job_id = pounce.submit(Box::new(job));
-        self.pending_snapshot = Some(PendingSnapshot {
-            job_id,
-            slot,
-            generation: self.generation,
-        });
+        self.pending_snapshot = Some(PendingSnapshot { job_id, slot });
     }
 
     /// Cancels every in-flight batch and forgets them. Batch indices refer to positions in the
@@ -210,26 +246,29 @@ impl GridSession {
         let Some(result) = pending.slot.lock().unwrap().take() else {
             return;
         };
-        let generation = pending.generation;
         self.pending_snapshot = None;
-        if generation != self.generation {
-            return; // superseded by a newer request that is (or was) also pending
-        }
         match result {
             Ok(ids) => {
+                self.last_error = None;
+                // A periodic reload usually finds nothing new. Leave everything alone then:
+                // cancelling the in-flight batches would throw away the on-screen cells' work
+                // every couple of seconds for an import's whole duration.
+                if self.loaded && ids == self.ids {
+                    return;
+                }
                 self.cancel_batches(pounce);
                 self.ids = ids;
                 self.loaded = true;
-                self.last_error = None;
-                self.cursor = match self.cursor {
-                    _ if self.ids.is_empty() => None,
-                    Some(c) => Some(c.min(self.ids.len() - 1)),
-                    None => None,
-                };
+                // Keep the selection on the same photo, wherever it landed (or drop it if the
+                // new query no longer contains it).
+                self.cursor = self
+                    .cursor_id
+                    .and_then(|id| self.ids.iter().position(|&x| x == id));
             }
             Err(msg) => {
-                // Keep showing the previous ids; surface why the new query didn't apply.
-                self.loaded = true;
+                // Keep showing the previous ids (if any) and surface why the query didn't apply.
+                // `loaded` is deliberately untouched: a first read that failed is not "loaded,
+                // and empty", and the view offers Retry instead.
                 self.last_error = Some(msg);
             }
         }
@@ -242,8 +281,11 @@ impl GridSession {
             for (id, outcome) in out.ready.drain(..) {
                 match outcome {
                     Ok(thumb) => self.pending_uploads.push_back((id, thumb)),
-                    Err(_) => {
+                    Err(ThumbError::Permanent(_)) => {
                         self.failed.insert(id);
+                    }
+                    Err(ThumbError::Transient(_)) => {
+                        self.transient_failed.insert(id, Instant::now());
                     }
                 }
             }
@@ -280,6 +322,17 @@ impl GridSession {
 
     pub fn has_failed(&self, asset_id: i64) -> bool {
         self.failed.contains(&asset_id)
+    }
+
+    /// Whether a thumbnail for `id` should be requested now: not already textured, not
+    /// permanently failed, and not inside a transient error's retry back-off.
+    fn needs_thumbnail(&self, id: i64) -> bool {
+        !self.failed.contains(&id)
+            && !self
+                .transient_failed
+                .get(&id)
+                .is_some_and(|at| at.elapsed() < TRANSIENT_RETRY_AFTER)
+            && !self.textures.contains(&texture_key(id))
     }
 
     /// Makes sure thumbnails are being produced for the ids in `visible` (an index range into the
@@ -322,9 +375,7 @@ impl GridSession {
             let missing: Vec<i64> = self.ids[range]
                 .iter()
                 .copied()
-                .filter(|&id| {
-                    !self.failed.contains(&id) && !self.textures.contains(&texture_key(id))
-                })
+                .filter(|&id| self.needs_thumbnail(id))
                 .collect();
             if missing.is_empty() {
                 continue;
@@ -337,6 +388,12 @@ impl GridSession {
         if self.last_window.as_ref() != Some(&visible) {
             self.last_window = Some(visible);
             pounce.reprioritize(move |spec| {
+                // The id snapshot has no grid position and would otherwise sort as `usize::MAX`,
+                // behind every thumbnail batch -- but every batch's index is only meaningful
+                // against the snapshot it's waiting on, so it goes first.
+                if spec.kind == JobKind::Snapshot {
+                    return 0;
+                }
                 spec.image_index
                     .map(|i| i.abs_diff(centre))
                     .unwrap_or(usize::MAX)
@@ -647,6 +704,203 @@ mod tests {
         wait_for(&mut session, &ctx, &pounce, |s| !s.is_loading());
         assert!(session.is_empty());
         assert_eq!(session.cursor(), None);
+    }
+
+    /// The catalog behind a `loaded_session`, for tests that change it after the first snapshot.
+    fn loaded_with_store(
+        n: usize,
+    ) -> (
+        GridSession,
+        Arc<SqliteCatalog>,
+        Vec<i64>,
+        egui::Context,
+        Pounce,
+    ) {
+        let (store, ids) = seeded(n, |_| false);
+        let ctx = egui::Context::default();
+        let pounce = pounce();
+        let mut session = GridSession::new(store.clone(), 64 << 20);
+        session.set_query(Filter::default(), sort_imported(), &pounce);
+        wait_for(&mut session, &ctx, &pounce, |s| s.is_loaded());
+        (session, store, ids, ctx, pounce)
+    }
+
+    /// Adds `n` assets that sort *before* everything else under `sort_imported()`.
+    fn insert_earlier_assets(store: &SqliteCatalog, n: usize) {
+        let root = store.list_roots().unwrap()[0].id;
+        for i in 0..n {
+            store
+                .insert_asset(
+                    root,
+                    &new_asset(&format!("early{i}.NEF"), -100 + i as i64),
+                    None,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_selection_stays_on_its_photo_when_new_assets_sort_in_before_it() {
+        let (mut session, store, ids, ctx, pounce) = loaded_with_store(10);
+        session.set_cursor(Some(5));
+        assert_eq!(session.cursor_id(), Some(ids[5]));
+
+        // An import lands three assets ahead of the selection; a live reload picks them up.
+        insert_earlier_assets(&store, 3);
+        session.reload(&pounce);
+        wait_for(&mut session, &ctx, &pounce, |s| s.len() == 13);
+
+        assert_eq!(session.cursor_id(), Some(ids[5]));
+        assert_eq!(session.cursor(), Some(8), "same photo, shifted index");
+        assert_eq!(session.ids()[8], ids[5]);
+    }
+
+    #[test]
+    fn the_selection_clears_when_its_photo_leaves_the_snapshot() {
+        let (mut session, _store, ids, ctx, pounce) = loaded_with_store(10);
+        session.set_cursor(Some(4));
+        assert_eq!(session.cursor_id(), Some(ids[4]));
+        session.set_query(
+            Filter {
+                root_id: Some(9999),
+                ..Default::default()
+            },
+            sort_imported(),
+            &pounce,
+        );
+        wait_for(&mut session, &ctx, &pounce, |s| s.is_empty());
+        assert_eq!(session.cursor(), None);
+    }
+
+    #[test]
+    fn select_asset_finds_a_photo_by_id_not_by_index() {
+        let (mut session, _store, ids, _ctx, _pounce) = loaded_with_store(10);
+        // The loupe's own list may order things differently; only the id is shared.
+        session.select_asset(ids[7]);
+        assert_eq!(session.cursor(), Some(7));
+        assert_eq!(session.cursor_id(), Some(ids[7]));
+
+        // An id this snapshot doesn't hold is remembered, with no index -- and asking for it
+        // again is a no-op rather than a fresh scan of the whole id list.
+        session.select_asset(987_654);
+        assert_eq!(session.cursor(), None);
+        assert_eq!(session.cursor_id(), Some(987_654));
+    }
+
+    #[test]
+    fn an_unchanged_reload_keeps_in_flight_work_but_a_changed_one_cancels_it() {
+        let (mut session, store, _ids, ctx, pounce) = loaded_with_store(2000);
+        session.request_visible(0..64, &pounce);
+        assert!(session.last_window.is_some());
+
+        // Nothing changed: the live reload must not throw the on-screen cells' work away.
+        session.reload(&pounce);
+        wait_for(&mut session, &ctx, &pounce, |s| !s.is_loading());
+        assert!(
+            session.last_window.is_some(),
+            "an identical snapshot must not cancel in-flight batches"
+        );
+
+        // Something changed: batch indices now refer to the wrong assets, so they're dropped.
+        insert_earlier_assets(&store, 1);
+        session.reload(&pounce);
+        wait_for(&mut session, &ctx, &pounce, |s| s.len() == 2001);
+        assert!(session.last_window.is_none());
+        assert_eq!(session.inflight_batches(), 0);
+    }
+
+    #[test]
+    fn refresh_cancels_batches_that_were_decoding_the_old_previews() {
+        let (mut session, _store, _ids, _ctx, pounce) = loaded_with_store(2000);
+        session.request_visible(0..64, &pounce);
+        assert!(session.inflight_batches() > 0);
+        session.refresh(&pounce);
+        assert_eq!(session.inflight_batches(), 0);
+        assert!(session.pending_uploads.is_empty());
+    }
+
+    #[test]
+    fn a_permanent_thumbnail_error_is_never_retried_but_a_transient_one_backs_off() {
+        let (mut session, _store, ids, _ctx, pounce) = loaded_with_store(5);
+        // Two hand-made batch results, delivered through a real job's id so `inflight` is valid.
+        let (job, slot) = ThumbBatchJob::new(session.store.clone(), Vec::new(), 0);
+        let job_id = pounce.submit(Box::new(job));
+        {
+            let mut out = slot.lock().unwrap();
+            out.ready.push((
+                ids[0],
+                Err(ThumbError::Permanent("no stored preview".into())),
+            ));
+            out.ready.push((
+                ids[1],
+                Err(ThumbError::Transient("database is locked".into())),
+            ));
+            out.done = true;
+        }
+        session.inflight.insert(0, InflightBatch { job_id, slot });
+        session.poll_batches();
+
+        assert!(session.has_failed(ids[0]), "permanent -> failed set");
+        assert!(!session.has_failed(ids[1]), "transient -> not written off");
+        assert!(!session.needs_thumbnail(ids[0]));
+        assert!(
+            !session.needs_thumbnail(ids[1]),
+            "inside its back-off window"
+        );
+        assert!(
+            session.needs_thumbnail(ids[2]),
+            "untouched cells still need one"
+        );
+
+        // Once the back-off has passed the cell is asked for again; the permanent one never is.
+        session.transient_failed.insert(
+            ids[1],
+            Instant::now() - TRANSIENT_RETRY_AFTER - Duration::from_secs(1),
+        );
+        assert!(session.needs_thumbnail(ids[1]));
+        assert!(!session.needs_thumbnail(ids[0]));
+
+        // A refresh forgives both.
+        session.refresh(&pounce);
+        assert!(session.needs_thumbnail(ids[0]));
+    }
+
+    #[test]
+    fn a_failed_first_read_is_not_loaded_not_empty_and_not_resubmitted_every_frame() {
+        let (store, _ids) = seeded(3, |_| false);
+        let ctx = egui::Context::default();
+        let pounce = pounce();
+        let mut session = GridSession::new(store.clone(), 1 << 20);
+        session.set_query(Filter::default(), sort_imported(), &pounce);
+        // Swap the pending read for one that failed.
+        let (job, _real_slot) = SnapshotJob::new(store, Filter::default(), sort_imported());
+        let job_id = pounce.submit(Box::new(job));
+        let failed: ReportSlot<SnapshotResult> = Arc::new(std::sync::Mutex::new(Some(Err(
+            "disk I/O error".to_string(),
+        ))));
+        session.pending_snapshot = Some(PendingSnapshot {
+            job_id,
+            slot: failed,
+        });
+
+        session.poll(&ctx, &pounce);
+        assert!(!session.is_loaded(), "a failed first read is not 'loaded'");
+        assert!(!session.is_loading());
+        assert_eq!(session.last_error(), Some("disk I/O error"));
+
+        // The toolbar calls set_query with the same query every frame: it must not resubmit.
+        session.set_query(Filter::default(), sort_imported(), &pounce);
+        assert!(
+            !session.is_loading(),
+            "no resubmit without an explicit Retry"
+        );
+
+        // Retry is an explicit reload.
+        session.reload(&pounce);
+        assert!(session.is_loading());
+        wait_for(&mut session, &ctx, &pounce, |s| s.is_loaded());
+        assert_eq!(session.last_error(), None);
+        assert_eq!(session.len(), 3);
     }
 
     #[test]

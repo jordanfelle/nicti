@@ -48,9 +48,9 @@ impl ChunkedJob for SnapshotJob {
             kind: JobKind::Snapshot,
             lane: Lane::Cpu,
             vram_bytes: 0,
-            // Not tied to a grid position: sorts after every thumbnail batch under the
-            // nearest-to-viewport reprioritization, which is wrong for the very first snapshot but
-            // harmless -- there are no thumbnail batches until a snapshot exists.
+            // Not tied to a grid position. `GridSession::request_visible`'s reprioritization
+            // special-cases `JobKind::Snapshot` to sort first; without that a reload would queue
+            // behind every thumbnail batch of a scroll backlog.
             image_index: None,
         }
     }
@@ -91,12 +91,23 @@ pub struct ThumbImage {
     pub image: egui::ColorImage,
 }
 
+/// Why a cell has no thumbnail. The split decides whether the grid ever asks again: a missing or
+/// undecodable preview can't fix itself (until a rescan, which `GridSession::refresh` handles),
+/// but a catalog error -- a busy/locked database, say -- usually can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbError {
+    /// No stored T0, or its bytes don't decode. Not retried until a refresh.
+    Permanent(String),
+    /// The catalog read itself failed. Retried after a short delay.
+    Transient(String),
+}
+
 /// Finished thumbnails accumulate here as the job progresses, so the grid can show the first
 /// cells of a batch before its last is decoded. `done` is set by the job's final step (or its
 /// failure), which is how the session knows to drop the batch from its in-flight set.
 #[derive(Default)]
 pub struct ThumbOutput {
-    pub ready: Vec<(i64, Result<ThumbImage, String>)>,
+    pub ready: Vec<(i64, Result<ThumbImage, ThumbError>)>,
     pub done: bool,
 }
 
@@ -169,23 +180,31 @@ impl ChunkedJob for ThumbBatchJob {
         let chunk = &self.ids[self.next..end];
 
         // One lock acquisition for the chunk's previews, not one per cell.
-        let mut results: Vec<(i64, Result<ThumbImage, String>)> = Vec::with_capacity(chunk.len());
+        let mut results: Vec<(i64, Result<ThumbImage, ThumbError>)> =
+            Vec::with_capacity(chunk.len());
         match self.store.get_previews(chunk, PreviewTier::T0) {
             Ok(previews) => {
                 let mut by_id: std::collections::HashMap<i64, _> = previews.into_iter().collect();
                 for &id in chunk {
                     let outcome = match by_id.remove(&id) {
-                        Some(preview) => make_thumbnail(&preview.bytes),
-                        None => Err("no stored preview".to_string()),
+                        Some(preview) => {
+                            make_thumbnail(&preview.bytes).map_err(ThumbError::Permanent)
+                        }
+                        None => Err(ThumbError::Permanent("no stored preview".to_string())),
                     };
                     results.push((id, outcome));
                 }
             }
             Err(e) => {
-                // A catalog error fails this chunk's cells, not the job: the rest of the batch
-                // still gets its own attempt.
+                // A catalog error fails this chunk's cells, not the job (the rest of the batch
+                // still gets its own attempt) -- and as *transient*, so the cells aren't written
+                // off until the next refresh over what may be a momentary lock.
                 let msg = e.to_string();
-                results.extend(chunk.iter().map(|&id| (id, Err(msg.clone()))));
+                results.extend(
+                    chunk
+                        .iter()
+                        .map(|&id| (id, Err(ThumbError::Transient(msg.clone())))),
+                );
             }
         }
 
@@ -314,6 +333,10 @@ mod tests {
         for (i, (id, outcome)) in out.ready.iter().enumerate() {
             assert_eq!(*id, ids[i]);
             assert_eq!(outcome.is_ok(), i % 5 != 0, "index {i}");
+            if let Err(e) = outcome {
+                // A missing preview can't fix itself: it must never be retried as if transient.
+                assert!(matches!(e, ThumbError::Permanent(_)), "index {i}: {e:?}");
+            }
         }
     }
 
