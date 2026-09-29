@@ -61,7 +61,7 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 - **`crates/nicti-lair`** (#22, landed; #23 landed; #25 landed) — the real production catalog
   implementation: `schema.rs`/`sqlite.rs`/`scruff.rs`/`patrol.rs`/`hunt.rs`/`clowder.rs`/
-  `ninelives.rs`. Promotes the SQLite choice this topic's ADR series settled on. `spikes/den` (the
+  `ninelives.rs`, plus `larder.rs` (#27, T2 preview cache — see `preview-tiers`). Promotes the SQLite choice this topic's ADR series settled on. `spikes/den` (the
   throwaway comparison spike backing ADR-0067/0102/0106/0103/0107/0113/0115/0116 — one module per
   candidate engine plus a shared `Workload` trait and synthetic catalog generator) was deleted in
   #123 once #22 landed; the per-candidate findings above are the durable record, not the spike

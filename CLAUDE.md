@@ -168,7 +168,8 @@ terse index: crate/spike → purpose → owning topic.
   `catalog-engine`/`volume-identity`/`preview-tiers` topics for the design this promotes, and
   `jobs` for the Pounce wiring. **#23** extends this crate further with `hunt.rs`/`clowder.rs` —
   see the `catalog-engine` topic's own "Package contents" section (also covers **#25**'s
-  `ninelives.rs`/`BackupJob`), not duplicated here.
+  `ninelives.rs`/`BackupJob`), not duplicated here. **#27** adds `larder.rs` (`Larder`, the
+  byte-capped LRU T2 preview cache + manual purge) — see the `preview-tiers` topic.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,

@@ -50,3 +50,21 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   numeric findings. Real lossy WebP was measured and rejected outright: worse SSIM than AVIF at
   comparable size, worse encode/decode latency than JPEG at comparable quality, plus a native C
   dependency (`libwebp-sys`) neither JPEG nor AVIF requires. See the ADR for the full table.
+
+- **T2 cache management (#27, landed)**: `crates/nicti-lair/src/larder.rs` (`Larder`) implements
+  the bounded T2 disk cache ADR-0029 chose a pack-file format for. Cap is on *live* payload bytes;
+  eviction is LRU by a per-entry sequence number kept in the SQLite index (persisted lazily, so a
+  restart can only under-order the last <256 touches, never reorder old entries past new ones).
+  Eviction and purge only drop index rows, leaving dead bytes in the pack file, so `compact`
+  rewrites live entries into `pack-<gen+1>.bin` and adopts it by committing new offsets and the
+  new generation in one SQLite transaction, then deleting the old file: a crash leaves either
+  generation fully consistent, and nothing renames over an open file (Windows would refuse).
+  Auto-compaction triggers once dead bytes exceed both a floor and the live bytes, bounding the
+  pack file to roughly `2 * cap + floor` (once a compaction succeeds -- it is best-effort, so a
+  failed attempt can leave the file above that until the next one). Every payload carries a
+  blake3 checksum in its index row;
+  a checksum failure, short read, stale `render_hash`, or a row pointing past the end of the pack
+  file (crash before the OS flushed the tail) is dropped and reported as a miss, since the cache
+  is fully regenerable. A payload larger than the whole cap is rejected without evicting anything.
+  T0 stays in the catalog's `preview` table and is neither capped nor purged by this module.
+

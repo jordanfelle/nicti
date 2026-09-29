@@ -10,7 +10,9 @@
 //! `hunt.rs` (`Filter`/`Sort`/keyset-paginated `hunt`/`facets`) and `clowder.rs`
 //! (manual/smart collections — a clowder is a group of cats). #25 (ADR-0025) adds `ninelives.rs`:
 //! continuous, crash-safe `VACUUM INTO` backup with integrity verification and retention — a cat
-//! has nine lives, and a verified backup is a spare one for the catalog.
+//! has nine lives, and a verified backup is a spare one for the catalog. #27 adds `larder.rs`: the
+//! byte-capped, LRU-evicting, purgeable pack-file cache for T2 screen-resolution previews
+//! (ADR-0029) — a cat keeps its kills in a larder.
 
 use nicti_claw::{Module, Registry};
 
@@ -20,6 +22,7 @@ mod sqlite;
 
 pub mod clowder;
 pub mod hunt;
+pub mod larder;
 pub mod ninelives;
 pub mod patrol;
 pub mod pounce_jobs;
