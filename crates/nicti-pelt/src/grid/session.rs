@@ -77,6 +77,11 @@ pub struct GridSession {
     transient_failed: HashMap<i64, Instant>,
     inflight: HashMap<usize, InflightBatch>,
     pending_uploads: VecDeque<(i64, ThumbImage)>,
+    /// The ids in `pending_uploads`: decoded but not yet textured (uploads are capped per frame).
+    /// `needs_thumbnail` must skip them, or `request_visible` -- which runs after `poll` in the
+    /// same frame, once the batch has left `inflight` -- resubmits work whose result is already
+    /// sitting in the queue.
+    pending_ids: HashSet<i64>,
     /// The selection, tracked by asset id (`cursor_id`) with its current index (`cursor`) as a
     /// cache: a snapshot change (an import adding assets, a new sort) moves indices, and the
     /// selection must stay on the same photo, not the same slot.
@@ -111,6 +116,7 @@ impl GridSession {
             transient_failed: HashMap::new(),
             inflight: HashMap::new(),
             pending_uploads: VecDeque::new(),
+            pending_ids: HashSet::new(),
             cursor: None,
             cursor_id: None,
             last_window: None,
@@ -204,6 +210,7 @@ impl GridSession {
         self.failed.clear();
         self.transient_failed.clear();
         self.pending_uploads.clear();
+        self.pending_ids.clear();
         // Batches already running were decoding the *old* previews; letting them finish would
         // push those results into the fresh cache. `request_visible` re-queues what's on screen.
         self.cancel_batches(pounce);
@@ -280,7 +287,10 @@ impl GridSession {
             let mut out = inflight.slot.lock().unwrap();
             for (id, outcome) in out.ready.drain(..) {
                 match outcome {
-                    Ok(thumb) => self.pending_uploads.push_back((id, thumb)),
+                    Ok(thumb) => {
+                        self.pending_ids.insert(id);
+                        self.pending_uploads.push_back((id, thumb));
+                    }
                     Err(ThumbError::Permanent(_)) => {
                         self.failed.insert(id);
                     }
@@ -303,6 +313,7 @@ impl GridSession {
             let Some((id, thumb)) = self.pending_uploads.pop_front() else {
                 return;
             };
+            self.pending_ids.remove(&id);
             let handle = ctx.load_texture(
                 format!("grid-thumb-{id}"),
                 thumb.image,
@@ -328,6 +339,7 @@ impl GridSession {
     /// permanently failed, and not inside a transient error's retry back-off.
     fn needs_thumbnail(&self, id: i64) -> bool {
         !self.failed.contains(&id)
+            && !self.pending_ids.contains(&id)
             && !self
                 .transient_failed
                 .get(&id)
@@ -609,10 +621,28 @@ mod tests {
             "need a backlog to test the cap"
         );
 
+        // Decoded-but-not-yet-textured cells are already handled: asking for the visible window
+        // again must not resubmit their batches (CodeRabbit finding: the batch has left
+        // `inflight`, and without `pending_ids` every one of these ids looked untouched).
+        assert_eq!(session.pending_ids.len(), decoded);
+        assert!(!session.needs_thumbnail(ids[0]));
+        assert!(!session.needs_thumbnail(*session.pending_ids.iter().next().unwrap()));
+        session.request_visible(0..64, &pounce);
+        assert_eq!(
+            session.inflight_batches(),
+            0,
+            "cells already decoded and awaiting upload were queued for decoding a second time"
+        );
+
         session.upload(&ctx);
         assert_eq!(
             session.pending_uploads.len(),
             decoded - MAX_UPLOADS_PER_FRAME
+        );
+        assert_eq!(
+            session.pending_ids.len(),
+            decoded - MAX_UPLOADS_PER_FRAME,
+            "uploaded ids must leave the pending set"
         );
         assert!(session.texture(ids[0]).is_some());
     }
