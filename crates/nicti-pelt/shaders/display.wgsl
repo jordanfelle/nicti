@@ -27,6 +27,14 @@ struct Uniforms {
     col0: vec4<f32>,
     col1: vec4<f32>,
     col2: vec4<f32>,
+    // Soft proof (ADR-0042): linear ProPhoto -> proof-space linear RGB (`pcol*`) and back
+    // (`qcol*`), same vec4-per-column layout. Only read when `proof_enabled` is 1.
+    pcol0: vec4<f32>,
+    pcol1: vec4<f32>,
+    pcol2: vec4<f32>,
+    qcol0: vec4<f32>,
+    qcol1: vec4<f32>,
+    qcol2: vec4<f32>,
     // Screen-UV-to-texture-UV scale/offset (see this file's own header comment) -- vec2 has
     // align/size 8 in WGSL's uniform-address-space layout rules, placed before the scalar tail so
     // nothing needs an explicit alignment-bump pad the way a trailing vec3<u32> would (see below).
@@ -39,9 +47,13 @@ struct Uniforms {
     mode: u32,
     // Mode 0 transfer function: 0 = sRGB curve (sRGB, Display P3), 1 = Adobe RGB gamma 563/256.
     trc: u32,
-    // 1 = tint pixels the LUT flags as outside the proof space's gamut (alpha channel).
+    // 1 = tint pixels outside the proof space's gamut (needs `proof_enabled`).
     gamut_warn: u32,
-    // Four scalar u32s, not a `vec4<u32>`/`vec3<u32>` pad -- a vecN field would itself need align
+    proof_enabled: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    // Scalar u32s, not a `vec4<u32>`/`vec3<u32>` pad -- a vecN field would itself need align
     // 16 in WGSL's uniform-address-space layout rules, pushing the struct's total size past what
     // the host-side `DisplayUniforms` (plain `u32`s, no vecN alignment) actually allocates -- a
     // real min-binding-size mismatch caught in review once already for this same struct. Matches
@@ -51,8 +63,8 @@ struct Uniforms {
 @group(0) @binding(0) var frame_tex: texture_2d<f32>;
 @group(0) @binding(1) var frame_sampler: sampler;
 @group(0) @binding(2) var<uniform> u: Uniforms;
-// ADR-0042 display/proof LUT: 33^3, red = x, green = y, blue = z; rgb = display-encoded output,
-// a = out-of-proof-gamut flag. A 1^3 dummy is bound in mode 0.
+// ADR-0042 monitor LUT (mode 1 only): 33^3, red = x, green = y, blue = z; rgb = display-encoded
+// output. A 1^3 dummy is bound in mode 0.
 @group(0) @binding(3) var lut_tex: texture_3d<f32>;
 @group(0) @binding(4) var lut_sampler: sampler;
 
@@ -96,6 +108,8 @@ const ADOBE_RGB_GAMMA: f32 = 2.19921875;
 // ProPhoto's transfer exponent -- the LUT's input shaper (calico `PROPHOTO_GAMMA`).
 const PROPHOTO_GAMMA: f32 = 1.8;
 // Gamut-warning overlay color (encoded, display space).
+// A linear channel this far outside [0, 1] is float noise, not out of gamut (calico `GAMUT_EPS`).
+const GAMUT_EPS: f32 = 0.002;
 const GAMUT_WARN: vec3<f32> = vec3<f32>(0.9, 0.1, 0.55);
 
 fn encode_trc(c: f32) -> f32 {
@@ -117,26 +131,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let working_space = textureSample(frame_tex, frame_sampler, tex_uv);
 
+    var working = working_space.rgb;
+    var out_of_gamut = false;
+    if (u.proof_enabled != 0u) {
+        // Exact relative-colorimetric proof: clip in the proof space's linear RGB, come back.
+        let pm = mat3x3<f32>(u.pcol0.xyz, u.pcol1.xyz, u.pcol2.xyz);
+        let qm = mat3x3<f32>(u.qcol0.xyz, u.qcol1.xyz, u.qcol2.xyz);
+        let v = pm * working;
+        out_of_gamut = any(v < vec3<f32>(-GAMUT_EPS)) || any(v > vec3<f32>(1.0 + GAMUT_EPS));
+        working = qm * clamp(v, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+
     var encoded: vec3<f32>;
     if (u.mode == 1u) {
         // Shaper (linear ProPhoto -> gamma 1.8), then trilinear LUT sample. Texel-centered
         // addressing: texel i sits at (i + 0.5) / N, so remap [0,1] onto that range.
         let n = f32(textureDimensions(lut_tex).x);
-        let shaped = pow(clamp(working_space.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / PROPHOTO_GAMMA));
+        let shaped = pow(clamp(working, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / PROPHOTO_GAMMA));
         let coord = shaped * ((n - 1.0) / n) + vec3<f32>(0.5 / n);
-        let texel = textureSampleLevel(lut_tex, lut_sampler, coord, 0.0);
-        encoded = texel.rgb;
-        if (u.gamut_warn != 0u && texel.a > 0.5) {
-            encoded = GAMUT_WARN;
-        }
+        encoded = textureSampleLevel(lut_tex, lut_sampler, coord, 0.0).rgb;
     } else {
         let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
-        let linear_out = m * working_space.rgb;
+        let linear_out = m * working;
         encoded = vec3<f32>(
             encode_trc(linear_out.x),
             encode_trc(linear_out.y),
             encode_trc(linear_out.z),
         );
+    }
+    if (u.gamut_warn != 0u && out_of_gamut) {
+        encoded = GAMUT_WARN;
     }
 
     if (u.target_srgb != 0u) {

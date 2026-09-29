@@ -30,21 +30,32 @@ check against our own matrices.
 so moving the window to another monitor or toggling soft-proofing re-uploads a texture and
 re-runs zero bake or live-suffix work.
 
-**Two shapes** (`nicti_calico::transform::DisplayTransform`):
+**Two independent per-pixel stages** (`nicti_calico::transform::DisplayTransform`, evaluated by
+the display shader, with a CPU reference `apply` the tests measure the GPU against):
 
-- `Direct(space)` -- the monitor is a built-in space and there is no proof. The shader applies an
-  exact matrix plus transfer function. This is the default and the sRGB fallback.
-- `Lut(Lut3d)` -- a real monitor ICC profile and/or soft-proofing. A 33^3 3D LUT indexed by the
-  working space encoded with a gamma-1.8 shaper (ProPhoto's own exponent, so the shaped values
-  are exactly `moxcms::ColorProfile::new_pro_photo_rgb()`'s encoded input), holding display-encoded
-  RGB in `rgb` and an out-of-proof-gamut flag in `a`. Uploaded as `Rgba16Float` (filterable
-  everywhere; `Rgba32Float` needs an optional feature).
+1. **Proof** (optional): working -> proof-space linear RGB -> clamp to [0, 1] -> back to working.
+   For the built-in spaces this is exactly what a matrix/TRC profile does under relative
+   colorimetric, so it is plain 3x3 math (`OutputSpace::from_working`/`to_working`) and the
+   out-of-gamut flag is exact: a linear channel more than 0.002 outside [0, 1] (`GAMUT_EPS`).
+   The gamut warning tints flagged pixels a fixed color. **There is no rendering-intent choice**:
+   for matrix profiles Perceptual and Relative colorimetric produce byte-identical results
+   (verified in review), so the UI does not pretend otherwise. Intents matter only for LUT-based
+   proof profiles (CMYK/printer), which are out of scope for v1.
+2. **Display**: `DisplayKind::Space` -- an exact matrix + transfer function -- for the default,
+   the sRGB fallback, and any monitor ICC profile that is indistinguishable from a built-in space
+   (probe-grid comparison, `< 0.004`; Windows' stock sRGB profile is the usual case). Only a
+   genuinely different monitor profile (wide-gamut with its own curves, etc.) takes
+   `DisplayKind::Lut`: a 33^3 3D LUT baked by `moxcms`, indexed by the working space under a
+   gamma-1.8 shaper (ProPhoto's own exponent, so the shaped values are exactly
+   `ColorProfile::new_pro_photo_rgb()`'s encoded input), `Rgba16Float` (filterable everywhere;
+   `Rgba32Float` needs an optional feature).
 
-**Soft-proofing** is working -> proof space (chosen intent) -> clamp to [0, 1] -> monitor
-(relative colorimetric). The gamut flag is computed from the proof space's own matrix (exact for
-the built-in spaces): a color is out of gamut if any linear channel leaves [0, 1] by more than
-0.002. The gamut warning tints flagged pixels a fixed color in the shader. Only the built-in
-spaces are offered as proof targets in v1; a CMYK/printer ICC proof would need a ΔE-based flag.
+*Why not one LUT for everything?* The first implementation baked proofing into the LUT with a
+per-node gamut flag. Adversarial review measured it: `moxcms` clamps f32 output to [0, 1], the
+sRGB gamut boundary cuts diagonally through the ProPhoto-indexed cube, and trilinear interpolation
+across the clipped nodes put up to ~9-12/255 of error into plainly in-gamut colors (a teal 10%
+inside sRGB came out 12/255 off) -- growing the LUT to 65^3 did not fix it -- and the flag was
+quantised to a cell-wide false-positive band. Analytic proofing removes all three problems.
 
 **Monitor profile** (`nicti_calico::display_profile`): on Windows, `MonitorFromWindow` ->
 `GetMonitorInfoW` -> `CreateDCW` -> `GetICMProfileW` -> read the file -> `moxcms`. `nicti-pelt`
@@ -57,17 +68,23 @@ into the encoders is #57. TIFF ICC embedding stays deferred with ADR-0056.
 
 ## Consequences
 
+- **LUT accuracy is limited to non-built-in monitor profiles.** Colors near that monitor's gamut
+  boundary carry interpolation error from clipped nodes, and near-black is lifted slightly by the
+  33-node gamma-1.8 shaper (review measured up to ~2.5 codes on an sRGB-like profile, which does
+  not take this path). The fix, if a real wide-gamut monitor shows it, is extracting the profile's
+  matrix + TRC and evaluating it analytically (the same technique proofing already uses).
 - **No black-point compensation.** `moxcms` 0.9's `TransformOptions` has no BPC (the field is
-  commented out upstream). Relative colorimetric without BPC is what the LUT builder does;
-  revisit if a real monitor profile shows crushed blacks.
+  commented out upstream); the monitor LUT is relative colorimetric without it.
+- **LUT mode clamps in working space** before the shaper, whereas the exact path clamps after the
+  matrix in display space. Tapetum's output is display-referred in [0, 1] in practice; values
+  outside it would clip differently between the two paths.
 - **Unmanaged surfaces.** The T0/T2 embedded-JPEG previews and grid thumbnails go straight to
   egui's sRGB textures and ignore both the monitor profile and any embedded JPEG profile. The
   Develop and Loupe *rendered* frames are managed.
-- **LUT accuracy.** A 33^3 LUT agrees with the exact sRGB path to about 1.5% worst case, at
-  saturated colors near a gamut edge where a node channel clips (`transform::tests::
-  lut_for_srgb_display_matches_the_direct_path`). The common case (sRGB monitor, no proof) never
-  uses the LUT.
 - **Working space unchanged.** Still linear ProPhoto (ADR-0038 leaves the pick to #149's
   reference-machine run). `OutputSpace::from_working` is the only place that assumes it.
-- **Needs a physical check** on a real wide-gamut display before this is called verified:
-  profile pick-up, a monitor move, and the gamut warning on real saturated photos.
+- **Windows-only paths are type-checked, not run.** `display_profile.rs` compiles for
+  `x86_64-pc-windows-gnu` but has only been exercised through its non-Windows fallback; a real
+  wide-gamut display check (profile pick-up, moving between monitors, the gamut warning on real
+  saturated photos) is still outstanding. A profile changed in Windows settings without moving
+  monitors is only picked up via the "Re-read display profile" menu item.

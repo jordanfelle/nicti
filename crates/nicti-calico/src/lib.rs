@@ -4,8 +4,9 @@
 //! - [`space`]: the sRGB / Display P3 / Adobe RGB output spaces — matrices from the linear
 //!   ProPhoto (D50) working space, and transfer functions.
 //! - [`icc`]: runtime-generated ICC profiles for those spaces (`moxcms`), for export embedding.
-//! - [`transform`]: [`transform::DisplayTransform`], the display + soft-proof transform (exact
-//!   matrix fast path, or a baked 3D LUT with an out-of-gamut flag).
+//! - [`transform`]: [`transform::DisplayTransform`], the display + soft-proof transform (analytic
+//!   proof stage with an exact out-of-gamut flag; exact matrix display, or a baked 3D LUT for a
+//!   non-built-in monitor profile).
 //! - [`display_profile`]: the active monitor's ICC profile, degrading to sRGB.
 //!
 //! `ColorProfile` still settles identity and versioning only, via `Module`; DCP parsing

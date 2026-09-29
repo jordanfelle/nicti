@@ -97,16 +97,26 @@ pipeline from linear camera RGB to a display-referred image.
 `nicti-calico` gained the display/output color-management core: `space.rs` (sRGB / Display P3 /
 Adobe RGB matrices from published primaries, Bradford-adapted to D50, from linear ProPhoto; sRGB
 curve or 563/256 gamma), `icc.rs` (profiles generated at runtime with `moxcms`, checked against our
-own matrices), `transform.rs` (`DisplayTransform::Direct` exact fast path, or `Lut`: a 33^3
-`Rgba16Float` LUT indexed by the working space under a gamma-1.8 ProPhoto shaper, alpha carrying
-the out-of-proof-gamut flag) and `display_profile.rs` (Windows `GetICMProfileW`, any failure
-degrades to sRGB with the reason surfaced). It is display-only and lives outside the render graph,
-so a monitor change or proofing toggle costs zero bake work. `nicti-pelt` wires it in
-(`color_mgmt.rs`, `viewport.rs::set_display_transform`, `display.wgsl` modes 0/1), including
+own matrices), `transform.rs` (`DisplayTransform { proof, kind }`) and `display_profile.rs`
+(Windows `GetICMProfileW`, any failure degrades to sRGB with the reason surfaced).
+
+Soft-proofing is analytic: working -> proof-space linear RGB -> clamp [0,1] -> back, with an exact
+out-of-gamut flag (`GAMUT_EPS` = 0.002). The display stage is an exact matrix + transfer function
+(default, fallback, and any monitor profile equivalent to a built-in space), or a 33^3 `Rgba16Float`
+LUT baked by `moxcms` for a genuinely different monitor profile. It is display-only and lives
+outside the render graph, so a monitor change or proofing toggle costs zero bake work. `nicti-pelt`
+wires it in (`color_mgmt.rs`, `viewport.rs::set_display_transform`, `display.wgsl`), including
 Shift+S gamut warning and re-resolving the profile when the window moves monitors.
 
-Known limits, all recorded in ADR-0042: no black-point compensation (`moxcms` 0.9 doesn't
-implement it), the T0/T2 previews and grid thumbnails are not color-managed, a 33^3 LUT is ~1.5%
-off the exact path at saturated gamut-edge colors, and a real wide-gamut monitor check is still
-outstanding.
+**Why proofing is not baked into the LUT** (found by adversarial review of the first
+implementation, which did exactly that): `moxcms` clamps f32 output to [0, 1], the sRGB gamut
+boundary cuts diagonally through the ProPhoto-indexed cube, and trilinear interpolation across the
+clipped nodes gave 9-12/255 error on plainly in-gamut colors (a teal 10% inside sRGB was 12/255
+off); a 65^3 LUT did not help, and the gamut flag was quantised to a cell-wide false-positive band.
+The Intent dropdown was also a no-op (Perceptual and Relative colorimetric are byte-identical for
+matrix profiles), so it was removed.
 
+Known limits, all recorded in ADR-0042: no black-point compensation (`moxcms` 0.9 doesn't
+implement it), the T0/T2 previews and grid thumbnails are not color-managed, a non-built-in
+monitor's LUT carries interpolation error near its gamut boundary, Windows code is type-checked
+but not run, and a real wide-gamut monitor check is still outstanding.

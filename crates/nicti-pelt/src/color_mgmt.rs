@@ -8,7 +8,7 @@
 
 use nicti_calico::display_profile;
 use nicti_calico::space::OutputSpace;
-use nicti_calico::transform::{DisplayProfile, DisplayTransform, ProofSettings, RenderingIntent};
+use nicti_calico::transform::{DisplayProfile, DisplayTransform};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::viewport::ViewportResources;
@@ -21,7 +21,6 @@ pub struct ColorManagement {
     monitor: Option<isize>,
     soft_proof: bool,
     proof_space: OutputSpace,
-    intent: RenderingIntent,
     gamut_warn: bool,
     /// The transform must be rebuilt and re-pushed to the GPU.
     dirty: bool,
@@ -43,7 +42,6 @@ impl ColorManagement {
             monitor: None,
             soft_proof: false,
             proof_space: OutputSpace::Srgb,
-            intent: RenderingIntent::RelativeColorimetric,
             gamut_warn: false,
             dirty: true,
             error: None,
@@ -52,10 +50,7 @@ impl ColorManagement {
 
     /// The transform for the current settings. Pure (no GPU), so it is unit-tested directly.
     fn build_transform(&self) -> Result<DisplayTransform, String> {
-        let proof = self.soft_proof.then_some(ProofSettings {
-            space: self.proof_space,
-            intent: self.intent,
-        });
+        let proof = self.soft_proof.then_some(self.proof_space);
         DisplayTransform::build(&self.display, proof).map_err(|e| e.to_string())
     }
 
@@ -88,18 +83,6 @@ impl ColorManagement {
                         for s in OutputSpace::ALL {
                             changed |= ui
                                 .selectable_value(&mut self.proof_space, s, s.name())
-                                .changed();
-                        }
-                    });
-                egui::ComboBox::from_label("Intent")
-                    .selected_text(intent_name(self.intent))
-                    .show_ui(ui, |ui| {
-                        for i in [
-                            RenderingIntent::RelativeColorimetric,
-                            RenderingIntent::Perceptual,
-                        ] {
-                            changed |= ui
-                                .selectable_value(&mut self.intent, i, intent_name(i))
                                 .changed();
                         }
                     });
@@ -154,7 +137,7 @@ impl ColorManagement {
             }
             Err(e) => {
                 self.error = Some(format!("color transform failed, using sRGB: {e}"));
-                DisplayTransform::Direct(OutputSpace::Srgb)
+                DisplayTransform::exact(OutputSpace::Srgb)
             }
         };
         let Some(rs) = frame.wgpu_render_state() else {
@@ -171,15 +154,6 @@ impl ColorManagement {
     }
 }
 
-fn intent_name(i: RenderingIntent) -> &'static str {
-    match i {
-        RenderingIntent::Perceptual => "Perceptual",
-        RenderingIntent::RelativeColorimetric => "Relative colorimetric",
-        RenderingIntent::Saturation => "Saturation",
-        RenderingIntent::AbsoluteColorimetric => "Absolute colorimetric",
-    }
-}
-
 /// The native window handle as an integer (Windows HWND), or `None` if unavailable.
 fn native_window_handle(frame: &eframe::Frame) -> Option<isize> {
     match frame.window_handle().ok()?.as_raw() {
@@ -191,22 +165,23 @@ fn native_window_handle(frame: &eframe::Frame) -> Option<isize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nicti_calico::transform::DisplayKind;
 
     #[test]
     fn default_is_a_direct_srgb_transform() {
         let cm = ColorManagement::new();
-        assert!(matches!(
-            cm.build_transform(),
-            Ok(DisplayTransform::Direct(OutputSpace::Srgb))
-        ));
+        let t = cm.build_transform().unwrap();
+        assert!(t.proof.is_none());
+        assert!(matches!(t.kind, DisplayKind::Space(OutputSpace::Srgb)));
     }
 
     #[test]
-    fn soft_proof_builds_a_lut() {
+    fn soft_proof_sets_the_proof_space() {
         let mut cm = ColorManagement::new();
         cm.soft_proof = true;
         cm.proof_space = OutputSpace::AdobeRgb;
-        assert!(matches!(cm.build_transform(), Ok(DisplayTransform::Lut(_))));
+        let t = cm.build_transform().unwrap();
+        assert_eq!(t.proof, Some(OutputSpace::AdobeRgb));
     }
 
     #[test]

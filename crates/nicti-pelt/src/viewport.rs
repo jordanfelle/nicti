@@ -12,7 +12,7 @@ use bytemuck::{Pod, Zeroable};
 use egui_wgpu::{CallbackResources, CallbackTrait};
 use half::f16;
 use nicti_calico::space::OutputSpace;
-use nicti_calico::transform::{DisplayTransform, Lut3d};
+use nicti_calico::transform::{DisplayKind, DisplayTransform, Lut3d};
 use nicti_tapetum::frame::FrameTexture;
 
 const DISPLAY_WGSL: &str = include_str!("../shaders/display.wgsl");
@@ -23,6 +23,14 @@ struct DisplayUniforms {
     col0: [f32; 4],
     col1: [f32; 4],
     col2: [f32; 4],
+    /// Soft proof: linear ProPhoto -> proof-space linear RGB (`p*`) and back (`q*`), same
+    /// column-per-vec4 layout as `col*`.
+    pcol0: [f32; 4],
+    pcol1: [f32; 4],
+    pcol2: [f32; 4],
+    qcol0: [f32; 4],
+    qcol1: [f32; 4],
+    qcol2: [f32; 4],
     /// Screen-UV-to-texture-UV scale/offset (#31 phase 3) -- see `display.wgsl`'s own header
     /// comment for the derivation. Placed before the scalar tail, matching WGSL's own layout, so
     /// neither side needs an alignment-bump pad (both `[f32; 2]`/`vec2<f32>` already land on an
@@ -35,8 +43,11 @@ struct DisplayUniforms {
     mode: u32,
     /// Mode 0 transfer function: 0 = sRGB curve, 1 = Adobe RGB gamma.
     trc: u32,
-    /// 1 = tint out-of-proof-gamut pixels (LUT alpha).
+    /// 1 = tint out-of-proof-gamut pixels.
     gamut_warn: u32,
+    /// 1 = run the proof stage (`p*`/`q*`).
+    proof_enabled: u32,
+    _pad: [u32; 3],
 }
 
 /// Built once against eframe's shared device (`PeltApp::new`), then reused every frame. The
@@ -126,7 +137,7 @@ impl ViewportResources {
             ..Default::default()
         });
         let uniforms = uniforms_for(
-            &DisplayTransform::Direct(OutputSpace::Srgb),
+            &DisplayTransform::exact(OutputSpace::Srgb),
             false,
             target_srgb,
         );
@@ -159,9 +170,9 @@ impl ViewportResources {
         u.view_scale = self.uniforms.view_scale;
         u.view_offset = self.uniforms.view_offset;
         self.uniforms = u;
-        self.lut_view = match transform {
-            DisplayTransform::Direct(_) => dummy_lut_view(device),
-            DisplayTransform::Lut(lut) => upload_lut(device, queue, lut),
+        self.lut_view = match &transform.kind {
+            DisplayKind::Space(_) => dummy_lut_view(device),
+            DisplayKind::Lut(lut) => upload_lut(device, queue, lut),
         };
     }
 }
@@ -172,22 +183,44 @@ fn uniforms_for(
     gamut_warn: bool,
     target_srgb: bool,
 ) -> DisplayUniforms {
-    // In LUT mode the matrix is unused; keep sRGB's so the struct is never uninitialised-looking.
-    let (space, mode) = match transform {
-        DisplayTransform::Direct(s) => (*s, 0),
-        DisplayTransform::Lut(_) => (OutputSpace::Srgb, 1),
+    // In LUT mode the display matrix is unused; keep sRGB's so the struct is always well-formed.
+    let (space, mode) = match &transform.kind {
+        DisplayKind::Space(s) => (*s, 0),
+        DisplayKind::Lut(_) => (OutputSpace::Srgb, 1),
     };
-    let m = space.from_working_f32();
+    let cols = |m: [[f32; 3]; 3]| {
+        [
+            [m[0][0], m[1][0], m[2][0], 0.0],
+            [m[0][1], m[1][1], m[2][1], 0.0],
+            [m[0][2], m[1][2], m[2][2], 0.0],
+        ]
+    };
+    let [col0, col1, col2] = cols(space.from_working_f32());
+    // Identity when not proofing (never read: `proof_enabled` is 0).
+    let (p, q) = match transform.proof {
+        Some(ps) => (ps.from_working_f32(), ps.to_working_f32()),
+        None => ([[0.0; 3]; 3], [[0.0; 3]; 3]),
+    };
+    let [pcol0, pcol1, pcol2] = cols(p);
+    let [qcol0, qcol1, qcol2] = cols(q);
     DisplayUniforms {
-        col0: [m[0][0], m[1][0], m[2][0], 0.0],
-        col1: [m[0][1], m[1][1], m[2][1], 0.0],
-        col2: [m[0][2], m[1][2], m[2][2], 0.0],
+        col0,
+        col1,
+        col2,
+        pcol0,
+        pcol1,
+        pcol2,
+        qcol0,
+        qcol1,
+        qcol2,
         view_scale: [1.0, 1.0],
         view_offset: [0.0, 0.0],
         target_srgb: target_srgb as u32,
         mode,
         trc: (space == OutputSpace::AdobeRgb) as u32,
-        gamut_warn: (gamut_warn && mode == 1) as u32,
+        gamut_warn: (gamut_warn && transform.proof.is_some()) as u32,
+        proof_enabled: transform.proof.is_some() as u32,
+        _pad: [0; 3],
     }
 }
 
@@ -364,6 +397,7 @@ impl CallbackTrait for ViewportCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nicti_calico::transform::DisplayProfile;
     use nicti_tapetum::frame::Extent;
     use nicti_tapetum::gpu::{GpuContext, GpuPreference};
 
@@ -445,6 +479,17 @@ mod tests {
         resources: &mut ViewportResources,
         pixels: &[[f32; 3]],
     ) -> Vec<[u8; 4]> {
+        render_row_to(gpu, resources, pixels, wgpu::TextureFormat::Rgba8Unorm)
+    }
+
+    /// As [`render_row`] but into `format`; the pipeline in `resources` must have been built for
+    /// the same format.
+    fn render_row_to(
+        gpu: &GpuContext,
+        resources: &mut ViewportResources,
+        pixels: &[[f32; 3]],
+        format: wgpu::TextureFormat,
+    ) -> Vec<[u8; 4]> {
         let w = pixels.len() as u32;
         assert_eq!(w * 4 % 256, 0, "row bytes must satisfy copy alignment");
         let frame = Arc::new(FrameTexture::new(
@@ -515,7 +560,7 @@ mod tests {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -592,6 +637,7 @@ mod tests {
     }
 
     fn assert_matches_cpu(gpu_px: &[[u8; 4]], transform: &DisplayTransform, gamut_warn: bool) {
+        // f16 LUT storage + 8-bit rounding: a few codes.
         let warn = [0.9f32, 0.1, 0.55];
         for (i, (got, src)) in gpu_px.iter().zip(test_pixels()).enumerate() {
             let (cpu, flagged) = transform.apply(src);
@@ -606,52 +652,119 @@ mod tests {
         }
     }
 
-    #[test]
-    fn direct_mode_matches_the_cpu_reference_for_every_space() {
-        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
+    fn gpu_or_skip() -> Option<GpuContext> {
+        let gpu = GpuContext::new(GpuPreference::Auto).ok();
+        if gpu.is_none() {
             eprintln!("no wgpu adapter available in this environment, skipping");
-            return;
-        };
+        }
+        gpu
+    }
+
+    #[test]
+    fn exact_mode_matches_the_cpu_reference_for_every_space() {
+        let Some(gpu) = gpu_or_skip() else { return };
         for space in OutputSpace::ALL {
             let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
-            let t = DisplayTransform::Direct(space);
+            let t = DisplayTransform::exact(space);
             res.set_display_transform(&gpu.device, &gpu.queue, &t, false);
             assert_matches_cpu(&render_row(&gpu, &mut res, &test_pixels()), &t, false);
         }
     }
 
     #[test]
-    fn lut_mode_with_gamut_warning_matches_the_cpu_reference() {
-        use nicti_calico::transform::{DisplayProfile, ProofSettings, RenderingIntent};
-        let Some(gpu) = GpuContext::new(GpuPreference::Auto).ok() else {
-            eprintln!("no wgpu adapter available in this environment, skipping");
-            return;
-        };
+    fn proof_with_gamut_warning_matches_the_cpu_reference() {
+        let Some(gpu) = gpu_or_skip() else { return };
         let t = DisplayTransform::build(
             &DisplayProfile::Space(OutputSpace::DisplayP3),
-            Some(ProofSettings {
-                space: OutputSpace::Srgb,
-                intent: RenderingIntent::RelativeColorimetric,
-            }),
+            Some(OutputSpace::Srgb),
         )
         .unwrap();
         let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
         for gamut_warn in [false, true] {
             res.set_display_transform(&gpu.device, &gpu.queue, &t, gamut_warn);
-            assert_matches_cpu(&render_row(&gpu, &mut res, &test_pixels()), &t, gamut_warn);
+            let px = render_row(&gpu, &mut res, &test_pixels());
+            assert_matches_cpu(&px, &t, gamut_warn);
+            let flagged = test_pixels().iter().filter(|p| t.apply(**p).1).count();
+            assert!(
+                flagged > 0 && flagged < 64,
+                "test set should mix in- and out-of-gamut, got {flagged}/64"
+            );
+        }
+    }
+
+    #[test]
+    fn lut_mode_for_a_non_builtin_monitor_matches_the_cpu_reference() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let monitor =
+            DisplayProfile::Icc(Arc::new(nicti_calico::transform::ColorProfile::new_bt2020()));
+        for proof in [None, Some(OutputSpace::AdobeRgb)] {
+            let t = DisplayTransform::build(&monitor, proof).unwrap();
+            assert!(matches!(t.kind, DisplayKind::Lut(_)));
+            let mut res = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+            res.set_display_transform(&gpu.device, &gpu.queue, &t, proof.is_some());
+            assert_matches_cpu(
+                &render_row(&gpu, &mut res, &test_pixels()),
+                &t,
+                proof.is_some(),
+            );
+        }
+    }
+
+    #[test]
+    fn srgb_render_target_gets_the_same_bytes_as_a_unorm_one() {
+        // The hardware applies the sRGB OETF on write to an `*Srgb` target, so the shader hands
+        // it linear values (`target_srgb`); the final bytes must match the non-sRGB target's
+        // shader-side encoding in every mode.
+        let Some(gpu) = gpu_or_skip() else { return };
+        let monitor =
+            DisplayProfile::Icc(Arc::new(nicti_calico::transform::ColorProfile::new_bt2020()));
+        let transforms = [
+            DisplayTransform::exact(OutputSpace::Srgb),
+            DisplayTransform::build(&monitor, None).unwrap(),
+        ];
+        for t in transforms {
+            let mut plain = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+            plain.set_display_transform(&gpu.device, &gpu.queue, &t, false);
+            let a = render_row(&gpu, &mut plain, &test_pixels());
+            let mut srgb = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb);
+            srgb.set_display_transform(&gpu.device, &gpu.queue, &t, false);
+            let b = render_row_to(
+                &gpu,
+                &mut srgb,
+                &test_pixels(),
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                for c in 0..3 {
+                    assert!(
+                        (i32::from(x[c]) - i32::from(y[c])).abs() <= 2,
+                        "pixel {i} channel {c}: unorm {x:?} vs srgb {y:?}"
+                    );
+                }
+            }
         }
     }
 
     #[test]
     fn uniforms_select_the_right_mode_and_transfer_function() {
-        let d = uniforms_for(
-            &DisplayTransform::Direct(OutputSpace::AdobeRgb),
-            true,
-            false,
-        );
-        assert_eq!((d.mode, d.trc, d.gamut_warn), (0, 1, 0));
-        let s = uniforms_for(&DisplayTransform::Direct(OutputSpace::Srgb), false, true);
+        let d = uniforms_for(&DisplayTransform::exact(OutputSpace::AdobeRgb), true, false);
+        assert_eq!((d.mode, d.trc, d.gamut_warn, d.proof_enabled), (0, 1, 0, 0));
+        let s = uniforms_for(&DisplayTransform::exact(OutputSpace::Srgb), false, true);
         assert_eq!((s.mode, s.trc, s.target_srgb), (0, 0, 1));
+        let p = DisplayTransform::build(
+            &DisplayProfile::Space(OutputSpace::Srgb),
+            Some(OutputSpace::AdobeRgb),
+        )
+        .unwrap();
+        let u = uniforms_for(&p, true, false);
+        assert_eq!((u.proof_enabled, u.gamut_warn), (1, 1));
+    }
+
+    #[test]
+    fn display_uniforms_size_is_a_multiple_of_16() {
+        // WGSL uniform structs round up to their max member alignment (16 for vec4).
+        assert_eq!(std::mem::size_of::<DisplayUniforms>() % 16, 0);
+        assert_eq!(std::mem::size_of::<DisplayUniforms>(), 192);
     }
 
     #[test]

@@ -6,8 +6,9 @@ use crate::transform::DisplayProfile;
 use moxcms::ColorProfile;
 use std::sync::Arc;
 
-/// Parses ICC bytes into a [`DisplayProfile`], falling back to sRGB (and returning the reason)
-/// when they don't parse or aren't an RGB display-class profile.
+/// Parses ICC bytes into a [`DisplayProfile`]; an unparseable profile is an `Err` with the
+/// reason (the caller falls back to sRGB). A parseable profile that turns out unusable for RGB
+/// display (gray, CMYK, no B2A table) fails later, in `DisplayTransform::build`.
 pub fn from_icc_bytes(bytes: &[u8]) -> Result<DisplayProfile, String> {
     let profile =
         ColorProfile::new_from_slice(bytes).map_err(|e| format!("unparseable ICC: {e}"))?;

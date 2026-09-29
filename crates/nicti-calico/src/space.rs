@@ -63,6 +63,16 @@ impl OutputSpace {
         mat_mul(&mat_invert(&self.to_xyz_d50()), &prophoto_to_xyz)
     }
 
+    /// Linear RGB of this space -> linear ProPhoto (D50); the inverse of [`Self::from_working`].
+    pub fn to_working(self) -> Mat3 {
+        mat_invert(&self.from_working())
+    }
+
+    /// [`Self::to_working`] as f32, ready for a shader uniform.
+    pub fn to_working_f32(self) -> [[f32; 3]; 3] {
+        self.to_working().map(|r| r.map(|v| v as f32))
+    }
+
     /// [`Self::from_working`] as f32, ready for a shader uniform.
     pub fn from_working_f32(self) -> [[f32; 3]; 3] {
         self.from_working().map(|r| r.map(|v| v as f32))

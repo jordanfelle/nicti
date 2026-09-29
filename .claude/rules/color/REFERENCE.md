@@ -54,14 +54,17 @@ Full reasoning/history: `docs/decisions/color.md`.
   [`render-graph`](../render-graph/REFERENCE.md)'s own package-contents entry for #46's stages.
 - **Color management (#42)** — `docs/adr/0042`: **Accepted**. `nicti-calico` owns it: `space.rs`
   (`OutputSpace` sRGB/Display P3/Adobe RGB; matrices from primaries + Bradford to D50, from linear
-  ProPhoto), `icc.rs` (runtime `moxcms` profiles, never vendored), `transform.rs` (`DisplayTransform`:
-  `Direct` exact matrix+TRC, or `Lut` 33³ RGBA16F with gamma-1.8 ProPhoto shaper, alpha = out-of-
-  proof-gamut flag), `display_profile.rs` (Windows `GetICMProfileW`, degrades to sRGB). **Display-
-  only, outside the render graph** — no cache-key involvement. `nicti-pelt`: `color_mgmt.rs` (Color
-  menu, Shift+S gamut warning, follows the window across monitors), `viewport.rs`
-  `set_display_transform`, `display.wgsl` modes 0/1. **No BPC** (`moxcms` 0.9 lacks it). Preview
-  tiers/thumbnails are unmanaged. Working space still ProPhoto (#149). DCP HueSatMap/LookTable
-  promotion is the second PR of #42.
+  ProPhoto), `icc.rs` (runtime `moxcms` profiles, never vendored), `transform.rs`
+  (`DisplayTransform { proof, kind }`: **proof is analytic** — matrix to proof space, clamp, back;
+  exact gamut flag, no intent choice; **display** is `Space` exact matrix+TRC, or a 33³ RGBA16F
+  `Lut` only for a monitor ICC that isn't a built-in space), `display_profile.rs` (Windows
+  `GetICMProfileW`, degrades to sRGB). **Do not put proofing back into a LUT**: moxcms clamps node
+  output, and interpolating across the clipped nodes cost ~9-12/255 in-gamut error (review).
+  **Display-only, outside the render graph** — no cache-key involvement. `nicti-pelt`:
+  `color_mgmt.rs` (Color menu, Shift+S gamut warning, follows the window across monitors),
+  `viewport.rs` `set_display_transform`, `display.wgsl` (proof stage, then mode 0/1). **No BPC**
+  (`moxcms` 0.9 lacks it). Preview tiers/thumbnails are unmanaged. Working space still ProPhoto
+  (#149). DCP HueSatMap/LookTable promotion is the second PR of #42.
 
 ## Package contents
 
