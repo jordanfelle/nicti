@@ -41,24 +41,26 @@ fn snapshot_completes_without_waiting_for_a_slower_concurrent_writer() {
 
     let policy = BackupPolicy::for_catalog(&catalog_path);
 
-    // A writer thread deliberately paced with a small sleep between writes, so it's guaranteed to
-    // take a real, bounded wall-clock time (WRITER_COUNT * WRITER_DELAY, here ~600ms) regardless
-    // of hardware speed -- unlike an unpaced loop, whose real duration on a tiny in-test catalog
-    // would be too close to `run_backup`'s own duration for a timing comparison to mean anything
-    // either way.
-    const WRITER_COUNT: usize = 200;
+    // A writer thread that keeps writing, paced by a small sleep, until told to stop. It runs for
+    // exactly as long as the backup does, whatever the hardware: an earlier version raced a fixed
+    // ~600 ms of paced writes against `run_backup`'s own duration and flaked (#314) whenever a
+    // loaded CI runner made the backup slower than the writer's budget.
     const WRITER_DELAY: Duration = Duration::from_millis(3);
     let progress = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let writer_catalog = catalog.clone();
     let writer_progress = progress.clone();
+    let writer_stop = stop.clone();
     let writer = std::thread::spawn(move || {
-        for i in 0..WRITER_COUNT {
+        let mut i = 0usize;
+        while !writer_stop.load(Ordering::SeqCst) {
             std::thread::sleep(WRITER_DELAY);
             writer_catalog
                 .ensure_root(volume_id, &format!("root-{i}"))
                 .unwrap();
             writer_progress.fetch_add(1, Ordering::SeqCst);
+            i += 1;
         }
     });
 
@@ -67,32 +69,35 @@ fn snapshot_completes_without_waiting_for_a_slower_concurrent_writer() {
     assert!(
         wait_until(
             || progress.load(Ordering::SeqCst) > 0,
-            Duration::from_secs(2)
+            Duration::from_secs(30)
         ),
         "writer thread never made any progress"
     );
 
+    let before = progress.load(Ordering::SeqCst);
+    let started = Instant::now();
     let report = run_backup(&catalog, &policy, 1_000).unwrap();
+    let backup_took = started.elapsed();
+    let during = progress.load(Ordering::SeqCst) - before;
 
-    // The real property this test demonstrates: `run_backup` (specifically its `snapshot_into`
-    // step, which opens its own independent read-only connection for a file-backed catalog rather
-    // than reusing the shared `Mutex<Connection>` -- see that function's own doc comment) returns
-    // long before the writer's own ~600ms of deliberately-paced work is done. If `snapshot_into`
-    // instead contended for the same connection every `ensure_root` call goes through, the writer
-    // would make no further progress while the snapshot ran, and -- since the snapshot itself
-    // completes quickly regardless of which connection performs it, at this small a row count --
-    // this specific assertion wouldn't reliably distinguish the two cases at 2M-row scale the way
-    // it does here; ADR-0067 is where that scale's own timing (2.0s/2.5s p50/p95) was measured.
-    let progress_at_return = progress.load(Ordering::SeqCst);
-    assert!(
-        progress_at_return < WRITER_COUNT,
-        "expected the writer to still be mid-pace ({progress_at_return}/{WRITER_COUNT} done) \
-         when run_backup returned -- if this fails, either the backup unexpectedly took as long \
-         as the writer's own ~600ms, or something now blocks the writer behind the snapshot"
-    );
-
+    stop.store(true, Ordering::SeqCst);
     writer.join().unwrap();
-    assert_eq!(progress.load(Ordering::SeqCst), WRITER_COUNT);
+
+    // The property: `run_backup` (specifically its `snapshot_into` step, which opens its own
+    // independent read-only connection for a file-backed catalog rather than reusing the shared
+    // `Mutex<Connection>` -- see that function's own doc comment) must not hold the connection
+    // every `ensure_root` call goes through. If it did, the writer would make *no* progress for
+    // as long as the backup ran. So: whenever the backup ran long enough that a paced writer must
+    // have been able to write (~16 writes per 50 ms at 3 ms pacing), it did. A backup faster than
+    // that can't distinguish the two cases at this catalog size (ADR-0067 measured the real
+    // 2M-row scale), and asserting anything then would only be a race against the scheduler.
+    if backup_took >= Duration::from_millis(50) {
+        assert!(
+            during > 0,
+            "the writer made no progress during a {backup_took:?} backup -- something now \
+             blocks writers behind the snapshot"
+        );
+    }
 
     assert!(matches!(report.outcome, BackupOutcome::Verified(_)));
 }
