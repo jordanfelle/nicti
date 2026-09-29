@@ -53,7 +53,7 @@ struct Inflight {
     slot: ReportSlot<DecodeResult>,
 }
 
-/// An in-flight T2 generation (#301), tracked like [`Inflight`] but resolving to `()`.
+/// An in-flight T2 generation (#301), tracked like [`Inflight`] but resolving to a `T2Outcome`.
 struct T2Inflight {
     job_id: JobId,
     /// The asset's identity *at submit time* -- what a failure is recorded against, so a re-ingest
@@ -75,6 +75,10 @@ struct T2State {
     failed: HashMap<i64, blake3::Hash>,
     /// The in-flight `CompactJob`'s slot -- at most one at a time.
     compaction: Option<ReportSlot<CompactResult>>,
+    /// Set once a `CompactJob` fails: compaction stays due after a persistent failure (disk full,
+    /// a corrupt row), so without this every later `poll` would queue another attempt that copies
+    /// the whole pack again while holding the lock. Cleared with the session.
+    compaction_failed: bool,
 }
 
 pub struct LoupeSession {
@@ -124,6 +128,7 @@ impl LoupeSession {
             inflight: HashMap::new(),
             failed: HashMap::new(),
             compaction: None,
+            compaction_failed: false,
         });
         self
     }
@@ -219,7 +224,8 @@ impl LoupeSession {
     }
 
     /// Queues T2 generation (#301) for the asset at `index` unless the Larder already holds it,
-    /// one is already running, it already failed for this identity, or its file isn't reachable.
+    /// one is already running, or it already failed for this identity. (Whether the file is
+    /// reachable is the job's own check, not this UI-thread method's.)
     /// Independent of the decode path: a RAM-cached decode still wants its T2 on disk, and a T2
     /// hit doesn't need a decode to have happened.
     fn request_t2(
@@ -344,12 +350,17 @@ impl LoupeSession {
                 t2.failed.insert(asset_id, identity);
             }
         }
-        if let Some(slot) = &t2.compaction {
-            if slot.lock().unwrap().take().is_some() {
-                t2.compaction = None;
+        let compaction_result = t2
+            .compaction
+            .as_ref()
+            .and_then(|slot| slot.lock().unwrap().take());
+        if let Some(result) = compaction_result {
+            t2.compaction = None;
+            if result.is_err() {
+                t2.compaction_failed = true;
             }
         }
-        if t2.compaction.is_none() {
+        if t2.compaction.is_none() && !t2.compaction_failed {
             let due = try_lock_larder(&t2.larder)
                 .map(|larder| larder.compaction_due())
                 .unwrap_or(false);

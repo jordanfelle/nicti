@@ -7,8 +7,8 @@
 //!
 //! Both jobs run on Pounce's CPU lane at `Background` priority. [`T2Job`] generates and stores
 //! one asset's T2; [`CompactJob`] runs `Larder::compact` so a multi-GiB pack rewrite never
-//! happens inline on whichever thread happened to `put` last (the session turns the Larder's own
-//! auto-compaction off, see `LoupeSession::with_larder`).
+//! happens inline on whichever thread happened to `put` last (`open_larder` turns the Larder's own
+//! auto-compaction off).
 
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -27,9 +27,11 @@ use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progr
 /// jobs (writes, on Pounce workers). `Larder`'s methods take `&mut self`, so one mutex guards it.
 pub type SharedLarder = Arc<Mutex<Larder>>;
 
-/// Non-blocking lock. `None` means a `put`/compaction holds it right now; a poisoned lock (a job
-/// panicked mid-`put`) is recovered rather than treated as permanently busy -- the Larder is
-/// self-healing (checksums, dropped bad rows), so its state after a panic is safe to keep using.
+/// Non-blocking lock. `None` means a `put`/compaction holds it right now. A poisoned lock (a job
+/// panicked while holding it) is recovered rather than treated as permanently busy. That isn't a
+/// guarantee the Larder is healthy afterwards -- a panic inside `put` could leave its transaction
+/// open, making every later `put` fail -- but such failures surface as `T2Outcome::Failed` per
+/// asset (see `T2Job::run`), not a retry storm, and the loupe still works from T0.
 pub fn try_lock_larder(larder: &SharedLarder) -> Option<MutexGuard<'_, Larder>> {
     match larder.try_lock() {
         Ok(guard) => Some(guard),
@@ -157,11 +159,12 @@ pub enum T2Outcome {
     /// Stored (or already present).
     Stored,
     /// Nothing stored, but nothing is wrong with the asset: the file is unreachable (an unmounted
-    /// archive drive), the Larder was busy, or a `put` hit a transient error (disk full). Not
-    /// recorded as a failure, so the next prefetch of this asset simply tries again.
+    /// archive drive) or the Larder stayed busy past `LOCK_WAIT`. Not recorded as a failure, so
+    /// the next prefetch of this asset -- the next cursor move, not a stationary cursor -- tries
+    /// again.
     Retry(String),
     /// This asset can't produce a T2 (no embedded preview, corrupt JPEG, panic). Remembered per
-    /// asset identity so it isn't re-read on every cursor move.
+    /// asset identity so it isn't re-read on every cursor move. Includes a failed `put`.
     Failed(String),
 }
 
@@ -216,10 +219,10 @@ impl T2Job {
         if std::fs::metadata(&self.path).is_err() {
             return T2Outcome::Retry("source file unreachable".into());
         }
-        // Never block on the Larder lock: a compaction holds it for the whole rewrite, and a
-        // worker parked here is a worker a foreground decode can't use. Busy = try again later.
+        // Never wait unboundedly on the Larder lock: a compaction holds it for the whole rewrite,
+        // and a worker parked here is a worker a foreground decode can't use.
         {
-            let Some(larder) = try_lock_larder(&self.larder) else {
+            let Some(larder) = lock_larder_within(&self.larder, LOCK_WAIT) else {
                 return T2Outcome::Retry("larder busy".into());
             };
             // Another path (a second session, an earlier job that finished after this was queued)
@@ -232,13 +235,16 @@ impl T2Job {
             Ok(payload) => payload,
             Err(e) => return T2Outcome::Failed(e),
         };
-        let Some(mut larder) = try_lock_larder(&self.larder) else {
+        let Some(mut larder) = lock_larder_within(&self.larder, LOCK_WAIT) else {
             return T2Outcome::Retry("larder busy".into());
         };
         match larder.put(self.key(), &payload) {
             Ok(true) => T2Outcome::Stored,
             Ok(false) => T2Outcome::Failed("T2 larger than the whole cache cap".into()),
-            Err(e) => T2Outcome::Retry(e.to_string()),
+            // A `put` error (disk full, read-only directory, a wedged transaction) tends to be
+            // persistent: `Failed` (once per identity) rather than `Retry`, so it can't become a
+            // decode-resize-encode-fail loop on every cursor move.
+            Err(e) => T2Outcome::Failed(e.to_string()),
         }
     }
 }
@@ -274,6 +280,27 @@ impl ChunkedJob for T2Job {
         *self.result.lock().unwrap() = Some(outcome);
         self.done = true;
         Ok(Step::Done)
+    }
+}
+
+/// How long a T2 job waits for the Larder lock before giving up with `Retry`. Bounded so a worker
+/// is never parked behind a whole compaction, but long enough that two jobs finishing together
+/// (or a UI-thread `get`) don't cost a finished payload.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn lock_larder_within(
+    larder: &SharedLarder,
+    wait: std::time::Duration,
+) -> Option<MutexGuard<'_, Larder>> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(guard) = try_lock_larder(larder) {
+            return Some(guard);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -484,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn t2_job_retries_instead_of_blocking_when_the_larder_is_busy() {
+    fn t2_job_retries_after_a_bounded_wait_when_the_larder_stays_busy() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("a.NEF");
         std::fs::write(&src, tiff_with_jpeg(&jpeg_of(800, 600))).unwrap();

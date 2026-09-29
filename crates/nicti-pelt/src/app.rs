@@ -758,6 +758,7 @@ impl PeltApp {
         self.loupe_zoomed = false;
         self.loupe_pan = [0.0, 0.0];
         self.loupe_preview = None;
+        self.loupe_t2_undecodable = None;
         self.view = View::Loupe;
     }
 
