@@ -74,14 +74,46 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   ever existed (ADR-0068's Hard-gate-1 early exit).
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell: `lib.rs` (`run`, the
   `WgpuSetup::CreateNew` device-descriptor wiring), `app.rs` (`PeltApp`, view routing), `render.rs`
-  (`DevelopView` — wires a synthetic gradient `LinearFrame` through the real Tapetum pipeline;
-  a real NEF is #31's job; #46: now owns a real in-memory `nicti_pawprint::EditDocument` +
-  `StageRegistry`, `histogram`/`apply_auto_tone` methods, `show_before` toggle), `develop_panel.rs`
-  (#46: the Develop view's right-side edit panel — Basic/Tone Curve/HSL/Detail sections, live
-  histogram, Auto + before/after buttons; see `render-graph`'s own "#46 completion" bullet),
-  `viewport.rs` (`ViewportResources`/`ViewportCallback`, the
-  `egui_wgpu::CallbackTrait` display pass) and `catalog.rs` (opens a `nicti-lair` `SqliteCatalog`).
-  Supersedes `spikes/pelt-egui` as the real, non-throwaway crate ADR-0068 points to.
+  (`DevelopView` — wires a `LinearFrame` through the real Tapetum pipeline; #46: owns a real
+  in-memory `nicti_pawprint::EditDocument` + `StageRegistry`, `histogram`/`apply_auto_tone`
+  methods, `show_before` toggle), `develop_panel.rs` (#46: the Develop view's right-side edit
+  panel — Basic/Tone Curve/HSL/Detail sections, live histogram, Auto + before/after buttons; see
+  `render-graph`'s own "#46 completion" bullet), `viewport.rs` (`ViewportResources`/
+  `ViewportCallback`, the `egui_wgpu::CallbackTrait` display pass) and `catalog.rs` (opens a
+  `nicti-lair` `SqliteCatalog`). Supersedes `spikes/pelt-egui` as the real, non-throwaway crate
+  ADR-0068 points to.
+  - **#31 (loupe, landed) module breakdown**: `decode_job.rs`'s `DecodeJob` — a single-chunk
+    Pounce CPU-lane job (new `JobKind::Decode`) wrapping `RawDecoder::decode_linear`, generic over
+    the decoder trait (not hard-coded to `LibRawDecoder`) so tests use a fake decoder rather than
+    needing a real NEF file — always resolves its `ReportSlot` even on decode failure, matching
+    `BackupJob`'s own established fix for the same "a poller must never wait on a slot that never
+    resolves" failure mode. `loupe.rs`'s `LoupeSession` — an ordered asset-id list + cursor, a
+    `nicti_tapetum::cache::Tier<Arc<LinearFrame>>` RAM cache keyed by `asset_cache_key`
+    (fingerprint, falling back to `id:mtime_unix`), submits `DecodeJob`s for the cursor +/- 1 on
+    every `set_cursor` and reprioritizes Pounce's background queue by distance-from-cursor; errors
+    are tracked as `(identity, message)` pairs so a stale error from a since-superseded revision
+    (a re-ingest fixing/replacing the file) doesn't keep blocking the new one; `cancel_all` clears
+    `inflight` immediately rather than waiting on a cancelled-while-queued job's slot, which would
+    never resolve at all. `render.rs`'s `DevelopView::load_real_frame(frame: Arc<LinearFrame>,
+    identity)` swaps in a real decode and calls `RenderGraph::set_own_hash(DECODE, identity)` so
+    Tapetum's baked-output cache doesn't collide across different real photos at the same pixel
+    extent; `has_edits()` lets a caller check for a real in-memory edit before swapping (`app.rs`'s
+    Loupe view blocks the swap behind an explicit confirmation if Develop has unsaved edits open
+    for a *different* photo, since `develop` is one instance shared between the Develop and Loupe
+    tabs — an adversarial review caught an earlier version silently discarding them). `app.rs`'s
+    "Open in Loupe" button (Library view) builds a session over a folder's assets (`id`-ordered —
+    real grid/filter-driven selection is #30/#242's job); the Loupe view polls every frame, shows
+    the T0 embedded JPEG preview (decoded via the `image` crate, cached per asset id) while a real
+    decode is still in flight — the actual mechanism behind the ticket's "< 50ms next/prev" target,
+    since the RAW decode itself never hits that number (`raw-decoder` topic's own 1-2.4s/file
+    measurement) — Left/Right navigate, Space toggles Fit/100% zoom (reset on every cursor move),
+    drag pans while zoomed. `viewport.rs`/`display.wgsl` gained `view_scale`/`view_offset` uniform
+    fields and a real bilinear `wgpu::Sampler` (replacing the old `textureLoad`, which had no
+    resampling at all) so the same shader serves both Fit (aspect-correct, `fit_scale`) and 100%
+    (`one_to_one_scale`) zoom; `ViewportCallback::identity(frame)` keeps the Develop tab's old
+    always-1:1-stretch mapping exactly. Known non-blocking follow-ups: #294 (unclamped 100% pan),
+    #295 (a rare cache-eviction flicker back to the T0 fallback), #296 (NaN/Inf on a zero-dimension
+    rect or corrupt asset in `fit_scale`/`one_to_one_scale`).
 - **`spikes/groom`** (#50/ADR-0050) — healing/removal research: CPU clone-stamp/Poisson-heal +
   auto-source-pick reference, a `wgpu` compute-shader Poisson twin proven correct against it,
   `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox,

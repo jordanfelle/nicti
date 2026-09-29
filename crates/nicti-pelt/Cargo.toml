@@ -16,6 +16,11 @@ blake3 = "1"
 semver = "1"
 serde = "1"
 serde_json = "1"
+# JPEG-decodes a catalog asset's T0 embedded preview for the loupe's instant fallback while a real
+# decode is still in flight (#31 phase 3) -- already in the workspace's resolved dependency graph
+# via nicti-tapetum/nicti-prowl, so this is a new direct edge to an already-vetted crate, not a new
+# dependency (no docs/licensing.md update needed per ADR-0018's amendment).
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 nicti-tapetum = { path = "../nicti-tapetum" }
 nicti-lair = { path = "../nicti-lair" }
 nicti-cornea = { path = "../nicti-cornea", features = ["libraw"] }
