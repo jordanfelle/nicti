@@ -176,7 +176,7 @@ terse index: crate/spike → purpose → owning topic.
   `nicti-lair` `SqliteCatalog` (`catalog.rs`). Named "pelt" (not the issue's own `nicti-ui`) to
   match the feline naming convention below, reusing the name from the now-deleted `spikes/pelt-*`
   research spikes (#232). Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
-  `nicti_pelt::run()` shim). **#31 (loupe, landed)**: real NEF loading, directional prefetch, and
+  `nicti_pelt::run()` shim; its `windows_subsystem` attr hides the console in release, #298). **#31 (loupe, landed)**: real NEF loading, directional prefetch, and
   Fit/100% zoom — see [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)'s own
   "Package contents" section for `render.rs`/`decode_job.rs`/`loupe.rs`/`viewport.rs`/`app.rs`'s
   actual module breakdown, also covering `activity.rs` (#55, #70) and
