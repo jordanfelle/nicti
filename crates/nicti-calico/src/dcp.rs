@@ -249,7 +249,9 @@ fn read_ifd(data: &[u8]) -> Result<HashMap<u16, TagValue>, DcpError> {
 
 fn decode_value(ty: TagType, count: usize, bytes: &[u8], le: bool) -> Option<TagValue> {
     match ty {
-        TagType::Ascii => {
+        // ProfileName may be ASCII or BYTE (UTF-8) per the DNG spec. Every BYTE tag in
+        // `KNOWN_TAGS` is a string tag, so decoding BYTE as text is safe.
+        TagType::Ascii | TagType::Byte => {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             Some(TagValue::Ascii(
                 String::from_utf8_lossy(&bytes[..end]).into_owned(),
@@ -733,6 +735,22 @@ mod tests {
         for n in 0..good.len() {
             let _ = DcpProfile::parse(&good[..n]);
         }
+    }
+
+    #[test]
+    fn a_byte_typed_profile_name_is_decoded_as_text() {
+        // The DNG spec allows ProfileName as BYTE (UTF-8); it must not fall back to "(unnamed)".
+        let name = "Caméra Standard\0".as_bytes().to_vec();
+        let identity: Vec<u8> = [1, 0, 0, 0, 1, 0, 0, 0, 1i32]
+            .iter()
+            .flat_map(|n| [n.to_le_bytes(), 1i32.to_le_bytes()].concat())
+            .collect();
+        let entries = vec![
+            (50721u16, 10u16, 9u32, identity),
+            (50936, 1, name.len() as u32, name),
+        ];
+        let p = DcpProfile::parse(&testing::assemble(entries, true)).unwrap();
+        assert_eq!(p.name, "Caméra Standard");
     }
 
     #[test]
