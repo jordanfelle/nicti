@@ -173,18 +173,14 @@ terse index: crate/spike → purpose → owning topic.
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,
   `shaders/display.wgsl`), placeholder library/loupe/develop view routing (`app.rs`), and a real
-  `nicti-lair` `SqliteCatalog` (`catalog.rs`). `render.rs` wires a synthetic gradient frame through
-  the real Tapetum pipeline for the Develop panel — loading a real NEF is #31's (loupe) scope, not
-  this ticket's. Named "pelt" (not the issue's own `nicti-ui`) to match the feline naming
-  convention below, reusing the name from the now-deleted `spikes/pelt-*` research spikes (#232).
-  Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
-  `nicti_pelt::run()` shim). **`activity.rs`** (#55, #70) adds the Pounce activity/progress panel
-  (a bottom status bar: bottleneck headline, running/queued counts, CPU/RAM/VRAM/GPU/Disk
-  telemetry, CPU-lane concurrency control, per-job cancel list) plus Import/Sync buttons on the
-  Library view (`app.rs`'s `submit_root_job`) that submit
-  `nicti-lair::pounce_jobs::IngestJob`/`SyncJob` to a `nicti_pounce::Pounce` owned by `PeltApp`. See
-  [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md) and
-  [`jobs`](.claude/rules/jobs/REFERENCE.md).
+  `nicti-lair` `SqliteCatalog` (`catalog.rs`). Named "pelt" (not the issue's own `nicti-ui`) to
+  match the feline naming convention below, reusing the name from the now-deleted `spikes/pelt-*`
+  research spikes (#232). Is now the real `nicti` binary's entry point (`src/main.rs` is a thin
+  `nicti_pelt::run()` shim). **#31 (loupe, landed)**: real NEF loading, directional prefetch, and
+  Fit/100% zoom — see [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)'s own
+  "Package contents" section for `render.rs`/`decode_job.rs`/`loupe.rs`/`viewport.rs`/`app.rs`'s
+  actual module breakdown, also covering `activity.rs` (#55, #70) and
+  [`jobs`](.claude/rules/jobs/REFERENCE.md) for Pounce.
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/groom`** (#50/ADR-0050) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
