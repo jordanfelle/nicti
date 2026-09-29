@@ -1,6 +1,7 @@
 ---
 paths:
   - "spikes/sniff/**"
+  - "crates/nicti-lair/src/larder.rs"
 ---
 
 # Preview Tiers — Quick Reference
@@ -27,6 +28,13 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   **Real lossy WebP measured and rejected** — worse SSIM than AVIF at comparable size, worse
   encode/decode latency than JPEG at comparable quality, plus a native C dependency neither JPEG
   nor AVIF needs.
+- **T2 cache mgmt (#27, landed)** — `crates/nicti-lair/src/larder.rs` (`Larder`): the bounded T2
+  disk cache ADR-0029 chose a pack file for. Byte cap + LRU eviction (recency = per-entry `seq`
+  in the SQLite index), `purge_asset`/`purge_tier`/`purge_all`, generation-numbered pack files so
+  `compact` switches over atomically (index offsets + generation commit in one transaction; no
+  rename over an open file, which Windows refuses). Self-healing: blake3 checksum per payload,
+  bad/stale/truncated entries become misses. T0 stays in the catalog `preview` table (not capped
+  or purged here). Not yet wired into the render pipeline or a purge UI — see follow-up issues.
 
 ## Package contents
 
