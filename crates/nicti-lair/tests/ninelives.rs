@@ -26,6 +26,33 @@ fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     cond()
 }
 
+/// Stops and joins a background writer thread when dropped, so a panic in the test body can't
+/// leave it detached and still inserting rows while other tests run.
+struct WriterGuard {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WriterGuard {
+    /// Signals the writer to stop and waits for it (propagating a panic inside the writer).
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.join().unwrap();
+        }
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            // Already unwinding (or `finish` already ran): don't turn a second panic into an abort.
+            let _ = handle.join();
+        }
+    }
+}
+
 fn open_catalog(dir: &Path) -> (SqliteCatalog, std::path::PathBuf) {
     let path = dir.join("test.catalog.sqlite");
     let catalog = SqliteCatalog::open(&path).unwrap();
@@ -89,6 +116,10 @@ fn snapshot_completes_without_waiting_for_a_slower_concurrent_writer() {
             i += 1;
         }
     });
+    let mut writer = WriterGuard {
+        stop: stop.clone(),
+        handle: Some(writer),
+    };
 
     // Wait until the writer has genuinely started (and is now mid-pace) before snapshotting, so
     // the assertion below can't pass merely because the writer thread hadn't been scheduled yet.
@@ -105,8 +136,7 @@ fn snapshot_completes_without_waiting_for_a_slower_concurrent_writer() {
     let ended = Instant::now();
     let backup_took = ended - started;
 
-    stop.store(true, Ordering::SeqCst);
-    writer.join().unwrap();
+    writer.finish();
     // The longest stretch inside the backup window in which the writer completed nothing. The
     // snapshot only holds the shared connection for the `VACUUM INTO` step (not the verification
     // that follows), so a *count* of writes during the backup can't tell the cases apart -- a
