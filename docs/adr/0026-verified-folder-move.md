@@ -26,12 +26,12 @@ copy, only then let go of the original, with the catalog following the folder.
    entries (all keyed by asset id) are untouched.
 2. **The source is never touched before the catalog commit.** Preflight (source exists, destination
    is an existing folder, not inside the source, target name free or an empty folder, not already
-   a registered root, no symlinks in the tree) -> journal row -> fast path or copy.
+   a registered root, no symlinks in the tree, no other registered root nested inside or around the source/destination -- only the moved root's own path is rewritten) -> journal row -> fast path or copy.
 3. **Fast path:** `fs::rename` first. Same-volume moves are atomic and copy nothing. Any failure
    (cross-device, locks) falls through to the copy path. No per-file hashes are recorded on this
    path (nothing was read).
 4. **Copy path:** every file under the source -- not only cataloged assets, so XMP sidecars and
-   stray files move too -- is streamed to `<name>.partial`, BLAKE3-hashed as read, mtime carried
+   stray files move too -- is streamed to `<name>.nicti-partial` (opened `create_new`; a source file already ending in that suffix is refused, and a final name that already exists in the destination -- same-name sibling or a case-insensitive collision -- aborts the move rather than being renamed over), BLAKE3-hashed as read, mtime carried
    over, `sync_all`'d, then **re-read from the destination and re-hashed**. Only an exact match (and
    an unchanged length) is renamed into place. The verify re-read hits the OS page cache on small
    files, so it proves the bytes we wrote, not that the platter survived; a later "Verify folder"
@@ -39,16 +39,22 @@ copy, only then let go of the original, with the catalog following the folder.
 5. **Commit = one transaction** (`CatalogStore::commit_root_move`): re-point the root, record each
    cataloged asset's full-file BLAKE3 in the new `asset.content_hash` column (the existing
    `fingerprint` is only a 64KB head+tail hash), flip the journal row to `committed`.
-6. **Cleanup:** delete verified source files -- skipping any whose size or mtime changed since it
-   was copied -- then empty directories. A file that can't be deleted (antivirus, Explorer) is
+6. **Cleanup:** delete verified source files -- skipping any whose size changed or whose bytes no
+   longer hash to what was copied (a re-hash, not mtime: FAT/exFAT timestamps are too coarse to see
+   a same-size rewrite; costs one extra read of the source) -- then empty directories. A file that can't be deleted (antivirus, Explorer) is
    reported as a leftover, not a failure: the move already committed.
 7. **Crash safety via a `root_move` journal** (migration v6; at most one open row per root).
    `carry::resume_open_moves` runs at startup: a `copying` row rolls back (delete the half-built
-   destination; the source is intact), unless the source is gone and the destination exists (the
-   rename landed) in which case it commits; a `committed` row finishes cleanup, deleting only source
+   destination; the source is intact); a `renaming` row (journaled *before* the fast-path
+   `fs::rename`) never deletes either side -- source gone + destination present commits, source
+   present + destination absent rolls back, both present is reported as needing attention (the
+   source path may have been recreated after the rename landed; found in adversarial review, the
+   old rule deleted the moved folder); a `committed` row finishes cleanup, deleting only source
    files whose bytes match the destination's.
-8. **Cancel:** Pounce cancels by no longer stepping the job, so `Carry`'s `Drop` discards the
-   half-built destination and closes the journal. After commit there is nothing to undo.
+8. **Cancel / panic:** Pounce cancels by dropping the job, so `Carry`'s `Drop` discards the
+   half-built destination (copy path only) and closes the journal; if the commit already happened it
+   finishes the hash-matched source cleanup instead. `MoveJob`'s `Drop` fills the report slot so the
+   UI never sits on "Moving...".
 9. **Runs as `pounce_jobs::MoveJob`** (`JobKind::Move`, CPU lane, background), chunked at 64MiB so
    cancel is responsive. Never returns `Err`; every failure is a `CarryOutcome` in the report slot
    (same lesson as `BackupJob`). The Library view refuses import/sync while a move runs, and a move

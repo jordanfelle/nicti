@@ -370,7 +370,8 @@ CREATE INDEX idx_collection_asset_position ON collection_asset(collection_id, po
 /// #26 (v6): verified folder move. `asset.content_hash` is the full-file BLAKE3 (hex) a move
 /// records for each cataloged asset it carried (`fingerprint` is only a partial hash, see
 /// `scruff::partial_hash`); NULL for assets never moved. `root_move` is the crash-recovery
-/// journal (ADR-0026): one row per in-flight move, `copying` until the catalog commit,
+/// journal (ADR-0026): one row per in-flight move, `copying` until the catalog commit
+/// (`renaming` while the whole-folder `fs::rename` fast path is in flight),
 /// `committed` until the source deletion finishes. At most one open move per root.
 const MIGRATION_V6: &str = r#"
 ALTER TABLE asset ADD COLUMN content_hash TEXT;
@@ -380,7 +381,7 @@ CREATE TABLE root_move (
     root_id     INTEGER NOT NULL UNIQUE REFERENCES root(id),
     src_path    TEXT NOT NULL,
     dest_path   TEXT NOT NULL,
-    state       TEXT NOT NULL CHECK (state IN ('copying', 'committed')),
+    state       TEXT NOT NULL CHECK (state IN ('copying', 'renaming', 'committed')),
     started_at  INTEGER NOT NULL
 );
 "#;

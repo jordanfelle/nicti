@@ -700,6 +700,11 @@ impl PeltApp {
         if path.as_os_str().is_empty() {
             return;
         }
+        if self.job_active(&[JobKind::Move]) {
+            self.last_move_summary =
+                Some("A folder move is running; wait for it to finish first.".into());
+            return;
+        }
         let Ok(root_id) = register_root(store.as_ref(), &path) else {
             return;
         };

@@ -102,6 +102,10 @@ pub trait CatalogStore: Module {
     /// flips the journal to `committed`. Idempotent on an already-`committed` move.
     fn commit_root_move(&self, move_id: i64, hashes: &[(i64, String)]) -> Result<(), CatalogError>;
 
+    /// Moves an open journal row to `state` (`Copying` <-> `Renaming`; `Committed` only via
+    /// `commit_root_move`).
+    fn set_root_move_state(&self, move_id: i64, state: MoveState) -> Result<(), CatalogError>;
+
     /// Deletes the journal row: the move is fully done (`committed` and source cleaned up) or
     /// abandoned (`copying`, destination copy discarded, catalog never re-pointed).
     fn finish_root_move(&self, move_id: i64) -> Result<(), CatalogError>;

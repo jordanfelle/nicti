@@ -106,6 +106,10 @@ pub struct Root {
 pub enum MoveState {
     /// Files are being copied/verified; the catalog still points at the source.
     Copying,
+    /// The whole-folder `fs::rename` fast path is in flight or just landed: the folder is at
+    /// the source, the destination, or (if the source path was since recreated) both -- recovery
+    /// must never delete either side on its own.
+    Renaming,
     /// The catalog already points at the destination; only source cleanup remains.
     Committed,
 }

@@ -305,10 +305,6 @@ impl SqliteCatalog {
         self.conn.lock().unwrap().total_changes()
     }
 
-    /// `PRAGMA user_version` of the live catalog -- Nine Lives compares this against a freshly
-    /// written backup's own `user_version` as one of its verification checks (a `VACUUM INTO` copy
-    /// always carries the source's schema version, so a mismatch would mean something read a
-    /// different file than it meant to, not a real migration race).
     /// The full-file BLAKE3 (hex) a verified folder move (#26) recorded for this asset; `None`
     /// for an asset that has never been moved.
     pub fn content_hash(&self, asset_id: i64) -> Result<Option<String>, CatalogError> {
@@ -323,6 +319,10 @@ impl SqliteCatalog {
             .flatten())
     }
 
+    /// `PRAGMA user_version` of the live catalog -- Nine Lives compares this against a freshly
+    /// written backup's own `user_version` as one of its verification checks (a `VACUUM INTO` copy
+    /// always carries the source's schema version, so a mismatch would mean something read a
+    /// different file than it meant to, not a real migration race).
     pub fn user_version(&self) -> Result<i64, CatalogError> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
@@ -590,6 +590,24 @@ impl CatalogStore for SqliteCatalog {
         Ok(())
     }
 
+    fn set_root_move_state(&self, move_id: i64, state: MoveState) -> Result<(), CatalogError> {
+        let name = match state {
+            MoveState::Copying => "copying",
+            MoveState::Renaming => "renaming",
+            MoveState::Committed => {
+                return Err(CatalogError::Io(
+                    "a move is only committed via commit_root_move".into(),
+                ))
+            }
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE root_move SET state = ?1 WHERE id = ?2 AND state != 'committed'",
+            params![name, move_id],
+        )?;
+        Ok(())
+    }
+
     fn finish_root_move(&self, move_id: i64) -> Result<(), CatalogError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM root_move WHERE id = ?1", params![move_id])?;
@@ -607,10 +625,10 @@ impl CatalogStore for SqliteCatalog {
                 root_id: row.get(1)?,
                 src_path: row.get(2)?,
                 dest_path: row.get(3)?,
-                state: if state == "committed" {
-                    MoveState::Committed
-                } else {
-                    MoveState::Copying
+                state: match state.as_str() {
+                    "committed" => MoveState::Committed,
+                    "renaming" => MoveState::Renaming,
+                    _ => MoveState::Copying,
                 },
             })
         })?;

@@ -7,12 +7,12 @@
 //! 2. *Fast path*: `fs::rename` (atomic, no copy) -- works when source and destination share a
 //!    volume. Any failure falls through to the copy path.
 //! 3. *Copy path*: every file under the source (not just cataloged assets -- XMP sidecars and
-//!    anything else in the folder come along) is streamed to `<name>.partial`, BLAKE3-hashed as it
+//!    anything else in the folder come along) is streamed to `<name>.nicti-partial`, BLAKE3-hashed as it
 //!    is read, `sync_all`'d, then **re-read from the destination disk and re-hashed**; only a match
 //!    is renamed into place.
 //! 4. *Commit*: one catalog transaction re-points the root and records each cataloged asset's
 //!    full-file hash (`commit_root_move`).
-//! 5. *Cleanup*: verified source files are deleted (skipping any whose size/mtime changed since
+//! 5. *Cleanup*: verified source files are deleted (skipping any whose size or content hash changed since
 //!    they were copied), then now-empty source directories. A file that can't be removed (antivirus,
 //!    Explorer) is reported as a leftover, not a failure -- the move already committed.
 //!
@@ -38,6 +38,12 @@ const CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 /// At most this many leftover paths are named in a report (the count is always exact).
 const MAX_LEFTOVERS_LISTED: usize = 20;
+
+/// Suffix of in-progress copies. Deliberately unusual: a source file whose own name ends with it
+/// is refused at walk time, and partials are also opened `create_new` and never renamed over an
+/// existing file, so a name collision aborts the move (source untouched) instead of clobbering a
+/// verified copy.
+const PARTIAL_SUFFIX: &str = ".nicti-partial";
 
 #[derive(Debug, Clone, Default)]
 pub struct CarryOptions {
@@ -72,7 +78,6 @@ struct DoneFile {
     rel: PathBuf,
     hash: String,
     size: u64,
-    mtime: Option<SystemTime>,
 }
 
 /// The file currently being copied / verified.
@@ -125,6 +130,9 @@ pub struct Carry {
     now_unix: i64,
     move_id: Option<i64>,
     committed: bool,
+    /// Set once the copy path has started creating files under `dest`: only then is `dest`
+    /// ours to delete on cancel/panic. (Before that, `dest` may hold the renamed-over folder.)
+    copy_started: bool,
     phase: Phase,
     total_files: Option<u64>,
     files_done: u64,
@@ -152,6 +160,7 @@ impl Carry {
             now_unix,
             move_id: None,
             committed: false,
+            copy_started: false,
             phase: Phase::Start,
             total_files: None,
             files_done: 0,
@@ -159,6 +168,11 @@ impl Carry {
             #[cfg(test)]
             after_dest_written: None,
         }
+    }
+
+    /// `true` once the catalog points at the destination (a dropped job's message differs).
+    pub fn is_committed(&self) -> bool {
+        self.committed
     }
 
     pub fn label(&self) -> String {
@@ -223,6 +237,10 @@ impl Carry {
             return Some(CarryOutcome::Refused(reason));
         }
 
+        if let Err(reason) = self.check_no_nested_roots() {
+            return Some(CarryOutcome::Refused(reason));
+        }
+
         let move_id = match self.store.begin_root_move(
             self.root_id,
             &self.dest.to_string_lossy(),
@@ -233,7 +251,7 @@ impl Carry {
         };
         self.move_id = Some(move_id);
 
-        if !self.opts.force_copy && self.try_rename() {
+        if !self.opts.force_copy && self.try_rename(move_id) {
             self.phase = Phase::Commit {
                 done: Vec::new(),
                 dirs: Vec::new(),
@@ -241,6 +259,7 @@ impl Carry {
             };
             return None;
         }
+        self.copy_started = true;
 
         // Walk: every file, every directory. Symlinks are refused rather than followed or copied.
         let mut pending = VecDeque::new();
@@ -263,6 +282,15 @@ impl Carry {
                 )));
             } else if ft.is_dir() {
                 dirs.push(rel);
+            } else if entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(PARTIAL_SUFFIX)
+            {
+                return Some(self.abort_refused(format!(
+                    "{} looks like an interrupted copy (ends in {PARTIAL_SUFFIX}); remove it first",
+                    rel.display()
+                )));
             } else {
                 pending.push_back(rel);
             }
@@ -285,13 +313,49 @@ impl Carry {
         None
     }
 
-    /// `true` if the whole folder moved by rename.
-    fn try_rename(&self) -> bool {
-        // Windows refuses to rename onto an existing directory, even an empty one.
-        if self.dest.is_dir() && fs::remove_dir(&self.dest).is_err() {
+    /// `true` if the whole folder moved by rename. The journal is flipped to `renaming` first so
+    /// a crash right after the rename lands is recoverable without ever guessing which side holds
+    /// the folder, and back to `copying` if the rename didn't happen.
+    fn try_rename(&self, move_id: i64) -> bool {
+        if self
+            .store
+            .set_root_move_state(move_id, MoveState::Renaming)
+            .is_err()
+        {
             return false;
         }
-        fs::rename(&self.src, &self.dest).is_ok()
+        // Windows refuses to rename onto an existing directory, even an empty one.
+        let ok = !(self.dest.is_dir() && fs::remove_dir(&self.dest).is_err())
+            && fs::rename(&self.src, &self.dest).is_ok();
+        if !ok {
+            let _ = self.store.set_root_move_state(move_id, MoveState::Copying);
+        }
+        ok
+    }
+
+    /// A move rewrites only the moved root's own path, so a registered root nested inside (or
+    /// containing) the source or destination would be orphaned or double-imported. Compared both
+    /// as-is and case-folded (NTFS).
+    fn check_no_nested_roots(&self) -> Result<(), String> {
+        let roots = self.store.list_roots().map_err(|e| e.to_string())?;
+        let fold = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        for root in roots.into_iter().filter(|r| r.id != self.root_id) {
+            let other = PathBuf::from(&root.path);
+            for mine in [&self.src, &self.dest] {
+                let nested = other.starts_with(mine)
+                    || mine.starts_with(&other)
+                    || fold(&other).starts_with(fold(mine))
+                    || fold(mine).starts_with(fold(&other));
+                if nested {
+                    return Err(format!(
+                        "{} is registered separately and overlaps {}; move or remove it first",
+                        other.display(),
+                        mine.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     // ---- copy + verify ----
@@ -330,7 +394,6 @@ impl Carry {
                     rel: cur.rel.clone(),
                     hash: cur.hasher.finalize().to_hex().to_string(),
                     size,
-                    mtime: cur.src_mtime,
                 });
                 self.phase = Phase::Copy {
                     pending,
@@ -371,10 +434,14 @@ impl Carry {
             .file_name()
             .expect("a walked file has a name")
             .to_os_string();
-        partial_name.push(".partial");
+        partial_name.push(PARTIAL_SUFFIX);
         let partial = final_path.with_file_name(partial_name);
-        let dest =
-            File::create(&partial).map_err(|e| format!("creating {}: {e}", partial.display()))?;
+        // `create_new`: never truncate something already there (see `PARTIAL_SUFFIX`).
+        let dest = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .map_err(|e| format!("creating {}: {e}", partial.display()))?;
         Ok(Current {
             rel,
             src_len: meta.len(),
@@ -445,6 +512,15 @@ impl Carry {
                             // The source changed size mid-copy; the copy is internally consistent
                             // but not a faithful copy of the file we walked.
                             return Ok(Advance::Mismatch);
+                        }
+                        // `rename` silently replaces an existing file: a same-name (or, on a
+                        // case-insensitive destination, differently-cased) sibling already copied
+                        // would be destroyed. Abort instead; the source is untouched.
+                        if fs::symlink_metadata(&cur.final_path).is_ok() {
+                            return Err(format!(
+                                "{} already exists in the destination (name collision)",
+                                cur.final_path.display()
+                            ));
                         }
                         fs::rename(&cur.partial, &cur.final_path).map_err(|e| {
                             format!("renaming into {}: {e}", cur.final_path.display())
@@ -518,9 +594,10 @@ impl Carry {
             for d in &done {
                 let p = self.src.join(&d.rel);
                 // Only delete what is still exactly what we copied.
-                let unchanged = fs::metadata(&p)
-                    .map(|m| m.len() == d.size && m.modified().ok() == d.mtime)
-                    .unwrap_or(false);
+                // Size is a cheap pre-filter; the re-hash is the real guard (mtime alone is too
+                // coarse on FAT/exFAT and can't see a same-size in-place rewrite).
+                let unchanged = fs::metadata(&p).map(|m| m.len() == d.size).unwrap_or(false)
+                    && hash_file(&p).as_deref() == Some(d.hash.as_str());
                 if !unchanged || fs::remove_file(&p).is_err() {
                     note(p, &mut leftovers);
                 }
@@ -565,12 +642,20 @@ impl Carry {
     }
 }
 
-/// A cancelled job (Pounce just stops stepping it) is dropped mid-copy: discard the half-built
-/// destination and close the journal so the root isn't stuck "move in progress". Once committed
-/// there's nothing to undo; the journal stays and [`resume_open_moves`] finishes the cleanup.
+/// A cancelled job (Pounce just stops stepping it), or one that panicked mid-`step`, is dropped
+/// with the move unfinished (`move_id` still set -- every normal exit clears it):
+/// - mid-copy, before the commit: discard the half-built destination and close the journal;
+/// - after the commit: finish what cleanup would have done (delete only source files whose bytes
+///   match the destination) and close the journal;
+/// - mid-`fs::rename` window: leave the journal open for [`resume_open_moves`], which never
+///   guesses which side holds the folder.
 impl Drop for Carry {
     fn drop(&mut self) {
-        if !self.committed && self.move_id.is_some() && !matches!(self.phase, Phase::Finished) {
+        let Some(id) = self.move_id else { return };
+        if self.committed {
+            cleanup_matching(&self.src, &self.dest);
+            let _ = self.store.finish_root_move(id);
+        } else if self.copy_started {
             self.discard_dest();
         }
     }
@@ -648,27 +733,50 @@ pub fn resume_open_moves(store: &dyn CatalogStore) -> Vec<Resumed> {
         let dest = PathBuf::from(&m.dest_path);
         match m.state {
             MoveState::Copying => {
+                // `Copying` means the fast-path rename was never attempted (or was reverted), so
+                // `dest` only ever holds our own half-built copy.
                 if src.is_dir() {
                     let _ = fs::remove_dir_all(&dest);
                     let _ = store.finish_root_move(m.id);
                     out.push(Resumed::RolledBack { root_id: m.root_id });
-                } else if dest.is_dir() {
-                    // Source gone, destination present: the fast-path rename landed.
-                    match store
-                        .commit_root_move(m.id, &[])
-                        .and_then(|_| store.finish_root_move(m.id))
-                    {
-                        Ok(()) => out.push(Resumed::Committed { root_id: m.root_id }),
-                        Err(e) => out.push(Resumed::Stuck {
-                            root_id: m.root_id,
-                            reason: e.to_string(),
-                        }),
-                    }
                 } else {
                     out.push(Resumed::Stuck {
                         root_id: m.root_id,
                         reason: "neither the source nor the destination folder exists".into(),
                     });
+                }
+            }
+            MoveState::Renaming => {
+                // Never delete either side here: the rename may or may not have landed, and the
+                // source path may have been recreated since.
+                match (src.is_dir(), dest.is_dir()) {
+                    (false, true) => {
+                        match store
+                            .commit_root_move(m.id, &[])
+                            .and_then(|_| store.finish_root_move(m.id))
+                        {
+                            Ok(()) => out.push(Resumed::Committed { root_id: m.root_id }),
+                            Err(e) => out.push(Resumed::Stuck {
+                                root_id: m.root_id,
+                                reason: e.to_string(),
+                            }),
+                        }
+                    }
+                    (true, false) => {
+                        // The rename never happened; nothing moved.
+                        let _ = store.finish_root_move(m.id);
+                        out.push(Resumed::RolledBack { root_id: m.root_id });
+                    }
+                    (true, true) => out.push(Resumed::Stuck {
+                        root_id: m.root_id,
+                        reason: "the folder exists at both locations after an interrupted \
+                                 rename; check both before continuing"
+                            .into(),
+                    }),
+                    (false, false) => out.push(Resumed::Stuck {
+                        root_id: m.root_id,
+                        reason: "neither the source nor the destination folder exists".into(),
+                    }),
                 }
             }
             MoveState::Committed => {
@@ -839,7 +947,7 @@ mod tests {
         assert_eq!(fs::read(dest.join("day1/b.NEF")).unwrap(), vec![9u8; 100]);
         assert!(dest.join("empty-dir").is_dir());
         assert!(!f.src.exists());
-        assert!(!dest.join("a.NEF.partial").exists());
+        assert!(!dest.join("a.NEF.nicti-partial").exists());
         assert_eq!(
             fs::metadata(dest.join("a.NEF"))
                 .unwrap()
@@ -1045,9 +1153,11 @@ mod tests {
         let f = fixture();
         let dest = f.dest_parent.join("event-2026");
         // Simulate: journal opened, rename happened, crash before commit.
-        f.cat
+        let id = f
+            .cat
             .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
             .unwrap();
+        f.cat.set_root_move_state(id, MoveState::Renaming).unwrap();
         fs::rename(&f.src, &dest).unwrap();
 
         let r = resume_open_moves(&*f.cat);
@@ -1082,5 +1192,121 @@ mod tests {
             }]
         );
         assert_eq!(fs::read(f.src.join("a.xmp")).unwrap(), b"<edited/>");
+    }
+
+    #[test]
+    fn a_source_file_named_like_a_temp_copy_is_refused_not_clobbered() {
+        let f = fixture();
+        fs::write(f.src.join("x.NEF"), b"real").unwrap();
+        fs::write(f.src.join("x.NEF.nicti-partial"), b"user file").unwrap();
+        let mut c = carry(&f, true);
+        assert!(matches!(run(&mut c), CarryOutcome::Refused(_)));
+        assert_eq!(
+            fs::read(f.src.join("x.NEF.nicti-partial")).unwrap(),
+            b"user file"
+        );
+        assert!(!f.dest_parent.join("event-2026").exists());
+        no_journal(&f);
+    }
+
+    #[test]
+    fn a_source_file_ending_dot_partial_survives_the_move() {
+        // Regression: the old temp name was `<name>.partial`, so `x.NEF` and `x.NEF.partial`
+        // clobbered each other and the real `.partial` file was then deleted from the source.
+        let f = fixture();
+        for i in 0..30 {
+            fs::write(f.src.join(format!("p{i}.NEF")), format!("raw{i}")).unwrap();
+            fs::write(f.src.join(format!("p{i}.NEF.partial")), format!("side{i}")).unwrap();
+        }
+        let mut c = carry(&f, true);
+        assert!(matches!(run(&mut c), CarryOutcome::Moved { .. }));
+        let dest = f.dest_parent.join("event-2026");
+        for i in 0..30 {
+            assert_eq!(
+                fs::read(dest.join(format!("p{i}.NEF"))).unwrap(),
+                format!("raw{i}").as_bytes()
+            );
+            assert_eq!(
+                fs::read(dest.join(format!("p{i}.NEF.partial"))).unwrap(),
+                format!("side{i}").as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn resume_never_deletes_either_side_when_the_source_was_recreated_after_a_rename() {
+        // Regression: rename landed, commit never ran, then something recreated the source path.
+        // The old rollback saw "source exists" and deleted the moved folder.
+        let f = fixture();
+        let dest = f.dest_parent.join("event-2026");
+        let id = f
+            .cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
+            .unwrap();
+        f.cat.set_root_move_state(id, MoveState::Renaming).unwrap();
+        fs::rename(&f.src, &dest).unwrap();
+        fs::create_dir_all(&f.src).unwrap();
+
+        let r = resume_open_moves(&*f.cat);
+        assert!(matches!(r[..], [Resumed::Stuck { .. }]), "{r:?}");
+        assert!(dest.join("a.NEF").is_file(), "moved folder must survive");
+        assert_eq!(
+            f.cat.open_root_moves().unwrap().len(),
+            1,
+            "journal stays for a human"
+        );
+    }
+
+    #[test]
+    fn nested_roots_are_refused() {
+        let f = fixture();
+        let vol = f.cat.upsert_volume("test-vol", None, None, 0).unwrap();
+        f.cat
+            .ensure_root(vol, &f.src.join("day1").to_string_lossy())
+            .unwrap();
+        let mut c = carry(&f, true);
+        assert!(matches!(run(&mut c), CarryOutcome::Refused(_)));
+        assert!(f.src.join("a.NEF").is_file());
+        no_journal(&f);
+    }
+
+    #[test]
+    fn dropping_after_commit_finishes_cleanup_and_closes_the_journal() {
+        let f = fixture();
+        let mut c = carry(&f, true);
+        loop {
+            assert!(c.step().is_none());
+            if c.committed {
+                break;
+            }
+        }
+        drop(c); // cancel landed in the Cleanup phase
+        assert!(!f.src.exists());
+        assert!(f.dest_parent.join("event-2026/a.NEF").is_file());
+        no_journal(&f);
+    }
+
+    #[test]
+    fn a_same_size_rewrite_of_a_source_file_is_kept_not_deleted() {
+        // mtime alone can't see this on coarse-granularity filesystems; the re-hash does.
+        let f = fixture();
+        let src_xmp = f.src.join("a.xmp");
+        let mut c = carry(&f, true);
+        c.after_dest_written = Some(Box::new(move |partial| {
+            if partial
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("a.xmp")
+            {
+                fs::write(&src_xmp, b"<XMP/>").unwrap(); // same length as "<xmp/>"
+            }
+        }));
+        let out = run(&mut c);
+        let CarryOutcome::Moved { leftovers, .. } = out else {
+            panic!("expected Moved, got {out:?}");
+        };
+        assert_eq!(leftovers, vec![f.src.join("a.xmp")]);
+        assert_eq!(fs::read(f.src.join("a.xmp")).unwrap(), b"<XMP/>");
     }
 }

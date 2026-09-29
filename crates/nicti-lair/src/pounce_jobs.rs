@@ -407,3 +407,20 @@ impl ChunkedJob for MoveJob {
         }
     }
 }
+
+/// A cancelled (or panicked) move is dropped without ever reporting; fill the slot so the UI
+/// doesn't sit on "Moving..." forever.
+impl Drop for MoveJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(CarryOutcome::Failed(if self.carry.is_committed() {
+                "move interrupted after the catalog was updated; the folder is at its new \
+                 location and the original is cleaned up where the bytes match"
+                    .to_string()
+            } else {
+                "move cancelled; nothing was changed".to_string()
+            }));
+        }
+    }
+}
