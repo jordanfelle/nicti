@@ -11,7 +11,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     Asset, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, FacetCounts, Filter,
-    Keyword, NewAsset, Page, Preview, PreviewTier, Sort, SortDirection, SortField,
+    Keyword, MoveState, NewAsset, Page, Preview, PreviewTier, Root, RootMove, Sort, SortDirection,
+    SortField,
 };
 use nicti_claw::Module;
 
@@ -304,6 +305,20 @@ impl SqliteCatalog {
         self.conn.lock().unwrap().total_changes()
     }
 
+    /// The full-file BLAKE3 (hex) a verified folder move (#26) recorded for this asset; `None`
+    /// for an asset that has never been moved.
+    pub fn content_hash(&self, asset_id: i64) -> Result<Option<String>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT content_hash FROM asset WHERE id = ?1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// `PRAGMA user_version` of the live catalog -- Nine Lives compares this against a freshly
     /// written backup's own `user_version` as one of its verification checks (a `VACUUM INTO` copy
     /// always carries the source's schema version, so a mismatch would mean something read a
@@ -319,7 +334,20 @@ impl SqliteCatalog {
     /// `Ok(None)` means healthy; `Ok(Some(msg))` carries the first problem SQLite reported.
     pub fn quick_check(&self) -> Result<Option<String>, CatalogError> {
         let conn = self.conn.lock().unwrap();
-        first_check_problem(&conn, "quick_check")
+        match first_check_problem(&conn, "quick_check") {
+            // Sufficiently damaged pages make SQLite fail the pragma itself rather than list a
+            // problem row -- that's still "the live catalog is corrupt", not an I/O hiccup, and
+            // callers (Nine Lives) must see it as such instead of a generic error.
+            Err(CatalogError::Sqlite(rusqlite::Error::SqliteFailure(e, msg)))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                ) =>
+            {
+                Ok(Some(msg.unwrap_or_else(|| e.to_string())))
+            }
+            other => other,
+        }
     }
 
     /// Opens a fresh, independent read-only connection onto this catalog's own file for Nine
@@ -466,6 +494,145 @@ impl CatalogStore for SqliteCatalog {
             params![volume_id, rel_path],
             |row| row.get(0),
         )?)
+    }
+
+    fn list_roots(&self) -> Result<Vec<Root>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, volume_id, rel_path, archived FROM root ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Root {
+                id: row.get(0)?,
+                volume_id: row.get(1)?,
+                path: row.get(2)?,
+                archived: row.get::<_, i64>(3)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn begin_root_move(
+        &self,
+        root_id: i64,
+        dest_path: &str,
+        now_unix: i64,
+    ) -> Result<i64, CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let (volume_id, src_path): (i64, String) = tx
+            .query_row(
+                "SELECT volume_id, rel_path FROM root WHERE id = ?1",
+                params![root_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| CatalogError::Io(format!("root {root_id} does not exist")))?;
+        let open: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM root_move WHERE root_id = ?1",
+            params![root_id],
+            |row| row.get(0),
+        )?;
+        if open > 0 {
+            return Err(CatalogError::Io(format!(
+                "root {root_id} already has a move in progress"
+            )));
+        }
+        let taken: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM root WHERE volume_id = ?1 AND rel_path = ?2",
+            params![volume_id, dest_path],
+            |row| row.get(0),
+        )?;
+        if taken > 0 {
+            return Err(CatalogError::Io(format!(
+                "{dest_path} is already a registered folder"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO root_move (root_id, src_path, dest_path, state, started_at) \
+             VALUES (?1, ?2, ?3, 'copying', ?4)",
+            params![root_id, src_path, dest_path, now_unix],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    fn commit_root_move(&self, move_id: i64, hashes: &[(i64, String)]) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let (root_id, dest_path, state): (i64, String, String) = tx
+            .query_row(
+                "SELECT root_id, dest_path, state FROM root_move WHERE id = ?1",
+                params![move_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| CatalogError::Io(format!("move {move_id} does not exist")))?;
+        if state == "committed" {
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE root SET rel_path = ?1 WHERE id = ?2",
+            params![dest_path, root_id],
+        )?;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE asset SET content_hash = ?1 WHERE id = ?2 AND root_id = ?3")?;
+            for (asset_id, hash) in hashes {
+                stmt.execute(params![hash, asset_id, root_id])?;
+            }
+        }
+        tx.execute(
+            "UPDATE root_move SET state = 'committed' WHERE id = ?1",
+            params![move_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn set_root_move_state(&self, move_id: i64, state: MoveState) -> Result<(), CatalogError> {
+        let name = match state {
+            MoveState::Copying => "copying",
+            MoveState::Renaming => "renaming",
+            MoveState::Committed => {
+                return Err(CatalogError::Io(
+                    "a move is only committed via commit_root_move".into(),
+                ))
+            }
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE root_move SET state = ?1 WHERE id = ?2 AND state != 'committed'",
+            params![name, move_id],
+        )?;
+        Ok(())
+    }
+
+    fn finish_root_move(&self, move_id: i64) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM root_move WHERE id = ?1", params![move_id])?;
+        Ok(())
+    }
+
+    fn open_root_moves(&self) -> Result<Vec<RootMove>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, root_id, src_path, dest_path, state FROM root_move ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            let state: String = row.get(4)?;
+            Ok(RootMove {
+                id: row.get(0)?,
+                root_id: row.get(1)?,
+                src_path: row.get(2)?,
+                dest_path: row.get(3)?,
+                state: match state.as_str() {
+                    "committed" => MoveState::Committed,
+                    "renaming" => MoveState::Renaming,
+                    _ => MoveState::Copying,
+                },
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     fn find_asset_by_path(
@@ -1442,6 +1609,65 @@ mod tests {
     fn get_root_path_returns_none_for_a_root_id_that_does_not_exist() {
         let store = SqliteCatalog::open_in_memory().unwrap();
         assert_eq!(store.get_root_path(999).unwrap(), None);
+    }
+
+    #[test]
+    fn root_move_journal_begin_commit_finish() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "/ssd/e").unwrap();
+        let other = store.ensure_root(volume_id, "/archive/taken").unwrap();
+        let asset = store
+            .insert_asset(
+                root_id,
+                &NewAsset {
+                    rel_path: "a.NEF".into(),
+                    rel_path_fold: "a.nef".into(),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    fingerprint: None,
+                    natural_key: None,
+                    make: None,
+                    model: None,
+                    captured_at: None,
+                    width: None,
+                    height: None,
+                    imported_at: 0,
+                },
+                None,
+            )
+            .unwrap();
+
+        // A destination that is already a registered root is refused before any copying.
+        assert!(store.begin_root_move(root_id, "/archive/taken", 1).is_err());
+        assert!(store.begin_root_move(999, "/x", 1).is_err());
+
+        let id = store.begin_root_move(root_id, "/archive/e", 1).unwrap();
+        // One open move per root.
+        assert!(store.begin_root_move(root_id, "/archive/e2", 1).is_err());
+        assert_eq!(
+            store.open_root_moves().unwrap()[0].state,
+            MoveState::Copying
+        );
+        // Nothing is re-pointed until the commit.
+        assert_eq!(store.get_root_path(root_id).unwrap().unwrap(), "/ssd/e");
+
+        store
+            .commit_root_move(id, &[(asset, "abc".into()), (999, "ignored".into())])
+            .unwrap();
+        assert_eq!(store.get_root_path(root_id).unwrap().unwrap(), "/archive/e");
+        assert_eq!(store.content_hash(asset).unwrap().as_deref(), Some("abc"));
+        assert_eq!(
+            store.open_root_moves().unwrap()[0].state,
+            MoveState::Committed
+        );
+        // Committing again is a no-op, not an error.
+        store.commit_root_move(id, &[]).unwrap();
+
+        store.finish_root_move(id).unwrap();
+        assert!(store.open_root_moves().unwrap().is_empty());
+        assert_eq!(store.list_roots().unwrap().len(), 2);
+        let _ = other;
     }
 
     #[test]

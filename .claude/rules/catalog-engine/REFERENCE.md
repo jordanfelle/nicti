@@ -56,12 +56,20 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   Scheduled by `NineLives::due`, polled ~every 30s by `nicti-pelt`'s app loop — nothing runs at
   startup or on exit, by design. Runs as a 4-chunk Pounce job (`pounce_jobs::BackupJob`, new
   `JobKind::Backup`).
+- **Verified folder move (#26, landed)**: `docs/adr/0026`, "Carry". Re-scoped from "RAW backup to
+  TBD target" to LRC-style move-a-folder-to-another-drive. Copy each file to `.nicti-partial`, BLAKE3 as
+  read, `sync_all`, re-read+re-hash the destination, rename in; one transaction re-points the
+  `root` row (assets/edits/keywords follow, ids unchanged) and records `asset.content_hash`;
+  source deleted only after commit. `fs::rename` fast path on the same volume. `root_move` journal
+  + `carry::resume_open_moves` at startup for crash recovery; cancel = drop discards the
+  destination. Runs as `pounce_jobs::MoveJob` (`JobKind::Move`). Not a backup copy, no
+  drag-and-drop tree, no archive-drive behavior (#72).
 
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 landed; #25 landed) — the real production catalog
   implementation: `schema.rs`/`sqlite.rs`/`scruff.rs`/`patrol.rs`/`hunt.rs`/`clowder.rs`/
-  `ninelives.rs`, plus `larder.rs` (#27, T2 preview cache — see `preview-tiers`). Promotes the SQLite choice this topic's ADR series settled on. `spikes/den` (the
+  `ninelives.rs`/`carry.rs`, plus `larder.rs` (#27, T2 preview cache — see `preview-tiers`). Promotes the SQLite choice this topic's ADR series settled on. `spikes/den` (the
   throwaway comparison spike backing ADR-0067/0102/0106/0103/0107/0113/0115/0116 — one module per
   candidate engine plus a shared `Workload` trait and synthetic catalog generator) was deleted in
   #123 once #22 landed; the per-candidate findings above are the durable record, not the spike

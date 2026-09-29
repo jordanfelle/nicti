@@ -204,3 +204,17 @@ Covers the catalog database engine decision (SQLite) and every evaluated alterna
   granularity became clear. Filenames use plain Unix-second epochs, not a formatted UTC calendar
   timestamp — no `chrono`/`time` crate exists anywhere in this workspace, and adding one for
   filename cosmetics alone wasn't worth it.
+
+## #26: Verified folder move (Carry)
+
+Full ADR: `docs/adr/0026-verified-folder-move.md`. #26 was filed as a RAW backup to a TBD target;
+the user's actual workflow is dragging a folder to another drive in LRC, so it was re-scoped to a
+checksum-verified folder move (`crates/nicti-lair/src/carry.rs`). Files are copied to `.nicti-partial`,
+BLAKE3-hashed while read, `sync_all`'d, then re-read from the destination and re-hashed before
+being renamed into place. One catalog transaction re-points the `root` row and records each
+cataloged asset's full-file hash in the new `asset.content_hash`; only then is the source deleted
+(skipping files that changed since being copied). A `root_move` journal (schema v6) plus
+`resume_open_moves` at startup recovers a crash at any point; cancelling a job drops it, and
+`Carry`'s `Drop` discards the half-built destination. `fs::rename` is tried first for same-volume
+moves. Also: `SqliteCatalog::quick_check` now reports a corrupt-database error from the pragma as
+a problem string rather than a generic `Err`.

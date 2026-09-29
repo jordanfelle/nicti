@@ -20,6 +20,7 @@ mod model;
 pub mod schema;
 mod sqlite;
 
+pub mod carry;
 pub mod clowder;
 pub mod hunt;
 pub mod larder;
@@ -30,7 +31,7 @@ pub mod scruff;
 
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
-pub use model::{Asset, Keyword, NewAsset, Preview, PreviewTier};
+pub use model::{Asset, Keyword, MoveState, NewAsset, Preview, PreviewTier, Root, RootMove};
 pub use sqlite::SqliteCatalog;
 
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +82,36 @@ pub trait CatalogStore: Module {
 
     /// Registers (or finds) a tracked folder under a volume.
     fn ensure_root(&self, volume_id: i64, rel_path: &str) -> Result<i64, CatalogError>;
+
+    /// Every registered folder, in `id` order.
+    fn list_roots(&self) -> Result<Vec<Root>, CatalogError>;
+
+    /// Opens a `copying` journal row for a verified folder move of `root_id` to `dest_path`
+    /// (#26). Refuses (`CatalogError::Io`) if the root doesn't exist, already has an open move,
+    /// or `dest_path` is already a registered root on the same volume -- so a doomed move fails
+    /// before any file is copied.
+    fn begin_root_move(
+        &self,
+        root_id: i64,
+        dest_path: &str,
+        now_unix: i64,
+    ) -> Result<i64, CatalogError>;
+
+    /// The move's catalog commit, **one transaction**: re-points the root at the journal's
+    /// `dest_path`, records each `(asset_id, blake3_hex)` as that asset's `content_hash`, and
+    /// flips the journal to `committed`. Idempotent on an already-`committed` move.
+    fn commit_root_move(&self, move_id: i64, hashes: &[(i64, String)]) -> Result<(), CatalogError>;
+
+    /// Moves an open journal row to `state` (`Copying` <-> `Renaming`; `Committed` only via
+    /// `commit_root_move`).
+    fn set_root_move_state(&self, move_id: i64, state: MoveState) -> Result<(), CatalogError>;
+
+    /// Deletes the journal row: the move is fully done (`committed` and source cleaned up) or
+    /// abandoned (`copying`, destination copy discarded, catalog never re-pointed).
+    fn finish_root_move(&self, move_id: i64) -> Result<(), CatalogError>;
+
+    /// Every open journal row, for crash recovery at startup.
+    fn open_root_moves(&self) -> Result<Vec<RootMove>, CatalogError>;
 
     fn find_asset_by_path(
         &self,
