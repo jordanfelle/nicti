@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
+use super::kernels::FieldTexture;
 use super::local::LocalUniform;
+use crate::frame::FrameTexture;
 use crate::gpu::GpuContext;
 
 /// Channels (corrections) per atlas layer.
@@ -77,10 +79,24 @@ impl Atlas {
     }
 }
 
-/// Everything the live shader needs to apply this render's local corrections: the atlas and the
-/// per-correction uniforms (in atlas channel order).
+/// The cached per-photo inputs of the *spatial* local adjustments (see `bases`). Each is present
+/// only when some active correction needs it -- an image with only exposure masks builds none.
+#[derive(Clone, Default)]
+pub struct Bases {
+    /// `Rgba16Float` `(fine band, mid band, baked perceptual luma, 0)` for clarity/texture,
+    /// sampled bilinearly.
+    pub bands: Option<Arc<FrameTexture>>,
+    /// `R32Float` dehaze transmission, read with `textureLoad`.
+    pub haze: Option<Arc<FieldTexture>>,
+    /// Airlight colour in the baked (camera-linear) space.
+    pub airlight: [f32; 3],
+}
+
+/// Everything the live shader needs to apply this render's local corrections: the atlas, the
+/// per-correction uniforms (in atlas channel order) and the spatial bases.
 #[derive(Clone)]
 pub struct MaskFrame {
     pub atlas: Arc<Atlas>,
     pub uniforms: Vec<LocalUniform>,
+    pub bases: Bases,
 }

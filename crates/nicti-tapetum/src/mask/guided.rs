@@ -441,7 +441,7 @@ impl GuidedKernels {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::frame::Extent;
     use crate::test_util::{shared_test_gpu, upload_frame};
@@ -455,6 +455,14 @@ mod tests {
                 .map(|i| if i % w < edge_x { 0.15 } else { 0.85 })
                 .collect(),
         }
+    }
+
+    /// One `GuidedKernels` for the whole test binary (see `kernels::tests::shared_kernels`).
+    pub(crate) fn shared_kernels(
+        gpu: &std::sync::Arc<GpuContext>,
+    ) -> std::sync::Arc<GuidedKernels> {
+        static K: std::sync::OnceLock<std::sync::Arc<GuidedKernels>> = std::sync::OnceLock::new();
+        std::sync::Arc::clone(K.get_or_init(|| std::sync::Arc::new(GuidedKernels::new(gpu))))
     }
 
     #[test]
@@ -588,7 +596,7 @@ mod tests {
     #[test]
     fn the_gpu_refine_matches_the_cpu_reference() {
         let Some(gpu) = shared_test_gpu() else { return };
-        let k = GuidedKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         // Odd, non-multiple-of-8 extents so bounds handling is exercised.
         let (w, h, lw, lh) = (173usize, 111usize, 41usize, 27usize);
         let guide = textured_guide(w, h);
@@ -614,7 +622,7 @@ mod tests {
     #[test]
     fn the_gpu_guide_luma_matches_the_cpu_and_resamples() {
         let Some(gpu) = shared_test_gpu() else { return };
-        let k = GuidedKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let (fw, fh, mw, mh) = (90usize, 50usize, 47usize, 26usize);
         let frame: Vec<[f32; 4]> = (0..fw * fh)
             .map(|i| {

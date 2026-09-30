@@ -12,8 +12,11 @@
 //! tone (contrast/highlights/shadows/whites/blacks)* -> tone curve -> vibrance -> HSL ->
 //! saturation/hue/colour overlay*`.
 //!
-//! The spatial adjustments (clarity, texture, dehaze, sharpness, noise) are *not* here: they need
-//! neighbouring pixels and live in `basis`/`detail_combine`.
+//! The spatial adjustments need neighbouring pixels, so their *inputs* are precomputed and cached
+//! per photo (`bases`): clarity/texture read two detail bands of the baked luminance, dehaze reads a
+//! transmission map and an airlight colour. The shader only *applies* them, per pixel, scaled by
+//! the same stacked mask weights -- a slider drag is still uniform-only. Sharpness and noise
+//! reduction are per-pixel deltas into `detail_combine`.
 
 use super::params::{LocalCorrection, MaskParams, TintColor};
 use crate::coat::{HslParams, ToneParams};
@@ -25,6 +28,18 @@ pub const TEMP_STOPS: f32 = 0.5;
 pub const TINT_STOPS: f32 = 0.25;
 /// `hue` of +1 rotates colour around the grey axis by this many degrees (the HSL panel's scale).
 pub const HUE_DEGREES: f32 = 30.0;
+/// Strength of the clarity (mid-scale) band at a slider value of 1, in perceptual-luma units.
+pub const CLARITY_GAIN: f32 = 1.5;
+/// Strength of the texture (fine-scale) band at a slider value of 1.
+pub const TEXTURE_GAIN: f32 = 1.5;
+/// The luminance ratio a clarity/texture edit may apply is clamped to this range.
+pub const RATIO_RANGE: (f32, f32) = (0.25, 4.0);
+/// Fraction of the estimated haze the dark-channel prior removes at dehaze = 1 (He et al.'s omega).
+pub const HAZE_OMEGA: f32 = 0.95;
+/// Transmission floor, so dividing by it can't blow up a dense-haze pixel.
+pub const HAZE_T0: f32 = 0.1;
+/// A negative dehaze adds a *uniform* veil of up to this much, independent of the estimated haze.
+pub const VEIL_MAX: f32 = 0.5;
 /// Effective contrast is clamped to this range after stacking.
 pub const CONTRAST_RANGE: (f32, f32) = (-1.0, 2.0);
 /// Every other effective tone slider is clamped to `-TONE_LIMIT..=TONE_LIMIT` after stacking.
@@ -32,14 +47,15 @@ pub const TONE_LIMIT: f32 = 2.0;
 
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
-/// One correction as the shader reads it: four `vec4`s.
+/// One correction as the shader reads it: five `vec4`s.
 ///
 /// | field | x | y | z | w |
 /// |---|---|---|---|---|
 /// | `d0` | amount | exposure (stops) | contrast | highlights |
 /// | `d1` | shadows | whites | blacks | temp |
-/// | `d2` | tint | saturation | hue | 0 |
-/// | `d3` | tint multiplier r | g | b | 0 |
+/// | `d2` | tint | saturation | hue | noise |
+/// | `d3` | tint multiplier r | g | b | sharpness |
+/// | `d4` | clarity | texture | dehaze | 0 |
 #[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct LocalUniform {
@@ -47,6 +63,7 @@ pub struct LocalUniform {
     pub d1: [f32; 4],
     pub d2: [f32; 4],
     pub d3: [f32; 4],
+    pub d4: [f32; 4],
 }
 
 /// HSV -> RGB with `s = 1, v = 1`, hue in degrees: the pure colour of a tint swatch.
@@ -80,8 +97,9 @@ impl LocalUniform {
         Self {
             d0: [c.amount, a.exposure, a.contrast, a.highlights],
             d1: [a.shadows, a.whites, a.blacks, a.temp],
-            d2: [a.tint, a.saturation, a.hue, 0.0],
-            d3: [tint[0], tint[1], tint[2], 0.0],
+            d2: [a.tint, a.saturation, a.hue, a.noise],
+            d3: [tint[0], tint[1], tint[2], a.sharpness],
+            d4: [a.clarity, a.texture, a.dehaze, 0.0],
         }
     }
 }
@@ -105,6 +123,11 @@ pub struct LocalSums {
     pub saturation: f32,
     pub hue: f32,
     pub tint_mult: [f32; 3],
+    pub noise: f32,
+    pub sharpness: f32,
+    pub clarity: f32,
+    pub texture: f32,
+    pub dehaze: f32,
 }
 
 impl LocalSums {
@@ -127,6 +150,11 @@ impl LocalSums {
             for c in 0..3 {
                 s.tint_mult[c] += f * u.d3[c];
             }
+            s.noise += f * u.d2[3];
+            s.sharpness += f * u.d3[3];
+            s.clarity += f * u.d4[0];
+            s.texture += f * u.d4[1];
+            s.dehaze += f * u.d4[2];
         }
         s
     }
@@ -161,6 +189,71 @@ pub fn saturate(rgb: [f32; 3], amount: f32) -> [f32; 3] {
     rgb.map(|c| luma + (c - luma) * k)
 }
 
+/// What the cached bases hold for one pixel (see `bases`): the two detail bands of the baked
+/// perceptual luminance `g`, the dehaze transmission there, and the frame's airlight colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpatialPixel {
+    /// Fine-scale band: `g - base_fine`.
+    pub d_tex: f32,
+    /// Mid-scale band: `base_fine - base_coarse`.
+    pub d_clar: f32,
+    /// Perceptual luminance of the *baked* pixel.
+    pub g: f32,
+    /// Estimated transmission, 0..=1 (1 = no haze).
+    pub transmission: f32,
+    /// Airlight, in the baked (camera-linear) colour space.
+    pub airlight_cam: [f32; 3],
+}
+
+impl Default for SpatialPixel {
+    fn default() -> Self {
+        Self {
+            d_tex: 0.0,
+            d_clar: 0.0,
+            g: 0.5,
+            transmission: 1.0,
+            airlight_cam: [0.0; 3],
+        }
+    }
+}
+
+/// Dehaze in scene-linear working space. Positive `amount` divides the airlight out along the
+/// estimated transmission (`J = (I - A) / max(t', t0) + A`, `t' = 1 - amount * (1 - t)`); negative
+/// adds a uniform veil toward the airlight (`J = I * v + A * (1 - v)`).
+pub fn apply_dehaze(rgb: [f32; 3], transmission: f32, airlight: [f32; 3], amount: f32) -> [f32; 3] {
+    if amount == 0.0 {
+        return rgb;
+    }
+    if amount > 0.0 {
+        let t = (1.0 - amount * (1.0 - transmission)).max(HAZE_T0);
+        std::array::from_fn(|i| (rgb[i] - airlight[i]) / t + airlight[i])
+    } else {
+        let v = 1.0 - VEIL_MAX * (-amount).min(1.0);
+        std::array::from_fn(|i| rgb[i] * v + airlight[i] * (1.0 - v))
+    }
+}
+
+/// Clarity and texture: shifts the baked perceptual luma `g` by the mid/fine detail bands and
+/// applies the resulting brightness *ratio* to `rgb` (so chroma is preserved). Clarity is weighted
+/// toward midtones by the current pixel's own brightness; texture is not. The ratio is clamped so a
+/// hostile band value can't blow a pixel out.
+pub fn apply_bands(rgb: [f32; 3], sp: &SpatialPixel, clarity: f32, texture: f32) -> [f32; 3] {
+    if clarity == 0.0 && texture == 0.0 {
+        return rgb;
+    }
+    let luma = LUMA[0] * rgb[0] + LUMA[1] * rgb[1] + LUMA[2] * rgb[2];
+    let g_now = luma.max(0.0).cbrt().clamp(0.0, 1.0);
+    let mid = 4.0 * g_now * (1.0 - g_now);
+    let g_base = sp.g.max(1e-3);
+    let g_new =
+        (g_base + clarity * CLARITY_GAIN * mid * sp.d_clar + texture * TEXTURE_GAIN * sp.d_tex)
+            .max(0.0);
+    let ratio = (g_new / g_base)
+        .powf(2.2)
+        .clamp(RATIO_RANGE.0, RATIO_RANGE.1);
+    rgb.map(|c| c * ratio)
+}
+
 /// The global (non-local) inputs to one pixel, mirroring `live_suffix.wgsl`'s uniforms.
 pub struct PixelParams<'a> {
     pub matrix: Mat3,
@@ -187,14 +280,27 @@ pub fn effective_tone(global: &ToneParams, s: &LocalSums) -> ToneParams {
 /// The whole per-pixel live pipeline with local deltas applied -- what `live_suffix.wgsl` computes
 /// for a pixel whose stacked local sums are `s`. (No DCP profile: the CPU twin covers the path the
 /// masks add, and the profile path has its own parity test.)
-pub fn live_pixel(cam_rgb: [f32; 3], p: &PixelParams, s: &LocalSums) -> [f32; 3] {
+pub fn live_pixel(
+    cam_rgb: [f32; 3],
+    p: &PixelParams,
+    s: &LocalSums,
+    spatial: Option<&SpatialPixel>,
+) -> [f32; 3] {
     let mut rgb = color::mat3_apply(p.matrix, cam_rgb);
     let exposure = p.exposure_mult * s.exposure.exp2();
     rgb = rgb.map(|c| c * exposure);
+    if let Some(sp) = spatial {
+        // The airlight goes through the same matrix and exposure as the pixels it is subtracted from.
+        let a = color::mat3_apply(p.matrix, sp.airlight_cam).map(|c| c * exposure);
+        rgb = apply_dehaze(rgb, sp.transmission, a, s.dehaze);
+    }
     let gains = temp_tint_gains(s.temp, s.tint);
     rgb = std::array::from_fn(|i| rgb[i] * gains[i]);
     rgb = color::apply_tone(rgb, &effective_tone(&p.tone, s));
     rgb = color::apply_tone_curve(rgb, p.lut);
+    if let Some(sp) = spatial {
+        rgb = apply_bands(rgb, sp, s.clarity, s.texture);
+    }
     rgb = color::apply_vibrance(rgb, p.vibrance);
     rgb = color::apply_hsl(rgb, p.hsl);
     rgb = saturate(rgb, s.saturation);
@@ -259,8 +365,13 @@ mod tests {
                 1.0,
             )],
         });
-        let with = live_pixel([0.2, 0.3, 0.1], &p, &LocalSums::accumulate(&u, &[0.0]));
-        let without = live_pixel([0.2, 0.3, 0.1], &p, &LocalSums::default());
+        let with = live_pixel(
+            [0.2, 0.3, 0.1],
+            &p,
+            &LocalSums::accumulate(&u, &[0.0]),
+            None,
+        );
+        let without = live_pixel([0.2, 0.3, 0.1], &p, &LocalSums::default(), None);
         assert_eq!(with, without);
     }
 
@@ -280,9 +391,19 @@ mod tests {
                 1.0,
             )],
         });
-        let base = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::default());
-        let inside = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::accumulate(&u, &[1.0]));
-        let outside = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::accumulate(&u, &[0.0]));
+        let base = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::default(), None);
+        let inside = live_pixel(
+            [0.1, 0.05, 0.02],
+            &p,
+            &LocalSums::accumulate(&u, &[1.0]),
+            None,
+        );
+        let outside = live_pixel(
+            [0.1, 0.05, 0.02],
+            &p,
+            &LocalSums::accumulate(&u, &[0.0]),
+            None,
+        );
         assert!(close(outside, base, 1e-7));
         for c in 0..3 {
             assert!(
@@ -307,8 +428,8 @@ mod tests {
                 1.0,
             )],
         });
-        let base = live_pixel([0.1; 3], &p, &LocalSums::default())[0];
-        let half = live_pixel([0.1; 3], &p, &LocalSums::accumulate(&u, &[0.5]))[0];
+        let base = live_pixel([0.1; 3], &p, &LocalSums::default(), None)[0];
+        let half = live_pixel([0.1; 3], &p, &LocalSums::accumulate(&u, &[0.5]), None)[0];
         assert!(
             (half / base - 2.0).abs() < 0.01,
             "+1 stop at half weight of +2"
@@ -451,7 +572,7 @@ mod tests {
         assert_eq!(u.d0, [0.75, 0.1, 0.2, 0.3]);
         assert_eq!(u.d1, [0.4, 0.5, 0.6, 0.7]);
         assert_eq!(u.d2, [0.8, 0.9, 0.11, 0.0]);
-        assert_eq!(std::mem::size_of::<LocalUniform>(), 64);
+        assert_eq!(std::mem::size_of::<LocalUniform>(), 80);
     }
 
     #[test]
@@ -481,8 +602,8 @@ mod tests {
 
 #[cfg(test)]
 mod gpu_tests {
-    use super::super::atlas::{Atlas, MaskFrame};
-    use super::super::kernels::{FieldTexture, MaskKernels};
+    use super::super::atlas::{Atlas, Bases, MaskFrame};
+    use super::super::kernels::FieldTexture;
     use super::super::params::{LocalAdjust, MaskComponent, MaskGroup, MaskSource};
     use super::super::Field;
     use super::*;
@@ -591,7 +712,7 @@ mod gpu_tests {
             };
             let uniforms = pack_active(&params);
             let atlas = Atlas::new(gpu, W as u32, H as u32, uniforms.len());
-            let kernels = MaskKernels::new(gpu);
+            let kernels = super::super::kernels::tests::shared_kernels(gpu);
             let textures: Vec<FieldTexture> = setup
                 .fields
                 .iter()
@@ -617,6 +738,7 @@ mod gpu_tests {
                 Some(&MaskFrame {
                     atlas: Arc::new(atlas),
                     uniforms,
+                    bases: Bases::default(),
                 }),
             );
         }
@@ -648,7 +770,7 @@ mod gpu_tests {
             .map(|(i, px)| {
                 let weights: Vec<f32> = setup.fields.iter().map(|f| f.data[i]).collect();
                 let sums = LocalSums::accumulate(&uniforms, &weights);
-                live_pixel([px[0], px[1], px[2]], &p, &sums)
+                live_pixel([px[0], px[1], px[2]], &p, &sums, None)
             })
             .collect()
     }
@@ -821,5 +943,485 @@ mod gpu_tests {
                 }
             }
         }
+    }
+}
+
+/// End-to-end tests of the spatial adjustments through the real engine and live kernel.
+#[cfg(test)]
+mod spatial_tests {
+    use super::super::atlas::MaskFrame;
+    use super::super::bases;
+    use super::super::engine::{MaskEngine, MaskInputs};
+    use super::super::guided;
+    use super::super::params::{LocalAdjust, MaskComponent, MaskGroup, MaskSource};
+    use super::*;
+    use crate::coat::{
+        ExposureParams, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
+        VibranceParams,
+    };
+    use crate::frame::{Extent, FrameTexture};
+    use crate::gpu::GpuContext;
+    use crate::renderer::LiveExec;
+    use crate::stages::{LiveParams, LiveSuffixKernel};
+    use crate::test_util::{read_frame, shared_test_gpu, upload_frame};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const W: usize = 384;
+    const H: usize = 256;
+
+    fn luma(p: &[f32; 4]) -> f32 {
+        LUMA[0] * p[0] + LUMA[1] * p[1] + LUMA[2] * p[2]
+    }
+
+    /// A correction whose mask covers the whole frame.
+    fn everywhere(adjust: LocalAdjust) -> LocalCorrection {
+        LocalCorrection {
+            id: "all".into(),
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::RadialGradient {
+                        center: [0.5, 0.5],
+                        radii: [4.0, 4.0],
+                        angle_deg: 0.0,
+                        feather: 0.5,
+                    },
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust,
+            ..LocalCorrection::default()
+        }
+    }
+
+    /// Renders `frame` through the neutral live pipeline with `corrections` (the frame itself is
+    /// the guide, as it is in the real graph). Returns the pixels and the mask frame used.
+    fn render(
+        gpu: &Arc<GpuContext>,
+        frame: &[[f32; 4]],
+        corrections: Vec<LocalCorrection>,
+    ) -> (Vec<[f32; 4]>, Option<MaskFrame>) {
+        let extent = Extent {
+            width: W as u32,
+            height: H as u32,
+        };
+        let input = upload_frame(gpu, extent, frame);
+        let output = FrameTexture::new(gpu, extent);
+        let kernel = LiveSuffixKernel::new(gpu);
+        kernel.set_params(
+            gpu,
+            &LiveParams {
+                working_space_matrix: color::mat3_identity(),
+                exposure: ExposureParams::default(),
+                tone: ToneParams::default(),
+                tone_curve: ToneCurveParams::default(),
+                vibrance: VibranceParams::default(),
+                hsl: HslParams::default(),
+                sharpen: SharpenParams::default(),
+                noise_reduction: NoiseReductionParams::default(),
+                camera_profile: None,
+                pixel_scale: 1.0,
+            },
+        );
+        let params = MaskParams { corrections };
+        let mut engine = MaskEngine::with_kernels(
+            super::super::kernels::tests::shared_kernels(gpu),
+            super::super::guided::tests::shared_kernels(gpu),
+            super::super::bases::tests::shared_kernels(gpu),
+        );
+        let alphas = HashMap::new();
+        let mask_frame = engine.prepare(
+            gpu,
+            &MaskInputs {
+                params: &params,
+                ai_alphas: &alphas,
+                neutral_key: blake3::hash(b"n"),
+                guide: &input,
+                guide_key: blake3::hash(b"g"),
+                range_matrix: color::mat3_identity(),
+            },
+        );
+        kernel.set_masks(gpu, mask_frame.as_ref());
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(gpu, &mut enc, &input, &output);
+        gpu.queue.submit(Some(enc.finish()));
+        (read_frame(gpu, &output), mask_frame)
+    }
+
+    /// Standard deviation of the local high-pass (pixel minus its `r`-box mean) over a region.
+    fn highpass_std(px: &[[f32; 4]], r: usize, x0: usize, x1: usize, y0: usize, y1: usize) -> f32 {
+        let l: Vec<f32> = px.iter().map(luma).collect();
+        let mut acc = 0.0f32;
+        let mut n = 0.0f32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let mut sum = 0.0;
+                let mut c = 0.0;
+                for yy in y.saturating_sub(r)..=(y + r).min(H - 1) {
+                    for xx in x.saturating_sub(r)..=(x + r).min(W - 1) {
+                        sum += l[yy * W + xx];
+                        c += 1.0;
+                    }
+                }
+                let d = l[y * W + x] - sum / c;
+                acc += d * d;
+                n += 1.0;
+            }
+        }
+        (acc / n).sqrt()
+    }
+
+    fn mean_luma(px: &[[f32; 4]]) -> f32 {
+        px.iter().map(luma).sum::<f32>() / px.len() as f32
+    }
+
+    /// Mid-scale blobs (wavelength ~24 px) on a broad gradient, with a hard step edge down the
+    /// right-hand side.
+    fn blob_scene() -> Vec<[f32; 4]> {
+        (0..W * H)
+            .map(|i| {
+                let (x, y) = ((i % W) as f32, (i / W) as f32);
+                let base = 0.10 + 0.08 * x / W as f32;
+                let blobs = 0.020 * (x * 0.26).sin() * (y * 0.26).cos();
+                let step = if x > 300.0 { 0.16 } else { 0.0 };
+                let v = base + blobs + step;
+                [v, v * 0.9, v * 0.8, 1.0]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn clarity_adds_local_contrast_keeps_the_mean_and_does_not_halo_a_hard_edge() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = blob_scene();
+        let (base, none) = render(&gpu, &scene, vec![]);
+        assert!(none.is_none());
+        let clarity = |amount: f32| {
+            render(
+                &gpu,
+                &scene,
+                vec![everywhere(LocalAdjust {
+                    clarity: amount,
+                    ..LocalAdjust::default()
+                })],
+            )
+            .0
+        };
+        let boosted = clarity(1.0);
+        let softened = clarity(-1.0);
+
+        // Blob region (well away from the step): local contrast rises / falls.
+        let s = |px: &[[f32; 4]]| highpass_std(px, 12, 40, 250, 40, 216);
+        let (s0, s_up, s_down) = (s(&base), s(&boosted), s(&softened));
+        assert!(
+            s_up > s0 * 1.2,
+            "clarity +1 must raise local contrast: {s0} -> {s_up}"
+        );
+        assert!(
+            s_down < s0 * 0.9,
+            "clarity -1 must lower it: {s0} -> {s_down}"
+        );
+        // Overall brightness is not shifted.
+        assert!(
+            (mean_luma(&boosted) / mean_luma(&base) - 1.0).abs() < 0.04,
+            "the mean moved: {} -> {}",
+            mean_luma(&base),
+            mean_luma(&boosted)
+        );
+    }
+
+    /// Two flat plateaus and a hard step: the cleanest place to look for a halo, because nothing
+    /// else in the image is *supposed* to change.
+    #[test]
+    fn clarity_does_not_halo_a_hard_edge() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene: Vec<[f32; 4]> = (0..W * H)
+            .map(|i| {
+                let v = if i % W < 300 { 0.13 } else { 0.29 };
+                [v, v, v, 1.0]
+            })
+            .collect();
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let (boosted, _) = render(
+            &gpu,
+            &scene,
+            vec![everywhere(LocalAdjust {
+                clarity: 1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        // Local contrast legitimately steepens the edge itself (that is what clarity is), but the
+        // effect stays local: past ~3x the coarse radius from the step the plateau is untouched,
+        // and near it the change is bounded (a Gaussian-based clarity rings visibly for tens of
+        // pixels here, and shifts the whole plateau).
+        let reach = 3 * bases::coarse_radius(W, H);
+        for y in [60usize, 128, 200] {
+            for x in (0..W).filter(|&x| (x as i32 - 300).unsigned_abs() as usize > reach) {
+                let (b, o) = (luma(&base[y * W + x]), luma(&boosted[y * W + x]));
+                assert!(
+                    (o / b - 1.0).abs() < 0.02,
+                    "halo reaches x={x} (>{reach}px from the edge) at y={y}: {b} -> {o}"
+                );
+            }
+            for x in (300 - reach)..(300 + reach) {
+                let (b, o) = (luma(&base[y * W + x]), luma(&boosted[y * W + x]));
+                assert!(
+                    (o / b - 1.0).abs() < 0.30,
+                    "overshoot at ({x},{y}): {b} -> {o}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn texture_boosts_fine_detail_and_leaves_broad_shading_alone() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        // A smooth ramp plus fine checker speckle.
+        let scene: Vec<[f32; 4]> = (0..W * H)
+            .map(|i| {
+                let (x, y) = (i % W, i / W);
+                let v =
+                    0.15 + 0.15 * x as f32 / W as f32 + if (x + y) % 2 == 0 { 0.02 } else { -0.02 };
+                [v, v, v, 1.0]
+            })
+            .collect();
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let (boosted, _) = render(
+            &gpu,
+            &scene,
+            vec![everywhere(LocalAdjust {
+                texture: 1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        let fine = |px: &[[f32; 4]]| highpass_std(px, 1, 20, W - 20, 20, H - 20);
+        assert!(
+            fine(&boosted) > fine(&base) * 1.4,
+            "texture +1 must raise fine detail: {} -> {}",
+            fine(&base),
+            fine(&boosted)
+        );
+        // Broad shading is untouched: compare the two images after blurring the speckle away.
+        let blurred = |px: &[[f32; 4]]| -> Vec<f32> {
+            let l: Vec<f32> = px.iter().map(luma).collect();
+            let r = 5usize;
+            (0..W * H)
+                .map(|i| {
+                    let (x, y) = (i % W, i / W);
+                    let mut sum = 0.0;
+                    let mut c = 0.0;
+                    for yy in y.saturating_sub(r)..=(y + r).min(H - 1) {
+                        for xx in x.saturating_sub(r)..=(x + r).min(W - 1) {
+                            sum += l[yy * W + xx];
+                            c += 1.0;
+                        }
+                    }
+                    sum / c
+                })
+                .collect()
+        };
+        let (b0, b1) = (blurred(&base), blurred(&boosted));
+        let drift =
+            b0.iter().zip(&b1).map(|(a, b)| (a - b).abs()).sum::<f32>() / b0.iter().sum::<f32>();
+        assert!(
+            drift < 0.03,
+            "broad shading drifted by {:.1} %",
+            drift * 100.0
+        );
+    }
+
+    /// Dark-channel dehaze on `I = J t + A (1 - t)`: with the prior's own assumption satisfied
+    /// (dark pixels in every window) the recovered image must be much closer to the haze-free `J`.
+    #[test]
+    fn dehaze_recovers_a_synthetic_hazy_scene() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let a = [0.85f32, 0.86, 0.90];
+        let t = 0.55f32;
+        // The prior needs something to anchor the airlight on: a hazy sky band across the top,
+        // where the pixel *is* the airlight (as in any real hazy landscape).
+        let scene_j: Vec<[f32; 4]> = (0..W * H)
+            .map(|i| {
+                let (x, y) = (i % W, i / W);
+                if y < 24 {
+                    [a[0], a[1], a[2], 1.0]
+                } else if (x * 5 + y * 11) % 8 == 0 {
+                    [0.015, 0.015, 0.015, 1.0]
+                } else {
+                    let f = 0.25 + 0.35 * (x as f32 / W as f32);
+                    [f, 0.3 + 0.2 * (y as f32 / H as f32), 0.15 + 0.2 * f, 1.0]
+                }
+            })
+            .collect();
+        let hazy: Vec<[f32; 4]> = scene_j
+            .iter()
+            .map(|p| {
+                [
+                    p[0] * t + a[0] * (1.0 - t),
+                    p[1] * t + a[1] * (1.0 - t),
+                    p[2] * t + a[2] * (1.0 - t),
+                    1.0,
+                ]
+            })
+            .collect();
+        let (truth, _) = render(&gpu, &scene_j, vec![]);
+        let (unfixed, _) = render(&gpu, &hazy, vec![]);
+        let (fixed, frame) = render(
+            &gpu,
+            &hazy,
+            vec![everywhere(LocalAdjust {
+                dehaze: 1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        let est = frame.unwrap().bases.airlight;
+        for c in 0..3 {
+            assert!(
+                (est[c] - a[c]).abs() < 0.1,
+                "airlight channel {c}: estimated {} vs {}",
+                est[c],
+                a[c]
+            );
+        }
+        let error = |px: &[[f32; 4]]| {
+            px.iter()
+                .zip(&truth)
+                .map(|(p, q)| (0..3).map(|c| (p[c] - q[c]).abs()).sum::<f32>() / 3.0)
+                .sum::<f32>()
+                / px.len() as f32
+        };
+        let (before, after) = (error(&unfixed), error(&fixed));
+        assert!(
+            after < before * 0.5,
+            "dehaze must recover most of the scene: error {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn negative_dehaze_adds_a_veil_and_zero_changes_nothing() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = blob_scene();
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let (zero, _) = render(
+            &gpu,
+            &scene,
+            vec![everywhere(LocalAdjust {
+                dehaze: 0.0,
+                exposure: 0.0001,
+                ..LocalAdjust::default()
+            })],
+        );
+        for (a, b) in base.iter().zip(&zero) {
+            assert!((luma(a) - luma(b)).abs() < 1e-3);
+        }
+        let (veiled, _) = render(
+            &gpu,
+            &scene,
+            vec![everywhere(LocalAdjust {
+                dehaze: -1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        // A veil toward the (bright) airlight lowers contrast and lifts the shadows.
+        assert!(mean_luma(&veiled) > mean_luma(&base));
+        assert!(
+            highpass_std(&veiled, 12, 40, 250, 40, 216) < highpass_std(&base, 12, 40, 250, 40, 216)
+        );
+    }
+
+    /// The application step on the GPU must equal the CPU twin given the same bases: this pins the
+    /// shader's band/dehaze maths (indexing, sampling, order in the pipeline) independently of the
+    /// outcome tests above.
+    #[test]
+    fn the_gpu_spatial_application_matches_the_cpu_twin() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let a = [0.8f32, 0.82, 0.88];
+        let scene: Vec<[f32; 4]> = blob_scene()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let dark = (i % W * 3 + i / W * 7).is_multiple_of(10);
+                let k = if dark { 0.1 } else { 1.0 };
+                [
+                    p[0] * k * 0.6 + a[0] * 0.4,
+                    p[1] * k * 0.6 + a[1] * 0.4,
+                    p[2] * k * 0.6 + a[2] * 0.4,
+                    1.0,
+                ]
+            })
+            .collect();
+        let adjust = LocalAdjust {
+            clarity: 0.7,
+            texture: 0.5,
+            dehaze: 0.6,
+            ..LocalAdjust::default()
+        };
+        let (got, frame) = render(&gpu, &scene, vec![everywhere(adjust)]);
+        let frame = frame.unwrap();
+
+        // The same bases on the CPU, at the (identical) extent.
+        let g = guided::guide_from_frame(&scene, W, H, W, H);
+        let (fine, mid) = bases::bands_cpu(&g);
+        let airlight = frame.bases.airlight;
+        let trans = bases::transmission_cpu(&scene, W, H, airlight, &g);
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        let p = PixelParams {
+            matrix: color::mat3_identity(),
+            exposure_mult: 1.0,
+            tone: ToneParams::default(),
+            lut: &lut,
+            vibrance: 0.0,
+            hsl: &hsl,
+        };
+        let uniforms = pack_active(&MaskParams {
+            corrections: vec![everywhere(adjust)],
+        });
+        let mut worst = 0.0f32;
+        for (i, px) in scene.iter().enumerate() {
+            let sums = LocalSums::accumulate(&uniforms, &[1.0]);
+            let sp = SpatialPixel {
+                d_tex: fine.data[i],
+                d_clar: mid.data[i],
+                g: g.data[i],
+                transmission: trans.data[i],
+                airlight_cam: airlight,
+            };
+            let want = live_pixel([px[0], px[1], px[2]], &p, &sums, Some(&sp));
+            for c in 0..3 {
+                worst = worst.max((got[i][c] - want[c]).abs());
+            }
+        }
+        assert!(
+            worst < 0.05,
+            "GPU vs CPU spatial application differ by {worst}"
+        );
+    }
+
+    #[test]
+    fn bases_are_built_only_when_a_correction_needs_them() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = blob_scene();
+        let (_, only_exposure) = render(
+            &gpu,
+            &scene,
+            vec![everywhere(LocalAdjust {
+                exposure: 1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        let f = only_exposure.unwrap();
+        assert!(f.bases.bands.is_none() && f.bases.haze.is_none());
+        let (_, clarity) = render(
+            &gpu,
+            &scene,
+            vec![everywhere(LocalAdjust {
+                clarity: 0.3,
+                ..LocalAdjust::default()
+            })],
+        );
+        let f = clarity.unwrap();
+        assert!(f.bases.bands.is_some() && f.bases.haze.is_none());
     }
 }

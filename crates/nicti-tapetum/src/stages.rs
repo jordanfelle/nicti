@@ -612,10 +612,16 @@ struct MaskBinding {
     /// `None` = no local corrections: the dummy atlas below is bound and count is 0.
     frame: Option<crate::mask::atlas::MaskFrame>,
     dummy: Arc<crate::mask::atlas::Atlas>,
+    /// 1x1 stand-ins for the spatial bases (`bases_tex` / `haze_tex`), never read while their
+    /// header flag is 0.
+    dummy_bands: FrameTexture,
+    dummy_haze: crate::mask::kernels::FieldTexture,
 }
 
-/// Bytes of the mask uniform block: a `vec4` header plus 16 corrections x 4 `vec4`s.
-const MASK_UNIFORM_BYTES: u64 = 16 + (crate::mask::params::MAX_CORRECTIONS as u64) * 64;
+/// Bytes of the mask uniform block: two `vec4` headers plus 16 corrections x 5 `vec4`s.
+const MASK_UNIFORM_BYTES: u64 = 32
+    + (crate::mask::params::MAX_CORRECTIONS as u64)
+        * std::mem::size_of::<crate::mask::local::LocalUniform>() as u64;
 
 struct ProfileTables {
     hue_sat_view: wgpu::TextureView,
@@ -758,6 +764,14 @@ impl LiveSuffixKernel {
             mask_state: std::sync::Mutex::new(MaskBinding {
                 frame: None,
                 dummy: Arc::new(crate::mask::atlas::Atlas::new(gpu, 1, 1, 0)),
+                dummy_bands: FrameTexture::new(
+                    gpu,
+                    crate::frame::Extent {
+                        width: 1,
+                        height: 1,
+                    },
+                ),
+                dummy_haze: crate::mask::kernels::FieldTexture::new(gpu, 1, 1),
             }),
             // Clamp on every axis: unlike the DCP sampler, the mask must not wrap at the borders.
             mask_sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -780,10 +794,24 @@ impl LiveSuffixKernel {
             f.uniforms.len().min(crate::mask::params::MAX_CORRECTIONS)
         });
         let mut block = vec![0u8; MASK_UNIFORM_BYTES as usize];
-        block[..4].copy_from_slice(&(count as f32).to_ne_bytes());
+        // header: (count, bands bound, haze bound, 0), then the airlight, then the corrections.
+        let header: [f32; 8] = match frame {
+            Some(f) => [
+                count as f32,
+                f32::from(f.bases.bands.is_some()),
+                f32::from(f.bases.haze.is_some()),
+                0.0,
+                f.bases.airlight[0],
+                f.bases.airlight[1],
+                f.bases.airlight[2],
+                0.0,
+            ],
+            None => [0.0; 8],
+        };
+        block[..32].copy_from_slice(bytemuck::cast_slice(&header));
         if let Some(f) = frame {
             let bytes: &[u8] = bytemuck::cast_slice(&f.uniforms[..count]);
-            block[16..16 + bytes.len()].copy_from_slice(bytes);
+            block[32..32 + bytes.len()].copy_from_slice(bytes);
         }
         gpu.queue.write_buffer(&self.mask_buf, 0, &block);
         self.mask_state.lock().unwrap().frame = frame.cloned();
@@ -871,6 +899,22 @@ impl LiveSuffixKernel {
             Some(f) => &f.atlas.array_view,
             None => &mask_state.dummy.array_view,
         };
+        let bands_view = match mask_state
+            .frame
+            .as_ref()
+            .and_then(|f| f.bases.bands.as_ref())
+        {
+            Some(b) => &b.view,
+            None => &mask_state.dummy_bands.view,
+        };
+        let haze_view = match mask_state
+            .frame
+            .as_ref()
+            .and_then(|f| f.bases.haze.as_ref())
+        {
+            Some(h) => &h.view,
+            None => &mask_state.dummy_haze.view,
+        };
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live_suffix bind group"),
             layout: &bind_group_layout,
@@ -910,6 +954,14 @@ impl LiveSuffixKernel {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(bands_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(haze_view),
                 },
             ],
         });

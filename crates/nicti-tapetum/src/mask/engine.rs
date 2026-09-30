@@ -21,7 +21,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::atlas::{Atlas, MaskFrame, CHANNELS};
+use super::atlas::{Atlas, Bases, MaskFrame, CHANNELS};
+use super::bases::{self, BasesKernels, ThumbTexture};
 use super::compose::{ai_bake_key, hash_group, stable_hash};
 use super::guided::{self, GuidedKernels};
 use super::kernels::{bin_stroke, FieldTexture, MaskKernels};
@@ -31,7 +32,7 @@ use super::raster;
 use super::Field;
 use crate::cache::Tier;
 use crate::color::Mat3;
-use crate::frame::FrameTexture;
+use crate::frame::{Extent, FrameTexture};
 use crate::gpu::GpuContext;
 
 /// Longest mask edge. A 45 MP frame's masks are 4096 px on the long edge (~45 MB per `R32Float`
@@ -42,6 +43,8 @@ const COMPOSITE_BUDGET: u64 = 512 << 20;
 const REFINED_BUDGET: u64 = 256 << 20;
 const GUIDE_BUDGET: u64 = 128 << 20;
 const BRUSH_BUDGET: u64 = 384 << 20;
+const BANDS_BUDGET: u64 = 128 << 20;
+const HAZE_BUDGET: u64 = 64 << 20;
 
 /// The mask extent for a frame of `width x height`.
 pub fn mask_extent(width: u32, height: u32) -> (u32, u32) {
@@ -104,6 +107,10 @@ pub struct MaskStats {
     pub range_passes: usize,
     /// Atlas repacks.
     pub packs: usize,
+    /// Clarity/texture band builds.
+    pub band_builds: usize,
+    /// Dehaze transmission + airlight builds.
+    pub haze_builds: usize,
 }
 
 /// Everything one `prepare` reads.
@@ -122,6 +129,13 @@ pub struct MaskInputs<'a> {
     pub range_matrix: Mat3,
 }
 
+/// A finished dehaze base: the refined transmission and the airlight it was built against.
+#[derive(Clone)]
+struct HazeState {
+    transmission: Arc<FieldTexture>,
+    airlight: [f32; 3],
+}
+
 #[derive(Clone)]
 struct BrushState {
     tex: Arc<FieldTexture>,
@@ -135,8 +149,11 @@ struct Cx<'a> {
 }
 
 pub struct MaskEngine {
-    kernels: MaskKernels,
-    guided: GuidedKernels,
+    kernels: Arc<MaskKernels>,
+    guided: Arc<GuidedKernels>,
+    bases_kernels: Arc<BasesKernels>,
+    band_cache: Tier<Arc<FrameTexture>>,
+    haze_cache: Tier<HazeState>,
     composites: Tier<Arc<FieldTexture>>,
     refined: Tier<Arc<FieldTexture>>,
     guides: Tier<Arc<FieldTexture>>,
@@ -161,9 +178,26 @@ fn submit(gpu: &GpuContext, build: impl FnOnce(&mut wgpu::CommandEncoder)) {
 
 impl MaskEngine {
     pub fn new(gpu: &GpuContext) -> Self {
+        Self::with_kernels(
+            Arc::new(MaskKernels::new(gpu)),
+            Arc::new(GuidedKernels::new(gpu)),
+            Arc::new(BasesKernels::new(gpu)),
+        )
+    }
+
+    /// An engine over already-built pipelines (so several engines, or a test binary, compile them
+    /// once).
+    pub fn with_kernels(
+        kernels: Arc<MaskKernels>,
+        guided: Arc<GuidedKernels>,
+        bases_kernels: Arc<BasesKernels>,
+    ) -> Self {
         Self {
-            kernels: MaskKernels::new(gpu),
-            guided: GuidedKernels::new(gpu),
+            kernels,
+            guided,
+            bases_kernels,
+            band_cache: Tier::new(BANDS_BUDGET, |f: &Arc<FrameTexture>| f.byte_size()),
+            haze_cache: Tier::new(HAZE_BUDGET, |h: &HazeState| h.transmission.byte_size()),
             composites: Tier::new(COMPOSITE_BUDGET, field_size),
             refined: Tier::new(REFINED_BUDGET, field_size),
             guides: Tier::new(GUIDE_BUDGET, field_size),
@@ -222,9 +256,25 @@ impl MaskEngine {
                 atlas
             }
         };
+        // The spatial bases are built only when some active correction uses them, and depend only
+        // on the guide frame -- never on a slider, an Amount or a mask edit.
+        let needs_bands = active
+            .iter()
+            .any(|c| c.adjust.clarity != 0.0 || c.adjust.texture != 0.0);
+        let needs_haze = active.iter().any(|c| c.adjust.dehaze != 0.0);
+        let mut bases = Bases::default();
+        if needs_bands {
+            bases.bands = Some(self.bands(gpu, &cx));
+        }
+        if needs_haze {
+            let haze = self.haze(gpu, &cx);
+            bases.haze = Some(haze.transmission);
+            bases.airlight = haze.airlight;
+        }
         Some(MaskFrame {
             atlas,
             uniforms: pack_active(&params),
+            bases,
         })
     }
 
@@ -453,7 +503,17 @@ impl MaskEngine {
     }
 
     fn guide_luma(&mut self, gpu: &GpuContext, cx: &Cx) -> Arc<FieldTexture> {
-        let (mw, mh) = cx.mask;
+        self.guide_luma_at(gpu, cx, cx.mask)
+    }
+
+    /// The guide luminance resampled to `extent` (the mask extent, or the smaller bases extent).
+    fn guide_luma_at(
+        &mut self,
+        gpu: &GpuContext,
+        cx: &Cx,
+        extent: (u32, u32),
+    ) -> Arc<FieldTexture> {
+        let (mw, mh) = extent;
         let mut h = blake3::Hasher::new();
         h.update(b"guide-luma-1");
         h.update(cx.inputs.guide_key.as_bytes());
@@ -478,6 +538,116 @@ impl MaskEngine {
         let out = Arc::new(out);
         self.guides.put(key, Arc::clone(&out));
         out
+    }
+
+    /// The clarity/texture bands for the current guide: `(g - fine, fine - coarse, g)` at the bases
+    /// extent, cached per (guide, extent).
+    fn bands(&mut self, gpu: &GpuContext, cx: &Cx) -> Arc<FrameTexture> {
+        let (bw, bh) = bases::bases_extent(cx.mask);
+        let mut h = blake3::Hasher::new();
+        h.update(b"bands-1");
+        h.update(cx.inputs.guide_key.as_bytes());
+        h.update(&bw.to_le_bytes());
+        h.update(&bh.to_le_bytes());
+        let key = h.finalize();
+        if let Some(t) = self.band_cache.get(&key) {
+            return Arc::clone(t);
+        }
+        self.stats.band_builds += 1;
+        let g = self.guide_luma_at(gpu, cx, (bw, bh));
+        let fine = FieldTexture::new(gpu, bw, bh);
+        let coarse = FieldTexture::new(gpu, bw, bh);
+        let out = FrameTexture::new(
+            gpu,
+            Extent {
+                width: bw,
+                height: bh,
+            },
+        );
+        let (w, hh) = (bw as usize, bh as usize);
+        submit(gpu, |enc| {
+            // Self-guided: the luminance smooths itself, so edges survive and detail does not.
+            self.guided.refine(
+                gpu,
+                enc,
+                &g,
+                &g,
+                &fine,
+                bases::fine_radius(w, hh),
+                bases::FINE_EPS,
+            );
+            self.guided.refine(
+                gpu,
+                enc,
+                &g,
+                &g,
+                &coarse,
+                bases::coarse_radius(w, hh),
+                bases::COARSE_EPS,
+            );
+            self.bases_kernels
+                .combine(gpu, enc, &g, &fine, &coarse, &out);
+        });
+        let out = Arc::new(out);
+        self.band_cache.put(key, Arc::clone(&out));
+        out
+    }
+
+    /// The dehaze transmission (refined) and airlight for the current guide, cached per
+    /// (guide, extent). The airlight needs a small CPU readback (a ~128 px thumbnail).
+    fn haze(&mut self, gpu: &GpuContext, cx: &Cx) -> HazeState {
+        let (bw, bh) = bases::bases_extent(cx.mask);
+        let mut h = blake3::Hasher::new();
+        h.update(b"haze-1");
+        h.update(cx.inputs.guide_key.as_bytes());
+        h.update(&bw.to_le_bytes());
+        h.update(&bh.to_le_bytes());
+        let key = h.finalize();
+        if let Some(s) = self.haze_cache.get(&key) {
+            return s.clone();
+        }
+        self.stats.haze_builds += 1;
+        let guide = cx.inputs.guide;
+        let fextent = (guide.extent.width, guide.extent.height);
+
+        let (tw, th) = bases::thumb_extent(fextent.0, fextent.1);
+        let thumb = ThumbTexture::new(gpu, tw, th);
+        submit(gpu, |enc| {
+            self.bases_kernels
+                .thumb(gpu, enc, &guide.view, fextent, &thumb);
+        });
+        let airlight = bases::estimate_airlight(&thumb.read(gpu), tw as usize, th as usize);
+
+        let g = self.guide_luma_at(gpu, cx, (bw, bh));
+        let scratch = FieldTexture::new(gpu, bw, bh);
+        let raw = FieldTexture::new(gpu, bw, bh);
+        let refined = FieldTexture::new(gpu, bw, bh);
+        submit(gpu, |enc| {
+            self.bases_kernels.transmission(
+                gpu,
+                enc,
+                &guide.view,
+                fextent,
+                airlight,
+                &scratch,
+                &raw,
+            );
+            self.guided.refine(
+                gpu,
+                enc,
+                &raw,
+                &g,
+                &refined,
+                bases::dark_radius(bw as usize, bh as usize),
+                bases::TRANSMISSION_EPS,
+            );
+        });
+        let state = HazeState {
+            transmission: Arc::new(refined),
+            airlight,
+        };
+        self.haze_cache.put(key, state.clone());
+        state
     }
 
     fn refined_alpha(&mut self, gpu: &GpuContext, alpha: &AiAlpha, cx: &Cx) -> Arc<FieldTexture> {
@@ -598,7 +768,11 @@ mod tests {
     impl Rig {
         fn new() -> Option<Self> {
             let gpu = shared_test_gpu()?;
-            let engine = MaskEngine::new(&gpu);
+            let engine = MaskEngine::with_kernels(
+                super::super::kernels::tests::shared_kernels(&gpu),
+                super::super::guided::tests::shared_kernels(&gpu),
+                super::super::bases::tests::shared_kernels(&gpu),
+            );
             let guide = guide_frame(&gpu, 0.0);
             Some(Self {
                 gpu,
@@ -1104,6 +1278,53 @@ mod tests {
             &cpu_group(&c.mask, W, H).data,
             3e-3,
         );
+    }
+
+    #[test]
+    fn the_spatial_bases_are_built_once_per_guide_and_never_for_a_slider_drag() {
+        let Some(mut rig) = Rig::new() else { return };
+        let mut c = correction("a", radial(0.5), 0.0);
+        c.adjust = LocalAdjust {
+            clarity: 0.5,
+            dehaze: 0.4,
+            ..LocalAdjust::default()
+        };
+        let frame = rig.prepare(vec![c.clone()]).unwrap();
+        assert!(frame.bases.bands.is_some() && frame.bases.haze.is_some());
+        let s = rig.engine.stats();
+        assert_eq!((s.band_builds, s.haze_builds), (1, 1));
+
+        // Dragging clarity/dehaze/texture or Amount touches only uniforms: no rebuild.
+        for v in [0.1, -0.7, 1.0] {
+            c.adjust.clarity = v;
+            c.adjust.dehaze = -v;
+            c.adjust.texture = v * 0.5;
+            c.amount = 0.6;
+            rig.prepare(vec![c.clone()]).unwrap();
+        }
+        let s = rig.engine.stats();
+        assert_eq!(
+            (s.band_builds, s.haze_builds),
+            (1, 1),
+            "drags must not rebuild bases"
+        );
+
+        // A new guide (a heal edit, another photo) rebuilds both, once.
+        rig.guide = guide_frame(&rig.gpu, 0.1);
+        rig.guide_key = blake3::hash(b"guide-3");
+        rig.prepare(vec![c.clone()]).unwrap();
+        rig.prepare(vec![c]).unwrap();
+        let s = rig.engine.stats();
+        assert_eq!((s.band_builds, s.haze_builds), (2, 2));
+    }
+
+    #[test]
+    fn a_mask_that_needs_no_spatial_base_builds_none() {
+        let Some(mut rig) = Rig::new() else { return };
+        rig.prepare(vec![correction("a", radial(0.5), 1.0)])
+            .unwrap();
+        let s = rig.engine.stats();
+        assert_eq!((s.band_builds, s.haze_builds), (0, 0));
     }
 
     trait CloneWithRadii {

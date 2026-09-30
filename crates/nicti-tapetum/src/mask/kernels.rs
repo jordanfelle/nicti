@@ -635,7 +635,7 @@ impl MaskKernels {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::compose::fold_step;
     use super::super::params::{MaskComponent, MaskGroup, MaskSource, Stroke};
     use super::*;
@@ -647,6 +647,14 @@ mod tests {
 
     fn gpu() -> Option<Arc<GpuContext>> {
         shared_test_gpu()
+    }
+
+    /// One `MaskKernels` for the whole test binary: compiling a fresh set of pipelines in every
+    /// test, concurrently, is exactly the pressure that made lavapipe segfault in this crate's
+    /// GPU tests before (see `test_util::shared_test_gpu`).
+    pub(crate) fn shared_kernels(gpu: &Arc<GpuContext>) -> Arc<MaskKernels> {
+        static K: std::sync::OnceLock<Arc<MaskKernels>> = std::sync::OnceLock::new();
+        Arc::clone(K.get_or_init(|| Arc::new(MaskKernels::new(gpu))))
     }
 
     fn assert_close(a: &Field, b: &Field, what: &str) {
@@ -671,7 +679,7 @@ mod tests {
     #[test]
     fn the_linear_gradient_matches_the_cpu_reference() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         for (w, h) in [(64usize, 48usize), (37, 91)] {
             let out = FieldTexture::new(&gpu, w as u32, h as u32);
             run(&gpu, |e| {
@@ -695,7 +703,7 @@ mod tests {
     #[test]
     fn a_degenerate_linear_gradient_is_finite_on_the_gpu() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let out = FieldTexture::new(&gpu, 16, 16);
         run(&gpu, |e| k.linear(&gpu, e, &out, (8.0, 8.0), (8.0, 8.0)));
         assert!(out.read(&gpu).data.iter().all(|v| v.is_finite()));
@@ -704,7 +712,7 @@ mod tests {
     #[test]
     fn the_radial_gradient_matches_the_cpu_reference() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let (w, h) = (80usize, 60usize);
         let (center, radii, angle, feather) = ((40.0, 28.0), (25.0, 12.0), 33.0, 9.0);
         let out = FieldTexture::new(&gpu, w as u32, h as u32);
@@ -761,7 +769,7 @@ mod tests {
     #[test]
     fn the_brush_matches_the_cpu_reference_including_erase_and_flow() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         // 300x200 so a long stroke spans several 64px tiles.
         let strokes = [
             stroke(
@@ -785,7 +793,7 @@ mod tests {
     #[test]
     fn a_brush_stroke_off_the_frame_is_skipped_and_one_at_the_edge_is_clipped() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let strokes = [
             stroke(&[[3.0, 3.0]], 0.05, 0.0, 1.0, false), // entirely off-frame
             stroke(&[[0.0, 0.0], [1.0, 1.0]], 0.05, 0.01, 1.0, false), // hugs the corners
@@ -797,7 +805,7 @@ mod tests {
     #[test]
     fn an_empty_brush_leaves_the_field_zero() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         assert!(gpu_brush(&gpu, &k, &[], 32, 32)
             .data
             .iter()
@@ -855,7 +863,7 @@ mod tests {
     #[test]
     fn compose_matches_fold_step_for_every_op_invert_and_opacity() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let (w, h) = (24usize, 20usize);
         let ramp = |phase: f32| Field {
             width: w,
@@ -883,7 +891,7 @@ mod tests {
     #[test]
     fn a_whole_group_composed_on_the_gpu_matches_compose_on_the_cpu() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let (w, h) = (96usize, 64usize);
         let group = MaskGroup {
             components: vec![
@@ -928,7 +936,7 @@ mod tests {
     #[test]
     fn pack_writes_one_composite_per_channel_and_zeroes_the_rest() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let (w, h) = (20usize, 12usize);
         let field = |v: f32| Field::new(w, h, v);
         let (a, b, c) = (
@@ -984,7 +992,7 @@ mod tests {
     }
 
     fn assert_range_matches(gpu: &Arc<GpuContext>, source: &MaskSource, what: &str) {
-        let k = MaskKernels::new(gpu);
+        let k = shared_kernels(gpu);
         let (fw, fh, mw, mh) = (64usize, 40usize, 33usize, 21usize);
         let matrix: crate::color::Mat3 = [[1.3, -0.2, -0.1], [-0.1, 1.2, -0.1], [0.0, -0.1, 1.1]];
         let frame = range_frame(fw, fh);
@@ -1059,7 +1067,7 @@ mod tests {
     #[test]
     fn a_non_range_source_is_a_no_op_on_the_range_kernel() {
         let Some(gpu) = gpu() else { return };
-        let k = MaskKernels::new(&gpu);
+        let k = shared_kernels(&gpu);
         let tex = crate::test_util::upload_frame(
             &gpu,
             Extent {

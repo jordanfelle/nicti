@@ -10,6 +10,7 @@
 //! no bake); an AI alpha is baked once per (neutral render, recipe) and only composed here.
 
 pub mod atlas;
+pub mod bases;
 pub mod compose;
 pub mod engine;
 pub mod guided;
