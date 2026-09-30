@@ -40,6 +40,11 @@ pub const HAZE_OMEGA: f32 = 0.95;
 pub const HAZE_T0: f32 = 0.1;
 /// A negative dehaze adds a *uniform* veil of up to this much, independent of the estimated haze.
 pub const VEIL_MAX: f32 = 0.5;
+/// A noise-reduction delta of 1 adds this much to the NR luminance amount (0..=1).
+pub const NOISE_LOCAL_GAIN: f32 = 1.0;
+/// A sharpness delta of 1 adds this much to the sharpen amount (0..=1.5). A stacked amount below
+/// zero softens toward the sharpen-radius blur instead of sharpening.
+pub const SHARPNESS_LOCAL_GAIN: f32 = 1.0;
 /// Effective contrast is clamped to this range after stacking.
 pub const CONTRAST_RANGE: (f32, f32) = (-1.0, 2.0);
 /// Every other effective tone slider is clamped to `-TONE_LIMIT..=TONE_LIMIT` after stacking.
@@ -252,6 +257,36 @@ pub fn apply_bands(rgb: [f32; 3], sp: &SpatialPixel, clarity: f32, texture: f32)
         .powf(2.2)
         .clamp(RATIO_RANGE.0, RATIO_RANGE.1);
     rgb.map(|c| c * ratio)
+}
+
+/// Luma after noise reduction and sharpening with the local deltas stacked on the global Detail
+/// values -- the CPU twin of `detail_combine.wgsl`'s local path. Local noise adds to the NR
+/// luminance amount; local sharpness adds to the sharpen amount, and a stacked amount below zero
+/// softens toward `blurred_sharpen` instead.
+pub fn local_detail_luma(
+    original: f32,
+    blurred_nr: f32,
+    blurred_sharpen: f32,
+    edge_weight: f32,
+    nr: &crate::coat::NoiseReductionParams,
+    sharpen: &crate::coat::SharpenParams,
+    s: &LocalSums,
+) -> f32 {
+    let mut nr = *nr;
+    nr.luminance = (nr.luminance + s.noise * NOISE_LOCAL_GAIN).clamp(0.0, 1.0);
+    let effective = sharpen.amount + s.sharpness * SHARPNESS_LOCAL_GAIN;
+    let mut sharpen = *sharpen;
+    sharpen.amount = effective.max(0.0);
+    let soften = (-effective).clamp(0.0, 1.0);
+    let luma = crate::detail::apply_detail(
+        original,
+        blurred_nr,
+        blurred_sharpen,
+        edge_weight,
+        &nr,
+        &sharpen,
+    );
+    luma + (blurred_sharpen - luma) * soften
 }
 
 /// The global (non-local) inputs to one pixel, mirroring `live_suffix.wgsl`'s uniforms.
@@ -1001,6 +1036,23 @@ mod spatial_tests {
         frame: &[[f32; 4]],
         corrections: Vec<LocalCorrection>,
     ) -> (Vec<[f32; 4]>, Option<MaskFrame>) {
+        render_with(
+            gpu,
+            frame,
+            corrections,
+            SharpenParams::default(),
+            NoiseReductionParams::default(),
+        )
+    }
+
+    /// As [`render`], with explicit *global* Detail-panel values.
+    fn render_with(
+        gpu: &Arc<GpuContext>,
+        frame: &[[f32; 4]],
+        corrections: Vec<LocalCorrection>,
+        sharpen: SharpenParams,
+        noise_reduction: NoiseReductionParams,
+    ) -> (Vec<[f32; 4]>, Option<MaskFrame>) {
         let extent = Extent {
             width: W as u32,
             height: H as u32,
@@ -1017,8 +1069,8 @@ mod spatial_tests {
                 tone_curve: ToneCurveParams::default(),
                 vibrance: VibranceParams::default(),
                 hsl: HslParams::default(),
-                sharpen: SharpenParams::default(),
-                noise_reduction: NoiseReductionParams::default(),
+                sharpen,
+                noise_reduction,
                 camera_profile: None,
                 pixel_scale: 1.0,
             },
@@ -1423,5 +1475,207 @@ mod spatial_tests {
         );
         let f = clarity.unwrap();
         assert!(f.bases.bands.is_some() && f.bases.haze.is_none());
+    }
+
+    /// A soft-edged pattern plus deterministic noise, for the local sharpness / noise tests.
+    fn noisy_scene() -> Vec<[f32; 4]> {
+        (0..W * H)
+            .map(|i| {
+                let (x, y) = ((i % W) as f32, (i / W) as f32);
+                // Soft vertical bars (edges to sharpen) ...
+                let bars = 0.18
+                    + 0.10 * (x * 0.09).sin().signum() * (1.0 - (0.5 * (x * 0.09).sin()).abs());
+                // ... plus hash noise (something to reduce).
+                let h = (i as u32).wrapping_mul(2654435761) ^ (i as u32 >> 7).wrapping_mul(40503);
+                let n = ((h % 1000) as f32 / 1000.0 - 0.5) * 0.04;
+                let v = (bars + n + 0.0001 * y).max(0.001);
+                [v, v, v, 1.0]
+            })
+            .collect()
+    }
+
+    /// A mask over the left-middle third of the frame only.
+    fn left_third(adjust: LocalAdjust) -> LocalCorrection {
+        LocalCorrection {
+            id: "left".into(),
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::RadialGradient {
+                        center: [0.2, 0.5],
+                        radii: [0.15, 4.0],
+                        angle_deg: 0.0,
+                        feather: 0.01,
+                    },
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust,
+            ..LocalCorrection::default()
+        }
+    }
+
+    const INSIDE: (usize, usize) = (40, 110);
+    const OUTSIDE: (usize, usize) = (200, 360);
+
+    #[test]
+    fn local_sharpness_sharpens_inside_the_mask_only_even_with_the_global_detail_panel_untouched() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = noisy_scene();
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let (sharp, _) = render(
+            &gpu,
+            &scene,
+            vec![left_third(LocalAdjust {
+                sharpness: 1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        let hp =
+            |px: &[[f32; 4]], (x0, x1): (usize, usize)| highpass_std(px, 2, x0, x1, 20, H - 20);
+        assert!(
+            hp(&sharp, INSIDE) > hp(&base, INSIDE) * 1.3,
+            "inside: {} -> {}",
+            hp(&base, INSIDE),
+            hp(&sharp, INSIDE)
+        );
+        let (a, b) = (hp(&base, OUTSIDE), hp(&sharp, OUTSIDE));
+        assert!((b / a - 1.0).abs() < 0.02, "outside changed: {a} -> {b}");
+    }
+
+    #[test]
+    fn negative_local_sharpness_softens_inside_the_mask() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = noisy_scene();
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let (soft, _) = render(
+            &gpu,
+            &scene,
+            vec![left_third(LocalAdjust {
+                sharpness: -1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        let hp =
+            |px: &[[f32; 4]], (x0, x1): (usize, usize)| highpass_std(px, 2, x0, x1, 20, H - 20);
+        assert!(hp(&soft, INSIDE) < hp(&base, INSIDE) * 0.85);
+        assert!((hp(&soft, OUTSIDE) / hp(&base, OUTSIDE) - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn local_noise_reduction_smooths_noise_inside_the_mask_only() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        // Pure noise on a flat field: nothing but noise to remove.
+        let scene: Vec<[f32; 4]> = (0..W * H)
+            .map(|i| {
+                let h = (i as u32).wrapping_mul(2654435761) ^ (i as u32 >> 5).wrapping_mul(40503);
+                let v = 0.2 + ((h % 1000) as f32 / 1000.0 - 0.5) * 0.05;
+                [v, v, v, 1.0]
+            })
+            .collect();
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let (denoised, _) = render(
+            &gpu,
+            &scene,
+            vec![left_third(LocalAdjust {
+                noise: 1.0,
+                ..LocalAdjust::default()
+            })],
+        );
+        let hp =
+            |px: &[[f32; 4]], (x0, x1): (usize, usize)| highpass_std(px, 3, x0, x1, 20, H - 20);
+        assert!(
+            hp(&denoised, INSIDE) < hp(&base, INSIDE) * 0.6,
+            "inside: {} -> {}",
+            hp(&base, INSIDE),
+            hp(&denoised, INSIDE)
+        );
+        assert!((hp(&denoised, OUTSIDE) / hp(&base, OUTSIDE) - 1.0).abs() < 0.02);
+    }
+
+    /// GPU == CPU twin with the global Detail panel active *and* local sharpness/noise on a
+    /// gradient mask (so every weight in 0..1 is exercised).
+    #[test]
+    fn the_gpu_local_detail_matches_the_cpu_twin() {
+        use crate::detail::{edge_weight, gaussian_blur, Extent2D, EDGE_SCALE};
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = noisy_scene();
+        let sharpen = SharpenParams {
+            amount: 0.3,
+            radius_px: 1.5,
+            detail: 0.25,
+        };
+        let nr = NoiseReductionParams {
+            luminance: 0.2,
+            color: 0.1,
+            detail: 0.5,
+        };
+        let correction = LocalCorrection {
+            id: "grad".into(),
+            amount: 0.9,
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::LinearGradient {
+                        p0: [0.0, 0.5],
+                        p1: [1.0, 0.5],
+                    },
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust: LocalAdjust {
+                sharpness: 0.8,
+                noise: 0.6,
+                ..LocalAdjust::default()
+            },
+            ..LocalCorrection::default()
+        };
+        let (got, _) = render_with(&gpu, &scene, vec![correction.clone()], sharpen, nr);
+
+        // CPU: the pointwise result (locals add nothing pointwise here), its two blurs, then the
+        // per-pixel local combine.
+        let extent = Extent2D {
+            width: W,
+            height: H,
+        };
+        let planes: [Vec<f32>; 3] = std::array::from_fn(|c| scene.iter().map(|p| p[c]).collect());
+        let blur = |sigma: f32| planes.clone().map(|p| gaussian_blur(&p, extent, sigma));
+        let (nr_b, sh_b) = (blur(2.0), blur(sharpen.radius_px));
+        let weights =
+            super::super::raster::rasterize_source(&correction.mask.components[0].source, W, H)
+                .unwrap();
+        let uniforms = pack_active(&MaskParams {
+            corrections: vec![correction],
+        });
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        let p = PixelParams {
+            matrix: color::mat3_identity(),
+            exposure_mult: 1.0,
+            tone: ToneParams::default(),
+            lut: &lut,
+            vibrance: 0.0,
+            hsl: &hsl,
+        };
+        let mut worst = 0.0f32;
+        for (i, px) in scene.iter().enumerate() {
+            let sums = LocalSums::accumulate(&uniforms, &[weights.data[i]]);
+            let base = live_pixel([px[0], px[1], px[2]], &p, &sums, None);
+            // (Blurs are of the *input*, which equals the pointwise output for this neutral
+            // pipeline up to the tone round trip.)
+            let orig_l = LUMA[0] * base[0] + LUMA[1] * base[1] + LUMA[2] * base[2];
+            let nr_px: [f32; 3] = std::array::from_fn(|c| nr_b[c][i]);
+            let sh_px: [f32; 3] = std::array::from_fn(|c| sh_b[c][i]);
+            let nr_l = LUMA[0] * nr_px[0] + LUMA[1] * nr_px[1] + LUMA[2] * nr_px[2];
+            let sh_l = LUMA[0] * sh_px[0] + LUMA[1] * sh_px[1] + LUMA[2] * sh_px[2];
+            let w = edge_weight(orig_l, nr_l, EDGE_SCALE);
+            let new_l = local_detail_luma(orig_l, nr_l, sh_l, w, &nr, &sharpen, &sums);
+            let color_amount = nr.color.clamp(0.0, 1.0);
+            for c in 0..3 {
+                let chroma = base[c] - orig_l;
+                let chroma_b = nr_px[c] - nr_l;
+                let want = new_l + chroma + (chroma_b - chroma) * color_amount;
+                worst = worst.max((got[i][c] - want).abs());
+            }
+        }
+        assert!(worst < 0.03, "GPU vs CPU local detail differ by {worst}");
     }
 }

@@ -477,6 +477,8 @@ struct CombineUniforms {
     nr: [f32; 4],
     /// amount, unused, detail, unused.
     sharpen: [f32; 4],
+    /// x = local sharpness/noise corrections are bound (#49); the rest is padding.
+    local: [f32; 4],
 }
 
 /// The live suffix's full per-render parameter set -- everything [`LiveSuffixKernel::set_params`]
@@ -611,6 +613,9 @@ pub struct LiveSuffixKernel {
 struct MaskBinding {
     /// `None` = no local corrections: the dummy atlas below is bound and count is 0.
     frame: Option<crate::mask::atlas::MaskFrame>,
+    /// True when some bound correction adjusts sharpness or noise, which forces the multi-pass
+    /// detail path even if the global Detail panel is untouched.
+    local_detail: bool,
     dummy: Arc<crate::mask::atlas::Atlas>,
     /// 1x1 stand-ins for the spatial bases (`bases_tex` / `haze_tex`), never read while their
     /// header flag is 0.
@@ -763,6 +768,7 @@ impl LiveSuffixKernel {
             mask_buf: make_uniform_buffer(gpu, "live_suffix mask uniforms", MASK_UNIFORM_BYTES),
             mask_state: std::sync::Mutex::new(MaskBinding {
                 frame: None,
+                local_detail: false,
                 dummy: Arc::new(crate::mask::atlas::Atlas::new(gpu, 1, 1, 0)),
                 dummy_bands: FrameTexture::new(
                     gpu,
@@ -814,7 +820,13 @@ impl LiveSuffixKernel {
             block[32..32 + bytes.len()].copy_from_slice(bytes);
         }
         gpu.queue.write_buffer(&self.mask_buf, 0, &block);
-        self.mask_state.lock().unwrap().frame = frame.cloned();
+        let mut state = self.mask_state.lock().unwrap();
+        state.local_detail = frame.is_some_and(|f| {
+            f.uniforms[..count]
+                .iter()
+                .any(|u| u.d0[0] > 0.0 && (u.d2[3] != 0.0 || u.d3[3] != 0.0))
+        });
+        state.frame = frame.cloned();
     }
 
     /// Uploads this render's params -- call before `Renderer::render` whenever any of them
@@ -1092,7 +1104,8 @@ impl LiveExec for LiveSuffixKernel {
         output: &FrameTexture,
     ) {
         let detail = *self.detail_state.lock().unwrap();
-        if detail.sharpen.is_noop() && detail.noise_reduction.is_noop() {
+        let local_detail = self.mask_state.lock().unwrap().local_detail;
+        if detail.sharpen.is_noop() && detail.noise_reduction.is_noop() && !local_detail {
             self.dispatch_pointwise(gpu, encoder, input, output);
             return;
         }
@@ -1128,10 +1141,16 @@ impl LiveExec for LiveSuffixKernel {
                 0.0,
             ],
             sharpen: [detail.sharpen.amount, 0.0, detail.sharpen.detail, 0.0],
+            local: [f32::from(local_detail), 0.0, 0.0, 0.0],
         };
         gpu.queue
             .write_buffer(&self.combine_buf, 0, bytemuck::bytes_of(&cu));
 
+        let mask_state = self.mask_state.lock().unwrap();
+        let atlas_view = match &mask_state.frame {
+            Some(f) => &f.atlas.array_view,
+            None => &mask_state.dummy.array_view,
+        };
         let bind_group_layout = self.combine_pipeline.get_bind_group_layout(0);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("detail_combine bind group"),
@@ -1157,8 +1176,21 @@ impl LiveExec for LiveSuffixKernel {
                     binding: 4,
                     resource: self.combine_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.mask_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
+                },
             ],
         });
+        drop(mask_state);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("detail_combine"),
             timestamp_writes: None,
