@@ -5,6 +5,13 @@
 - **Date:** 2026-09-26
 - **Ticket:** [#48](https://github.com/jordanfelle/nicti/issues/48) Research: masking
 - **Formerly:** ADR-0024 (sequential numbering, pre-#183)
+- **Build update (2026-09-30):** [ADR-0049](0049-masking-build.md) (#49) built this design and
+  departs from it in several places -- the neutral render taps post-lens, *pre-heal*; `Add` is a union
+  rather than `min(a + w, 1)`; masks use normalized coordinates; the brush rasterizes through CPU-binned
+  tiles; model choice is a pluggable registry. It also ran the real BiRefNet weights for the first
+  time: the tensor contract holds, but CPU latency is ~9 s per bake (this ADR's <= 1 s assumed CUDA).
+  Quality on real photos, fursuiters in particular, is still the open reference-machine pass (#171),
+  so this ADR stays *Proposed*. The spike it describes (`spikes/siamese`) no longer exists.
 
 ## Context
 

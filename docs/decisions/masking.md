@@ -38,3 +38,24 @@ the mask-group compose model that ties them together.
   but downloading/running it was out of this pass's time budget, same call ADR-0050 made for
   LaMa/MobileSAM. `spikes/siamese/src/segment.rs` proves only the `ort`/`load-dynamic`
   loading/error-handling shape (`ModelNotFound` on a missing file), same as groom's own `ai.rs`.
+
+### #49 -- the build (`docs/adr/0049-masking-build.md`)
+
+ADR-0049 built the design above and records every departure from it. In one place: **one `nicti.masks`
+stage** holds every local correction (normalized coordinates, sanitized on the way in); the **neutral
+render taps post-lens, pre-heal** and `Renderer::render_baked` lets the engine read the baked frame; `Add`
+is a **union** (`max`), not `min(a+w, 1)`; bakes are requested for *enabled* corrections; the **engine
+caches every expensive intermediate** so a slider drag is uniform-only, a geometry edit recomposes one
+correction and painting is one GPU pass per frame; local adjustments **stack additively** in the fused
+live shader (clarity/texture/dehaze from bases cached per baked frame; sharpness/noise inside
+`detail_combine`); **model choice is data** behind a backend-agnostic `SegmentationProvider` registry
+(a version mismatch is a typed error, never a silent newer model); BiRefNet ships as a pinned fp32 ONNX
+conversion, on-demand only.
+
+**What running the real thing showed** (RTX 5080, release, Windows): 16 masks at 45 MP cost +1.4-1.9 ms
+over the no-mask live pass (2.5-3.2 ms p95 total with spatial adjustments) -- inside the 4 ms rule; the real
+BiRefNet bake is **9.2 s warm / 15.3 s cold on the CPU provider** (ADR-0048's <= 1 s assumed CUDA), with the
+tensor contract verified against the real weights; and the real-hardware pass found a **pre-existing Dx12
+bug on `main`** (`detail_blur.wgsl` reading a storage texture) that fails an existing end-to-end test on the
+5080, fixed here. Quality on real photos (fursuiters) is still open (#171).
+

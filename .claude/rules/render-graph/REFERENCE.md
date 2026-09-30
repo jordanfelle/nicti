@@ -16,8 +16,9 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   NEF goldens via `bench/knead`) — the hero-scenario screen-capture pass is a separate follow-up
   issue (filed when #45 itself closes).
 - **Stage order**: baked prefix `decode → demosaic (AHD) → denoise (SCUNet) → lens correction →
-  heal/remove` → neutral branch `neutral_render → mask_bake` (decoupled from live sliders) → one
-  fused live dispatch `WB → HueSatMap → exposure → tone → vibrance → mask compose/apply` → crop as
+  heal/remove` → (#49, amends ADR-0044) the neutral render for AI masks taps **post-lens, pre-heal**, a
+  keying-only node that is not executed → one
+  fused live dispatch `WB → HueSatMap → exposure → tone → vibrance → HSL → local corrections (masks)` → crop as
   an affine sample pass over the live suffix's own output only.
 - **Cache key**: `nicti_pawprint::chain` generalizes ADR-0021's flat one-upstream chain to a DAG;
   `nicti_tapetum::graph::RenderGraph::cache_key`/`invalidated_bakes`/`set_own_hash` are the tested,
@@ -31,8 +32,11 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   codec (zstd/lz4) stayed with #190, which needs real baked output to choose against.
 - **Disk compression**: zstd/lz4 both round-trip; synthetic-gradient ratios (~3688×/~247×) are
   **not** a real-photo promise — see follow-up #190.
-- **Mask refine**: `refine.rs::guided_upsample` — ported from `spikes/siamese/src/refine.rs`
-  (spikes don't depend on each other, this is a copy). `box_filter` also has a GPU twin.
+- **Masks (#49)**: `nicti-tapetum/src/mask/` -- the `nicti.masks` Live stage (in the fused live dispatch, tail),
+  the keying-only `nicti.neutral` Baked node (upstream `nicti.lens`, **pre-heal**, not in the baked chain), the
+  guided-filter refine (`mask/guided.rs`, CPU reference + GPU kernels) and `Renderer::render_baked` (bakes +
+  submits the chain so the mask engine can read the baked frame; the following `render` finds it cached).
+  See the `masking` topic.
 - **Real RTX 5080 numbers** (GPU-timestamp only): live-suffix 0.375ms p50/0.392ms p95 (screen res),
   1.767ms p50/3.924ms p95 (full res, matches ADR-0016's own comparable figure within a few
   percent). Present/sample (crop): ≤1.611ms p95 even at full res.
