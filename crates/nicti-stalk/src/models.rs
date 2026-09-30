@@ -506,14 +506,13 @@ impl ModelStore {
             Payload::ZipMember(member) => extract_member(artifact, download_tmp, member, &staged)?,
         }
         // The extracted/renamed file must itself match the pinned installed hash and size.
-        let installed = fs::read(&staged)?;
-        if installed.len() as u64 != artifact.installed_size
-            || hex(&Sha256::digest(&installed)) != artifact.installed_sha256
-        {
+        // Streamed: the installed file can be 200+ MB and must not be loaded into memory to hash.
+        let (installed_len, installed_hash) = hash_file(&staged)?;
+        if installed_len != artifact.installed_size || installed_hash != artifact.installed_sha256 {
             let _ = fs::remove_file(&staged);
             return Err(InstallError::HashMismatch {
                 id: artifact.id,
-                got: hex(&Sha256::digest(&installed)),
+                got: installed_hash,
             });
         }
         fs::rename(&staged, final_path)?;
@@ -556,6 +555,23 @@ fn extract_member(
         return Err(bad("member is larger than the pinned size".to_owned()));
     }
     Ok(())
+}
+
+/// Length and SHA-256 (hex) of a file, read in chunks.
+fn hash_file(path: &Path) -> io::Result<(u64, String)> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut len = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        len += n as u64;
+    }
+    Ok((len, hex(&hasher.finalize())))
 }
 
 fn hex(bytes: &[u8]) -> String {

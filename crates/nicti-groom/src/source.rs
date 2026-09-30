@@ -48,6 +48,12 @@ pub fn auto_source_pick(
     }
     let (w, h) = (src.width() as i32, src.height() as i32);
     let border = (radius * 0.5).max(2.0);
+    // The spot's own ring spans 2*floor(outer)+1 px per axis. If that exceeds the image, no centre
+    // can pass the full-ring check below, so bail before building an O(outer^2) annulus: a huge
+    // radius would otherwise hang, and near 1e9 it saturates `as i32` and overflows `dx * dx`.
+    if 2.0 * (radius + border).floor() + 1.0 > w.min(h) as f32 {
+        return None;
+    }
     let full_ring = annulus(radius, radius + border);
     let stride = full_ring.len().div_ceil(MAX_RING_SAMPLES).max(1);
     let ring: Vec<(i32, i32)> = full_ring.iter().copied().step_by(stride).collect();
@@ -205,6 +211,15 @@ mod tests {
             reads > 1000,
             "the search must actually have run ({reads} reads)"
         );
+    }
+
+    #[test]
+    fn a_radius_too_big_for_the_image_returns_at_once_instead_of_hanging_or_overflowing() {
+        let img = stripes(200, 120);
+        // Uncapped these build a ~4e10-cell (1e5) or overflowing (1e9, f32::MAX) annulus.
+        for r in [1.0e5, 1.0e9, f32::MAX] {
+            assert_eq!(auto_source_pick(&img, (100, 60), r), None, "radius {r}");
+        }
     }
 
     #[test]

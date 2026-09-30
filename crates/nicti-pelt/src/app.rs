@@ -622,10 +622,12 @@ impl eframe::App for PeltApp {
         // frame (the histogram itself still reflects the pre-edit state at this point in the
         // frame; a real re-render for it too would need restructuring the panel to render at its
         // own end instead of its own start, not worth it for a histogram bar's one-frame lag).
-        if self.view == View::Develop {
-            if let Some(d) = self.develop.as_mut() {
-                // The heal tool works on the whole, uncropped image (see `heal_tool`'s docs).
-                d.uncropped_preview = self.heal_ui.heal_active();
+        if let Some(d) = self.develop.as_mut() {
+            // The heal tool works on the whole, uncropped image (see `heal_tool`'s docs). Set on
+            // every frame and tied to the view: the Loupe renders the same `DevelopView`, and a
+            // flag left over from Develop would show it without its crop and straighten.
+            d.uncropped_preview = self.view == View::Develop && self.heal_ui.heal_active();
+            if self.view == View::Develop {
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
             }
         }
@@ -665,8 +667,15 @@ impl eframe::App for PeltApp {
                 ui.heading("Develop");
                 if let Some(frame) = viewport_frame {
                     let available = ui.available_size();
-                    let (rect, response) =
-                        ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+                    // Only the heal tool needs clicks. Sensing them makes egui report `drag_started`
+                    // after the pointer has crossed its drag threshold, which would offset the
+                    // crop tool's handle hit tests and lag every crop/rotate/pan drag.
+                    let sense = if self.heal_ui.heal_active() {
+                        egui::Sense::click_and_drag()
+                    } else {
+                        egui::Sense::drag()
+                    };
+                    let (rect, response) = ui.allocate_exact_size(available, sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
                         ViewportCallback::identity(frame),

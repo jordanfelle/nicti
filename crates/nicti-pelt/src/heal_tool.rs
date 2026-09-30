@@ -268,6 +268,11 @@ impl RemovalService {
             .as_ref()
             .and_then(|h| h.result.lock().unwrap().take())?;
         self.install = None;
+        if done.is_ok() {
+            // The files on disk may have just been replaced (a repair), so any backend built over
+            // the old ones must not survive to run removals on stale sessions.
+            self.backend = None;
+        }
         Some(done)
     }
 
@@ -1249,6 +1254,32 @@ mod tests {
         assert!(!svc.is_installing());
         assert!(svc.poll_install().is_none(), "delivered once");
         let _ = DownloadError::Unsupported; // the underlying cause on this platform
+    }
+
+    #[test]
+    fn a_finished_install_drops_the_cached_backend_but_a_failed_one_keeps_it() {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        let handle = |result: Result<(), String>| InstallHandle {
+            bytes: Arc::new(AtomicU64::new(0)),
+            total: Arc::new(AtomicU64::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            result: Arc::new(Mutex::new(Some(result))),
+        };
+        let backend: SharedBackend = Arc::new(Mutex::new(Fake { fail: false }));
+        let mut svc = RemovalService::with_store(None);
+
+        svc.backend = Some((fake_models(), Arc::clone(&backend)));
+        svc.install = Some(handle(Ok(())));
+        assert!(svc.poll_install().unwrap().is_ok());
+        assert!(
+            svc.backend.is_none(),
+            "a repair may have replaced the files it was built over"
+        );
+
+        svc.backend = Some((fake_models(), backend));
+        svc.install = Some(handle(Err("network down".into())));
+        assert!(svc.poll_install().unwrap().is_err());
+        assert!(svc.backend.is_some(), "nothing changed on disk, so keep it");
     }
 
     #[test]
