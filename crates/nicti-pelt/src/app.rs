@@ -1924,7 +1924,8 @@ impl PeltApp {
             JobKind::Sync,
             JobKind::Move,
             JobKind::Delete,
-        ]) || self.delete.is_confirming();
+        ]) || self.delete.is_confirming()
+            || self.export.is_running();
         if busy {
             self.knead.set_status(
                 "Wait for the running import, sync, move or delete to finish first.".into(),

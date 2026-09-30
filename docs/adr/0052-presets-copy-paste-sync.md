@@ -56,7 +56,7 @@ catalog, and no filter is built for them.
 
 **Presets** are a name plus the stage entries the checked groups had, stored in
 `<catalog>.develop-presets.json` next to the catalog, written via temp file + rename, exactly like
-export presets. A missing or corrupt file means no presets and never blocks the app. There are no
+export presets. A missing file means no presets. An unreadable or partly unusable file never blocks the app: the usable presets load, and the first save copies the original to `<file>.bad` (`.bad1`, ...) before replacing it, so nothing is silently lost. There are no
 built-ins, a duplicate or empty name is refused (never silently replaced), and applying one sets
 only the stages it holds: a preset never resets a stage it doesn't mention.
 
@@ -77,6 +77,6 @@ saved (`DevelopView::replace_document`), so the per-frame autosave cannot write 
 - Deferred: relative paste; background AI pre-bake of a synced selection (#353); real undo/redo
   through `History` (#324); rendering masks in export (#354).
 - A paste runs synchronously on the UI thread: one read under the catalog lock and one write transaction over small JSON documents
-  (1,000 photos is well under a second, asserted in `knead::batch` tests). If a future catalog or
+  (1,000 photos is one batch and one undo, covered in `knead::batch` tests; it isn't timed). If a future catalog or
   document size makes that visible, move `run_batch` onto a Pounce job; its plan/write split already
   fits one.

@@ -100,8 +100,9 @@ impl KneadUi {
         self.modal.is_some()
     }
 
+    /// Whether the line has anything to show: a message, or a batch that can still be undone.
     pub fn has_status(&self) -> bool {
-        self.status.is_some()
+        self.status.is_some() || self.last.is_some()
     }
 
     pub fn ask_copy(&mut self, doc: EditDocument) {
@@ -383,7 +384,11 @@ impl KneadUi {
 
     /// The summary line with Undo and Dismiss. Returns `Command::Undo` when Undo was clicked.
     pub fn show_status(&mut self, ui: &mut egui::Ui) -> Option<Command> {
-        let text = self.status.clone()?;
+        let text = match (&self.status, &self.last) {
+            (Some(text), _) => text.clone(),
+            (None, Some(last)) => format!("{} can still be undone.", last.label),
+            (None, None) => return None,
+        };
         let mut command = None;
         let mut dismiss = false;
         ui.horizontal(|ui| {
@@ -394,12 +399,20 @@ impl KneadUi {
                     command = Some(Command::Undo);
                 }
             }
-            dismiss = ui.button("Dismiss").clicked();
+            let label = if self.status.is_some() {
+                "Dismiss"
+            } else {
+                "Discard undo"
+            };
+            dismiss = ui.button(label).clicked();
         });
         if dismiss {
-            // Dismissing also gives up the undo, rather than leaving one nothing can reach.
-            self.status = None;
-            self.last = None;
+            // The message goes first; only a second click (now "Discard undo") gives up the undo.
+            if self.status.is_some() {
+                self.status = None;
+            } else {
+                self.last = None;
+            }
         }
         command
     }

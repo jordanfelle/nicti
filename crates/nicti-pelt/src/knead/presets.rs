@@ -44,39 +44,81 @@ struct PresetFile {
 #[derive(Debug, Default, PartialEq)]
 pub struct PresetStore {
     presets: Vec<DevelopPreset>,
+    /// Set when `load` couldn't use everything in an existing file (unreadable, not valid JSON, or
+    /// entries dropped). The first `save` copies that file to `<path>.bad` before replacing it.
+    backup_first: bool,
+}
+
+/// `<path>.bad`, or `.bad1`, `.bad2`, ... -- the first that doesn't exist yet, so a second
+/// problem never overwrites the first backup.
+fn backup_path_for(path: &Path) -> PathBuf {
+    let with = |suffix: &str| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let first = with(".bad");
+    if !first.exists() {
+        return first;
+    }
+    (1u32..)
+        .map(|n| with(&format!(".bad{n}")))
+        .find(|p| !p.exists())
+        .expect("an unused backup name exists")
 }
 
 impl PresetStore {
-    /// Loads `path`; a missing or unreadable file yields no presets. A file that exists but isn't
-    /// valid JSON is moved aside to `<path>.bad` first, so the next save can't destroy what the
-    /// user may still want to recover. One malformed preset is skipped, not the whole file.
+    /// Loads `path`; a missing file yields no presets. Anything in an existing file that can't be
+    /// used (it can't be read, isn't valid JSON, or holds a malformed, unnamed or duplicate
+    /// preset) is skipped rather than failing the app -- but the next [`Self::save`] first copies
+    /// the original to `<path>.bad`, so a hand-edit or newer-schema file is never silently lost.
     pub fn load(path: &Path) -> Self {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(_) => {
+                return Self {
+                    backup_first: true,
+                    ..Self::default()
+                }
+            }
         };
         let Ok(file) = serde_json::from_str::<PresetFile>(&text) else {
-            let mut bad = path.as_os_str().to_os_string();
-            bad.push(".bad");
-            let _ = std::fs::rename(path, bad);
-            return Self::default();
+            return Self {
+                backup_first: true,
+                ..Self::default()
+            };
         };
-        // A hand-edited file can't hold an unnamed preset or two of one name.
+        let mut backup_first = false;
         let mut presets: Vec<DevelopPreset> = Vec::new();
-        for mut p in file
-            .presets
-            .into_iter()
-            .filter_map(|v| serde_json::from_value::<DevelopPreset>(v).ok())
-        {
+        for value in file.presets {
+            let Ok(mut p) = serde_json::from_value::<DevelopPreset>(value) else {
+                backup_first = true;
+                continue;
+            };
             p.name = p.name.trim().to_string();
-            if !p.name.is_empty() && !presets.iter().any(|q| q.name == p.name) {
-                presets.push(p);
+            if p.name.is_empty() || presets.iter().any(|q| q.name == p.name) {
+                backup_first = true;
+                continue;
             }
+            presets.push(p);
         }
-        Self { presets }
+        Self {
+            presets,
+            backup_first,
+        }
     }
 
-    /// Writes via a temp file + rename so a crash never leaves a half-written document.
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+    /// Writes via a temp file + rename so a crash never leaves a half-written document. If `load`
+    /// left something unusable behind, that file is copied aside first; if the copy fails, nothing
+    /// is overwritten and the error is returned.
+    pub fn save(&mut self, path: &Path) -> std::io::Result<()> {
+        if self.backup_first {
+            if path.exists() {
+                std::fs::copy(path, backup_path_for(path))?;
+            }
+            self.backup_first = false;
+        }
         let file = serde_json::json!({ "presets": self.presets });
         let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
@@ -195,7 +237,7 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
 
         let mut store = PresetStore::load(&path);
-        assert_eq!(store, PresetStore::default());
+        assert!(store.all().is_empty());
         store.add("New", stages(1.0)).unwrap();
         store.save(&path).unwrap();
 
@@ -216,10 +258,57 @@ mod tests {
         let text = serde_json::json!({ "presets": [ { "name": "Bad", "stages": 7 }, good ] });
         std::fs::write(&path, text.to_string()).unwrap();
 
-        let store = PresetStore::load(&path);
+        let mut store = PresetStore::load(&path);
         assert_eq!(store.all().len(), 1);
         assert_eq!(store.all()[0].name, "Good");
-        assert!(!dir.path().join("p.json.bad").exists());
+
+        // The dropped entry isn't lost: the original is copied aside before the save replaces it.
+        store.save(&path).unwrap();
+        let backup = std::fs::read_to_string(dir.path().join("p.json.bad")).unwrap();
+        assert!(backup.contains("\"Bad\""));
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("\"Bad\""));
+    }
+
+    #[test]
+    fn an_unreadable_file_is_backed_up_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        // UTF-16 with a BOM (what Notepad's "Unicode" save writes) is not valid UTF-8.
+        let original: Vec<u8> = vec![0xFF, 0xFE, b'{', 0, b'}', 0];
+        std::fs::write(&path, &original).unwrap();
+
+        let mut store = PresetStore::load(&path);
+        assert_eq!(store.all().len(), 0);
+        store.add("New", stages(1.0)).unwrap();
+        store.save(&path).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("p.json.bad")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn a_second_problem_never_overwrites_the_first_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        for (n, text) in ["{ first", "{ second"].into_iter().enumerate() {
+            std::fs::write(&path, text).unwrap();
+            let mut store = PresetStore::load(&path);
+            store.add("New", stages(1.0)).unwrap();
+            store.save(&path).unwrap();
+            assert!(dir
+                .path()
+                .join(if n == 0 { "p.json.bad" } else { "p.json.bad1" })
+                .exists());
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("p.json.bad")).unwrap(),
+            "{ first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("p.json.bad1")).unwrap(),
+            "{ second"
+        );
     }
 
     #[test]
