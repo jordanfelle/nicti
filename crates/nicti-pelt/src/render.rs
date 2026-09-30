@@ -39,7 +39,7 @@ use nicti_tapetum::StageRegistry;
 /// suffix/crop dispatches, but no real file on disk (loading one is #31's job). Distinct per-
 /// channel gradients so a color-pipeline bug (e.g. a channel swap) is visible, not masked by a
 /// flat test color.
-fn synthetic_linear_frame() -> LinearFrame {
+pub(crate) fn synthetic_linear_frame() -> LinearFrame {
     const SIZE: u32 = 64;
     let black = 0u32;
     let maximum = 4095u32;
@@ -97,6 +97,10 @@ pub struct DevelopView {
     /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
     /// photo changes: a patch is pixels inpainted from *this* frame and means nothing on another.
     removals: RemovalSet,
+    /// Identity of the loaded photo (`loupe::asset_cache_key`), stamped into every render's
+    /// document (`spine::stamp_source_identity`) so Tapetum's baked cache can't serve one photo's
+    /// pixels for another of the same size.
+    identity: blake3::Hash,
     /// Identity of the loaded photo as a `u64`, keying the removal engine's per-photo caches (its
     /// model frame and SAM embedding). Changes whenever `load_real_frame` swaps the photo.
     frame_key: u64,
@@ -148,6 +152,7 @@ impl DevelopView {
             crop_kernel,
             heal_kernel,
             removals: RemovalSet::new(),
+            identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
             renderer,
@@ -231,11 +236,8 @@ impl DevelopView {
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
     /// gives a document with no entry for a stage, just applied to the whole document at once.
     pub fn render(&mut self) -> Arc<FrameTexture> {
-        let empty;
-        let stamped;
-        let doc = if self.show_before {
-            empty = EditDocument::default();
-            &empty
+        let mut stamped = if self.show_before {
+            EditDocument::default()
         } else {
             // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
             // changing) rebakes the heal stage through the normal cache-key path.
@@ -246,9 +248,10 @@ impl DevelopView {
                 // its default hash, so the cached cropped composite can't be served back.
                 d.stages.remove(CROP);
             }
-            stamped = d;
-            &stamped
+            d
         };
+        spine::stamp_source_identity(&mut stamped, self.identity);
+        let doc = &stamped;
         self.graph
             .apply_document(doc, &self.registry)
             .expect("build_registry covers every id build_graph adds");
@@ -355,9 +358,9 @@ impl DevelopView {
 
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
     /// with `doc` as its edits (the catalog's stored master document, #57; pass
-    /// `EditDocument::default()` for none), and updating the `DECODE` stage's `own_hash` to
-    /// `identity` so Tapetum's baked-output cache doesn't collide between different real photos at
-    /// the same pixel extent. `identity` is the caller's job to compute
+    /// `EditDocument::default()` for none), remembering `identity` so every render stamps it into
+    /// its document (`spine::stamp_source_identity`) and Tapetum's baked-output cache can't
+    /// collide between different real photos at the same pixel extent. `identity` is the caller's job to compute
     /// (`crate::loupe::asset_cache_key`) -- this crate stays decoupled from `nicti-lair`. Callers
     /// must save (or deliberately discard) a dirty document first -- see [`Self::is_dirty`].
     ///
@@ -396,9 +399,7 @@ impl DevelopView {
             self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
             self.profiles_for = Some(needles);
         }
-        self.graph
-            .set_own_hash(DECODE, identity)
-            .expect("DECODE is always present -- build_graph always adds it");
+        self.identity = identity;
     }
 
     /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).
@@ -518,6 +519,29 @@ mod tests {
 
         view.reset_stage(EXPOSURE);
         assert!(!view.has_edits(), "the only edit was just reset away");
+    }
+
+    /// Regression: `apply_document` used to reset the identity `load_real_frame` set on the DECODE
+    /// node, so a second photo of the same size was served the first photo's cached pixels.
+    #[test]
+    fn two_photos_of_the_same_size_never_share_cached_pixels() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let a = synthetic_linear_frame();
+        let mut b = synthetic_linear_frame();
+        b.pixels.reverse();
+        assert_eq!((a.width, a.height), (b.width, b.height));
+
+        view.load_real_frame(Arc::new(a), blake3::hash(b"a"), EditDocument::default());
+        let first = nicti_tapetum::frame::read_frame(&gpu, &view.render());
+        view.load_real_frame(Arc::new(b), blake3::hash(b"b"), EditDocument::default());
+        let second = nicti_tapetum::frame::read_frame(&gpu, &view.render());
+        assert_ne!(
+            first, second,
+            "the second photo rendered the first photo's pixels"
+        );
     }
 
     /// #57: edits are dirty relative to what the catalog holds, and loading a photo with its stored

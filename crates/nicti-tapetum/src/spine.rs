@@ -141,6 +141,24 @@ pub fn build_registry() -> StageRegistry {
     registry
 }
 
+/// Stamps the loaded photo's identity into `doc`'s `DECODE` entry.
+///
+/// Call this on the **render-time copy** of a document (never the one stored in the catalog),
+/// every render. `RenderGraph::apply_document` recomputes every node's `own_hash` from the
+/// document, so identity set directly with `set_own_hash(DECODE, ..)` is reset to the stage default
+/// on the next render -- and two different photos of the same pixel size would then share baked
+/// cache keys and serve each other's pixels. Living in the document, the identity is reapplied
+/// identically each time (no per-frame invalidation) and `DecodeExec` ignores the params.
+pub fn stamp_source_identity(doc: &mut EditDocument, identity: blake3::Hash) {
+    doc.stages.insert(
+        DECODE.to_string(),
+        nicti_pawprint::StageEntry {
+            schema_version: 1,
+            params: serde_json::json!({ "source": identity.to_hex().to_string() }),
+        },
+    );
+}
+
 /// One stage's typed params out of a document (`T::default()` when the document has no entry).
 pub fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id: &str) -> T {
     match doc.stages.get(id) {
@@ -235,6 +253,52 @@ mod tests {
         graph
             .apply_document(&EditDocument::default(), &build_registry())
             .expect("registry covers the graph");
+    }
+
+    #[test]
+    fn apply_document_overwrites_a_hash_set_directly_on_the_decode_node() {
+        // Why photo identity goes into the *document* (stamp_source_identity) instead of
+        // `set_own_hash(DECODE, ..)`: apply_document recomputes every node's hash from the
+        // document, so a hash set directly is silently reset on the next render.
+        let mut graph = build_graph();
+        let registry = build_registry();
+        graph.apply_document(&EditDocument::default(), &registry).unwrap();
+        let default_key = graph.cache_key(DECODE).unwrap();
+        graph.set_own_hash(DECODE, blake3::hash(b"photo A")).unwrap();
+        assert_ne!(graph.cache_key(DECODE).unwrap(), default_key);
+        graph.apply_document(&EditDocument::default(), &registry).unwrap();
+        assert_eq!(graph.cache_key(DECODE).unwrap(), default_key);
+    }
+
+    #[test]
+    fn a_stamped_identity_survives_apply_document_and_separates_photos() {
+        let registry = build_registry();
+        let key_for = |graph: &mut RenderGraph, identity: &[u8]| {
+            let mut doc = EditDocument::default();
+            stamp_source_identity(&mut doc, blake3::hash(identity));
+            graph.apply_document(&doc, &registry).unwrap();
+            // Every downstream key chains from DECODE, so check the last baked node.
+            graph.cache_key(HEAL).unwrap()
+        };
+        let mut graph = build_graph();
+        let a = key_for(&mut graph, b"photo A");
+        let b = key_for(&mut graph, b"photo B");
+        assert_ne!(a, b, "two photos must never share cache keys");
+        // Stable under repeated application (no per-frame invalidation), and back to A again.
+        assert_eq!(key_for(&mut graph, b"photo B"), b);
+        assert_eq!(key_for(&mut graph, b"photo A"), a);
+        // Edits to a live stage don't touch the baked chain's keys.
+        let mut doc = EditDocument::default();
+        stamp_source_identity(&mut doc, blake3::hash(b"photo A"));
+        doc.stages.insert(
+            EXPOSURE.to_string(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "stops": 1.0 }),
+            },
+        );
+        graph.apply_document(&doc, &registry).unwrap();
+        assert_eq!(graph.cache_key(HEAL).unwrap(), a);
     }
 
     #[test]

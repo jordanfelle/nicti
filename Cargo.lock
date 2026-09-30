@@ -3755,6 +3755,7 @@ dependencies = [
  "nicti-lair",
  "nicti-pawprint",
  "nicti-pounce",
+ "nicti-preen",
  "nicti-shed",
  "nicti-stalk",
  "nicti-tapetum",
@@ -3763,6 +3764,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "wgpu",
 ]
 
