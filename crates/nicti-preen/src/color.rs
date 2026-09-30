@@ -69,13 +69,19 @@ pub fn quantize(pixels: &[f32], space: OutputSpace, depth: BitDepth) -> OutputPi
     let lut: Vec<f32> = (0..=LUT_SIZE)
         .map(|i| space.encode(i as f32 / LUT_SIZE as f32))
         .collect();
+    // Linearly interpolated: nearest-neighbour would collapse a 16-bit ramp to ~16k distinct codes
+    // (and ~50-code shadow steps). The curve is smooth (and exactly linear near black), so
+    // interpolation error at this table size is far below one 16-bit code.
     let encoded = |v: f32| -> f32 {
         if v.is_nan() || v <= 0.0 {
             0.0
         } else if v >= 1.0 {
             lut[LUT_SIZE]
         } else {
-            lut[(v * LUT_SIZE as f32).round() as usize]
+            let x = v * LUT_SIZE as f32;
+            let i = x as usize;
+            let t = x - i as f32;
+            lut[i] + (lut[i + 1] - lut[i]) * t
         }
     };
     match depth {
@@ -142,6 +148,26 @@ mod tests {
             panic!()
         };
         assert_eq!(q, [0, 0, 65_535, 65_535, 0, 65_535]);
+    }
+
+    #[test]
+    fn a_dark_16_bit_ramp_uses_nearly_every_code_not_a_coarse_lut() {
+        // 0..0.01 linear spans ~6500 sRGB 16-bit codes; nearest-neighbour lookup gave ~165.
+        let px: Vec<f32> = (0..30_000).map(|i| i as f32 / 30_000.0 * 0.01).collect();
+        let OutputPixels::Rgb16(q) = quantize(&px, OutputSpace::Srgb, BitDepth::Sixteen) else {
+            panic!()
+        };
+        let distinct: std::collections::BTreeSet<_> = q.iter().collect();
+        assert!(
+            distinct.len() > 5_500,
+            "only {} distinct codes",
+            distinct.len()
+        );
+        // And it still tracks the exact curve.
+        for (v, code) in px.iter().zip(&q).step_by(997) {
+            let want = OutputSpace::Srgb.encode(*v) * 65_535.0;
+            assert!((*code as f32 - want).abs() <= 1.5, "{v}: {code} vs {want}");
+        }
     }
 
     #[test]

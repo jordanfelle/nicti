@@ -340,6 +340,24 @@ pub fn build_xmp(spec: &MetadataSpec, source: &SourceMetadata, software: &str) -
     Some(wrap_xpacket(&xmp))
 }
 
+/// JFIF requires its APP0 segment immediately after SOI, but `little_exif` and the XMP insert both
+/// put their APP1 at index 1. Moves a leading-APP0-elsewhere JFIF segment back to the front.
+pub fn jfif_first(jpeg: &[u8]) -> Result<Vec<u8>, MetadataError> {
+    let mut img = img_parts::jpeg::Jpeg::from_bytes(bytes::Bytes::copy_from_slice(jpeg))
+        .map_err(|e| MetadataError::Parse(e.to_string()))?;
+    let is_jfif = |s: &img_parts::jpeg::JpegSegment| {
+        s.marker() == 0xE0 && s.contents().starts_with(b"JFIF\0")
+    };
+    if let Some(pos) = img.segments().iter().position(is_jfif) {
+        if pos != 0 {
+            let seg = img.segments_mut().remove(pos);
+            img.segments_mut().insert(0, seg);
+            return Ok(img.encoder().bytes().to_vec());
+        }
+    }
+    Ok(jpeg.to_vec())
+}
+
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const APP1: u8 = 0xE1;
 /// A segment length field is a u16 that includes itself.

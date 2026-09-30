@@ -24,7 +24,9 @@ use nicti_claw::{Descriptor, Module, Registry};
 use serde_json::Value;
 
 use crate::color::OutputPixels;
-use crate::metadata::{embed_xmp_jpeg, exif_tiff_bytes, write_exif_jpeg, xmp_png_chunk};
+use crate::metadata::{
+    embed_xmp_jpeg, exif_tiff_bytes, jfif_first, write_exif_jpeg, xmp_png_chunk,
+};
 use crate::spec::{BitDepth, ExportFormat, FormatSpec, Subsampling, TiffCompression};
 use crate::{Embed, EmbedSupport, ExportError, Exporter, ExporterRegistry, OutputImage};
 
@@ -174,7 +176,8 @@ impl Exporter for JpegExporter {
         if let Some(exif) = embed.exif {
             buf = write_exif_jpeg(&buf, exif)?;
         }
-        Ok(buf)
+        // JFIF's APP0 must directly follow SOI; the XMP/EXIF inserts above went in front of it.
+        Ok(jfif_first(&buf)?)
     }
 }
 

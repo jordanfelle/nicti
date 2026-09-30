@@ -203,11 +203,15 @@ impl ExportRun {
                 .into_iter()
                 .map(|k| k.name)
                 .collect();
-            let edit = env
-                .store
-                .get_master_edit(id)
-                .map_err(catalog_err)?
-                .unwrap_or_default();
+            // A photo whose saved edits can't be read fails on its own (naming it) instead of
+            // aborting the whole batch.
+            let edit = match env.store.get_master_edit(id) {
+                Ok(edit) => edit.unwrap_or_default(),
+                Err(e) => {
+                    failed_up_front.push((id, format!("its saved edits couldn't be read: {e}")));
+                    continue;
+                }
+            };
             let facts = facts_for(&asset, &source_path);
             prepared.push(Prepared {
                 plan_item: PlanItem { facts, source_dir },

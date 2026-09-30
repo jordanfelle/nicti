@@ -110,6 +110,12 @@ pub enum ExportError {
     Encode(String),
 }
 
+/// Largest exported image, in pixels. Resize allocates several f32 RGB copies of the *output*
+/// (12 bytes/px each), and only the render buffer uses fallible allocation, so an unbounded
+/// target (`LongEdge(60000)` on a small source with "don't enlarge" off) would abort the process
+/// on OOM and lose unsaved edits. 250 MP (~3 GB of f32) is far past any real print.
+pub const MAX_OUTPUT_PIXELS: u64 = 250_000_000;
+
 /// A rendered frame in host memory: interleaved **linear ProPhoto (D50)** RGB f32, unclamped --
 /// what Tapetum's readback produces, alpha dropped.
 pub struct WorkingFrame {
@@ -170,6 +176,13 @@ pub fn export_frame(
     let orientation = ctx.source.exif.orientation;
     let (ow, oh) = orientation.oriented_size(w, h);
     let (tw, th) = resize::target_size(ow, oh, &spec.resize);
+    if u64::from(tw) * u64::from(th) > MAX_OUTPUT_PIXELS {
+        return Err(ExportError::Frame(format!(
+            "the export would be {tw}x{th} ({} MP); the limit is {} MP -- lower the size setting",
+            u64::from(tw) * u64::from(th) / 1_000_000,
+            MAX_OUTPUT_PIXELS / 1_000_000
+        )));
+    }
     let (rw, rh) = orientation.oriented_size(tw, th); // swap back if the orientation swaps
 
     let resized = resize::resize_linear_f32(frame.pixels, w, h, rw, rh)?;
@@ -475,6 +488,24 @@ mod tests {
                 "{space:?} {px:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_absurd_output_size_is_refused_before_allocating() {
+        let reg = builtin_registry();
+        let spec = ExportSpec {
+            resize: ResizeSpec {
+                mode: ResizeMode::LongEdge(60_000),
+                dont_enlarge: false,
+            },
+            ..ExportSpec::default()
+        };
+        let err = export_frame(
+            split_frame(2, 2),
+            &ctx(&spec, &SourceMetadata::default()),
+            &reg,
+        );
+        assert!(matches!(err, Err(ExportError::Frame(m)) if m.contains("limit")));
     }
 
     #[test]

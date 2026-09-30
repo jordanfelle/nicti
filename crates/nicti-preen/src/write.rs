@@ -7,7 +7,7 @@
 //! - **Claiming a name** (`UniqueSuffix`/`Skip`) uses `OpenOptions::create_new`, which is atomic
 //!   (works across threads *and* processes, and on FAT32/exFAT where hard links don't). The claim
 //!   leaves a 0-byte placeholder.
-//! - **The data** goes to a unique temp file (`.{name}.{pid}-{n}.nicti-tmp`, `n` from a
+//! - **The data** goes to a unique temp file (`.{pid}-{n}.nicti-tmp`, `n` from a
 //!   process-wide counter) in the same directory, is `sync_all`'d, then renamed over the
 //!   placeholder (or over the existing file for `Overwrite`).
 //! - On any error the temp file and any placeholder *we* created are removed.
@@ -63,11 +63,9 @@ fn with_suffix(path: &Path, n: u32) -> PathBuf {
 
 fn temp_path_for(target: &Path) -> PathBuf {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = target
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    target.with_file_name(format!(".{name}.{}-{n}.nicti-tmp", std::process::id()))
+    // Short and independent of the target's name: a name-derived temp is ~20 chars longer than the
+    // target, so a name planned right at the filesystem's limit would fail at write time.
+    target.with_file_name(format!(".{}-{n}.nicti-tmp", std::process::id()))
 }
 
 /// Removes a file on drop unless disarmed.
@@ -297,6 +295,50 @@ mod tests {
         let res = write_output(&target, b"data", CollisionPolicy::Overwrite);
         assert!(res.is_err());
         assert_eq!(files(dir.path()), ["blocker", "t.jpg"], "temp file removed");
+    }
+
+    #[test]
+    fn names_the_planner_allows_can_actually_be_written_even_at_the_limit() {
+        use crate::naming::AssetFacts;
+        use crate::plan::{plan_batch, FsProbe, PlanItem};
+        use crate::spec::{DestinationBase, DestinationSpec, ExportSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let spec = ExportSpec {
+            destination: DestinationSpec {
+                base: DestinationBase::Folder(dir.path().to_path_buf()),
+                subfolder: None,
+            },
+            ..ExportSpec::default()
+        };
+        // 400 ASCII chars, and 300 CJK chars (900 bytes but only 300 UTF-16 units).
+        let items: Vec<PlanItem> = ["a".repeat(400), "\u{5199}".repeat(300)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, stem)| PlanItem {
+                facts: AssetFacts {
+                    asset_id: i as i64,
+                    stem,
+                    ..AssetFacts::default()
+                },
+                source_dir: dir.path().to_path_buf(),
+            })
+            .collect();
+        let plan = plan_batch(&items, &spec, "jpg", &FsProbe).unwrap();
+        for out in &plan.outputs {
+            let name = out.path.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name.len() <= 255 && name.encode_utf16().count() <= 255,
+                "{}",
+                name.len()
+            );
+            write_output(&out.path, b"x", CollisionPolicy::UniqueSuffix)
+                .unwrap_or_else(|e| panic!("planned name of {} bytes failed: {e}", name.len()));
+        }
+        // The suffix a collision adds still fits.
+        let again =
+            write_output(&plan.outputs[0].path, b"y", CollisionPolicy::UniqueSuffix).unwrap();
+        assert!(matches!(again, WriteOutcome::Written(_)));
     }
 
     #[test]

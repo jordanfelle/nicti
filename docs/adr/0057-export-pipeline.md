@@ -87,7 +87,7 @@ time, so parallelism and failures never change a name (a failed photo leaves a g
 de-duplicates within the batch on a case-folded path under every policy.
 
 `write_output` claims a name with `create_new` (atomic across threads and processes, works on
-FAT/exFAT), writes a unique temp file (`.{name}.{pid}-{n}.nicti-tmp`), `sync_all`s, and renames over
+FAT/exFAT), writes a unique temp file (`.{pid}-{n}.nicti-tmp`), `sync_all`s, and renames over
 the claim, retrying transient Windows access-denied errors; on any error the temp file and the claim
 are removed. This replaces `spikes/scent::atomic_write`, whose single shared temp name and silently
 overwriting rename are unsafe for parallel writers. A crash can leave a 0-byte claim or a temp

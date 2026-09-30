@@ -65,7 +65,7 @@ impl WatermarkSource {
     }
 
     pub fn from_svg(text: String) -> Result<Self, WatermarkError> {
-        let tree = usvg::Tree::from_str(&text, &usvg::Options::default())
+        let tree = usvg::Tree::from_str(&text, &svg_options())
             .map_err(|e| WatermarkError::Svg(e.to_string()))?;
         let size = tree.size();
         if !(size.width() > 0.0 && size.height() > 0.0) {
@@ -89,8 +89,8 @@ impl WatermarkSource {
         match self {
             WatermarkSource::Png(img) => img.height() as f64 / img.width() as f64,
             WatermarkSource::Svg(text) => {
-                let tree = usvg::Tree::from_str(text, &usvg::Options::default())
-                    .expect("validated in from_svg");
+                let tree =
+                    usvg::Tree::from_str(text, &svg_options()).expect("validated in from_svg");
                 tree.size().height() as f64 / tree.size().width() as f64
             }
         }
@@ -116,9 +116,18 @@ impl WatermarkSource {
     }
 }
 
+/// Parse options for a logo: an `<image xlink:href>` may only be an inline `data:` URL. usvg's
+/// default also reads arbitrary local paths, which would let a logo file pull other files' pixels
+/// into every export.
+fn svg_options() -> usvg::Options<'static> {
+    let mut options = usvg::Options::default();
+    options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+    options
+}
+
 /// Rasterizes an SVG at `width` x `height` into straight-alpha RGBA (sRGB-encoded color).
 pub fn rasterize_svg(svg: &str, width: u32, height: u32) -> Result<RgbaImage, WatermarkError> {
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default())
+    let tree = usvg::Tree::from_str(svg, &svg_options())
         .map_err(|e| WatermarkError::Svg(e.to_string()))?;
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or(WatermarkError::Empty)?;
     let size = tree.size();
@@ -265,6 +274,25 @@ mod tests {
 
     fn at(base: &[f32], w: u32, x: u32, y: u32) -> f32 {
         base[(y as usize * w as usize + x as usize) * 3]
+    }
+
+    #[test]
+    fn an_svg_cannot_pull_in_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.png");
+        RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]))
+            .save(&secret)
+            .unwrap();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4" height="4"><image xlink:href="{}" width="4" height="4"/></svg>"#,
+            secret.display()
+        );
+        let img = rasterize_svg(&svg, 4, 4).unwrap();
+        assert!(
+            img.pixels().all(|p| p[3] == 0),
+            "the local file was drawn: {:?}",
+            img.get_pixel(1, 1)
+        );
     }
 
     #[test]

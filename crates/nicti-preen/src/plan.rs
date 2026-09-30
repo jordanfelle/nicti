@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::naming::{truncate_utf16, AssetFacts, Template};
+use crate::naming::{truncate_bytes, truncate_utf16, AssetFacts, Template, MAX_COMPONENT_UTF16};
 use crate::spec::{CollisionPolicy, DestinationBase, ExportSpec};
 
 /// Windows' classic `MAX_PATH` minus the terminating NUL.
@@ -131,6 +131,11 @@ pub fn plan_batch(
                 stem = "untitled".to_string();
             }
         }
+        // A single name component is limited to 255 UTF-16 units on NTFS but 255 *bytes* on
+        // ext4/APFS/etc; leave room for "-NNNNN.ext" under both.
+        let component_room = MAX_COMPONENT_UTF16.saturating_sub(SUFFIX_RESERVE + 1 + ext.len());
+        stem = truncate_utf16(&stem, component_room);
+        stem = truncate_bytes(&stem, component_room);
         if fixed + MIN_STEM > MAX_PATH_UTF16 {
             plan.warnings.push(format!(
                 "destination folder for photo {} is very long ({} characters); the exported path \

@@ -1749,7 +1749,14 @@ impl PeltApp {
             return;
         }
         // Export renders what the catalog holds, so put Develop's pending edits there first.
-        self.save_develop_edits(true);
+        // If that save fails, export would silently render the older stored edits: stop instead.
+        if !self.save_develop_edits(true) {
+            self.cull_notice = Some(
+                "Couldn't save Develop's edits, so nothing was exported (see the message above)."
+                    .into(),
+            );
+            return;
+        }
         let CatalogOpenState::Open(store) = &self.catalog else {
             return;
         };

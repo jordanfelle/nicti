@@ -385,7 +385,11 @@ pub fn sanitize_component(input: &str) -> String {
     let mapped: String = input
         .chars()
         .map(|c| {
-            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            if c.is_control()
+                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                // Bidi overrides/isolates: `photo\u{202E}gpj.exe`-style spoofing.
+                || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            {
                 '_'
             } else {
                 c
@@ -404,6 +408,18 @@ pub fn sanitize_component(input: &str) -> String {
     out = truncate_utf16(&out, MAX_COMPONENT_UTF16);
     // Truncation can expose a new trailing dot/space.
     out.trim_end_matches(['.', ' ']).to_string()
+}
+
+/// Truncates to at most `max` UTF-8 bytes, never splitting a character.
+pub fn truncate_bytes(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Truncates to at most `max` UTF-16 code units, never splitting a character.
@@ -538,6 +554,7 @@ mod tests {
         assert_eq!(sanitize_component("."), "");
         assert_eq!(sanitize_component(".."), "");
         assert_eq!(sanitize_component("keep.dots.inside"), "keep.dots.inside");
+        assert_eq!(sanitize_component("photo\u{202E}gpj.exe"), "photo_gpj.exe");
     }
 
     #[test]
