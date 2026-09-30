@@ -22,6 +22,10 @@ use crate::backend::{BakeRequest, MaskBackend};
 
 pub type Slot<T> = Arc<Mutex<Option<T>>>;
 
+/// The error a bake resolves with when its job was cancelled before it ran. A poller treats it as
+/// retryable, not as a failure of the model.
+pub const CANCELLED: &str = "cancelled";
+
 /// Shared handle to the (loaded-once) backend.
 pub type SharedBackend = Arc<Mutex<dyn MaskBackend + Send>>;
 
@@ -129,10 +133,56 @@ impl ChunkedJob for MaskBakeJob {
     }
 }
 
+impl Drop for MaskBakeJob {
+    /// Pounce drops a job cancelled while still queued *without* ever calling `step()`, so the slot
+    /// would stay empty and whoever holds it would wait forever (a stuck "Selecting..." badge and a
+    /// permanent repaint timer). Resolve it here, unless `step()` already did.
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        if let Ok(mut slot) = self.slot.lock() {
+            if slot.is_none() {
+                *slot = Some(MaskBakeOutcome {
+                    image_key: self.image_key,
+                    bake_key: self.bake_key,
+                    result: Err(CANCELLED.to_owned()),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nicti_groom::RgbBuffer;
+
+    #[test]
+    fn a_job_dropped_before_it_ran_resolves_its_slot_as_cancelled() {
+        let (job, slot, _) = job_with(Fake { ok: true, calls: 0 });
+        drop(job); // what Pounce does to a job cancelled while queued
+        let out = slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("a cancelled job must not strand its slot");
+        assert_eq!(out.image_key, 42);
+        assert_eq!(out.result.err().as_deref(), Some(CANCELLED));
+    }
+
+    #[test]
+    fn a_job_that_ran_is_not_overwritten_when_it_is_dropped_afterwards() {
+        let (mut job, slot, _) = job_with(Fake { ok: true, calls: 0 });
+        job.step().unwrap();
+        let first = slot.lock().unwrap().take().expect("resolved by step()");
+        assert!(first.result.is_ok());
+        drop(job);
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "Drop must not refill a consumed slot"
+        );
+    }
     use nicti_stalk::{AlphaMap, SegmentError, SegmentTarget};
 
     struct Fake {

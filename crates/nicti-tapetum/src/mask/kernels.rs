@@ -18,7 +18,7 @@ use super::Field;
 use crate::gpu::{make_compute_pipeline, GpuContext};
 
 /// Brush dabs are binned into tiles of this many pixels per side (matches `mask_brush.wgsl`).
-pub const BRUSH_TILE: usize = 64;
+pub use super::raster::BRUSH_TILE;
 
 /// A single-channel `f32` mask texture.
 pub struct FieldTexture {

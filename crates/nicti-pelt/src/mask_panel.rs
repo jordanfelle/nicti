@@ -20,9 +20,9 @@ use nicti_tapetum::stages::MASKS;
 use crate::develop_panel::{image_to_screen, screen_to_image};
 use crate::mask_edit::{
     add_color_sample, add_component, add_correction, begin_stroke, delete, duplicate,
-    extend_stroke, linear_ends, new_correction, next_id, preview_extent, preview_field,
-    preview_key, radial_shape, set_linear, set_radial, Arm, BrushSettings, NewMask, Thumb,
-    MAX_BRUSH_RADIUS, MIN_BRUSH_RADIUS,
+    extend_stroke, has_brush, has_color_range, linear_ends, new_correction, next_id,
+    preview_extent, preview_field, preview_key, radial_shape, set_linear, set_radial, Arm,
+    BrushSettings, NewMask, Thumb, MAX_BRUSH_RADIUS, MIN_BRUSH_RADIUS,
 };
 use crate::mask_tool::MaskBakeService;
 use crate::render::DevelopView;
@@ -288,7 +288,8 @@ fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
         }
     });
     if overlay_changed {
-        a.color = (overlay.saturation > 0.0).then_some(overlay);
+        // Keep a chosen hue even while the amount is still 0 (an all-default tint is "none").
+        a.color = (overlay != Default::default()).then_some(overlay);
         changed = true;
     }
     ui.label("Effects");
@@ -414,8 +415,13 @@ pub fn show_panel(
             if ui
                 .selectable_label(mask.selected == Some(i), c.name.clone())
                 .clicked()
+                && mask.selected != Some(i)
             {
+                // The armed tool belonged to the previous correction; a stale one would otherwise
+                // make the next drag edit (or add a component to) this one.
                 mask.selected = Some(i);
+                mask.arm = Arm::None;
+                mask.drag = None;
             }
             if ui.small_button("Dup").on_hover_text("Duplicate").clicked() {
                 action = Some((i, ListAction::Duplicate(false)));
@@ -657,6 +663,24 @@ fn show_selected(
 // Viewport
 // ---------------------------------------------------------------------------------------------
 
+/// The armed tool, but only if the selected correction has the component it edits. The arm is
+/// reset when the selection changes, but a component can also be removed while its tool is armed;
+/// without this a drag would silently *add* a fresh component to a mask that never had one.
+fn effective_arm(c: &nicti_tapetum::mask::params::LocalCorrection, arm: Arm) -> Arm {
+    let present = match arm {
+        Arm::None => true,
+        Arm::Brush => has_brush(c),
+        Arm::Linear => linear_ends(c).is_some(),
+        Arm::Radial => radial_shape(c).is_some(),
+        Arm::Pick => has_color_range(c),
+    };
+    if present {
+        arm
+    } else {
+        Arm::None
+    }
+}
+
 /// Screen point -> normalized frame coordinates.
 pub(crate) fn to_norm(rect: egui::Rect, source: (f32, f32), p: egui::Pos2) -> [f32; 2] {
     let (x, y) = screen_to_image(rect, source, p);
@@ -680,30 +704,55 @@ pub(crate) fn radial_handles(
     source: (f32, f32),
     center: [f32; 2],
     radii: [f32; 2],
+    angle_deg: f32,
 ) -> (egui::Pos2, egui::Pos2, egui::Pos2) {
-    let long = source.0.max(source.1);
     let c = to_screen(rect, source, center);
     let ex = to_screen(
         rect,
         source,
-        [center[0] + radii[0] * long / source.0, center[1]],
+        local_to_norm(center, radii[0], 0.0, angle_deg, source),
     );
     let ey = to_screen(
         rect,
         source,
-        [center[0], center[1] + radii[1] * long / source.1],
+        local_to_norm(center, 0.0, radii[1], angle_deg, source),
     );
     (c, ex, ey)
 }
 
+/// A point `(lx, ly)` (fractions of the long edge) in the ellipse's own rotated frame, as normalized
+/// frame coordinates. The mask's x axis is `(cos a, sin a)` in pixel space, exactly as
+/// `raster::radial_weight` rotates it, so handles and outline sit on the real mask edge.
+pub(crate) fn local_to_norm(
+    center: [f32; 2],
+    lx: f32,
+    ly: f32,
+    angle_deg: f32,
+    source: (f32, f32),
+) -> [f32; 2] {
+    let long = source.0.max(source.1).max(1.0);
+    let (s, c) = angle_deg.to_radians().sin_cos();
+    let (px, py) = (lx * long, ly * long);
+    [
+        center[0] + (px * c - py * s) / source.0.max(1.0),
+        center[1] + (px * s + py * c) / source.1.max(1.0),
+    ]
+}
+
 /// Radii (fractions of the long edge) of an axis-aligned ellipse centred at `center` passing
 /// through `p` -- how a drag sizes a radial mask.
-pub(crate) fn radii_to(center: [f32; 2], p: [f32; 2], source: (f32, f32)) -> [f32; 2] {
+pub(crate) fn radii_to(
+    center: [f32; 2],
+    p: [f32; 2],
+    source: (f32, f32),
+    angle_deg: f32,
+) -> [f32; 2] {
     let long = source.0.max(source.1).max(1.0);
-    [
-        ((p[0] - center[0]).abs() * source.0 / long).max(0.002),
-        ((p[1] - center[1]).abs() * source.1 / long).max(0.002),
-    ]
+    // The pointer's offset in pixels, expressed in the ellipse's own (rotated) axes.
+    let (dx, dy) = ((p[0] - center[0]) * source.0, (p[1] - center[1]) * source.1);
+    let (s, c) = angle_deg.to_radians().sin_cos();
+    let (lx, ly) = (dx * c + dy * s, -dx * s + dy * c);
+    [(lx.abs() / long).max(0.002), (ly.abs() / long).max(0.002)]
 }
 
 /// Handles the photo area while the Masks tool is active: brush strokes, gradient handles, the
@@ -758,7 +807,7 @@ pub fn handle_viewport(
         let pointer = response
             .interact_pointer_pos()
             .or_else(|| ui.input(|i| i.pointer.hover_pos()));
-        match mask.arm {
+        match effective_arm(&params.corrections[sel], mask.arm) {
             Arm::Brush => {
                 if response.drag_started() {
                     if let Some(p) = press {
@@ -771,6 +820,11 @@ pub fn handle_viewport(
                         ) {
                             mask.drag = Some(MaskDrag::Stroke { comp, stroke });
                             changed = true;
+                        } else {
+                            mask.status = Some(
+                                "This mask can't take more brush strokes (limit reached)."
+                                    .to_owned(),
+                            );
                         }
                     }
                 } else if response.dragged() {
@@ -831,8 +885,9 @@ pub fn handle_viewport(
                     if let Some(press) = press {
                         let c = &mut params.corrections[sel];
                         let handle = match radial_shape(c) {
-                            Some((center, radii, _, _)) => {
-                                let (hc, hx, hy) = radial_handles(rect, source, center, radii);
+                            Some((center, radii, angle, _)) => {
+                                let (hc, hx, hy) =
+                                    radial_handles(rect, source, center, radii, angle);
                                 if near(press, hc) {
                                     RadialHandle::Center
                                 } else if near(press, hx) {
@@ -854,17 +909,14 @@ pub fn handle_viewport(
                 } else if response.dragged() {
                     if let (Some(MaskDrag::Radial(h)), Some(p)) = (mask.drag, pointer) {
                         let c = &mut params.corrections[sel];
-                        if let Some((center, radii, _, _)) = radial_shape(c) {
+                        if let Some((center, radii, angle, _)) = radial_shape(c) {
                             let n = to_norm(rect, source, p);
+                            let to = radii_to(center, n, source, angle);
                             let (new_center, new_radii) = match h {
                                 RadialHandle::Center => (n, radii),
-                                RadialHandle::EdgeX => {
-                                    (center, [radii_to(center, n, source)[0], radii[1]])
-                                }
-                                RadialHandle::EdgeY => {
-                                    (center, [radii[0], radii_to(center, n, source)[1]])
-                                }
-                                RadialHandle::New => (center, radii_to(center, n, source)),
+                                RadialHandle::EdgeX => (center, [to[0], radii[1]]),
+                                RadialHandle::EdgeY => (center, [radii[0], to[1]]),
+                                RadialHandle::New => (center, to),
                             };
                             changed |= set_radial(c, new_center, new_radii);
                         }
@@ -949,7 +1001,7 @@ fn draw_overlay(
 
     let white = egui::Stroke::new(1.5, egui::Color32::WHITE);
     let accent = egui::Color32::from_rgb(255, 210, 0);
-    match mask.arm {
+    match effective_arm(c, mask.arm) {
         Arm::Linear => {
             if let Some((p0, p1)) = linear_ends(c) {
                 let (a, b) = (to_screen(rect, source, p0), to_screen(rect, source, p1));
@@ -959,13 +1011,26 @@ fn draw_overlay(
             }
         }
         Arm::Radial => {
-            if let Some((center, radii, _, _)) = radial_shape(c) {
-                let (hc, hx, hy) = radial_handles(rect, source, center, radii);
-                painter.add(egui::Shape::ellipse_stroke(
-                    hc,
-                    egui::vec2((hx.x - hc.x).abs(), (hy.y - hc.y).abs()),
-                    white,
-                ));
+            if let Some((center, radii, angle, _)) = radial_shape(c) {
+                let (hc, hx, hy) = radial_handles(rect, source, center, radii, angle);
+                // A polyline, not `ellipse_stroke`: the ellipse can be rotated.
+                let outline: Vec<egui::Pos2> = (0..64)
+                    .map(|i| {
+                        let t = i as f32 / 64.0 * std::f32::consts::TAU;
+                        to_screen(
+                            rect,
+                            source,
+                            local_to_norm(
+                                center,
+                                radii[0] * t.cos(),
+                                radii[1] * t.sin(),
+                                angle,
+                                source,
+                            ),
+                        )
+                    })
+                    .collect();
+                painter.add(egui::Shape::closed_line(outline, white));
                 painter.circle_filled(hc, HANDLE_DRAW_PX, accent);
                 painter.circle_filled(hx, HANDLE_DRAW_PX, egui::Color32::WHITE);
                 painter.circle_filled(hy, HANDLE_DRAW_PX, egui::Color32::WHITE);
@@ -1469,5 +1534,71 @@ mod tests {
             Some(AiState::NeedsModel)
         );
         assert!(mask.status().is_none());
+    }
+
+    #[test]
+    fn a_stale_arm_never_edits_a_correction_that_lacks_the_tool() {
+        // Brush armed, then a Subject mask is selected: a drag must not add a brush component.
+        let Some((mut develop, mut mask, mut h)) = setup(NewMask::Subject, Arm::Brush) else {
+            return;
+        };
+        h.drag(h.at(0.2, 0.2), h.at(0.7, 0.7), &mut develop, &mut mask);
+        assert_eq!(
+            correction(&develop).mask.components.len(),
+            1,
+            "no component was added"
+        );
+        assert!(strokes(&develop).is_empty());
+        // Same for the other tools.
+        for arm in [Arm::Linear, Arm::Radial, Arm::Pick] {
+            mask.arm = arm;
+            h.drag(h.at(0.2, 0.2), h.at(0.7, 0.7), &mut develop, &mut mask);
+            h.click(h.at(0.5, 0.5), &mut develop, &mut mask);
+            assert_eq!(correction(&develop).mask.components.len(), 1, "{arm:?}");
+        }
+    }
+
+    #[test]
+    fn rotated_radial_handles_sit_on_the_real_mask_edge_and_drags_size_the_rotated_axes() {
+        let source = (600.0f32, 400.0);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0));
+        let (center, radii, angle) = ([0.5f32, 0.5], [0.2f32, 0.1], 30.0f32);
+        let (hc, hx, hy) = radial_handles(rect, source, center, radii, angle);
+        // The X handle is where the rasterizer's own math puts the ellipse edge along its x axis.
+        let long = 600.0f32;
+        let (s, c) = angle.to_radians().sin_cos();
+        let want_x = pos2(300.0 + 0.2 * long * c, 200.0 + 0.2 * long * s);
+        assert!(hx.distance(want_x) < 0.5, "{hx:?} vs {want_x:?}");
+        assert!(hc.distance(pos2(300.0, 200.0)) < 0.5);
+        // On the ellipse boundary the weight is still full (the feather starts outside it).
+        let w = |p: egui::Pos2| {
+            nicti_tapetum::mask::raster::radial_weight(
+                (300.0, 200.0),
+                (0.2 * long, 0.1 * long),
+                angle,
+                20.0,
+                p.x,
+                p.y,
+            )
+        };
+        assert!(w(hx) > 0.99 && w(hy) > 0.99, "handles are on the edge");
+        // Dragging the X handle to a point along the rotated axis gives that radius back.
+        let target = local_to_norm(center, 0.3, 0.0, angle, source);
+        let r = radii_to(center, target, source, angle);
+        assert!((r[0] - 0.3).abs() < 1e-4 && r[1] <= 0.0021, "{r:?}");
+    }
+
+    #[test]
+    fn a_tint_hue_chosen_while_the_amount_is_zero_is_kept_and_still_inert() {
+        let hue_only = nicti_tapetum::mask::params::TintColor {
+            hue_deg: 200.0,
+            saturation: 0.0,
+        };
+        assert_ne!(hue_only, Default::default());
+        let a = LocalAdjust {
+            color: Some(hue_only),
+            ..LocalAdjust::default()
+        };
+        assert!(a.is_noop(), "an amount-0 tint still changes nothing");
     }
 }

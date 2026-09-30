@@ -16,6 +16,13 @@ use super::Field;
 pub const MAX_DABS_PER_STROKE: usize = 20_000;
 /// Most dabs the whole brush component expands to (spent stroke by stroke, in order).
 pub const MAX_DABS_TOTAL: usize = 400_000;
+/// Most (dab, tile) pairs one stroke's tile list may hold (the GPU brush kernel bins each stroke's
+/// dabs into [`BRUSH_TILE`]-pixel tiles). Each entry is 4 bytes and costs one tile of per-pixel dab
+/// evaluations, so this bounds both the buffer (8 MB, far under a software adapter's 128 MB binding
+/// limit) and one stroke's dispatch time, however large a synced document's radius is.
+pub const MAX_TILE_ENTRIES_PER_STROKE: usize = 2_000_000;
+/// The brush kernel's tile edge in pixels.
+pub const BRUSH_TILE: usize = 64;
 /// Dab spacing as a fraction of the radius (LRC-style overlap; 1/4 keeps an edge visibly smooth).
 pub const SPACING_FRACTION: f32 = 0.25;
 /// Never space dabs closer than this many pixels.
@@ -80,11 +87,22 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
         .windows(2)
         .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
         .sum();
-    let cap = cap.min(MAX_DABS_PER_STROKE);
+    // A dab's box spans at most this many tiles along an axis (and never more than the frame has).
+    let axis_tiles = |extent: usize| {
+        (((2.0 * radius + 2.0) / BRUSH_TILE as f32).ceil() as usize + 1)
+            .min(extent.div_ceil(BRUSH_TILE).max(1))
+    };
+    let tiles_per_dab = axis_tiles(width) * axis_tiles(height);
+    let cap = cap
+        .min(MAX_DABS_PER_STROKE)
+        .min((MAX_TILE_ENTRIES_PER_STROKE / tiles_per_dab).max(1));
     let mut spacing = (radius * SPACING_FRACTION).max(MIN_SPACING_PX);
-    // Widen rather than truncate, so the whole path is still covered at a coarser spacing.
-    if total / spacing > (cap.saturating_sub(pts.len())) as f32 {
-        spacing = total / (cap.saturating_sub(pts.len()).max(1)) as f32;
+    // Widen rather than truncate, so the whole path is still covered at a coarser spacing. The
+    // first dab is placed separately, so `cap - 1` more are available -- however many points the
+    // stroke has (a point is not a dab: points closer than `spacing` produce none).
+    let steps = cap.saturating_sub(1).max(1) as f32;
+    if total / spacing > steps {
+        spacing = total / steps;
     }
 
     let mut dabs = vec![make(pts[0])];
@@ -388,6 +406,70 @@ mod tests {
             flow: 1.0,
             erase,
         }
+    }
+
+    /// A straight left-to-right stroke of `n` evenly spaced points.
+    fn straight(n: usize, radius: f32) -> Stroke {
+        let pts: Vec<[f32; 2]> = (0..n).map(|i| [i as f32 / (n - 1) as f32, 0.5]).collect();
+        stroke(&pts, radius, 0.01, false)
+    }
+
+    #[test]
+    fn a_stroke_with_more_points_than_the_dab_cap_still_covers_its_path() {
+        // 4096 px across, radius 82 px => spacing ~20 px => ~200 dabs are enough. Points are not
+        // dabs: before the fix the cap was reduced by the point count, so 25k points (past the 20k
+        // cap) collapsed the whole stroke to a single dot and 19,990 left beads 409 px apart.
+        for n in [2_000, 19_990, 25_000, 150_000] {
+            let dabs = dabs_for_stroke(&straight(n, 0.02), 4096, 2731, MAX_DABS_TOTAL);
+            let spacing = 0.02 * 4096.0 * SPACING_FRACTION;
+            assert!(dabs.len() > 150, "{n} points gave {} dabs", dabs.len());
+            let worst = dabs
+                .windows(2)
+                .map(|w| (w[1].cx - w[0].cx).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst <= spacing * 1.01, "{n} points: a gap of {worst}px");
+            let last = dabs.last().unwrap().cx;
+            assert!(last > 4096.0 - spacing * 2.0, "{n} points stop at {last}px");
+        }
+    }
+
+    #[test]
+    fn a_dab_budget_smaller_than_the_point_count_widens_spacing_instead_of_collapsing() {
+        let dabs = dabs_for_stroke(&straight(5_000, 0.02), 4096, 2731, 40);
+        assert_eq!(dabs.len(), 40);
+        assert!(
+            dabs.last().unwrap().cx > 4096.0 * 0.9,
+            "the path is still covered"
+        );
+    }
+
+    #[test]
+    fn a_huge_radius_bounds_the_tile_list_however_long_the_path() {
+        use super::super::kernels::bin_stroke;
+        // `sanitized` allows a radius of 4.0 (four long edges): every dab covers the whole mask, so
+        // the un-capped tile list was ~200 MiB near the dab cap -- past a software adapter's 128 MiB
+        // binding limit (a validation panic) and minutes of per-pixel work on a real one.
+        let pts: Vec<[f32; 2]> = (0..10_000)
+            .map(|i| [(i % 2) as f32, ((i / 2) % 2) as f32])
+            .collect();
+        let s = stroke(&pts, 4.0, 0.5, false);
+        let dabs = dabs_for_stroke(&s, 4096, 2731, MAX_DABS_TOTAL);
+        assert!(dabs.len() > 100, "still a usable stroke: {}", dabs.len());
+        let binned = bin_stroke(&dabs, 4096, 2731).expect("covers the frame");
+        assert!(
+            binned.tile_dabs.len() <= MAX_TILE_ENTRIES_PER_STROKE,
+            "{} tile entries",
+            binned.tile_dabs.len()
+        );
+    }
+
+    #[test]
+    fn a_small_brush_is_not_limited_by_the_tile_budget() {
+        // A normal stroke (radius 2% of the long edge) keeps the dab cap it always had.
+        let dabs = dabs_for_stroke(&straight(400, 0.02), 4096, 2731, MAX_DABS_TOTAL);
+        let spacing = 0.02 * 4096.0 * SPACING_FRACTION;
+        let expected = (4096.0 / spacing) as usize;
+        assert!(dabs.len() >= expected, "{} < {expected}", dabs.len());
     }
 
     #[test]

@@ -21,7 +21,7 @@ use nicti_tapetum::mask::compose::{self, ai_bake_key};
 use nicti_tapetum::mask::guided::sample_mapped;
 use nicti_tapetum::mask::params::{
     LocalCorrection, MaskComponent, MaskGroup, MaskParams, MaskSource, Op, Stroke,
-    MAX_COLOR_SAMPLES, MAX_COMPONENTS, MAX_CORRECTIONS,
+    MAX_BRUSH_POINTS, MAX_COLOR_SAMPLES, MAX_COMPONENTS, MAX_CORRECTIONS, MAX_STROKES,
 };
 use nicti_tapetum::mask::raster;
 use nicti_tapetum::mask::Field;
@@ -250,6 +250,19 @@ impl BrushSettings {
     }
 }
 
+/// True when the correction has a component of each kind a gesture edits -- the viewport only acts
+/// on the armed tool when its component exists, so a stale arm can never silently add one.
+pub fn has_brush(c: &LocalCorrection) -> bool {
+    first_brush(c).is_some()
+}
+
+pub fn has_color_range(c: &LocalCorrection) -> bool {
+    c.mask
+        .components
+        .iter()
+        .any(|m| matches!(m.source, MaskSource::ColorRange { .. }))
+}
+
 fn first_brush(c: &LocalCorrection) -> Option<usize> {
     c.mask
         .components
@@ -272,6 +285,13 @@ pub fn begin_stroke(
     let MaskSource::Brush { strokes } = &mut c.mask.components[comp].source else {
         return None;
     };
+    // The renderer drops anything past these caps (`MaskParams::sanitized`), so storing more would
+    // grow the document forever for strokes that never show. Refuse instead.
+    if strokes.len() >= MAX_STROKES
+        || strokes.iter().map(|s| s.points.len()).sum::<usize>() >= MAX_BRUSH_POINTS
+    {
+        return None;
+    }
     strokes.push(Stroke {
         points: vec![p],
         radius: brush.radius,
@@ -296,6 +316,10 @@ pub fn extend_stroke(
     else {
         return false;
     };
+    let total: usize = strokes.iter().map(|s| s.points.len()).sum();
+    if total >= MAX_BRUSH_POINTS {
+        return false; // past the cap nothing is rendered; don't store it (see `begin_stroke`)
+    }
     let Some(s) = strokes.get_mut(stroke) else {
         return false;
     };
@@ -423,8 +447,9 @@ pub struct Thumb {
 pub const THUMB_LONG_EDGE: usize = 96;
 
 impl Thumb {
-    /// Averages an evenly strided grid of source pixels per thumbnail pixel (never more than 6x6
-    /// taps), so a 45 MP frame costs ~55 k reads.
+    /// Averages an evenly strided grid of source pixels per thumbnail pixel (about 7x7 taps for a
+    /// 45 MP frame, where a block is ~86 px and the stride 14), so the build costs a few hundred
+    /// thousand reads -- built once per photo, only when a colour/range mask needs it.
     pub fn build(frame: Arc<LinearFrame>) -> Self {
         let matrix = color::camera_to_working_space_matrix(
             frame.cam_mul,
@@ -844,5 +869,42 @@ mod tests {
     fn a_tiny_frame_still_makes_a_thumbnail() {
         let t = Thumb::build(Arc::new(frame(2, 2)));
         assert_eq!((t.width, t.height), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn painting_stops_at_the_stroke_and_point_caps_instead_of_storing_what_never_renders() {
+        let brush = BrushSettings::default();
+        let mut c = new_correction(NewMask::Brush, "b".into());
+        // Fill the stroke cap with one-point strokes.
+        for _ in 0..MAX_STROKES {
+            assert!(begin_stroke(&mut c, &brush, false, [0.5, 0.5]).is_some());
+        }
+        assert!(
+            begin_stroke(&mut c, &brush, false, [0.5, 0.5]).is_none(),
+            "no stroke past the cap"
+        );
+
+        // A single stroke grown to the point cap stops accepting points.
+        let mut c = new_correction(NewMask::Brush, "b".into());
+        let (comp, stroke) = begin_stroke(&mut c, &brush, false, [0.0, 0.0]).unwrap();
+        if let MaskSource::Brush { strokes } = &mut c.mask.components[comp].source {
+            strokes[stroke].points = vec![[0.1, 0.1]; MAX_BRUSH_POINTS];
+        }
+        assert!(!extend_stroke(&mut c, comp, stroke, [0.9, 0.9], 0.0));
+        assert!(begin_stroke(&mut c, &brush, false, [0.5, 0.5]).is_none());
+    }
+
+    #[test]
+    fn a_stale_tool_finds_no_component_to_edit() {
+        let c = new_correction(NewMask::Subject, "s".into());
+        assert!(!has_brush(&c) && !has_color_range(&c));
+        assert!(linear_ends(&c).is_none() && radial_shape(&c).is_none());
+        assert!(has_brush(&new_correction(NewMask::Brush, "b".into())));
+        assert!(has_color_range(&new_correction(NewMask::Color, "c".into())));
     }
 }

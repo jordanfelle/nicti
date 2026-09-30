@@ -353,8 +353,15 @@ impl DevelopView {
 
     /// Sets a stage's params from a typed value, replacing any existing entry -- the write half
     /// of [`Self::stage_params`].
-    pub fn set_stage_params<T: serde::Serialize>(&mut self, stage_id: &str, params: &T) {
-        let value = serde_json::to_value(params).expect("a coat params struct always serializes");
+    pub fn set_stage_params<T: serde::Serialize + 'static>(&mut self, stage_id: &str, params: &T) {
+        // Masks are scrubbed as a *typed* value: a NaN serializes to JSON `null`, which the
+        // canonical stage hasher refuses, and re-parsing that `null` would discard the whole
+        // document. Everything else serializes as given.
+        let value = match (params as &dyn std::any::Any).downcast_ref::<MaskParams>() {
+            Some(masks) if stage_id == MASKS => serde_json::to_value(masks.sanitized()),
+            _ => serde_json::to_value(params),
+        }
+        .expect("a coat params struct always serializes");
         self.document.stages.insert(
             stage_id.to_string(),
             StageEntry {
@@ -1006,6 +1013,31 @@ mod tests {
     fn pixels(gpu: &Arc<GpuContext>, view: &mut DevelopView) -> Vec<[f32; 4]> {
         let f = view.render();
         nicti_tapetum::frame::read_frame(gpu, &f)
+    }
+
+    /// A NaN serializes to JSON `null`, which the canonical stage hasher refuses; it would reach
+    /// `hash_value` through `apply_document` on the next render. The setter must scrub it, the same
+    /// way a document loaded from disk is scrubbed.
+    #[test]
+    fn a_nan_written_into_the_mask_params_cannot_reach_the_graph_hash() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut c = left_half(1.0);
+        c.adjust.exposure = f32::NAN;
+        c.amount = f32::INFINITY;
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![c],
+            },
+        );
+        let stored: MaskParams = view.stage_params(MASKS);
+        let c = &stored.corrections[0];
+        assert!(c.adjust.exposure.is_finite() && c.amount.is_finite());
+        // Would panic hashing a `null` before the fix.
+        let _ = pixels(&gpu, &mut view);
     }
 
     #[test]

@@ -170,11 +170,22 @@ impl Renderer {
             return Err(RenderError::EmptyBakedChain);
         }
         let mut current: Option<Arc<FrameTexture>> = None;
-        let mut baked_output_key: Option<blake3::Hash> = None;
-        for (id, exec) in req.baked_chain {
-            let raw_key = req.graph.cache_key(id)?;
-            baked_output_key = Some(raw_key);
-            let key = keyed_by_extent(raw_key, req.extent);
+        // A node's key chains from everything upstream, so a cached output for node k is valid
+        // whatever became of the nodes before it. Resume after the *last* cached node: when the
+        // byte budget holds fewer frames than the chain is long, earlier nodes get evicted as later
+        // ones are inserted, and re-running them just to reach a cached final output would redo
+        // the whole chain on every render.
+        let mut start = 0;
+        for (i, (id, _)) in req.baked_chain.iter().enumerate().rev() {
+            let key = keyed_by_extent(req.graph.cache_key(id)?, req.extent);
+            if let Some(cached) = self.baked_cache.get(&key) {
+                current = Some(Arc::clone(cached));
+                start = i + 1;
+                break;
+            }
+        }
+        for (id, exec) in &req.baked_chain[start..] {
+            let key = keyed_by_extent(req.graph.cache_key(id)?, req.extent);
             if let Some(cached) = self.baked_cache.get(&key) {
                 current = Some(Arc::clone(cached));
                 continue;
@@ -186,11 +197,13 @@ impl Renderer {
             current = Some(output);
         }
         let baked_output = current.ok_or(RenderError::EmptyBakedChain)?;
-        // `baked_chain` is non-empty (checked above), so the loop ran at least once.
-        Ok((
-            baked_output,
-            baked_output_key.expect("baked_chain is non-empty"),
-        ))
+        // The key of the chain's last node, whether it was cached or just computed.
+        let last = req
+            .baked_chain
+            .last()
+            .map(|(id, _)| *id)
+            .expect("checked non-empty");
+        Ok((baked_output, req.graph.cache_key(last)?))
     }
 
     /// Runs and **submits** just the baked chain, returning the last baked frame.
@@ -597,6 +610,47 @@ mod tests {
         // And it is itself a cache hit the second time.
         renderer.render_baked(&req).unwrap();
         assert_eq!(baked_exec.0.load(Ordering::SeqCst), 5);
+    }
+
+    /// When the byte budget holds fewer frames than the chain is long, earlier nodes are evicted as
+    /// later ones are inserted. A render must resume after the last node still cached, not re-run
+    /// the chain from the top just to reach a cached final output -- `render_baked` runs on every
+    /// frame of a mask-carrying document, so that would redo the whole bake each time.
+    #[test]
+    fn a_tiny_cache_budget_does_not_make_every_render_rebake_the_chain() {
+        let Some(gpu) = test_gpu() else { return };
+        let one_frame = FrameTexture::new(&gpu, extent()).byte_size();
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, one_frame);
+        let g = hero_graph(&[]);
+        let chain = baked_chain(&g, &baked_exec);
+        let req = RenderRequest {
+            graph: &g,
+            baked_chain: &chain,
+            live: &live_exec,
+            live_nodes: &["wb", "tone"],
+            geometry: &geom_exec,
+            geometry_nodes: &["crop"],
+            extent: extent(),
+        };
+        renderer.render_baked(&req).unwrap();
+        assert_eq!(
+            baked_exec.0.load(Ordering::SeqCst),
+            5,
+            "first time: the whole chain"
+        );
+        for _ in 0..3 {
+            renderer.render_baked(&req).unwrap();
+            renderer.render(&req).unwrap();
+        }
+        assert_eq!(
+            baked_exec.0.load(Ordering::SeqCst),
+            5,
+            "the last node stayed cached, so nothing upstream of it runs again"
+        );
+        assert_eq!(renderer.last_stats().bake_dispatches, 0);
     }
 
     #[test]

@@ -33,7 +33,7 @@ content hash), and a whole set copies/pastes/syncs as a unit like any other stag
   resolution, survives a crop change, and pastes onto a differently sized photo. (Heal's spots use
   source pixels; masks deliberately don't.)
 - **Sanitized, because documents are untrusted** (a synced or imported edit). `MaskParams::sanitized`
-  caps counts (16 corrections, 16 components each, 200 000 brush points document-wide, 4096 strokes,
+  caps counts (16 corrections, 16 components each, 200 000 brush points document-wide, 4096 strokes per brush component,
   16 colour samples), clamps every number and scrubs NaN — the canonical hasher refuses JSON `null`,
   which is what a NaN serializes to. Over a limit is dropped, never a panic or an unbounded
   allocation.
@@ -89,7 +89,7 @@ test asserting it with counters (`MaskStats`):
 
 | Edit | What runs |
 |---|---|
-| A slider or Amount drag | nothing here — the deltas live in uniforms; zero recomposes, zero repacks |
+| A slider or Amount drag | nothing on the GPU — the deltas live in uniforms; zero recomposes, zero repacks. The composite and atlas *keys* are computed first and the atlas is reused on a match, so a drag never touches a composite texture even when the cache can't hold them all (tested with a 1-byte budget) |
 | Move one correction's geometry | exactly that correction recomposes; the atlas repacks once |
 | Paint a brush stroke | one GPU pass per frame: the field after strokes `[..n-1]` is cached |
 | An AI alpha arrives | only its corrections recompose; a mask and its inverse share one guided refine |
@@ -104,14 +104,30 @@ stored polyline (small documents; dabs are derived at `radius/4` spacing, widene
 past a cap), dabs are binned into 64 px tiles on the CPU, and one GPU pass per stroke covers only its
 bounding box, reading a sampled texture and writing a fresh one.
 
+Two bounds keep a hostile or synced document from stalling the GPU. A stroke's dab count is capped at
+20 000 *dabs* (not points — points closer than the spacing produce none; an early version subtracted
+the point count from the cap and collapsed a 25 000-point stroke to a single dot), and its tile list at
+2 M (dab, tile) entries (8 MB, under a software adapter's 128 MB binding limit): a stroke whose radius
+covers the whole mask gets proportionally fewer, wider-spaced dabs. **Residual cost, not bounded:**
+a document may still hold 4096 strokes per brush component, so a hand-crafted document of huge-radius
+strokes costs one full-frame pass each.
+
+**CPU cost per frame.** `prepare` runs on every render, so it hashes every brush point to build the
+composite key. That hash feeds raw bytes to blake3 (~1 ms at the 200 000-point cap) rather than
+canonical JSON (~45 ms). The graph's own `apply_document` still canonicalises the *stage params* each
+render (the same ~45 ms at the cap, ~4 ms at 20 000 points, which is already a lot of painting);
+memoising that is #362, since it belongs to the graph, not the mask engine.
+
 ### 5. Local adjustments stack additively on the global values, as LRC does
 
 At a pixel the effective value of each slider is `global + Σ weightᵢ · amountᵢ · deltaᵢ`, computed
 in one loop over the active corrections in the fused live shader. Placement (ADR-0038 order):
 `matrix → [DCP HueSatMap] → exposure* → [DCP LookTable] → dehaze* → temp/tint* → tone* → tone curve →
-clarity/texture* → vibrance → HSL → saturation/hue/colour overlay*` (`*` = local). Each local step is
-skipped when its stacked delta is exactly zero, so a mask that selects nothing leaves pixels
-**bit-identical** (found because an unbaked AI mask altered them by a rounding error). Definitions a
+clarity/texture* → vibrance → HSL → saturation/hue/colour overlay*` (`*` = local). The dehaze,
+clarity/texture, saturation, hue and colour-overlay steps are skipped when their stacked delta is exactly
+zero; exposure, temp/tint and the tone stack still run but are identities at zero (`exp2(0) = 1`, and the
+clamps are no-ops for in-range globals: contrast `-1..2`, other tone sliders `±2`, wider than the UI
+allows), so a mask that selects nothing leaves pixels **bit-identical** (found because an unbaked AI mask altered them by a rounding error). Definitions a
 reader will want: local **temp/tint** are per-channel gains in linear working space (`2^±0.5·temp` on
 red/blue, `2^-0.25·tint` on green), *not* a camera-matrix white-balance solve; **hue** rotates about the
 grey axis by up to 30°; the **colour overlay** is a luma-preserving tint; contrast is clamped to
@@ -176,7 +192,8 @@ labelled *beta*.
 A third tool in the Develop tool switch (`nicti-pelt/src/mask_panel.rs`). Creating Subject / Background
 / Sky / Brush / Linear / Radial / Luminance range / Colour range; a list with enable, duplicate,
 duplicate-and-invert and delete; per-component op / invert / opacity; the full LRC local slider set
-shown as −100…100; drag gestures selected by a "Drag edits" row (brush, linear and radial handles, a
+(most shown as −100…100; exposure is in stops, the colour tint is a hue angle plus an amount, and
+Amount/opacity/range sliders use their own ranges); drag gestures selected by a "Drag edits" row (brush, linear and radial handles, a
 colour eyedropper); `[`/`]` resize the brush and `O` toggles the overlay only while the pointer is over
 the photo. The AI download prompt states size, sources and provenance, downloads nothing until clicked,
 and offers Cancel, Repair and Retry. The **overlay is a CPU preview painted by egui** (geometry, the
@@ -201,7 +218,7 @@ rule. Wall-clock, submit + device wait, p50 (p95):
 
 The design risk flagged before building — that 16 masks at 45 MP would break 4 ms — did **not**
 materialize, so neither tile-bitmask culling nor a preview/full-res live split is needed yet. Memory:
-the atlas is 85 MB for ≤ 4 masks and 341 MB for 16 at 45 MP.
+the atlas is 85 MB for ≤ 4 masks and 341 MB for 16 at 45 MP; the composite cache is budgeted at 1 GiB (16 worst-case 4096² fields) so the LRU doesn't thrash once a photo has 12+ corrections. The table above times the live pass only; `prepare` (hashing, and the uniform-only drag path) is CPU work it doesn't include.
 
 **Edits that rebuild something** (p50): move a gradient 3.2 ms (Vulkan) / 2.1 ms (Dx12); one more brush
 point 3.3 ms / 2.3 ms (p95 up to 9 ms); guided refine of a 1024² AI alpha 7.8 ms / 5.3 ms; clarity +

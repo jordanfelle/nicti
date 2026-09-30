@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use nicti_pawprint::EditDocument;
 use serde_json::Value;
 
-use super::params::{MaskComponent, MaskGroup, MaskParams, MaskSource, Op};
+use super::params::{MaskComponent, MaskGroup, MaskParams, MaskSource, Op, Stroke};
 use super::Field;
 use crate::coat::{self, MaskRecipe};
 use crate::stages::MASKS;
@@ -104,8 +104,54 @@ pub fn ai_bake_key(source: &MaskSource, neutral_key: blake3::Hash) -> Option<bla
 
 /// Hash of a whole group including every component's `invert`/`opacity`/`op`, so any visible
 /// change recomposes -- unlike [`ai_bake_key`].
+///
+/// Runs on every `prepare` (every render, slider drags included), so brush points are fed to the
+/// hasher as raw bytes instead of going through canonical JSON: a painted document near the point
+/// cap cost ~45 ms to canonicalise per frame. Both destructurings below are exhaustive on purpose --
+/// a new field that isn't hashed would be a stale-cache bug, so adding one must fail to compile.
 pub fn hash_group(group: &MaskGroup) -> blake3::Hash {
-    stable_hash(group)
+    let mut h = blake3::Hasher::new();
+    h.update(b"mask-group-2");
+    h.update(&(group.components.len() as u64).to_le_bytes());
+    for comp in &group.components {
+        let MaskComponent {
+            source,
+            op,
+            invert,
+            opacity,
+        } = comp;
+        match source {
+            MaskSource::Brush { strokes } => {
+                h.update(b"brush");
+                h.update(&(strokes.len() as u64).to_le_bytes());
+                for stroke in strokes {
+                    let Stroke {
+                        points,
+                        radius,
+                        feather,
+                        flow,
+                        erase,
+                    } = stroke;
+                    h.update(&(points.len() as u64).to_le_bytes());
+                    for p in points {
+                        h.update(&p[0].to_bits().to_le_bytes());
+                        h.update(&p[1].to_bits().to_le_bytes());
+                    }
+                    for v in [radius, feather, flow] {
+                        h.update(&v.to_bits().to_le_bytes());
+                    }
+                    h.update(&[*erase as u8]);
+                }
+            }
+            // Everything else is a handful of numbers: canonical JSON is cheap and can't drift.
+            other => {
+                h.update(b"other");
+                h.update(stable_hash(other).as_bytes());
+            }
+        }
+        h.update(stable_hash(&(op, invert, opacity)).as_bytes());
+    }
+    h.finalize()
 }
 
 /// A model run the current document needs but doesn't have yet.
@@ -202,6 +248,77 @@ mod tests {
     use super::super::params::{LocalAdjust, LocalCorrection, Stroke};
     use super::super::raster::rasterize_source;
     use super::*;
+
+    fn painted(points: &[[f32; 2]]) -> MaskGroup {
+        MaskGroup {
+            components: vec![MaskComponent {
+                source: MaskSource::Brush {
+                    strokes: vec![Stroke {
+                        points: points.to_vec(),
+                        radius: 0.02,
+                        feather: 0.01,
+                        flow: 1.0,
+                        erase: false,
+                    }],
+                },
+                op: Op::Add,
+                invert: false,
+                opacity: 1.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_group_hash_sees_every_brush_field_and_nothing_else() {
+        let base = painted(&[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]);
+        assert_eq!(hash_group(&base), hash_group(&base.clone()));
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(hash_group(&base));
+        type Edit = Box<dyn Fn(&mut Stroke)>;
+        let edits: Vec<Edit> = vec![
+            Box::new(|s| s.points[1][0] += 1e-6),
+            Box::new(|s| s.points[2][1] -= 1e-6),
+            Box::new(|s| s.points.push([0.7, 0.8])),
+            Box::new(|s| {
+                s.points.pop();
+            }),
+            Box::new(|s| s.radius *= 1.01),
+            Box::new(|s| s.feather *= 1.01),
+            Box::new(|s| s.flow = 0.5),
+            Box::new(|s| s.erase = true),
+        ];
+        for edit in &edits {
+            let mut g = base.clone();
+            if let MaskSource::Brush { strokes } = &mut g.components[0].source {
+                edit(&mut strokes[0]);
+            }
+            assert!(
+                seen.insert(hash_group(&g)),
+                "an edit left the hash unchanged"
+            );
+        }
+        // A second stroke is not the same as a longer first one.
+        let mut two = base.clone();
+        if let MaskSource::Brush { strokes } = &mut two.components[0].source {
+            let first = strokes[0].clone();
+            strokes.push(first);
+        }
+        assert!(seen.insert(hash_group(&two)));
+    }
+
+    #[test]
+    fn the_group_hash_still_sees_a_component_s_op_invert_and_opacity() {
+        let base = painted(&[[0.1, 0.2]]);
+        let mut g = base.clone();
+        g.components[0].opacity = 0.5;
+        assert_ne!(hash_group(&base), hash_group(&g));
+        let mut g = base.clone();
+        g.components[0].invert = true;
+        assert_ne!(hash_group(&base), hash_group(&g));
+        let mut g = base.clone();
+        g.components[0].op = Op::Subtract;
+        assert_ne!(hash_group(&base), hash_group(&g));
+    }
     use nicti_pawprint::StageEntry;
     use serde_json::json;
 

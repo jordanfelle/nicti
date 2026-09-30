@@ -22,7 +22,7 @@ use nicti_groom::install::{InstallHandle, InstallModelsJob};
 use nicti_groom::FramePixels;
 use nicti_pounce::Pounce;
 use nicti_siamese::backend::RegistryBackend;
-use nicti_siamese::job::{MaskBakeJob, MaskBakeOutcome, SharedBackend, Slot};
+use nicti_siamese::job::{MaskBakeJob, MaskBakeOutcome, SharedBackend, Slot, CANCELLED};
 use nicti_siamese::providers::segmentation_registry;
 use nicti_stalk::models::{self, HttpDownloader, ModelStore, Status};
 use nicti_stalk::SegmentationRegistry;
@@ -61,6 +61,21 @@ impl Default for MaskBakeService {
     }
 }
 
+/// True when any of `artifacts` still has to be downloaded. `NICTI_ORT_DYLIB` (the dev/CI/Linux
+/// override) supplies the ONNX Runtime, so when it is set the store's own copy isn't needed and
+/// must not make the panel prompt for a download that would be wrong.
+fn needs_download(
+    artifacts: &[&'static models::Artifact],
+    ort_overridden: bool,
+    installed: impl Fn(&models::Artifact) -> bool,
+) -> bool {
+    artifacts
+        .iter()
+        .copied()
+        .filter(|a| !(ort_overridden && a.id == models::ORT_RUNTIME.id))
+        .any(|a| !installed(a))
+}
+
 impl MaskBakeService {
     /// The store lives at `NICTI_MODELS_DIR` if set (also how a Linux dev drops in models by hand),
     /// else the platform default -- the same place AI removal keeps its models.
@@ -95,12 +110,12 @@ impl MaskBakeService {
         if artifacts.is_empty() {
             return false;
         }
-        match &self.store {
-            Some(store) => artifacts
-                .iter()
-                .any(|a| store.status(a) != Status::Installed),
-            None => true,
-        }
+        let ort_overridden = std::env::var_os("NICTI_ORT_DYLIB").is_some_and(|v| !v.is_empty());
+        needs_download(&artifacts, ort_overridden, |a| {
+            self.store
+                .as_ref()
+                .is_some_and(|store| store.status(a) == Status::Installed)
+        })
     }
 
     /// True if a provider is registered under `model_id` (an edit from a newer build, or an
@@ -266,6 +281,11 @@ impl MaskBakeService {
             self.pending_keys
                 .remove(&(outcome.image_key, outcome.bake_key));
             if outcome.image_key != open {
+                continue;
+            }
+            // Cancelled before it ran (from the activity panel): not a model failure, so don't
+            // remember it as one -- the next `request_missing` simply submits it again.
+            if outcome.result.as_ref().err().map(String::as_str) == Some(CANCELLED) {
                 continue;
             }
             match &outcome.result {
@@ -503,6 +523,65 @@ mod tests {
             vec![ai(recipe_for(SegmentTarget::Sky), false)],
         );
         assert_eq!(svc.download_needed(&develop), None);
+    }
+
+    #[test]
+    fn an_overridden_onnx_runtime_is_not_a_download() {
+        let arts: [&'static models::Artifact; 2] = [&models::ORT_RUNTIME, &models::BIREFNET];
+        let only_model = |a: &models::Artifact| a.id == models::BIREFNET.id;
+        assert!(
+            needs_download(&arts, false, only_model),
+            "the runtime is missing"
+        );
+        assert!(
+            !needs_download(&arts, true, only_model),
+            "NICTI_ORT_DYLIB supplies it, so only the model counts"
+        );
+        assert!(
+            needs_download(&arts, true, |_| false),
+            "the model is still missing"
+        );
+        assert!(!needs_download(&arts, false, |_| true));
+    }
+
+    #[test]
+    fn a_bake_cancelled_before_it_ran_is_not_a_failure_and_can_be_resubmitted() {
+        let Some(mut develop) = develop() else { return };
+        let p = pounce();
+        let (mut svc, _) = service(false);
+        set_masks(
+            &mut develop,
+            vec![ai(recipe_for(SegmentTarget::Sky), false)],
+        );
+        let key = develop.mask_bake_requests()[0].key;
+        let image = develop.frame_key();
+        // What `MaskBakeJob`'s Drop leaves in the slot when Pounce cancels it while still queued.
+        let slot: Slot<MaskBakeOutcome> = Arc::new(Mutex::new(Some(MaskBakeOutcome {
+            image_key: image,
+            bake_key: key,
+            result: Err(CANCELLED.to_owned()),
+        })));
+        svc.pending.push(slot);
+        svc.pending_keys.insert((image, key));
+        assert_eq!(
+            svc.request_missing(&p, &develop),
+            0,
+            "in flight, not resubmitted"
+        );
+
+        let events = svc.poll(&mut develop);
+        assert!(events.is_empty(), "a cancel is not reported as an error");
+        assert!(
+            svc.failure_for(image, &key).is_none(),
+            "and never remembered as one"
+        );
+        assert_eq!(svc.pending_count(), 0, "the slot is released");
+        assert_eq!(
+            svc.request_missing(&p, &develop),
+            1,
+            "so it simply runs again"
+        );
+        drain(&p);
     }
 
     #[test]

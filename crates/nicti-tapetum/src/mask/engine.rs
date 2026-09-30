@@ -39,7 +39,10 @@ use crate::gpu::GpuContext;
 /// field) rather than 8280; the live shader's bilinear sample hides the difference.
 pub const MAX_MASK_LONG_EDGE: u32 = 4096;
 
-const COMPOSITE_BUDGET: u64 = 512 << 20;
+/// Sixteen corrections (the most a document may hold) at the largest capped field, 4096 x 4096 x 4 B =
+/// 64 MiB. A smaller budget made the LRU thrash on a sequential scan of 12+ corrections: every
+/// atlas rebuild (and, before the key-first path below, every drag) recomposed all of them.
+const COMPOSITE_BUDGET: u64 = 1 << 30;
 const REFINED_BUDGET: u64 = 256 << 20;
 const GUIDE_BUDGET: u64 = 128 << 20;
 const BRUSH_BUDGET: u64 = 384 << 20;
@@ -211,6 +214,12 @@ impl MaskEngine {
         self.stats
     }
 
+    /// Replaces the composite cache with one of `bytes` (tests make it too small to hold anything).
+    #[cfg(test)]
+    fn set_composite_budget(&mut self, bytes: u64) {
+        self.composites = Tier::new(bytes, field_size);
+    }
+
     /// Builds (or reuses) everything the live shader needs for `inputs`. `None` when no correction
     /// is active -- the caller should then `set_masks(None)`, which costs the shader nothing.
     pub fn prepare(&mut self, gpu: &GpuContext, inputs: &MaskInputs) -> Option<MaskFrame> {
@@ -222,20 +231,28 @@ impl MaskEngine {
         let mask = mask_extent(inputs.guide.extent.width, inputs.guide.extent.height);
         let cx = Cx { mask, inputs };
 
-        let mut composites = Vec::with_capacity(active.len());
+        // Keys first, textures only if the atlas has to be rebuilt: a slider drag changes neither,
+        // so it must not so much as touch (let alone re-make) a composite.
+        let keys: Vec<blake3::Hash> = active
+            .iter()
+            .map(|correction| self.composite_key(correction, &cx))
+            .collect();
         let mut atlas_key = blake3::Hasher::new();
         atlas_key.update(&mask.0.to_le_bytes());
         atlas_key.update(&mask.1.to_le_bytes());
-        for correction in &active {
-            let (key, texture) = self.composite(gpu, correction, &cx);
+        for key in &keys {
             atlas_key.update(key.as_bytes());
-            composites.push(texture);
         }
         let atlas_key = atlas_key.finalize();
 
         let atlas = match &self.atlas {
             Some((k, a)) if *k == atlas_key => Arc::clone(a),
             _ => {
+                let composites: Vec<Arc<FieldTexture>> = active
+                    .iter()
+                    .zip(&keys)
+                    .map(|(correction, key)| self.composite(gpu, correction, &cx, *key))
+                    .collect();
                 self.stats.packs += 1;
                 let atlas = Atlas::new(gpu, mask.0, mask.1, composites.len());
                 submit(gpu, |enc| {
@@ -316,10 +333,10 @@ impl MaskEngine {
         gpu: &GpuContext,
         c: &LocalCorrection,
         cx: &Cx,
-    ) -> (blake3::Hash, Arc<FieldTexture>) {
-        let key = self.composite_key(c, cx);
+        key: blake3::Hash,
+    ) -> Arc<FieldTexture> {
         if let Some(t) = self.composites.get(&key) {
-            return (key, Arc::clone(t));
+            return Arc::clone(t);
         }
         self.stats.composites += 1;
         let (mw, mh) = cx.mask;
@@ -345,7 +362,7 @@ impl MaskEngine {
         }
         let texture = Arc::new(acc);
         self.composites.put(key, Arc::clone(&texture));
-        (key, texture)
+        texture
     }
 
     /// One component's raw weight field, or `None` when it isn't available yet.
@@ -930,6 +947,34 @@ mod tests {
             );
         }
         assert_eq!(rig.engine.stats(), before, "drags must be uniform-only");
+    }
+
+    #[test]
+    fn a_drag_never_touches_the_composites_even_when_the_cache_cannot_hold_them() {
+        let Some(mut rig) = Rig::new() else { return };
+        // A cache that evicts everything at once is what an LRU scanning 12+ full-size fields in
+        // order degenerates to. The drag must not care: it only needs the atlas, not the fields.
+        rig.engine.set_composite_budget(1);
+        let mut cs: Vec<LocalCorrection> = (0..6)
+            .map(|i| correction(&format!("c{i}"), radial(0.1 + i as f32 * 0.12), 1.0))
+            .collect();
+        rig.prepare(cs.clone()).unwrap();
+        let before = rig.engine.stats();
+        for stops in [0.4, -0.9, 2.0] {
+            for c in &mut cs {
+                c.adjust.exposure = stops;
+            }
+            rig.prepare(cs.clone()).unwrap();
+        }
+        assert_eq!(rig.engine.stats(), before, "no recompose, no repack");
+    }
+
+    #[test]
+    fn the_composite_cache_holds_a_full_document_of_worst_case_fields() {
+        // 16 corrections x the largest capped field (4096 x 4096 x 4 B). Anything smaller makes the
+        // LRU miss on every atlas rebuild once a photo has 12+ corrections at 45 MP.
+        let worst = MAX_MASK_LONG_EDGE as u64 * MAX_MASK_LONG_EDGE as u64 * 4;
+        assert!(COMPOSITE_BUDGET >= 16 * worst);
     }
 
     #[test]

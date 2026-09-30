@@ -20,7 +20,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   `nicti-stalk`'s `SegmentationProvider`/`SegmentationRegistry`. UI in `nicti-pelt`'s `mask_panel.rs`
   (egui), `mask_edit.rs` (egui-free ops, unit-tested), `mask_tool.rs` (`MaskBakeService`).
 - **Normalized coordinates**: points = x/width, y/height of the *uncropped* frame; lengths = fraction of
-  the long edge. `MaskParams::sanitized` caps counts (16 corrections/16 components/200k brush points)
+  the long edge. `MaskParams::sanitized` caps counts (16 corrections/16 components/200k brush points document-wide, 4096 strokes per brush)
   and scrubs NaN (the canonical hasher refuses JSON `null`). Documents are untrusted.
 - **Fold**: `Add` = `max` (union), `Subtract` = `acc*(1-w)`, `Intersect` = `acc*w` (`compose::fold_step`;
   the spike's `min(a+w,1)` seamed overlapping feathers). An unavailable component (model missing / not
@@ -32,17 +32,20 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   tone/WB/crop/local/heal edit can re-run a model. Renderer stays a linear chain; `Renderer::render_baked`
   bakes+submits first so the engine can read the baked frame (it cannot from inside `LiveExec::encode` --
   one encoder, submitted at the end).
-- **Engine costs** (tested with `MaskStats`): slider drag = uniform-only (0 recomposes); a geometry edit
+- **Engine costs** (tested with `MaskStats`): slider drag = uniform-only (0 recomposes; keys first, atlas reused, composites untouched even if evicted); a geometry edit
   recomposes that correction only; painting = one GPU pass/frame (prefix `[..n-1]` cached); an AI alpha
   recomposes only its corrections; a new guide rebuilds AI/range masks, not gradients/brushes.
-- **Local adjustments stack additively** (`global + Σ weight·amount·delta`) in `live_suffix.wgsl`; each
-  step is skipped at exactly-zero delta so an empty mask is bit-identical. Local temp/tint are per-channel
+- **Local adjustments stack additively** (`global + Σ weight·amount·delta`) in `live_suffix.wgsl`; the
+  dehaze/clarity/texture/sat/hue/tint steps are skipped at exactly-zero delta and the rest are identities at
+  zero, so an empty mask is bit-identical for in-range globals. Local temp/tint are per-channel
   gains (NOT a camera WB solve). CPU twin: `mask/local.rs::live_pixel`. Spatial ones (clarity/texture/
   dehaze) read bases cached per baked frame (`bases.rs`); sharpness/noise add into `detail_combine.wgsl`.
 - **Halo gotcha**: the clarity/texture guided-filter `eps` was first too large (1.6e-2) and haloed a hard
   step by 25%; now coarse 2e-3 / fine 1e-3 (`bases.rs`). Dark-channel dehaze needs a sky/dense-haze pixel to
   anchor the airlight -- a uniformly hazy scene with none under-estimates it.
-- **Mask extent** = frame extent capped at 4096 long edge; atlas = Rgba16Float, 4 corrections/layer.
+- **Mask extent** = frame extent capped at 4096 long edge; atlas = Rgba16Float, 4 corrections/layer; composite cache 1 GiB (16 worst-case fields).
+- **Brush bounds**: dabs cap at 20k/stroke (dabs, NOT points -- `cap - points.len()` once collapsed a stroke) AND 2M tile-list entries/stroke (`raster::MAX_TILE_ENTRIES_PER_STROKE`); `compose::hash_group` hashes points as raw bytes (canonical JSON was 45 ms/frame at the point cap) with exhaustive destructuring -- a new field must be hashed or it won't compile.
+- **`MaskBakeJob` Drop** fills its slot with `CANCELLED` if Pounce drops it unrun; `MaskBakeService::poll` treats that as retryable, never a failure. `set_stage_params(MASKS, ..)` sanitizes the typed value (a NaN -> `null` would wipe the parse).
 - **Models are data**: recipe = `model_id`+`model_version`+`params.target`; `resolve_provider` returns a
   typed error for unknown model / version mismatch (never a silent newer model) / unsupported target;
   `providers::default_model_for(target)` is the one table for new masks. Registry ids allow only
