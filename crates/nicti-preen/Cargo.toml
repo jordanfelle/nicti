@@ -17,7 +17,7 @@ thiserror = "2"
 fast_image_resize = "6"
 bytemuck = "1"
 # Encoders/embedders, all as ADR-0056 picked them (spikes/prey -> promoted).
-jpeg-encoder = "0.6"
+jpeg-encoder = "0.7"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tiff = "0.11"
 little_exif = "0.6.23"

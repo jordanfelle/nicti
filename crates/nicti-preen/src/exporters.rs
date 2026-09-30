@@ -162,7 +162,7 @@ impl Exporter for JpegExporter {
                 Subsampling::S420 => jpeg_encoder::SamplingFactor::F_2_2,
                 Subsampling::S444 => jpeg_encoder::SamplingFactor::F_1_1,
             });
-            enc.set_density(jpeg_encoder::Density::Inch { x: dpi, y: dpi });
+            enc.set_density(jpeg_encoder::PixelDensity::dpi(dpi));
             if !embed.icc.is_empty() {
                 enc.add_icc_profile(embed.icc)
                     .map_err(|e| encode_err("adding ICC profile", e))?;
