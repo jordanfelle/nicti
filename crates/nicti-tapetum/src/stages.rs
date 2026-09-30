@@ -51,6 +51,13 @@ pub const HSL: &str = "nicti.hsl";
 pub const SHARPEN: &str = "nicti.sharpen";
 pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
 pub const CROP: &str = "nicti.crop";
+/// Local corrections (#49): every mask + its adjustments, one stage so a whole set pastes/syncs as a
+/// unit and the graph stays fixed-shape. Live: its cost is uniforms, not bakes.
+pub const MASKS: &str = "nicti.masks";
+/// The fixed neutral render AI masks infer on (post-lens, pre-heal, default tone -- ADR-0049). A
+/// keying-only node: nothing renders it, it exists so an AI bake key chains from LENS and so a tone
+/// or white-balance edit provably cannot invalidate a model's output.
+pub const NEUTRAL: &str = "nicti.neutral";
 
 /// A `RenderStage` whose identity/kind/defaults are all fixed at construction -- every stage id
 /// in this module needs the same `Module`/`RenderStage` boilerplate, so one type serves all of
@@ -82,6 +89,20 @@ impl RenderStage for BasicStage {
     }
 }
 
+pub fn neutral_stage() -> BasicStage {
+    BasicStage {
+        id: NEUTRAL,
+        kind: StageKind::Baked,
+        default_params: || json!({}),
+    }
+}
+pub fn masks_stage() -> BasicStage {
+    BasicStage {
+        id: MASKS,
+        kind: StageKind::Live,
+        default_params: || json!({ "corrections": [] }),
+    }
+}
 pub fn decode_stage() -> BasicStage {
     BasicStage {
         id: DECODE,
