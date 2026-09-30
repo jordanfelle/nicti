@@ -414,6 +414,12 @@ impl Default for HealUi {
 }
 
 impl HealUi {
+    /// Forgets the selected spot. Call after the document is replaced under the tool (a batch
+    /// paste or undo): the index could now name a different spot.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+    }
+
     pub fn new() -> Self {
         Self {
             tool: Tool::Crop,

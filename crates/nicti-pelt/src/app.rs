@@ -43,6 +43,9 @@ use crate::export::{facts_for, ExportEnv, ExportUi};
 use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
+use crate::knead::batch::run_batch;
+use crate::knead::ui::{Command as KneadCommand, KneadUi, PanelAction};
+use crate::knead::Clipboard;
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::mask_panel::MaskUi;
 use crate::render::DevelopView;
@@ -108,6 +111,8 @@ pub struct PeltApp {
     gpu: Arc<GpuContext>,
     /// Export (#57): dialog, presets, the active run and its report.
     export: ExportUi,
+    /// Copy/paste, sync and presets for develop settings (#52).
+    knead: KneadUi,
     export_registry: Arc<ExporterRegistry>,
     /// A save of Develop's edits that failed, and the document it failed for: the autosave doesn't
     /// retry the same document every frame, and the message shows in the top bar.
@@ -260,6 +265,7 @@ impl PeltApp {
         // location, another instance holding its lock) only costs the T2 upgrade, never the loupe.
         let larder = t2::open_larder(&catalog_path);
         let export = ExportUi::new(&catalog_path);
+        let knead = KneadUi::new(&catalog_path);
 
         // A crash mid-move (#26) leaves a `root_move` journal row: finish or roll it back before
         // anything else touches that root.
@@ -355,6 +361,7 @@ impl PeltApp {
             loupe_loaded_asset: None,
             gpu,
             export,
+            knead,
             export_registry: Arc::new(builtin_registry()),
             edit_save_failed: None,
             loupe_zoomed: false,
@@ -619,7 +626,10 @@ impl PeltApp {
     /// Reads this frame's culling keys and acts on them. Off while the Develop view is showing
     /// (its sliders own the digit keys) and while the delete prompt is up.
     fn handle_cull_keys(&mut self, ctx: &egui::Context) {
-        if self.cull.is_none() || !cull_keys_active(self.view, self.delete.is_confirming()) {
+        if self.cull.is_none()
+            || !cull_keys_active(self.view, self.delete.is_confirming())
+            || self.knead.is_asking()
+        {
             return;
         }
         for command in crate::cull::input::poll(ctx) {
@@ -1055,6 +1065,26 @@ impl eframe::App for PeltApp {
         {
             self.request_export();
         }
+        // Ctrl+Shift+C / V / S: copy, paste and sync develop settings (#52). Plain `C` is Compare.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let chord = |key| {
+                egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, key)
+            };
+            let action = ui.ctx().input_mut(|i| {
+                if i.consume_shortcut(&chord(egui::Key::C)) {
+                    Some(PanelAction::Copy)
+                } else if i.consume_shortcut(&chord(egui::Key::V)) {
+                    Some(PanelAction::Paste)
+                } else if i.consume_shortcut(&chord(egui::Key::S)) {
+                    Some(PanelAction::Sync)
+                } else {
+                    None
+                }
+            });
+            if let Some(action) = action {
+                self.handle_knead_action(action);
+            }
+        }
         // Autosave Develop's edits once the pointer is up (not on every slider-drag frame).
         if !ui.ctx().input(|i| i.pointer.any_down()) {
             self.save_develop_edits(false);
@@ -1175,6 +1205,13 @@ impl eframe::App for PeltApp {
         if self.export.has_status() {
             egui::Panel::top("export_status").show(ui, |ui| self.export.show_status(ui));
         }
+        if self.knead.has_status() {
+            let mut command = None;
+            egui::Panel::top("knead_status").show(ui, |ui| command = self.knead.show_status(ui));
+            if let Some(command) = command {
+                self.run_knead_command(command);
+            }
+        }
         if let Some((_, err)) = &self.edit_save_failed {
             egui::Panel::top("edit_save_error").show(ui, |ui| {
                 ui.colored_label(egui::Color32::RED, format!("Couldn't save edits: {err}"));
@@ -1211,6 +1248,13 @@ impl eframe::App for PeltApp {
         };
 
         if let (View::Develop, Some(frame)) = (self.view, &panel_frame) {
+            let mut knead_action = None;
+            egui::Panel::left("presets_panel")
+                .resizable(true)
+                .show(ui, |ui| knead_action = self.knead.show_panel(ui));
+            if let Some(action) = knead_action {
+                self.handle_knead_action(action);
+            }
             egui::Panel::right("develop_panel")
                 .min_size(280.0)
                 .show(ui, |ui| {
@@ -1286,6 +1330,7 @@ impl eframe::App for PeltApp {
 
         self.show_delete_modal(ui.ctx());
         self.show_export_dialog(ui.ctx());
+        self.show_knead_modal(ui.ctx());
     }
 }
 
@@ -1394,6 +1439,7 @@ impl PeltApp {
         ]);
         let (mut select_all, mut delete, mut survey, mut compare, mut export) =
             (false, false, false, false, false);
+        let mut knead_action: Option<PanelAction> = None;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(total > 0, egui::Button::new("Select all"))
@@ -1442,7 +1488,43 @@ impl PeltApp {
             {
                 export = true;
             }
+            let can_edit = targets > 0 && !busy && !self.knead.is_asking();
+            if ui
+                .add_enabled(total > 0, egui::Button::new("Copy settings\u{2026}"))
+                .on_hover_text("Ctrl+Shift+C. Copy the cursor photo's develop settings.")
+                .clicked()
+            {
+                knead_action = Some(PanelAction::Copy);
+            }
+            if ui
+                .add_enabled(
+                    can_edit && self.knead.has_clipboard(),
+                    egui::Button::new(format!("Paste settings {targets}")),
+                )
+                .on_hover_text("Ctrl+Shift+V. Paste the copied settings onto the selection.")
+                .clicked()
+            {
+                knead_action = Some(PanelAction::Paste);
+            }
+            if ui
+                .add_enabled(
+                    can_edit && targets >= 2,
+                    egui::Button::new(format!("Sync settings {targets}\u{2026}")),
+                )
+                .on_hover_text(
+                    "Ctrl+Shift+S. Copy the cursor photo's settings onto the rest of the selection.",
+                )
+                .clicked()
+            {
+                knead_action = Some(PanelAction::Sync);
+            }
+            if let Some(picked) = self.knead.preset_menu(ui, can_edit) {
+                knead_action = Some(picked);
+            }
         });
+        if let Some(action) = knead_action {
+            self.handle_knead_action(action);
+        }
         if select_all {
             if let Some(grid) = self.grid.as_mut() {
                 grid.select_all();
@@ -1791,6 +1873,205 @@ impl PeltApp {
             n => format!("{n} photos"),
         };
         self.export.request(ids, scope, samples);
+    }
+
+    /// The photos a copy/paste/preset acts on. Develop edits the one photo `DevelopView` has
+    /// loaded; everywhere else it's the marked targets (the photo on screen, in the Loupe).
+    fn knead_targets(&self) -> Vec<i64> {
+        match self.view {
+            View::Develop => self
+                .loupe_loaded_asset
+                .map(|(id, _)| id)
+                .into_iter()
+                .collect(),
+            // The Loupe's own cursor, not `loupe_loaded_asset`: that only moves once the next
+            // photo has decoded, so while one is loading (or failed) it still names the last one.
+            _ => self.mark_targets(),
+        }
+    }
+
+    /// The photo whose settings a copy/sync/preset-save reads, and its current document: the live
+    /// one when it's the photo `DevelopView` has loaded, else the catalog's.
+    fn knead_source_doc(&self) -> Option<(i64, nicti_pawprint::EditDocument)> {
+        let id = match self.view {
+            View::Develop => self.loupe_loaded_asset?.0,
+            View::Library => self.grid.as_ref()?.cursor_id()?,
+            _ => *self.mark_targets().first()?,
+        };
+        // The live (possibly unsaved) document, but only when it really is this photo's.
+        if self.loupe_loaded_asset.map(|(loaded, _)| loaded) == Some(id) {
+            if let Some(develop) = self.develop.as_ref() {
+                return Some((id, develop.document().clone()));
+            }
+        }
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return None;
+        };
+        store
+            .get_master_edit(id)
+            .ok()
+            .flatten()
+            .map(|doc| (id, doc))
+    }
+
+    /// Whether a job or prompt that also rewrites photos is in flight (the same set Export refuses
+    /// on, minus Export itself, which only reads).
+    fn knead_busy(&mut self) -> bool {
+        let busy = self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]) || self.delete.is_confirming()
+            || self.export.is_running();
+        if busy {
+            self.knead.set_status(
+                "Wait for the running import, sync, move or delete to finish first.".into(),
+            );
+        }
+        busy
+    }
+
+    fn handle_knead_action(&mut self, action: PanelAction) {
+        if self.knead.is_asking() {
+            return;
+        }
+        // A second prompt on top of the delete prompt would let the confirmed one be dropped by
+        // `knead_busy` (which also refuses while that prompt is up).
+        if self.delete.is_confirming()
+            && matches!(
+                action,
+                PanelAction::Copy | PanelAction::Sync | PanelAction::SavePreset
+            )
+        {
+            return;
+        }
+        match action {
+            PanelAction::Copy | PanelAction::SavePreset => {
+                let Some((_, doc)) = self.knead_source_doc() else {
+                    self.knead
+                        .set_status("Open or select a photo to copy settings from.".into());
+                    return;
+                };
+                if action == PanelAction::Copy {
+                    self.knead.ask_copy(doc);
+                } else {
+                    self.knead.ask_save_preset(doc);
+                }
+            }
+            PanelAction::Sync => {
+                let Some((source, doc)) = self.knead_source_doc() else {
+                    self.knead
+                        .set_status("Put the cursor on the photo to copy settings from.".into());
+                    return;
+                };
+                let ids: Vec<i64> = self
+                    .knead_targets()
+                    .into_iter()
+                    .filter(|id| *id != source)
+                    .collect();
+                if ids.is_empty() {
+                    self.knead.set_status(
+                        "Select the photos to sync onto. The photo under the cursor is the source."
+                            .into(),
+                    );
+                    return;
+                }
+                self.knead.ask_sync(doc, ids);
+            }
+            PanelAction::Paste => match self.knead.clipboard().cloned() {
+                Some(clip) => self.run_knead_paste(clip, "Paste"),
+                None => self.knead.set_status("Copy settings first.".into()),
+            },
+            PanelAction::Apply(name) => {
+                if let Some(clip) = self.knead.preset_clipboard(&name) {
+                    self.run_knead_paste(clip, &format!("Apply \"{name}\""));
+                }
+            }
+        }
+    }
+
+    fn run_knead_paste(&mut self, clip: Clipboard, label: &str) {
+        let ids = self.knead_targets();
+        if ids.is_empty() {
+            self.knead
+                .set_status("Open or select the photos to paste onto.".into());
+            return;
+        }
+        self.run_knead_command(KneadCommand::Run {
+            clip,
+            ids,
+            label: label.to_string(),
+        });
+    }
+
+    /// Draws the checklist prompt; a confirmed sync runs here.
+    fn show_knead_modal(&mut self, ctx: &egui::Context) {
+        if let Some(command) = self.knead.show_modal(ctx) {
+            self.run_knead_command(command);
+        }
+    }
+
+    /// Runs a paste/sync/preset or an undo against the catalog (#52). The loaded photo's unsaved
+    /// edits are flushed first so the batch sees them, and its `DevelopView` is refreshed after,
+    /// or the per-frame autosave would write the stale in-memory document back over the batch.
+    fn run_knead_command(&mut self, command: KneadCommand) {
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return;
+        };
+        let store = store.clone();
+        if self.knead_busy() {
+            return;
+        }
+        if !self.save_develop_edits_to(store.as_ref(), true) {
+            self.knead.set_status(
+                "Couldn't save this photo's edits first, so nothing was changed.".into(),
+            );
+            return;
+        }
+        let touched: Vec<i64> = match command {
+            KneadCommand::Run { clip, ids, label } => {
+                match run_batch(store.as_ref(), &clip, &ids, &label) {
+                    Ok((outcome, last)) => self.knead.finish_batch(&label, &outcome, last),
+                    Err(e) => self.knead.set_status(format!("{label} failed: {e}")),
+                }
+                ids
+            }
+            KneadCommand::Undo => {
+                let Some(last) = self.knead.take_undo() else {
+                    return;
+                };
+                let ids: Vec<i64> = last.asset_ids().collect();
+                match last.undo(store.as_ref()) {
+                    Ok(outcome) => self.knead.finish_undo(&last.label, &outcome),
+                    Err(e) => {
+                        self.knead.set_status(format!("Undo failed: {e}"));
+                        self.knead.keep_undo(last);
+                    }
+                }
+                ids
+            }
+        };
+        self.refresh_loaded_develop(store.as_ref(), &touched);
+    }
+
+    /// Re-reads the loaded photo's document into `DevelopView` if a batch touched it.
+    fn refresh_loaded_develop(&mut self, store: &dyn CatalogStore, touched: &[i64]) {
+        let (Some((id, _)), Some(develop)) = (self.loupe_loaded_asset, self.develop.as_mut())
+        else {
+            return;
+        };
+        if !touched.contains(&id) {
+            return;
+        }
+        if let Ok(Some(doc)) = store.get_master_edit(id) {
+            if &doc != develop.document() {
+                develop.replace_document(doc);
+                // Selected corrections and spots may no longer exist.
+                self.mask_ui.selected = None;
+                self.heal_ui.clear_selection();
+            }
+        }
     }
 
     /// Draws the Export dialog while open; starting it builds the run's environment from live

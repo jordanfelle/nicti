@@ -700,6 +700,37 @@ impl SqliteCatalog {
     }
 }
 
+impl SqliteCatalog {
+    /// Shared body of `get_master_edit`/`get_master_edits`, on an already-locked connection.
+    fn read_master_edit(
+        conn: &Connection,
+        asset_id: i64,
+    ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError> {
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT document FROM edit_variant WHERE asset_id = ?1 AND is_master = 1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match json {
+            Some(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| CatalogError::Document(e.to_string())),
+            None => {
+                // No master row: an existing asset still reads as "no edits yet"; a missing
+                // asset reads as `None`.
+                let exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM asset WHERE id = ?1)",
+                    params![asset_id],
+                    |row| row.get(0),
+                )?;
+                Ok(exists.then(nicti_pawprint::EditDocument::default))
+            }
+        }
+    }
+}
+
 impl CatalogStore for SqliteCatalog {
     fn upsert_volume(
         &self,
@@ -929,28 +960,19 @@ impl CatalogStore for SqliteCatalog {
         asset_id: i64,
     ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError> {
         let conn = self.conn.lock().unwrap();
-        let json: Option<String> = conn
-            .query_row(
-                "SELECT document FROM edit_variant WHERE asset_id = ?1 AND is_master = 1",
-                params![asset_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match json {
-            Some(text) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|e| CatalogError::Document(e.to_string())),
-            None => {
-                // No master row: an existing asset still reads as "no edits yet"; a missing
-                // asset reads as `None`.
-                let exists: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM asset WHERE id = ?1)",
-                    params![asset_id],
-                    |row| row.get(0),
-                )?;
-                Ok(exists.then(nicti_pawprint::EditDocument::default))
-            }
-        }
+        Self::read_master_edit(&conn, asset_id)
+    }
+
+    fn get_master_edits(
+        &self,
+        asset_ids: &[i64],
+    ) -> Result<Vec<(i64, Option<nicti_pawprint::EditDocument>)>, CatalogError> {
+        // One lock for the whole batch: the mutex already keeps every writer out meanwhile.
+        let conn = self.conn.lock().unwrap();
+        asset_ids
+            .iter()
+            .map(|&id| Ok((id, Self::read_master_edit(&conn, id)?)))
+            .collect()
     }
 
     fn put_master_edit(
@@ -969,6 +991,36 @@ impl CatalogStore for SqliteCatalog {
              ON CONFLICT(asset_id, name) DO UPDATE SET document = excluded.document",
             params![asset_id, json],
         )?;
+        Ok(())
+    }
+
+    fn put_master_edits(
+        &self,
+        edits: &[(i64, nicti_pawprint::EditDocument)],
+    ) -> Result<(), CatalogError> {
+        // Serialise every document before touching the database, so a bad one is refused without
+        // opening a transaction at all.
+        let rows = edits
+            .iter()
+            .map(|(id, doc)| {
+                nicti_pawprint::to_canonical_json(doc)
+                    .map(|json| (*id, json))
+                    .map_err(|e| CatalogError::Document(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO edit_variant (asset_id, name, is_master, document) \
+                 VALUES (?1, 'master', 1, ?2) \
+                 ON CONFLICT(asset_id, name) DO UPDATE SET document = excluded.document",
+            )?;
+            for (id, json) in &rows {
+                stmt.execute(params![id, json])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2065,6 +2117,87 @@ mod tests {
             Err(CatalogError::Document(_))
         ));
         assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.5)));
+    }
+
+    fn seeded_assets(store: &SqliteCatalog, n: usize) -> Vec<i64> {
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        (0..n)
+            .map(|i| {
+                store
+                    .insert_asset(root_id, &new_asset(&format!("{i}.NEF"), None), None)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn put_master_edits_writes_a_large_batch_and_get_reads_it_back() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let ids = seeded_assets(&store, 1200);
+        let edits: Vec<_> = ids
+            .iter()
+            .map(|&id| (id, edit_doc(id as f64 / 10.0)))
+            .collect();
+        store.put_master_edits(&edits).unwrap();
+
+        let back = store.get_master_edits(&ids).unwrap();
+        assert_eq!(back.len(), ids.len());
+        for ((id, doc), (want_id, want)) in back.iter().zip(&edits) {
+            assert_eq!(id, want_id);
+            assert_eq!(doc.as_ref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn get_master_edits_keeps_request_order_and_reports_a_missing_asset_as_none() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let ids = seeded_assets(&store, 2);
+        store.put_master_edit(ids[1], &edit_doc(1.5)).unwrap();
+
+        let back = store.get_master_edits(&[ids[1], 999_999, ids[0]]).unwrap();
+        assert_eq!(back[0], (ids[1], Some(edit_doc(1.5))));
+        assert_eq!(back[1], (999_999, None));
+        // A freshly ingested asset reads as an empty document, not `None`.
+        assert_eq!(
+            back[2],
+            (ids[0], Some(nicti_pawprint::EditDocument::default()))
+        );
+    }
+
+    #[test]
+    fn put_master_edits_is_atomic_when_one_document_is_non_finite() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let ids = seeded_assets(&store, 3);
+        for &id in &ids {
+            store.put_master_edit(id, &edit_doc(0.5)).unwrap();
+        }
+        let mut bad = edit_doc(0.0);
+        bad.stages.get_mut("nicti.exposure").unwrap().params = serde_json::Value::Null;
+
+        let edits = vec![
+            (ids[0], edit_doc(9.0)),
+            (ids[1], bad),
+            (ids[2], edit_doc(9.0)),
+        ];
+        assert!(matches!(
+            store.put_master_edits(&edits),
+            Err(CatalogError::Document(_))
+        ));
+        for &id in &ids {
+            assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.5)));
+        }
+    }
+
+    #[test]
+    fn put_master_edits_rolls_back_when_a_later_asset_does_not_exist() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let ids = seeded_assets(&store, 1);
+        store.put_master_edit(ids[0], &edit_doc(0.5)).unwrap();
+
+        let edits = vec![(ids[0], edit_doc(9.0)), (999_999, edit_doc(9.0))];
+        assert!(store.put_master_edits(&edits).is_err());
+        assert_eq!(store.get_master_edit(ids[0]).unwrap(), Some(edit_doc(0.5)));
     }
 
     #[test]

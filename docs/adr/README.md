@@ -57,6 +57,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0049](0049-masking-build.md) | — | Masks and local adjustments — the build (engine, local adjustments, pluggable AI models, Masks tool) | Accepted |
 | [0050](0050-healing-and-removal.md) | 0007 | Healing and removal | Proposed |
 | [0051](0051-healing-removal-build.md) | — | Healing and removal — the build (GPU clone/heal, AI removal, model store) | Accepted |
+| [0052](0052-presets-copy-paste-sync.md) | — | Develop presets, copy/paste settings, and sync across a selection | Accepted |
 | [0053](0053-ai-auto-tone.md) | — | AI auto-tone (MLP, per-user edit history) | Proposed |
 | [0054](0054-job-scheduler-pounce.md) | — | Job scheduler design (Pounce) | Proposed |
 | [0056](0056-export-stack.md) | — | Export stack | Proposed |

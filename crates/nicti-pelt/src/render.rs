@@ -488,6 +488,27 @@ impl DevelopView {
         self.saved = self.document.clone();
     }
 
+    /// Swaps in `doc` as the loaded photo's edits, already persisted (#52): a paste/sync/undo wrote
+    /// it to the catalog, and the autosave must not write this view's older copy back over it.
+    /// Drops the removals and AI alphas `doc` no longer references (the next frame re-bakes any AI
+    /// mask it does), and reloads the camera profile, which `doc` may have changed.
+    pub fn replace_document(&mut self, doc: EditDocument) {
+        self.saved = doc.clone();
+        self.document = doc;
+        self.prune_removals();
+        self.prune_ai_alphas();
+        self.active_profile = None;
+        self.profile_error = None;
+        match camera_profiles::load_for_document(
+            &self.document,
+            &self.frame.make,
+            &self.frame.model,
+        ) {
+            Ok(profile) => self.active_profile = profile,
+            Err(e) => self.profile_error = Some(e),
+        }
+    }
+
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
     /// with `doc` as its edits (the catalog's stored master document, #57; pass
     /// `EditDocument::default()` for none), remembering `identity` so every render stamps it into
@@ -1256,6 +1277,47 @@ mod tests {
         assert_ne!(
             reqs[0].key, key_a,
             "and its bake key differs from photo A's"
+        );
+    }
+
+    /// #52: a batch paste/sync/undo rewrites the loaded photo in the catalog, so the view must take
+    /// the new document as already saved (else the autosave writes its old copy back over the
+    /// batch), drop alphas the document no longer references, and leave a pasted AI mask to
+    /// re-bake lazily.
+    #[test]
+    fn replace_document_is_saved_and_leaves_ai_masks_to_rebake() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(
+            view.frame_arc(),
+            blake3::hash(b"photo"),
+            EditDocument::default(),
+        );
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![subject_correction()],
+            },
+        );
+        let with_mask = view.document().clone();
+        let key = view.mask_bake_requests()[0].key;
+        view.set_ai_alpha(key, Arc::new(AiAlpha::new(4, 4, vec![1.0; 16]).unwrap()));
+        assert!(view.is_dirty());
+
+        view.replace_document(EditDocument::default());
+        assert!(!view.is_dirty(), "the batch already wrote it");
+        assert_eq!(view.document(), &EditDocument::default());
+        assert!(!view.has_ai_alpha(&key), "no mask references it any more");
+
+        view.replace_document(with_mask.clone());
+        assert!(!view.is_dirty());
+        assert_eq!(view.document(), &with_mask);
+        assert_eq!(
+            view.mask_bake_requests().len(),
+            1,
+            "a pasted AI mask bakes on this photo when it's next shown"
         );
     }
 
