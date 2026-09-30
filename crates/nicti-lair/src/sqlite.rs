@@ -177,6 +177,12 @@ fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, Cat
         clauses.push("a.model = ?".to_string());
         params.push(Box::new(model.clone()));
     }
+    if filter.captured_after.is_some() || filter.captured_before.is_some() {
+        // Ingest stores a blank DateTimeOriginal as the literal text 'unknown' (kamadak-exif's
+        // display form), which would sort after every digit-leading bound and leak into every
+        // "from" range while being excluded by every "to" range. Only real dates take part.
+        clauses.push("a.captured_at GLOB '[0-9][0-9][0-9][0-9]-*'".to_string());
+    }
     if let Some(after) = &filter.captured_after {
         clauses.push("a.captured_at >= ?".to_string());
         params.push(Box::new(after.clone()));
@@ -283,6 +289,156 @@ pub struct SqliteCatalog {
 }
 
 impl SqliteCatalog {
+    /// Runs a long read-only scan on its own snapshot connection when the catalog is file-backed
+    /// (WAL: consistent, never blocks a writer), else on the shared one. Holding the shared mutex
+    /// for a full-table scan would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
+    /// -- see `hunt_ids`.
+    fn with_scan_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogError> {
+        if self.path.is_some() {
+            f(&self.open_snapshot_reader()?)
+        } else {
+            f(&self.conn.lock().unwrap())
+        }
+    }
+
+    fn facets_on(conn: &Connection, filter: &Filter) -> Result<FacetCounts, CatalogError> {
+        // An unfiltered query reads the trigger-maintained cache (ADR-0103's own optimized case);
+        // any narrowing filter falls back to a live, exact GROUP BY, since the cache's
+        // (volume_id, model, rating) grain has no way to answer a keyword/date/etc-narrowed facet
+        // count on its own.
+        let is_unfiltered = *filter == Filter::default();
+
+        let (by_model, by_rating) = if is_unfiltered {
+            let mut stmt = conn.prepare(
+                "SELECT fc.model, SUM(fc.cnt) FROM facet_counts fc \
+                     JOIN volume v ON v.id = fc.volume_id \
+                     WHERE v.online = 1 GROUP BY fc.model",
+            )?;
+            let by_model = stmt
+                .query_map([], |row| {
+                    let model: String = row.get(0)?;
+                    let cnt: i64 = row.get(1)?;
+                    Ok((
+                        if model.is_empty() { None } else { Some(model) },
+                        cnt as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut stmt = conn.prepare(
+                "SELECT fc.rating, SUM(fc.cnt) FROM facet_counts fc \
+                     JOIN volume v ON v.id = fc.volume_id \
+                     WHERE v.online = 1 GROUP BY fc.rating",
+            )?;
+            let by_rating = stmt
+                .query_map([], |row| {
+                    let rating: i64 = row.get(0)?;
+                    let cnt: i64 = row.get(1)?;
+                    Ok((
+                        if rating == FACET_UNRATED_SENTINEL {
+                            None
+                        } else {
+                            Some(rating)
+                        },
+                        cnt as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (by_model, by_rating)
+        } else {
+            let filter_sql = build_filter_sql(conn, filter)?;
+            let base = format!(
+                "FROM asset a \
+                     JOIN root r ON r.id = a.root_id \
+                     JOIN volume v ON v.id = r.volume_id \
+                     WHERE {}",
+                filter_sql.where_clause
+            );
+
+            let sql = format!("SELECT a.model, COUNT(*) {base} GROUP BY a.model");
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let by_model = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)? as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let sql = format!("SELECT a.rating, COUNT(*) {base} GROUP BY a.rating");
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let by_rating = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (by_model, by_rating)
+        };
+
+        // `flag` has no trigger-maintained cache at all (it's a much lower-cardinality, cheaper
+        // aggregate than model/rating), so it's always a live GROUP BY, filtered or not.
+        let by_flag: Vec<(Option<i64>, u64)> = {
+            let filter_sql = build_filter_sql(conn, filter)?;
+            let sql = format!(
+                "SELECT a.flag, COUNT(*) FROM asset a \
+                 JOIN root r ON r.id = a.root_id \
+                 JOIN volume v ON v.id = r.volume_id \
+                 WHERE {} GROUP BY a.flag",
+                filter_sql.where_clause
+            );
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let total: u64 = by_model.iter().map(|(_, cnt)| cnt).sum();
+
+        Ok(FacetCounts {
+            by_model,
+            by_rating,
+            by_flag,
+            total,
+        })
+    }
+
+    /// Distinct non-empty values of one `asset` text column, online volumes only. `column` is
+    /// always a compile-time literal from this file, never caller input.
+    fn distinct_asset_column(&self, column: &str) -> Result<Vec<String>, CatalogError> {
+        self.with_scan_conn(|conn| Self::distinct_asset_column_on(conn, column))
+    }
+
+    fn distinct_asset_column_on(
+        conn: &Connection,
+        column: &str,
+    ) -> Result<Vec<String>, CatalogError> {
+        let sql = format!(
+            "SELECT DISTINCT a.{column} FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE v.online = 1 AND a.{column} IS NOT NULL AND a.{column} <> '' \
+             ORDER BY a.{column} COLLATE NOCASE ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn open(path: &Path) -> Result<Self, CatalogError> {
         let conn = Connection::open(path)?;
         Self::init(conn, Some(path.to_path_buf()))
@@ -1203,6 +1359,36 @@ impl CatalogStore for SqliteCatalog {
         Ok(rows)
     }
 
+    fn list_keywords(&self) -> Result<Vec<Keyword>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, name, path FROM keyword ORDER BY name_fold ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], row_to_keyword)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn list_collections(&self) -> Result<Vec<Collection>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, kind, name FROM collection ORDER BY name_fold ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], row_to_collection)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn distinct_makes(&self) -> Result<Vec<String>, CatalogError> {
+        self.distinct_asset_column("make")
+    }
+
+    fn distinct_labels(&self) -> Result<Vec<String>, CatalogError> {
+        self.distinct_asset_column("label")
+    }
+
     fn keyword_by_path(&self, segments: &[&str]) -> Result<Option<Keyword>, CatalogError> {
         let conn = self.conn.lock().unwrap();
         let mut parent_id: Option<i64> = None;
@@ -1337,115 +1523,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn facets(&self, filter: &Filter) -> Result<FacetCounts, CatalogError> {
-        let conn = self.conn.lock().unwrap();
-        // An unfiltered query reads the trigger-maintained cache (ADR-0103's own optimized case);
-        // any narrowing filter falls back to a live, exact GROUP BY, since the cache's
-        // (volume_id, model, rating) grain has no way to answer a keyword/date/etc-narrowed facet
-        // count on its own.
-        let is_unfiltered = *filter == Filter::default();
-
-        let (by_model, by_rating) = if is_unfiltered {
-            let mut stmt = conn.prepare(
-                "SELECT fc.model, SUM(fc.cnt) FROM facet_counts fc \
-                     JOIN volume v ON v.id = fc.volume_id \
-                     WHERE v.online = 1 GROUP BY fc.model",
-            )?;
-            let by_model = stmt
-                .query_map([], |row| {
-                    let model: String = row.get(0)?;
-                    let cnt: i64 = row.get(1)?;
-                    Ok((
-                        if model.is_empty() { None } else { Some(model) },
-                        cnt as u64,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let mut stmt = conn.prepare(
-                "SELECT fc.rating, SUM(fc.cnt) FROM facet_counts fc \
-                     JOIN volume v ON v.id = fc.volume_id \
-                     WHERE v.online = 1 GROUP BY fc.rating",
-            )?;
-            let by_rating = stmt
-                .query_map([], |row| {
-                    let rating: i64 = row.get(0)?;
-                    let cnt: i64 = row.get(1)?;
-                    Ok((
-                        if rating == FACET_UNRATED_SENTINEL {
-                            None
-                        } else {
-                            Some(rating)
-                        },
-                        cnt as u64,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            (by_model, by_rating)
-        } else {
-            let filter_sql = build_filter_sql(&conn, filter)?;
-            let base = format!(
-                "FROM asset a \
-                     JOIN root r ON r.id = a.root_id \
-                     JOIN volume v ON v.id = r.volume_id \
-                     WHERE {}",
-                filter_sql.where_clause
-            );
-
-            let sql = format!("SELECT a.model, COUNT(*) {base} GROUP BY a.model");
-            let param_refs: Vec<&dyn ToSql> =
-                filter_sql.params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let by_model = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, i64>(1)? as u64,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let sql = format!("SELECT a.rating, COUNT(*) {base} GROUP BY a.rating");
-            let param_refs: Vec<&dyn ToSql> =
-                filter_sql.params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let by_rating = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            (by_model, by_rating)
-        };
-
-        // `flag` has no trigger-maintained cache at all (it's a much lower-cardinality, cheaper
-        // aggregate than model/rating), so it's always a live GROUP BY, filtered or not.
-        let by_flag: Vec<(Option<i64>, u64)> = {
-            let filter_sql = build_filter_sql(&conn, filter)?;
-            let sql = format!(
-                "SELECT a.flag, COUNT(*) FROM asset a \
-                 JOIN root r ON r.id = a.root_id \
-                 JOIN volume v ON v.id = r.volume_id \
-                 WHERE {} GROUP BY a.flag",
-                filter_sql.where_clause
-            );
-            let param_refs: Vec<&dyn ToSql> =
-                filter_sql.params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-
-        let total: u64 = by_model.iter().map(|(_, cnt)| cnt).sum();
-
-        Ok(FacetCounts {
-            by_model,
-            by_rating,
-            by_flag,
-            total,
-        })
+        self.with_scan_conn(|conn| Self::facets_on(conn, filter))
     }
 
     fn collection(&self, collection_id: i64) -> Result<Option<Collection>, CatalogError> {
@@ -1733,6 +1811,67 @@ mod tests {
         assert_eq!(asset.id, id);
         assert_eq!(asset.rel_path, "a.NEF");
         assert_eq!(asset.model, Some("Z8".to_string()));
+    }
+
+    #[test]
+    fn list_keywords_and_collections_are_name_sorted_and_flat() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let zoo = store.create_keyword(None, "Zoo").unwrap();
+        let apple = store.create_keyword(None, "apple").unwrap();
+        let cat = store.create_keyword(Some(zoo), "Cats").unwrap();
+        let names: Vec<_> = store
+            .list_keywords()
+            .unwrap()
+            .into_iter()
+            .map(|k| (k.id, k.parent_id))
+            .collect();
+        assert_eq!(names, vec![(apple, None), (cat, Some(zoo)), (zoo, None)]);
+
+        let smart = store
+            .create_collection(None, "Picks", CollectionKind::Smart)
+            .unwrap();
+        let manual = store
+            .create_collection(Some(smart), "Album", CollectionKind::Manual)
+            .unwrap();
+        let ids: Vec<_> = store
+            .list_collections()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, vec![manual, smart]);
+    }
+
+    #[test]
+    fn distinct_makes_and_labels_skip_empty_and_offline_volumes() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let v1 = store.upsert_volume("v1", None, None, 0).unwrap();
+        let v2 = store.upsert_volume("v2", None, None, 0).unwrap();
+        let r1 = store.ensure_root(v1, "").unwrap();
+        let r2 = store.ensure_root(v2, "").unwrap();
+        let mut a = new_asset("a.NEF", Some("Z8"));
+        a.make = Some("NIKON".to_string());
+        let mut b = new_asset("b.NEF", Some("Z6"));
+        b.make = Some("NIKON".to_string());
+        let mut c = new_asset("c.NEF", None);
+        c.make = Some("Canon".to_string());
+        let mut d = new_asset("d.NEF", None);
+        d.make = Some("Sony".to_string()); // on the offline volume below
+        let a_id = store.insert_asset(r1, &a, None).unwrap();
+        let b_id = store.insert_asset(r1, &b, None).unwrap();
+        store.insert_asset(r1, &c, None).unwrap();
+        let d_id = store.insert_asset(r2, &d, None).unwrap();
+        store.set_label(&[a_id, d_id], Some("Red")).unwrap();
+        store.set_label(&[b_id], Some("")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE volume SET online = 0 WHERE id = ?1", params![v2])
+            .unwrap();
+
+        assert_eq!(store.distinct_makes().unwrap(), vec!["Canon", "NIKON"]);
+        assert_eq!(store.distinct_labels().unwrap(), vec!["Red"]);
     }
 
     #[test]
@@ -2543,6 +2682,82 @@ mod tests {
         drop(held);
         worker.join().unwrap();
         assert_eq!(got, Ok(20), "hunt_ids blocked on the shared connection");
+    }
+
+    /// Same guarantee as `hunt_ids`: facets and the distinct-value scans must not hold the shared
+    /// connection (the UI thread's `list_roots` needs it every frame).
+    #[test]
+    fn facets_and_distinct_scans_on_a_file_backed_catalog_do_not_take_the_shared_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(SqliteCatalog::open(&dir.path().join("c.db")).unwrap());
+        let v = store.upsert_volume("v", None, None, 0).unwrap();
+        let r = store.ensure_root(v, "").unwrap();
+        let mut a = new_asset("a.NEF", Some("Z8"));
+        a.make = Some("NIKON".to_string());
+        store.insert_asset(r, &a, None).unwrap();
+
+        let held = store.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let narrowed = Filter {
+                    model: Some("Z8".into()),
+                    ..Default::default()
+                };
+                let total = store.facets(&narrowed).unwrap().total;
+                let makes = store.distinct_makes().unwrap();
+                tx.send((total, makes)).unwrap();
+            })
+        };
+        let got = rx.recv_timeout(std::time::Duration::from_secs(30));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(
+            got,
+            Ok((1, vec!["NIKON".to_string()])),
+            "blocked on shared conn"
+        );
+    }
+
+    #[test]
+    fn date_bounds_skip_unknown_and_malformed_captured_at() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let v = store.upsert_volume("v", None, None, 0).unwrap();
+        let r = store.ensure_root(v, "").unwrap();
+        let mut ids = Vec::new();
+        for (name, at) in [
+            ("real", Some("2026-03-01 10:00:00")),
+            ("unknown", Some("unknown")),
+            ("none", None),
+        ] {
+            let mut a = new_asset(&format!("{name}.NEF"), None);
+            a.captured_at = at.map(str::to_string);
+            ids.push(store.insert_asset(r, &a, None).unwrap());
+        }
+        let after = Filter {
+            captured_after: Some("2026-01-01 00:00:00".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt_ids(&after, default_sort()).unwrap(),
+            vec![ids[0]]
+        );
+        let before = Filter {
+            captured_before: Some("2026-12-31 23:59:59".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt_ids(&before, default_sort()).unwrap(),
+            vec![ids[0]]
+        );
+        assert_eq!(
+            store
+                .hunt_ids(&Filter::default(), default_sort())
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The `eframe::App` shell: top-level view routing (library/loupe/develop -- the Library view's
-//! virtualized grid is #30 (`crate::grid`), the loupe is #31; culling UX is #32 and the filter
-//! bar is #242, both still to come) and the wgpu device Tapetum's `GpuContext` shares
+//! virtualized grid is #30 (`crate::grid`), its filter bar #242 (`crate::filter_bar`), the loupe
+//! is #31; culling UX is #32, still to come) and the wgpu device Tapetum's `GpuContext` shares
 //! with eframe (ADR-0016). Also owns Pounce (#55): the job runtime plus the activity panel
 //! (`crate::activity`) that reads it, and the Library view's Import/Sync buttons that submit real
 //! jobs to it. Also polls Nine Lives (#25) on a slow timer and submits a `BackupJob` when it says
@@ -16,7 +16,7 @@ use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, SyncJob};
 use nicti_lair::{
-    CatalogError, CatalogStore, Filter, PreviewTier, Sort, SortDirection, SortField, SqliteCatalog,
+    CatalogError, CatalogStore, PreviewTier, Sort, SortDirection, SortField, SqliteCatalog,
 };
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
@@ -27,6 +27,7 @@ use nicti_shed::state::Channel as UpdateChannel;
 
 use crate::cache_settings::{self, CacheSettingsUi};
 use crate::color_mgmt::ColorManagement;
+use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
 use crate::loupe::{asset_cache_key, LoupeSession};
@@ -161,6 +162,8 @@ pub struct PeltApp {
     grid_view: grid::ViewState,
     /// The grid's root selector: `None` = every folder.
     grid_root: Option<i64>,
+    /// #242: the Library filter bar's controls (`filter_bar.rs`).
+    filter_bar: FilterBar,
     grid_sort: Sort,
     /// Whether an import/sync/move was running last frame -- the busy -> idle edge is what
     /// triggers a full grid refresh (new assets, replaced previews).
@@ -278,6 +281,7 @@ impl PeltApp {
             grid: None,
             grid_view: grid::ViewState::default(),
             grid_root: None,
+            filter_bar: FilterBar::default(),
             grid_sort: grid::DEFAULT_SORT,
             grid_was_busy: false,
             grid_last_live_reload: None,
@@ -381,6 +385,10 @@ impl PeltApp {
     fn drive_grid(&mut self, ui: &egui::Ui) {
         let busy = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
         let was_busy = std::mem::replace(&mut self.grid_was_busy, busy);
+        if was_busy && !busy {
+            // New assets may bring new keywords/makes/labels and shift every facet count.
+            self.filter_bar.invalidate_options();
+        }
         let Some(grid) = self.grid.as_mut() else {
             return;
         };
@@ -742,9 +750,15 @@ impl PeltApp {
         let mut root_sel = self.grid_root;
         let mut sort = self.grid_sort;
         ui.horizontal(|ui| {
-            let root_label = root_sel
-                .and_then(|id| roots.iter().find(|r| r.id == id))
-                .map_or("All folders", |r| r.path.as_str());
+            // Never read "All folders" while a root filter is live (a loaded smart collection can
+            // name a folder that's no longer registered -- that matches nothing).
+            let root_label = match root_sel {
+                None => "All folders".to_string(),
+                Some(id) => roots
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map_or_else(|| format!("Missing folder (#{id})"), |r| r.path.clone()),
+            };
             egui::ComboBox::from_id_salt("grid_root")
                 .selected_text(root_label)
                 .show_ui(ui, |ui| {
@@ -771,10 +785,21 @@ impl PeltApp {
         });
         self.grid_root = root_sel;
         self.grid_sort = sort;
-        let filter = Filter {
-            root_id: root_sel,
-            ..Default::default()
+        // #242: the filter bar. Loading a smart collection may retarget the folder selection.
+        let header = if self.filter_bar.is_active() {
+            "Filters (active)"
+        } else {
+            "Filters"
         };
+        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+        egui::CollapsingHeader::new(header)
+            .id_salt("nicti_pelt_library_filters")
+            .default_open(true)
+            .show(ui, |ui| {
+                self.filter_bar.show(ui, &dyn_store, &mut self.grid_root);
+            });
+        // Read after the header, and even while it's collapsed: a collapsed bar still filters.
+        let filter = self.filter_bar.to_filter(self.grid_root);
         if let Some(grid) = self.grid.as_mut() {
             grid.set_query(filter, sort, &self.pounce);
         }
@@ -875,7 +900,6 @@ impl PeltApp {
         if let Some(summary) = &self.last_move_summary {
             ui.label(summary);
         }
-        ui.label("Filter bar lands in #242.");
     }
 
     /// Registers `self.import_path_input` as a root under the placeholder volume (see this

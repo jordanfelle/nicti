@@ -48,6 +48,11 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   manual + smart) landed alongside it; `hunt.rs`'s `Filter`/`Sort`/keyset-paginated `hunt` is the
   query both the filter bar (#242) and a smart collection's saved rule resolve through. Filename
   search is a plain `GLOB` scan for now — FTS5 is a documented, not-yet-done follow-up.
+- **Filter-bar listing queries (#242)**: `CatalogStore::list_keywords` (name-sorted, flat —
+  caller rebuilds the tree from `parent_id`), `list_collections`, `distinct_makes`/`distinct_labels`
+  (online volumes only, empties skipped) — the option lists `nicti-pelt`'s `filter_bar.rs` needs;
+  no `Filter`/`hunt` change. `distinct_*` and `facets` are full scans, so they run on `with_scan_conn` (a snapshot reader for
+  file-backed catalogs, like `hunt_ids`) so they never hold the shared mutex the UI thread needs.
 - **Continuous backup (#25, landed)**: `docs/adr/0025`, "Nine Lives". `VACUUM INTO` from a second,
   independent read-only connection (`SqliteCatalog::open_snapshot_reader`) — proven, not just
   assumed, never to block a concurrent writer (`tests/ninelives.rs`'s own concurrent-writer test).
