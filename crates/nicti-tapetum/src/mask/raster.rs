@@ -174,6 +174,85 @@ pub fn color_range_weight(lab: [f32; 3], samples: &[[f32; 3]], tolerance: f32) -
     (1.0 - nearest / tolerance).clamp(0.0, 1.0)
 }
 
+/// ProPhoto linear luminance coefficients (the Y row of ProPhoto -> XYZ D50).
+pub const PROPHOTO_Y: [f32; 3] = [0.2880402, 0.7118741, 0.0000857];
+
+/// Perceptual luma of a *working-space* (linear ProPhoto) pixel: `clamp(Y, 0, 1) ^ (1 / 2.2)`. This
+/// is the value a luminance-range mask compares against `lo..hi`.
+pub fn working_luma(working: [f32; 3]) -> f32 {
+    let y = PROPHOTO_Y[0] * working[0] + PROPHOTO_Y[1] * working[1] + PROPHOTO_Y[2] * working[2];
+    y.clamp(0.0, 1.0).powf(1.0 / 2.2)
+}
+
+/// CIE Lab (D50) of a working-space (linear ProPhoto) pixel -- what a colour-range mask measures.
+pub fn working_lab(working: [f32; 3]) -> [f32; 3] {
+    let x = 0.7976749 * working[0] + 0.1351917 * working[1] + 0.0313534 * working[2];
+    let y = PROPHOTO_Y[0] * working[0] + PROPHOTO_Y[1] * working[1] + PROPHOTO_Y[2] * working[2];
+    let z = 0.82521 * working[2];
+    let f = |t: f32| {
+        if t > 0.008856 {
+            t.cbrt()
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
+    let (fx, fy, fz) = (f(x / 0.9642), f(y), f(z / 0.8251));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// A range source's weight for one camera-linear pixel: the pixel goes through `matrix` (camera ->
+/// working) and is then measured by luma or Lab. `None` for a non-range source.
+pub fn range_weight_at(
+    source: &MaskSource,
+    cam_rgb: [f32; 3],
+    matrix: crate::color::Mat3,
+) -> Option<f32> {
+    let working = crate::color::mat3_apply(matrix, cam_rgb);
+    match source {
+        MaskSource::LuminanceRange { lo, hi, smooth } => Some(luminance_range_weight(
+            working_luma(working),
+            *lo,
+            *hi,
+            *smooth,
+        )),
+        MaskSource::ColorRange { samples, tolerance } => Some(color_range_weight(
+            working_lab(working),
+            samples,
+            *tolerance,
+        )),
+        _ => None,
+    }
+}
+
+/// A range source rasterized at `mask_w x mask_h` from an RGBA frame: the weight is computed per
+/// source tap and bilinearly combined at each mask pixel (so a smaller mask is smooth, not
+/// aliased) -- the CPU twin of `mask_range.wgsl`.
+pub fn range_field(
+    source: &MaskSource,
+    frame: &[[f32; 4]],
+    frame_w: usize,
+    frame_h: usize,
+    mask_w: usize,
+    mask_h: usize,
+    matrix: crate::color::Mat3,
+) -> Option<Field> {
+    let taps = Field {
+        width: frame_w,
+        height: frame_h,
+        data: frame
+            .iter()
+            .map(|p| range_weight_at(source, [p[0], p[1], p[2]], matrix))
+            .collect::<Option<Vec<f32>>>()?,
+    };
+    let mut out = Field::new(mask_w, mask_h, 0.0);
+    for y in 0..mask_h {
+        for x in 0..mask_w {
+            out.data[y * mask_w + x] = super::guided::sample_mapped(&taps, x, y, mask_w, mask_h);
+        }
+    }
+    Some(out)
+}
+
 /// The pixel box `[lo_x, hi_x) x [lo_y, hi_y)` a dab can touch, clamped to the frame; `None` when it
 /// is entirely outside. Shared by the CPU splat and the GPU tile binning so both visit exactly the
 /// same pixels.
@@ -490,5 +569,56 @@ mod tests {
             4
         )
         .is_none());
+    }
+
+    #[test]
+    fn working_luma_and_lab_are_sane_reference_points() {
+        assert_eq!(working_luma([0.0; 3]), 0.0);
+        assert!((working_luma([1.0; 3]) - 1.0).abs() < 1e-3);
+        assert!(working_luma([0.2; 3]) < working_luma([0.5; 3]));
+        // A neutral grey has no chroma; white is L*=100; black is L*=0.
+        let grey = working_lab([0.18; 3]);
+        assert!(grey[1].abs() < 1.5 && grey[2].abs() < 1.5, "{grey:?}");
+        assert!((working_lab([1.0; 3])[0] - 100.0).abs() < 0.5);
+        assert!(working_lab([0.0; 3])[0].abs() < 1e-3);
+        // A saturated red has a strongly positive a*.
+        assert!(working_lab([0.6, 0.02, 0.02])[1] > 40.0);
+    }
+
+    #[test]
+    fn range_field_is_none_for_a_non_range_source_and_follows_the_frame() {
+        let frame: Vec<[f32; 4]> = (0..16)
+            .map(|i| {
+                let v = i as f32 / 15.0;
+                [v, v, v, 1.0]
+            })
+            .collect();
+        let id = crate::color::mat3_identity();
+        assert!(range_field(
+            &MaskSource::Brush { strokes: vec![] },
+            &frame,
+            4,
+            4,
+            4,
+            4,
+            id
+        )
+        .is_none());
+        let bright = range_field(
+            &MaskSource::LuminanceRange {
+                lo: 0.6,
+                hi: 1.0,
+                smooth: 0.0,
+            },
+            &frame,
+            4,
+            4,
+            4,
+            4,
+            id,
+        )
+        .unwrap();
+        // The last (brightest) pixel is selected, the first (darkest) is not.
+        assert!(bright.get(3, 3) > 0.99 && bright.get(0, 0) < 0.01);
     }
 }

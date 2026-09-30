@@ -600,7 +600,22 @@ pub struct LiveSuffixKernel {
     /// of each so `set_params` only re-uploads when content actually changed.
     profile_tables: std::sync::Mutex<ProfileTables>,
     profile_sampler: wgpu::Sampler,
+    /// Local corrections (#49): the uniform block (`count` + up to 16 corrections), the atlas
+    /// currently bound (a 1x1 dummy and count 0 when there are none) and its sampler.
+    mask_buf: wgpu::Buffer,
+    mask_state: std::sync::Mutex<MaskBinding>,
+    mask_sampler: wgpu::Sampler,
 }
+
+/// What the live shader's mask bindings currently point at.
+struct MaskBinding {
+    /// `None` = no local corrections: the dummy atlas below is bound and count is 0.
+    frame: Option<crate::mask::atlas::MaskFrame>,
+    dummy: Arc<crate::mask::atlas::Atlas>,
+}
+
+/// Bytes of the mask uniform block: a `vec4` header plus 16 corrections x 4 `vec4`s.
+const MASK_UNIFORM_BYTES: u64 = 16 + (crate::mask::params::MAX_CORRECTIONS as u64) * 64;
 
 struct ProfileTables {
     hue_sat_view: wgpu::TextureView,
@@ -739,7 +754,39 @@ impl LiveSuffixKernel {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             }),
+            mask_buf: make_uniform_buffer(gpu, "live_suffix mask uniforms", MASK_UNIFORM_BYTES),
+            mask_state: std::sync::Mutex::new(MaskBinding {
+                frame: None,
+                dummy: Arc::new(crate::mask::atlas::Atlas::new(gpu, 1, 1, 0)),
+            }),
+            // Clamp on every axis: unlike the DCP sampler, the mask must not wrap at the borders.
+            mask_sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("mask atlas sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         }
+    }
+
+    /// Binds this render's local corrections (`None` clears them). Call alongside
+    /// [`Self::set_params`] whenever the masks changed; it writes the mask uniform block and never
+    /// rebuilds a pipeline.
+    pub fn set_masks(&self, gpu: &GpuContext, frame: Option<&crate::mask::atlas::MaskFrame>) {
+        let count = frame.map_or(0, |f| {
+            f.uniforms.len().min(crate::mask::params::MAX_CORRECTIONS)
+        });
+        let mut block = vec![0u8; MASK_UNIFORM_BYTES as usize];
+        block[..4].copy_from_slice(&(count as f32).to_ne_bytes());
+        if let Some(f) = frame {
+            let bytes: &[u8] = bytemuck::cast_slice(&f.uniforms[..count]);
+            block[16..16 + bytes.len()].copy_from_slice(bytes);
+        }
+        gpu.queue.write_buffer(&self.mask_buf, 0, &block);
+        self.mask_state.lock().unwrap().frame = frame.cloned();
     }
 
     /// Uploads this render's params -- call before `Renderer::render` whenever any of them
@@ -819,6 +866,11 @@ impl LiveSuffixKernel {
     ) {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
         let tables = self.profile_tables.lock().unwrap();
+        let mask_state = self.mask_state.lock().unwrap();
+        let atlas_view = match &mask_state.frame {
+            Some(f) => &f.atlas.array_view,
+            None => &mask_state.dummy.array_view,
+        };
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live_suffix bind group"),
             layout: &bind_group_layout,
@@ -847,8 +899,21 @@ impl LiveSuffixKernel {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(&self.profile_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.mask_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
+                },
             ],
         });
+        drop(mask_state);
         drop(tables);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("live_suffix"),

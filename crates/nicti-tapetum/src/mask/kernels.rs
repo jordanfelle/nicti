@@ -12,7 +12,7 @@
 
 use wgpu::util::DeviceExt;
 
-use super::params::Op;
+use super::params::{MaskSource, Op};
 use super::raster::{self, Dab};
 use super::Field;
 use crate::gpu::{make_compute_pipeline, GpuContext};
@@ -227,6 +227,7 @@ pub struct MaskKernels {
     brush: wgpu::ComputePipeline,
     compose: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
+    range: wgpu::ComputePipeline,
     /// A 1x1 zero field bound to unused `mask_pack` channels.
     zero: FieldTexture,
 }
@@ -306,8 +307,86 @@ impl MaskKernels {
                 include_str!("../../shaders/mask_pack.wgsl"),
                 "mask_pack",
             ),
+            range: make_compute_pipeline(
+                d,
+                include_str!("../../shaders/mask_range.wgsl"),
+                "mask_range",
+            ),
             zero: FieldTexture::new(gpu, 1, 1),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// A luminance- or colour-range selection of `frame` (camera-linear `Rgba16Float`) into `out`.
+    /// `source` must be a range source; any other kind is a no-op. `matrix` takes camera RGB to
+    /// the working space the range is measured in.
+    pub fn range(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &wgpu::TextureView,
+        frame_extent: (u32, u32),
+        out: &FieldTexture,
+        source: &MaskSource,
+        matrix: crate::color::Mat3,
+    ) {
+        let (mode, lo, hi, smooth, tolerance, samples): (f32, f32, f32, f32, f32, &[[f32; 3]]) =
+            match source {
+                MaskSource::LuminanceRange { lo, hi, smooth } => (0.0, *lo, *hi, *smooth, 0.0, &[]),
+                MaskSource::ColorRange { samples, tolerance } => {
+                    (1.0, 0.0, 0.0, 0.0, *tolerance, samples.as_slice())
+                }
+                _ => return,
+            };
+        let n = samples.len().min(super::params::MAX_COLOR_SAMPLES);
+        let mut data: Vec<f32> = vec![
+            mode,
+            lo,
+            hi,
+            smooth,
+            tolerance,
+            n as f32,
+            out.width as f32,
+            out.height as f32,
+            frame_extent.0 as f32,
+            frame_extent.1 as f32,
+            0.0,
+            0.0,
+            matrix[0][0],
+            matrix[1][0],
+            matrix[2][0],
+            0.0,
+            matrix[0][1],
+            matrix[1][1],
+            matrix[2][1],
+            0.0,
+            matrix[0][2],
+            matrix[1][2],
+            matrix[2][2],
+            0.0,
+        ];
+        for i in 0..super::params::MAX_COLOR_SAMPLES {
+            let s = samples.get(i).copied().unwrap_or([0.0; 3]);
+            data.extend_from_slice(&[s[0], s[1], s[2], 0.0]);
+        }
+        let u = uniform(gpu, "mask_range uniforms", &data);
+        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mask_range"),
+            layout: &self.range.get_bind_group_layout(0),
+            entries: &[
+                entry(0, wgpu::BindingResource::TextureView(frame)),
+                entry(1, wgpu::BindingResource::TextureView(&out.view)),
+                entry(2, u.as_entire_binding()),
+            ],
+        });
+        dispatch(
+            encoder,
+            "mask_range",
+            &self.range,
+            &bg,
+            out.width,
+            out.height,
+        );
     }
 
     /// Linear gradient into `out`, endpoints in pixels.
@@ -893,5 +972,114 @@ mod tests {
             data: (0..37 * 5).map(|i| i as f32 * 0.01).collect(),
         };
         assert_eq!(FieldTexture::upload(&gpu, &f).read(&gpu), f);
+    }
+
+    fn range_frame(w: usize, h: usize) -> Vec<[f32; 4]> {
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+                [0.02 + 0.8 * x, 0.02 + 0.6 * y, 0.02 + 0.5 * (1.0 - x), 1.0]
+            })
+            .collect()
+    }
+
+    fn assert_range_matches(gpu: &Arc<GpuContext>, source: &MaskSource, what: &str) {
+        let k = MaskKernels::new(gpu);
+        let (fw, fh, mw, mh) = (64usize, 40usize, 33usize, 21usize);
+        let matrix: crate::color::Mat3 = [[1.3, -0.2, -0.1], [-0.1, 1.2, -0.1], [0.0, -0.1, 1.1]];
+        let frame = range_frame(fw, fh);
+        let tex = crate::test_util::upload_frame(
+            gpu,
+            Extent {
+                width: fw as u32,
+                height: fh as u32,
+            },
+            &frame,
+        );
+        let out = FieldTexture::new(gpu, mw as u32, mh as u32);
+        run(gpu, |e| {
+            k.range(
+                gpu,
+                e,
+                &tex.view,
+                (fw as u32, fh as u32),
+                &out,
+                source,
+                matrix,
+            )
+        });
+        let cpu = raster::range_field(source, &frame, fw, fh, mw, mh, matrix).unwrap();
+        // The frame is stored as f16, which bounds the agreement (and Lab amplifies it).
+        let worst = out
+            .read(gpu)
+            .data
+            .iter()
+            .zip(&cpu.data)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.03, "{what}: GPU vs CPU range differ by {worst}");
+        assert!(
+            cpu.data.iter().any(|&v| v > 0.05) && cpu.data.iter().any(|&v| v < 0.95),
+            "{what}: the test range selected all or nothing, so it proves little"
+        );
+    }
+
+    #[test]
+    fn the_luminance_range_kernel_matches_the_cpu_reference() {
+        let Some(gpu) = gpu() else { return };
+        assert_range_matches(
+            &gpu,
+            &MaskSource::LuminanceRange {
+                lo: 0.35,
+                hi: 0.6,
+                smooth: 0.1,
+            },
+            "luminance",
+        );
+    }
+
+    #[test]
+    fn the_colour_range_kernel_matches_the_cpu_reference() {
+        let Some(gpu) = gpu() else { return };
+        let matrix: crate::color::Mat3 = [[1.3, -0.2, -0.1], [-0.1, 1.2, -0.1], [0.0, -0.1, 1.1]];
+        // Sample a colour actually present in the frame so the range is neither empty nor total.
+        let frame = range_frame(64, 40);
+        let p = frame[20 * 64 + 30];
+        let lab = raster::working_lab(crate::color::mat3_apply(matrix, [p[0], p[1], p[2]]));
+        assert_range_matches(
+            &gpu,
+            &MaskSource::ColorRange {
+                samples: vec![lab],
+                tolerance: 25.0,
+            },
+            "colour",
+        );
+    }
+
+    #[test]
+    fn a_non_range_source_is_a_no_op_on_the_range_kernel() {
+        let Some(gpu) = gpu() else { return };
+        let k = MaskKernels::new(&gpu);
+        let tex = crate::test_util::upload_frame(
+            &gpu,
+            Extent {
+                width: 4,
+                height: 4,
+            },
+            &[[0.5, 0.5, 0.5, 1.0]; 16],
+        );
+        let out = FieldTexture::new(&gpu, 4, 4);
+        run(&gpu, |e| {
+            k.range(
+                &gpu,
+                e,
+                &tex.view,
+                (4, 4),
+                &out,
+                &MaskSource::Brush { strokes: vec![] },
+                crate::color::mat3_identity(),
+            )
+        });
+        assert!(out.read(&gpu).data.iter().all(|&v| v == 0.0));
     }
 }

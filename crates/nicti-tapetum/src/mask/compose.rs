@@ -84,7 +84,7 @@ pub fn compose(
 /// A stable hex identity for any serializable value. A free-form recipe `params` can hold a JSON
 /// null (or a float that serializes as one), which the canonical hasher refuses; that must not be a
 /// panic on every render, so fall back to hashing the JSON text -- still a stable identity.
-fn stable_hash<T: serde::Serialize>(value: &T) -> blake3::Hash {
+pub(super) fn stable_hash<T: serde::Serialize>(value: &T) -> blake3::Hash {
     nicti_pawprint::hash_value(value).unwrap_or_else(|_| {
         blake3::hash(serde_json::to_string(value).unwrap_or_default().as_bytes())
     })

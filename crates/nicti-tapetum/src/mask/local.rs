@@ -1,0 +1,825 @@
+//! Per-mask *pointwise* local adjustments (#49): the maths the fused live shader runs for each
+//! pixel inside a mask, and its CPU twin.
+//!
+//! **Model.** Local corrections stack *additively* on the global values, exactly how LRC stacks
+//! them: at a pixel, every slider's effective value is `global + sum_i(weight_i * amount_i *
+//! delta_i)`. So the shader loops the active corrections once, accumulates seven sums and a tint
+//! multiplier, and then runs the normal pipeline with the adjusted values -- a slider drag only
+//! rewrites a uniform (zero recomposes, zero bakes).
+//!
+//! Where each one lands in the live pipeline (ADR-0038 order, locals marked *):
+//! `camera->working matrix -> [DCP HueSatMap] -> exposure* -> [DCP LookTable] -> temp/tint* ->
+//! tone (contrast/highlights/shadows/whites/blacks)* -> tone curve -> vibrance -> HSL ->
+//! saturation/hue/colour overlay*`.
+//!
+//! The spatial adjustments (clarity, texture, dehaze, sharpness, noise) are *not* here: they need
+//! neighbouring pixels and live in `basis`/`detail_combine`.
+
+use super::params::{LocalCorrection, MaskParams, TintColor};
+use crate::coat::{HslParams, ToneParams};
+use crate::color::{self, Mat3};
+
+/// `temp` of +1 scales red by `2^TEMP_STOPS` and blue by `2^-TEMP_STOPS` (warmer).
+pub const TEMP_STOPS: f32 = 0.5;
+/// `tint` of +1 scales green by `2^-TINT_STOPS` (towards magenta).
+pub const TINT_STOPS: f32 = 0.25;
+/// `hue` of +1 rotates colour around the grey axis by this many degrees (the HSL panel's scale).
+pub const HUE_DEGREES: f32 = 30.0;
+/// Effective contrast is clamped to this range after stacking.
+pub const CONTRAST_RANGE: (f32, f32) = (-1.0, 2.0);
+/// Every other effective tone slider is clamped to `-TONE_LIMIT..=TONE_LIMIT` after stacking.
+pub const TONE_LIMIT: f32 = 2.0;
+
+const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+/// One correction as the shader reads it: four `vec4`s.
+///
+/// | field | x | y | z | w |
+/// |---|---|---|---|---|
+/// | `d0` | amount | exposure (stops) | contrast | highlights |
+/// | `d1` | shadows | whites | blacks | temp |
+/// | `d2` | tint | saturation | hue | 0 |
+/// | `d3` | tint multiplier r | g | b | 0 |
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct LocalUniform {
+    pub d0: [f32; 4],
+    pub d1: [f32; 4],
+    pub d2: [f32; 4],
+    pub d3: [f32; 4],
+}
+
+/// HSV -> RGB with `s = 1, v = 1`, hue in degrees: the pure colour of a tint swatch.
+fn swatch(hue_deg: f32) -> [f32; 3] {
+    let h = (hue_deg.rem_euclid(360.0)) / 60.0;
+    let x = 1.0 - ((h % 2.0) - 1.0).abs();
+    match h as i32 {
+        0 => [1.0, x, 0.0],
+        1 => [x, 1.0, 0.0],
+        2 => [0.0, 1.0, x],
+        3 => [0.0, x, 1.0],
+        4 => [x, 0.0, 1.0],
+        _ => [1.0, 0.0, x],
+    }
+}
+
+/// The per-channel multiplier offset a colour overlay applies: a luma-preserving tint, so the
+/// overlay changes colour without changing brightness. `(tint / luma(tint) - 1) * saturation`.
+fn tint_multiplier(c: &TintColor) -> [f32; 3] {
+    let s = swatch(c.hue_deg);
+    let luma = LUMA[0] * s[0] + LUMA[1] * s[1] + LUMA[2] * s[2];
+    s.map(|v| (v / luma.max(1e-4) - 1.0) * c.saturation)
+}
+
+impl LocalUniform {
+    /// Packs one (already sanitized) correction. `amount` stays separate from the deltas so an
+    /// Amount drag is a pure uniform change.
+    pub fn pack(c: &LocalCorrection) -> Self {
+        let a = &c.adjust;
+        let tint = a.color.map(|t| tint_multiplier(&t)).unwrap_or([0.0; 3]);
+        Self {
+            d0: [c.amount, a.exposure, a.contrast, a.highlights],
+            d1: [a.shadows, a.whites, a.blacks, a.temp],
+            d2: [a.tint, a.saturation, a.hue, 0.0],
+            d3: [tint[0], tint[1], tint[2], 0.0],
+        }
+    }
+}
+
+/// Uniforms for every *active* correction, in list order (the order the atlas channels use).
+pub fn pack_active(params: &MaskParams) -> Vec<LocalUniform> {
+    params.active().map(LocalUniform::pack).collect()
+}
+
+/// The accumulated local deltas at one pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LocalSums {
+    pub exposure: f32,
+    pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+    pub temp: f32,
+    pub tint: f32,
+    pub saturation: f32,
+    pub hue: f32,
+    pub tint_mult: [f32; 3],
+}
+
+impl LocalSums {
+    /// Sums `weight_i * amount_i * delta_i` over the corrections; `weights[i]` is correction `i`'s
+    /// mask weight at this pixel. Extra weights or uniforms are ignored.
+    pub fn accumulate(uniforms: &[LocalUniform], weights: &[f32]) -> Self {
+        let mut s = Self::default();
+        for (u, &w) in uniforms.iter().zip(weights) {
+            let f = w * u.d0[0];
+            s.exposure += f * u.d0[1];
+            s.contrast += f * u.d0[2];
+            s.highlights += f * u.d0[3];
+            s.shadows += f * u.d1[0];
+            s.whites += f * u.d1[1];
+            s.blacks += f * u.d1[2];
+            s.temp += f * u.d1[3];
+            s.tint += f * u.d2[0];
+            s.saturation += f * u.d2[1];
+            s.hue += f * u.d2[2];
+            for c in 0..3 {
+                s.tint_mult[c] += f * u.d3[c];
+            }
+        }
+        s
+    }
+}
+
+/// Temperature/tint as per-channel gains in linear working space.
+pub fn temp_tint_gains(temp: f32, tint: f32) -> [f32; 3] {
+    [
+        (TEMP_STOPS * temp).exp2(),
+        (-TINT_STOPS * tint).exp2(),
+        (-TEMP_STOPS * temp).exp2(),
+    ]
+}
+
+/// Rotates `rgb` around the grey axis by `degrees` (Rodrigues' formula about `(1,1,1)/sqrt(3)`).
+pub fn rotate_hue(rgb: [f32; 3], degrees: f32) -> [f32; 3] {
+    let (s, c) = degrees.to_radians().sin_cos();
+    let k = 1.0 / 3.0f32.sqrt();
+    let dot = (rgb[0] + rgb[1] + rgb[2]) * k;
+    let cross = [
+        k * (rgb[2] - rgb[1]),
+        k * (rgb[0] - rgb[2]),
+        k * (rgb[1] - rgb[0]),
+    ];
+    std::array::from_fn(|i| c * rgb[i] + s * cross[i] + (1.0 - c) * dot * k)
+}
+
+/// Saturation as a luma-preserving chroma scale; the factor floors at 0 (fully grey).
+pub fn saturate(rgb: [f32; 3], amount: f32) -> [f32; 3] {
+    let luma = LUMA[0] * rgb[0] + LUMA[1] * rgb[1] + LUMA[2] * rgb[2];
+    let k = (1.0 + amount).max(0.0);
+    rgb.map(|c| luma + (c - luma) * k)
+}
+
+/// The global (non-local) inputs to one pixel, mirroring `live_suffix.wgsl`'s uniforms.
+pub struct PixelParams<'a> {
+    pub matrix: Mat3,
+    /// Baseline-exposure x the user's global exposure multiplier.
+    pub exposure_mult: f32,
+    pub tone: ToneParams,
+    pub lut: &'a [f32; 256],
+    pub vibrance: f32,
+    pub hsl: &'a HslParams,
+}
+
+/// The tone values after stacking the local deltas, clamped to sane ranges.
+pub fn effective_tone(global: &ToneParams, s: &LocalSums) -> ToneParams {
+    let clamp = |v: f32| v.clamp(-TONE_LIMIT, TONE_LIMIT);
+    ToneParams {
+        contrast: (global.contrast + s.contrast).clamp(CONTRAST_RANGE.0, CONTRAST_RANGE.1),
+        highlights: clamp(global.highlights + s.highlights),
+        shadows: clamp(global.shadows + s.shadows),
+        whites: clamp(global.whites + s.whites),
+        blacks: clamp(global.blacks + s.blacks),
+    }
+}
+
+/// The whole per-pixel live pipeline with local deltas applied -- what `live_suffix.wgsl` computes
+/// for a pixel whose stacked local sums are `s`. (No DCP profile: the CPU twin covers the path the
+/// masks add, and the profile path has its own parity test.)
+pub fn live_pixel(cam_rgb: [f32; 3], p: &PixelParams, s: &LocalSums) -> [f32; 3] {
+    let mut rgb = color::mat3_apply(p.matrix, cam_rgb);
+    let exposure = p.exposure_mult * s.exposure.exp2();
+    rgb = rgb.map(|c| c * exposure);
+    let gains = temp_tint_gains(s.temp, s.tint);
+    rgb = std::array::from_fn(|i| rgb[i] * gains[i]);
+    rgb = color::apply_tone(rgb, &effective_tone(&p.tone, s));
+    rgb = color::apply_tone_curve(rgb, p.lut);
+    rgb = color::apply_vibrance(rgb, p.vibrance);
+    rgb = color::apply_hsl(rgb, p.hsl);
+    rgb = saturate(rgb, s.saturation);
+    rgb = rotate_hue(rgb, s.hue * HUE_DEGREES);
+    std::array::from_fn(|i| rgb[i] * (1.0 + s.tint_mult[i]).max(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::params::{LocalAdjust, MaskComponent, MaskGroup, MaskSource};
+    use super::*;
+    use crate::coat::ToneCurveParams;
+
+    fn correction(adjust: LocalAdjust, amount: f32) -> LocalCorrection {
+        LocalCorrection {
+            id: "c".into(),
+            amount,
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::Brush {
+                        strokes: Vec::new(),
+                    },
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust,
+            ..LocalCorrection::default()
+        }
+    }
+
+    fn params<'a>(lut: &'a [f32; 256], hsl: &'a HslParams) -> PixelParams<'a> {
+        PixelParams {
+            matrix: color::mat3_identity(),
+            exposure_mult: 1.0,
+            tone: ToneParams::default(),
+            lut,
+            vibrance: 0.0,
+            hsl,
+        }
+    }
+
+    fn identity_lut() -> [f32; 256] {
+        color::build_tone_curve_lut(&ToneCurveParams::default())
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3], tol: f32) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < tol)
+    }
+
+    #[test]
+    fn a_zero_weight_changes_nothing_exactly() {
+        let (lut, hsl) = (identity_lut(), HslParams::default());
+        let p = params(&lut, &hsl);
+        let u = pack_active(&MaskParams {
+            corrections: vec![correction(
+                LocalAdjust {
+                    exposure: 2.0,
+                    contrast: 0.5,
+                    saturation: 0.7,
+                    ..LocalAdjust::default()
+                },
+                1.0,
+            )],
+        });
+        let with = live_pixel([0.2, 0.3, 0.1], &p, &LocalSums::accumulate(&u, &[0.0]));
+        let without = live_pixel([0.2, 0.3, 0.1], &p, &LocalSums::default());
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn local_exposure_of_one_stop_doubles_linear_values_in_the_mask() {
+        let (lut, hsl) = (identity_lut(), HslParams::default());
+        let mut p = params(&lut, &hsl);
+        // Bypass the tone stack so the exposure multiplier is directly observable: a neutral tone
+        // curve and zero tone still cube-root/cube, which is the identity for non-negative input.
+        p.tone = ToneParams::default();
+        let u = pack_active(&MaskParams {
+            corrections: vec![correction(
+                LocalAdjust {
+                    exposure: 1.0,
+                    ..LocalAdjust::default()
+                },
+                1.0,
+            )],
+        });
+        let base = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::default());
+        let inside = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::accumulate(&u, &[1.0]));
+        let outside = live_pixel([0.1, 0.05, 0.02], &p, &LocalSums::accumulate(&u, &[0.0]));
+        assert!(close(outside, base, 1e-7));
+        for c in 0..3 {
+            assert!(
+                (inside[c] / base[c] - 2.0).abs() < 0.01,
+                "channel {c}: {} vs {}",
+                inside[c],
+                base[c]
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_weight_is_half_the_exposure_in_stops_not_half_the_light() {
+        let (lut, hsl) = (identity_lut(), HslParams::default());
+        let p = params(&lut, &hsl);
+        let u = pack_active(&MaskParams {
+            corrections: vec![correction(
+                LocalAdjust {
+                    exposure: 2.0,
+                    ..LocalAdjust::default()
+                },
+                1.0,
+            )],
+        });
+        let base = live_pixel([0.1; 3], &p, &LocalSums::default())[0];
+        let half = live_pixel([0.1; 3], &p, &LocalSums::accumulate(&u, &[0.5]))[0];
+        assert!(
+            (half / base - 2.0).abs() < 0.01,
+            "+1 stop at half weight of +2"
+        );
+    }
+
+    #[test]
+    fn amount_scales_the_delta_linearly() {
+        let adjust = LocalAdjust {
+            exposure: 1.0,
+            ..LocalAdjust::default()
+        };
+        let full = pack_active(&MaskParams {
+            corrections: vec![correction(adjust, 1.0)],
+        });
+        let half = pack_active(&MaskParams {
+            corrections: vec![correction(adjust, 0.5)],
+        });
+        assert_eq!(LocalSums::accumulate(&full, &[1.0]).exposure, 1.0);
+        assert_eq!(LocalSums::accumulate(&half, &[1.0]).exposure, 0.5);
+    }
+
+    #[test]
+    fn stacked_corrections_add_and_a_correction_and_its_inverse_weights_sum_to_one_application() {
+        let adjust = LocalAdjust {
+            exposure: 1.0,
+            contrast: 0.2,
+            ..LocalAdjust::default()
+        };
+        let u = pack_active(&MaskParams {
+            corrections: vec![correction(adjust, 1.0), correction(adjust, 1.0)],
+        });
+        // Two full-weight corrections stack to double the delta.
+        let s = LocalSums::accumulate(&u, &[1.0, 1.0]);
+        assert_eq!(s.exposure, 2.0);
+        assert!((s.contrast - 0.4).abs() < 1e-6);
+        // Subject (w) and background (1 - w) carrying the SAME adjustment sum to exactly one
+        // global application, at every weight -- the partition property.
+        for w in [0.0f32, 0.25, 0.5, 1.0] {
+            let s = LocalSums::accumulate(&u, &[w, 1.0 - w]);
+            assert!((s.exposure - 1.0).abs() < 1e-6, "w={w}");
+            assert!((s.contrast - 0.2).abs() < 1e-6, "w={w}");
+        }
+    }
+
+    #[test]
+    fn effective_tone_is_clamped_after_stacking() {
+        let s = LocalSums {
+            contrast: -5.0,
+            highlights: 9.0,
+            blacks: -9.0,
+            ..LocalSums::default()
+        };
+        let t = effective_tone(&ToneParams::default(), &s);
+        assert_eq!(t.contrast, CONTRAST_RANGE.0);
+        assert_eq!(t.highlights, TONE_LIMIT);
+        assert_eq!(t.blacks, -TONE_LIMIT);
+    }
+
+    #[test]
+    fn temp_warms_and_tint_shifts_green_and_zero_is_identity() {
+        assert_eq!(temp_tint_gains(0.0, 0.0), [1.0, 1.0, 1.0]);
+        let warm = temp_tint_gains(1.0, 0.0);
+        assert!(warm[0] > 1.0 && warm[2] < 1.0 && warm[1] == 1.0);
+        let magenta = temp_tint_gains(0.0, 1.0);
+        assert!(magenta[1] < 1.0 && magenta[0] == 1.0 && magenta[2] == 1.0);
+        // Opposite temps are exact reciprocals on each channel.
+        let cool = temp_tint_gains(-1.0, 0.0);
+        assert!((warm[0] * cool[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn saturation_zero_is_identity_and_minus_one_is_grey_and_preserves_luma() {
+        let c = [0.4, 0.2, 0.1];
+        assert!(close(saturate(c, 0.0), c, 1e-7));
+        let grey = saturate(c, -1.0);
+        assert!((grey[0] - grey[1]).abs() < 1e-6 && (grey[1] - grey[2]).abs() < 1e-6);
+        let luma = |v: [f32; 3]| LUMA[0] * v[0] + LUMA[1] * v[1] + LUMA[2] * v[2];
+        assert!((luma(saturate(c, 0.8)) - luma(c)).abs() < 1e-6);
+        // Over-desaturating (< -1) floors at grey rather than inverting the colour.
+        assert!(close(saturate(c, -3.0), grey, 1e-6));
+    }
+
+    #[test]
+    fn hue_rotation_keeps_grey_and_is_periodic_and_preserves_the_grey_axis_component() {
+        assert!(close(rotate_hue([0.3; 3], 77.0), [0.3; 3], 1e-6));
+        let c = [0.6, 0.3, 0.1];
+        assert!(close(rotate_hue(c, 0.0), c, 1e-6));
+        assert!(close(rotate_hue(c, 360.0), c, 1e-5));
+        let mean = |v: [f32; 3]| (v[0] + v[1] + v[2]) / 3.0;
+        assert!((mean(rotate_hue(c, 40.0)) - mean(c)).abs() < 1e-6);
+        // 120 degrees cycles the channels: r -> g -> b.
+        assert!(close(
+            rotate_hue([1.0, 0.0, 0.0], 120.0),
+            [0.0, 1.0, 0.0],
+            1e-5
+        ));
+    }
+
+    #[test]
+    fn a_tint_overlay_changes_colour_but_not_brightness() {
+        let m = tint_multiplier(&TintColor {
+            hue_deg: 210.0,
+            saturation: 1.0,
+        });
+        let grey = [0.3f32; 3];
+        let tinted: [f32; 3] = std::array::from_fn(|i| grey[i] * (1.0 + m[i]));
+        let luma = |v: [f32; 3]| LUMA[0] * v[0] + LUMA[1] * v[1] + LUMA[2] * v[2];
+        assert!((luma(tinted) - luma(grey)).abs() < 1e-4);
+        assert!(
+            tinted[2] > tinted[0],
+            "a blue-ish tint pushes blue above red"
+        );
+        let none = tint_multiplier(&TintColor {
+            hue_deg: 210.0,
+            saturation: 0.0,
+        });
+        assert_eq!(none, [0.0; 3]);
+    }
+
+    #[test]
+    fn pack_orders_the_fields_the_shader_reads() {
+        let c = correction(
+            LocalAdjust {
+                exposure: 0.1,
+                contrast: 0.2,
+                highlights: 0.3,
+                shadows: 0.4,
+                whites: 0.5,
+                blacks: 0.6,
+                temp: 0.7,
+                tint: 0.8,
+                saturation: 0.9,
+                hue: 0.11,
+                ..LocalAdjust::default()
+            },
+            0.75,
+        );
+        let u = LocalUniform::pack(&c);
+        assert_eq!(u.d0, [0.75, 0.1, 0.2, 0.3]);
+        assert_eq!(u.d1, [0.4, 0.5, 0.6, 0.7]);
+        assert_eq!(u.d2, [0.8, 0.9, 0.11, 0.0]);
+        assert_eq!(std::mem::size_of::<LocalUniform>(), 64);
+    }
+
+    #[test]
+    fn only_active_corrections_are_packed() {
+        let mut off = correction(
+            LocalAdjust {
+                exposure: 1.0,
+                ..LocalAdjust::default()
+            },
+            1.0,
+        );
+        off.enabled = false;
+        let on = correction(
+            LocalAdjust {
+                exposure: 2.0,
+                ..LocalAdjust::default()
+            },
+            1.0,
+        );
+        let u = pack_active(&MaskParams {
+            corrections: vec![off, on],
+        });
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].d0[1], 2.0);
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::super::atlas::{Atlas, MaskFrame};
+    use super::super::kernels::{FieldTexture, MaskKernels};
+    use super::super::params::{LocalAdjust, MaskComponent, MaskGroup, MaskSource};
+    use super::super::Field;
+    use super::*;
+    use crate::coat::{
+        ExposureParams, HslParams, NoiseReductionParams, SharpenParams, ToneCurveParams,
+        VibranceParams,
+    };
+    use crate::frame::{Extent, FrameTexture};
+    use crate::gpu::GpuContext;
+    use crate::renderer::LiveExec;
+    use crate::stages::{LiveParams, LiveSuffixKernel};
+    use crate::test_util::{shared_test_gpu, upload_frame};
+    use std::sync::Arc;
+
+    const W: usize = 24;
+    const H: usize = 16;
+
+    fn correction(adjust: LocalAdjust, amount: f32) -> LocalCorrection {
+        LocalCorrection {
+            id: "c".into(),
+            amount,
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::Brush {
+                        strokes: Vec::new(),
+                    },
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust,
+            ..LocalCorrection::default()
+        }
+    }
+
+    fn frame_pixels() -> Vec<[f32; 4]> {
+        (0..W * H)
+            .map(|i| {
+                let (x, y) = ((i % W) as f32 / W as f32, (i / W) as f32 / H as f32);
+                [
+                    0.05 + 0.6 * x,
+                    0.04 + 0.5 * y,
+                    0.03 + 0.4 * (1.0 - x) * (1.0 - y),
+                    1.0,
+                ]
+            })
+            .collect()
+    }
+
+    fn ramp(flip: bool) -> Field {
+        Field {
+            width: W,
+            height: H,
+            data: (0..W * H)
+                .map(|i| {
+                    let t = (i % W) as f32 / (W - 1) as f32;
+                    if flip {
+                        1.0 - t
+                    } else {
+                        t
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    struct Setup {
+        corrections: Vec<LocalCorrection>,
+        fields: Vec<Field>,
+        matrix: Mat3,
+        exposure: f32,
+        tone: ToneParams,
+        vibrance: f32,
+    }
+
+    /// Renders `setup` through the real `LiveSuffixKernel` and returns GPU pixels.
+    fn render(gpu: &Arc<GpuContext>, setup: &Setup, with_masks: bool) -> Vec<[f32; 4]> {
+        let extent = Extent {
+            width: W as u32,
+            height: H as u32,
+        };
+        let input = upload_frame(gpu, extent, &frame_pixels());
+        let output = FrameTexture::new(gpu, extent);
+        let kernel = LiveSuffixKernel::new(gpu);
+        kernel.set_params(
+            gpu,
+            &LiveParams {
+                working_space_matrix: setup.matrix,
+                exposure: ExposureParams {
+                    stops: setup.exposure,
+                },
+                tone: setup.tone,
+                tone_curve: ToneCurveParams::default(),
+                vibrance: VibranceParams {
+                    amount: setup.vibrance,
+                },
+                hsl: HslParams::default(),
+                sharpen: SharpenParams::default(),
+                noise_reduction: NoiseReductionParams::default(),
+                camera_profile: None,
+                pixel_scale: 1.0,
+            },
+        );
+        if with_masks {
+            let params = MaskParams {
+                corrections: setup.corrections.clone(),
+            };
+            let uniforms = pack_active(&params);
+            let atlas = Atlas::new(gpu, W as u32, H as u32, uniforms.len());
+            let kernels = MaskKernels::new(gpu);
+            let textures: Vec<FieldTexture> = setup
+                .fields
+                .iter()
+                .map(|f| FieldTexture::upload(gpu, f))
+                .collect();
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            for (layer, chunk) in textures.chunks(4).enumerate() {
+                let slot = |i: usize| chunk.get(i);
+                kernels.pack(
+                    gpu,
+                    &mut enc,
+                    [slot(0), slot(1), slot(2), slot(3)],
+                    &atlas.layer_views[layer],
+                    W as u32,
+                    H as u32,
+                );
+            }
+            gpu.queue.submit(Some(enc.finish()));
+            kernel.set_masks(
+                gpu,
+                Some(&MaskFrame {
+                    atlas: Arc::new(atlas),
+                    uniforms,
+                }),
+            );
+        }
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(gpu, &mut enc, &input, &output);
+        gpu.queue.submit(Some(enc.finish()));
+        crate::test_util::read_frame(gpu, &output)
+    }
+
+    fn cpu(setup: &Setup) -> Vec<[f32; 3]> {
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        let p = PixelParams {
+            matrix: setup.matrix,
+            exposure_mult: color::exposure_multiplier(setup.exposure),
+            tone: setup.tone,
+            lut: &lut,
+            vibrance: setup.vibrance,
+            hsl: &hsl,
+        };
+        let uniforms = pack_active(&MaskParams {
+            corrections: setup.corrections.clone(),
+        });
+        frame_pixels()
+            .iter()
+            .enumerate()
+            .map(|(i, px)| {
+                let weights: Vec<f32> = setup.fields.iter().map(|f| f.data[i]).collect();
+                let sums = LocalSums::accumulate(&uniforms, &weights);
+                live_pixel([px[0], px[1], px[2]], &p, &sums)
+            })
+            .collect()
+    }
+
+    fn setup(corrections: Vec<LocalCorrection>, fields: Vec<Field>) -> Setup {
+        Setup {
+            corrections,
+            fields,
+            matrix: [[1.4, -0.3, -0.1], [-0.2, 1.3, -0.1], [0.0, -0.2, 1.2]],
+            exposure: 0.25,
+            tone: ToneParams {
+                contrast: 0.2,
+                highlights: -0.1,
+                shadows: 0.15,
+                whites: 0.05,
+                blacks: -0.05,
+            },
+            vibrance: 0.1,
+        }
+    }
+
+    fn assert_matches_cpu(gpu: &Arc<GpuContext>, s: &Setup, what: &str) {
+        let got = render(gpu, s, true);
+        let want = cpu(s);
+        let mut worst = 0.0f32;
+        for (g, w) in got.iter().zip(&want) {
+            for c in 0..3 {
+                worst = worst.max((g[c] - w[c]).abs());
+            }
+        }
+        assert!(worst < 0.02, "{what}: GPU vs CPU differ by {worst}");
+    }
+
+    #[test]
+    fn the_live_shader_with_every_pointwise_local_matches_the_cpu_twin() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let everything = LocalAdjust {
+            exposure: 0.8,
+            contrast: 0.3,
+            highlights: -0.4,
+            shadows: 0.5,
+            whites: 0.2,
+            blacks: -0.3,
+            temp: 0.5,
+            tint: -0.3,
+            saturation: 0.4,
+            hue: 0.25,
+            color: Some(crate::mask::params::TintColor {
+                hue_deg: 200.0,
+                saturation: 0.3,
+            }),
+            ..LocalAdjust::default()
+        };
+        let s = setup(vec![correction(everything, 0.8)], vec![ramp(false)]);
+        assert_matches_cpu(&gpu, &s, "one correction, every slider");
+    }
+
+    #[test]
+    fn stacked_corrections_across_two_atlas_layers_match_the_cpu_twin() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        // Six corrections -> two layers (4 + 2), each with a different weight field and delta.
+        let deltas = [
+            LocalAdjust {
+                exposure: 0.6,
+                ..LocalAdjust::default()
+            },
+            LocalAdjust {
+                contrast: 0.4,
+                saturation: -0.3,
+                ..LocalAdjust::default()
+            },
+            LocalAdjust {
+                highlights: -0.5,
+                ..LocalAdjust::default()
+            },
+            LocalAdjust {
+                temp: -0.6,
+                tint: 0.4,
+                ..LocalAdjust::default()
+            },
+            LocalAdjust {
+                shadows: 0.7,
+                hue: -0.4,
+                ..LocalAdjust::default()
+            },
+            LocalAdjust {
+                exposure: -0.5,
+                blacks: 0.2,
+                ..LocalAdjust::default()
+            },
+        ];
+        let corrections: Vec<_> = deltas
+            .iter()
+            .enumerate()
+            .map(|(i, d)| correction(*d, 1.0 - i as f32 * 0.1))
+            .collect();
+        let fields: Vec<_> = (0..6).map(|i| ramp(i % 2 == 1)).collect();
+        assert_matches_cpu(&gpu, &setup(corrections, fields), "six corrections");
+    }
+
+    #[test]
+    fn a_zero_weight_mask_and_no_masks_render_identically_to_the_unmasked_pipeline() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let strong = LocalAdjust {
+            exposure: 2.0,
+            contrast: 0.5,
+            saturation: 0.6,
+            ..LocalAdjust::default()
+        };
+        let s = setup(vec![correction(strong, 1.0)], vec![Field::new(W, H, 0.0)]);
+        let unmasked = render(&gpu, &s, false);
+        let zero_weight = render(&gpu, &s, true);
+        for (a, b) in unmasked.iter().zip(&zero_weight) {
+            for c in 0..3 {
+                assert!((a[c] - b[c]).abs() < 1e-3, "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// The outcome test the parity tests can't give: a real +1 EV radial-shaped mask brightens
+    /// inside and leaves outside exactly as the unmasked render, through the real GPU path.
+    #[test]
+    fn plus_one_ev_inside_a_mask_doubles_light_inside_and_leaves_outside_alone() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let mut s = setup(
+            vec![correction(
+                LocalAdjust {
+                    exposure: 1.0,
+                    ..LocalAdjust::default()
+                },
+                1.0,
+            )],
+            // Left half fully selected, right half not.
+            vec![Field {
+                width: W,
+                height: H,
+                data: (0..W * H)
+                    .map(|i| if i % W < W / 2 { 1.0 } else { 0.0 })
+                    .collect(),
+            }],
+        );
+        // Neutral tone so the exposure change is directly readable as a light ratio.
+        s.tone = ToneParams::default();
+        s.vibrance = 0.0;
+        s.exposure = 0.0;
+        s.matrix = color::mat3_identity();
+        let base = render(&gpu, &s, false);
+        let masked = render(&gpu, &s, true);
+        for y in 0..H {
+            for x in 0..W {
+                let (b, m) = (base[y * W + x], masked[y * W + x]);
+                if x < W / 2 - 1 {
+                    for c in 0..3 {
+                        // The tone-curve stage clamps at white, so a doubled value that would pass
+                        // 1.0 is (correctly) clipped -- only assert where it stays in range.
+                        if b[c] * 2.0 > 0.95 {
+                            continue;
+                        }
+                        assert!(
+                            (m[c] / b[c] - 2.0).abs() < 0.03,
+                            "({x},{y}) c{c}: {} vs {}",
+                            m[c],
+                            b[c]
+                        );
+                    }
+                } else if x > W / 2 {
+                    for c in 0..3 {
+                        assert!((m[c] - b[c]).abs() < 1e-3, "({x},{y}) outside changed");
+                    }
+                }
+            }
+        }
+    }
+}

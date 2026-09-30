@@ -9,9 +9,12 @@
 //! A mask is a *weight field* in 0..=1 at some pixel extent. Geometry is rasterized live (it has
 //! no bake); an AI alpha is baked once per (neutral render, recipe) and only composed here.
 
+pub mod atlas;
 pub mod compose;
+pub mod engine;
 pub mod guided;
 pub mod kernels;
+pub mod local;
 pub mod params;
 pub mod raster;
 
