@@ -1,6 +1,6 @@
 //! The `eframe::App` shell: top-level view routing (library/loupe/develop -- the Library view's
 //! virtualized grid is #30 (`crate::grid`), its filter bar #242 (`crate::filter_bar`), the loupe
-//! is #31; culling UX is #32, still to come) and the wgpu device Tapetum's `GpuContext` shares
+//! is #31, culling is #32 (`crate::cull`)) and the wgpu device Tapetum's `GpuContext` shares
 //! with eframe (ADR-0016). Also owns Pounce (#55): the job runtime plus the activity panel
 //! (`crate::activity`) that reads it, and the Library view's Import/Sync buttons that submit real
 //! jobs to it. Also polls Nine Lives (#25) on a slow timer and submits a `BackupJob` when it says
@@ -16,6 +16,7 @@ use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, SyncJob};
+use nicti_lair::shred;
 use nicti_lair::{
     CatalogError, CatalogStore, PreviewTier, Sort, SortDirection, SortField, SqliteCatalog,
 };
@@ -28,6 +29,14 @@ use nicti_shed::state::Channel as UpdateChannel;
 
 use crate::cache_settings::{self, CacheSettingsUi};
 use crate::color_mgmt::ColorManagement;
+use crate::cull::compare::{self as cull_compare, CompareSession, Side};
+use crate::cull::delete::DeleteFlow;
+use crate::cull::input::KeyCommand;
+use crate::cull::keys::CullAction;
+use crate::cull::previews::{preview_texture, TilePreviews};
+use crate::cull::survey::{self as cull_survey, SurveySession};
+use crate::cull::worker::CatalogMeta;
+use crate::cull::CullState;
 use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
@@ -68,6 +77,10 @@ pub enum View {
     Library,
     Loupe,
     Develop,
+    /// A handful of photos side by side (#32). Only reachable while a `SurveySession` exists.
+    Survey,
+    /// Select vs. candidate (#32). Only reachable while a `CompareSession` exists.
+    Compare,
 }
 
 /// Which button the Library view's Import/Sync row was clicked for -- distinct from
@@ -176,6 +189,21 @@ pub struct PeltApp {
     /// cursor is an index into the grid and can be mirrored back onto the grid selection. A loupe
     /// opened from the folder box (`open_in_loupe`) has its own list and must not touch the grid.
     loupe_from_grid: bool,
+    /// Culling (#32): marking, undo, and the markers the views draw. `None` when the catalog
+    /// failed to open (nothing to mark).
+    cull: Option<CullState>,
+    /// The Delete flow's prompt, job and status line (#32).
+    delete: DeleteFlow,
+    survey: Option<SurveySession>,
+    compare: Option<CompareSession>,
+    /// Preview textures for the survey/compare tiles.
+    tile_previews: TilePreviews,
+    /// When marking last happened, while the filter bar's facet counts ("Unrated (N)") are stale
+    /// because of it. Marking never changes the filter, so nothing else would refresh them.
+    facets_dirty_since: Option<Instant>,
+    /// A short hint about the last culling action that couldn't happen ("select two or more
+    /// photos to survey"), cleared by the next successful one.
+    cull_notice: Option<String>,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -226,7 +254,41 @@ impl PeltApp {
             CatalogOpenState::Error(_) => None,
         };
 
+        // A crash mid-delete (#32) leaves `delete_item` journal rows: settle them (finish the ones
+        // whose files are in the Recycle Bin, keep the ones whose files are still on disk) before
+        // the grid reads the catalog.
+        let mut delete = DeleteFlow::new();
+        if let CatalogOpenState::Open(store) = &catalog {
+            match shred::resume_open_deletes(&**store, |ids| {
+                crate::cull::delete::purge_previews(larder.as_ref(), ids);
+            }) {
+                Ok(r) if r.finished + r.rolled_back + r.stuck > 0 => {
+                    delete.last_summary = Some(format!(
+                        "Recovered an interrupted delete: {} finished, {} kept (file still on \
+                         disk), {} waiting for their drive.",
+                        r.finished, r.rolled_back, r.stuck
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    delete.last_summary =
+                        Some(format!("Couldn't recover an interrupted delete: {e}"));
+                }
+            }
+        }
+
         let egui_ctx = cc.egui_ctx.clone();
+        let cull = match &catalog {
+            CatalogOpenState::Open(store) => {
+                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                let ctx = egui_ctx.clone();
+                Some(CullState::new(
+                    Arc::new(CatalogMeta(dyn_store)),
+                    move || ctx.request_repaint(),
+                ))
+            }
+            CatalogOpenState::Error(_) => None,
+        };
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -279,7 +341,7 @@ impl PeltApp {
             loupe_zoomed: false,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
-            larder,
+            larder: larder.clone(),
             cache_settings: CacheSettingsUi::default(),
             loupe_t2_undecodable: None,
             grid: None,
@@ -290,6 +352,13 @@ impl PeltApp {
             grid_was_busy: false,
             grid_last_live_reload: None,
             loupe_from_grid: false,
+            cull,
+            delete,
+            survey: None,
+            compare: None,
+            tile_previews: TilePreviews::new(larder.clone()),
+            cull_notice: None,
+            facets_dirty_since: None,
         }
     }
 
@@ -387,7 +456,12 @@ impl PeltApp {
     /// a rescan can replace previews -- on the busy -> idle edge. Also stops thumbnail decoding
     /// when the Library view isn't the one on screen.
     fn drive_grid(&mut self, ui: &egui::Ui) {
-        let busy = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
+        let busy = self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]);
         let was_busy = std::mem::replace(&mut self.grid_was_busy, busy);
         if was_busy && !busy {
             // New assets may bring new keywords/makes/labels and shift every facet count.
@@ -398,6 +472,11 @@ impl PeltApp {
         };
         if was_busy && !busy {
             grid.refresh(&self.pounce);
+            // New rows can reuse the ids of photos deleted earlier; don't let them inherit a
+            // stale cached marker.
+            if let Some(cull) = self.cull.as_mut() {
+                cull.invalidate();
+            }
         } else if busy {
             let due = self
                 .grid_last_live_reload
@@ -433,9 +512,14 @@ impl PeltApp {
 
     /// Shared by the typed-path controls and the folder panel's drag-and-drop (#303).
     fn submit_move_to(&mut self, store: &Arc<SqliteCatalog>, root_id: i64, dest: PathBuf) {
-        if self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]) {
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]) {
             self.last_move_summary =
-                Some("Wait for the running import/sync/move to finish first.".into());
+                Some("Wait for the running import/sync/move/delete to finish first.".into());
             return;
         }
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -451,6 +535,378 @@ impl PeltApp {
         self.last_move_summary = Some("Moving\u{2026}".into());
     }
 }
+
+/// #32: culling -- the marking keys, undo, survey/compare, and the Delete flow. The vocabulary
+/// (which key does what) is `crate::cull::keys`; this is the wiring between it and the views.
+impl PeltApp {
+    /// Folds culling worker replies and delete progress into the UI. Once per frame.
+    fn poll_cull(&mut self) {
+        if let Some(cull) = self.cull.as_mut() {
+            cull.poll();
+        }
+        // Marking changes what the filter bar's counts say without changing the filter. Once it
+        // goes quiet, recompute them -- not per keypress, which at 1M photos would be a facet
+        // scan for every mark.
+        if facets_refresh_due(self.facets_dirty_since, Instant::now()) {
+            self.facets_dirty_since = None;
+            self.filter_bar.invalidate_facets();
+        }
+        let poll = self.delete.poll();
+        if !poll.removed.is_empty() {
+            self.after_photos_removed(&poll.removed);
+        }
+    }
+
+    /// Photos left the catalog: forget their markers/previews, and drop any session that listed
+    /// them (the loupe's id list is frozen at open time, so it would still walk onto them).
+    fn after_photos_removed(&mut self, gone: &[i64]) {
+        if let Some(cull) = self.cull.as_mut() {
+            cull.forget(gone);
+        }
+        for id in gone {
+            self.tile_previews.forget(*id);
+        }
+        if self.loupe.as_ref().is_some_and(|l| l.contains_any(gone)) {
+            if let Some(mut old) = self.loupe.take() {
+                old.cancel_all(&self.pounce);
+            }
+            self.loupe_preview = None;
+            if self.view == View::Loupe {
+                self.view = View::Library;
+            }
+        }
+        if self.survey.as_mut().is_some_and(|s| !s.remove(gone)) {
+            self.survey = None;
+        }
+        if self.compare.as_mut().is_some_and(|c| !c.remove(gone)) {
+            self.compare = None;
+        }
+        self.leave_tiles_if_gone();
+    }
+
+    /// Back to the Library if the survey/compare being shown no longer exists.
+    fn leave_tiles_if_gone(&mut self) {
+        if (self.view == View::Survey && self.survey.is_none())
+            || (self.view == View::Compare && self.compare.is_none())
+        {
+            self.view = View::Library;
+        }
+        if self.survey.is_none() && self.compare.is_none() {
+            self.tile_previews.clear(&self.pounce);
+        }
+    }
+
+    /// Reads this frame's culling keys and acts on them. Off while the Develop view is showing
+    /// (its sliders own the digit keys) and while the delete prompt is up.
+    fn handle_cull_keys(&mut self, ctx: &egui::Context) {
+        if self.cull.is_none() || !cull_keys_active(self.view, self.delete.is_confirming()) {
+            return;
+        }
+        for command in crate::cull::input::poll(ctx) {
+            match command {
+                KeyCommand::Mark {
+                    action,
+                    invert_advance,
+                } => self.apply_mark(action, invert_advance),
+                KeyCommand::Undo => {
+                    if let Some(cull) = &self.cull {
+                        cull.undo();
+                        self.facets_dirty_since = Some(Instant::now());
+                    }
+                }
+                KeyCommand::Redo => {
+                    if let Some(cull) = &self.cull {
+                        cull.redo();
+                        self.facets_dirty_since = Some(Instant::now());
+                    }
+                }
+                KeyCommand::Delete => self.request_delete(),
+                KeyCommand::Survey => self.open_survey(),
+                KeyCommand::Compare => self.open_compare(),
+            }
+        }
+    }
+
+    /// The photos a marking key or Delete acts on in the current view.
+    fn mark_targets(&self) -> Vec<i64> {
+        match self.view {
+            View::Library => self
+                .grid
+                .as_ref()
+                .map(GridSession::target_ids)
+                .unwrap_or_default(),
+            View::Loupe => self
+                .loupe
+                .as_ref()
+                .and_then(LoupeSession::current_asset_id)
+                .into_iter()
+                .collect(),
+            View::Survey => self
+                .survey
+                .as_ref()
+                .and_then(SurveySession::active_id)
+                .into_iter()
+                .collect(),
+            View::Compare => self
+                .compare
+                .as_ref()
+                .map(|c| c.active_id())
+                .into_iter()
+                .collect(),
+            View::Develop => Vec::new(),
+        }
+    }
+
+    /// Marks the current targets and, for a single photo with auto-advance on (Shift flips it for
+    /// this press), moves on to the next.
+    fn apply_mark(&mut self, action: CullAction, invert_advance: bool) {
+        let ids = self.mark_targets();
+        if ids.is_empty() {
+            return;
+        }
+        self.facets_dirty_since = Some(Instant::now());
+        let auto = self.cull.as_ref().is_some_and(|c| c.auto_advance);
+        let advance = crate::cull::should_advance(auto, invert_advance, ids.len());
+        if let Some(cull) = self.cull.as_mut() {
+            cull.mark(ids, action);
+        }
+        self.cull_notice = None;
+        if !advance {
+            return;
+        }
+        match self.view {
+            View::Library => {
+                if let Some(grid) = self.grid.as_mut() {
+                    if grid.advance_after_mark() {
+                        self.grid_view.reveal_cursor();
+                    }
+                }
+            }
+            View::Loupe => {
+                let CatalogOpenState::Open(store) = &self.catalog else {
+                    return;
+                };
+                if let Some(loupe) = self.loupe.as_mut() {
+                    if loupe.cursor() + 1 < loupe.len() {
+                        let _ = loupe.set_cursor(loupe.cursor() + 1, store.as_ref(), &self.pounce);
+                        self.loupe_zoomed = false;
+                        self.loupe_pan = [0.0, 0.0];
+                    }
+                }
+            }
+            View::Compare => {
+                if let Some(compare) = self.compare.as_mut() {
+                    if compare.active == Side::Candidate {
+                        compare.advance_candidate();
+                    }
+                }
+            }
+            View::Survey | View::Develop => {}
+        }
+    }
+
+    /// Opens the delete prompt for the current targets.
+    fn request_delete(&mut self) {
+        let ids = self.mark_targets();
+        let scope = match self.view {
+            View::Library => match self.grid.as_ref() {
+                Some(g) if g.has_selection() => format!("the {} selected photos", ids.len()),
+                _ => "the photo under the cursor".to_string(),
+            },
+            View::Loupe => "the photo in the loupe".to_string(),
+            View::Survey | View::Compare => "the photo picked in this view".to_string(),
+            View::Develop => return,
+        };
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]) {
+            self.delete.last_summary =
+                Some("Wait for the running import, sync, move or delete to finish first.".into());
+            return;
+        }
+        self.delete.request(ids, scope);
+    }
+
+    /// Draws the delete prompt and, once a mode is chosen, starts the job.
+    fn show_delete_modal(&mut self, ctx: &egui::Context) {
+        let Some((request, mode)) = self.delete.show_modal(ctx) else {
+            return;
+        };
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return;
+        };
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]) {
+            self.delete.last_summary =
+                Some("Wait for the running import, sync, move or delete to finish first.".into());
+            return;
+        }
+        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+        self.delete.submit(
+            dyn_store,
+            self.larder.clone(),
+            mode,
+            request.ids,
+            &self.pounce,
+        );
+    }
+
+    /// `N`: survey the Library's multi-selection (or, from a compare, its photos).
+    fn open_survey(&mut self) {
+        let ids = match self.view {
+            View::Library => self
+                .grid
+                .as_ref()
+                .filter(|g| g.has_selection())
+                .map(GridSession::target_ids)
+                .unwrap_or_default(),
+            View::Compare => self
+                .compare
+                .as_ref()
+                .map(|c| c.ids().to_vec())
+                .unwrap_or_default(),
+            _ => return,
+        };
+        match SurveySession::new(&ids) {
+            Some(session) => {
+                self.survey = Some(session);
+                self.view = View::Survey;
+                self.cull_notice = None;
+            }
+            None => {
+                self.cull_notice = Some(
+                    "Select two or more photos (Ctrl-click, Shift-click or Ctrl+A) to survey them."
+                        .into(),
+                );
+            }
+        }
+    }
+
+    /// `C`: compare the Library's selection, or -- with fewer than two selected -- the photo under
+    /// the cursor against the ones after it, in the grid's own order.
+    fn open_compare(&mut self) {
+        let ids: Vec<i64> = match self.view {
+            View::Library => match self.grid.as_ref() {
+                Some(g) if g.target_count() >= 2 && g.has_selection() => g.target_ids(),
+                Some(g) => match g.cursor() {
+                    Some(c) => g.ids()[c..(c + COMPARE_FROM_CURSOR).min(g.len())].to_vec(),
+                    None => Vec::new(),
+                },
+                None => Vec::new(),
+            },
+            View::Survey => match self.survey.as_ref() {
+                Some(s) => {
+                    // The active tile becomes the select; the rest follow in order.
+                    let mut ids = s.ids().to_vec();
+                    ids.rotate_left(s.active());
+                    ids
+                }
+                None => Vec::new(),
+            },
+            _ => return,
+        };
+        match CompareSession::new(ids) {
+            Some(session) => {
+                self.compare = Some(session);
+                self.view = View::Compare;
+                self.cull_notice = None;
+            }
+            None => {
+                self.cull_notice =
+                    Some("Put the cursor on a photo that has another after it to compare.".into());
+            }
+        }
+    }
+
+    fn show_survey(&mut self, ui: &mut egui::Ui) {
+        let (CatalogOpenState::Open(store), Some(session), Some(cull)) =
+            (&self.catalog, self.survey.as_mut(), self.cull.as_mut())
+        else {
+            self.view = View::Library;
+            return;
+        };
+        let store = store.clone();
+        let outcome = cull_survey::show(
+            ui,
+            session,
+            cull,
+            &mut self.tile_previews,
+            store.as_ref(),
+            &self.pounce,
+        );
+        let open = outcome.open.map(|id| {
+            (
+                session.ids().to_vec(),
+                session.ids().iter().position(|i| *i == id),
+            )
+        });
+        if outcome.exit {
+            self.survey = None;
+            self.view = if self.compare.is_some() {
+                View::Compare
+            } else {
+                View::Library
+            };
+            self.leave_tiles_if_gone();
+        }
+        if let Some((ids, Some(index))) = open {
+            self.start_loupe(&store, ids, index, false);
+        }
+    }
+
+    fn show_compare(&mut self, ui: &mut egui::Ui) {
+        let (CatalogOpenState::Open(store), Some(session), Some(cull)) =
+            (&self.catalog, self.compare.as_mut(), self.cull.as_mut())
+        else {
+            self.view = View::Library;
+            return;
+        };
+        let store = store.clone();
+        let outcome = cull_compare::show(
+            ui,
+            session,
+            cull,
+            &mut self.tile_previews,
+            store.as_ref(),
+            &self.pounce,
+        );
+        if outcome.exit {
+            self.compare = None;
+            self.view = if self.survey.is_some() {
+                View::Survey
+            } else {
+                View::Library
+            };
+            self.leave_tiles_if_gone();
+        }
+    }
+}
+
+/// How long marking must be quiet before the filter bar's facet counts are recomputed.
+const FACET_REFRESH_AFTER: Duration = Duration::from_millis(1500);
+
+/// Whether stale facet counts are due for a refresh: marking happened, and has been quiet for
+/// [`FACET_REFRESH_AFTER`]. Pure, so the debounce is testable.
+fn facets_refresh_due(dirty_since: Option<Instant>, now: Instant) -> bool {
+    dirty_since.is_some_and(|t| now.saturating_duration_since(t) >= FACET_REFRESH_AFTER)
+}
+
+/// Whether the culling keys are live: in the Library, Loupe, Survey and Compare views, and not
+/// while the delete prompt is up. Not in Develop, whose sliders own the digit keys.
+fn cull_keys_active(view: View, delete_prompt_open: bool) -> bool {
+    !delete_prompt_open && view != View::Develop
+}
+
+/// Photos `C` puts into a comparison when only the cursor's photo is selected: it plus the ones
+/// that follow, enough to walk a whole burst.
+const COMPARE_FROM_CURSOR: usize = 200;
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -555,6 +1011,12 @@ impl eframe::App for PeltApp {
         self.color.sync(frame);
         self.poll_backup();
         self.poll_move();
+        self.poll_cull();
+        self.handle_cull_keys(ui.ctx());
+        if self.facets_dirty_since.is_some() {
+            // Nothing else repaints an otherwise idle window once marking stops.
+            ui.ctx().request_repaint_after(FACET_REFRESH_AFTER);
+        }
         self.drive_grid(ui);
         self.update.poll();
         if self.update.is_checking() || self.update.is_applying() {
@@ -570,7 +1032,27 @@ impl eframe::App for PeltApp {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
                 ui.selectable_value(&mut self.view, View::Loupe, "Loupe");
                 ui.selectable_value(&mut self.view, View::Develop, "Develop");
+                if self.survey.is_some() {
+                    ui.selectable_value(&mut self.view, View::Survey, "Survey");
+                }
+                if self.compare.is_some() {
+                    ui.selectable_value(&mut self.view, View::Compare, "Compare");
+                }
                 ui.separator();
+                if let Some(cull) = self.cull.as_mut() {
+                    ui.checkbox(&mut cull.auto_advance, "Auto-advance")
+                        .on_hover_text(
+                            "After marking a photo, move to the next one. Hold Shift while \
+                             marking to do the opposite for that one press.",
+                        );
+                    if let Some(err) = cull.last_error().map(str::to_string) {
+                        ui.colored_label(egui::Color32::RED, err);
+                        if ui.small_button("Dismiss").clicked() {
+                            cull.clear_error();
+                        }
+                    }
+                    ui.separator();
+                }
                 self.color.show_menu(ui);
                 ui.separator();
                 ui.label(format!("Catalog: {}", self.catalog_path.display()));
@@ -697,6 +1179,8 @@ impl eframe::App for PeltApp {
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.show_library(ui),
             View::Loupe => self.show_loupe(ui),
+            View::Survey => self.show_survey(ui),
+            View::Compare => self.show_compare(ui),
             View::Develop => {
                 ui.heading("Develop");
                 if let Some(frame) = viewport_frame {
@@ -733,6 +1217,8 @@ impl eframe::App for PeltApp {
                 }
             }
         });
+
+        self.show_delete_modal(ui.ctx());
     }
 }
 
@@ -828,15 +1314,86 @@ impl PeltApp {
             grid.set_query(filter, sort, &self.pounce);
         }
 
+        // Selection and what to do with it.
+        let (targets, has_selection, total) = self.grid.as_ref().map_or((0, false, 0), |g| {
+            (g.target_count(), g.has_selection(), g.len())
+        });
+        let busy = self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]);
+        let (mut select_all, mut delete, mut survey, mut compare) = (false, false, false, false);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(total > 0, egui::Button::new("Select all"))
+                .on_hover_text("Ctrl+A. Every photo matching the current filter.")
+                .clicked()
+            {
+                select_all = true;
+            }
+            if has_selection {
+                ui.label(format!("{targets} selected"));
+            }
+            if ui
+                .add_enabled(
+                    targets > 0 && !busy && !self.delete.is_running(),
+                    egui::Button::new(format!("Delete {targets}\u{2026}")),
+                )
+                .on_hover_text("Delete / Backspace. Asks whether to use the Recycle Bin.")
+                .clicked()
+            {
+                delete = true;
+            }
+            if ui
+                .add_enabled(
+                    targets >= 2 && has_selection,
+                    egui::Button::new("Survey (N)"),
+                )
+                .clicked()
+            {
+                survey = true;
+            }
+            if ui
+                .add_enabled(total >= 2, egui::Button::new("Compare (C)"))
+                .clicked()
+            {
+                compare = true;
+            }
+        });
+        if select_all {
+            if let Some(grid) = self.grid.as_mut() {
+                grid.select_all();
+            }
+        }
+        if delete {
+            self.request_delete();
+        }
+        if survey {
+            self.open_survey();
+        }
+        if compare {
+            self.open_compare();
+        }
+        if let Some(notice) = &self.cull_notice {
+            ui.colored_label(egui::Color32::YELLOW, notice);
+        }
+        if let Some(summary) = &self.delete.last_summary {
+            ui.label(summary);
+        }
+
         egui::CollapsingHeader::new("Folders: import, sync, move")
             .id_salt("nicti_pelt_library_folders")
             .default_open(true)
             .show(ui, |ui| self.show_library_controls(ui));
         ui.separator();
 
-        let outcome = match self.grid.as_mut() {
-            Some(grid) => grid::view::show(ui, grid, &mut self.grid_view, &self.pounce),
-            None => grid::view::GridOutcome::default(),
+        let outcome = match (self.grid.as_mut(), self.cull.as_mut()) {
+            (Some(grid), Some(cull)) => {
+                grid::view::show(ui, grid, &mut self.grid_view, cull, &self.pounce)
+            }
+            _ => grid::view::GridOutcome::default(),
         };
         if let Some(index) = outcome.open {
             self.open_from_grid(&store, index);
@@ -845,7 +1402,14 @@ impl PeltApp {
 
     /// #303: the left-hand folder/drive tree; a drop on a drive or folder starts a verified move.
     fn show_folder_panel(&mut self, ui: &mut egui::Ui, store: &Arc<SqliteCatalog>) {
-        let moving = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
+        // A delete is busy work too: dragging a folder to another drive while its photos are
+        // being deleted would race the two.
+        let moving = self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+        ]);
         let move_running = self.job_active(&[JobKind::Move]);
         // Re-read on a busy edge or the cache's own cadence -- never per frame.
         // Nothing else repaints an idle window, so wake up when the cache goes stale.
@@ -972,9 +1536,10 @@ impl PeltApp {
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.job_active(&[JobKind::Move]) {
-            self.last_move_summary =
-                Some("A folder move is running; import/sync waits until it finishes.".into());
+        if self.job_active(&[JobKind::Move, JobKind::Delete]) {
+            self.last_move_summary = Some(
+                "A folder move or delete is running; import/sync waits until it finishes.".into(),
+            );
             return;
         }
         let Ok(root_id) = register_root(store.as_ref(), &path) else {
@@ -1003,9 +1568,9 @@ impl PeltApp {
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.job_active(&[JobKind::Move]) {
+        if self.job_active(&[JobKind::Move, JobKind::Delete]) {
             self.last_move_summary =
-                Some("A folder move is running; wait for it to finish first.".into());
+                Some("A folder move or delete is running; wait for it to finish first.".into());
             return;
         }
         let Ok(root_id) = register_root(store.as_ref(), &path) else {
@@ -1021,9 +1586,9 @@ impl PeltApp {
     /// Opens the loupe on the grid's current ordering (#30), starting at `index` -- so Left/Right
     /// in the loupe walk the same sequence the grid shows, in its sort and filter.
     fn open_from_grid(&mut self, store: &Arc<SqliteCatalog>, index: usize) {
-        if self.job_active(&[JobKind::Move]) {
+        if self.job_active(&[JobKind::Move, JobKind::Delete]) {
             self.last_move_summary =
-                Some("A folder move is running; wait for it to finish first.".into());
+                Some("A folder move or delete is running; wait for it to finish first.".into());
             return;
         }
         let Some(grid) = self.grid.as_ref() else {
@@ -1103,18 +1668,22 @@ impl PeltApp {
         }
 
         let mut cursor_moved = false;
-        ui.input(|i| {
-            if i.key_pressed(egui::Key::ArrowRight) && loupe.cursor() + 1 < loupe.len() {
-                let _ = loupe.set_cursor(loupe.cursor() + 1, store.as_ref(), &self.pounce);
-                cursor_moved = true;
-            } else if i.key_pressed(egui::Key::ArrowLeft) && loupe.cursor() > 0 {
-                let _ = loupe.set_cursor(loupe.cursor() - 1, store.as_ref(), &self.pounce);
-                cursor_moved = true;
-            }
-            if i.key_pressed(egui::Key::Space) {
-                self.loupe_zoomed = !self.loupe_zoomed;
-            }
-        });
+        // Not while a text field (the folder box) has the keyboard: typing a space there must not
+        // toggle the loupe's zoom.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            ui.input(|i| {
+                if i.key_pressed(egui::Key::ArrowRight) && loupe.cursor() + 1 < loupe.len() {
+                    let _ = loupe.set_cursor(loupe.cursor() + 1, store.as_ref(), &self.pounce);
+                    cursor_moved = true;
+                } else if i.key_pressed(egui::Key::ArrowLeft) && loupe.cursor() > 0 {
+                    let _ = loupe.set_cursor(loupe.cursor() - 1, store.as_ref(), &self.pounce);
+                    cursor_moved = true;
+                }
+                if i.key_pressed(egui::Key::Space) {
+                    self.loupe_zoomed = !self.loupe_zoomed;
+                }
+            });
+        }
         if cursor_moved {
             self.loupe_zoomed = false;
             self.loupe_pan = [0.0, 0.0];
@@ -1143,10 +1712,18 @@ impl PeltApp {
             }
         }
 
+        // #32: the markers of the photo on screen -- and the ones the auto-advance is about to
+        // land on, so the header is right the instant the cursor moves.
+        if let Some(cull) = self.cull.as_mut() {
+            cull.ensure([asset_id]);
+        }
+        let marks = self.cull.as_ref().and_then(|c| c.meta(asset_id)).cloned();
+
         let mut retry_clicked = false;
         ui.horizontal(|ui| {
             ui.heading("Loupe");
             ui.label(cursor_label);
+            crate::cull::badges::show_marks_inline(ui, marks.as_ref());
             if let Some(err) = &error_label {
                 ui.colored_label(egui::Color32::RED, err);
                 retry_clicked = ui.button("Retry").clicked();
@@ -1311,15 +1888,6 @@ impl PeltApp {
     }
 }
 
-/// JPEG-decodes `bytes` into an egui texture, `None` if they aren't a decodable image.
-fn preview_texture(ctx: &egui::Context, name: String, bytes: &[u8]) -> Option<egui::TextureHandle> {
-    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    let color_image =
-        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
-    Some(ctx.load_texture(name, color_image, egui::TextureOptions::default()))
-}
-
 /// Registers `path` as a root under the fixed placeholder volume this shell uses (see
 /// `PLACEHOLDER_VOLUME_IDENTITY_KEY`'s own doc comment) and returns its root id.
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
@@ -1329,4 +1897,51 @@ fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogEr
         .unwrap_or(0);
     let volume_id = store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now)?;
     store.ensure_root(volume_id, &path.to_string_lossy())
+}
+
+#[cfg(test)]
+mod cull_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn culling_keys_are_live_in_the_four_culling_views_only() {
+        for view in [View::Library, View::Loupe, View::Survey, View::Compare] {
+            assert!(cull_keys_active(view, false), "{view:?}");
+        }
+        assert!(
+            !cull_keys_active(View::Develop, false),
+            "Develop owns the digit keys"
+        );
+    }
+
+    #[test]
+    fn facet_counts_refresh_only_after_marking_has_been_quiet() {
+        let t0 = Instant::now();
+        assert!(
+            !facets_refresh_due(None, t0),
+            "nothing marked, nothing stale"
+        );
+        assert!(
+            !facets_refresh_due(Some(t0), t0),
+            "just marked: still typing"
+        );
+        let almost = t0 + FACET_REFRESH_AFTER - Duration::from_millis(1);
+        assert!(!facets_refresh_due(Some(t0), almost));
+        assert!(facets_refresh_due(Some(t0), t0 + FACET_REFRESH_AFTER));
+        // A clock that appears to go backwards must not underflow or fire early.
+        assert!(!facets_refresh_due(Some(t0 + Duration::from_secs(5)), t0));
+    }
+
+    #[test]
+    fn culling_keys_are_dead_while_the_delete_prompt_is_open() {
+        for view in [
+            View::Library,
+            View::Loupe,
+            View::Survey,
+            View::Compare,
+            View::Develop,
+        ] {
+            assert!(!cull_keys_active(view, true), "{view:?}");
+        }
+    }
 }

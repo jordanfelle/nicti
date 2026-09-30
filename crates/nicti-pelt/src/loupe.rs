@@ -141,6 +141,13 @@ impl LoupeSession {
         self.asset_ids.len()
     }
 
+    /// Whether any of `ids` is in this session's (frozen) list -- one pass, however many ids.
+    /// The app uses it to drop a loupe whose photos were just deleted.
+    pub fn contains_any(&self, ids: &[i64]) -> bool {
+        let gone: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        self.asset_ids.iter().any(|id| gone.contains(id))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.asset_ids.is_empty()
     }

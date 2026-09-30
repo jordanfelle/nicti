@@ -28,10 +28,14 @@ pub mod ninelives;
 pub mod patrol;
 pub mod pounce_jobs;
 pub mod scruff;
+pub mod shred;
 
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
-pub use model::{Asset, Keyword, MoveState, NewAsset, Preview, PreviewTier, Root, RootMove};
+pub use model::{
+    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, MoveState, NewAsset, Preview, PreviewTier,
+    Root, RootMove,
+};
 pub use sqlite::SqliteCatalog;
 
 #[derive(Debug, thiserror::Error)]
@@ -223,6 +227,39 @@ pub trait CatalogStore: Module {
     /// Sets (or clears, with `None`) the free-text label on every listed asset in one statement. A
     /// no-op on an empty slice.
     fn set_label(&self, asset_ids: &[i64], label: Option<&str>) -> Result<(), CatalogError>;
+
+    /// Reads the culling markers (rating/flag/label) of every listed asset that exists, keyed by
+    /// id (#32). Ids with no row are simply absent from the map. Chunked under SQLite's parameter
+    /// limit, so any batch size is fine.
+    fn get_meta(
+        &self,
+        asset_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, AssetMeta>, CatalogError>;
+
+    /// Writes each `(asset_id, meta)` pair's rating, flag and label, all in **one transaction**
+    /// (#32). Unlike `set_rating`/`set_flag`/`set_label` (one value across many assets), this
+    /// restores *mixed* per-asset values in one call -- what an undo of a multi-select mark needs.
+    /// Ids with no row are ignored.
+    fn set_meta(&self, items: &[(i64, AssetMeta)]) -> Result<(), CatalogError>;
+
+    /// Deletes every listed asset row (and its previews, edit history, keyword/collection links
+    /// and any `delete_item` journal row) in **one transaction** (#32) -- the batch form of
+    /// `remove_asset`. Ids with no row are ignored.
+    fn remove_assets(&self, asset_ids: &[i64]) -> Result<(), CatalogError>;
+
+    /// Journals `(asset_id, abs_path)` pairs as `pending` deletes (#32), before any file is
+    /// touched. An asset already journaled `pending` has its path refreshed; a `trashed` one is left as is.
+    fn begin_delete_items(&self, items: &[(i64, String)]) -> Result<(), CatalogError>;
+
+    /// Flips the listed journal rows to `trashed`: their files are in the Recycle Bin.
+    fn mark_delete_items_trashed(&self, asset_ids: &[i64]) -> Result<(), CatalogError>;
+
+    /// Drops the listed journal rows *without* touching the assets: the delete is abandoned for
+    /// them (the file could not be trashed, or is still on disk at recovery).
+    fn abandon_delete_items(&self, asset_ids: &[i64]) -> Result<(), CatalogError>;
+
+    /// Every open `delete_item` journal row, in asset-id order, for crash recovery at startup.
+    fn open_delete_items(&self) -> Result<Vec<DeleteItem>, CatalogError>;
 
     /// Every asset registered under this root, in `id` order. `patrol::sync_root` (#24) uses this
     /// to find rows whose file it needs to check for, since ingest only ever walks the disk and

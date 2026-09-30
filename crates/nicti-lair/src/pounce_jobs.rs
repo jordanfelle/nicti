@@ -16,6 +16,7 @@ use crate::carry::{Carry, CarryOptions, CarryOutcome};
 use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
 use crate::scruff::{Ingest, IngestReport};
+use crate::shred::{Shred, ShredOutcome};
 use crate::{CatalogStore, SqliteCatalog};
 
 /// A shared slot a caller can poll for the final report once a job reaches `Done`. Stays `None`
@@ -421,6 +422,75 @@ impl Drop for MoveJob {
             } else {
                 "move cancelled; nothing was changed".to_string()
             }));
+        }
+    }
+}
+
+/// Batch delete (#32): steps [`Shred`] one chunk of up to `shred::CHUNK` assets per call. Never
+/// returns `Err` -- every failure is a [`ShredOutcome`] in the report slot, same reasoning as
+/// [`BackupJob`]. A cancel drops the job between chunks (a chunk is never split), and the report
+/// says how far it got.
+pub struct DeleteJob {
+    shred: Shred,
+    progress: Progress,
+    result: ReportSlot<ShredOutcome>,
+}
+
+impl DeleteJob {
+    pub fn new(shred: Shred) -> (Self, ReportSlot<ShredOutcome>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = DeleteJob {
+            shred,
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for DeleteJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Delete,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.shred.label()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let outcome = self.shred.step();
+        let (done, total) = self.shred.progress();
+        self.progress = Progress { done, total };
+        match outcome {
+            Some(o) => {
+                *self.result.lock().unwrap() = Some(o);
+                Ok(Step::Done)
+            }
+            None => Ok(Step::Yield),
+        }
+    }
+}
+
+/// A cancelled (or panicked) delete is dropped without ever reporting; fill the slot with what it
+/// did get through so the UI doesn't sit on "Deleting..." forever.
+impl Drop for DeleteJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(ShredOutcome::Failed {
+                message: "delete cancelled; photos not yet processed were left untouched".into(),
+                report: self.shred.partial_report().clone(),
+            });
         }
     }
 }

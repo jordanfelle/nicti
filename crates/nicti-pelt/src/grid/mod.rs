@@ -6,11 +6,13 @@
 //! - `layout`: pure geometry (columns, rows, visible index range, batching) -- unit-tested alone.
 //! - `jobs`: `SnapshotJob` (one index-ordered `hunt_ids` scan) and `ThumbBatchJob` (batched T0
 //!   decode + downsize).
+//! - `selection`: the multi-selection (sorted index ranges), for culling's select-all-then-delete.
 //! - `session`: `GridSession`, the state machine tying them together.
 //! - `view`: the egui drawing and keyboard/mouse handling on top of a session.
 
 pub mod jobs;
 pub mod layout;
+pub mod selection;
 pub mod session;
 pub mod view;
 

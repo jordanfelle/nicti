@@ -418,6 +418,19 @@ CREATE INDEX idx_asset_root_sort_imported ON asset(root_id, imported_at, id);
 CREATE INDEX idx_asset_root_sort_filename ON asset(root_id, rel_path_fold, id);
 "#;
 
+/// #32 (v8): the delete journal. One row per asset whose delete is in flight (ADR-0032-style
+/// record-before-write): `pending` is journaled *before* any file is moved to the Recycle Bin,
+/// `trashed` once it is there and only the catalog row removal remains. `remove_assets` deletes
+/// the journal row in the same transaction as the asset, so a finished delete leaves nothing
+/// behind; a crash leaves rows for `shred::resume_open_deletes` to settle at startup.
+const MIGRATION_V8: &str = r#"
+CREATE TABLE delete_item (
+    asset_id    INTEGER PRIMARY KEY REFERENCES asset(id),
+    abs_path    TEXT NOT NULL,
+    state       TEXT NOT NULL CHECK (state IN ('pending', 'trashed'))
+);
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -430,6 +443,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V5,
     MIGRATION_V6,
     MIGRATION_V7,
+    MIGRATION_V8,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call

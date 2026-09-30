@@ -27,10 +27,25 @@ pub struct Filter {
     /// `rating_min`/`rating_max` (a `NULL` fails any real `>=`/`<=` comparison, so this is the
     /// explicit opt-in to include it alongside a star-rating range).
     pub include_unrated: bool,
+    /// Match only unrated assets (`rating IS NULL`) -- #32's "unrated" quick filter, for a
+    /// first culling pass over what nothing has marked yet. Combining it with a rating range
+    /// matches nothing (a row can't be both), which is the honest answer. `#[serde(default)]`
+    /// for the same saved-rule reason as `unflagged`.
+    #[serde(default)]
+    pub unrated: bool,
     /// Match assets whose `flag` equals this (only real value is `1`, pick).
     pub flag: Option<i64>,
+    /// Match only assets with no flag at all (`flag IS NULL`) -- #32's "unflagged" quick filter.
+    /// `#[serde(default)]` so a smart-collection rule saved before this field existed still
+    /// deserializes (`Filter`'s `v: 1` rule contract, `clowder.rs`).
+    #[serde(default)]
+    pub unflagged: bool,
     /// Match assets whose `label` equals this, exactly.
     pub label: Option<String>,
+    /// Match only assets with no colour label (`label IS NULL`) -- #32. Same `serde(default)`
+    /// reason as `unflagged`.
+    #[serde(default)]
+    pub no_label: bool,
     /// Match assets whose EXIF `make` equals this, exactly.
     pub make: Option<String>,
     /// Match assets whose EXIF `model` equals this, exactly.

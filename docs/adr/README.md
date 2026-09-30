@@ -43,6 +43,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0025](0025-continuous-catalog-backup.md) | — | Continuous catalog backup + integrity checks (Nine Lives) | Accepted |
 | [0029](0029-preview-tier-strategy.md) | 0017 | Preview tier strategy | Accepted |
 | [0026](0026-verified-folder-move.md) | — | Verified folder move (Carry) | Accepted |
+| [0032](0032-culling-ux.md) | — | Culling UX (marking, survey/compare, filter-select-delete) | Accepted |
 | [0033](0033-burst-duplicate-grouping.md) | 0025 | Burst/duplicate grouping | Proposed |
 | [0034](0034-blur-misfocus-eye-detection.md) | — | Blur/misfocus/eye detection | Proposed |
 | [0035](0035-subject-grouping.md) | — | Subject grouping | Proposed — measurement pending |

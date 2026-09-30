@@ -15,11 +15,15 @@ use std::sync::{mpsc, Arc};
 
 use nicti_lair::{CatalogStore, Collection, CollectionKind, FacetCounts, Filter, Keyword};
 
-/// The rating control's choices. A `Filter` can't express "unrated only", so that isn't offered.
+/// The rating control's choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RatingChoice {
     #[default]
     Any,
+    /// Nothing has rated it yet (`Filter::unrated`, #32) -- what is left after a culling pass.
+    Unrated,
+    /// Exactly `n` stars, `n` in `1..=5` (#32).
+    Exactly(i64),
     /// `rating >= n`, `n` in `1..=5`.
     AtLeast(i64),
     Rejected,
@@ -31,10 +35,12 @@ pub enum RatingChoice {
 
 impl RatingChoice {
     fn from_filter(f: &Filter) -> Self {
-        match (f.rating_min, f.rating_max, f.include_unrated) {
-            (None, None, false) => Self::Any,
-            (Some(-1), Some(-1), false) => Self::Rejected,
-            (Some(n @ 1..=5), None, false) => Self::AtLeast(n),
+        match (f.rating_min, f.rating_max, f.include_unrated, f.unrated) {
+            (None, None, false, false) => Self::Any,
+            (None, None, false, true) => Self::Unrated,
+            (Some(-1), Some(-1), false, false) => Self::Rejected,
+            (Some(n @ 1..=5), Some(m), false, false) if n == m => Self::Exactly(n),
+            (Some(n @ 1..=5), None, false, false) => Self::AtLeast(n),
             _ => Self::Custom,
         }
     }
@@ -42,11 +48,65 @@ impl RatingChoice {
     fn apply(self, f: &mut Filter) {
         match self {
             Self::Any | Self::Custom => {}
+            Self::Unrated => f.unrated = true,
+            Self::Exactly(n) => {
+                f.rating_min = Some(n);
+                f.rating_max = Some(n);
+            }
             Self::AtLeast(n) => f.rating_min = Some(n),
             Self::Rejected => {
                 f.rating_min = Some(-1);
                 f.rating_max = Some(-1);
             }
+        }
+    }
+}
+
+/// The flag control's choices (#32 added *Unflagged* to the original picks-only checkbox).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlagChoice {
+    #[default]
+    Any,
+    Picked,
+    /// No flag at all (`Filter::unflagged`).
+    Unflagged,
+    /// A loaded rule's flag shape the control can't express (`flag: Some(2)`, or a flag together
+    /// with `unflagged`). The raw fields live in `FilterBar::custom_flag` and are applied
+    /// untouched, so re-saving such a rule never widens or narrows it.
+    Custom,
+}
+
+impl FlagChoice {
+    fn from_filter(f: &Filter) -> Self {
+        match (f.flag, f.unflagged) {
+            (None, false) => Self::Any,
+            (Some(1), false) => Self::Picked,
+            (None, true) => Self::Unflagged,
+            _ => Self::Custom,
+        }
+    }
+}
+
+/// The label control's choices (#32 added *No label* to the original any-or-a-name dropdown).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LabelChoice {
+    #[default]
+    Any,
+    /// No colour label at all (`Filter::no_label`).
+    None,
+    Is(String),
+    /// A label together with `no_label` (matches nothing): kept verbatim in
+    /// `FilterBar::custom_label`, like `RatingChoice::Custom`.
+    Custom,
+}
+
+impl LabelChoice {
+    fn from_filter(f: &Filter) -> Self {
+        match (&f.label, f.no_label) {
+            (Some(l), false) => Self::Is(l.clone()),
+            (None, true) => Self::None,
+            (None, false) => Self::Any,
+            (Some(_), true) => Self::Custom,
         }
     }
 }
@@ -104,6 +164,8 @@ pub struct FacetView {
     pub by_model: Vec<(Option<String>, u64)>,
     pub by_rating: Vec<(Option<i64>, u64)>,
     pub picks: u64,
+    /// Photos with no flag (#32), counted like `picks`.
+    pub unflagged: u64,
 }
 
 impl FacetView {
@@ -118,6 +180,22 @@ impl FacetView {
         self.by_rating
             .iter()
             .filter(|(r, _)| r.is_some_and(|r| r >= n))
+            .map(|(_, c)| c)
+            .sum()
+    }
+
+    fn unrated(&self) -> u64 {
+        self.by_rating
+            .iter()
+            .filter(|(r, _)| r.is_none())
+            .map(|(_, c)| c)
+            .sum()
+    }
+
+    fn exactly(&self, n: i64) -> u64 {
+        self.by_rating
+            .iter()
+            .filter(|(r, _)| *r == Some(n))
             .map(|(_, c)| c)
             .sum()
     }
@@ -158,27 +236,35 @@ pub fn compute_facets(
         ..filter.clone()
     })?
     .by_model;
+    // Each dimension is counted with its OWN constraint cleared -- including the `unrated` /
+    // `unflagged` fields #32 added, or a chosen "Unrated" would zero every other rating's count.
     let by_rating = run(Filter {
         rating_min: None,
         rating_max: None,
         include_unrated: false,
+        unrated: false,
         ..filter.clone()
     })?
     .by_rating;
-    let picks = run(Filter {
+    let by_flag = run(Filter {
         flag: None,
+        unflagged: false,
         ..filter.clone()
     })?
-    .by_flag
-    .iter()
-    .filter(|(f, _)| *f == Some(1))
-    .map(|(_, c)| c)
-    .sum();
+    .by_flag;
+    let count_flag = |wanted: Option<i64>| {
+        by_flag
+            .iter()
+            .filter(|(f, _)| *f == wanted)
+            .map(|(_, c)| c)
+            .sum()
+    };
     Ok(FacetView {
         total,
         by_model,
         by_rating,
-        picks,
+        picks: count_flag(Some(1)),
+        unflagged: count_flag(None),
     })
 }
 
@@ -265,10 +351,14 @@ pub struct FilterBar {
     keyword_id: Option<i64>,
     include_subtree: bool,
     rating: RatingChoice,
-    /// `(rating_min, rating_max, include_unrated)` of a loaded `RatingChoice::Custom` rule.
-    custom_rating: (Option<i64>, Option<i64>, bool),
-    picks_only: bool,
-    label: Option<String>,
+    /// `(rating_min, rating_max, include_unrated, unrated)` of a loaded `RatingChoice::Custom` rule.
+    custom_rating: (Option<i64>, Option<i64>, bool, bool),
+    flag: FlagChoice,
+    /// `(flag, unflagged)` of a loaded `FlagChoice::Custom` rule.
+    custom_flag: (Option<i64>, bool),
+    label: LabelChoice,
+    /// `(label, no_label)` of a loaded `LabelChoice::Custom` rule.
+    custom_label: (Option<String>, bool),
     make: Option<String>,
     model: Option<String>,
 
@@ -303,13 +393,30 @@ pub struct FilterBar {
 }
 
 impl FilterBar {
+    /// A bar with just the three marker controls set -- lets other modules' end-to-end tests drive
+    /// the real controls-to-`Filter` mapping instead of hand-building a `Filter`.
+    #[cfg(test)]
+    pub fn with_markers(rating: RatingChoice, flag: FlagChoice, label: LabelChoice) -> Self {
+        FilterBar {
+            rating,
+            flag,
+            label,
+            ..Default::default()
+        }
+    }
+
     /// The `Filter` the current controls describe, scoped to `root_id`.
     pub fn to_filter(&self, root_id: Option<i64>) -> Filter {
         let mut f = Filter {
             keyword_id: self.keyword_id,
             include_subtree: self.include_subtree,
-            flag: self.picks_only.then_some(1),
-            label: self.label.clone(),
+            flag: (self.flag == FlagChoice::Picked).then_some(1),
+            unflagged: self.flag == FlagChoice::Unflagged,
+            label: match &self.label {
+                LabelChoice::Is(l) => Some(l.clone()),
+                _ => None,
+            },
+            no_label: self.label == LabelChoice::None,
             make: self.make.clone(),
             model: self.model.clone(),
             root_id,
@@ -317,9 +424,15 @@ impl FilterBar {
             filename_contains: Some(self.filename.trim().to_string()).filter(|s| !s.is_empty()),
             ..Default::default()
         };
+        if self.flag == FlagChoice::Custom {
+            (f.flag, f.unflagged) = self.custom_flag;
+        }
+        if self.label == LabelChoice::Custom {
+            (f.label, f.no_label) = self.custom_label.clone();
+        }
         self.rating.apply(&mut f);
         if self.rating == RatingChoice::Custom {
-            (f.rating_min, f.rating_max, f.include_unrated) = self.custom_rating;
+            (f.rating_min, f.rating_max, f.include_unrated, f.unrated) = self.custom_rating;
         }
         f.captured_after = bound(&self.from, false, &self.raw_after);
         f.captured_before = bound(&self.to, true, &self.raw_before);
@@ -331,9 +444,11 @@ impl FilterBar {
         self.keyword_id = f.keyword_id;
         self.include_subtree = f.include_subtree;
         self.rating = RatingChoice::from_filter(f);
-        self.custom_rating = (f.rating_min, f.rating_max, f.include_unrated);
-        self.picks_only = f.flag == Some(1);
-        self.label.clone_from(&f.label);
+        self.custom_rating = (f.rating_min, f.rating_max, f.include_unrated, f.unrated);
+        self.flag = FlagChoice::from_filter(f);
+        self.custom_flag = (f.flag, f.unflagged);
+        self.label = LabelChoice::from_filter(f);
+        self.custom_label = (f.label.clone(), f.no_label);
         self.make.clone_from(&f.make);
         self.model.clone_from(&f.model);
         self.filename = f.filename_contains.clone().unwrap_or_default();
@@ -353,6 +468,13 @@ impl FilterBar {
             options_job,
             ..Default::default()
         };
+    }
+
+    /// Forces the facet counts to be recomputed for the current filter. Marking photos changes
+    /// what every count says ("Unrated (N)", "Picked (k)") without changing the filter, so the
+    /// culling code calls this once marking goes quiet.
+    pub fn invalidate_facets(&mut self) {
+        self.facets_for = None;
     }
 
     /// Forces the dropdown option lists to be re-read (after an import or sync may have added
@@ -429,6 +551,8 @@ impl FilterBar {
             };
             let rating_text = match self.rating {
                 RatingChoice::Any => "Any rating".to_string(),
+                RatingChoice::Unrated => "Unrated".to_string(),
+                RatingChoice::Exactly(n) => format!("{n} star{}", if n == 1 { "" } else { "s" }),
                 RatingChoice::AtLeast(n) => format!("{n}+ stars"),
                 RatingChoice::Rejected => "Rejected".to_string(),
                 RatingChoice::Custom => "Custom (saved rule)".to_string(),
@@ -441,6 +565,22 @@ impl FilterBar {
                         RatingChoice::Any,
                         format!("Any rating{}", count(facets.any())),
                     );
+                    ui.selectable_value(
+                        &mut self.rating,
+                        RatingChoice::Unrated,
+                        format!("Unrated{}", count(facets.unrated())),
+                    );
+                    for n in 1..=5 {
+                        ui.selectable_value(
+                            &mut self.rating,
+                            RatingChoice::Exactly(n),
+                            format!(
+                                "{n} star{} exactly{}",
+                                if n == 1 { "" } else { "s" },
+                                count(facets.exactly(n))
+                            ),
+                        );
+                    }
                     for n in 1..=5 {
                         ui.selectable_value(
                             &mut self.rating,
@@ -455,19 +595,51 @@ impl FilterBar {
                     );
                 });
 
-            ui.checkbox(
-                &mut self.picks_only,
-                format!("Picks{}", count(facets.picks)),
-            );
+            let flag_text = match self.flag {
+                FlagChoice::Any => "Any flag",
+                FlagChoice::Picked => "Picked",
+                FlagChoice::Unflagged => "Unflagged",
+                FlagChoice::Custom => "Custom (saved rule)",
+            };
+            egui::ComboBox::from_id_salt("fb_flag")
+                .selected_text(flag_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.flag, FlagChoice::Any, "Any flag");
+                    ui.selectable_value(
+                        &mut self.flag,
+                        FlagChoice::Picked,
+                        format!("Picked{}", count(facets.picks)),
+                    );
+                    ui.selectable_value(
+                        &mut self.flag,
+                        FlagChoice::Unflagged,
+                        format!("Unflagged{}", count(facets.unflagged)),
+                    );
+                });
 
-            string_combo(
-                ui,
-                "fb_label",
-                "Any label",
-                &mut self.label,
-                &options.labels,
-                |_| String::new(),
-            );
+            let label_text = match &self.label {
+                LabelChoice::Any => "Any label".to_string(),
+                LabelChoice::None => "No label".to_string(),
+                LabelChoice::Is(l) => l.clone(),
+                LabelChoice::Custom => "Custom (saved rule)".to_string(),
+            };
+            egui::ComboBox::from_id_salt("fb_label")
+                .selected_text(label_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.label, LabelChoice::Any, "Any label");
+                    ui.selectable_value(&mut self.label, LabelChoice::None, "No label");
+                    // A loaded rule may name a label that isn't in the (online) list; keep it
+                    // selectable.
+                    if let LabelChoice::Is(l) = &self.label {
+                        if !options.labels.contains(l) {
+                            let l = l.clone();
+                            ui.selectable_value(&mut self.label, LabelChoice::Is(l.clone()), l);
+                        }
+                    }
+                    for l in &options.labels {
+                        ui.selectable_value(&mut self.label, LabelChoice::Is(l.clone()), l);
+                    }
+                });
             string_combo(
                 ui,
                 "fb_make",
@@ -820,7 +992,7 @@ mod tests {
         assert_eq!(bar.to_filter(None), Filter::default());
         assert_eq!(bar.to_filter(Some(7)).root_id, Some(7));
         assert!(!bar.is_active());
-        bar.picks_only = true;
+        bar.flag = FlagChoice::Picked;
         assert!(bar.is_active());
     }
 
@@ -830,8 +1002,8 @@ mod tests {
         bar.keyword_id = Some(3);
         bar.include_subtree = true;
         bar.rating = RatingChoice::AtLeast(4);
-        bar.picks_only = true;
-        bar.label = Some("Red".into());
+        bar.flag = FlagChoice::Picked;
+        bar.label = LabelChoice::Is("Red".into());
         bar.make = Some("NIKON".into());
         bar.model = Some("Z8".into());
         bar.filename = "  dsc_ ".into();
@@ -1122,5 +1294,229 @@ mod tests {
         bar.save_smart_collection(&egui::Context::default(), &store, &filter);
         assert!(bar.error.is_some());
         assert!(store.list_collections().unwrap().is_empty());
+    }
+
+    // ---- #32: unrated / exactly-N / unflagged / no-label ------------------------------------
+
+    fn marker_filter(r: RatingChoice, f: FlagChoice, l: LabelChoice) -> Filter {
+        FilterBar::with_markers(r, f, l).to_filter(None)
+    }
+
+    #[test]
+    fn the_culling_choices_map_onto_their_filter_fields() {
+        let unrated = marker_filter(RatingChoice::Unrated, FlagChoice::Any, LabelChoice::Any);
+        assert!(unrated.unrated);
+        assert_eq!((unrated.rating_min, unrated.rating_max), (None, None));
+
+        let two = marker_filter(RatingChoice::Exactly(2), FlagChoice::Any, LabelChoice::Any);
+        assert_eq!((two.rating_min, two.rating_max), (Some(2), Some(2)));
+        assert!(!two.unrated);
+
+        let unflagged = marker_filter(RatingChoice::Any, FlagChoice::Unflagged, LabelChoice::Any);
+        assert!(unflagged.unflagged && unflagged.flag.is_none());
+        let picked = marker_filter(RatingChoice::Any, FlagChoice::Picked, LabelChoice::Any);
+        assert!(!picked.unflagged && picked.flag == Some(1));
+
+        let none = marker_filter(RatingChoice::Any, FlagChoice::Any, LabelChoice::None);
+        assert!(none.no_label && none.label.is_none());
+        let red = marker_filter(
+            RatingChoice::Any,
+            FlagChoice::Any,
+            LabelChoice::Is("Red".into()),
+        );
+        assert!(!red.no_label && red.label.as_deref() == Some("Red"));
+    }
+
+    #[test]
+    fn the_culling_choices_survive_a_smart_collection_save_and_load() {
+        for (r, f, l) in [
+            (
+                RatingChoice::Unrated,
+                FlagChoice::Unflagged,
+                LabelChoice::None,
+            ),
+            (
+                RatingChoice::Exactly(1),
+                FlagChoice::Picked,
+                LabelChoice::Is("Blue".into()),
+            ),
+            (RatingChoice::Exactly(5), FlagChoice::Any, LabelChoice::Any),
+        ] {
+            let saved = marker_filter(r, f, l.clone());
+            let mut bar = FilterBar::default();
+            bar.load_filter(&saved);
+            assert_eq!(bar.rating, r);
+            assert_eq!(bar.flag, f);
+            assert_eq!(bar.label, l);
+            assert_eq!(
+                bar.to_filter(None),
+                saved,
+                "loading then rebuilding is lossless"
+            );
+        }
+    }
+
+    #[test]
+    fn unrated_combined_with_a_range_is_kept_verbatim_not_widened() {
+        // A hand-edited rule: unrated AND rating >= 3 (matches nothing). The controls can't say
+        // that, so it must round-trip through `Custom` untouched.
+        let rule = Filter {
+            unrated: true,
+            rating_min: Some(3),
+            ..Filter::default()
+        };
+        assert_eq!(RatingChoice::from_filter(&rule), RatingChoice::Custom);
+        let mut bar = FilterBar::default();
+        bar.load_filter(&rule);
+        assert_eq!(bar.to_filter(None), rule);
+    }
+
+    #[test]
+    fn a_range_of_exactly_one_star_is_recognised_but_a_wider_one_is_custom() {
+        let exact = Filter {
+            rating_min: Some(4),
+            rating_max: Some(4),
+            ..Filter::default()
+        };
+        assert_eq!(RatingChoice::from_filter(&exact), RatingChoice::Exactly(4));
+        let wider = Filter {
+            rating_min: Some(2),
+            rating_max: Some(4),
+            ..Filter::default()
+        };
+        assert_eq!(RatingChoice::from_filter(&wider), RatingChoice::Custom);
+    }
+
+    #[test]
+    fn facets_of_a_chosen_unrated_or_unflagged_still_count_the_other_choices() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume = store.upsert_volume("v", None, None, 0).unwrap();
+        let root = store.ensure_root(volume, "").unwrap();
+        let ids: Vec<i64> = (0..4)
+            .map(|i| {
+                store
+                    .insert_asset(root, &asset(&format!("{i}.NEF"), "Z8"), None)
+                    .unwrap()
+            })
+            .collect();
+        store.set_rating(&[ids[0]], Some(3)).unwrap();
+        store.set_rating(&[ids[1]], Some(3)).unwrap();
+        store.set_flag(&[ids[0]], Some(1)).unwrap();
+
+        // Only "Unrated" chosen: the rating facets are counted with that constraint CLEARED, so
+        // the other ratings still show real numbers (2 photos rated 3, 2 unrated). Had `unrated`
+        // leaked into that query, every rating but "unrated" would read 0.
+        let v = compute_facets(
+            &store,
+            &Filter {
+                unrated: true,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(v.exactly(3), 2, "rating counts ignore the chosen 'unrated'");
+        assert_eq!(v.unrated(), 2);
+        assert_eq!(
+            v.total, 2,
+            "while the grid itself shows only the unrated ones"
+        );
+
+        // Only "Unflagged" chosen: the flag facets clear it, so "Picked" still counts 1 (and
+        // "Unflagged" 3). A leaked `unflagged` would make "Picked" read 0.
+        let v = compute_facets(
+            &store,
+            &Filter {
+                unflagged: true,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(v.picks, 1, "flag counts ignore the chosen 'unflagged'");
+        assert_eq!(v.unflagged, 3);
+    }
+
+    // ---- contradictory / unexpressible saved rules must round-trip untouched ------------------
+
+    fn assert_round_trips(rule: Filter) {
+        let mut bar = FilterBar::default();
+        bar.load_filter(&rule);
+        assert_eq!(
+            bar.to_filter(None),
+            rule,
+            "rule was widened or narrowed on load"
+        );
+    }
+
+    #[test]
+    fn a_flag_together_with_unflagged_is_kept_not_widened_to_all_picks() {
+        // Matches nothing; reloading it as plain "Picked" would match every pick.
+        let rule = Filter {
+            flag: Some(1),
+            unflagged: true,
+            ..Filter::default()
+        };
+        assert_eq!(FlagChoice::from_filter(&rule), FlagChoice::Custom);
+        assert_round_trips(rule);
+    }
+
+    #[test]
+    fn a_label_together_with_no_label_is_kept_not_widened_to_all_of_that_label() {
+        let rule = Filter {
+            label: Some("Red".into()),
+            no_label: true,
+            ..Filter::default()
+        };
+        assert_eq!(LabelChoice::from_filter(&rule), LabelChoice::Custom);
+        assert_round_trips(rule);
+    }
+
+    #[test]
+    fn a_flag_value_the_control_cannot_express_is_kept_not_dropped() {
+        // `flag: Some(2)` used to reload as no flag at all, widening the rule to everything.
+        let rule = Filter {
+            flag: Some(2),
+            ..Filter::default()
+        };
+        assert_eq!(FlagChoice::from_filter(&rule), FlagChoice::Custom);
+        assert_round_trips(rule);
+    }
+
+    #[test]
+    fn expressible_flag_and_label_shapes_stay_ordinary_choices() {
+        assert_eq!(
+            FlagChoice::from_filter(&Filter {
+                flag: Some(1),
+                ..Filter::default()
+            }),
+            FlagChoice::Picked
+        );
+        assert_eq!(
+            FlagChoice::from_filter(&Filter {
+                unflagged: true,
+                ..Filter::default()
+            }),
+            FlagChoice::Unflagged
+        );
+        assert_eq!(
+            LabelChoice::from_filter(&Filter::default()),
+            LabelChoice::Any
+        );
+    }
+
+    #[test]
+    fn switching_a_custom_flag_or_label_to_a_real_choice_drops_the_saved_shape() {
+        let mut bar = FilterBar::default();
+        bar.load_filter(&Filter {
+            flag: Some(1),
+            unflagged: true,
+            label: Some("Red".into()),
+            no_label: true,
+            ..Filter::default()
+        });
+        bar.flag = FlagChoice::Picked;
+        bar.label = LabelChoice::Any;
+        let f = bar.to_filter(None);
+        assert_eq!((f.flag, f.unflagged), (Some(1), false));
+        assert_eq!((f.label, f.no_label), (None, false));
     }
 }

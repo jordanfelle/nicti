@@ -22,7 +22,7 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
-`lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033, 0034, 0035, 0108), `denoise` (0040),
+`lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101), `jobs` (0054), `export` (0056),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
@@ -181,7 +181,8 @@ terse index: crate/spike → purpose → owning topic.
   `ninelives.rs`/`BackupJob`), not duplicated here. **#26** adds `carry.rs`
   (`Carry`/`resume_open_moves`, verified folder move) + `pounce_jobs::MoveJob`, wired into
   `nicti-pelt`'s Library view. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
-  **#301** wires it into the loupe via `nicti-pelt`'s `t2.rs`, **#302** adds `cache_settings.rs`) — see `preview-tiers`.
+  **#301** wires it into the loupe via `nicti-pelt`'s `t2.rs`, **#302** adds `cache_settings.rs`) — see `preview-tiers`. **#32** adds `shred.rs` (`Shred`/`resume_open_deletes`,
+  delete-to-Recycle-Bin with a journal) + `pounce_jobs::DeleteJob` — see `culling`.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,
@@ -193,7 +194,8 @@ terse index: crate/spike → purpose → owning topic.
   Fit/100% zoom — see [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)'s own
   "Package contents" section for `render.rs`/`decode_job.rs`/`loupe.rs`/`viewport.rs`/`app.rs`'s
   actual module breakdown, also covering `activity.rs` (#55, #70), `grid/` (#30) and
-  [`jobs`](.claude/rules/jobs/REFERENCE.md) for Pounce.
+  [`jobs`](.claude/rules/jobs/REFERENCE.md) for Pounce. **#32 (culling, landed)**: `cull/` (marking keys, undo,
+  survey/compare, delete prompt) and `grid/selection.rs` — see [`culling`](.claude/rules/culling/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)

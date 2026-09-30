@@ -51,6 +51,9 @@ pub enum JobKind {
     Backup,
     /// A verified folder move (#26) -- CPU/disk-bound, CPU lane.
     Move,
+    /// A batch delete of assets, optionally moving their files to the Recycle Bin (#32) --
+    /// CPU/disk-bound, CPU lane.
+    Delete,
     /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
     /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
     Decode,

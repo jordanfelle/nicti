@@ -70,6 +70,12 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   destination. Runs as `pounce_jobs::MoveJob` (`JobKind::Move`). Not a backup copy, no
   archive-drive behavior (#72). Drag-a-folder-onto-a-drive UI: #303, `nicti-pelt`'s `folder_panel.rs`.
 
+- **Batch delete (#32, landed)**: `docs/adr/0032`, "Shred". `remove_assets` (chunked, one
+  transaction, also clears the `delete_item` journal row) + `get_meta`/`set_meta` (batch marker
+  read, and per-photo *mixed*-value restore for undo). Journal `delete_item` (schema v8) is written
+  *before* files move to the Recycle Bin; `shred::resume_open_deletes` settles it at startup.
+  Runs as `pounce_jobs::DeleteJob` (`JobKind::Delete`).
+
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 landed; #25 landed) — the real production catalog

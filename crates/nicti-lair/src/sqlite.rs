@@ -3,6 +3,7 @@
 //! `CatalogStore`) requires `Send + Sync` since it's shared as `Arc<dyn CatalogStore>` through the
 //! Claw registry.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -10,9 +11,9 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, ToSql};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    Asset, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, FacetCounts, Filter,
-    Keyword, MoveState, NewAsset, Page, Preview, PreviewTier, Root, RootMove, Sort, SortDirection,
-    SortField,
+    Asset, AssetMeta, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, DeleteItem,
+    DeleteState, FacetCounts, Filter, Keyword, MoveState, NewAsset, Page, Preview, PreviewTier,
+    Root, RootMove, Sort, SortDirection, SortField,
 };
 use nicti_claw::Module;
 
@@ -161,13 +162,22 @@ fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, Cat
         params.push(Box::new(max));
     }
 
+    if filter.unrated {
+        clauses.push("a.rating IS NULL".to_string());
+    }
     if let Some(flag) = filter.flag {
         clauses.push("a.flag = ?".to_string());
         params.push(Box::new(flag));
     }
+    if filter.unflagged {
+        clauses.push("a.flag IS NULL".to_string());
+    }
     if let Some(label) = &filter.label {
         clauses.push("a.label = ?".to_string());
         params.push(Box::new(label.clone()));
+    }
+    if filter.no_label {
+        clauses.push("a.label IS NULL".to_string());
     }
     if let Some(make) = &filter.make {
         clauses.push("a.make = ?".to_string());
@@ -665,6 +675,28 @@ impl Module for SqliteCatalog {
         params: serde_json::Value,
     ) -> Option<serde_json::Value> {
         Some(params)
+    }
+}
+
+impl SqliteCatalog {
+    /// `<stmt> WHERE asset_id IN (...)`, chunked, one transaction: the shared shape of the
+    /// `delete_item` journal's two bulk updates. `stmt` is always a hardcoded literal from this
+    /// module, never external input.
+    fn update_delete_items(&self, asset_ids: &[i64], stmt: &str) -> Result<(), CatalogError> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            tx.execute(
+                &format!("{stmt} WHERE asset_id IN ({ph})"),
+                rusqlite::params_from_iter(chunk.iter()),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -1168,23 +1200,139 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn remove_asset(&self, asset_id: i64) -> Result<(), CatalogError> {
+        self.remove_assets(&[asset_id])
+    }
+
+    fn remove_assets(&self, asset_ids: &[i64]) -> Result<(), CatalogError> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        // No `ON DELETE CASCADE` on any of these foreign keys (schema.rs's `asset`/`edit_variant`
+        // No `ON DELETE CASCADE` on most of these foreign keys (schema.rs's `asset`/`edit_variant`
         // references are plain `REFERENCES`, and `PRAGMA foreign_keys = ON` only *enforces*
         // referential integrity -- it never cascades a delete on its own) -- every child row is
         // deleted explicitly, in dependency order, or the asset delete itself would fail its own
-        // foreign-key check with orphaned children left behind.
-        tx.execute(
-            "DELETE FROM edit_history WHERE variant_id IN \
-                (SELECT id FROM edit_variant WHERE asset_id = ?1)",
-            [asset_id],
-        )?;
-        tx.execute("DELETE FROM edit_variant WHERE asset_id = ?1", [asset_id])?;
-        tx.execute("DELETE FROM preview WHERE asset_id = ?1", [asset_id])?;
-        tx.execute("DELETE FROM asset WHERE id = ?1", [asset_id])?;
+        // foreign-key check with orphaned children left behind. (`asset_keyword` and
+        // `collection_asset` do cascade.) The `delete_item` journal row goes in the same
+        // transaction, so a finished delete leaves no journal behind.
+        for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            let bound: Vec<&dyn ToSql> = chunk.iter().map(|id| id as &dyn ToSql).collect();
+            tx.execute(
+                &format!(
+                    "DELETE FROM edit_history WHERE variant_id IN \
+                        (SELECT id FROM edit_variant WHERE asset_id IN ({ph}))"
+                ),
+                bound.as_slice(),
+            )?;
+            for table in ["edit_variant", "preview", "delete_item"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE asset_id IN ({ph})"),
+                    bound.as_slice(),
+                )?;
+            }
+            tx.execute(
+                &format!("DELETE FROM asset WHERE id IN ({ph})"),
+                bound.as_slice(),
+            )?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    fn get_meta(&self, asset_ids: &[i64]) -> Result<HashMap<i64, AssetMeta>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = HashMap::with_capacity(asset_ids.len());
+        for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, rating, flag, label FROM asset WHERE id IN ({ph})"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    AssetMeta {
+                        rating: row.get(1)?,
+                        flag: row.get(2)?,
+                        label: row.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, meta) = row?;
+                out.insert(id, meta);
+            }
+        }
+        Ok(out)
+    }
+
+    fn set_meta(&self, items: &[(i64, AssetMeta)]) -> Result<(), CatalogError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
+            )?;
+            for (id, meta) in items {
+                stmt.execute(params![meta.rating, meta.flag, meta.label, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn begin_delete_items(&self, items: &[(i64, String)]) -> Result<(), CatalogError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                // A still-`pending` row from an earlier run is refreshed to the current path (a
+                // photo moved since would otherwise be judged by its old location); a `trashed`
+                // row is never touched -- its files are already in the bin.
+                "INSERT INTO delete_item (asset_id, abs_path, state) VALUES (?1, ?2, 'pending') \
+                 ON CONFLICT(asset_id) DO UPDATE SET abs_path = excluded.abs_path \
+                 WHERE delete_item.state = 'pending'",
+            )?;
+            for (id, path) in items {
+                stmt.execute(params![id, path])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn mark_delete_items_trashed(&self, asset_ids: &[i64]) -> Result<(), CatalogError> {
+        self.update_delete_items(asset_ids, "UPDATE delete_item SET state = 'trashed'")
+    }
+
+    fn abandon_delete_items(&self, asset_ids: &[i64]) -> Result<(), CatalogError> {
+        self.update_delete_items(asset_ids, "DELETE FROM delete_item")
+    }
+
+    fn open_delete_items(&self) -> Result<Vec<DeleteItem>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT asset_id, abs_path, state FROM delete_item ORDER BY asset_id")?;
+        let rows = stmt.query_map([], |row| {
+            let state: String = row.get(2)?;
+            Ok(DeleteItem {
+                asset_id: row.get(0)?,
+                abs_path: row.get(1)?,
+                state: if state == "trashed" {
+                    DeleteState::Trashed
+                } else {
+                    DeleteState::Pending
+                },
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     fn create_keyword(&self, parent_id: Option<i64>, name: &str) -> Result<i64, CatalogError> {
@@ -3134,5 +3282,245 @@ mod tests {
             "a literal `[1]` in filename_contains must match only the literal filename, \
              not be interpreted as a GLOB character class"
         );
+    }
+
+    // ---- #32: culling markers, batch removal, delete journal ------------------------------
+
+    fn store_with_assets(n: usize) -> (SqliteCatalog, i64, Vec<i64>) {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let ids = (0..n)
+            .map(|i| {
+                store
+                    .insert_asset(root_id, &new_asset(&format!("{i}.NEF"), Some("Z8")), None)
+                    .unwrap()
+            })
+            .collect();
+        (store, root_id, ids)
+    }
+
+    #[test]
+    fn get_meta_reads_all_three_markers_and_skips_unknown_ids() {
+        let (store, _, ids) = store_with_assets(3);
+        store.set_rating(&[ids[0]], Some(4)).unwrap();
+        store.set_rating(&[ids[1]], Some(-1)).unwrap();
+        store.set_flag(&[ids[0]], Some(1)).unwrap();
+        store.set_label(&[ids[0]], Some("Red")).unwrap();
+
+        let meta = store.get_meta(&[ids[0], ids[1], ids[2], 9999]).unwrap();
+        assert_eq!(meta.len(), 3, "an unknown id is absent, not an error");
+        assert_eq!(
+            meta[&ids[0]],
+            AssetMeta {
+                rating: Some(4),
+                flag: Some(1),
+                label: Some("Red".into())
+            }
+        );
+        assert_eq!(meta[&ids[1]].rating, Some(-1));
+        assert_eq!(meta[&ids[2]], AssetMeta::default());
+        assert!(store.get_meta(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_meta_spans_more_ids_than_one_chunk() {
+        let (store, _, ids) = store_with_assets(MAX_IDS_PER_STATEMENT + 5);
+        store.set_rating(&ids, Some(2)).unwrap();
+        let meta = store.get_meta(&ids).unwrap();
+        assert_eq!(meta.len(), ids.len());
+        assert!(meta.values().all(|m| m.rating == Some(2)));
+    }
+
+    #[test]
+    fn set_meta_restores_mixed_per_asset_values_in_one_call() {
+        let (store, _, ids) = store_with_assets(3);
+        store.set_rating(&ids, Some(5)).unwrap();
+        store.set_label(&[ids[2]], Some("Blue")).unwrap();
+
+        store
+            .set_meta(&[
+                (
+                    ids[0],
+                    AssetMeta {
+                        rating: None,
+                        flag: Some(1),
+                        label: None,
+                    },
+                ),
+                (
+                    ids[1],
+                    AssetMeta {
+                        rating: Some(-1),
+                        flag: None,
+                        label: Some("Red".into()),
+                    },
+                ),
+                // ids[2] is reset to fully unmarked, clearing its label.
+                (ids[2], AssetMeta::default()),
+                (9999, AssetMeta::default()), // unknown id is ignored
+            ])
+            .unwrap();
+
+        let meta = store.get_meta(&ids).unwrap();
+        assert_eq!(meta[&ids[0]].rating, None);
+        assert_eq!(meta[&ids[0]].flag, Some(1));
+        assert_eq!(meta[&ids[1]].rating, Some(-1));
+        assert_eq!(meta[&ids[1]].label.as_deref(), Some("Red"));
+        assert_eq!(meta[&ids[2]], AssetMeta::default());
+        store.set_meta(&[]).unwrap();
+    }
+
+    #[test]
+    fn set_meta_is_atomic_when_one_value_violates_a_check_constraint() {
+        let (store, _, ids) = store_with_assets(2);
+        store.set_rating(&ids, Some(3)).unwrap();
+        let bad = AssetMeta {
+            rating: Some(99), // outside -1..=5
+            flag: None,
+            label: None,
+        };
+        let good = AssetMeta {
+            rating: Some(1),
+            flag: None,
+            label: None,
+        };
+        assert!(store.set_meta(&[(ids[0], good), (ids[1], bad)]).is_err());
+        let meta = store.get_meta(&ids).unwrap();
+        assert_eq!(
+            meta[&ids[0]].rating,
+            Some(3),
+            "the failed batch must leave the earlier row untouched"
+        );
+    }
+
+    #[test]
+    fn remove_assets_deletes_every_child_row_across_chunks_and_ignores_unknown_ids() {
+        let (store, root_id, ids) = store_with_assets(MAX_IDS_PER_STATEMENT + 5);
+        let keyword = store.create_keyword(None, "Tag").unwrap();
+        store.tag(&ids[..3], keyword).unwrap();
+        let collection = store
+            .create_collection(None, "Selects", CollectionKind::Manual)
+            .unwrap();
+        store.add_to_collection(collection, &ids[..3]).unwrap();
+        store
+            .begin_delete_items(&[(ids[0], "/x/0.NEF".into())])
+            .unwrap();
+
+        let mut doomed: Vec<i64> = ids[..ids.len() - 2].to_vec();
+        doomed.push(9999);
+        store.remove_assets(&doomed).unwrap();
+
+        assert_eq!(store.asset_count().unwrap(), 2, "the two untouched survive");
+        assert!(store.open_delete_items().unwrap().is_empty());
+        assert!(store.collection_assets(collection).unwrap().is_empty());
+        assert!(store.keywords_for(ids[0]).unwrap().is_empty());
+        assert!(store
+            .find_asset_by_path(root_id, &format!("{}.NEF", ids.len() - 1))
+            .unwrap()
+            .is_some());
+        store.remove_assets(&[]).unwrap();
+    }
+
+    #[test]
+    fn delete_journal_begin_mark_abandon_and_open() {
+        let (store, _, ids) = store_with_assets(3);
+        store
+            .begin_delete_items(&[(ids[0], "/r/0.NEF".into()), (ids[1], "/r/1.NEF".into())])
+            .unwrap();
+        let open = store.open_delete_items().unwrap();
+        assert_eq!(open.len(), 2);
+        assert!(open.iter().all(|i| i.state == DeleteState::Pending));
+
+        store.mark_delete_items_trashed(&[ids[0]]).unwrap();
+        // Re-journaling an already-trashed asset must not reset it to pending.
+        store
+            .begin_delete_items(&[(ids[0], "/elsewhere.NEF".into())])
+            .unwrap();
+        let open = store.open_delete_items().unwrap();
+        assert_eq!(open[0].asset_id, ids[0]);
+        assert_eq!(open[0].state, DeleteState::Trashed);
+        assert_eq!(open[0].abs_path, "/r/0.NEF");
+        assert_eq!(open[1].state, DeleteState::Pending);
+
+        store.abandon_delete_items(&[ids[1]]).unwrap();
+        assert_eq!(store.open_delete_items().unwrap().len(), 1);
+        assert_eq!(
+            store.asset_count().unwrap(),
+            3,
+            "abandoning a journal row never touches the asset itself"
+        );
+        store.begin_delete_items(&[]).unwrap();
+        store.mark_delete_items_trashed(&[]).unwrap();
+        store.abandon_delete_items(&[]).unwrap();
+    }
+
+    #[test]
+    fn hunt_unflagged_and_no_label_filters() {
+        let (store, _, ids) = store_with_assets(4);
+        store.set_flag(&[ids[0]], Some(1)).unwrap();
+        store.set_label(&[ids[1]], Some("Red")).unwrap();
+        let sort = Sort {
+            field: SortField::Filename,
+            direction: SortDirection::Asc,
+        };
+
+        let unflagged = Filter {
+            unflagged: true,
+            ..Filter::default()
+        };
+        assert_eq!(
+            store.hunt_ids(&unflagged, sort).unwrap(),
+            vec![ids[1], ids[2], ids[3]]
+        );
+        let no_label = Filter {
+            no_label: true,
+            ..Filter::default()
+        };
+        assert_eq!(
+            store.hunt_ids(&no_label, sort).unwrap(),
+            vec![ids[0], ids[2], ids[3]]
+        );
+        let both = Filter {
+            unflagged: true,
+            no_label: true,
+            ..Filter::default()
+        };
+        assert_eq!(store.hunt_ids(&both, sort).unwrap(), vec![ids[2], ids[3]]);
+    }
+
+    #[test]
+    fn hunt_unrated_filter_and_its_combination_with_a_rating_range() {
+        let (store, _, ids) = store_with_assets(3);
+        store.set_rating(&[ids[0]], Some(4)).unwrap();
+        store.set_rating(&[ids[1]], Some(-1)).unwrap();
+        let sort = Sort {
+            field: SortField::Filename,
+            direction: SortDirection::Asc,
+        };
+        let unrated = Filter {
+            unrated: true,
+            ..Filter::default()
+        };
+        assert_eq!(store.hunt_ids(&unrated, sort).unwrap(), vec![ids[2]]);
+        let contradictory = Filter {
+            unrated: true,
+            rating_min: Some(0),
+            ..Filter::default()
+        };
+        assert!(store.hunt_ids(&contradictory, sort).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_saved_filter_rule_from_before_these_fields_still_deserializes() {
+        // `clowder.rs`'s `v: 1` rule contract: a rule serialized before `unflagged`/`no_label`
+        // existed has neither key.
+        let old = r#"{"keyword_id":null,"include_subtree":false,"rating_min":2,"rating_max":null,
+            "include_unrated":false,"flag":null,"label":null,"make":null,"model":null,
+            "captured_after":null,"captured_before":null,"root_id":null,"rel_path_prefix":null,
+            "filename_contains":null}"#;
+        let f: Filter = serde_json::from_str(old).unwrap();
+        assert_eq!(f.rating_min, Some(2));
+        assert!(!f.unflagged && !f.no_label && !f.unrated);
     }
 }
