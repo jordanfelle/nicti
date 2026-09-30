@@ -221,6 +221,8 @@ pub fn show(
         ] {
             develop.reset_stage(id);
         }
+        // The heal spots are gone, so their finished removals (up to tens of MB each) are too.
+        develop.prune_removals();
     }
 }
 

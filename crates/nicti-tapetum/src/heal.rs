@@ -37,6 +37,18 @@ pub const IMPL_VERSION: u32 = 1;
 /// stall the GPU. Spots past the cap are ignored (the UI refuses to add beyond it).
 pub const MAX_SPOTS: usize = 256;
 
+/// Most Jacobi passes one render will record across all its heal spots. Each pass is a full patch
+/// dispatch; without a budget, 256 spots of radius 512 would queue ~100k of them (seconds of GPU
+/// time -- enough to trip a driver's watchdog on a weaker GPU). A heal spot that would exceed the
+/// budget is skipped (passes through), like any other unappliable spot. Typical spots (r ~ 24)
+/// cost ~50 passes, so this admits hundreds of them.
+pub const MAX_JACOBI_PASSES: u32 = 12_000;
+
+/// Centers (and source centers) are clamped to +/- this many pixels. Real frames are tens of
+/// thousands of pixels across; the clamp exists so a hostile or corrupt document can't push
+/// `center - half` / `center + side` into `i32` overflow (a panic in debug builds).
+pub const COORD_LIMIT: f32 = 1.0e9;
+
 /// Largest destination radius honored, in pixels: bounds a single spot's patch (and so its scratch
 /// textures and Jacobi cost) no matter what a hand-edited or imported document asks for.
 pub const MAX_RADIUS: f32 = 512.0;
@@ -74,10 +86,11 @@ pub fn spot_geometry(spot: &Spot) -> Option<SpotGeometry> {
         return None;
     }
     let half = spot.radius.min(MAX_RADIUS).ceil() as i32;
-    let center = (cx.round() as i32, cy.round() as i32);
+    let clamp = |v: f32| v.clamp(-COORD_LIMIT, COORD_LIMIT).round() as i32;
+    let center = (clamp(cx), clamp(cy));
     Some(SpotGeometry {
         center,
-        src_center: ((cx + ox).round() as i32, (cy + oy).round() as i32),
+        src_center: (clamp(cx + ox), clamp(cy + oy)),
         half,
         side: 2 * half + 1,
     })
@@ -137,6 +150,8 @@ pub const MAX_PATCH_SIDE: u32 = 2049;
 pub enum PatchError {
     #[error("removal patch side {0} must be odd and between 1 and {MAX_PATCH_SIDE}")]
     BadSide(u32),
+    #[error("removal patch center {0:?} is outside the supported range")]
+    BadCenter((i32, i32)),
     #[error("removal patch has {got} pixels, expected {expected}")]
     WrongPixelCount { got: usize, expected: usize },
 }
@@ -160,6 +175,12 @@ impl RemovalPatch {
     pub fn new(center: (i32, i32), side: u32, pixels: Vec<[f32; 4]>) -> Result<Self, PatchError> {
         if side == 0 || side.is_multiple_of(2) || side > MAX_PATCH_SIDE {
             return Err(PatchError::BadSide(side));
+        }
+        let limit = COORD_LIMIT as i32;
+        // A range check, not `abs()`: `i32::MIN.abs()` itself overflows.
+        let range = -limit..=limit;
+        if !range.contains(&center.0) || !range.contains(&center.1) {
+            return Err(PatchError::BadCenter(center));
         }
         let expected = side as usize * side as usize;
         if pixels.len() != expected {
@@ -193,10 +214,15 @@ pub type RemovalSet = std::collections::HashMap<String, std::sync::Arc<RemovalPa
 /// A stable identity for a spot: the canonical hash of its full definition (kind, geometry and
 /// mask recipe), so editing a spot yields a new key and its old patch can never be reused for it.
 pub fn spot_key(spot: &Spot) -> String {
-    nicti_pawprint::hash_value(spot)
-        .expect("a Spot serializes without nulls (Option fields skip when None)")
-        .to_hex()
-        .to_string()
+    // A recipe's free-form `params` can hold a JSON null (or a float that serializes as one), which
+    // the canonical hasher deliberately refuses. That must not be a panic on every render, so fall
+    // back to hashing the plain JSON text: still a stable identity, just not the canonical one.
+    match nicti_pawprint::hash_value(spot) {
+        Ok(h) => h.to_hex().to_string(),
+        Err(_) => blake3::hash(serde_json::to_string(spot).unwrap_or_default().as_bytes())
+            .to_hex()
+            .to_string(),
+    }
 }
 
 /// Stamps which removals are ready into the document's heal entry, as an extra `"removals"` map
@@ -237,11 +263,15 @@ struct Scratch {
     patch_b: FrameTexture,
     guidance: FrameTexture,
     result: FrameTexture,
+    /// 1x1: the mean boundary offset `boundary_mean` reduces to.
+    mean: FrameTexture,
 }
 
 pub struct HealKernel {
     extract_dst: wgpu::ComputePipeline,
     extract_guidance: wgpu::ComputePipeline,
+    boundary_mean: wgpu::ComputePipeline,
+    init_heal: wgpu::ComputePipeline,
     jacobi: wgpu::ComputePipeline,
     composite: wgpu::ComputePipeline,
     composite_patch: wgpu::ComputePipeline,
@@ -253,6 +283,8 @@ impl HealKernel {
         Self {
             extract_dst: make_compute_pipeline(&gpu.device, src, "extract_dst"),
             extract_guidance: make_compute_pipeline(&gpu.device, src, "extract_guidance"),
+            boundary_mean: make_compute_pipeline(&gpu.device, src, "boundary_mean"),
+            init_heal: make_compute_pipeline(&gpu.device, src, "init_heal"),
             jacobi: make_compute_pipeline(&gpu.device, src, "jacobi"),
             composite: make_compute_pipeline(&gpu.device, src, "composite"),
             composite_patch: make_compute_pipeline(&gpu.device, src, "composite_patch"),
@@ -304,13 +336,27 @@ impl HealKernel {
             patch_b: FrameTexture::new(gpu, scratch),
             guidance: FrameTexture::new(gpu, scratch),
             result: FrameTexture::new(gpu, scratch),
+            mean: FrameTexture::new(
+                gpu,
+                Extent {
+                    width: 1,
+                    height: 1,
+                },
+            ),
         };
 
+        let mut jacobi_budget = MAX_JACOBI_PASSES;
         for op in ops {
             match op {
-                Op::Classic(spot, g) => {
-                    self.encode_classic(gpu, encoder, frame, &scratch_bufs, spot, g)
-                }
+                Op::Classic(spot, g) => self.encode_classic(
+                    gpu,
+                    encoder,
+                    frame,
+                    &scratch_bufs,
+                    spot,
+                    g,
+                    &mut jacobi_budget,
+                ),
                 Op::Patch(spot, patch) => {
                     self.encode_patch(gpu, encoder, frame, &scratch_bufs, spot, patch)
                 }
@@ -330,6 +376,8 @@ impl HealKernel {
             })
     }
 
+    // Internal helper threading the encoder's per-render state; a struct would only rename it.
+    #[allow(clippy::too_many_arguments)]
     fn encode_classic(
         &self,
         gpu: &GpuContext,
@@ -338,7 +386,15 @@ impl HealKernel {
         s: &Scratch,
         spot: &Spot,
         g: SpotGeometry,
+        jacobi_budget: &mut u32,
     ) {
+        if spot.kind == SpotKind::Heal {
+            let need = jacobi_iterations(g.side);
+            if need > *jacobi_budget {
+                return; // over budget: skipped, like any other unappliable spot
+            }
+            *jacobi_budget -= need;
+        }
         let ubuf = Self::uniform_buffer(
             gpu,
             &SpotUniforms {
@@ -375,16 +431,43 @@ impl HealKernel {
 
         let solved = if spot.kind == SpotKind::Heal {
             let iterations = jacobi_iterations(g.side);
-            let a_to_b = self.bind(
+
+            // Starting guess: interior := source + the mean (dst - src) offset on the ring just
+            // outside the spot (see heal.wgsl's header for why Jacobi can't start from dst).
+            let mean_bind = self.bind(
                 gpu,
-                &self.jacobi,
+                &self.boundary_mean,
                 &[
                     (0, &s.patch_a.view),
-                    (1, &s.patch_b.view),
+                    (1, &s.mean.view),
                     (2, &s.guidance.view),
                 ],
                 &ubuf,
             );
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("heal boundary mean"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.boundary_mean);
+                pass.set_bind_group(0, &mean_bind, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            self.dispatch(
+                gpu,
+                encoder,
+                &self.init_heal,
+                &[
+                    (0, &s.patch_a.view),
+                    (1, &s.patch_b.view),
+                    (2, &s.guidance.view),
+                    (4, &s.mean.view),
+                ],
+                &ubuf,
+                groups,
+            );
+
+            // The starting guess is in `patch_b`, so the sweeps run b -> a first.
             let b_to_a = self.bind(
                 gpu,
                 &self.jacobi,
@@ -395,11 +478,21 @@ impl HealKernel {
                 ],
                 &ubuf,
             );
+            let a_to_b = self.bind(
+                gpu,
+                &self.jacobi,
+                &[
+                    (0, &s.patch_a.view),
+                    (1, &s.patch_b.view),
+                    (2, &s.guidance.view),
+                ],
+                &ubuf,
+            );
             for i in 0..iterations {
                 let bind = if i.is_multiple_of(2) {
-                    &a_to_b
-                } else {
                     &b_to_a
+                } else {
+                    &a_to_b
                 };
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("heal jacobi"),
@@ -409,11 +502,12 @@ impl HealKernel {
                 pass.set_bind_group(0, bind, &[]);
                 pass.dispatch_workgroups(groups, groups, 1);
             }
-            // Even sweep count ends back in `patch_a`, odd in `patch_b`.
+            // The first sweep writes `patch_a`, so an odd count ends there and an even one in
+            // `patch_b`.
             if iterations.is_multiple_of(2) {
-                &s.patch_a
-            } else {
                 &s.patch_b
+            } else {
+                &s.patch_a
             }
         } else {
             &s.guidance
@@ -660,6 +754,43 @@ pub(crate) mod reference {
         out
     }
 
+    /// `heal.wgsl`'s `boundary_mean` + `init_heal`: interior := guidance + mean(dst - guidance) over
+    /// the ring [radius, radius + 1.5).
+    fn init_from_boundary(
+        cur: &mut [[f32; 4]],
+        guidance: &[[f32; 4]],
+        side: i32,
+        half: i32,
+        radius: f32,
+    ) {
+        let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
+        for y in 0..side {
+            for x in 0..side {
+                let (fx, fy) = ((x - half) as f32, (y - half) as f32);
+                let d = (fx * fx + fy * fy).sqrt();
+                if d >= radius && d < radius + 1.5 {
+                    let i = (y * side + x) as usize;
+                    for c in 0..3 {
+                        sum[c] += cur[i][c] - guidance[i][c];
+                    }
+                    count += 1.0;
+                }
+            }
+        }
+        let n = count.max(1.0);
+        for y in 0..side {
+            for x in 0..side {
+                let (fx, fy) = ((x - half) as f32, (y - half) as f32);
+                if (fx * fx + fy * fy).sqrt() < radius {
+                    let i = (y * side + x) as usize;
+                    for c in 0..3 {
+                        cur[i][c] = guidance[i][c] + sum[c] / n;
+                    }
+                }
+            }
+        }
+    }
+
     /// One Jacobi sweep, identical update rule to `heal.wgsl::jacobi`.
     fn jacobi_step(
         input: &[[f32; 4]],
@@ -722,6 +853,7 @@ pub(crate) mod reference {
 
     /// Applies every Clone/Heal spot in order onto `frame` (row-major, `w` x `h`).
     pub fn apply_spots(frame: &mut [[f32; 4]], w: i32, h: i32, spots: &[Spot]) {
+        let mut budget = MAX_JACOBI_PASSES;
         for spot in spots {
             if !matches!(spot.kind, SpotKind::Clone | SpotKind::Heal) {
                 continue;
@@ -732,8 +864,14 @@ pub(crate) mod reference {
             let radius = applied_radius(spot);
             let guidance = patch(frame, w, h, g.src_center, g);
             let solved = if spot.kind == SpotKind::Heal {
+                let need = jacobi_iterations(g.side);
+                if need > budget {
+                    continue;
+                }
+                budget -= need;
                 let mut cur = patch(frame, w, h, g.center, g);
-                for _ in 0..jacobi_iterations(g.side) {
+                init_from_boundary(&mut cur, &guidance, g.side, g.half, radius);
+                for _ in 0..need {
                     cur = jacobi_step(&cur, &guidance, g.side, g.half, radius);
                 }
                 cur
@@ -1319,6 +1457,120 @@ mod tests {
         // The same spot within the cap does change the frame, so the test isn't vacuous.
         let out = run_gpu(&gpu, w, h, &data, &spots[MAX_SPOTS..]);
         assert!(max_diff(&data, &out) > 0.02);
+    }
+
+    /// A flat 0.5 world with a dark 0.1 disc "blemish" at (100, 100); the source (offset +150) is
+    /// clean. The whole point of Heal: the blemish must be gone afterwards.
+    fn blemish_frame(w: i32, h: i32, blemish_r: f32) -> Vec<[f32; 4]> {
+        (0..w * h)
+            .map(|i| {
+                let (dx, dy) = ((i % w - 100) as f32, (i / w - 100) as f32);
+                let v = if (dx * dx + dy * dy).sqrt() < blemish_r {
+                    0.1
+                } else {
+                    0.5
+                };
+                [v, v, v, 1.0]
+            })
+            .collect()
+    }
+
+    /// Guards against the failure the parity tests cannot see: reference and shader could agree
+    /// and both leave the blemish in place (Jacobi started from the destination did exactly that,
+    /// for any blemish over about half the spot). Independent of the iteration count.
+    #[test]
+    fn heal_actually_removes_the_blemish() {
+        let Some(gpu) = test_gpu() else { return };
+        // Wide enough that even the r=100 spot's source patch (offset 300 -> x 200..400) is clean.
+        let (w, h) = (500i32, 300i32);
+        for (spot_r, blemish_r) in [
+            (24.0f32, 4.0f32),
+            (24.0, 14.0),
+            (24.0, 20.0),
+            (64.0, 30.0),
+            (100.0, 60.0),
+        ] {
+            let data = blemish_frame(w, h, blemish_r);
+            let spot = Spot::heal_spot((100.0, 100.0), spot_r, (300.0, 0.0), 0.0);
+
+            let mut cpu = data.clone();
+            reference::apply_spots(&mut cpu, w, h, std::slice::from_ref(&spot));
+            let cpu_center = cpu[(100 * w + 100) as usize][0];
+            assert!(
+                (cpu_center - 0.5).abs() < 0.03,
+                "reference: r={spot_r} blemish={blemish_r}: center is {cpu_center}, want 0.5"
+            );
+
+            let out = run_gpu(&gpu, w as u32, h as u32, &data, std::slice::from_ref(&spot));
+            let gpu_center = out[(100 * w + 100) as usize][0];
+            assert!(
+                (gpu_center - 0.5).abs() < 0.03,
+                "GPU: r={spot_r} blemish={blemish_r}: center is {gpu_center}, want 0.5"
+            );
+        }
+    }
+
+    #[test]
+    fn heal_beyond_the_jacobi_budget_is_skipped_not_queued() {
+        let Some(gpu) = test_gpu() else { return };
+        let (w, h) = (64i32, 64i32);
+        let data = blemish_frame(w, h, 0.0);
+        // r=24 costs 50 passes each; more than budget/50 of them exhausts the budget, after which
+        // a further heal spot must pass through untouched.
+        let per = jacobi_iterations(49);
+        let fit = (MAX_JACOBI_PASSES / per) as usize;
+        let mut spots = vec![Spot::heal_spot((10.0, 10.0), 24.0, (20.0, 0.0), 0.0); fit];
+        let mut last = Spot::heal_spot((40.0, 40.0), 8.0, (-20.0, -20.0), 0.0);
+        last.feather = 0.0;
+        spots.push(last);
+        let mut cpu = data.clone();
+        reference::apply_spots(&mut cpu, w, h, &spots);
+        let out = run_gpu(&gpu, w as u32, h as u32, &data, &spots);
+        assert!(max_diff(&cpu, &out) < 0.02);
+    }
+
+    #[test]
+    fn hostile_coordinates_neither_panic_nor_wrap() {
+        let Some(gpu) = test_gpu() else { return };
+        let data = synthetic_frame(32, 32);
+        // Debug builds panic on integer overflow, so this fails loudly if the clamp is missing.
+        let huge = [3.0e9f32, -3.0e9, f32::MAX, f32::MIN, 2_147_483_000.0];
+        let mut spots = Vec::new();
+        for &c in &huge {
+            spots.push(Spot::clone_spot((c, c), 8.0, (5.0, 5.0), 1.0));
+            spots.push(Spot::clone_spot((10.0, 10.0), 8.0, (c, c), 1.0));
+            spots.push(Spot::heal_spot((c, -c), 8.0, (c, c), 1.0));
+        }
+        let out = run_gpu(&gpu, 32, 32, &data, &spots);
+        assert_eq!(out.len(), data.len());
+        assert!(out.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn a_patch_with_an_out_of_range_center_is_rejected() {
+        let px = vec![[0.0; 4]; 9];
+        assert!(RemovalPatch::new((i32::MAX, 0), 3, px.clone()).is_err());
+        assert!(RemovalPatch::new((0, i32::MIN), 3, px.clone()).is_err());
+        assert!(RemovalPatch::new((1_000_000_000, -1_000_000_000), 3, px).is_ok());
+    }
+
+    #[test]
+    fn spot_key_survives_a_null_in_the_recipe_and_still_tells_spots_apart() {
+        let mut a = Spot::remove_spot(
+            (1.0, 2.0),
+            5.0,
+            1.0,
+            coat::MaskRecipe {
+                model_id: "x".into(),
+                model_version: "1".into(),
+                params: serde_json::json!({ "click": [1.0, null] }),
+                seed: None,
+            },
+        );
+        let key_a = spot_key(&a); // must not panic
+        assert_eq!(key_a, spot_key(&a.clone()));
+        a.radius = 6.0;
+        assert_ne!(key_a, spot_key(&a));
     }
 
     #[test]

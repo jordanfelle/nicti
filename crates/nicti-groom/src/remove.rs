@@ -17,6 +17,12 @@ const CONTEXT_FRAC: f32 = 0.75;
 const MIN_CROP: i32 = 160;
 /// Largest crop (source px), odd, and within `RemovalPatch`'s own limit.
 const MAX_CROP: i32 = 2047;
+/// Widest feather (source px) around the filled hole; see where it is used for why it is capped.
+const MAX_FEATHER_PX: f32 = 6.0;
+/// Camera-linear fill values are clamped to this. Normalized sensor values live around [0, ~1]; the
+/// cap only matters for extreme white-balance gains, where an unbounded value would overflow to
+/// infinity in the f16 texture and turn into NaN in the blend.
+const MAX_FILL: f32 = 1000.0;
 /// Largest object (source px across) the pipeline will attempt: past this a 512x512 inpaint is
 /// stretched too thin to look right, so it is refused rather than returning a smear.
 pub const MAX_OBJECT: i32 = 1024;
@@ -204,14 +210,18 @@ impl<S: Segmenter, I: Inpainter> RemovalBackend for RemovalEngine<S, I> {
             .map(|i| [out_chw[i], out_chw[plane + i], out_chw[2 * plane + i]])
             .collect();
         let filled = geom::resize_bilinear(&out_px, lama::SIZE, lama::SIZE, s, s);
-        let feather = ((side as f32 * 0.015).max(3.0)).round();
+        // Kept narrow: outside the hole the fill is the model's copy of the *original* round-tripped
+        // through a 512 px resize and the display mapping, i.e. slightly blurred and highlight-
+        // clipped, and the feather blends that over the real pixels. A wide ring would visibly
+        // soften real detail around every removal.
+        let feather = ((side as f32 * 0.015).clamp(3.0, MAX_FEATHER_PX)).round();
         let weight = geom::feathered_weight(&hole, s, s, feather);
         let pixels: Vec<[f32; 4]> = filled
             .iter()
             .zip(&weight)
             .map(|(&m, &wgt)| {
                 if wgt > 0.0 {
-                    let c = space.to_camera(m);
+                    let c = space.to_camera(m).map(|v| v.clamp(0.0, MAX_FILL));
                     [c[0], c[1], c[2], wgt]
                 } else {
                     [0.0; 4]
@@ -452,6 +462,42 @@ mod tests {
         let patch = e.remove(&request(&img, (50.0, 45.0), 12.0, 1)).unwrap();
         assert!(patch.side <= 89 && patch.side % 2 == 1);
         assert!(weight_at(&patch, 50, 45) > 0.99);
+    }
+
+    #[test]
+    fn the_feather_stays_narrow_even_for_a_huge_crop() {
+        // 900 px object -> ~2000 px crop; a proportional feather would be ~30 px.
+        let img = photo(4000, 3000);
+        let mut e = engine(450.0);
+        let patch = e
+            .remove(&request(&img, (2000.0, 1500.0), 470.0, 1))
+            .unwrap();
+        let ring: Vec<f32> = (450..500)
+            .map(|d| weight_at(&patch, 2000 + d, 1500))
+            .collect();
+        // Fully transparent again within (dilation + MAX_FEATHER_PX) of the 450 px mask edge.
+        let zero_at = ring
+            .iter()
+            .position(|&w| w == 0.0)
+            .expect("weight reaches 0")
+            + 450;
+        assert!(
+            zero_at <= 450 + 25 + MAX_FEATHER_PX as usize,
+            "weight reaches 0 only at {zero_at}"
+        );
+    }
+
+    #[test]
+    fn extreme_white_balance_cannot_produce_non_finite_or_huge_fill() {
+        let img = photo(800, 600);
+        let mut e = engine(30.0);
+        let mut req = request(&img, (400.0, 300.0), 60.0, 1);
+        req.cam_mul = [1.0e6, 1.0, 1.0e-6, 1.0];
+        let patch = e.remove(&req).unwrap();
+        assert!(patch
+            .pixels
+            .iter()
+            .all(|p| p.iter().all(|v| v.is_finite() && *v <= MAX_FILL)));
     }
 
     #[test]

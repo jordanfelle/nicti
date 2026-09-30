@@ -76,8 +76,10 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
 - **Healing/removal, the build (#51)**: `docs/adr/0051-healing-removal-build.md` — **Accepted**
   (2026-09-29). `spikes/groom` is deleted and promoted: classic clone/heal became the real baked
   `nicti.heal` stage in `nicti-tapetum::heal` (GPU passes on `Rgba16Float` textures, GPU-vs-CPU
-  parity-tested; **1 heal spot ≈ 0.9-3 ms and 10 ≈ 8-14 ms end to end on the RTX 5080**, inside the
-  16 ms budget), and AI removal became `nicti-groom` (MobileSAM + LaMa against their **real**
+  parity-tested; **on the RTX 5080 (noisy shared GPU) 1 heal spot ≈ 1-6 ms up to r=100, r=300 ≈
+  8-28 ms, 10 heals ≈ 7-18 ms end to end** — large or numerous heals reach the 16 ms budget. The
+  adversarial review caught that the first Jacobi solve started from the destination and so left a
+  blemish in place; it now starts from source + mean boundary offset), and AI removal became `nicti-groom` (MobileSAM + LaMa against their **real**
   tensor contracts, read from the ONNX files) producing a `RemovalPatch` the GPU blends in. A
   finished patch reaches the render graph by being *stamped into the heal params the render sees*
   (`heal::stamp_removal_state`), so it invalidates through the normal cache-key path. Models are

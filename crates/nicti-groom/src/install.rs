@@ -19,8 +19,9 @@ use crate::job::Slot;
 pub struct InstallHandle {
     /// Bytes downloaded so far across all artifacts (finished ones count in full).
     pub bytes: Arc<AtomicU64>,
-    /// Total bytes this install will download (artifacts already installed are excluded).
-    pub total: u64,
+    /// Total bytes this install will download (artifacts already installed are excluded). Shared
+    /// because a repair only learns which files are bad once its job starts hashing them.
+    pub total: Arc<AtomicU64>,
     pub cancel: Arc<AtomicBool>,
     /// Resolved exactly once, with `Ok` or a message.
     pub result: Slot<Result<(), String>>,
@@ -34,7 +35,11 @@ pub struct InstallModelsJob {
     finished_bytes: u64,
     bytes: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
-    total: u64,
+    total: Arc<AtomicU64>,
+    /// Repair mode: on the first step, hash what is installed, delete what fails, and download only
+    /// those (see [`InstallModelsJob::new_repair`]).
+    repair: bool,
+    checked: bool,
     result: Slot<Result<(), String>>,
     label: String,
 }
@@ -51,13 +56,36 @@ impl InstallModelsJob {
             .copied()
             .filter(|a| store.status(a) != Status::Installed)
             .collect();
-        let total: u64 = pending.iter().map(|a| a.download_size).sum();
+        Self::build(store, downloader, pending, false)
+    }
+
+    /// Like [`Self::new`], but for when an install exists yet a load reported it corrupt.
+    /// [`ModelStore::status`] only compares sizes, so a same-size bad file counts as installed and
+    /// a plain install would skip it forever. This hashes every installed artifact on the job's
+    /// thread, deletes the ones that fail, and downloads just those.
+    pub fn new_repair(
+        store: ModelStore,
+        downloader: Arc<dyn Downloader + Send + Sync>,
+        artifacts: &[&'static Artifact],
+    ) -> (Self, InstallHandle) {
+        Self::build(store, downloader, artifacts.to_vec(), true)
+    }
+
+    fn build(
+        store: ModelStore,
+        downloader: Arc<dyn Downloader + Send + Sync>,
+        pending: Vec<&'static Artifact>,
+        repair: bool,
+    ) -> (Self, InstallHandle) {
+        let total = Arc::new(AtomicU64::new(
+            pending.iter().map(|a| a.download_size).sum(),
+        ));
         let bytes = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let result: Slot<Result<(), String>> = Arc::new(Mutex::new(None));
         let handle = InstallHandle {
             bytes: Arc::clone(&bytes),
-            total,
+            total: Arc::clone(&total),
             cancel: Arc::clone(&cancel),
             result: Arc::clone(&result),
         };
@@ -70,8 +98,14 @@ impl InstallModelsJob {
             bytes,
             cancel,
             total,
+            repair,
+            checked: false,
             result,
-            label: "Download AI removal models".to_owned(),
+            label: if repair {
+                "Repair AI removal models".to_owned()
+            } else {
+                "Download AI removal models".to_owned()
+            },
         };
         (job, handle)
     }
@@ -99,7 +133,7 @@ impl ChunkedJob for InstallModelsJob {
     fn progress(&self) -> Progress {
         Progress {
             done: self.bytes.load(Ordering::Relaxed),
-            total: Some(self.total),
+            total: Some(self.total.load(Ordering::Relaxed)),
         }
     }
 
@@ -107,6 +141,28 @@ impl ChunkedJob for InstallModelsJob {
     /// ends the job with `Ok(Done)`: returning `Err` would drop the job without ever touching the
     /// slot, leaving the UI waiting on a download that already stopped.
     fn step(&mut self) -> Result<Step, JobError> {
+        if self.repair && !self.checked {
+            self.checked = true;
+            let store = &self.store;
+            let mut failed: Option<String> = None;
+            self.pending.retain(|a| {
+                if store.status(a) == Status::Installed && matches!(store.verify(a), Ok(true)) {
+                    return false; // intact: nothing to fetch
+                }
+                if let Err(e) = store.remove(a) {
+                    failed.get_or_insert(format!("Couldn't remove the bad {}: {e}", a.label));
+                }
+                true
+            });
+            self.total.store(
+                self.pending.iter().map(|a| a.download_size).sum(),
+                Ordering::Relaxed,
+            );
+            if let Some(msg) = failed {
+                self.resolve(Err(msg));
+                return Ok(Step::Done);
+            }
+        }
         let Some(&artifact) = self.pending.get(self.next) else {
             self.resolve(Ok(()));
             return Ok(Step::Done);
@@ -214,15 +270,24 @@ mod tests {
         let store = temp_store("multi");
         let dl = Arc::new(Fake(vec![("a", a_body.clone()), ("b", b_body.clone())]));
         let (mut job, handle) = InstallModelsJob::new(store.clone(), dl, &[a, b]);
-        assert_eq!(handle.total, (a_body.len() + b_body.len()) as u64);
+        assert_eq!(
+            handle.total.load(Ordering::Relaxed),
+            (a_body.len() + b_body.len()) as u64
+        );
 
         assert_eq!(job.step().unwrap(), Step::Yield, "more artifacts remain");
         assert_eq!(handle.bytes.load(Ordering::Relaxed), a_body.len() as u64);
         assert_eq!(resolved(&handle), None, "not done until the last artifact");
-        assert_eq!(job.progress().total, Some(handle.total));
+        assert_eq!(
+            job.progress().total,
+            Some(handle.total.load(Ordering::Relaxed))
+        );
 
         assert_eq!(job.step().unwrap(), Step::Done);
-        assert_eq!(handle.bytes.load(Ordering::Relaxed), handle.total);
+        assert_eq!(
+            handle.bytes.load(Ordering::Relaxed),
+            handle.total.load(Ordering::Relaxed)
+        );
         assert_eq!(resolved(&handle), Some(Ok(())));
         assert_eq!(store.status(a), Status::Installed);
         assert_eq!(store.status(b), Status::Installed);
@@ -238,14 +303,18 @@ mod tests {
         assert_eq!(first.step().unwrap(), Step::Done);
 
         let (_job, handle) = InstallModelsJob::new(store, dl, &[a, b]);
-        assert_eq!(handle.total, b_body.len() as u64, "a is already installed");
+        assert_eq!(
+            handle.total.load(Ordering::Relaxed),
+            b_body.len() as u64,
+            "a is already installed"
+        );
     }
 
     #[test]
     fn nothing_pending_finishes_immediately() {
         let store = temp_store("empty");
         let (mut job, handle) = InstallModelsJob::new(store, Arc::new(Fake(vec![])), &[]);
-        assert_eq!(handle.total, 0);
+        assert_eq!(handle.total.load(Ordering::Relaxed), 0);
         assert_eq!(job.step().unwrap(), Step::Done);
         assert_eq!(resolved(&handle), Some(Ok(())));
     }
@@ -291,6 +360,74 @@ mod tests {
         assert_eq!(job.step().unwrap(), Step::Done);
         assert!(resolved(&handle).unwrap().is_err());
         assert_eq!(store.status(a), Status::NotInstalled);
+    }
+
+    #[test]
+    fn repair_replaces_a_corrupt_file_of_the_right_size_that_a_plain_install_would_skip() {
+        let good = b"the real model bytes".to_vec();
+        let a = artifact("repair", &good);
+        let store = temp_store("repair");
+        let dl = Arc::new(Fake(vec![("repair", good.clone())]));
+        let (mut first, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a]);
+        assert_eq!(first.step().unwrap(), Step::Done);
+
+        // Same length, different bytes: `status` is fooled.
+        let mut bad = good.clone();
+        bad[0] ^= 0xff;
+        std::fs::write(store.path(a), &bad).unwrap();
+        assert_eq!(store.status(a), Status::Installed);
+        assert!(!store.verify(a).unwrap());
+
+        // A plain install has nothing to do...
+        let (plain, plain_handle) = InstallModelsJob::new(store.clone(), dl.clone(), &[a]);
+        assert_eq!(plain_handle.total.load(Ordering::Relaxed), 0);
+        drop(plain);
+        // ...but a repair fixes it, downloading exactly the bad file.
+        let (mut repair, handle) = InstallModelsJob::new_repair(store.clone(), dl, &[a]);
+        assert_eq!(repair.step().unwrap(), Step::Done);
+        assert_eq!(resolved(&handle), Some(Ok(())));
+        assert!(store.verify(a).unwrap());
+        assert_eq!(std::fs::read(store.path(a)).unwrap(), good);
+    }
+
+    #[test]
+    fn repair_leaves_intact_files_alone_and_downloads_nothing() {
+        let (a_body, b_body) = (b"aaaaaa".to_vec(), b"bbbbbbbbbb".to_vec());
+        let (a, b) = (artifact("ra", &a_body), artifact("rb", &b_body));
+        let store = temp_store("repair-intact");
+        let dl = Arc::new(Fake(vec![("ra", a_body), ("rb", b_body)]));
+        let (mut install, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a, b]);
+        while install.step().unwrap() == Step::Yield {}
+
+        // A downloader that fails every request: any fetch during repair would surface as an error.
+        let (mut repair, handle) =
+            InstallModelsJob::new_repair(store.clone(), Arc::new(Fake(vec![])), &[a, b]);
+        assert_eq!(repair.step().unwrap(), Step::Done);
+        assert_eq!(resolved(&handle), Some(Ok(())));
+        assert_eq!(
+            handle.total.load(Ordering::Relaxed),
+            0,
+            "nothing needed re-downloading"
+        );
+    }
+
+    #[test]
+    fn repair_fetches_only_the_bad_one_of_two() {
+        let (a_body, b_body) = (b"aaaaaa".to_vec(), b"bbbbbbbbbb".to_vec());
+        let (a, b) = (artifact("pa", &a_body), artifact("pb", &b_body));
+        let store = temp_store("repair-one");
+        let dl = Arc::new(Fake(vec![("pa", a_body.clone()), ("pb", b_body.clone())]));
+        let (mut install, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a, b]);
+        while install.step().unwrap() == Step::Yield {}
+        let mut bad = b_body.clone();
+        bad[3] ^= 1;
+        std::fs::write(store.path(b), bad).unwrap();
+
+        let (mut repair, handle) = InstallModelsJob::new_repair(store.clone(), dl, &[a, b]);
+        while repair.step().unwrap() == Step::Yield {}
+        assert_eq!(resolved(&handle), Some(Ok(())));
+        assert_eq!(handle.total.load(Ordering::Relaxed), b_body.len() as u64);
+        assert!(store.verify(a).unwrap() && store.verify(b).unwrap());
     }
 
     #[test]

@@ -57,9 +57,15 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   - **Built in #51 (`docs/adr/0051`)**: `spikes/groom` deleted/promoted. Classic heal = real baked
     stage `nicti-tapetum::heal` (`HealStage`/`HealKernel`/`HealExec`, `shaders/heal.wgsl`,
     `coat::HealParams`); AI removal = `nicti-groom` (`remove::RemovalEngine` → `RemovalPatch`);
-    model store = `nicti-stalk::models`. **RTX 5080: 1 heal ≈ 1-3 ms, 10 ≈ 8-14 ms** (end to end).
+    model store = `nicti-stalk::models`. **RTX 5080 (noisy shared GPU, ranges): 1 heal r=24 ≈ 1.2-2.2 ms, r=100 ≈ 3-6 ms, r=300 ≈ 8-28 ms, 10 heals ≈ 7-18 ms** (end to end) — big/many heals reach the 16 ms budget.
     **AI removal on the CPU ORT build ≈ 3-4 s — misses the <2 s CUDA-EP target**; quality checked
     on synthetic scenes only. **LaMa = on-demand download only, owner sign-off 2026-09-29.**
+  - **Gotcha (#51)**: **Jacobi must not start from the destination** — it needs ~side² sweeps to
+    smooth a blemish and we run 50-400, so a blemish over ~half the spot survived (Heal was a
+    near no-op). `boundary_mean`+`init_heal` start at source + mean ring offset. GPU-vs-CPU parity
+    tests can't catch this (reference shares the algorithm): keep `heal_actually_removes_the_blemish`
+    (asserts the outcome, mutation-checked). Also: bound per-render work (`MAX_SPOTS`,
+    `MAX_JACOBI_PASSES`) and clamp document coordinates (`COORD_LIMIT`) — documents are untrusted.
   - **Gotcha (#51)**: a finished patch isn't a params change, so `heal::stamp_removal_state` stamps
     `"removals": {spot key → patch hash}` into the heal entry the *render* sees (never the stored
     one) — that is how a patch arriving rebakes the stage; overriding `own_hash` after

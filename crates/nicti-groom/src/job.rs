@@ -25,6 +25,9 @@ pub type Slot<T> = Arc<Mutex<Option<T>>>;
 /// `heal::spot_key` even if the user has moved on to another spot meanwhile.
 #[derive(Debug, Clone)]
 pub struct RemoveOutcome {
+    /// The photo this was computed for (`RemovalRequest::image_key`), so a result that arrives
+    /// after the user has moved to another photo can be recognised and dropped.
+    pub image_key: u64,
     pub spot_key: String,
     pub result: Result<Arc<RemovalPatch>, String>,
 }
@@ -119,6 +122,7 @@ impl ChunkedJob for RemoveJob {
             Err(_) => Err("the removal engine failed earlier; restart to reload it".to_owned()),
         };
         *self.slot.lock().unwrap() = Some(RemoveOutcome {
+            image_key: self.image_key,
             spot_key: self.spot_key.clone(),
             result,
         });
@@ -199,6 +203,7 @@ mod tests {
         assert_eq!(job.progress().done, 1);
         let outcome = slot.lock().unwrap().take().expect("slot resolved");
         assert_eq!(outcome.spot_key, "spot-key");
+        assert_eq!(outcome.image_key, 1, "the photo the job was created for");
         assert_eq!(outcome.result.unwrap().side, 3);
         assert_eq!(backend.lock().unwrap().calls, 1);
     }

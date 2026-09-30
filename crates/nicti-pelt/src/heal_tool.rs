@@ -132,6 +132,8 @@ fn megabytes(bytes: u64) -> u64 {
 /// A finished (or failed) removal, keyed by `heal::spot_key`.
 #[derive(Debug)]
 pub struct RemovalEvent {
+    /// The photo the removal was computed for; a result for any other photo is dropped.
+    pub image_key: u64,
     pub key: String,
     pub result: Result<Arc<RemovalPatch>, String>,
 }
@@ -141,7 +143,9 @@ pub struct RemovalService {
     backend: Option<(RemovalModels, SharedBackend)>,
     install: Option<InstallHandle>,
     pending: Vec<Slot<RemoveOutcome>>,
-    pending_keys: HashSet<String>,
+    /// (photo, spot) pairs with a job in flight. Keyed by photo too: the same spot at the same
+    /// coordinates on a *different* photo is a different removal and must get its own job.
+    pending_keys: HashSet<(u64, String)>,
     /// Test seams: pretend the models are installed / substitute the backend, so gesture tests can
     /// exercise the whole click -> job -> patch path without ~250 MB of weights.
     #[cfg(test)]
@@ -203,9 +207,12 @@ impl RemovalService {
 
     /// `(downloaded, total)` bytes of the running install.
     pub fn install_progress(&self) -> Option<(u64, u64)> {
-        self.install
-            .as_ref()
-            .map(|h| (h.bytes.load(Ordering::Relaxed), h.total))
+        self.install.as_ref().map(|h| {
+            (
+                h.bytes.load(Ordering::Relaxed),
+                h.total.load(Ordering::Relaxed),
+            )
+        })
     }
 
     pub fn cancel_install(&self) {
@@ -224,6 +231,27 @@ impl RemovalService {
             .clone()
             .ok_or("No place to keep models: couldn't determine a data folder.")?;
         let (job, handle) = InstallModelsJob::new(
+            store,
+            Arc::new(HttpDownloader),
+            &models::removal_artifacts(),
+        );
+        self.install = Some(handle);
+        pounce.submit(Box::new(job));
+        Ok(())
+    }
+
+    /// Re-verifies the installed models and re-downloads any that are corrupt (see
+    /// [`InstallModelsJob::new_repair`]). The way out when a removal reports a failed integrity
+    /// check on files whose sizes look right.
+    pub fn start_repair(&mut self, pounce: &Pounce) -> Result<(), String> {
+        if self.install.is_some() {
+            return Ok(());
+        }
+        let store = self
+            .store
+            .clone()
+            .ok_or("No place to keep models: couldn't determine a data folder.")?;
+        let (job, handle) = InstallModelsJob::new_repair(
             store,
             Arc::new(HttpDownloader),
             &models::removal_artifacts(),
@@ -293,8 +321,8 @@ impl RemovalService {
         prompt: Prompt,
     ) -> Result<(), String> {
         let key = spot_key(spot);
-        if !self.pending_keys.insert(key.clone()) {
-            return Ok(()); // already running for exactly this spot
+        if !self.pending_keys.insert((develop.frame_key(), key.clone())) {
+            return Ok(()); // already running for exactly this spot on this photo
         }
         let frame = develop.frame_arc();
         let cam_mul = frame.cam_mul;
@@ -313,8 +341,8 @@ impl RemovalService {
         Ok(())
     }
 
-    pub fn is_pending(&self, key: &str) -> bool {
-        self.pending_keys.contains(key)
+    pub fn is_pending(&self, image_key: u64, key: &str) -> bool {
+        self.pending_keys.contains(&(image_key, key.to_owned()))
     }
 
     pub fn pending_count(&self) -> usize {
@@ -327,8 +355,10 @@ impl RemovalService {
         self.pending
             .retain(|slot| match slot.lock().unwrap().take() {
                 Some(outcome) => {
-                    self.pending_keys.remove(&outcome.spot_key);
+                    self.pending_keys
+                        .remove(&(outcome.image_key, outcome.spot_key.clone()));
                     events.push(RemovalEvent {
+                        image_key: outcome.image_key,
                         key: outcome.spot_key,
                         result: outcome.result,
                     });
@@ -365,6 +395,8 @@ pub struct HealUi {
     selected: Option<usize>,
     drag: Option<Drag>,
     status: Option<String>,
+    /// Set when a removal reported a failed model integrity check; shows the Repair button.
+    needs_repair: bool,
     pub service: RemovalService,
 }
 
@@ -385,6 +417,7 @@ impl HealUi {
             selected: None,
             drag: None,
             status: None,
+            needs_repair: false,
             service: RemovalService::new(),
         }
     }
@@ -408,7 +441,10 @@ fn delete_spot(develop: &mut DevelopView, params: &mut HealParams, index: usize)
 pub fn poll(ui: &egui::Ui, develop: &mut DevelopView, heal: &mut HealUi) {
     if let Some(result) = heal.service.poll_install() {
         heal.status = Some(match result {
-            Ok(()) => "AI removal models installed.".to_owned(),
+            Ok(()) => {
+                heal.needs_repair = false;
+                "AI removal models installed.".to_owned()
+            }
             Err(e) => e,
         });
     }
@@ -416,6 +452,11 @@ pub fn poll(ui: &egui::Ui, develop: &mut DevelopView, heal: &mut HealUi) {
     if !events.is_empty() {
         let mut params: HealParams = develop.stage_params(HEAL);
         for event in events {
+            // Computed for a photo that is no longer open: it means nothing here, and must not be
+            // applied even if a spot on this photo happens to share its key.
+            if event.image_key != develop.frame_key() {
+                continue;
+            }
             match event.result {
                 Ok(patch) => {
                     // Ignore a result for a spot the user has since deleted or edited.
@@ -430,6 +471,9 @@ pub fn poll(ui: &egui::Ui, develop: &mut DevelopView, heal: &mut HealUi) {
                         // spot instead of leaving it pending forever.
                         delete_spot(develop, &mut params, i);
                         heal.selected = None;
+                    }
+                    if message.contains("integrity check") {
+                        heal.needs_repair = true;
                     }
                     heal.status = Some(message);
                 }
@@ -584,7 +628,15 @@ pub fn handle_viewport(
         develop.set_stage_params(HEAL, &params);
         develop.prune_removals();
     }
-    draw_overlay(ui, rect, source, &params, heal, response);
+    draw_overlay(
+        ui,
+        rect,
+        source,
+        &params,
+        heal,
+        develop.frame_key(),
+        response,
+    );
 }
 
 /// Places a new spot of the current kind at `p`.
@@ -678,6 +730,7 @@ fn draw_overlay(
     source: (f32, f32),
     params: &HealParams,
     heal: &HealUi,
+    frame_key: u64,
     response: &egui::Response,
 ) {
     let painter = ui.painter_at(rect);
@@ -705,7 +758,7 @@ fn draw_overlay(
                 painter.circle_filled(sc, HANDLE_RADIUS_PX, source_stroke.color);
             }
         }
-        if s.kind == SpotKind::Remove && heal.service.is_pending(&spot_key(s)) {
+        if s.kind == SpotKind::Remove && heal.service.is_pending(frame_key, &spot_key(s)) {
             painter.text(
                 c,
                 egui::Align2::CENTER_CENTER,
@@ -829,7 +882,9 @@ pub fn show_panel(
     for (i, s) in params.spots.iter().enumerate() {
         ui.horizontal(|ui| {
             let mut text = format!("#{} {}", i + 1, kind_label(s.kind));
-            if s.kind == SpotKind::Remove && heal.service.is_pending(&spot_key(s)) {
+            if s.kind == SpotKind::Remove
+                && heal.service.is_pending(develop.frame_key(), &spot_key(s))
+            {
                 text.push_str(" (working...)");
             }
             if ui
@@ -864,8 +919,17 @@ pub fn show_panel(
 }
 
 fn show_models(ui: &mut egui::Ui, heal: &mut HealUi, pounce: &Pounce) {
-    if heal.service.models().is_some() {
+    if heal.service.models().is_some() && heal.service.install_progress().is_none() {
         ui.label("AI removal models are installed.");
+        if heal.needs_repair {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 130, 0),
+                "A model file failed its integrity check.",
+            );
+            if ui.button("Repair models").clicked() {
+                heal.status = heal.service.start_repair(pounce).err();
+            }
+        }
         return;
     }
     if let Some((done, total)) = heal.service.install_progress() {
@@ -1080,13 +1144,13 @@ mod tests {
             Prompt::Click { x: 20.0, y: 20.0 },
         )
         .unwrap();
-        assert!(svc.is_pending(&spot_key(&spot)));
+        assert!(svc.is_pending(develop.frame_key(), &spot_key(&spot)));
         drain(&p);
         let events = svc.poll_removals();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key, spot_key(&spot));
         assert_eq!(events[0].result.as_ref().unwrap().side, 3);
-        assert!(!svc.is_pending(&spot_key(&spot)));
+        assert!(!svc.is_pending(develop.frame_key(), &spot_key(&spot)));
         assert!(
             svc.poll_removals().is_empty(),
             "each result is delivered once"
@@ -1614,7 +1678,9 @@ mod tests {
             matches!(prompt, Some(Prompt::Click { .. })),
             "the recipe stores the click"
         );
-        assert!(heal.service.is_pending(&spot_key(&placed[0])));
+        assert!(heal
+            .service
+            .is_pending(develop.frame_key(), &spot_key(&placed[0])));
 
         // Until the job lands the render is unchanged (pending spots pass through).
         assert_eq!(pixels(&mut develop), before);
@@ -1686,6 +1752,122 @@ mod tests {
             pixels(&mut develop),
             before,
             "a deleted spot's patch must never be applied"
+        );
+    }
+
+    /// A backend that fails the integrity check, as `LazyBackend` does for a tampered install.
+    struct Tampered;
+
+    impl RemovalBackend for Tampered {
+        fn remove(&mut self, _: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
+            Err(RemovalError::Integrity(
+                "LaMa inpainting model failed".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn an_integrity_failure_offers_repair_and_a_successful_reinstall_clears_it() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Remove;
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Tampered)));
+        assert!(!heal.needs_repair);
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        drain(&p);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert!(
+            heal.needs_repair,
+            "an integrity failure must surface the Repair button"
+        );
+        assert!(heal
+            .status
+            .as_deref()
+            .unwrap_or("")
+            .contains("integrity check"));
+        assert!(spots(&develop).is_empty(), "the failed spot is dropped");
+    }
+
+    /// A removal that finishes after the user has switched photos must not land on the new one, and
+    /// the same spot placed on the new photo must get its own job (not be swallowed by the old).
+    #[test]
+    fn a_result_for_another_photo_is_dropped_and_the_new_photo_gets_its_own_job() {
+        struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+        impl RemovalBackend for Counting {
+            fn remove(&mut self, req: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
+                // The first (old photo's) removal fails; the second (new photo's) succeeds. With
+                // the wrong-photo guard missing, the old failure would delete the new photo's
+                // same-keyed spot and the success would then be discarded.
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return Err(RemovalError::NoObject);
+                }
+                RemovalPatch::new(
+                    (req.center.0 as i32, req.center.1 as i32),
+                    3,
+                    vec![[0.4, 0.4, 0.4, 1.0]; 9],
+                )
+                .map_err(|e| RemovalError::BadInput(e.to_string()))
+            }
+        }
+
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Remove;
+        heal.service.models_override = Some(fake_models());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend = Arc::new(Mutex::new(Counting(calls.clone())));
+        heal.service.backend_override = Some(backend.clone());
+
+        // Hold the backend so the first job is stuck mid-flight while we switch photos.
+        let gate = backend.lock().unwrap();
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        let first_key = develop.frame_key();
+        develop.load_real_frame(develop.frame_arc(), blake3::hash(b"a different photo"));
+        assert_ne!(develop.frame_key(), first_key);
+        assert!(
+            spots(&develop).is_empty(),
+            "opening a photo resets the document"
+        );
+
+        // The same click on the new photo: same coordinates, same spot key, different photo.
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        assert_eq!(spots(&develop).len(), 1);
+        assert_eq!(
+            heal.service.pending_count(),
+            2,
+            "one job per (photo, spot), not deduped"
+        );
+        drop(gate);
+        drain(&p);
+
+        let before = pixels(&mut develop);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "both photos' removals ran"
+        );
+        assert_eq!(heal.service.pending_count(), 0);
+        assert_eq!(
+            spots(&develop).len(),
+            1,
+            "the old photo's failure must not delete the new photo's spot"
+        );
+        assert_ne!(
+            pixels(&mut develop),
+            before,
+            "the new photo's own result was applied"
         );
     }
 }

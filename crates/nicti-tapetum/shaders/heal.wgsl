@@ -3,6 +3,11 @@
 //
 //   extract   frame -> dst_patch (frame around `center`) and guid_patch (frame around
 //             `src_center`), both `side` x `side`, edge-clamped at the frame border
+//   boundary_mean / init_heal  (Heal only) mean of (dst - src) on the ring just outside the spot,
+//             then interior := src + that mean. Jacobi converges in ~side^2 sweeps, far more than we
+//             run, so it must not start from the destination: whatever blemish it started from would
+//             survive the few sweeps we can afford. Starting from src + the boundary offset removes
+//             the blemish up front and leaves Jacobi only the (smooth) boundary variation to refine.
 //   jacobi    N ping-pong sweeps of the Poisson solve over the patch (Heal only)
 //   composite frame + solved patch -> result patch (feathered radial blend); the host then copies
 //             the in-bounds part of `result` back into the frame
@@ -33,6 +38,7 @@ struct Params {
 @group(0) @binding(1) var tex1_w: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var tex2: texture_storage_2d<rgba16float, read>;
 @group(0) @binding(3) var<uniform> p: Params;
+@group(0) @binding(4) var tex4: texture_storage_2d<rgba16float, read>;
 
 fn feather_weight(dist: f32, radius: f32, feather_in: f32) -> f32 {
     if (radius <= 0.0) { return 0.0; }
@@ -149,4 +155,64 @@ fn composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dist = sqrt(f32(dx * dx + dy * dy));
     let w = feather_weight(dist, p.radius, p.feather) * p.opacity;
     textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), dst + (solved - dst) * w);
+}
+
+// Width of the ring (outside the spot's radius) averaged for the boundary offset.
+const RING_WIDTH: f32 = 1.5;
+
+var<workgroup> partial_sum: array<vec4<f32>, 256>;
+var<workgroup> partial_count: array<f32, 256>;
+
+// One workgroup reduces the mean of (dst - src) over the ring [radius, radius + RING_WIDTH) and
+// writes it to texel (0,0) of tex1_w. tex0 = dst patch, tex2 = guidance patch.
+@compute @workgroup_size(256)
+fn boundary_mean(@builtin(local_invocation_index) lid: u32) {
+    var sum = vec4<f32>(0.0);
+    var count = 0.0;
+    let total = u32(p.side * p.side);
+    for (var i = lid; i < total; i = i + 256u) {
+        let x = i32(i) % p.side;
+        let y = i32(i) / p.side;
+        let fx = f32(x - p.half);
+        let fy = f32(y - p.half);
+        let d = sqrt(fx * fx + fy * fy);
+        if (d >= p.radius && d < p.radius + RING_WIDTH) {
+            sum += textureLoad(tex0, vec2<i32>(x, y)) - textureLoad(tex2, vec2<i32>(x, y));
+            count += 1.0;
+        }
+    }
+    partial_sum[lid] = sum;
+    partial_count[lid] = count;
+    workgroupBarrier();
+    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
+        if (lid < stride) {
+            partial_sum[lid] += partial_sum[lid + stride];
+            partial_count[lid] += partial_count[lid + stride];
+        }
+        workgroupBarrier();
+    }
+    if (lid == 0u) {
+        let n = max(partial_count[0], 1.0);
+        textureStore(tex1_w, vec2<i32>(0, 0), vec4<f32>((partial_sum[0] / n).xyz, 0.0));
+    }
+}
+
+// tex0 = dst patch, tex2 = guidance patch, tex4 = the 1x1 mean, tex1_w = initial patch.
+// Interior := guidance + mean offset; everything else stays as the destination (the Dirichlet
+// boundary the Jacobi sweeps hold fixed).
+@compute @workgroup_size(8, 8, 1)
+fn init_heal(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (!in_patch(gid)) { return; }
+    let x = i32(gid.x);
+    let y = i32(gid.y);
+    let dst = textureLoad(tex0, vec2<i32>(x, y));
+    let fx = f32(x - p.half);
+    let fy = f32(y - p.half);
+    if (sqrt(fx * fx + fy * fy) >= p.radius) {
+        textureStore(tex1_w, vec2<i32>(x, y), dst);
+        return;
+    }
+    let g = textureLoad(tex2, vec2<i32>(x, y));
+    let mean = textureLoad(tex4, vec2<i32>(0, 0)).xyz;
+    textureStore(tex1_w, vec2<i32>(x, y), vec4<f32>(g.xyz + mean, dst.w));
 }

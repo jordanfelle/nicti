@@ -26,14 +26,30 @@ correction and before the live suffix (ADR-0044), so it works in linear camera R
 `MaskRecipe`), in source-pixel coordinates like `CropParams`.
 
 Each spot is a sequence of compute passes on `Rgba16Float` textures (`shaders/heal.wgsl`): extract
-the destination and source patches, N Jacobi sweeps for `Heal` (none for `Clone`), then a feathered
-composite copied back into the frame. Reads and writes to the frame happen in different passes, so
+the destination and source patches; for `Heal`, a starting guess and N Jacobi sweeps (none for
+`Clone`); then a feathered composite copied back into the frame.
+
+**The Jacobi solve must not start from the destination.** The adversarial review of this change
+found that the first version did, and that it left a blemish essentially in place whenever the
+blemish filled more than about half the spot — i.e. Heal was close to a no-op for real use. Jacobi
+needs on the order of `side²` sweeps to smooth a blemish away, and only 50–400 are affordable. The
+fix (`boundary_mean` + `init_heal`) starts the interior at *source + the mean (destination − source)
+offset on the ring just outside the spot*, so the blemish never enters the solve and Jacobi only
+refines the smooth boundary variation. The lesson generalises: the GPU-vs-CPU parity tests could not
+see this, because the reference shared the algorithm and so agreed with the shader while both were
+wrong. `heal_actually_removes_the_blemish` now asserts the *outcome* (a known blemish on a flat
+field ends up at the flat value, on both GPU and reference) and is mutation-checked against reverting
+the initialisation. Reads and writes to the frame happen in different passes, so
 no `read_write` storage-texture feature is needed. Semantics, shared by the shader and the CPU
 reference used in the parity tests: centers round to whole pixels, out-of-frame reads clamp to the
 edge (the spike zero-filled, which would have painted black into a heal near a border), only
 in-frame patch pixels are written back, and spots apply in list order.
 
-`impl_version` is a real value here, so a change to the algorithm invalidates cached bakes.
+`impl_version` is a real value here, so a change to the algorithm invalidates cached bakes. A render
+applies at most `MAX_SPOTS` (256) spots and `MAX_JACOBI_PASSES` (12 000) Jacobi passes in total —
+a heal spot that would exceed the budget is skipped — and centres are clamped to ±10⁹ px, because
+a hand-edited or imported document must not be able to queue millions of GPU passes or overflow
+integer arithmetic.
 
 ### 2. AI removal: a click becomes a `RemovalPatch`
 
@@ -47,7 +63,11 @@ in-frame patch pixels are written back, and spots apply in list order.
 3. The mask is grown a few pixels (`geom::dilate`) and LaMa inpaints the 512×512 resize.
 4. The result is resized back, mapped into the heal stage's color space, and weighted by a feathered
    copy of the mask (`geom::feathered_weight`, an exact Euclidean distance transform — the spike's
-   O(r²)-per-pixel feather was explicitly "not the production algorithm").
+   O(r²)-per-pixel feather was explicitly "not the production algorithm"). The feather is capped at
+   6 px: outside the hole the fill is the model's copy of the *original*, round-tripped through a
+   512 px resize and the display mapping (slightly blurred, highlights clipped), so a wide ring
+   would visibly soften real detail around every removal. Fill values are clamped so extreme
+   white-balance gains cannot overflow f16 to infinity.
 
 The output is a `nicti_tapetum::heal::RemovalPatch`: a square, odd-sided patch of fill pixels with
 the fill weight in alpha. The GPU blends it with one extra pass (`composite_patch`). The document
@@ -90,6 +110,14 @@ URL pinned to an immutable revision, an exact size and a SHA-256; a download str
 or tampered download can never look installed. It runs as a Pounce job (`InstallModelsJob`), one
 artifact per chunk, cancellable, with live byte progress for the UI.
 
+`status()` only compares sizes (cheap enough to call every frame), but the ONNX Runtime library is
+native code loaded into the process and the models are parsed by it, so the removal backend
+re-hashes every pinned file **before the first load**, on the job's worker thread (hashing ~250 MB
+must not stall the UI), and again on every retry until the engine is loaded — a failed check can't
+be bypassed by trying twice. A same-size corrupt file would otherwise look installed forever, so a
+failed check surfaces a **Repair models** button (`InstallModelsJob::new_repair`), which hashes what
+is installed, deletes the files that fail, and downloads only those.
+
 | Artifact | Source | Size | License |
 |---|---|---|---|
 | MobileSAM encoder + decoder | `Acly/MobileSAM` (ONNX export) | 28 MB + 17 MB | Apache-2.0 |
@@ -130,25 +158,27 @@ why instead of leaving a spot pending forever.
 
 **Classic heal, end to end** (submit + GPU fence, frame copy included), release build cross-compiled
 for Windows and run on the real reference machine — NVIDIA GeForce RTX 5080, Vulkan — via
-`heal::tests::throughput`. Median of 5 after 1 warm-up:
+`heal::tests::throughput`. Median of 5 after 1 warm-up, **range over three runs**: this is a shared
+desktop GPU and run-to-run variance is large (one run measured the unchanged AI-patch row at 25 ms
+against 4.7 ms in the others), so treat these as ranges, not points:
 
 | | 3840×2560 | 8280×5520 |
 |---|---|---|
-| frame copy only (0 spots) | 0.19 ms | 0.53 ms |
-| 1 heal, r=24 | 0.87 ms | 1.44 ms |
-| 10 heal, r=24 | 7.7 ms | 13.7 ms |
-| 1 heal, r=100 | 2.5 ms | 3.0 ms |
-| 1 heal, r=300 | 6.6 ms | 7.4 ms |
-| 1 clone, r=100 | 0.8 ms | 0.7 ms |
-| 10 clone, r=24 | 2.4 ms | 1.1 ms |
-| 1 AI patch, 513×513 | 8.7 ms | 4.4 ms |
+| frame copy only (0 spots) | 0.2–0.3 ms | 0.5–0.7 ms |
+| 1 heal, r=24 | 1.7–2.2 ms | 1.2–2.1 ms |
+| 10 heal, r=24 | 8.9–17 ms | 7.4–18 ms |
+| 1 heal, r=100 | 3.1–5.7 ms | 3.1–5.1 ms |
+| 1 heal, r=300 | 7.8–15 ms | 7.7–28 ms |
+| 1 clone, r=100 | 0.4–0.8 ms | 0.7–1.7 ms |
+| 10 clone, r=24 | 2.4–3.0 ms | 1.1–3.4 ms |
+| 1 AI patch, 513×513 | 4.9–10 ms | 4.7–25 ms |
 
-A single spot is well inside ADR-0050's 16 ms interactive budget at any size measured. Ten heal
-spots at r=24 approach it: a heal spot's cost is mostly its ~50 Jacobi passes (~0.8–1.4 ms each
-regardless of radius at this size), whereas a clone spot costs a fraction of that. A stage this
-cheap is fine to rebake on every drag, but a document with dozens of heal spots would not be. The AI-patch
-row is dominated by the CPU converting and uploading the patch as f16 on every rebake, not by the
-GPU; storing it pre-converted is an easy win (follow-up).
+A single heal spot up to r≈100 is well inside ADR-0050's 16 ms interactive budget. **A very large
+spot (r=300) and ten heal spots each reach or exceed it** on a busy GPU, so dragging one of those
+would stutter; a heal spot's cost is mostly its Jacobi passes (a clone spot costs a fraction).
+These figures are after the review fix that added two passes per heal spot (r=24 was ~1 ms
+before). The AI-patch row is dominated by the CPU converting and uploading the patch as f16 on
+every rebake, not by the GPU (#325).
 
 **AI removal**, real MobileSAM/LaMa weights, ONNX Runtime 1.28.0 **CPU** execution provider, Linux,
 release build, session load excluded (`crates/nicti-groom/tests/real_models.rs`):
@@ -183,14 +213,16 @@ the tensor contracts, not that removals look good on real photos.
   execution provider it declares no VRAM; a GPU EP build must declare the sessions' footprint.
 - **#62 (LRC catalog import)** still owns translating LRC's `RetouchInfo`/`RemoveAreas`/People
   Removal entries into `HealParams`; nothing here parses those.
-- **Deferred, tracked as follow-up issues**: a GPU execution provider for removal; evaluating
-  removal quality on real photos (needs the reference machine and real images); pre-converting the
-  patch's f16 upload. Also deferred without an issue because they are Develop-wide rather than
-  heal-specific: undo/redo (Develop doesn't route edits through `History` yet) and persistence of
-  the edit document, on which removal patches (recomputed, not stored) will depend.
+- **Deferred, tracked as follow-up issues**: a GPU execution provider for removal
+  ([#322](https://github.com/jordanfelle/nicti/issues/322)); evaluating removal quality on real
+  photos ([#323](https://github.com/jordanfelle/nicti/issues/323)); undo/redo and persistence of the
+  edit document, which Develop-wide work removal patches (recomputed, not stored) will depend on
+  ([#324](https://github.com/jordanfelle/nicti/issues/324)); pre-converting the patch's f16 upload
+  ([#325](https://github.com/jordanfelle/nicti/issues/325)).
 - **Freehand brush geometry** for spots remains the additive `Geometry` enum ADR-0050 sketched;
   circles only for now. PatchMatch-style auto-source is likewise still a possible upgrade over the
   SSD baseline.
-- **Known limits**: an object larger than 1024 px is refused; a very large crop is inpainted at
+- **Known limits**: classic heal quality was verified on synthetic blemishes (a flat field with a
+  known dark disc), not real textured photos; a very large spot pays for hundreds of Jacobi passes; an object larger than 1024 px is refused; a very large crop is inpainted at
   512×512 and upsampled, so the fill is softer than the surrounding photo detail; the mask comes
   from a single click/box with no refine step.

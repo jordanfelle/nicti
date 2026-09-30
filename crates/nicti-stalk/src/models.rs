@@ -373,6 +373,16 @@ impl ModelStore {
         }
     }
 
+    /// Deletes `artifact`'s installed file (a no-op if it isn't there), so a later `install` fetches
+    /// it fresh -- the way out for a same-size but corrupt file that `status` still reports as
+    /// installed.
+    pub fn remove(&self, artifact: &Artifact) -> io::Result<()> {
+        match fs::remove_file(self.path(artifact)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     /// Re-hashes the installed file against the pinned SHA-256.
     pub fn verify(&self, artifact: &Artifact) -> io::Result<bool> {
         let mut file = match fs::File::open(self.path(artifact)) {
@@ -489,6 +499,8 @@ impl ModelStore {
         }
 
         let staged = final_path.with_extension("partial");
+        // Whatever happens below, don't leave the staged file behind.
+        let _cleanup = RemoveOnDrop(&staged);
         match artifact.payload {
             Payload::File => fs::rename(download_tmp, &staged)?,
             Payload::ZipMember(member) => extract_member(artifact, download_tmp, member, &staged)?,
@@ -506,6 +518,15 @@ impl ModelStore {
         }
         fs::rename(&staged, final_path)?;
         Ok(final_path.to_path_buf())
+    }
+}
+
+/// Removes a file when dropped -- after a successful rename it is already gone, so that is a no-op.
+struct RemoveOnDrop<'a>(&'a Path);
+
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
     }
 }
 
@@ -748,6 +769,33 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, InstallError::Download(_)));
         assert_eq!(store.status(&a), Status::NotInstalled);
+    }
+
+    #[test]
+    fn remove_deletes_an_installed_file_and_tolerates_a_missing_one() {
+        let body = b"0123456789".to_vec();
+        let a = file_artifact(&body);
+        let store = temp_store("remove");
+        store.remove(&a).unwrap(); // nothing there: fine
+        store
+            .install(&a, &Fake::new(body), &mut |_| {}, &no_cancel())
+            .unwrap();
+        assert_eq!(store.status(&a), Status::Installed);
+        store.remove(&a).unwrap();
+        assert_eq!(store.status(&a), Status::NotInstalled);
+    }
+
+    #[test]
+    fn a_failed_extraction_leaves_no_partial_file() {
+        let content = vec![1u8; 100];
+        let zip_bytes = zip_with("pkg/lib/lib.dll", &content);
+        let mut a = zip_artifact(&zip_bytes, &content);
+        a.installed_sha256 = sha(b"not the content"); // extraction succeeds, verification fails
+        let store = temp_store("no-partial");
+        assert!(store
+            .install(&a, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
+            .is_err());
+        assert_eq!(fs::read_dir(store.root().join(a.id)).unwrap().count(), 0);
     }
 
     #[test]
