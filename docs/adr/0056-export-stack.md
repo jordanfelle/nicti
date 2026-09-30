@@ -220,3 +220,13 @@ see #223 and this ADR's own JPEG encoder section above.)
 - **TIFF export's own ICC/EXIF/XMP write stays open** until a dedicated TIFF writer exists (same
   gap ADR-0059 left for DNG) -- #57 should treat TIFF as encode-only (no metadata) until that
   lands, or file a dedicated follow-up if TIFF export with metadata is needed sooner.
+
+## Amendments
+
+- **2026-09-30 (#57, [ADR-0057](0057-export-pipeline.md)):** the pipeline this ADR sketched is now
+  built. Three corrections to what it said: (1) TIFF export is **not** encode-only -- the `tiff`
+  crate writes resolution, an ICC profile (tag 34675) and XMP (tag 700); only EXIF in TIFF stays
+  deferred. (2) The spike hardcoded EXIF `ColorSpace = 1`; it is 1 for sRGB and 0xFFFF for Display
+  P3 / Adobe RGB. (3) `spikes/scent::atomic_write`'s pattern (one shared temp name, silently
+  overwriting rename) is not safe for parallel writers; ADR-0057 replaces it. The status stays
+  Proposed: the full-resolution GPU-resize measurement on the reference machine is still pending.

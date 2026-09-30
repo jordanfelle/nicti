@@ -218,3 +218,15 @@ cataloged asset's full-file hash in the new `asset.content_hash`; only then is t
 `Carry`'s `Drop` discards the half-built destination. `fs::rename` is tried first for same-volume
 moves. Also: `SqliteCatalog::quick_check` now reports a corrupt-database error from the pragma as
 a problem string rather than a generic `Err`.
+
+## #57: the master edit document
+
+`edit_variant` (ADR-0021) was created empty for every asset at ingest and never read or written
+again, so Develop's edits lived only in memory. Export renders "the photo with its edits", so
+`CatalogStore` gained `get_master_edit`/`put_master_edit`. `put` upserts on `(asset_id, 'master')`
+and serializes with `to_canonical_json` (sorted keys, `-0.0` normalized, any JSON `null` — what a
+NaN/Infinity becomes — refused as `CatalogError::Document` rather than persisted). `get` returns an
+empty document for an asset that exists but has no master row, `None` for an unknown asset, and a
+parse failure is an error, never silently an empty document (`nicti-pelt` falls back to an empty
+document so a corrupt one can't stop a photo from opening, and the next save replaces it). Append-
+only history and named snapshots (`edit_history`) are not touched — that is #324.

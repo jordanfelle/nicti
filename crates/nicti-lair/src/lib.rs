@@ -67,6 +67,9 @@ pub enum CatalogError {
     /// `delete_collection`'s subtree walk would never terminate).
     #[error("moving under itself or a descendant would create a cycle")]
     WouldCreateCycle,
+    /// A master edit document that couldn't be serialized (non-finite float) or parsed back.
+    #[error("edit document error: {0}")]
+    Document(String),
 }
 
 /// A catalog store backend. `Module` settles identity/versioning only (ADR-0019 §7); the
@@ -128,6 +131,24 @@ pub trait CatalogStore: Module {
     /// `list_assets_by_root`) — #31 (loupe) needs this to resolve a navigation cursor's current
     /// id into a real asset to display.
     fn get_asset(&self, id: i64) -> Result<Option<Asset>, CatalogError>;
+
+    /// Reads an asset's master edit document (#57): what the Develop view saved, and what export
+    /// renders. `None` means no such asset; a freshly ingested asset returns an empty document
+    /// (`ingest` always creates the master `edit_variant` row). A stored document that fails to
+    /// parse is `CatalogError::Document`, never silently replaced by an empty one.
+    fn get_master_edit(
+        &self,
+        asset_id: i64,
+    ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError>;
+
+    /// Writes an asset's master edit document as canonical JSON (#57). Refuses a document
+    /// containing a non-finite float (`CatalogError::Document`) rather than persisting `null`.
+    /// Doesn't touch `edit_history` -- append-only history/undo is #324's scope.
+    fn put_master_edit(
+        &self,
+        asset_id: i64,
+        doc: &nicti_pawprint::EditDocument,
+    ) -> Result<(), CatalogError>;
 
     /// Reads a root's own `rel_path` (which callers store as an absolute folder path under
     /// ADR-0071's placeholder-volume-identity stand-in — see `nicti-pelt::register_root`) by its

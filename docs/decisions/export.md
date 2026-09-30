@@ -37,3 +37,40 @@ trail.
   Text watermarking is deferred (no vendored font with a confirmed license picked yet).
 - **TIFF export's metadata write (ICC/EXIF/XMP) stays deferred** — same class of gap ADR-0059 left
   for DNG: no crate in this workspace builds arbitrary TIFF tags yet.
+
+## #57: the export pipeline
+
+Full record: `docs/adr/0057-export-pipeline.md` (Accepted). The decisions, in the order they were
+made while building it:
+
+- **Where the code goes.** The engine went into `crates/nicti-preen` and stays GPU-free and
+  catalog-free (it depends on neither `nicti-tapetum` nor `nicti-lair`), so every pixel/format/
+  naming/collision behavior is unit-testable without an adapter. The render and the Pounce wiring
+  live in `nicti-pelt/src/export/`. The graph/registry/"document → kernel inputs" step moved from
+  `nicti-pelt::render` into `nicti_tapetum::spine` so Develop, export and `bench/knead` share it.
+- **Chained jobs, one lane each.** decode (CPU) → render (GPU, one tile per step) → encode+write
+  (CPU). A single job would run a ~1.7 s decode inside a GPU-lane step and starve `RemoveJob`.
+  Stages submit the next through a weak `Pounce::submitter()`, because a job holding a `Pounce`
+  clone could become the last handle on a worker thread, where `Drop for Pounce` would join itself.
+  The render job declares `vram_bytes: 0` because Pounce silently drops a background job that
+  declares more than the *total* budget and a 45 MP frame's textures exceed the placeholder budget.
+- **The photo-identity bug.** `apply_document` recomputes every node's hash from the document, so
+  the identity Develop/Loupe set with `set_own_hash(DECODE, ..)` was reset on the first render and
+  two same-size photos could be served each other's cached pixels. Found because export would have
+  hit it immediately (mutation-checked: removing the stamp makes the tests fail). Fix: stamp the
+  identity into the render-time document copy.
+- **Edits come from the catalog.** `edit_variant` was always written empty and never read. The
+  get/put pair on `CatalogStore` plus Develop autosave (pointer release when dirty, before a photo
+  switch, before an export, on exit) is the minimum export needs; History/undo and AI-removal
+  recompute stay with #324. Export skips AI Remove spots and fails a photo whose DCP profile is gone.
+- **Orientation** is applied after resize, from the file's EXIF, because LibRaw's decode is
+  unrotated. **PNG EXIF** is a raw `eXIf` chunk lifted from a 1×1 JPEG `little_exif` writes: its own
+  PNG writer emits a non-standard zTXt "Raw profile type exif" and rewrites any XMP it finds.
+- **TIFF** turned out to be writable with ICC, XMP and resolution through the `tiff` crate (the ICC
+  tag must be UNDEFINED, not the crate's `[u8]` BYTE). Two exiftool TIFF complaints are validator/
+  crate quirks, not defects: it flags every Adobe-Deflate file (libtiff's own `tiffcp -c zip`
+  too), and the `tiff` crate leaves IFD values at an odd offset after an odd compressed strip.
+- **Collisions.** `create_new` claims a name atomically (threads, processes, FAT/exFAT), a unique
+  temp file is written and renamed over the claim, and the plan de-duplicates within the batch on a
+  case-folded path under every policy. `spikes/scent::atomic_write` (one shared temp name, silent
+  overwrite) is unsafe for parallel writers.

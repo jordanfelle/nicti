@@ -33,7 +33,11 @@ nicti-shed = { path = "../nicti-shed" }
 nicti-claw = { path = "../nicti-claw" }
 nicti-pawprint = { path = "../nicti-pawprint" }
 nicti-groom = { path = "../nicti-groom" }
+nicti-preen = { path = "../nicti-preen" }
+thiserror = "2"
 nicti-stalk = { path = "../nicti-stalk" }
 
 [dev-dependencies]
 tempfile = "3"
+# PNG decode for export round-trip assertions.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

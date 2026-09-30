@@ -11,7 +11,7 @@ use serde_json::Value;
 pub mod canonical;
 pub mod history;
 
-pub use canonical::{chain, hash_value, CanonicalError};
+pub use canonical::{chain, hash_value, to_canonical_json, CanonicalError};
 
 /// One pipeline stage's parameters. `params` is a raw JSON `Value` rather than a typed struct so
 /// a stage this build doesn't know about (a plugin not installed locally, or a newer schema

@@ -5,6 +5,7 @@ paths:
   - "crates/nicti-lair/src/pounce_jobs.rs"
   - "crates/nicti-pelt/src/activity.rs"
   - "docs/adr/0054-job-scheduler-pounce.md"
+  - "crates/nicti-pelt/src/export/**"
 ---
 
 # Jobs & Concurrency (Pounce) — Quick Reference
@@ -125,3 +126,11 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands. 42 unit tests, real reference-hardware
   numbers for both contention cases (not just lavapipe correctness). See
   `docs/research/crouch-scheduler.md`.
+- **`Pounce::submitter()` (#57)**: a `Weak`-backed `Submitter` (`submit -> Option<JobId>`, `cancel`) so
+  a *job* can chain a follow-up. Never hand a job a `Pounce` clone: `Drop for Pounce` joins the
+  workers when it sees the last handle, and a queued job could be that last handle on a worker
+  thread. `Submitter::submit` returns `None` after shutdown. A job's `Drop` can run inside the
+  scheduler's lock, so it must never submit (take other locks only); the export run chains from
+  `step()` and backstops from the UI thread. `JobKind::Export` jobs are folded into one line in
+  `activity.rs`. A GPU-lane job over the *total* VRAM budget is dropped — export's render job
+  declares `vram_bytes: 0`.

@@ -20,6 +20,7 @@ pub mod histogram;
 pub mod perk;
 pub mod prefetch;
 pub mod renderer;
+pub mod spine;
 pub mod stages;
 pub mod tile;
 

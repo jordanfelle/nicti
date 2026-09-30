@@ -18,143 +18,28 @@ use std::sync::Arc;
 
 use crate::camera_profiles::{self, ProfileEntry};
 use nicti_calico::dcp::DcpProfile;
-use nicti_calico::profile::ProfileSolution;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
-use nicti_tapetum::coat::{
-    self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
-    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
-};
-use nicti_tapetum::color;
+use nicti_tapetum::coat::{self, CameraProfileParams, CropParams, HealParams};
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, output_encode};
 use nicti_tapetum::gpu::GpuContext;
-use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::graph::RenderGraph;
 use nicti_tapetum::heal::{self, HealExec, HealKernel, RemovalPatch, RemovalSet};
 use nicti_tapetum::histogram::{self, Histogram};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
+use nicti_tapetum::spine::{self, build_graph, build_registry, LIVE_IDS};
 use nicti_tapetum::stages::{
-    self, CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec,
-    CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION, SHARPEN, TONE,
-    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
+    DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, WORKING_SPACE,
 };
-use nicti_tapetum::{RenderStage, StageRegistry};
-
-const LIVE_IDS: [&str; 9] = [
-    WB,
-    WORKING_SPACE,
-    EXPOSURE,
-    TONE,
-    TONE_CURVE,
-    VIBRANCE,
-    HSL,
-    SHARPEN,
-    NOISE_REDUCTION,
-];
-
-fn build_graph() -> RenderGraph {
-    let mut graph = RenderGraph::new();
-    let baked_ids = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
-    let mut prev: Option<&str> = None;
-    for id in baked_ids {
-        graph
-            .add_node(StageNode {
-                id: id.to_string(),
-                kind: StageKind::Baked,
-                upstream: prev.map(|p| vec![p.to_string()]).unwrap_or_default(),
-                own_hash: blake3::hash(id.as_bytes()),
-            })
-            .unwrap();
-        prev = Some(id);
-    }
-    for id in LIVE_IDS {
-        graph
-            .add_node(StageNode {
-                id: id.to_string(),
-                kind: StageKind::Live,
-                upstream: vec![prev.unwrap().to_string()],
-                own_hash: blake3::hash(id.as_bytes()),
-            })
-            .unwrap();
-        prev = Some(id);
-    }
-    graph
-        .add_node(StageNode {
-            id: CROP.to_string(),
-            kind: StageKind::Geometry,
-            upstream: vec![prev.unwrap().to_string()],
-            own_hash: blake3::hash(CROP.as_bytes()),
-        })
-        .unwrap();
-    graph
-}
-
-macro_rules! render_stage_factory {
-    ($name:ident, $stage_fn:path) => {
-        fn $name() -> Arc<dyn RenderStage> {
-            Arc::new($stage_fn())
-        }
-    };
-}
-render_stage_factory!(decode_factory, stages::decode_stage);
-render_stage_factory!(demosaic_factory, stages::demosaic_stage);
-render_stage_factory!(denoise_factory, stages::denoise_stage);
-render_stage_factory!(lens_factory, stages::lens_stage);
-render_stage_factory!(heal_factory, stages::heal_stage);
-render_stage_factory!(wb_factory, stages::wb_stage);
-render_stage_factory!(working_space_factory, stages::working_space_stage);
-render_stage_factory!(exposure_factory, stages::exposure_stage);
-render_stage_factory!(tone_factory, stages::tone_stage);
-render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
-render_stage_factory!(vibrance_factory, stages::vibrance_stage);
-render_stage_factory!(hsl_factory, stages::hsl_stage);
-render_stage_factory!(sharpen_factory, stages::sharpen_stage);
-render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
-render_stage_factory!(crop_factory, stages::crop_stage);
-
-type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
-
-/// Every stage this crate's own render graph (`build_graph`) can reference -- `apply_document`
-/// errors on any graph node id missing from this registry, so this list must stay in sync with
-/// `build_graph`'s own node ids.
-fn build_registry() -> StageRegistry {
-    let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 15] = [
-        (DECODE, decode_factory),
-        (DEMOSAIC, demosaic_factory),
-        (DENOISE, denoise_factory),
-        (LENS, lens_factory),
-        (HEAL, heal_factory),
-        (WB, wb_factory),
-        (WORKING_SPACE, working_space_factory),
-        (EXPOSURE, exposure_factory),
-        (TONE, tone_factory),
-        (TONE_CURVE, tone_curve_factory),
-        (VIBRANCE, vibrance_factory),
-        (HSL, hsl_factory),
-        (SHARPEN, sharpen_factory),
-        (NOISE_REDUCTION, noise_reduction_factory),
-        (CROP, crop_factory),
-    ];
-    for (id, factory) in entries {
-        registry
-            .register(
-                nicti_claw::Descriptor {
-                    id,
-                    schema_version: 1,
-                },
-                factory,
-            )
-            .expect("every stage id above is namespaced and registered exactly once");
-    }
-    registry
-}
+use nicti_tapetum::StageRegistry;
 
 /// A synthetic 64x64 "RAW" gradient frame -- a real `LinearFrame`, real decode/normalize/live-
 /// suffix/crop dispatches, but no real file on disk (loading one is #31's job). Distinct per-
 /// channel gradients so a color-pipeline bug (e.g. a channel swap) is visible, not masked by a
 /// flat test color.
-fn synthetic_linear_frame() -> LinearFrame {
+pub(crate) fn synthetic_linear_frame() -> LinearFrame {
     const SIZE: u32 = 64;
     let black = 0u32;
     let maximum = 4095u32;
@@ -200,9 +85,11 @@ pub struct DevelopView {
     extent: Extent,
     graph: RenderGraph,
     registry: StageRegistry,
-    /// The user's actual edits. Not yet persisted to a catalog (#31's scope, once a real asset
-    /// exists) -- lives only for this session/view's lifetime.
+    /// The user's actual edits. Persisted to the catalog by the app (`PeltApp::save_develop_edits`,
+    /// #57) whenever [`Self::is_dirty`].
     document: EditDocument,
+    /// The document as last loaded from / saved to the catalog: what `is_dirty` compares against.
+    saved: EditDocument,
     decode_kernel: DecodeKernel,
     live_kernel: LiveSuffixKernel,
     crop_kernel: CropKernel,
@@ -210,6 +97,10 @@ pub struct DevelopView {
     /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
     /// photo changes: a patch is pixels inpainted from *this* frame and means nothing on another.
     removals: RemovalSet,
+    /// Identity of the loaded photo (`loupe::asset_cache_key`), stamped into every render's
+    /// document (`spine::stamp_source_identity`) so Tapetum's baked cache can't serve one photo's
+    /// pixels for another of the same size.
+    identity: blake3::Hash,
     /// Identity of the loaded photo as a `u64`, keying the removal engine's per-photo caches (its
     /// model frame and SAM embedding). Changes whenever `load_real_frame` swaps the photo.
     frame_key: u64,
@@ -255,11 +146,13 @@ impl DevelopView {
             graph: build_graph(),
             registry: build_registry(),
             document: EditDocument::default(),
+            saved: EditDocument::default(),
             decode_kernel,
             live_kernel,
             crop_kernel,
             heal_kernel,
             removals: RemovalSet::new(),
+            identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
             renderer,
@@ -338,23 +231,13 @@ impl DevelopView {
         self.document.stages.remove(stage_id);
     }
 
-    fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id: &str) -> T {
-        match doc.stages.get(id) {
-            Some(entry) => coat::parse(&entry.params),
-            None => T::default(),
-        }
-    }
-
     /// Renders the current frame at its native extent, returning the final (post-crop) texture.
     /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
     /// gives a document with no entry for a stage, just applied to the whole document at once.
     pub fn render(&mut self) -> Arc<FrameTexture> {
-        let empty;
-        let stamped;
-        let doc = if self.show_before {
-            empty = EditDocument::default();
-            &empty
+        let mut stamped = if self.show_before {
+            EditDocument::default()
         } else {
             // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
             // changing) rebakes the heal stage through the normal cache-key path.
@@ -365,72 +248,31 @@ impl DevelopView {
                 // its default hash, so the cached cropped composite can't be served back.
                 d.stages.remove(CROP);
             }
-            stamped = d;
-            &stamped
+            d
         };
+        spine::stamp_source_identity(&mut stamped, self.identity);
+        let doc = &stamped;
         self.graph
             .apply_document(doc, &self.registry)
             .expect("build_registry covers every id build_graph adds");
 
-        let wb: WbParams = Self::resolve(doc, WB);
-        let exposure: ExposureParams = Self::resolve(doc, EXPOSURE);
-        let tone: ToneParams = Self::resolve(doc, TONE);
-        let tone_curve: ToneCurveParams = Self::resolve(doc, TONE_CURVE);
-        let vibrance: VibranceParams = Self::resolve(doc, VIBRANCE);
-        let hsl: HslParams = Self::resolve(doc, HSL);
-        let sharpen: SharpenParams = Self::resolve(doc, SHARPEN);
-        let noise_reduction: NoiseReductionParams = Self::resolve(doc, NOISE_REDUCTION);
-        let crop: CropParams = Self::resolve(doc, CROP);
-
-        let source_extent = (self.extent.width as f32, self.extent.height as f32);
-        let rect = crop.effective_rect(source_extent);
-        let transform = geometry::affine_for_crop(rect, crop.rotation_degrees);
-        self.crop_kernel.set_transform(transform);
-
-        // A selected DCP profile (#42) replaces the plain LibRaw matrix with its own
-        // illuminant-interpolated matrix (WB folded in per the DNG ForwardMatrix contract) and
-        // adds the HueSatMap / baseline exposure / LookTable stages. `doc` is empty under
-        // `show_before`, so the before view is always the plain matrix.
-        let chosen: CameraProfileParams = Self::resolve(doc, WORKING_SPACE);
-        let solution: Option<Arc<ProfileSolution>> =
-            match (&chosen.content_hash, &self.active_profile) {
-                (Some(_), Some(profile)) => {
-                    let gains =
-                        color::wb_gains_with_params(self.frame.cam_mul, &self.frame.cam_xyz, &wb);
-                    Some(Arc::new(profile.solve(gains.map(f64::from))))
-                }
-                _ => None,
-            };
-        let matrix = match &solution {
-            Some(s) => s.camera_to_working,
-            None => {
-                color::camera_to_working_space_matrix(self.frame.cam_mul, &self.frame.cam_xyz, &wb)
-            }
-        };
-        self.live_kernel.set_params(
-            &self.gpu,
-            &LiveParams {
-                working_space_matrix: matrix,
-                camera_profile: solution,
-                exposure,
-                tone,
-                tone_curve,
-                vibrance,
-                hsl,
-                sharpen,
-                noise_reduction,
-                pixel_scale: 1.0,
-            },
+        let inputs = spine::resolve_inputs(
+            doc,
+            &self.frame,
+            self.extent,
+            self.active_profile.as_deref(),
+            1.0,
         );
+        self.crop_kernel.set_transform(inputs.crop_transform);
+        self.live_kernel.set_params(&self.gpu, &inputs.live);
 
         let decode_exec = DecodeExec {
             kernel: &self.decode_kernel,
             frame: &self.frame,
         };
-        let heal: HealParams = Self::resolve(doc, HEAL);
         let heal_exec = HealExec {
             kernel: &self.heal_kernel,
-            params: &heal,
+            params: &inputs.heal,
             removals: &self.removals,
         };
         let passthrough = PassthroughExec;
@@ -494,39 +336,71 @@ impl DevelopView {
     /// follow-up (see this file's own module doc comment) -- this only guards against *losing*
     /// an in-memory edit to an unrelated navigation action, not against it never being saved at
     /// all.
+    #[cfg(test)]
     pub fn has_edits(&self) -> bool {
         !self.document.stages.is_empty()
     }
 
+    /// The current edits.
+    pub fn document(&self) -> &EditDocument {
+        &self.document
+    }
+
+    /// Whether the edits differ from what the catalog has (`load_real_frame`'s `doc` or the last
+    /// [`Self::mark_saved`]).
+    pub fn is_dirty(&self) -> bool {
+        self.document != self.saved
+    }
+
+    /// Records that the current edits are now persisted.
+    pub fn mark_saved(&mut self) {
+        self.saved = self.document.clone();
+    }
+
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
-    /// resetting `document` to a fresh default -- edits aren't persisted across a navigation
-    /// change yet (catalog persistence of edits is a documented follow-up, not this ticket's
-    /// scope, per this file's own module doc comment) -- and updating the `DECODE` stage's
-    /// `own_hash` to `identity` so Tapetum's baked-output cache doesn't collide between different
-    /// real photos at the same pixel extent. `identity` is the caller's job to compute
+    /// with `doc` as its edits (the catalog's stored master document, #57; pass
+    /// `EditDocument::default()` for none), remembering `identity` so every render stamps it into
+    /// its document (`spine::stamp_source_identity`) and Tapetum's baked-output cache can't
+    /// collide between different real photos at the same pixel extent. `identity` is the caller's job to compute
     /// (`crate::loupe::asset_cache_key`) -- this crate stays decoupled from `nicti-lair`. Callers
-    /// should check [`Self::has_edits`] first if silently discarding an active edit session would
-    /// be a surprise (the Loupe view does -- see its own caller-side guard).
-    pub fn load_real_frame(&mut self, frame: Arc<LinearFrame>, identity: blake3::Hash) {
+    /// must save (or deliberately discard) a dirty document first -- see [`Self::is_dirty`].
+    ///
+    /// A camera profile the document selects is reloaded and verified against the hash the
+    /// document recorded; on failure the profile is left off and [`Self::profile_error`] says why.
+    /// AI removals are not persisted (#324): `doc` keeps their recipes, but no patch exists until
+    /// the removal is re-run.
+    pub fn load_real_frame(
+        &mut self,
+        frame: Arc<LinearFrame>,
+        identity: blake3::Hash,
+        doc: EditDocument,
+    ) {
         self.extent = Extent {
             width: frame.width,
             height: frame.height,
         };
         self.frame = frame;
-        self.document = EditDocument::default();
+        self.saved = doc.clone();
+        self.document = doc;
         self.removals.clear();
         self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
         self.show_before = false;
         self.active_profile = None;
         self.profile_error = None;
+        match camera_profiles::load_for_document(
+            &self.document,
+            &self.frame.make,
+            &self.frame.model,
+        ) {
+            Ok(profile) => self.active_profile = profile,
+            Err(e) => self.profile_error = Some(e),
+        }
         let needles = camera_profiles::camera_needles(&self.frame.make, &self.frame.model);
         if self.profiles_for.as_ref() != Some(&needles) {
             self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
             self.profiles_for = Some(needles);
         }
-        self.graph
-            .set_own_hash(DECODE, identity)
-            .expect("DECODE is always present -- build_graph always adds it");
+        self.identity = identity;
     }
 
     /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).
@@ -625,6 +499,7 @@ impl DevelopView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nicti_tapetum::coat::ExposureParams;
     /// Regression test for a real data-loss bug caught in this ticket's own adversarial review:
     /// an earlier version of the Loupe view (#31 phase 3) would call `load_real_frame`
     /// unconditionally, silently discarding whatever edits were open on the Develop tab the
@@ -646,6 +521,93 @@ mod tests {
 
         view.reset_stage(EXPOSURE);
         assert!(!view.has_edits(), "the only edit was just reset away");
+    }
+
+    /// Regression: `apply_document` used to reset the identity `load_real_frame` set on the DECODE
+    /// node, so a second photo of the same size was served the first photo's cached pixels.
+    #[test]
+    fn two_photos_of_the_same_size_never_share_cached_pixels() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let a = synthetic_linear_frame();
+        let mut b = synthetic_linear_frame();
+        b.pixels.reverse();
+        assert_eq!((a.width, a.height), (b.width, b.height));
+
+        view.load_real_frame(Arc::new(a), blake3::hash(b"a"), EditDocument::default());
+        let first = nicti_tapetum::frame::read_frame(&gpu, &view.render());
+        view.load_real_frame(Arc::new(b), blake3::hash(b"b"), EditDocument::default());
+        let second = nicti_tapetum::frame::read_frame(&gpu, &view.render());
+        assert_ne!(
+            first, second,
+            "the second photo rendered the first photo's pixels"
+        );
+    }
+
+    /// #57: edits are dirty relative to what the catalog holds, and loading a photo with its stored
+    /// document starts clean with exactly that document.
+    #[test]
+    fn dirty_tracking_and_loading_a_stored_document() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        assert!(!view.is_dirty());
+
+        let mut exposure: ExposureParams = view.stage_params(EXPOSURE);
+        exposure.stops = 0.75;
+        view.set_stage_params(EXPOSURE, &exposure);
+        assert!(view.is_dirty(), "an edit not yet saved");
+        let edited = view.document().clone();
+        view.mark_saved();
+        assert!(!view.is_dirty());
+
+        // Undoing back to the empty document is a change relative to what was saved.
+        view.reset_stage(EXPOSURE);
+        assert!(view.is_dirty());
+
+        // Loading another photo with a stored document: clean, and the document is exactly it.
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo"), edited.clone());
+        assert!(!view.is_dirty());
+        assert_eq!(view.document(), &edited);
+        let loaded: ExposureParams = view.stage_params(EXPOSURE);
+        assert_eq!(loaded.stops, 0.75);
+
+        // And a photo with no stored edits loads empty.
+        view.load_real_frame(
+            view.frame_arc(),
+            blake3::hash(b"other"),
+            EditDocument::default(),
+        );
+        assert!(!view.is_dirty() && !view.has_edits());
+    }
+
+    /// A stored document whose camera profile is gone must not silently render with the plain
+    /// matrix: Develop reports why.
+    #[test]
+    fn a_stored_profile_that_cannot_be_reloaded_is_reported() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            WORKING_SPACE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(CameraProfileParams {
+                    name: Some("Gone".into()),
+                    path: Some("/definitely/not/here.dcp".into()),
+                    content_hash: Some("00".repeat(32)),
+                })
+                .unwrap(),
+            },
+        );
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"x"), doc);
+        assert!(view.profile_error.is_some());
+        assert!(!view.is_dirty(), "loading never marks the view dirty");
     }
 
     /// Selecting a camera profile must (a) record its identity in the edit document, (b) change
