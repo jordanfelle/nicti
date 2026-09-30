@@ -150,6 +150,23 @@ pub trait CatalogStore: Module {
         doc: &nicti_pawprint::EditDocument,
     ) -> Result<(), CatalogError>;
 
+    /// Batch form of [`get_master_edit`](Self::get_master_edit) (#52): one result per requested
+    /// id, in the same order, `None` for an id with no such asset. Read under a single lock, so the
+    /// batch is a consistent snapshot. A stored document that fails to parse fails the whole call
+    /// with `CatalogError::Document`.
+    fn get_master_edits(
+        &self,
+        asset_ids: &[i64],
+    ) -> Result<Vec<(i64, Option<nicti_pawprint::EditDocument>)>, CatalogError>;
+
+    /// Batch form of [`put_master_edit`](Self::put_master_edit) (#52): writes every document in
+    /// one transaction, so it's all-or-nothing. A document containing a non-finite float
+    /// (`CatalogError::Document`), or an id with no asset (FK error), writes nothing at all.
+    fn put_master_edits(
+        &self,
+        edits: &[(i64, nicti_pawprint::EditDocument)],
+    ) -> Result<(), CatalogError>;
+
     /// Reads a root's own `rel_path` (which callers store as an absolute folder path under
     /// ADR-0071's placeholder-volume-identity stand-in — see `nicti-pelt::register_root`) by its
     /// row id. Combined with `Asset::rel_path`, this is what lets a caller build a real

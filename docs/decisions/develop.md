@@ -85,6 +85,12 @@ from #99's classic auto-tone, not built on its output.
   algorithmic Auto Settings — and requires the best ML model to beat the ridge baseline by ≥15% on
   mean range-normalized MAE, not just clear an absolute per-slider bound alone.
 
+## Presets, copy/paste, sync
+
+Covers #52 (ADR-0052): reusing one photo's develop settings across others.
+
+- **Presets, copy/paste, sync (#52)**: `docs/adr/0052-presets-copy-paste-sync.md` — **Accepted**. Per-stage, absolute semantics: a checked stage replaces the target's `StageEntry` wholesale, a checked stage absent from the source is removed from the target (a reset), an unchecked stage is never touched. Checklist = Develop's "Reset all" stage ids; crop, heal and masks start unchecked because they describe one photo's content. Masks travel as the single `nicti.masks` stage; geometry masks are normalized so they transfer, AI masks re-bake lazily when each photo opens (batch pre-bake deferred to #353 — baked alphas have no disk tier yet). One batch write (`get_master_edits`/`put_master_edits`, single transaction, serialise-then-write so a bad document writes nothing). A target whose document would not change is not written and gets no undo entry (ADR-0101 rule 6); the result is one summary line (rule 5). Presets live in `<catalog>.develop-presets.json` (export-presets pattern), no built-ins, duplicate/empty names refused, applying a preset never resets a stage it doesn't hold. Undo is session-local (previous documents in memory) and skips any photo whose document is no longer what the batch wrote; real History is #324. The loaded photo is flushed before and re-read after a batch (`DevelopView::replace_document`), else the per-frame autosave overwrites the batch. Relative paste via `apply_relative` is deferred.
+
 ## Auto-op graceful degradation
 
 Covers #101 (ADR-0101): what an automatic, non-interactive develop op (auto-straighten #47, auto-tone #99) does on failure or low confidence.

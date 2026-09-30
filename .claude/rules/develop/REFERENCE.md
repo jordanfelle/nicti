@@ -5,12 +5,23 @@ paths:
   - "docs/adr/0099-classic-auto-tone.md"
   - "docs/adr/0101-auto-op-graceful-degradation.md"
   - "crates/nicti-tapetum/src/perk.rs"
+  - "docs/adr/0052-presets-copy-paste-sync.md"
+  - "crates/nicti-pelt/src/knead/**"
 ---
 
 # Develop (Auto-Tone) — Quick Reference
 
 Full reasoning/history: `docs/decisions/develop.md`.
 
+- **Presets, copy/paste, sync (#52)** — `docs/adr/0052-presets-copy-paste-sync.md`: **Accepted**.
+  Per-stage + absolute: a checked stage replaces the target's entry, a checked stage the source
+  lacks is *removed*, unchecked untouched; crop/heal/masks start unchecked. AI masks re-bake lazily
+  when a photo opens (batch pre-bake → #353). No-op targets: no write, no undo entry. Undo is
+  session-local and skips photos edited since. Presets = `<catalog>.develop-presets.json`, no
+  built-ins, dup/empty name refused. **Gotcha:** after a batch touching the loaded photo call
+  `DevelopView::replace_document`, or the per-frame autosave writes the stale doc back.
+  Code: `crates/nicti-pelt/src/knead/` (`mod.rs` pure core, `batch.rs`, `presets.rs`, `ui.rs`),
+  `PeltApp::run_knead_command`, `CatalogStore::get_master_edits`/`put_master_edits`.
 - **Classic auto-tone (#99)** — `docs/adr/0099-classic-auto-tone.md`: **Proposed**, pending #202
   (reference-machine run — no LRC install and `spikes/retina` can't build in this sandbox).
   Candidate A (percentile heuristic) vs. candidate B (ridge-regression fit); decision rule
@@ -47,6 +58,11 @@ Full reasoning/history: `docs/decisions/develop.md`.
   `ExposureParams`/`ToneParams` out).
 
 ## Package contents
+
+- **`crates/nicti-pelt/src/knead/`** (#52/ADR-0052) — `mod.rs` (`GROUPS` checklist, `StageSet`,
+  `Clipboard`, `plan`), `batch.rs` (`run_batch`, `LastBatch::undo`), `presets.rs` (`PresetStore`),
+  `ui.rs` (`KneadUi`: checklist modal, presets panel, Apply-preset menu, summary/Undo line). Wired
+  in `app.rs` (Ctrl+Shift+C/V/S, Library toolbar, Develop's left `presets_panel`).
 
 - **`spikes/pupil`** (#99/ADR-0099's classic auto-tone research) — `input` (retina dump-linear
   reader), `render` (default-render color treatment), `histogram` (percentile/mean/clip-fraction

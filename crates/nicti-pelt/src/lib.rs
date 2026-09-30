@@ -22,6 +22,7 @@ mod filter_bar;
 mod folder_panel;
 mod grid;
 mod heal_tool;
+mod knead;
 mod loupe;
 mod mask_edit;
 mod mask_panel;
@@ -30,6 +31,8 @@ mod render;
 mod t2;
 #[cfg(test)]
 mod test_gpu;
+#[cfg(test)]
+mod test_support;
 mod update;
 mod viewport;
 
