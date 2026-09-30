@@ -35,6 +35,7 @@ mod test_gpu;
 mod test_support;
 mod update;
 mod viewport;
+mod xmp_sync;
 
 use std::sync::Arc;
 

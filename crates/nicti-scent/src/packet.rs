@@ -60,6 +60,8 @@ pub struct Patch {
     pub keywords: Option<Vec<String>>,
     pub hierarchical_keywords: Option<Vec<Vec<String>>>,
     pub nicti_edit_document: Option<Option<String>>,
+    /// `Some(true)` writes `nicti:pick="1"`; `Some(false)` removes it.
+    pub nicti_pick: Option<bool>,
 }
 
 const NICTI_NS: &str = "https://nicti.dev/xmp/1.0/";
@@ -182,6 +184,9 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             if is_local(key, "editDocument") && patch.nicti_edit_document.is_some() {
                 continue;
             }
+            if key.as_ref() == b"nicti:pick" && patch.nicti_pick.is_some() {
+                continue;
+            }
             if key.as_ref() == b"xmlns:nicti" {
                 saw_nicti_ns = true;
             }
@@ -198,6 +203,12 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 new_tag.push_attribute(("xmlns:nicti", NICTI_NS));
             }
             new_tag.push_attribute(("nicti:editDocument", v.as_str()));
+        }
+        if patch.nicti_pick == Some(true) {
+            if !saw_nicti_ns && !matches!(&patch.nicti_edit_document, Some(Some(_))) {
+                new_tag.push_attribute(("xmlns:nicti", NICTI_NS));
+            }
+            new_tag.push_attribute(("nicti:pick", "1"));
         }
         (was_start, new_tag)
     };
@@ -500,5 +511,59 @@ mod tests {
             "{patched}"
         );
         assert!(patched.contains("crs:WhiteBalance=\"Custom\""), "{patched}");
+    }
+
+    #[test]
+    fn pick_round_trips_and_clears() {
+        let picked = apply(
+            SAMPLE,
+            &Patch {
+                nicti_pick: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(picked.contains("xmlns:nicti="), "{picked}");
+        assert!(picked.contains("nicti:pick=\"1\""), "{picked}");
+        assert!(picked.contains("crs:WhiteBalance=\"Custom\""), "{picked}");
+        assert!(lrc_fields::read(&picked).unwrap().pick);
+
+        // Re-picking doesn't duplicate the attribute or the namespace.
+        let again = apply(
+            &picked,
+            &Patch {
+                nicti_pick: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(again.matches("nicti:pick=").count(), 1, "{again}");
+        assert_eq!(again.matches("xmlns:nicti=").count(), 1, "{again}");
+
+        let cleared = apply(
+            &picked,
+            &Patch {
+                nicti_pick: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!cleared.contains("nicti:pick"), "{cleared}");
+        assert!(!lrc_fields::read(&cleared).unwrap().pick);
+    }
+
+    #[test]
+    fn pick_with_edit_document_declares_namespace_once() {
+        let out = apply(
+            SAMPLE,
+            &Patch {
+                nicti_edit_document: Some(Some("e30=".into())),
+                nicti_pick: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches("xmlns:nicti=").count(), 1, "{out}");
+        assert!(lrc_fields::read(&out).unwrap().pick);
     }
 }

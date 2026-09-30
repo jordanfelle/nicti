@@ -147,6 +147,20 @@ pub enum DeleteState {
     Trashed,
 }
 
+/// What nicti last saw and wrote in an asset's XMP sidecar (#60, `asset_sidecar` table). Hashes are
+/// raw BLAKE3 bytes (32 each); `None` means "never seen"/"never written".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SidecarState {
+    pub path: String,
+    pub last_seen_hash: Option<Vec<u8>>,
+    pub last_seen_mtime_ms: Option<i64>,
+    pub last_written_hash: Option<Vec<u8>>,
+    /// When the catalog's markers last diverged from the sidecar unwritten; `None` = in sync.
+    pub catalog_dirty_since_ms: Option<i64>,
+    /// Both sides changed within the ambiguity window; neither was overwritten.
+    pub needs_review: bool,
+}
+
 /// One open `delete_item` journal row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteItem {

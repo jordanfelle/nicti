@@ -1,6 +1,6 @@
-//! Throwaway spike for #59 (ADR-0059): XMP interop with Lightroom Classic. See
+//! XMP interop with Lightroom Classic (#60, promoted from the #59 `scent` spike). See
 //! `docs/research/scent-xmp-interop.md` for the full write-up and
-//! `docs/adr/0059-xmp-interop.md` for the decision this spike backs.
+//! `docs/adr/0059-xmp-interop.md` (still Proposed, pending #187) for the decision it backs.
 //!
 //! Scope, matching ADR-0021's handoff to #59:
 //! - `lrc_fields`: layer (a), the LRC-convention rating/label/keyword mapping.

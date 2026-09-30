@@ -301,3 +301,37 @@ Explicitly unverified, pending the follow-up hands-on LRC session (tracked as a 
 - **Explicitly deferred**: DNG/TIFF embedded-XMP write (see above); the `crs:` field-level mask
   mapping itself (masking's own territory, #48/ADR-0048); LRC's Pick-flag XMP mapping (unverified,
   above).
+
+## Implemented in #60 (phase-1 coexistence)
+
+The `scent` spike was promoted to `crates/nicti-scent` (spike deleted); `nicti-lair`'s
+`scent_sync.rs` is the one place the catalog and XMP meet. **This ADR is still Proposed** -- the
+Reject=`-1`, Pick and label-text mappings below are the best guess until #187's hands-on LRC pass
+confirms or amends them; #60 builds against them as written.
+
+- **Scope**: `.xmp` sidecars for NEF/NRW only (Scruff doesn't ingest JPEG/DNG yet, so the embedded
+  JPEG writer is ported but has no caller). Layer (a) only -- rating/reject, label, keywords --
+  plus Pick as `nicti:pick="1"` on the Description (no LRC-side mapping, per above). Layers (b)
+  (`nicti:editDocument`) and (c) (`crs:`) are not wired.
+- **Sides compare by meaning, not bytes**: both are reduced to a canonical marker set
+  (`scent_sync::Markers`), so LRC reformatting a packet is never a conflict and an unchanged
+  state never touches the file. A flat `dc:subject` entry that is the leaf of an
+  `lr:hierarchicalSubject` path is the same keyword, not a second top-level one.
+- **State**: schema v9 `asset_sidecar` (what nicti last saw and wrote, and
+  `catalog_dirty_since_ms` -- when the catalog last diverged from the sidecar unwritten, which is
+  the catalog side's "mtime" for the ADR-0021 rule, since the catalog has no metadata-modified
+  time of its own).
+- **Read path (ingest, and Synchronize Folder via Scruff's rescan)**: sidecar changed since last
+  seen -> if the catalog isn't dirty the file wins; if it is, ADR-0021's newer-wins applies with
+  `AMBIGUITY_WINDOW_MS = 2000` (inside it: flagged for review, neither side overwritten). No prior
+  record: a pristine catalog yields to the file, a non-pristine one is flagged, never guessed.
+- **Write path (after every marker change, auto-write on by default)**: stricter than the read
+  path -- if the sidecar changed under nicti and that change was never ingested, the write is
+  **held for review** rather than clobbering it. Writes patch the existing packet in place
+  (foreign namespaces, including `crs:`, preserved), go through `atomic_write`, and record the
+  hash of the bytes written. A sidecar that can't be read or parsed is an error, never a blank
+  packet. One process-wide lock covers the read-hash -> gate -> write -> record sequence.
+- **Known limits**: a sidecar that uses `lr:`/`dc:` elements without declaring the namespace
+  would get an unbound prefix if nicti adds keywords to it (LRC always declares them); no
+  keyword-tagging UI exists in pelt yet, so keywords only flow sidecar -> catalog in practice.
+

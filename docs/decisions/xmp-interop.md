@@ -35,3 +35,9 @@ trail.
   throwaway copies) to settle several open questions (does Reject/Pick reach XMP at all? does a
   renamed label set change the written text? what does "Read Metadata from File" do with a
   Nicti-written field?) before promoting this to Accepted.
+
+- **#60 implementation (phase-1 coexistence)**: `crates/nicti-scent` (promoted from `spikes/scent`,
+  spike deleted) + `nicti-lair`'s `scent_sync.rs` + `nicti-pelt`'s `xmp_sync.rs`; see the ADR's
+  "Implemented in #60" section for the conflict/hold-for-review rules, the schema v9
+  `asset_sidecar` state, and the known limits. ADR-0059 is still Proposed pending #187.
+

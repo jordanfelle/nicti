@@ -63,6 +63,10 @@ pub struct LrcMeta {
     /// `["Events", "Anthrocon 2025"]` for `lr:hierarchicalSubject`'s
     /// `Events|Anthrocon 2025`.
     pub hierarchical_keywords: Vec<Vec<String>>,
+    /// Pick flag. ADR-0059 defers an LRC-side mapping (#187), so this lives
+    /// only in nicti's own `nicti:pick` attribute (`"1"` = picked); absent
+    /// means not picked.
+    pub pick: bool,
 }
 
 #[derive(Debug, Error)]
@@ -131,6 +135,8 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
                                 meta.label = Some(val.to_string());
                             }
                         }
+                    } else if key == b"nicti:pick" {
+                        meta.pick = attr.value.as_ref() == b"1";
                     }
                 }
             }
@@ -164,6 +170,8 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
                                 meta.label = Some(val.to_string());
                             }
                         }
+                    } else if key == b"nicti:pick" {
+                        meta.pick = attr.value.as_ref() == b"1";
                     }
                 }
             }

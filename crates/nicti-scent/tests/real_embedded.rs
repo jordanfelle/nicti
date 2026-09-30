@@ -1,4 +1,4 @@
-//! Cross-checks `scent::embedded::jpeg` against real LRC-touched JPEGs --
+//! Cross-checks `nicti_scent::embedded::jpeg` against real LRC-touched JPEGs --
 //! the embedded-XMP case, distinct from `real_lrc_sidecars.rs`'s sidecar
 //! case, since ~72% of the reference library is JPEG
 //! (`docs/research/shed-lrcat-schema.md`).
@@ -46,7 +46,7 @@ fn real_embedded_jpegs_round_trip_a_no_op_write() {
         let data =
             fs::read(jpeg_path).unwrap_or_else(|e| panic!("read {}: {e}", jpeg_path.display()));
 
-        let Some(xmp) = scent::embedded::read_xmp(&data)
+        let Some(xmp) = nicti_scent::embedded::read_xmp(&data)
             .unwrap_or_else(|e| panic!("read_xmp {}: {e}", jpeg_path.display()))
         else {
             checked += 1;
@@ -54,19 +54,19 @@ fn real_embedded_jpegs_round_trip_a_no_op_write() {
         };
         with_xmp += 1;
 
-        let meta = scent::lrc_fields::read(&xmp)
+        let meta = nicti_scent::lrc_fields::read(&xmp)
             .unwrap_or_else(|e| panic!("parse embedded xmp {}: {e}", jpeg_path.display()));
 
         // Round-trip: patch the packet with a no-op, splice it back into a
         // *copy* of the file, and confirm the metadata a fresh read sees is
         // unchanged. The original file on disk is never touched.
-        let patched = scent::packet::apply(&xmp, &scent::packet::Patch::default())
+        let patched = nicti_scent::packet::apply(&xmp, &nicti_scent::packet::Patch::default())
             .unwrap_or_else(|e| panic!("patch {}: {e}", jpeg_path.display()));
-        let rewritten = scent::embedded::write_xmp(&data, &patched)
+        let rewritten = nicti_scent::embedded::write_xmp(&data, &patched)
             .unwrap_or_else(|e| panic!("write_xmp {}: {e}", jpeg_path.display()));
-        let reread = scent::embedded::read_xmp(&rewritten)
+        let reread = nicti_scent::embedded::read_xmp(&rewritten)
             .unwrap_or_else(|e| panic!("re-read {}: {e}", jpeg_path.display()))
-            .and_then(|x| scent::lrc_fields::read(&x).ok());
+            .and_then(|x| nicti_scent::lrc_fields::read(&x).ok());
 
         assert_eq!(
             Some(meta),

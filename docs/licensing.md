@@ -384,6 +384,12 @@ update) are both reused, no new review needed. `cargo deny check licenses` passe
 `deny.toml` entries needed. **DNG/TIFF tag-700 embedded-XMP write is out of scope for this pass**
 (see the research doc) — no TIFF-writer crate was evaluated or added.
 
+**Update ([#60](https://github.com/jordanfelle/nicti/issues/60), `crates/nicti-scent`):** the
+`scent` spike was promoted to a production crate, `nicti-scent`, and `nicti-lair` now depends on
+it. No new third-party dependency: `quick-xml`, `blake3`, `base64`, `serde` and `thiserror` are all
+already reviewed above. The spike's `roxmltree`, `serde_json`, `anyhow` and `clap` (CLI and
+comparison-only) were dropped with its binary, not carried over.
+
 **Update (2026-09-27, [#44](https://github.com/jordanfelle/nicti/issues/44)'s `loaf` spike,
 `docs/adr/0044-stage-cached-render-graph.md`):** two new crates for the disk cache tier's
 compression candidates — `zstd` v0.13.3 (`MIT`) plus its own `zstd-safe`/`zstd-sys` v7.3.0/

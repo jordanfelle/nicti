@@ -1,4 +1,4 @@
-//! Cross-checks `scent`'s LRC-field reader/patcher against real
+//! Cross-checks `nicti-scent`'s LRC-field reader/patcher against real
 //! LRC-written `.xmp` sidecars, and against the same photos' rows in a real
 //! `.lrcat` (via `spikes/shed`'s own reader) where available.
 //!
@@ -47,15 +47,15 @@ fn real_sidecars_parse_and_round_trip_through_a_no_op_patch() {
         let xmp = fs::read_to_string(xmp_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", xmp_path.display()));
 
-        let meta = scent::lrc_fields::read(&xmp)
+        let meta = nicti_scent::lrc_fields::read(&xmp)
             .unwrap_or_else(|e| panic!("parse {}: {e}", xmp_path.display()));
 
         // A no-op patch (nothing set) must never change the metadata a
         // second read sees -- the real correctness property this spike
         // needs, independent of exact byte formatting.
-        let patched = scent::packet::apply(&xmp, &scent::packet::Patch::default())
+        let patched = nicti_scent::packet::apply(&xmp, &nicti_scent::packet::Patch::default())
             .unwrap_or_else(|e| panic!("patch {}: {e}", xmp_path.display()));
-        let reread = scent::lrc_fields::read(&patched)
+        let reread = nicti_scent::lrc_fields::read(&patched)
             .unwrap_or_else(|e| panic!("re-parse patched {}: {e}", xmp_path.display()));
         assert_eq!(
             meta,
