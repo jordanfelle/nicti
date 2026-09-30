@@ -20,7 +20,7 @@ use crate::camera_profiles::{self, ProfileEntry};
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
-use nicti_tapetum::coat::{self, CameraProfileParams, CropParams, ExposureParams, HealParams};
+use nicti_tapetum::coat::{self, CameraProfileParams, CropParams, HealParams};
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, output_encode};
 use nicti_tapetum::gpu::GpuContext;
@@ -336,6 +336,7 @@ impl DevelopView {
     /// follow-up (see this file's own module doc comment) -- this only guards against *losing*
     /// an in-memory edit to an unrelated navigation action, not against it never being saved at
     /// all.
+    #[cfg(test)]
     pub fn has_edits(&self) -> bool {
         !self.document.stages.is_empty()
     }
@@ -498,6 +499,7 @@ impl DevelopView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nicti_tapetum::coat::ExposureParams;
     /// Regression test for a real data-loss bug caught in this ticket's own adversarial review:
     /// an earlier version of the Loupe view (#31 phase 3) would call `load_real_frame`
     /// unconditionally, silently discarding whatever edits were open on the Develop tab the

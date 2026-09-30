@@ -122,6 +122,27 @@ impl ExportReport {
 }
 
 /// A running (or finished) export. Cheap to hold; poll it once per frame.
+/// The template-facing facts of one catalog asset (also used for the dialog's filename preview).
+pub fn facts_for(asset: &nicti_lair::Asset, source_path: &std::path::Path) -> AssetFacts {
+    let source_dir = source_path.parent().map(PathBuf::from).unwrap_or_default();
+    AssetFacts {
+        asset_id: asset.id,
+        stem: source_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        folder: source_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        captured: asset.captured_at.as_deref().and_then(DateParts::parse),
+        mtime_unix: asset.mtime_unix,
+        rating: asset.rating.map(|r| r as i32),
+        make: asset.make.clone(),
+        model: asset.model.clone(),
+    }
+}
+
 pub struct ExportRun {
     shared: Arc<Shared>,
 }
@@ -187,22 +208,7 @@ impl ExportRun {
                 .get_master_edit(id)
                 .map_err(catalog_err)?
                 .unwrap_or_default();
-            let facts = AssetFacts {
-                asset_id: id,
-                stem: source_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                folder: source_dir
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                captured: asset.captured_at.as_deref().and_then(DateParts::parse),
-                mtime_unix: asset.mtime_unix,
-                rating: asset.rating.map(|r| r as i32),
-                make: asset.make.clone(),
-                model: asset.model.clone(),
-            };
+            let facts = facts_for(&asset, &source_path);
             prepared.push(Prepared {
                 plan_item: PlanItem { facts, source_dir },
                 source_path,
@@ -248,7 +254,6 @@ impl ExportRun {
 
         let shared = Arc::new(Shared {
             submitter: env.submitter,
-            store: env.store,
             decoder: env.decoder,
             gpu: env.gpu,
             registry: env.registry,
@@ -307,10 +312,6 @@ impl ExportRun {
         self.shared.cancelled.store(true, Ordering::SeqCst);
         self.shared.advance();
     }
-
-    pub fn is_finished(&self) -> bool {
-        self.shared.report_slot.lock().unwrap().is_some()
-    }
 }
 
 // --- shared state -------------------------------------------------------------------------------
@@ -360,7 +361,6 @@ struct RunState {
 
 struct Shared {
     submitter: Submitter,
-    store: Arc<dyn CatalogStore + Send + Sync>,
     decoder: Arc<dyn RawDecoder + Send + Sync>,
     gpu: Arc<GpuContext>,
     registry: Arc<ExporterRegistry>,
@@ -769,12 +769,10 @@ impl RenderJob {
         let live = match ctx.renderer.render_live(&req) {
             Ok(live) => live,
             Err(e) => {
-                drop(req);
                 self.give_back(ctx);
                 return Err((ticket, format!("render failed: {e:?}")));
             }
         };
-        drop(req);
         // The decoded frame (~270 MB at 45 MP) isn't needed past this point.
         drop(frame);
 
@@ -1336,7 +1334,7 @@ mod tests {
             "{:?}",
             fx.out_files()
         );
-        assert!(run.is_finished());
+        assert!(run.poll().is_some());
     }
 
     #[test]

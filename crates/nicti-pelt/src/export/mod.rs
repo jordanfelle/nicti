@@ -6,7 +6,10 @@
 //! The format-independent engine (settings, filename tokens, resize/color/watermark/metadata,
 //! encoders, collision-safe writes) lives in `nicti-preen`; this module is the render + job wiring.
 
+pub mod dialog;
 pub mod jobs;
+pub mod presets;
 pub mod sink;
 
-pub use jobs::{ExportEnv, ExportReport, ExportRun, StartError};
+pub use dialog::ExportUi;
+pub use jobs::{facts_for, ExportEnv};

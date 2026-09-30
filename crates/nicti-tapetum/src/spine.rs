@@ -262,11 +262,17 @@ mod tests {
         // document, so a hash set directly is silently reset on the next render.
         let mut graph = build_graph();
         let registry = build_registry();
-        graph.apply_document(&EditDocument::default(), &registry).unwrap();
+        graph
+            .apply_document(&EditDocument::default(), &registry)
+            .unwrap();
         let default_key = graph.cache_key(DECODE).unwrap();
-        graph.set_own_hash(DECODE, blake3::hash(b"photo A")).unwrap();
+        graph
+            .set_own_hash(DECODE, blake3::hash(b"photo A"))
+            .unwrap();
         assert_ne!(graph.cache_key(DECODE).unwrap(), default_key);
-        graph.apply_document(&EditDocument::default(), &registry).unwrap();
+        graph
+            .apply_document(&EditDocument::default(), &registry)
+            .unwrap();
         assert_eq!(graph.cache_key(DECODE).unwrap(), default_key);
     }
 
