@@ -68,7 +68,7 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   source deleted only after commit. `fs::rename` fast path on the same volume. `root_move` journal
   + `carry::resume_open_moves` at startup for crash recovery; cancel = drop discards the
   destination. Runs as `pounce_jobs::MoveJob` (`JobKind::Move`). Not a backup copy, no
-  drag-and-drop tree, no archive-drive behavior (#72).
+  archive-drive behavior (#72). Drag-a-folder-onto-a-drive UI: #303, `nicti-pelt`'s `folder_panel.rs`.
 
 ## Package contents
 

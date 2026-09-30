@@ -18,6 +18,7 @@ mod color_mgmt;
 mod decode_job;
 mod develop_panel;
 mod filter_bar;
+mod folder_panel;
 mod grid;
 mod heal_tool;
 mod loupe;

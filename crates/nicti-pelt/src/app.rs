@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::folder_panel;
 use nicti_cornea::{LibRawDecoder, RawDecoder};
 use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
@@ -117,6 +118,8 @@ pub struct PeltApp {
     last_backup_summary: Option<String>,
     /// Destination *parent* folder typed for a verified folder move (#26).
     move_dest_input: String,
+    /// The folder panel's (#303) throttled read of roots/journal rows/mounted drives.
+    folder_cache: folder_panel::Cache,
     /// The in-flight `MoveJob`'s result slot, folded into `last_move_summary` once it resolves.
     pending_move_result: Option<ReportSlot<CarryOutcome>>,
     last_move_summary: Option<String>,
@@ -267,6 +270,7 @@ impl PeltApp {
             pending_backup_changes: None,
             last_backup_summary: None,
             move_dest_input: String::new(),
+            folder_cache: folder_panel::Cache::default(),
             pending_move_result: None,
             last_move_summary,
             decoder: Arc::new(LibRawDecoder),
@@ -424,6 +428,11 @@ impl PeltApp {
             self.last_move_summary = Some("Type a destination folder first.".into());
             return;
         }
+        self.submit_move_to(store, root_id, dest);
+    }
+
+    /// Shared by the typed-path controls and the folder panel's drag-and-drop (#303).
+    fn submit_move_to(&mut self, store: &Arc<SqliteCatalog>, root_id: i64, dest: PathBuf) {
         if self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]) {
             self.last_move_summary =
                 Some("Wait for the running import/sync/move to finish first.".into());
@@ -516,7 +525,14 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
             _ => None,
         })
         .collect();
-    Some(if stuck.is_empty() {
+    let leftovers: u64 = resumed
+        .iter()
+        .map(|r| match r {
+            Resumed::CleanedUp { leftover_count, .. } => *leftover_count,
+            _ => 0,
+        })
+        .sum();
+    let mut msg = if stuck.is_empty() {
         format!("Recovered {} interrupted folder move(s).", resumed.len())
     } else {
         format!(
@@ -524,7 +540,13 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
             stuck.len(),
             stuck.join("; ")
         )
-    })
+    };
+    if leftovers > 0 {
+        msg.push_str(&format!(
+            " {leftovers} file(s) couldn't be removed from the original location."
+        ));
+    }
+    Some(msg)
 }
 
 impl eframe::App for PeltApp {
@@ -734,6 +756,8 @@ impl PeltApp {
             ));
         }
 
+        self.show_folder_panel(ui, &store);
+
         ui.horizontal(|ui| {
             ui.heading("Library");
             if let Some(grid) = &self.grid {
@@ -816,6 +840,41 @@ impl PeltApp {
         };
         if let Some(index) = outcome.open {
             self.open_from_grid(&store, index);
+        }
+    }
+
+    /// #303: the left-hand folder/drive tree; a drop on a drive or folder starts a verified move.
+    fn show_folder_panel(&mut self, ui: &mut egui::Ui, store: &Arc<SqliteCatalog>) {
+        let moving = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
+        let move_running = self.job_active(&[JobKind::Move]);
+        // Re-read on a busy edge or the cache's own cadence -- never per frame.
+        // Nothing else repaints an idle window, so wake up when the cache goes stale.
+        ui.ctx().request_repaint_after(folder_panel::CACHE_TTL);
+        self.folder_cache.refresh(moving, || {
+            (
+                store.list_roots().unwrap_or_default(),
+                store.open_root_moves().unwrap_or_default(),
+            )
+        });
+        let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
+        let attention = folder_panel::attention_lines(&self.folder_cache.open_moves, move_running);
+        let mut request = None;
+        egui::Panel::left("folder_panel")
+            .resizable(true)
+            .show(ui, |ui| {
+                ui.heading("Folders");
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    request = folder_panel::show(
+                        ui,
+                        &tree,
+                        &attention,
+                        self.last_move_summary.as_deref(),
+                        moving,
+                    );
+                });
+            });
+        if let Some(r) = request {
+            self.submit_move_to(store, r.root_id, r.dest_parent);
         }
     }
 
