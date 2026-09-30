@@ -26,12 +26,14 @@ pub struct StageGroup {
     pub id: &'static str,
     pub label: &'static str,
     /// Checked when the checklist first opens. Crop, heal spots and local corrections describe one
-    /// specific photo's content, so they start unchecked (LRC does the same).
+    /// specific photo's content, so they start unchecked (LRC does the same). So does the camera
+    /// profile: it names a camera-specific `.dcp`, and a target from another camera rejects it
+    /// (Develop shows an error, export fails the photo).
     pub default_on: bool,
 }
 
-/// Every stage that can travel, in the order the checklist shows them. Matches the "Reset all" list
-/// in `develop_panel`.
+/// Every stage that can travel, in the order the checklist shows them: the "Reset all" list in
+/// `develop_panel`, plus the camera profile (`WORKING_SPACE`).
 pub const GROUPS: &[StageGroup] = &[
     StageGroup {
         id: WB,
@@ -76,7 +78,7 @@ pub const GROUPS: &[StageGroup] = &[
     StageGroup {
         id: WORKING_SPACE,
         label: "Camera profile",
-        default_on: true,
+        default_on: false,
     },
     StageGroup {
         id: CROP,
@@ -261,6 +263,10 @@ mod tests {
         let d = StageSet::default();
         assert!(d.contains(WB) && d.contains(TONE));
         assert!(!d.contains(CROP) && !d.contains(HEAL) && !d.contains(MASKS));
+        assert!(
+            !d.contains(WORKING_SPACE),
+            "a camera profile is camera-specific, so pasting it is opt-in"
+        );
         assert!(StageSet::all().contains(MASKS));
         assert_eq!(StageSet::all().iter().count(), GROUPS.len());
     }

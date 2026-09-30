@@ -2132,7 +2132,7 @@ mod tests {
     }
 
     #[test]
-    fn put_master_edits_writes_more_ids_than_one_chunk_and_get_reads_them_back() {
+    fn put_master_edits_writes_a_large_batch_and_get_reads_it_back() {
         let store = SqliteCatalog::open_in_memory().unwrap();
         let ids = seeded_assets(&store, 1200);
         let edits: Vec<_> = ids

@@ -30,10 +30,12 @@ the exposure of a photo I never touched" resets exposure instead of doing nothin
 stage is never touched. Relative (additive) paste via `apply_relative` is deferred: it needs UI
 for choosing which sliders are relative, and absolute paste is what "sync settings" means in LRC.
 
-**The checklist** is the same set of stage ids Develop's "Reset all" clears: white balance,
-exposure, tone, tone curve, vibrance, HSL, sharpening, noise reduction, camera profile, crop, heal
-spots, local corrections (masks). Crop, heal and masks describe one photo's own content and start
-unchecked; the rest start checked. The last checklist is remembered for the session.
+**The checklist** is the stage ids Develop's "Reset all" clears (white balance, exposure, tone,
+tone curve, vibrance, HSL, sharpening, noise reduction, crop, heal spots, local corrections) plus
+the camera profile. Crop, heal and masks describe one photo's own content and start unchecked. So
+does the camera profile: it names a camera-specific `.dcp`, and a target from another camera
+rejects it (Develop shows an error, export fails that photo), so pasting it is opt-in. The rest
+start checked. The last checklist is remembered for the session.
 
 **Masks travel as one stage** (`nicti.masks`). Geometry masks use normalized coordinates and mean
 the same on a differently sized photo. AI masks are per photo (the bake key chains from the
@@ -74,7 +76,7 @@ saved (`DevelopView::replace_document`), so the per-frame autosave cannot write 
   parameters, and are not modelled here.
 - Deferred: relative paste; background AI pre-bake of a synced selection (#353); real undo/redo
   through `History` (#324); rendering masks in export (#354).
-- A paste runs synchronously on the UI thread: two SQLite transactions over small JSON documents
+- A paste runs synchronously on the UI thread: one read under the catalog lock and one write transaction over small JSON documents
   (1,000 photos is well under a second, asserted in `knead::batch` tests). If a future catalog or
   document size makes that visible, move `run_batch` onto a Pounce job; its plan/write split already
   fits one.

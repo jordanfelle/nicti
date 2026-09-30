@@ -155,9 +155,14 @@ impl KneadUi {
             .map(|p| Clipboard::from_entries(&p.stages))
     }
 
-    fn save_presets(&mut self) {
-        if let Err(e) = self.presets.save(&self.presets_path) {
-            self.status = Some(format!("Couldn't save presets: {e}"));
+    /// Whether the presets file was written; on failure `status` says why.
+    fn save_presets(&mut self) -> bool {
+        match self.presets.save(&self.presets_path) {
+            Ok(()) => true,
+            Err(e) => {
+                self.status = Some(format!("Couldn't save presets: {e}"));
+                false
+            }
         }
     }
 
@@ -257,8 +262,10 @@ impl KneadUi {
                 let stages = Clipboard::from_document(&doc, &self.set).entries();
                 match self.presets.add(&self.name_input, stages) {
                     Ok(()) => {
-                        self.save_presets();
-                        self.status = Some(format!("Saved preset \"{}\".", self.name_input.trim()));
+                        if self.save_presets() {
+                            self.status =
+                                Some(format!("Saved preset \"{}\".", self.name_input.trim()));
+                        }
                     }
                     Err(e) => {
                         // Keep the dialog up so the name can be fixed.
@@ -381,13 +388,18 @@ impl KneadUi {
         let mut dismiss = false;
         ui.horizontal(|ui| {
             ui.label(text);
-            if self.last.is_some() && ui.button("Undo").clicked() {
-                command = Some(Command::Undo);
+            // Named for its batch: the line may be showing an unrelated message by now.
+            if let Some(last) = &self.last {
+                if ui.button(format!("Undo {}", last.label)).clicked() {
+                    command = Some(Command::Undo);
+                }
             }
             dismiss = ui.button("Dismiss").clicked();
         });
         if dismiss {
+            // Dismissing also gives up the undo, rather than leaving one nothing can reach.
             self.status = None;
+            self.last = None;
         }
         command
     }

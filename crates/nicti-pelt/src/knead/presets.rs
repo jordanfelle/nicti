@@ -38,7 +38,7 @@ pub enum PresetError {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PresetFile {
     #[serde(default)]
-    presets: Vec<DevelopPreset>,
+    presets: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -47,17 +47,26 @@ pub struct PresetStore {
 }
 
 impl PresetStore {
-    /// Loads `path`; a missing, unreadable or corrupt file yields no presets.
+    /// Loads `path`; a missing or unreadable file yields no presets. A file that exists but isn't
+    /// valid JSON is moved aside to `<path>.bad` first, so the next save can't destroy what the
+    /// user may still want to recover. One malformed preset is skipped, not the whole file.
     pub fn load(path: &Path) -> Self {
-        let Some(file) = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<PresetFile>(&t).ok())
-        else {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let Ok(file) = serde_json::from_str::<PresetFile>(&text) else {
+            let mut bad = path.as_os_str().to_os_string();
+            bad.push(".bad");
+            let _ = std::fs::rename(path, bad);
             return Self::default();
         };
         // A hand-edited file can't hold an unnamed preset or two of one name.
         let mut presets: Vec<DevelopPreset> = Vec::new();
-        for mut p in file.presets {
+        for mut p in file
+            .presets
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<DevelopPreset>(v).ok())
+        {
             p.name = p.name.trim().to_string();
             if !p.name.is_empty() && !presets.iter().any(|q| q.name == p.name) {
                 presets.push(p);
@@ -68,9 +77,7 @@ impl PresetStore {
 
     /// Writes via a temp file + rename so a crash never leaves a half-written document.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let file = PresetFile {
-            presets: self.presets.clone(),
-        };
+        let file = serde_json::json!({ "presets": self.presets });
         let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
@@ -173,35 +180,63 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_corrupt_file_gives_no_presets() {
+    fn a_missing_file_gives_no_presets() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            PresetStore::load(&dir.path().join("p.json")),
+            PresetStore::default()
+        );
+    }
+
+    #[test]
+    fn a_corrupt_file_is_set_aside_so_the_next_save_cant_destroy_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.json");
-        assert_eq!(PresetStore::load(&path), PresetStore::default());
         std::fs::write(&path, "{ not json").unwrap();
-        assert_eq!(PresetStore::load(&path), PresetStore::default());
+
+        let mut store = PresetStore::load(&path);
+        assert_eq!(store, PresetStore::default());
+        store.add("New", stages(1.0)).unwrap();
+        store.save(&path).unwrap();
+
+        let bad = dir.path().join("p.json.bad");
+        assert_eq!(std::fs::read_to_string(bad).unwrap(), "{ not json");
+        assert_eq!(PresetStore::load(&path).all().len(), 1);
+    }
+
+    #[test]
+    fn one_malformed_preset_is_skipped_not_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        let good = serde_json::to_value(DevelopPreset {
+            name: "Good".into(),
+            stages: stages(1.0),
+        })
+        .unwrap();
+        let text = serde_json::json!({ "presets": [ { "name": "Bad", "stages": 7 }, good ] });
+        std::fs::write(&path, text.to_string()).unwrap();
+
+        let store = PresetStore::load(&path);
+        assert_eq!(store.all().len(), 1);
+        assert_eq!(store.all()[0].name, "Good");
+        assert!(!dir.path().join("p.json.bad").exists());
     }
 
     #[test]
     fn a_hand_edited_file_cant_hold_blank_or_duplicate_names() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.json");
-        let file = PresetFile {
-            presets: vec![
-                DevelopPreset {
-                    name: "  ".into(),
-                    stages: stages(1.0),
-                },
-                DevelopPreset {
-                    name: "A".into(),
-                    stages: stages(1.0),
-                },
-                DevelopPreset {
-                    name: "A".into(),
-                    stages: stages(2.0),
-                },
-            ],
+        let entry = |name: &str, v: f64| {
+            serde_json::to_value(DevelopPreset {
+                name: name.into(),
+                stages: stages(v),
+            })
+            .unwrap()
         };
-        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+        let file = serde_json::json!({
+            "presets": [entry("  ", 1.0), entry("A", 1.0), entry("A", 2.0)]
+        });
+        std::fs::write(&path, file.to_string()).unwrap();
         let store = PresetStore::load(&path);
         assert_eq!(store.all().len(), 1);
         assert_eq!(store.all()[0].stages, stages(1.0), "first one wins");

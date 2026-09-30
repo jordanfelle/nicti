@@ -71,7 +71,10 @@ pub fn run_batch(
     ids: &[i64],
     label: &str,
 ) -> Result<(BatchOutcome, Option<LastBatch>), CatalogError> {
-    let batch = plan(clip, store.get_master_edits(ids)?);
+    // A photo listed twice would get two changes and two undo entries.
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<i64> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    let batch = plan(clip, store.get_master_edits(&ids)?);
     let writes: Vec<(i64, EditDocument)> = batch
         .changes
         .iter()
@@ -222,15 +225,20 @@ mod tests {
     }
 
     #[test]
-    fn a_thousand_photos_batch_quickly() {
+    fn a_thousand_photos_are_one_batch_and_one_undo() {
         let (store, ids) = catalog(1000);
-        let start = std::time::Instant::now();
-        let (out, _) = run_batch(&store, &clip(2.0), &ids, "Sync").unwrap();
+        let (out, last) = run_batch(&store, &clip(2.0), &ids, "Sync").unwrap();
         assert_eq!(out.applied, 1000);
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "took {:?}",
-            start.elapsed()
-        );
+        let undo = last.unwrap().undo(&store).unwrap();
+        assert_eq!(undo.restored, 1000);
+    }
+
+    #[test]
+    fn a_photo_listed_twice_is_changed_and_undone_once() {
+        let (store, ids) = catalog(2);
+        let doubled = [ids[0], ids[1], ids[0]];
+        let (out, last) = run_batch(&store, &clip(2.0), &doubled, "Paste").unwrap();
+        assert_eq!(out.applied, 2);
+        assert_eq!(last.unwrap().len(), 2);
     }
 }

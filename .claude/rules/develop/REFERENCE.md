@@ -15,7 +15,7 @@ Full reasoning/history: `docs/decisions/develop.md`.
 
 - **Presets, copy/paste, sync (#52)** — `docs/adr/0052-presets-copy-paste-sync.md`: **Accepted**.
   Per-stage + absolute: a checked stage replaces the target's entry, a checked stage the source
-  lacks is *removed*, unchecked untouched; crop/heal/masks start unchecked. AI masks re-bake lazily
+  lacks is *removed*, unchecked untouched; crop/heal/masks/camera-profile start unchecked. AI masks re-bake lazily
   when a photo opens (batch pre-bake → #353). No-op targets: no write, no undo entry. Undo is
   session-local and skips photos edited since. Presets = `<catalog>.develop-presets.json`, no
   built-ins, dup/empty name refused. **Gotcha:** after a batch touching the loaded photo call

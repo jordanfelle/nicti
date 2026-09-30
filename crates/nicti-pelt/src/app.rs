@@ -626,7 +626,10 @@ impl PeltApp {
     /// Reads this frame's culling keys and acts on them. Off while the Develop view is showing
     /// (its sliders own the digit keys) and while the delete prompt is up.
     fn handle_cull_keys(&mut self, ctx: &egui::Context) {
-        if self.cull.is_none() || !cull_keys_active(self.view, self.delete.is_confirming()) {
+        if self.cull.is_none()
+            || !cull_keys_active(self.view, self.delete.is_confirming())
+            || self.knead.is_asking()
+        {
             return;
         }
         for command in crate::cull::input::poll(ctx) {
@@ -1874,30 +1877,35 @@ impl PeltApp {
 
     /// Draws the Export dialog while open; starting it builds the run's environment from live
     /// app state.
-    /// The photos a copy/paste/preset acts on. Develop and Loupe edit the one photo `DevelopView`
-    /// has loaded; everywhere else it's the marked targets.
+    /// The photos a copy/paste/preset acts on. Develop edits the one photo `DevelopView` has
+    /// loaded; everywhere else it's the marked targets (the photo on screen, in the Loupe).
     fn knead_targets(&self) -> Vec<i64> {
         match self.view {
-            View::Develop | View::Loupe => self
+            View::Develop => self
                 .loupe_loaded_asset
                 .map(|(id, _)| id)
                 .into_iter()
                 .collect(),
+            // The Loupe's own cursor, not `loupe_loaded_asset`: that only moves once the next
+            // photo has decoded, so while one is loading (or failed) it still names the last one.
             _ => self.mark_targets(),
         }
     }
 
-    /// The photo whose settings a copy/sync/preset-save reads, and its current document. Develop
-    /// and Loupe use the live (possibly unsaved) document; elsewhere it's the catalog's.
+    /// The photo whose settings a copy/sync/preset-save reads, and its current document: the live
+    /// one when it's the photo `DevelopView` has loaded, else the catalog's.
     fn knead_source_doc(&self) -> Option<(i64, nicti_pawprint::EditDocument)> {
-        if matches!(self.view, View::Develop | View::Loupe) {
-            let (id, _) = self.loupe_loaded_asset?;
-            return Some((id, self.develop.as_ref()?.document().clone()));
-        }
         let id = match self.view {
+            View::Develop => self.loupe_loaded_asset?.0,
             View::Library => self.grid.as_ref()?.cursor_id()?,
             _ => *self.mark_targets().first()?,
         };
+        // The live (possibly unsaved) document, but only when it really is this photo's.
+        if self.loupe_loaded_asset.map(|(loaded, _)| loaded) == Some(id) {
+            if let Some(develop) = self.develop.as_ref() {
+                return Some((id, develop.document().clone()));
+            }
+        }
         let CatalogOpenState::Open(store) = &self.catalog else {
             return None;
         };
@@ -1927,6 +1935,16 @@ impl PeltApp {
 
     fn handle_knead_action(&mut self, action: PanelAction) {
         if self.knead.is_asking() {
+            return;
+        }
+        // A second prompt on top of the delete prompt would let the confirmed one be dropped by
+        // `knead_busy` (which also refuses while that prompt is up).
+        if self.delete.is_confirming()
+            && matches!(
+                action,
+                PanelAction::Copy | PanelAction::Sync | PanelAction::SavePreset
+            )
+        {
             return;
         }
         match action {
