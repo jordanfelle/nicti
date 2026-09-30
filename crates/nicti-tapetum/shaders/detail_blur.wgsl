@@ -16,7 +16,10 @@ struct Uniforms {
     weights: array<vec4<f32>, 9>,
 }
 
-@group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
+// Read through an ordinary sampled texture (`texture_2d` + `textureLoad`), never a read-mode storage
+// texture: that binding produced garbage on the RTX 5080 under Dx12 (ADR-0051, found again in #49 --
+// `stages::tests::full_pipeline_end_to_end...` failed on real Dx12 hardware on `main` itself).
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u: Uniforms;
 
@@ -47,7 +50,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             coord.y = clamp(coord.y + i, 0, i32(dims.y) - 1);
         }
-        acc = acc + w * textureLoad(input_tex, coord);
+        acc = acc + w * textureLoad(input_tex, coord, 0);
     }
     textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), acc);
 }

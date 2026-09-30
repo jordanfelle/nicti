@@ -1327,6 +1327,319 @@ mod tests {
         assert_eq!((s.band_builds, s.haze_builds), (0, 0));
     }
 
+    /// Wall-clock cost of the mask pipeline on the machine's own adapter, per
+    /// `docs/benchmarks.md`'s protocol (1 warm-up, measured runs, p50/p95). Not run in CI. Uses
+    /// persistent kernels (ADR-0016: never rebuild a pipeline inside a timing loop) and refuses a
+    /// software adapter, whose timings would be meaningless:
+    ///
+    /// ```text
+    /// NICTI_WGPU_BACKEND=vulkan cargo test -p nicti-tapetum --release \
+    ///   mask::engine::tests::throughput -- --ignored --nocapture
+    /// ```
+    ///
+    /// Two parts. **Live pass**: the fused live dispatch with N stacked masks (the cost a *slider
+    /// drag* pays every frame, since a drag only rewrites uniforms), pointwise-only and with the
+    /// spatial adjustments on, against the no-mask baseline -- ADR-0044's 4 ms live-suffix rule is
+    /// the yardstick. **Engine**: what an edit that *does* rebuild something pays (a new gradient, a
+    /// brush-stroke step, a guided refine of an AI alpha, the clarity/dehaze bases).
+    #[test]
+    #[ignore = "timing measurement; needs a real GPU adapter"]
+    fn throughput() {
+        use crate::gpu::GpuPreference;
+        use crate::renderer::LiveExec;
+        use crate::stages::{LiveParams, LiveSuffixKernel};
+        use std::time::{Duration, Instant};
+
+        let gpu = Arc::new(GpuContext::new(GpuPreference::Auto).expect("an adapter"));
+        println!(
+            "adapter: {} ({:?}), software: {}",
+            gpu.adapter_name, gpu.backend, gpu.is_software
+        );
+        assert!(
+            !gpu.is_software,
+            "a software adapter's timings are meaningless"
+        );
+
+        let wait = |gpu: &GpuContext| {
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll failed");
+        };
+        let measure = |gpu: &GpuContext, runs: usize, mut f: Box<dyn FnMut() + '_>| {
+            f(); // warm-up
+            wait(gpu);
+            let mut times: Vec<Duration> = (0..runs)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    wait(gpu);
+                    t.elapsed()
+                })
+                .collect();
+            times.sort();
+            (
+                times[times.len() / 2],
+                times[(times.len() * 95 / 100).min(times.len() - 1)],
+            )
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+
+        let kernels = super::super::kernels::tests::shared_kernels(&gpu);
+        let guided = super::super::guided::tests::shared_kernels(&gpu);
+        let bases = super::super::bases::tests::shared_kernels(&gpu);
+
+        for (label, w, h) in [
+            ("screen 3840x2560", 3840u32, 2560u32),
+            ("full 8280x5520", 8280, 5520),
+        ] {
+            println!("=== {label} ===");
+            let extent = Extent {
+                width: w,
+                height: h,
+            };
+            let input = FrameTexture::new(&gpu, extent);
+            let output = FrameTexture::new(&gpu, extent);
+            let live = LiveSuffixKernel::new(&gpu);
+            live.set_params(&gpu, &LiveParams::default());
+            let mut engine = MaskEngine::with_kernels(
+                Arc::clone(&kernels),
+                Arc::clone(&guided),
+                Arc::clone(&bases),
+            );
+            let alphas = HashMap::new();
+            let neutral = blake3::hash(b"bench");
+            let guide_key = blake3::hash(b"bench-guide");
+
+            let corrections = |n: usize, adjust: LocalAdjust| -> Vec<LocalCorrection> {
+                (0..n)
+                    .map(|i| {
+                        let mut c = correction(
+                            &format!("c{i}"),
+                            radial(0.1 + 0.8 * i as f32 / n.max(1) as f32),
+                            0.0,
+                        );
+                        c.adjust = adjust;
+                        c
+                    })
+                    .collect()
+            };
+            let pointwise = LocalAdjust {
+                exposure: 0.5,
+                contrast: 0.2,
+                highlights: -0.2,
+                saturation: 0.2,
+                temp: 0.1,
+                ..LocalAdjust::default()
+            };
+            let spatial = LocalAdjust {
+                clarity: 0.4,
+                texture: 0.3,
+                dehaze: 0.3,
+                ..pointwise
+            };
+
+            println!("-- live pass (a slider drag pays this every frame) --");
+            let (base_p50, _) = measure(
+                &gpu,
+                8,
+                Box::new(|| {
+                    live.set_masks(&gpu, None);
+                    let mut enc = gpu.device.create_command_encoder(&Default::default());
+                    live.encode(&gpu, &mut enc, &input, &output);
+                    gpu.queue.submit(Some(enc.finish()));
+                }),
+            );
+            println!(
+                "no masks (baseline)              p50 {:7.3} ms",
+                ms(base_p50)
+            );
+            for (name, adjust) in [
+                ("pointwise", pointwise),
+                ("+ clarity/texture/dehaze", spatial),
+            ] {
+                for n in [1usize, 4, 16] {
+                    let params = MaskParams {
+                        corrections: corrections(n, adjust),
+                    };
+                    let frame = engine
+                        .prepare(
+                            &gpu,
+                            &MaskInputs {
+                                params: &params,
+                                ai_alphas: &alphas,
+                                neutral_key: neutral,
+                                guide: &input,
+                                guide_key,
+                                range_matrix: crate::color::mat3_identity(),
+                            },
+                        )
+                        .expect("active corrections");
+                    wait(&gpu);
+                    let (p50, p95) = measure(
+                        &gpu,
+                        8,
+                        Box::new(|| {
+                            live.set_masks(&gpu, Some(&frame));
+                            let mut enc = gpu.device.create_command_encoder(&Default::default());
+                            live.encode(&gpu, &mut enc, &input, &output);
+                            gpu.queue.submit(Some(enc.finish()));
+                        }),
+                    );
+                    println!(
+                        "{n:2} masks, {name:<24} p50 {:7.3} ms  p95 {:7.3} ms  (+{:.3} ms over baseline)  atlas {} MB",
+                        ms(p50),
+                        ms(p95),
+                        ms(p50) - ms(base_p50),
+                        frame.atlas.byte_size() >> 20,
+                    );
+                }
+            }
+
+            println!("-- engine (edits that rebuild something) --");
+            // A new gradient on one correction: raster + compose + pack.
+            let mut x = 0.0f32;
+            let (p50, p95) = measure(
+                &gpu,
+                5,
+                Box::new(|| {
+                    x += 0.013;
+                    let params = MaskParams {
+                        corrections: vec![correction("g", radial(0.3 + x % 0.4), 0.5)],
+                    };
+                    engine.prepare(
+                        &gpu,
+                        &MaskInputs {
+                            params: &params,
+                            ai_alphas: &alphas,
+                            neutral_key: neutral,
+                            guide: &input,
+                            guide_key,
+                            range_matrix: crate::color::mat3_identity(),
+                        },
+                    );
+                }),
+            );
+            println!(
+                "move a radial gradient           p50 {:7.3} ms  p95 {:7.3} ms",
+                ms(p50),
+                ms(p95)
+            );
+
+            // A brush stroke growing one point per frame (one GPU pass per frame).
+            let mut pts = vec![[0.2f32, 0.5]];
+            let (p50, p95) = measure(
+                &gpu,
+                8,
+                Box::new(|| {
+                    let last = *pts.last().unwrap();
+                    pts.push([(last[0] + 0.01).min(0.95), last[1]]);
+                    let params = MaskParams {
+                        corrections: vec![correction(
+                            "b",
+                            MaskSource::Brush {
+                                strokes: vec![Stroke {
+                                    points: pts.clone(),
+                                    radius: 0.03,
+                                    feather: 0.01,
+                                    flow: 1.0,
+                                    erase: false,
+                                }],
+                            },
+                            0.5,
+                        )],
+                    };
+                    engine.prepare(
+                        &gpu,
+                        &MaskInputs {
+                            params: &params,
+                            ai_alphas: &alphas,
+                            neutral_key: neutral,
+                            guide: &input,
+                            guide_key,
+                            range_matrix: crate::color::mat3_identity(),
+                        },
+                    );
+                }),
+            );
+            println!(
+                "paint: one more brush point      p50 {:7.3} ms  p95 {:7.3} ms",
+                ms(p50),
+                ms(p95)
+            );
+
+            // A guided refine of a 1024x1024 AI alpha (runs once per arriving alpha).
+            let mut seed = 0u32;
+            let ai_source = MaskSource::Ai(recipe("subject"));
+            let key = ai_bake_key(&ai_source, neutral).unwrap();
+            let (p50, p95) = measure(
+                &gpu,
+                5,
+                Box::new(|| {
+                    seed += 1;
+                    let data = (0..1024 * 1024)
+                        .map(|i| {
+                            if (i % 1024) < (300 + seed as usize % 7) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    let mut alphas = HashMap::new();
+                    alphas.insert(key, Arc::new(AiAlpha::new(1024, 1024, data).unwrap()));
+                    let params = MaskParams {
+                        corrections: vec![correction("ai", ai_source.clone(), 0.5)],
+                    };
+                    engine.prepare(
+                        &gpu,
+                        &MaskInputs {
+                            params: &params,
+                            ai_alphas: &alphas,
+                            neutral_key: neutral,
+                            guide: &input,
+                            guide_key,
+                            range_matrix: crate::color::mat3_identity(),
+                        },
+                    );
+                }),
+            );
+            println!(
+                "AI alpha 1024^2 guided refine    p50 {:7.3} ms  p95 {:7.3} ms",
+                ms(p50),
+                ms(p95)
+            );
+
+            // The spatial bases: rebuilt only when the guide (the baked frame) changes.
+            let mut n = 0u32;
+            let (p50, p95) = measure(
+                &gpu,
+                4,
+                Box::new(|| {
+                    n += 1;
+                    let params = MaskParams {
+                        corrections: corrections(1, spatial),
+                    };
+                    engine.prepare(
+                        &gpu,
+                        &MaskInputs {
+                            params: &params,
+                            ai_alphas: &alphas,
+                            neutral_key: neutral,
+                            guide: &input,
+                            guide_key: blake3::hash(&n.to_le_bytes()),
+                            range_matrix: crate::color::mat3_identity(),
+                        },
+                    );
+                }),
+            );
+            println!(
+                "clarity+texture+dehaze bases     p50 {:7.3} ms  p95 {:7.3} ms",
+                ms(p50),
+                ms(p95)
+            );
+        }
+    }
+
     trait CloneWithRadii {
         fn clone_with_radii(&self, r: f32) -> MaskSource;
     }

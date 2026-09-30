@@ -129,9 +129,11 @@ pub const LAMA: Artifact = Artifact {
 /// input/output names from the loaded graph rather than trusting these, and the tensor contract is
 /// re-verified by `nicti-siamese`'s `#[ignore]`d real-weight test.
 ///
-/// **On-demand download only, never bundled** (ADR-0218): ~970 MB. The repo's licence is MIT, but the
-/// general checkpoint was trained on several research datasets (DIS5K, COD, HRSOD families) whose
-/// own terms have not been reviewed -- recorded in `docs/licensing.md` and tracked as a follow-up.
+/// **On-demand download only, never bundled** (ADR-0218): ~970 MB. MIT; the upstream model card
+/// (`ZhengPeng7/BiRefNet`, which this export names as its `base_model`) states it is "trained on
+/// DIS-TR", a dataset with no stated use restriction. What is *not* verified: this is a third-party
+/// ONNX conversion (onnx-community), and its weights were not independently compared to the upstream
+/// checkpoint -- recorded in `docs/licensing.md` and tracked as a follow-up rather than assumed.
 /// The fp16 export in the same repo (490 MB) is deliberately not used: ONNX Runtime's CPU provider
 /// has thin fp16 kernel coverage and falls back through casts, so it is *slower* there.
 pub const BIREFNET: Artifact = Artifact {
@@ -143,7 +145,7 @@ pub const BIREFNET: Artifact = Artifact {
     download_sha256: "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
     installed_size: 972_666_916,
     installed_sha256: "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
-    license: "MIT (weights trained on research datasets -- their terms are not separately reviewed; see docs/licensing.md)",
+    license: "MIT (trained on DIS-TR per the upstream model card; a third-party ONNX conversion, see docs/licensing.md)",
     payload: Payload::File,
 };
 

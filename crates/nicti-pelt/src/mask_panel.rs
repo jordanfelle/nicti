@@ -342,7 +342,7 @@ fn show_download(ui: &mut egui::Ui, mask: &mut MaskUi, develop: &DevelopView, po
                 "Select Subject / Background needs a one-time download of about {} MB:\n\
                  - BiRefNet (MIT), from huggingface.co/onnx-community/BiRefNet-ONNX\n\
                  - ONNX Runtime (MIT), from github.com/microsoft/onnxruntime\n\
-                 The model's training-data terms have not been separately reviewed.\n\
+                 BiRefNet is trained on DIS-TR; this is a third-party ONNX conversion.\n\
                  Everything runs on this computer; nothing is uploaded.",
                 megabytes(bytes)
             ));
