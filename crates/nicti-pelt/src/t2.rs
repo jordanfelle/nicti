@@ -19,7 +19,7 @@ use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
-use nicti_lair::larder::{Larder, LarderConfig, LarderKey, LarderTier};
+use nicti_lair::larder::{Larder, LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
@@ -411,6 +411,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::*;
     use super::*;
+    use nicti_lair::larder::LarderConfig;
 
     #[test]
     fn a_large_source_is_downscaled_to_the_t2_long_edge() {
