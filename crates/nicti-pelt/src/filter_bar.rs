@@ -80,8 +80,7 @@ fn exif_bound((y, m, d): (u32, u32, u32), end_of_day: bool) -> String {
     format!("{y:04}-{m:02}-{d:02} {time}")
 }
 
-/// The inverse for showing a loaded rule's bound in the date box: the date part only. Also reads
-/// colon-form bounds from rules saved before this was fixed.
+/// The inverse for showing a loaded rule's bound in the date box: the date part only.
 fn date_from_exif(s: &str) -> String {
     s.get(..10)
         .map_or_else(String::new, |d| d.replace(':', "-"))
@@ -296,9 +295,10 @@ pub struct FilterBar {
     facets: Option<FacetView>,
     facets_for: Option<Filter>,
     facets_job: Option<Pending<Result<FacetView, String>>>,
-    /// The last background (options/facets) failure; cleared when that job next succeeds.
+    /// The last failure of each background job, cleared when that same job next succeeds.
     /// Separate from `error`, which belongs to a user action (load/save).
-    bg_error: Option<String>,
+    options_error: Option<String>,
+    facets_error: Option<String>,
     error: Option<String>,
 }
 
@@ -548,7 +548,12 @@ impl FilterBar {
         if let Some(status) = &self.status {
             ui.weak(status);
         }
-        for err in self.bg_error.iter().chain(&self.error) {
+        for err in self
+            .options_error
+            .iter()
+            .chain(&self.facets_error)
+            .chain(&self.error)
+        {
             ui.colored_label(ui.visuals().error_fg_color, err);
         }
 
@@ -570,40 +575,43 @@ impl FilterBar {
 
     fn poll(&mut self, _ctx: &egui::Context) {
         if let Some(job) = &self.options_job {
-            match job.poll() {
-                Ok(Some(Ok(o))) => {
-                    self.bg_error = None;
-                    self.options = Some(o);
-                    self.options_job = None;
-                }
-                Ok(Some(Err(e))) => {
-                    self.bg_error = Some(format!("Couldn't read filter options: {e}"));
-                    self.options = Some(Options::default());
-                    self.options_job = None;
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    self.options = Some(Options::default());
-                    self.options_job = None;
+            let outcome = match job.poll() {
+                Ok(None) => None,
+                Ok(Some(r)) => Some(r),
+                Err(_) => Some(Err("the option loader stopped unexpectedly".to_string())),
+            };
+            if let Some(outcome) = outcome {
+                self.options_job = None;
+                match outcome {
+                    Ok(o) => {
+                        self.options_error = None;
+                        self.options = Some(o);
+                    }
+                    Err(e) => {
+                        self.options_error = Some(format!("Couldn't read filter options: {e}"));
+                        self.options = Some(Options::default());
+                    }
                 }
             }
         }
         if let Some(job) = &self.facets_job {
-            match job.poll() {
-                Ok(Some(Ok(f))) => {
-                    self.bg_error = None;
-                    self.facets = Some(f);
-                    self.facets_job = None;
-                }
-                Ok(Some(Err(e))) => {
-                    self.bg_error = Some(format!("Couldn't count matches: {e}"));
-                    self.facets_job = None;
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    // Don't leave the previous filter's counts on screen against the new one.
-                    self.facets = None;
-                    self.facets_job = None;
+            let outcome = match job.poll() {
+                Ok(None) => None,
+                Ok(Some(r)) => Some(r),
+                Err(_) => Some(Err("the counter stopped unexpectedly".to_string())),
+            };
+            if let Some(outcome) = outcome {
+                self.facets_job = None;
+                match outcome {
+                    Ok(f) => {
+                        self.facets_error = None;
+                        self.facets = Some(f);
+                    }
+                    Err(e) => {
+                        // Never leave the previous filter's counts on screen against the new one.
+                        self.facets = None;
+                        self.facets_error = Some(format!("Couldn't count matches: {e}"));
+                    }
                 }
             }
         }
@@ -703,11 +711,31 @@ fn bound(text: &str, end_of_day: bool, raw: &Option<(String, String)>) -> Option
     parse_date(text).map(|d| exif_bound(d, end_of_day))
 }
 
+/// Rewrites a raw-EXIF colon-form bound (`2026:01:05 00:00:00`, the shape `Filter`'s own early
+/// tests used) into the dashed form ingest stores; anything else passes through verbatim.
+fn normalize_bound(raw: &str) -> String {
+    let b = raw.as_bytes();
+    let colon_date = b.len() >= 10
+        && b[4] == b':'
+        && b[7] == b':'
+        && b[..4]
+            .iter()
+            .chain(&b[5..7])
+            .chain(&b[8..10])
+            .all(u8::is_ascii_digit);
+    if colon_date {
+        format!("{}{}", raw[..10].replace(':', "-"), &raw[10..])
+    } else {
+        raw.to_string()
+    }
+}
+
 fn load_bound(raw: &Option<String>) -> (String, Option<(String, String)>) {
     match raw {
         Some(r) => {
-            let shown = date_from_exif(r);
-            (shown.clone(), Some((shown, r.clone())))
+            let raw = normalize_bound(r);
+            let shown = date_from_exif(&raw);
+            (shown.clone(), Some((shown, raw)))
         }
         None => (String::new(), None),
     }
@@ -851,6 +879,74 @@ mod tests {
             bar.to_filter(rule.root_id).captured_after.as_deref(),
             Some("2026-01-02 00:00:00")
         );
+    }
+
+    #[test]
+    fn legacy_colon_form_bounds_are_normalised_on_load() {
+        let rule = Filter {
+            captured_after: Some("2026:01:05 08:00:00".into()),
+            captured_before: Some("not a date".into()),
+            ..Default::default()
+        };
+        let mut bar = FilterBar::default();
+        bar.load_filter(&rule);
+        let f = bar.to_filter(None);
+        assert_eq!(f.captured_after.as_deref(), Some("2026-01-05 08:00:00"));
+        // An unrecognised bound is kept verbatim rather than guessed at.
+        assert_eq!(f.captured_before.as_deref(), Some("not a date"));
+        assert_eq!(
+            normalize_bound("2026-01-05 08:00:00"),
+            "2026-01-05 08:00:00"
+        );
+    }
+
+    #[test]
+    fn switching_away_from_a_custom_rating_and_clearing_leave_no_trace() {
+        let mut bar = FilterBar::default();
+        bar.load_filter(&Filter {
+            rating_min: Some(3),
+            include_unrated: true,
+            ..Default::default()
+        });
+        bar.rating = RatingChoice::Any;
+        assert_eq!(bar.to_filter(None), Filter::default());
+        bar.rating = RatingChoice::Custom;
+        bar.clear();
+        assert_eq!(bar.to_filter(None), Filter::default());
+    }
+
+    fn wait_for(bar: &mut FilterBar, ctx: &egui::Context, done: impl Fn(&FilterBar) -> bool) {
+        for _ in 0..400 {
+            bar.poll(ctx);
+            if done(bar) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("background job never finished");
+    }
+
+    #[test]
+    fn a_failed_facets_job_drops_stale_counts_and_only_its_own_success_clears_it() {
+        let ctx = egui::Context::default();
+        let mut bar = FilterBar::default();
+        bar.facets = Some(FacetView {
+            total: 9,
+            ..Default::default()
+        });
+        bar.facets_job = Some(Pending::spawn(&ctx, || Err("boom".to_string())));
+        wait_for(&mut bar, &ctx, |b| b.facets_job.is_none());
+        assert_eq!(bar.facets, None);
+        assert!(bar.facets_error.as_deref().unwrap().contains("boom"));
+        // A successful options load must not hide the facets failure.
+        bar.options_job = Some(Pending::spawn(&ctx, || Ok(Options::default())));
+        wait_for(&mut bar, &ctx, |b| b.options_job.is_none());
+        assert!(bar.options.is_some());
+        assert!(bar.facets_error.is_some());
+        // A facets success does clear it.
+        bar.facets_job = Some(Pending::spawn(&ctx, || Ok(FacetView::default())));
+        wait_for(&mut bar, &ctx, |b| b.facets_job.is_none());
+        assert_eq!(bar.facets_error, None);
     }
 
     #[test]

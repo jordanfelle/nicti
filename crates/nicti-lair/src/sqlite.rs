@@ -177,6 +177,12 @@ fn build_filter_sql(conn: &Connection, filter: &Filter) -> Result<FilterSql, Cat
         clauses.push("a.model = ?".to_string());
         params.push(Box::new(model.clone()));
     }
+    if filter.captured_after.is_some() || filter.captured_before.is_some() {
+        // Ingest stores a blank DateTimeOriginal as the literal text 'unknown' (kamadak-exif's
+        // display form), which would sort after every digit-leading bound and leak into every
+        // "from" range while being excluded by every "to" range. Only real dates take part.
+        clauses.push("a.captured_at GLOB '[0-9][0-9][0-9][0-9]-*'".to_string());
+    }
     if let Some(after) = &filter.captured_after {
         clauses.push("a.captured_at >= ?".to_string());
         params.push(Box::new(after.clone()));
@@ -2676,6 +2682,82 @@ mod tests {
         drop(held);
         worker.join().unwrap();
         assert_eq!(got, Ok(20), "hunt_ids blocked on the shared connection");
+    }
+
+    /// Same guarantee as `hunt_ids`: facets and the distinct-value scans must not hold the shared
+    /// connection (the UI thread's `list_roots` needs it every frame).
+    #[test]
+    fn facets_and_distinct_scans_on_a_file_backed_catalog_do_not_take_the_shared_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(SqliteCatalog::open(&dir.path().join("c.db")).unwrap());
+        let v = store.upsert_volume("v", None, None, 0).unwrap();
+        let r = store.ensure_root(v, "").unwrap();
+        let mut a = new_asset("a.NEF", Some("Z8"));
+        a.make = Some("NIKON".to_string());
+        store.insert_asset(r, &a, None).unwrap();
+
+        let held = store.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let narrowed = Filter {
+                    model: Some("Z8".into()),
+                    ..Default::default()
+                };
+                let total = store.facets(&narrowed).unwrap().total;
+                let makes = store.distinct_makes().unwrap();
+                tx.send((total, makes)).unwrap();
+            })
+        };
+        let got = rx.recv_timeout(std::time::Duration::from_secs(30));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(
+            got,
+            Ok((1, vec!["NIKON".to_string()])),
+            "blocked on shared conn"
+        );
+    }
+
+    #[test]
+    fn date_bounds_skip_unknown_and_malformed_captured_at() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let v = store.upsert_volume("v", None, None, 0).unwrap();
+        let r = store.ensure_root(v, "").unwrap();
+        let mut ids = Vec::new();
+        for (name, at) in [
+            ("real", Some("2026-03-01 10:00:00")),
+            ("unknown", Some("unknown")),
+            ("none", None),
+        ] {
+            let mut a = new_asset(&format!("{name}.NEF"), None);
+            a.captured_at = at.map(str::to_string);
+            ids.push(store.insert_asset(r, &a, None).unwrap());
+        }
+        let after = Filter {
+            captured_after: Some("2026-01-01 00:00:00".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt_ids(&after, default_sort()).unwrap(),
+            vec![ids[0]]
+        );
+        let before = Filter {
+            captured_before: Some("2026-12-31 23:59:59".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store.hunt_ids(&before, default_sort()).unwrap(),
+            vec![ids[0]]
+        );
+        assert_eq!(
+            store
+                .hunt_ids(&Filter::default(), default_sort())
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]
