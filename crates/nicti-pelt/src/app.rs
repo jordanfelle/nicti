@@ -900,7 +900,6 @@ impl PeltApp {
         if let Some(summary) = &self.last_move_summary {
             ui.label(summary);
         }
-        ui.label("Filter bar lands in #242.");
     }
 
     /// Registers `self.import_path_input` as a root under the placeholder volume (see this
