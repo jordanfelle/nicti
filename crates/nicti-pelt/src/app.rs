@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::folder_panel;
 use nicti_cornea::{LibRawDecoder, RawDecoder};
 use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
@@ -424,6 +425,11 @@ impl PeltApp {
             self.last_move_summary = Some("Type a destination folder first.".into());
             return;
         }
+        self.submit_move_to(store, root_id, dest);
+    }
+
+    /// Shared by the typed-path controls and the folder panel's drag-and-drop (#303).
+    fn submit_move_to(&mut self, store: &Arc<SqliteCatalog>, root_id: i64, dest: PathBuf) {
         if self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]) {
             self.last_move_summary =
                 Some("Wait for the running import/sync/move to finish first.".into());
@@ -734,6 +740,8 @@ impl PeltApp {
             ));
         }
 
+        self.show_folder_panel(ui, &store);
+
         ui.horizontal(|ui| {
             ui.heading("Library");
             if let Some(grid) = &self.grid {
@@ -816,6 +824,33 @@ impl PeltApp {
         };
         if let Some(index) = outcome.open {
             self.open_from_grid(&store, index);
+        }
+    }
+
+    /// #303: the left-hand folder/drive tree; a drop on a drive or folder starts a verified move.
+    fn show_folder_panel(&mut self, ui: &mut egui::Ui, store: &Arc<SqliteCatalog>) {
+        let moving = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
+        let roots = store.list_roots().unwrap_or_default();
+        let tree = folder_panel::build_tree(&roots, &folder_panel::mounted_drives());
+        let open = store.open_root_moves().unwrap_or_default();
+        let attention = folder_panel::attention_lines(&open, moving);
+        let mut request = None;
+        egui::Panel::left("folder_panel")
+            .resizable(true)
+            .show(ui, |ui| {
+                ui.heading("Folders");
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    request = folder_panel::show(
+                        ui,
+                        &tree,
+                        &attention,
+                        self.last_move_summary.as_deref(),
+                        moving,
+                    );
+                });
+            });
+        if let Some(r) = request {
+            self.submit_move_to(store, r.root_id, r.dest_parent);
         }
     }
 
