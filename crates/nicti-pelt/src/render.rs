@@ -213,6 +213,9 @@ pub struct DevelopView {
     /// Identity of the loaded photo as a `u64`, keying the removal engine's per-photo caches (its
     /// model frame and SAM embedding). Changes whenever `load_real_frame` swaps the photo.
     frame_key: u64,
+    /// Full identity of the loaded real photo (`None` for the synthetic frame). Stamped into the
+    /// DECODE entry of every rendered document so baked-output cache keys are per-photo.
+    identity: Option<blake3::Hash>,
     /// When set, `render` shows the whole frame with no crop/straighten applied. The heal tool
     /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
     /// inverse crop transform in the way.
@@ -261,6 +264,7 @@ impl DevelopView {
             heal_kernel,
             removals: RemovalSet::new(),
             frame_key: 0,
+            identity: None,
             uncropped_preview: false,
             renderer,
             show_before: false,
@@ -350,20 +354,35 @@ impl DevelopView {
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
     /// gives a document with no entry for a stage, just applied to the whole document at once.
     pub fn render(&mut self) -> Arc<FrameTexture> {
-        let empty;
         let stamped;
-        let doc = if self.show_before {
-            empty = EditDocument::default();
-            &empty
-        } else {
-            // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
-            // changing) rebakes the heal stage through the normal cache-key path.
-            let mut d = self.document.clone();
-            heal::stamp_removal_state(&mut d, &self.removals);
-            if self.uncropped_preview {
-                // Removing the entry (rather than only ignoring it below) also gives the crop node
-                // its default hash, so the cached cropped composite can't be served back.
-                d.stages.remove(CROP);
+        let doc = {
+            let mut d = if self.show_before {
+                EditDocument::default()
+            } else {
+                // The heal entry is stamped with which AI removals are ready, so a patch arriving
+                // (or changing) rebakes the heal stage through the normal cache-key path.
+                let mut d = self.document.clone();
+                heal::stamp_removal_state(&mut d, &self.removals);
+                if self.uncropped_preview {
+                    // Removing the entry (rather than only ignoring it below) also gives the crop
+                    // node its default hash, so the cached cropped composite can't be served back.
+                    d.stages.remove(CROP);
+                }
+                d
+            };
+            // The decode node is keyed by which photo it decoded. `apply_document` recomputes
+            // every node's hash from the document (falling back to the stage default), so the
+            // identity has to ride in the document the render sees -- a `set_own_hash` call would
+            // be overwritten by the very next render and let same-extent photos share bakes.
+            // Applies under `show_before` too: before/after is the same photo.
+            if let Some(identity) = &self.identity {
+                d.stages.insert(
+                    DECODE.to_owned(),
+                    StageEntry {
+                        schema_version: 1,
+                        params: serde_json::json!({ "identity": identity.to_hex().to_string() }),
+                    },
+                );
             }
             stamped = d;
             &stamped
@@ -524,9 +543,8 @@ impl DevelopView {
             self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
             self.profiles_for = Some(needles);
         }
-        self.graph
-            .set_own_hash(DECODE, identity)
-            .expect("DECODE is always present -- build_graph always adds it");
+        // Recorded, not applied here: `render` stamps it into the document it renders (see there).
+        self.identity = Some(identity);
     }
 
     /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).
@@ -747,5 +765,48 @@ mod tests {
             !view.has_edits(),
             "a rejected profile must not touch the document"
         );
+    }
+
+    /// Regression test (#49): `load_real_frame` used to record the photo identity with
+    /// `set_own_hash(DECODE, ..)`, which the next render's `apply_document` silently overwrote
+    /// with the stage default -- so two different photos at the same extent shared every baked
+    /// cache key and the second showed the first one's pixels. Keys and pixels must differ.
+    #[test]
+    fn same_extent_photos_get_distinct_decode_keys_and_pixels() {
+        use nicti_tapetum::frame::read_frame;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+
+        let first = Arc::new(synthetic_linear_frame());
+        let mut other = synthetic_linear_frame();
+        for px in &mut other.pixels {
+            *px = 4095 - *px;
+        }
+        let second = Arc::new(other);
+        assert_eq!((first.width, first.height), (second.width, second.height));
+
+        view.load_real_frame(Arc::clone(&first), blake3::hash(b"photo one"));
+        let pixels_one = read_frame(&gpu, &view.render());
+        let key_one = view.graph.cache_key(DECODE).unwrap();
+
+        view.load_real_frame(Arc::clone(&second), blake3::hash(b"photo two"));
+        let pixels_two = read_frame(&gpu, &view.render());
+        let key_two = view.graph.cache_key(DECODE).unwrap();
+
+        assert_ne!(
+            key_one, key_two,
+            "each photo needs its own DECODE cache key"
+        );
+        assert_ne!(
+            pixels_one, pixels_two,
+            "photo two must not show photo one's bake"
+        );
+
+        // And the before/after view is the same photo, so it keeps the key.
+        view.show_before = true;
+        view.render();
+        assert_eq!(view.graph.cache_key(DECODE).unwrap(), key_two);
     }
 }
