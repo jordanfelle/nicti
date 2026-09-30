@@ -338,9 +338,18 @@ pub fn live_pixel(
     }
     rgb = color::apply_vibrance(rgb, p.vibrance);
     rgb = color::apply_hsl(rgb, p.hsl);
-    rgb = saturate(rgb, s.saturation);
-    rgb = rotate_hue(rgb, s.hue * HUE_DEGREES);
-    std::array::from_fn(|i| rgb[i] * (1.0 + s.tint_mult[i]).max(0.0))
+    // Each is skipped when its stacked delta is exactly zero (mirroring the shader), so a mask that
+    // selects nothing leaves the pixel bit-identical.
+    if s.saturation != 0.0 {
+        rgb = saturate(rgb, s.saturation);
+    }
+    if s.hue != 0.0 {
+        rgb = rotate_hue(rgb, s.hue * HUE_DEGREES);
+    }
+    if s.tint_mult != [0.0; 3] {
+        rgb = std::array::from_fn(|i| rgb[i] * (1.0 + s.tint_mult[i]).max(0.0));
+    }
+    rgb
 }
 
 #[cfg(test)]

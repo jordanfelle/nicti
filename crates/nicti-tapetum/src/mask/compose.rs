@@ -138,6 +138,21 @@ pub fn bake_requests(params: &MaskParams, neutral_key: blake3::Hash) -> Vec<Bake
     out
 }
 
+/// Every AI bake key any correction refers to -- enabled or not -- so a caller pruning finished
+/// alphas doesn't throw one away just because the user toggled its mask off for a moment.
+pub fn referenced_bake_keys(
+    params: &MaskParams,
+    neutral_key: blake3::Hash,
+) -> HashSet<blake3::Hash> {
+    params
+        .sanitized()
+        .corrections
+        .iter()
+        .flat_map(|c| c.mask.components.iter())
+        .filter_map(|comp| ai_bake_key(&comp.source, neutral_key))
+        .collect()
+}
+
 /// Stamps which AI alphas are ready into the document's masks entry as `"ai_alphas": {bake key hex
 /// -> alpha content hash hex}`. [`MaskParams`] ignores the unknown field when parsing, but
 /// `apply_document` hashes the whole entry, so an alpha arriving (or being replaced) changes the
@@ -450,6 +465,32 @@ mod tests {
         let second = hash_with(&HashMap::from([(key, blake3::hash(b"b"))]));
         assert_ne!(none, first, "an alpha arriving must rebake the composite");
         assert_ne!(first, second, "a replaced alpha must rebake it too");
+    }
+
+    #[test]
+    fn referenced_keys_include_disabled_corrections_but_bake_requests_do_not() {
+        let neutral = blake3::hash(b"neutral");
+        let subject = MaskSource::Ai(recipe("subject"));
+        let sky = MaskSource::Ai(recipe("sky"));
+        let mut off = correction(vec![component(sky.clone(), Op::Add, false, 1.0)]);
+        off.enabled = false;
+        let params = MaskParams {
+            corrections: vec![
+                correction(vec![component(subject.clone(), Op::Add, false, 1.0)]),
+                off,
+            ],
+        };
+        let refs = referenced_bake_keys(&params, neutral);
+        assert!(refs.contains(&ai_bake_key(&subject, neutral).unwrap()));
+        assert!(
+            refs.contains(&ai_bake_key(&sky, neutral).unwrap()),
+            "a toggled-off mask keeps its finished alpha"
+        );
+        assert_eq!(
+            bake_requests(&params, neutral).len(),
+            1,
+            "but only active masks are baked"
+        );
     }
 
     #[test]

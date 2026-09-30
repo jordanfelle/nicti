@@ -32,15 +32,18 @@ use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
 use nicti_tapetum::heal::{self, HealExec, HealKernel, RemovalPatch, RemovalSet};
 use nicti_tapetum::histogram::{self, Histogram};
+use nicti_tapetum::mask::compose as mask_compose;
+use nicti_tapetum::mask::engine::{AiAlpha, MaskEngine, MaskInputs};
+use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
     self, CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec,
-    CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION, SHARPEN, TONE,
-    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, MASKS, NEUTRAL, NOISE_REDUCTION,
+    SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use nicti_tapetum::{RenderStage, StageRegistry};
 
-const LIVE_IDS: [&str; 9] = [
+const LIVE_IDS: [&str; 10] = [
     WB,
     WORKING_SPACE,
     EXPOSURE,
@@ -50,6 +53,8 @@ const LIVE_IDS: [&str; 9] = [
     HSL,
     SHARPEN,
     NOISE_REDUCTION,
+    // Local corrections (#49): applied inside the same fused live dispatch as everything above.
+    MASKS,
 ];
 
 fn build_graph() -> RenderGraph {
@@ -67,6 +72,17 @@ fn build_graph() -> RenderGraph {
             .unwrap();
         prev = Some(id);
     }
+    // The neutral render AI masks infer on (#49, ADR-0049): post-lens, *pre-heal*, so a heal edit
+    // never re-runs a model. A keying-only node -- nothing renders it (it is not in the baked
+    // chain), it exists so an AI bake key chains from LENS and can never depend on a slider.
+    graph
+        .add_node(StageNode {
+            id: NEUTRAL.to_string(),
+            kind: StageKind::Baked,
+            upstream: vec![LENS.to_string()],
+            own_hash: blake3::hash(NEUTRAL.as_bytes()),
+        })
+        .unwrap();
     for id in LIVE_IDS {
         graph
             .add_node(StageNode {
@@ -111,6 +127,8 @@ render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(sharpen_factory, stages::sharpen_stage);
 render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
 render_stage_factory!(crop_factory, stages::crop_stage);
+render_stage_factory!(neutral_factory, stages::neutral_stage);
+render_stage_factory!(masks_factory, stages::masks_stage);
 
 type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 
@@ -119,7 +137,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// `build_graph`'s own node ids.
 fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 15] = [
+    let entries: [StageFactoryEntry; 17] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -135,6 +153,8 @@ fn build_registry() -> StageRegistry {
         (SHARPEN, sharpen_factory),
         (NOISE_REDUCTION, noise_reduction_factory),
         (CROP, crop_factory),
+        (NEUTRAL, neutral_factory),
+        (MASKS, masks_factory),
     ];
     for (id, factory) in entries {
         registry
@@ -210,6 +230,11 @@ pub struct DevelopView {
     /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
     /// photo changes: a patch is pixels inpainted from *this* frame and means nothing on another.
     removals: RemovalSet,
+    /// Local-adjustment masks (#49): the engine that builds the atlas the live shader reads, and the
+    /// finished AI alphas by bake key. Alphas are pixels computed from *this* photo's neutral
+    /// render, so they are cleared whenever the photo changes (their keys chain from it anyway).
+    mask_engine: MaskEngine,
+    ai_alphas: std::collections::HashMap<blake3::Hash, Arc<AiAlpha>>,
     /// Identity of the loaded photo as a `u64`, keying the removal engine's per-photo caches (its
     /// model frame and SAM embedding). Changes whenever `load_real_frame` swaps the photo.
     frame_key: u64,
@@ -249,6 +274,7 @@ impl DevelopView {
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
         let heal_kernel = HealKernel::new(&gpu);
+        let mask_engine = MaskEngine::new(&gpu);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
 
         Self {
@@ -263,6 +289,8 @@ impl DevelopView {
             crop_kernel,
             heal_kernel,
             removals: RemovalSet::new(),
+            mask_engine,
+            ai_alphas: std::collections::HashMap::new(),
             frame_key: 0,
             identity: None,
             uncropped_preview: false,
@@ -354,8 +382,7 @@ impl DevelopView {
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
     /// gives a document with no entry for a stage, just applied to the whole document at once.
     pub fn render(&mut self) -> Arc<FrameTexture> {
-        let stamped;
-        let doc = {
+        let mut doc = {
             let mut d = if self.show_before {
                 EditDocument::default()
             } else {
@@ -384,12 +411,28 @@ impl DevelopView {
                     },
                 );
             }
-            stamped = d;
-            &stamped
+            d
         };
         self.graph
-            .apply_document(doc, &self.registry)
+            .apply_document(&doc, &self.registry)
             .expect("build_registry covers every id build_graph adds");
+        if !self.show_before {
+            // The masks entry is stamped with which AI alphas are ready, so one arriving (or being
+            // replaced) recomposes only the corrections that use it. The stamp needs the neutral
+            // render's key, which is known once the photo's identity is applied above -- hence the
+            // second, nearly free `apply_document` (only the masks node's hash changes).
+            let neutral_key = self.neutral_key();
+            let ready: std::collections::HashMap<blake3::Hash, blake3::Hash> = self
+                .ai_alphas
+                .iter()
+                .map(|(k, a)| (*k, a.content_hash))
+                .collect();
+            mask_compose::stamp_ai_alpha_state(&mut doc, neutral_key, &ready);
+            self.graph
+                .apply_document(&doc, &self.registry)
+                .expect("build_registry covers every id build_graph adds");
+        }
+        let doc = &doc;
 
         let wb: WbParams = Self::resolve(doc, WB);
         let exposure: ExposureParams = Self::resolve(doc, EXPOSURE);
@@ -469,9 +512,88 @@ impl DevelopView {
             geometry_nodes: &[CROP],
             extent: self.extent,
         };
+
+        // Local corrections (#49). The engine needs the *baked* frame (AI refines and range masks
+        // follow it), which only exists once the baked chain has run and been submitted -- so bake
+        // first, prepare the masks from it, bind them, and let the render below find every baked
+        // stage already cached. With no active correction none of this costs anything.
+        let mask_params: MaskParams = Self::resolve(doc, MASKS);
+        let mask_frame = if mask_params.active().next().is_some() {
+            let baked = self
+                .renderer
+                .render_baked(&req)
+                .expect("the synthetic frame's own graph/extent are always internally consistent");
+            let neutral_key = self
+                .graph
+                .cache_key(NEUTRAL)
+                .expect("build_graph always adds NEUTRAL");
+            let guide_key = self
+                .graph
+                .cache_key(HEAL)
+                .expect("build_graph always adds HEAL");
+            // Range masks measure the frame as shot: the as-shot matrix (no user white balance),
+            // so a white-balance drag doesn't rebuild every range mask.
+            let range_matrix = color::camera_to_working_space_matrix(
+                self.frame.cam_mul,
+                &self.frame.cam_xyz,
+                &WbParams::default(),
+            );
+            self.mask_engine.prepare(
+                &self.gpu,
+                &MaskInputs {
+                    params: &mask_params,
+                    ai_alphas: &self.ai_alphas,
+                    neutral_key,
+                    guide: &baked,
+                    guide_key,
+                    range_matrix,
+                },
+            )
+        } else {
+            None
+        };
+        self.live_kernel.set_masks(&self.gpu, mask_frame.as_ref());
+
         self.renderer
             .render(&req)
             .expect("the synthetic frame's own graph/extent are always internally consistent")
+    }
+
+    /// Cache key of the neutral render AI masks infer on (see `build_graph`'s `NEUTRAL` node):
+    /// what a bake key chains from, so a finished alpha is only ever reused for the same photo.
+    pub fn neutral_key(&self) -> blake3::Hash {
+        self.graph
+            .cache_key(NEUTRAL)
+            .expect("build_graph always adds NEUTRAL")
+    }
+
+    /// The AI model runs the current masks need but don't have a finished alpha for yet. Only
+    /// active corrections are listed (a disabled mask is not baked).
+    pub fn mask_bake_requests(&self) -> Vec<mask_compose::BakeRequest> {
+        let params: MaskParams = self.stage_params(MASKS);
+        mask_compose::bake_requests(&params, self.neutral_key())
+            .into_iter()
+            .filter(|r| !self.ai_alphas.contains_key(&r.key))
+            .collect()
+    }
+
+    /// Records a finished AI alpha under its bake key; the next `render` recomposes only the
+    /// corrections that use it.
+    pub fn set_ai_alpha(&mut self, bake_key: blake3::Hash, alpha: Arc<AiAlpha>) {
+        self.ai_alphas.insert(bake_key, alpha);
+    }
+
+    /// True once `bake_key`'s alpha has arrived.
+    pub fn has_ai_alpha(&self, bake_key: &blake3::Hash) -> bool {
+        self.ai_alphas.contains_key(bake_key)
+    }
+
+    /// Drops finished alphas no correction refers to any more. A mask that is merely toggled off
+    /// keeps its alpha (only deleted or re-recipe'd masks release theirs).
+    pub fn prune_ai_alphas(&mut self) {
+        let params: MaskParams = self.stage_params(MASKS);
+        let keep = mask_compose::referenced_bake_keys(&params, self.neutral_key());
+        self.ai_alphas.retain(|k, _| keep.contains(k));
     }
 
     /// A live histogram of `frame`'s display-encoded pixels -- a CPU readback, cheap at this
@@ -534,6 +656,7 @@ impl DevelopView {
         self.frame = frame;
         self.document = EditDocument::default();
         self.removals.clear();
+        self.ai_alphas.clear();
         self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
         self.show_before = false;
         self.active_profile = None;
@@ -543,8 +666,23 @@ impl DevelopView {
             self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
             self.profiles_for = Some(needles);
         }
-        // Recorded, not applied here: `render` stamps it into the document it renders (see there).
+        // `render` stamps the identity into the document it renders (see there), which is what
+        // keeps the cache keys right. Apply it to the graph *now* as well, so `neutral_key()` -- and
+        // therefore `mask_bake_requests()` -- is already the new photo's the moment it loads, not
+        // one render late: a caller asking what to bake right after loading must never be handed a
+        // key that belongs to the previous photo.
         self.identity = Some(identity);
+        let mut identity_only = EditDocument::default();
+        identity_only.stages.insert(
+            DECODE.to_owned(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "identity": identity.to_hex().to_string() }),
+            },
+        );
+        self.graph
+            .apply_document(&identity_only, &self.registry)
+            .expect("build_registry covers every id build_graph adds");
     }
 
     /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).
@@ -808,5 +946,312 @@ mod tests {
         view.show_before = true;
         view.render();
         assert_eq!(view.graph.cache_key(DECODE).unwrap(), key_two);
+    }
+
+    // --- Local corrections (#49) through the real DevelopView -----------------------------------
+
+    use nicti_tapetum::coat::MaskRecipe;
+    use nicti_tapetum::mask::params::{
+        LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+    };
+
+    /// A +`stops` exposure correction over the left half of the frame (a hard-ish linear ramp).
+    fn left_half(stops: f32) -> LocalCorrection {
+        LocalCorrection {
+            id: "left".into(),
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::LinearGradient {
+                        p0: [0.45, 0.5],
+                        p1: [0.55, 0.5],
+                    },
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust: LocalAdjust {
+                exposure: stops,
+                ..LocalAdjust::default()
+            },
+            ..LocalCorrection::default()
+        }
+    }
+
+    fn subject_correction() -> LocalCorrection {
+        LocalCorrection {
+            id: "subject".into(),
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::Ai(MaskRecipe {
+                        model_id: "test.model".into(),
+                        model_version: "1".into(),
+                        params: serde_json::json!({ "target": "subject" }),
+                        seed: None,
+                    }),
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust: LocalAdjust {
+                exposure: 1.0,
+                ..LocalAdjust::default()
+            },
+            ..LocalCorrection::default()
+        }
+    }
+
+    fn pixels(gpu: &Arc<GpuContext>, view: &mut DevelopView) -> Vec<[f32; 4]> {
+        let f = view.render();
+        nicti_tapetum::frame::read_frame(gpu, &f)
+    }
+
+    #[test]
+    fn a_local_exposure_brightens_inside_the_mask_only_and_removing_it_restores_the_image() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let base = pixels(&gpu, &mut view);
+
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![left_half(1.0)],
+            },
+        );
+        let masked = pixels(&gpu, &mut view);
+        let w = 64usize;
+        // Left of the ramp (fully selected): brighter. Right of it: untouched.
+        let left = 8 * w + 6;
+        let right = 8 * w + 58;
+        assert!(
+            masked[left][1] > base[left][1] * 1.3,
+            "left: {:?} -> {:?}",
+            base[left],
+            masked[left]
+        );
+        assert_eq!(
+            masked[right], base[right],
+            "outside the mask nothing changes"
+        );
+
+        // The before/after toggle shows the unedited image, masks included.
+        view.show_before = true;
+        assert_eq!(pixels(&gpu, &mut view), base);
+        view.show_before = false;
+        assert_eq!(pixels(&gpu, &mut view), masked);
+
+        view.reset_stage(MASKS);
+        assert_eq!(
+            pixels(&gpu, &mut view),
+            base,
+            "removing the entry restores the image"
+        );
+    }
+
+    #[test]
+    fn a_mask_correction_with_no_active_adjustment_costs_the_pipeline_nothing() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let base = pixels(&gpu, &mut view);
+        let mut c = left_half(0.0); // a mask with no adjustment yet
+        c.enabled = true;
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![c],
+            },
+        );
+        assert_eq!(pixels(&gpu, &mut view), base);
+    }
+
+    #[test]
+    fn the_neutral_key_ignores_every_edit_including_heal_but_follows_the_photo() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo one"));
+        view.render();
+        let key = view.neutral_key();
+
+        // Global tone / white balance / crop / detail edits...
+        let mut exposure: ExposureParams = view.stage_params(EXPOSURE);
+        exposure.stops = 1.5;
+        view.set_stage_params(EXPOSURE, &exposure);
+        let mut tone: ToneParams = view.stage_params(TONE);
+        tone.contrast = 0.4;
+        view.set_stage_params(TONE, &tone);
+        view.set_stage_params(
+            WB,
+            &WbParams {
+                temp_k: Some(4200.0),
+                tint: 20.0,
+            },
+        );
+        view.set_stage_params(
+            CROP,
+            &CropParams {
+                x: 0.1,
+                y: 0.1,
+                width: 0.5,
+                height: 0.5,
+                rotation_degrees: 3.0,
+            },
+        );
+        // ...a local edit...
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![left_half(1.0)],
+            },
+        );
+        // ...and a HEAL edit (the neutral render is post-lens, *pre-heal*, so healing a spot must
+        // never re-run a model).
+        view.set_stage_params(
+            HEAL,
+            &HealParams {
+                spots: vec![nicti_tapetum::coat::Spot {
+                    kind: nicti_tapetum::coat::SpotKind::Heal,
+                    center: (20.0, 20.0),
+                    radius: 5.0,
+                    source_offset: Some((10.0, 0.0)),
+                    feather: 2.0,
+                    opacity: 1.0,
+                    mask_recipe: None,
+                }],
+            },
+        );
+        view.render();
+        assert_eq!(
+            view.neutral_key(),
+            key,
+            "no edit may change what a model sees"
+        );
+
+        // A different photo does.
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo two"));
+        view.render();
+        assert_ne!(view.neutral_key(), key);
+    }
+
+    #[test]
+    fn an_ai_mask_needs_a_bake_shows_nothing_until_it_arrives_then_appears() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo"));
+        let base = pixels(&gpu, &mut view);
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![subject_correction()],
+            },
+        );
+        // Not baked yet: it is requested, and the mask selects nothing.
+        let reqs = view.mask_bake_requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            pixels(&gpu, &mut view),
+            base,
+            "an unbaked mask must select nothing"
+        );
+
+        // The model finishes: a left-half subject at model resolution.
+        let alpha = AiAlpha::new(
+            16,
+            16,
+            (0..256)
+                .map(|i| if i % 16 < 8 { 1.0 } else { 0.0 })
+                .collect(),
+        )
+        .unwrap();
+        view.set_ai_alpha(reqs[0].key, Arc::new(alpha));
+        assert!(view.has_ai_alpha(&reqs[0].key));
+        assert!(view.mask_bake_requests().is_empty(), "nothing left to bake");
+        let with = pixels(&gpu, &mut view);
+        let w = 64usize;
+        assert!(
+            with[8 * w + 4][1] > base[8 * w + 4][1] * 1.3,
+            "the subject half is brightened"
+        );
+        assert_eq!(
+            with[8 * w + 60],
+            base[8 * w + 60],
+            "the background is untouched"
+        );
+    }
+
+    /// The bug the DECODE-identity fix exists for, tested at the level that matters: a mask made
+    /// on one photo must never show up on another.
+    #[test]
+    fn an_ai_mask_from_one_photo_never_leaks_onto_the_next() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo A"));
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![subject_correction()],
+            },
+        );
+        let key_a = view.mask_bake_requests()[0].key;
+        view.set_ai_alpha(key_a, Arc::new(AiAlpha::new(4, 4, vec![1.0; 16]).unwrap()));
+        view.render();
+        assert!(view.mask_bake_requests().is_empty());
+
+        // Photo B: same extent, and the same masks pasted onto it (loading a photo starts a fresh
+        // edit document, so re-apply them -- as a synced/pasted edit would).
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo B"));
+        assert!(
+            !view.has_ai_alpha(&key_a),
+            "the finished alpha was released"
+        );
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![subject_correction()],
+            },
+        );
+        let reqs = view.mask_bake_requests();
+        assert_eq!(reqs.len(), 1, "photo B needs its own bake");
+        assert_ne!(
+            reqs[0].key, key_a,
+            "and its bake key differs from photo A's"
+        );
+    }
+
+    #[test]
+    fn pruning_drops_alphas_of_deleted_masks_but_keeps_a_disabled_ones() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut c = subject_correction();
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![c.clone()],
+            },
+        );
+        let key = view.mask_bake_requests()[0].key;
+        view.set_ai_alpha(key, Arc::new(AiAlpha::new(2, 2, vec![1.0; 4]).unwrap()));
+
+        c.enabled = false; // toggled off: the alpha is worth keeping
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![c],
+            },
+        );
+        view.prune_ai_alphas();
+        assert!(view.has_ai_alpha(&key));
+
+        view.reset_stage(MASKS); // deleted: released
+        view.prune_ai_alphas();
+        assert!(!view.has_ai_alpha(&key));
     }
 }

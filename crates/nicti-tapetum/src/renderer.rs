@@ -158,22 +158,17 @@ impl Renderer {
         self.last_stats
     }
 
-    /// Renders `req`, returning the final (post-geometry) frame. A `Baked` node whose cache key
-    /// is already resident in `baked_cache` is a cache hit -- zero dispatches for it. The fused
-    /// live/geometry passes are each either a cache hit (their composite key matches the stored
-    /// one from the previous render) or exactly one dispatch.
-    pub fn render(&mut self, req: &RenderRequest<'_>) -> Result<Arc<FrameTexture>, RenderError> {
+    /// Runs the baked chain into `encoder`, returning its last output and that node's cache key. A
+    /// node whose key is resident in `baked_cache` is a hit (zero dispatches).
+    fn run_baked(
+        &mut self,
+        req: &RenderRequest<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+        stats: &mut RenderStats,
+    ) -> Result<(Arc<FrameTexture>, blake3::Hash), RenderError> {
         if req.baked_chain.is_empty() {
             return Err(RenderError::EmptyBakedChain);
         }
-        let mut stats = RenderStats::default();
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("nicti-tapetum frame"),
-            });
-
         let mut current: Option<Arc<FrameTexture>> = None;
         let mut baked_output_key: Option<blake3::Hash> = None;
         for (id, exec) in req.baked_chain {
@@ -185,14 +180,56 @@ impl Renderer {
                 continue;
             }
             let output = Arc::new(FrameTexture::new(&self.gpu, req.extent));
-            exec.encode(&self.gpu, &mut encoder, current.as_deref(), &output);
+            exec.encode(&self.gpu, encoder, current.as_deref(), &output);
             stats.bake_dispatches += 1;
             self.baked_cache.put(key, Arc::clone(&output));
             current = Some(output);
         }
         let baked_output = current.ok_or(RenderError::EmptyBakedChain)?;
         // `baked_chain` is non-empty (checked above), so the loop ran at least once.
-        let baked_output_key = baked_output_key.expect("baked_chain is non-empty");
+        Ok((
+            baked_output,
+            baked_output_key.expect("baked_chain is non-empty"),
+        ))
+    }
+
+    /// Runs and **submits** just the baked chain, returning the last baked frame.
+    ///
+    /// A stage that needs the baked frame *before* the live dispatch is recorded -- the mask engine
+    /// reads it to refine AI alphas and to build range masks -- cannot get it from inside
+    /// [`LiveExec::encode`]: `render` records every pass into one encoder that is only submitted at
+    /// the end, so anything submitted from within would run first and read an unwritten texture.
+    /// Call this, use the frame, then call [`Self::render`]: its baked stages are now all cache
+    /// hits, so nothing is computed twice. (Does not touch [`Self::last_stats`].)
+    pub fn render_baked(
+        &mut self,
+        req: &RenderRequest<'_>,
+    ) -> Result<Arc<FrameTexture>, RenderError> {
+        let mut stats = RenderStats::default();
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("nicti-tapetum baked chain"),
+            });
+        let (baked, _) = self.run_baked(req, &mut encoder, &mut stats)?;
+        self.gpu.queue.submit(Some(encoder.finish()));
+        Ok(baked)
+    }
+
+    /// Renders `req`, returning the final (post-geometry) frame. A `Baked` node whose cache key
+    /// is already resident in `baked_cache` is a cache hit -- zero dispatches for it. The fused
+    /// live/geometry passes are each either a cache hit (their composite key matches the stored
+    /// one from the previous render) or exactly one dispatch.
+    pub fn render(&mut self, req: &RenderRequest<'_>) -> Result<Arc<FrameTexture>, RenderError> {
+        let mut stats = RenderStats::default();
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("nicti-tapetum frame"),
+            });
+        let (baked_output, baked_output_key) = self.run_baked(req, &mut encoder, &mut stats)?;
 
         let live_key = composite_key(req.graph, req.live_nodes, baked_output_key, req.extent)?;
         let live_output = if self.live_key == Some(live_key) {
@@ -520,6 +557,65 @@ mod tests {
             "a live-stage change must trigger zero bake dispatches"
         );
         assert_eq!(renderer.last_stats().live_dispatches, 1);
+    }
+
+    /// `render_baked` (used by the mask engine, which needs the baked frame *before* the live
+    /// dispatch is recorded) must do the baked work exactly once: it bakes and submits the chain,
+    /// and the `render` that follows finds every baked node cached.
+    #[test]
+    fn render_baked_does_the_baked_work_once_and_the_following_render_reuses_it() {
+        let Some(gpu) = test_gpu() else { return };
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 1_000_000_000);
+        let g = hero_graph(&[]);
+        let chain = baked_chain(&g, &baked_exec);
+        let req = RenderRequest {
+            graph: &g,
+            baked_chain: &chain,
+            live: &live_exec,
+            live_nodes: &["wb", "tone"],
+            geometry: &geom_exec,
+            geometry_nodes: &["crop"],
+            extent: extent(),
+        };
+        let baked = renderer.render_baked(&req).unwrap();
+        assert_eq!(baked.extent, extent());
+        assert_eq!(baked_exec.0.load(Ordering::SeqCst), 5, "the chain ran once");
+        assert_eq!(live_exec.0.load(Ordering::SeqCst), 0, "no live work yet");
+
+        renderer.render(&req).unwrap();
+        assert_eq!(
+            baked_exec.0.load(Ordering::SeqCst),
+            5,
+            "render reuses the baked outputs render_baked left in the cache"
+        );
+        assert_eq!(renderer.last_stats().bake_dispatches, 0);
+        assert_eq!(renderer.last_stats().live_dispatches, 1);
+
+        // And it is itself a cache hit the second time.
+        renderer.render_baked(&req).unwrap();
+        assert_eq!(baked_exec.0.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn render_baked_needs_a_baked_chain() {
+        let Some(gpu) = test_gpu() else { return };
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 1_000_000);
+        let g = hero_graph(&[]);
+        let err = renderer.render_baked(&RenderRequest {
+            graph: &g,
+            baked_chain: &[],
+            live: &live_exec,
+            live_nodes: &[],
+            geometry: &geom_exec,
+            geometry_nodes: &[],
+            extent: extent(),
+        });
+        assert!(matches!(err, Err(RenderError::EmptyBakedChain)));
     }
 
     #[test]

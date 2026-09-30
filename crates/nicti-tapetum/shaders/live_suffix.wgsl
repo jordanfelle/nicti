@@ -518,9 +518,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_vibrance(rgb, u.tone1.z);
     rgb = apply_hsl(rgb);
     if (has_locals) {
-        rgb = saturate_chroma(rgb, locals.saturation);
-        rgb = rotate_hue(rgb, locals.hue * HUE_DEGREES);
-        rgb = rgb * max(vec3<f32>(1.0) + locals.tint_mult, vec3<f32>(0.0));
+        // Each is skipped when its stacked delta is exactly zero, so a mask that selects nothing
+        // (or has no such adjustment) leaves the pixel bit-identical, not merely close.
+        if (locals.saturation != 0.0) {
+            rgb = saturate_chroma(rgb, locals.saturation);
+        }
+        if (locals.hue != 0.0) {
+            rgb = rotate_hue(rgb, locals.hue * HUE_DEGREES);
+        }
+        if (any(locals.tint_mult != vec3<f32>(0.0))) {
+            rgb = rgb * max(vec3<f32>(1.0) + locals.tint_mult, vec3<f32>(0.0));
+        }
     }
     textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(rgb, px.a));
 }

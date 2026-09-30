@@ -110,6 +110,13 @@ impl InstallModelsJob {
         (job, handle)
     }
 
+    /// Replaces the job's activity-panel label (the default names AI removal, which this job was
+    /// first written for; AI masks reuse it for their own model).
+    pub fn labelled(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
     fn resolve(&self, r: Result<(), String>) {
         *self.result.lock().unwrap() = Some(r);
     }
@@ -437,5 +444,15 @@ mod tests {
         assert_eq!(spec.kind, JobKind::Download);
         assert_eq!(spec.lane, Lane::Cpu);
         assert_eq!(spec.priority, Priority::Foreground);
+    }
+
+    #[test]
+    fn a_job_can_be_relabelled_for_another_feature() {
+        let (job, _) = InstallModelsJob::new(temp_store("label"), Arc::new(Fake(Vec::new())), &[]);
+        assert_eq!(job.label(), "Download AI removal models");
+        assert_eq!(
+            job.labelled("Download AI mask model").label(),
+            "Download AI mask model"
+        );
     }
 }
