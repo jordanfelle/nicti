@@ -1,7 +1,7 @@
 ## Culling
 
 Covers burst/duplicate grouping (#33), blur/misfocus/eye detection (#34), subject grouping (#35),
-and Ultralytics YOLO as a culling/detection candidate (#108).
+Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX build (#32).
 
 - **Burst/duplicate grouping (#33)**: `docs/adr/0033-burst-duplicate-grouping.md` — con-day
   duplicates are pose sets 2-30s apart, not sub-second bursts (measured on a real con day: most
@@ -66,3 +66,23 @@ and Ultralytics YOLO as a culling/detection candidate (#108).
   accuracy in isolation. **Accepted, deferred**: no dedicated integration this pass — #35's own
   full-frame-vs-crop ablation (pending #243) is the concrete mechanism to decide whether a
   detection stage is worth adding, so this ticket doesn't duplicate that pending experiment.
+- **Culling UX (#32)**: `docs/adr/0032-culling-ux.md` — the build that gives the catalog's
+  rating/flag/label columns a UI. The owner's own flow is stars only (1 = discard, 4 = "edit this",
+  re-rate the 4s to 5 or 1); others use pick/reject or colour labels; the resulting requirement was
+  that *no* marker is privileged and discarding is just "filter on whatever you marked with,
+  select all, Delete" -- so there are no profiles, only the standard Lightroom Classic keys all live
+  at once (`0-5`, `P`/`X`/`U`, `6-9`, Ctrl+Z/Y), #242's filter bar (extended with unrated / exactly-N / unflagged / no-label), and a Delete
+  that always asks Recycle Bin vs. catalog-only. Reject is `rating = -1` and replaces the stars;
+  pick/reject are exclusive; a toggle decides once for a whole multi-selection. Writes never block a
+  keypress: a writer thread owns all marker I/O and the undo ring while the UI updates a cache first
+  (the catalog is one mutex an import holds in bursts). Marking never reloads the grid, so the
+  cursor never jumps. Delete follows Carry's discipline (journal before write, steppable, startup
+  recovery) and adds one rule of its own: only a *positive* "absent from a reachable folder" ever
+  removes a catalog row -- every disk question is present/absent/unknown (an errored stat or an
+  unreachable folder is unknown, and keeps the row), which an adversarial review showed the first
+  version got wrong in three ways (`Path::exists` swallowing errors, no reachability check after
+  the trash call, a stale journal path at recovery). A sidecar shared with an unselected sibling
+  is left for it. egui gotchas found on the way: `key_pressed` includes OS auto-repeat and egui derives
+  `repeat` from its own held-key set, so holding `X` would flip a reject repeatedly unless raw
+  events are read and repeats ignored. Survey/Compare work on the embedded previews only. **Not
+  verified in this sandbox**: the real Windows Recycle Bin, drawn pixels, real-hardware latency.

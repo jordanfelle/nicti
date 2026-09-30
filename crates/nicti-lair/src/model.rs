@@ -123,3 +123,36 @@ pub struct RootMove {
     pub dest_path: String,
     pub state: MoveState,
 }
+
+/// The three culling markers on an asset (#32): star rating, pick flag, and colour label. A unit
+/// so the culling UI can snapshot, restore and diff all three at once (`CatalogStore::get_meta`
+/// / `set_meta`), instead of round-tripping whole [`Asset`] rows. Same value domains as the
+/// matching `Asset` fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetMeta {
+    /// `None` = unrated, `Some(-1)` = reject, `Some(0..=5)` = star rating.
+    pub rating: Option<i64>,
+    /// `None` = unflagged, `Some(1)` = pick.
+    pub flag: Option<i64>,
+    pub label: Option<String>,
+}
+
+/// Journal state of one asset in an in-flight delete (#32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteState {
+    /// Recorded before any file was touched: the RAW (and its sidecar) may or may not be in the
+    /// Recycle Bin yet.
+    Pending,
+    /// The files are in the Recycle Bin; only the catalog row removal remains.
+    Trashed,
+}
+
+/// One open `delete_item` journal row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteItem {
+    pub asset_id: i64,
+    /// Absolute path of the RAW file, as it was when the delete began (the row itself may be gone
+    /// by recovery time, so the path is journaled, not re-derived).
+    pub abs_path: String,
+    pub state: DeleteState,
+}

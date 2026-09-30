@@ -175,7 +175,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     `hunt_ids` 37–270 ms (filename across all roots 1.1 s), first keyset page 0.19 ms,
     `get_previews` 64 × ~138 KB 6 ms. Not measured: real-machine grid frame time (#233).
   - **#242 (Library filter bar, landed)**: `filter_bar.rs`'s `FilterBar` — keyword (+subtree), rating
-    (any / N+ / rejected), picks, label, make, model, capture-date range, filename controls →
+    (any / unrated / exactly N / N+ / rejected), flag (any / picked / unflagged), label (any / none /
+    a name), make, model, capture-date range, filename controls (#32 added the unrated, exactly-N,
+    unflagged and no-label choices; a saved rule whose rating, flag or label shape the controls
+    can't express is carried verbatim via the `Custom` variants) →
     `to_filter(root_id)` → `Filter` for `GridSession::set_query`; `load_filter` is its inverse and
     round-trips a saved rule losslessly (raw date bounds, `rel_path_prefix`, and any rating shape the
     controls can't express via `RatingChoice::Custom` are carried through). Facet

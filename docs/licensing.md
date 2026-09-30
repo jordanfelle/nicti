@@ -667,6 +667,18 @@ runtime dependency of the shipped binary) — MIT.[^rel4]
 
 No ML model, font, or other bundled data asset is introduced by this ticket.
 
+## Update (2026-09-29, [#32](https://github.com/jordanfelle/nicti/issues/32)'s culling UX ticket)
+
+Two new crates enter the dependency graph via `crates/nicti-lair`'s delete engine (`shred.rs`,
+"move to the Recycle Bin"), both MIT and already clearing `deny.toml`'s allowlist with no new
+entries (`cargo deny check licenses` passes):
+
+- **`trash`** v5.2.9 — MIT.[^tr1] Windows Recycle Bin via `IFileOperation`; on Windows it uses the
+  `windows` crate at 0.62, the same version already in the tree (no duplicate).
+- **`urlencoding`** v2.1.3 — MIT, a `trash` dependency.[^tr2]
+
+No ML model, font, or other bundled data asset is introduced by this ticket.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23
@@ -725,3 +737,5 @@ No ML model, font, or other bundled data asset is introduced by this ticket.
 [^rel2]: `minisign-verify` `license = "MIT"` — https://crates.io/api/v1/crates/minisign-verify — verified 2026-09-27
 [^rel3]: `ureq` `license = "MIT OR Apache-2.0"` — https://crates.io/api/v1/crates/ureq — verified 2026-09-27
 [^rel4]: `rsign2` `license = "MIT"` — https://crates.io/api/v1/crates/rsign2 — verified 2026-09-27
+[^tr1]: `trash` `license = "MIT"` — https://crates.io/api/v1/crates/trash — verified 2026-09-29 against the downloaded 5.2.9 `Cargo.toml`
+[^tr2]: `urlencoding` `license = "MIT"` — https://crates.io/api/v1/crates/urlencoding — verified 2026-09-29 against the downloaded 2.1.3 `Cargo.toml`

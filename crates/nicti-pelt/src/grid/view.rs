@@ -4,10 +4,13 @@
 //! [`GridSession`]; this file is layout and input.
 
 use egui::{Color32, Rect, Sense, Vec2};
+use nicti_lair::AssetMeta;
 use nicti_pounce::Pounce;
 
 use super::layout::GridLayout;
 use super::session::GridSession;
+use crate::cull::badges::paint_marks;
+use crate::cull::CullState;
 
 /// Outer size of one cell (thumbnail plus gap), in points.
 pub const CELL: f32 = 168.0;
@@ -109,6 +112,7 @@ pub fn show(
     ui: &mut egui::Ui,
     session: &mut GridSession,
     state: &mut ViewState,
+    cull: &mut CullState,
     pounce: &Pounce,
 ) -> GridOutcome {
     let mut outcome = GridOutcome::default();
@@ -143,11 +147,16 @@ pub fn show(
     let layout = GridLayout::new(ui.available_width() - scrollbar_w, CELL);
     let rows_per_page = ((state.viewport_h / CELL).floor() as usize).max(1);
 
-    // Keyboard navigation -- skipped while a text field (the folder box) has focus.
+    // Keyboard navigation and selection -- skipped while a text field (the folder box) has focus.
+    // Marking keys (stars, pick/reject, labels, undo) are handled app-wide, not here.
     if !ui.ctx().egui_wants_keyboard_input() {
         let mut open_cursor = false;
         let mut moved_to = None;
-        ui.input(|i| {
+        let mut extend = false;
+        let mut select_all = false;
+        let mut clear = false;
+        ui.input_mut(|i| {
+            extend = i.modifiers.shift;
             for key in NAV_KEYS {
                 if i.key_pressed(key) {
                     moved_to = navigate(key, session.cursor(), total, layout.cols, rows_per_page)
@@ -155,10 +164,24 @@ pub fn show(
                 }
             }
             open_cursor = i.key_pressed(egui::Key::Enter);
+            select_all = i.consume_key(egui::Modifiers::COMMAND, egui::Key::A);
+            clear = i.key_pressed(egui::Key::Escape);
         });
         if let Some(index) = moved_to {
-            session.set_cursor(Some(index));
+            // Shift+arrow grows the selection from its anchor; a plain arrow drops it, like
+            // clicking the destination.
+            if extend {
+                session.select_range_to(index);
+            } else {
+                session.click(index);
+            }
             state.reveal_cursor = true;
+        }
+        if select_all {
+            session.select_all();
+        }
+        if clear && session.has_selection() {
+            session.clear_selection();
         }
         if open_cursor {
             outcome.open = session.cursor();
@@ -192,12 +215,24 @@ pub fn show(
                     let id = session.ids()[index];
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::splat(CELL), Sense::click());
-                    paint_cell(ui, session, id, rect, cursor == Some(index));
+                    let marks = Marks {
+                        cursor: cursor == Some(index),
+                        selected: session.is_selected(index),
+                        meta: cull.meta(id),
+                    };
+                    paint_cell(ui, session, id, rect, &marks);
                     if response.clicked() {
-                        session.set_cursor(Some(index));
+                        let mods = ui.input(|i| i.modifiers);
+                        if mods.command {
+                            session.toggle_select(index);
+                        } else if mods.shift {
+                            session.select_range_to(index);
+                        } else {
+                            session.click(index);
+                        }
                     }
                     if response.double_clicked() {
-                        session.set_cursor(Some(index));
+                        session.click(index);
                         outcome.open = Some(index);
                     }
                 }
@@ -208,11 +243,28 @@ pub fn show(
     state.viewport_h = output.inner_rect.height();
 
     let visible = layout.indices_for_rows(visible_rows, total);
+    // Markers for what is on screen (plus the same overscan the thumbnails get), read off-thread.
+    cull.ensure(
+        session.ids()[visible.clone()]
+            .iter()
+            .copied()
+            .chain(session.cursor().map(|c| session.ids()[c])),
+    );
     session.request_visible(visible, pounce);
     outcome
 }
 
-fn paint_cell(ui: &egui::Ui, session: &mut GridSession, id: i64, rect: Rect, selected: bool) {
+/// What a cell shows besides its thumbnail.
+struct Marks<'a> {
+    /// The keyboard/click focus.
+    cursor: bool,
+    /// Part of the multi-selection.
+    selected: bool,
+    /// Rating, pick/reject and label, once read; `None` draws nothing (never a guess).
+    meta: Option<&'a AssetMeta>,
+}
+
+fn paint_cell(ui: &egui::Ui, session: &mut GridSession, id: i64, rect: Rect, marks: &Marks<'_>) {
     let inner = rect.shrink(GAP);
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
@@ -242,11 +294,20 @@ fn paint_cell(ui: &egui::Ui, session: &mut GridSession, id: i64, rect: Rect, sel
         );
     }
 
-    if selected {
+    if let Some(meta) = marks.meta {
+        paint_marks(&painter, inner, meta);
+    }
+
+    if marks.selected {
+        let tint = visuals.selection.bg_fill.gamma_multiply(0.35);
+        painter.rect_filled(inner, 2.0, tint);
+    }
+    if marks.cursor || marks.selected {
+        let width = if marks.cursor { 2.5 } else { 1.5 };
         painter.rect_stroke(
             inner,
             2.0,
-            egui::Stroke::new(2.0, visuals.selection.stroke.color),
+            egui::Stroke::new(width, visuals.selection.stroke.color),
             egui::StrokeKind::Inside,
         );
     }

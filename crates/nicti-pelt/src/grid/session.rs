@@ -20,6 +20,7 @@ use nicti_tapetum::cache::Tier;
 
 use super::jobs::{SnapshotJob, SnapshotResult, ThumbBatchJob, ThumbError, ThumbImage, ThumbSlot};
 use super::layout::{batch_indices, batches_for};
+use super::selection::Selection;
 
 /// How long a cell whose thumbnail hit a *transient* catalog error waits before being asked for
 /// again -- long enough that a persistent error can't turn `request_visible` (called every frame)
@@ -87,6 +88,8 @@ pub struct GridSession {
     /// selection must stay on the same photo, not the same slot.
     cursor: Option<usize>,
     cursor_id: Option<i64>,
+    /// The multi-selection (#32). Empty means "just the cursor" -- see [`Selection`].
+    selection: Selection,
     last_window: Option<Range<usize>>,
 }
 
@@ -119,6 +122,7 @@ impl GridSession {
             pending_ids: HashSet::new(),
             cursor: None,
             cursor_id: None,
+            selection: Selection::default(),
             last_window: None,
         }
     }
@@ -163,6 +167,118 @@ impl GridSession {
             .map(|c| c.min(self.ids.len() - 1));
         self.cursor = index;
         self.cursor_id = index.map(|i| self.ids[i]);
+    }
+
+    // ---- multi-selection (#32) -------------------------------------------------------------
+
+    /// Plain click: the cursor moves to `index`, any multi-selection is dropped, and `index`
+    /// becomes the anchor for a following shift-click.
+    pub fn click(&mut self, index: usize) {
+        self.set_cursor(Some(index));
+        self.selection.clear();
+        self.selection.set_anchor(self.cursor);
+    }
+
+    /// Ctrl-click: toggles `index` in the selection. The first ctrl-click on a bare cursor
+    /// keeps that photo selected too, so it reads as "add this one".
+    pub fn toggle_select(&mut self, index: usize) {
+        if index >= self.ids.len() {
+            return;
+        }
+        if self.selection.is_empty() {
+            if let Some(c) = self.cursor {
+                self.selection.insert(c);
+            }
+        }
+        self.selection.toggle(index);
+        self.selection.set_anchor(Some(index));
+        // The cursor follows the click -- unless that click just *removed* the photo, in which
+        // case it moves to a photo that is still selected. Otherwise the highlight sits on a
+        // photo no action will touch, and auto-advance would step from there.
+        if self.selection.contains(index) || self.selection.is_empty() {
+            self.set_cursor(Some(index));
+        } else {
+            self.set_cursor(self.selection.last());
+        }
+    }
+
+    /// Shift-click / shift-arrow: selects from the anchor (or the cursor, if none) to `index`
+    /// and moves the cursor there.
+    pub fn select_range_to(&mut self, index: usize) {
+        if self.ids.is_empty() {
+            return;
+        }
+        let index = index.min(self.ids.len() - 1);
+        let from = self
+            .selection
+            .anchor()
+            .or(self.cursor)
+            .unwrap_or(index)
+            .min(self.ids.len() - 1);
+        self.selection.set_anchor(Some(from));
+        self.selection.set_range(from, index);
+        self.set_cursor(Some(index));
+    }
+
+    /// Auto-advance after a single-photo mark: moves the cursor to the next photo and drops any
+    /// multi-selection (`click`, not `set_cursor` -- a one-photo selection must not keep
+    /// targeting the photo the cursor just left). `false`, and nothing changes, at the last photo
+    /// or with no cursor.
+    pub fn advance_after_mark(&mut self) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        if cursor + 1 >= self.ids.len() {
+            return false;
+        }
+        self.click(cursor + 1);
+        true
+    }
+
+    /// Ctrl+A: every photo in the current snapshot (the current filter), cursor unchanged.
+    pub fn select_all(&mut self) {
+        self.selection.select_all(self.ids.len());
+        if self.selection.anchor().is_none() {
+            self.selection.set_anchor(self.cursor.or(Some(0)));
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Whether the cell at `index` is part of the multi-selection.
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selection.contains(index)
+    }
+
+    /// How many photos an action would apply to: the multi-selection, else the cursor's photo.
+    pub fn target_count(&self) -> usize {
+        if self.selection.is_empty() {
+            usize::from(self.cursor.is_some())
+        } else {
+            self.selection.len()
+        }
+    }
+
+    /// Whether a multi-selection (not just the cursor) is active.
+    pub fn has_selection(&self) -> bool {
+        !self.selection.is_empty()
+    }
+
+    /// The ids an action applies to: the multi-selection in grid order, else the cursor's photo.
+    pub fn target_ids(&self) -> Vec<i64> {
+        if self.selection.is_empty() {
+            self.cursor_id
+                .filter(|_| self.cursor.is_some())
+                .into_iter()
+                .collect()
+        } else {
+            self.selection
+                .indices()
+                .filter_map(|i| self.ids.get(i).copied())
+                .collect()
+        }
     }
 
     /// Selects `asset_id` wherever it is in the current snapshot -- for mirroring a selection made
@@ -264,7 +380,8 @@ impl GridSession {
                     return;
                 }
                 self.cancel_batches(pounce);
-                self.ids = ids;
+                let old_ids = std::mem::replace(&mut self.ids, ids);
+                self.selection.remap(&old_ids, &self.ids);
                 self.loaded = true;
                 // Keep the selection on the same photo, wherever it landed (or drop it if the
                 // new query no longer contains it).
@@ -944,5 +1061,135 @@ mod tests {
         // Coming back re-queues what the window still lacks.
         session.request_visible(0..64, &pounce);
         assert!(session.inflight_batches() > 0);
+    }
+
+    // ---- multi-selection (#32) ------------------------------------------------------------
+
+    #[test]
+    fn a_bare_cursor_targets_just_its_photo_and_nothing_when_unset() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(10, 1 << 20, |_| false);
+        assert_eq!(session.target_count(), 0);
+        assert!(session.target_ids().is_empty());
+        session.click(4);
+        assert_eq!(session.target_ids(), vec![ids[4]]);
+        assert_eq!(session.target_count(), 1);
+        assert!(!session.has_selection());
+    }
+
+    #[test]
+    fn shift_click_selects_the_span_from_the_anchor_in_either_direction() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(10, 1 << 20, |_| false);
+        session.click(6);
+        session.select_range_to(3);
+        assert_eq!(session.target_ids(), ids[3..=6].to_vec());
+        assert_eq!(session.cursor(), Some(3));
+        // Extending again is measured from the same anchor, not from the new cursor.
+        session.select_range_to(8);
+        assert_eq!(session.target_ids(), ids[6..=8].to_vec());
+        assert!(session.is_selected(7) && !session.is_selected(5));
+    }
+
+    #[test]
+    fn ctrl_click_adds_and_removes_and_keeps_the_original_cursor_photo() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(10, 1 << 20, |_| false);
+        session.click(2);
+        session.toggle_select(5);
+        assert_eq!(session.target_ids(), vec![ids[2], ids[5]]);
+        session.toggle_select(2);
+        assert_eq!(session.target_ids(), vec![ids[5]]);
+        session.toggle_select(5);
+        assert!(!session.has_selection());
+    }
+
+    #[test]
+    fn a_plain_click_drops_the_multi_selection() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(10, 1 << 20, |_| false);
+        session.click(1);
+        session.select_range_to(4);
+        assert_eq!(session.target_count(), 4);
+        session.click(7);
+        assert_eq!(session.target_ids(), vec![ids[7]]);
+    }
+
+    #[test]
+    fn select_all_covers_the_whole_snapshot_and_clear_empties_it() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(25, 1 << 20, |_| false);
+        session.select_all();
+        assert_eq!(session.target_count(), 25);
+        assert_eq!(session.target_ids(), ids);
+        session.clear_selection();
+        assert!(!session.has_selection());
+    }
+
+    #[test]
+    fn the_selection_follows_its_photos_through_a_new_sort() {
+        let (mut session, ids, ctx, pounce) = loaded_session(10, 1 << 20, |_| false);
+        session.click(0);
+        session.select_range_to(2); // photos 0, 1, 2 (oldest imports)
+        session.set_query(
+            Filter::default(),
+            Sort {
+                field: SortField::Imported,
+                direction: SortDirection::Desc,
+            },
+            &pounce,
+        );
+        wait_for(&mut session, &ctx, &pounce, |s| !s.is_loading());
+        let mut selected = session.target_ids();
+        selected.sort_unstable();
+        assert_eq!(
+            selected,
+            ids[0..3].to_vec(),
+            "the same three photos, now at the end"
+        );
+        assert!(session.is_selected(9) && session.is_selected(7) && !session.is_selected(6));
+    }
+
+    #[test]
+    fn select_range_and_toggle_ignore_an_empty_or_out_of_range_grid() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(3, 1 << 20, |_| false);
+        session.toggle_select(99); // out of range: ignored
+        assert!(session.target_ids().is_empty());
+        session.click(1);
+        session.select_range_to(99); // clamped to the last photo
+        assert_eq!(session.target_ids(), ids[1..=2].to_vec());
+    }
+
+    #[test]
+    fn advancing_after_a_mark_moves_on_drops_the_selection_and_stops_at_the_end() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(3, 1 << 20, |_| false);
+        assert!(
+            !session.advance_after_mark(),
+            "no cursor: nothing to advance from"
+        );
+        session.click(0);
+        session.toggle_select(0); // a one-photo multi-selection of the cursor's photo
+        assert!(session.advance_after_mark());
+        assert_eq!(session.cursor_id(), Some(ids[1]));
+        assert_eq!(
+            session.target_ids(),
+            vec![ids[1]],
+            "the old selection is gone"
+        );
+        assert!(session.advance_after_mark());
+        assert!(!session.advance_after_mark(), "already on the last photo");
+        assert_eq!(session.cursor_id(), Some(ids[2]));
+    }
+
+    #[test]
+    fn ctrl_clicking_a_photo_off_moves_the_cursor_to_one_still_selected() {
+        let (mut session, ids, _ctx, _pounce) = loaded_session(8, 1 << 20, |_| false);
+        session.click(2);
+        session.toggle_select(5); // selection {2, 5}, cursor on 5
+        session.toggle_select(5); // 5 deselected
+        assert_eq!(session.target_ids(), vec![ids[2]]);
+        assert_eq!(
+            session.cursor_id(),
+            Some(ids[2]),
+            "the cursor must sit on a photo an action would touch"
+        );
+        // So auto-advance steps from the photo that was actually marked.
+        assert!(session.advance_after_mark());
+        assert_eq!(session.cursor_id(), Some(ids[3]));
     }
 }
