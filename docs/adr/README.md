@@ -54,6 +54,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0047](0047-crop-straighten-autolevel.md) | — | Crop, straighten, and auto-level | Accepted |
 | [0048](0048-masking.md) | 0024 | Masking | Proposed |
 | [0050](0050-healing-and-removal.md) | 0007 | Healing and removal | Proposed |
+| [0051](0051-healing-removal-build.md) | — | Healing and removal — the build (GPU clone/heal, AI removal, model store) | Accepted |
 | [0053](0053-ai-auto-tone.md) | — | AI auto-tone (MLP, per-user edit history) | Proposed |
 | [0054](0054-job-scheduler-pounce.md) | — | Job scheduler design (Pounce) | Proposed |
 | [0056](0056-export-stack.md) | — | Export stack | Proposed |

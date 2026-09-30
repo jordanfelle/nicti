@@ -2407,26 +2407,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "groom"
-version = "0.0.0"
-dependencies = [
- "blake3",
- "bytemuck",
- "crouch",
- "litter",
- "nicti-haw",
- "ort",
- "pollster",
- "rods",
- "rosette",
- "serde",
- "serde_json",
- "siamese",
- "thiserror 2.0.21",
- "wgpu",
-]
-
-[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3694,14 +3674,19 @@ dependencies = [
 name = "nicti-groom"
 version = "0.0.0"
 dependencies = [
+ "crouch",
+ "litter",
  "nicti-cornea",
  "nicti-haw",
  "nicti-pounce",
  "nicti-stalk",
  "nicti-tapetum",
  "ort",
+ "rods",
+ "rosette",
  "serde_json",
  "sha2 0.11.0",
+ "siamese",
  "thiserror 2.0.21",
 ]
 

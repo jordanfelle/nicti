@@ -5,8 +5,8 @@
 //! `commit()` -- it would trivially pass under the original buggy code too, given the first call
 //! already succeeded).
 //!
-//! The real bug is cross-crate: six throwaway spikes (`groom`, `siamese`, `crouch`, `rods`,
-//! `litter`, `rosette`) each used to carry their own copy of `ensure_ort_environment`, but `ort`'s
+//! The real bug is cross-crate: six crates (`groom` -- now `nicti-groom`, calling `nicti-haw` directly -- and the
+//! throwaway spikes `siamese`, `crouch`, `rods`, `litter`, `rosette`) each used to carry their own copy of `ensure_ort_environment`, but `ort`'s
 //! environment is a single process-global (`G_ENV_OPTIONS`). Before #179's fix, whichever crate's
 //! copy lost the race -- i.e. called `EnvironmentBuilder::commit()` after any other crate already
 //! had -- treated `commit() == false` as a permanent, cached error, so every subsequent model load
@@ -26,14 +26,14 @@
 //!
 //! Needs a real ONNX Runtime shared library (`NICTI_TEST_ORT_DYLIB`) to get past
 //! `ort::init_from`'s own dlopen -- neither exists in CI, so both tests are `#[ignore]`d, same
-//! posture as each crate's own real-model tests (e.g. `groom::ai::tests::runs_a_real_model_if_present`).
+//! posture as each crate's own real-model tests (e.g. this crate's `tests/real_models.rs`).
 //!
 //! **Run these directly, not through `cargo test`'s harness process**: `spikes/litter/src/embed.rs`
 //! documents a known `ort`/`load-dynamic` static-destructor-ordering segfault on process exit
 //! after a real dylib load succeeds -- the tests' own assertions still pass and print before that,
 //! but `cargo test`'s harness reports the child's segfault as a failure regardless, since it
 //! judges pass/fail by the test process's exit status, not by what it printed before exiting.
-//! Build without running via `cargo test -p groom --test ort_cross_module --no-run`, then run the
+//! Build without running via `cargo test -p nicti-groom --test ort_cross_module --no-run`, then run the
 //! resulting binary directly (path printed by that command, under `target/debug/deps/`) with
 //! `NICTI_TEST_ORT_DYLIB=<path-to-libonnxruntime.so> <binary-path> --ignored --nocapture` -- the
 //! env var must be set on that direct invocation too, since running the binary standalone skips
@@ -46,9 +46,11 @@ fn all_six_spikes_can_commit_the_shared_ort_environment_in_one_process() {
     let dylib_path = std::env::var("NICTI_TEST_ORT_DYLIB").expect("set NICTI_TEST_ORT_DYLIB");
     let dylib_path = std::path::Path::new(&dylib_path);
 
-    groom::ai::ensure_ort_environment(dylib_path).expect("groom (first caller) must succeed");
-    siamese::segment::ensure_ort_environment(dylib_path)
-        .expect("siamese (second caller, environment already committed by groom) must succeed");
+    // nicti-groom's own model loaders (sam.rs/lama.rs) call exactly this.
+    nicti_haw::ensure_ort_environment(dylib_path).expect("nicti-groom (first caller) must succeed");
+    siamese::segment::ensure_ort_environment(dylib_path).expect(
+        "siamese (second caller, environment already committed by nicti-groom) must succeed",
+    );
     crouch::ort_contend::ensure_ort_environment(dylib_path)
         .expect("crouch (third caller) must succeed");
     rods::ai::ensure_ort_environment(dylib_path).expect("rods (fourth caller) must succeed");
@@ -81,8 +83,8 @@ fn a_different_dylib_path_is_rejected_before_reaching_session_builder() {
          absolute_path, or the assertion below would prove nothing"
     );
 
-    groom::ai::ensure_ort_environment(absolute_path)
-        .expect("groom (first caller) commits the absolute path");
+    nicti_haw::ensure_ort_environment(absolute_path)
+        .expect("nicti-groom (first caller) commits the absolute path");
 
     let err = siamese::segment::ensure_ort_environment(&relative_path)
         .expect_err("a genuinely different path string must be rejected, not silently reused");
