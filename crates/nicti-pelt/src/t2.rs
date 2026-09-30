@@ -74,7 +74,11 @@ pub fn larder_dir_for(catalog_path: &Path) -> PathBuf {
 
 /// Opens (creating if needed) the Larder beside `catalog_path`, or `None` if it can't be opened.
 pub fn open_larder(catalog_path: &Path) -> Option<SharedLarder> {
-    let mut larder = Larder::open(&larder_dir_for(catalog_path), LarderConfig::default()).ok()?;
+    let mut larder = Larder::open(
+        &larder_dir_for(catalog_path),
+        crate::cache_settings::larder_config_for(catalog_path),
+    )
+    .ok()?;
     // Compaction runs as a Pounce `CompactJob` (see `loupe::poll_t2`), never inline in `put`.
     larder.set_auto_compact(false);
     Some(Arc::new(Mutex::new(larder)))

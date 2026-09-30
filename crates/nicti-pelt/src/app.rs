@@ -25,6 +25,7 @@ use nicti_tapetum::gpu::GpuContext;
 
 use nicti_shed::state::Channel as UpdateChannel;
 
+use crate::cache_settings::{self, CacheSettingsUi};
 use crate::color_mgmt::ColorManagement;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
@@ -149,6 +150,8 @@ pub struct PeltApp {
     /// opened (read-only location, another instance holding its lock) -- the loupe then falls back
     /// to T0 alone, exactly as before.
     larder: Option<SharedLarder>,
+    /// The preview-cache settings panel's UI state (#302).
+    cache_settings: CacheSettingsUi,
     /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
     /// re-read and re-decode them every frame.
     loupe_t2_undecodable: Option<i64>,
@@ -270,6 +273,7 @@ impl PeltApp {
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
             larder,
+            cache_settings: CacheSettingsUi::default(),
             loupe_t2_undecodable: None,
             grid: None,
             grid_view: grid::ViewState::default(),
@@ -856,6 +860,15 @@ impl PeltApp {
                 );
             }
         }
+        ui.separator();
+        cache_settings::show(
+            ui,
+            &mut self.cache_settings,
+            self.larder.as_ref(),
+            &self.catalog_path,
+            &self.pounce,
+        );
+        ui.separator();
         if let Some(summary) = &self.last_backup_summary {
             ui.label(summary);
         }

@@ -1,0 +1,401 @@
+//! Preview-cache settings (#302): live/file bytes against the Larder's cap (#27), an editable cap
+//! (default 8 GiB, persisted beside the cache), and purge / reclaim buttons.
+//!
+//! Every Larder touch from the UI thread uses `try_lock_larder`, never a blocking lock: a running
+//! `CompactJob` can hold it for minutes, and the panel must not freeze the window. A busy Larder
+//! shows the last stats it read and refuses an action with a message instead of queueing it.
+//! Purging is "all T2" only -- T2 is the sole tier (`LarderTier`), and `purge_all` reclaims disk
+//! immediately where `purge_tier` would leave dead bytes for a later compaction. A T0 purge is a
+//! catalog `preview` table operation the Larder doesn't cover; left out on purpose (the ticket
+//! marks it optional).
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use nicti_lair::larder::{LarderConfig, LarderStats};
+use nicti_lair::pounce_jobs::ReportSlot;
+use nicti_pounce::Pounce;
+
+use crate::t2::{self, CompactJob, CompactResult, SharedLarder};
+
+const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+/// Below this a single T2 (~1.2 MB) barely fits and the cache thrashes on every browse step.
+pub const MIN_CAP_BYTES: u64 = 256 * MIB;
+/// Upper bound on the typed value: keeps `GiB * 1024^3` well inside `u64` and rejects typos.
+pub const MAX_CAP_BYTES: u64 = 4096 * GIB;
+const STATS_REFRESH: Duration = Duration::from_secs(1);
+
+/// Parses the cap text box (GiB, decimals allowed) into bytes, enforcing the min/max bounds.
+pub fn parse_cap_gib(text: &str) -> Result<u64, String> {
+    let gib: f64 = text
+        .trim()
+        .parse()
+        .map_err(|_| format!("\"{}\" is not a number of GiB", text.trim()))?;
+    if !gib.is_finite() {
+        return Err("cap must be a finite number".into());
+    }
+    let bytes = gib * GIB as f64;
+    if bytes < MIN_CAP_BYTES as f64 {
+        return Err(format!(
+            "cap must be at least {}",
+            format_bytes(MIN_CAP_BYTES)
+        ));
+    }
+    if bytes > MAX_CAP_BYTES as f64 {
+        return Err(format!(
+            "cap must be at most {}",
+            format_bytes(MAX_CAP_BYTES)
+        ));
+    }
+    Ok(bytes as u64)
+}
+
+/// "1.5 GiB" / "300.0 MiB" / "12 KiB" / "7 B", binary units to match the cap's own unit.
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// The cap text box shows GiB with no trailing noise: 8 -> "8", 1.5 -> "1.5".
+fn cap_text(cap_bytes: u64) -> String {
+    let gib = cap_bytes as f64 / GIB as f64;
+    let s = format!("{gib:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Where the persisted cap lives: a sibling of the Larder directory (the Larder owns everything
+/// inside its own directory).
+pub fn cap_file_for(catalog_path: &Path) -> PathBuf {
+    let mut name = t2::larder_dir_for(catalog_path).into_os_string();
+    name.push(".cap.json");
+    PathBuf::from(name)
+}
+
+/// The saved cap, or `None` when absent, unreadable, or outside the allowed bounds -- a hand-edited
+/// or corrupt file falls back to the default rather than opening a 0-byte or absurd cache.
+pub fn load_cap(catalog_path: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(cap_file_for(catalog_path)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let cap = value.get("cap_bytes")?.as_u64()?;
+    (MIN_CAP_BYTES..=MAX_CAP_BYTES)
+        .contains(&cap)
+        .then_some(cap)
+}
+
+/// Writes the cap via a temp file + rename so a crash never leaves a half-written document.
+pub fn save_cap(catalog_path: &Path, cap_bytes: u64) -> std::io::Result<()> {
+    let path = cap_file_for(catalog_path);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::json!({ "cap_bytes": cap_bytes }).to_string(),
+    )?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// The `LarderConfig` a session should open with: default, with the persisted cap if there is one.
+pub fn larder_config_for(catalog_path: &Path) -> LarderConfig {
+    let mut cfg = LarderConfig::default();
+    if let Some(cap) = load_cap(catalog_path) {
+        cfg.cap_bytes = cap;
+    }
+    cfg
+}
+
+/// UI-only state for the panel.
+#[derive(Default)]
+pub struct CacheSettingsUi {
+    /// The cap text box; `None` until first shown, then seeded from the Larder's real cap.
+    cap_input: Option<String>,
+    stats: Option<LarderStats>,
+    last_refresh: Option<Instant>,
+    message: Option<String>,
+    /// Purge is destructive (the whole cache regenerates lazily), so it takes a second click.
+    confirm_purge: bool,
+    compaction: Option<ReportSlot<CompactResult>>,
+}
+
+impl CacheSettingsUi {
+    fn refresh_stats(&mut self, larder: &SharedLarder) {
+        let due = self
+            .last_refresh
+            .is_none_or(|t| t.elapsed() >= STATS_REFRESH);
+        if !due {
+            return;
+        }
+        if let Some(guard) = t2::try_lock_larder(larder) {
+            self.stats = guard.stats().ok();
+            self.last_refresh = Some(Instant::now());
+        }
+    }
+
+    fn poll_compaction(&mut self) {
+        let Some(slot) = &self.compaction else {
+            return;
+        };
+        let Some(result) = slot.lock().ok().and_then(|mut s| s.take()) else {
+            return;
+        };
+        self.message = Some(match result {
+            Ok(()) => "Reclaimed unused space in the preview cache.".into(),
+            Err(e) => format!("Reclaiming space failed: {e}"),
+        });
+        self.compaction = None;
+        // Force a stats re-read so the file size drops on screen right away.
+        self.last_refresh = None;
+    }
+
+    fn apply_cap(&mut self, larder: &SharedLarder, catalog_path: &Path, bytes: u64) {
+        let Some(mut guard) = t2::try_lock_larder(larder) else {
+            self.message = Some("Preview cache is busy; try again in a moment.".into());
+            return;
+        };
+        if let Err(e) = guard.set_cap(bytes) {
+            self.message = Some(format!("Setting the cap failed: {e}"));
+            return;
+        }
+        drop(guard);
+        self.message = Some(match save_cap(catalog_path, bytes) {
+            Ok(()) => format!("Cap set to {}.", format_bytes(bytes)),
+            Err(e) => format!(
+                "Cap set to {} for this session, but saving it failed: {e}",
+                format_bytes(bytes)
+            ),
+        });
+        self.last_refresh = None;
+    }
+
+    fn purge(&mut self, larder: &SharedLarder) {
+        let Some(mut guard) = t2::try_lock_larder(larder) else {
+            self.message = Some("Preview cache is busy; try again in a moment.".into());
+            return;
+        };
+        self.message = Some(match guard.purge_all() {
+            Ok(freed) => format!("Purged {} of cached previews.", format_bytes(freed)),
+            Err(e) => format!("Purge failed: {e}"),
+        });
+        self.last_refresh = None;
+    }
+}
+
+/// Draws the panel. `larder` is `None` when the cache couldn't be opened at startup.
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut CacheSettingsUi,
+    larder: Option<&SharedLarder>,
+    catalog_path: &Path,
+    pounce: &Pounce,
+) {
+    ui.label("Preview cache (T2 screen-size previews for the loupe):");
+    let Some(larder) = larder else {
+        ui.label("The preview cache could not be opened (read-only location, or another Nicti instance holds it).");
+        return;
+    };
+
+    state.poll_compaction();
+    state.refresh_stats(larder);
+    if state.compaction.is_some() {
+        ui.ctx().request_repaint_after(Duration::from_millis(300));
+    } else {
+        ui.ctx().request_repaint_after(STATS_REFRESH);
+    }
+
+    let Some(stats) = state.stats else {
+        ui.label("Reading preview cache...");
+        return;
+    };
+    let cap_input = state
+        .cap_input
+        .get_or_insert_with(|| cap_text(stats.cap_bytes));
+
+    let fraction = if stats.cap_bytes == 0 {
+        0.0
+    } else {
+        (stats.live_bytes as f32 / stats.cap_bytes as f32).clamp(0.0, 1.0)
+    };
+    ui.add(egui::ProgressBar::new(fraction).text(format!(
+        "{} of {} cap ({} previews)",
+        format_bytes(stats.live_bytes),
+        format_bytes(stats.cap_bytes),
+        stats.entry_count
+    )));
+    ui.label(format!(
+        "On disk: {} (includes {} awaiting reclaim)",
+        format_bytes(stats.file_bytes),
+        format_bytes(stats.file_bytes.saturating_sub(stats.live_bytes)),
+    ));
+
+    let mut apply = None;
+    ui.horizontal(|ui| {
+        ui.label("Cap (GiB):");
+        let response = ui.add(egui::TextEdit::singleline(cap_input).desired_width(60.0));
+        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui.button("Apply").clicked() || enter {
+            apply = Some(parse_cap_gib(cap_input));
+        }
+        if ui.button("Default (8)").clicked() {
+            *cap_input = cap_text(LarderConfig::default().cap_bytes);
+            apply = Some(Ok(LarderConfig::default().cap_bytes));
+        }
+    });
+    match apply {
+        Some(Ok(bytes)) => state.apply_cap(larder, catalog_path, bytes),
+        Some(Err(e)) => state.message = Some(e),
+        None => {}
+    }
+
+    ui.horizontal(|ui| {
+        let compacting = state.compaction.is_some();
+        if ui
+            .add_enabled(!compacting, egui::Button::new("Reclaim disk space"))
+            .clicked()
+        {
+            let (job, slot) = CompactJob::new(larder.clone());
+            pounce.submit(Box::new(job));
+            state.compaction = Some(slot);
+            state.message = Some("Reclaiming space in the background...".into());
+        }
+        if state.confirm_purge {
+            if ui.button("Really purge all previews").clicked() {
+                state.confirm_purge = false;
+                state.purge(larder);
+            }
+            if ui.button("Cancel").clicked() {
+                state.confirm_purge = false;
+            }
+        } else if ui.button("Purge all previews").clicked() {
+            state.confirm_purge = true;
+        }
+    });
+    if state.confirm_purge {
+        ui.label("Previews regenerate as you browse; nothing else is lost.");
+    }
+    if let Some(msg) = &state.message {
+        ui.label(msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cap_accepts_whole_and_fractional_gib() {
+        assert_eq!(parse_cap_gib("8").unwrap(), 8 * GIB);
+        assert_eq!(parse_cap_gib(" 1.5 ").unwrap(), GIB + GIB / 2);
+    }
+
+    #[test]
+    fn parse_cap_rejects_garbage_and_out_of_range() {
+        for bad in ["", "abc", "nan", "inf", "-1", "0", "0.1", "5000"] {
+            assert!(parse_cap_gib(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_cap_bounds_are_inclusive() {
+        assert_eq!(parse_cap_gib("0.25").unwrap(), MIN_CAP_BYTES);
+        assert_eq!(parse_cap_gib("4096").unwrap(), MAX_CAP_BYTES);
+    }
+
+    #[test]
+    fn cap_text_round_trips_through_parse() {
+        for cap in [8 * GIB, GIB + GIB / 2, MIN_CAP_BYTES] {
+            assert_eq!(parse_cap_gib(&cap_text(cap)).unwrap(), cap);
+        }
+        assert_eq!(cap_text(8 * GIB), "8");
+    }
+
+    #[test]
+    fn format_bytes_picks_a_unit() {
+        assert_eq!(format_bytes(7), "7 B");
+        assert_eq!(format_bytes(2048), "2 KiB");
+        assert_eq!(format_bytes(3 * MIB), "3.0 MiB");
+        assert_eq!(format_bytes(8 * GIB), "8.00 GiB");
+    }
+
+    #[test]
+    fn saved_cap_is_loaded_and_bad_files_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        assert_eq!(load_cap(&catalog), None);
+        save_cap(&catalog, 3 * GIB).unwrap();
+        assert_eq!(load_cap(&catalog), Some(3 * GIB));
+        assert_eq!(larder_config_for(&catalog).cap_bytes, 3 * GIB);
+
+        for bad in [
+            "not json",
+            "{}",
+            r#"{"cap_bytes":0}"#,
+            r#"{"cap_bytes":-5}"#,
+        ] {
+            std::fs::write(cap_file_for(&catalog), bad).unwrap();
+            assert_eq!(load_cap(&catalog), None, "{bad}");
+            assert_eq!(
+                larder_config_for(&catalog).cap_bytes,
+                LarderConfig::default().cap_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn apply_cap_persists_and_shrinks_the_live_larder() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        let larder = t2::open_larder(&catalog).unwrap();
+        let mut ui = CacheSettingsUi::default();
+        ui.apply_cap(&larder, &catalog, GIB);
+        assert_eq!(larder.lock().unwrap().stats().unwrap().cap_bytes, GIB);
+        assert_eq!(load_cap(&catalog), Some(GIB));
+        // A fresh session opens with the saved cap.
+        drop(larder);
+        let reopened = t2::open_larder(&catalog).unwrap();
+        assert_eq!(reopened.lock().unwrap().stats().unwrap().cap_bytes, GIB);
+    }
+
+    #[test]
+    fn purge_empties_the_larder_and_reports_freed_bytes() {
+        use nicti_lair::larder::{LarderKey, LarderTier};
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        let larder = t2::open_larder(&catalog).unwrap();
+        let key = LarderKey {
+            asset_id: 1,
+            tier: LarderTier::T2,
+            render_hash: "h",
+        };
+        assert!(larder.lock().unwrap().put(key, &[7u8; 4096]).unwrap());
+        let mut ui = CacheSettingsUi::default();
+        ui.purge(&larder);
+        let stats = larder.lock().unwrap().stats().unwrap();
+        assert_eq!(
+            (stats.entry_count, stats.live_bytes, stats.file_bytes),
+            (0, 0, 0)
+        );
+        assert!(ui.message.unwrap().contains("4 KiB"));
+    }
+
+    #[test]
+    fn actions_refuse_rather_than_block_while_the_larder_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        let larder = t2::open_larder(&catalog).unwrap();
+        let held = larder.lock().unwrap();
+        let mut ui = CacheSettingsUi::default();
+        ui.apply_cap(&larder, &catalog, GIB);
+        assert!(ui.message.as_deref().unwrap().contains("busy"));
+        ui.purge(&larder);
+        assert!(ui.message.as_deref().unwrap().contains("busy"));
+        drop(held);
+        assert_eq!(load_cap(&catalog), None, "a refused apply must not persist");
+    }
+}

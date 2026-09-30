@@ -35,7 +35,7 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   `compact` switches over atomically (index offsets + generation commit in one transaction; no
   rename over an open file, which Windows refuses). Self-healing: blake3 checksum per payload,
   bad/stale/truncated entries become misses. T0 stays in the catalog `preview` table (not capped
-  or purged here). Purge UI is still a follow-up (#302).
+  or purged here). Settings UI (#302, landed): `crates/nicti-pelt/src/cache_settings.rs` (Library view) — live/file bytes vs cap, editable cap (persisted to `<catalog>.larder.cap.json`, loaded by `t2::open_larder`), purge-all + reclaim (`CompactJob`); UI-thread Larder access is `try_lock` only (busy = refuse, never block). T0 purge not built (catalog `preview` table, not Larder).
 - **T2 wired into the loupe (#301, landed)** — `crates/nicti-pelt/src/t2.rs` (`T2Job`, `CompactJob`,
   `generate_t2`): embedded `JpgFromRaw` (or a plain JPEG's own file) → 3840px long edge → JPEG q85,
   no RAW decode; `LoupeSession::with_larder` queues one per prefetch-window asset the Larder lacks

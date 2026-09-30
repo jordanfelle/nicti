@@ -10,6 +10,7 @@
 
 mod activity;
 mod app;
+mod cache_settings;
 mod camera_profiles;
 mod catalog;
 mod color_mgmt;
