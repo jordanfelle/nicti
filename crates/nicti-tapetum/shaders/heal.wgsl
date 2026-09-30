@@ -12,6 +12,11 @@
 //   composite frame + solved patch -> result patch (feathered radial blend); the host then copies
 //             the in-bounds part of `result` back into the frame
 //
+// Dx12 note: wgpu's Dx12 backend does not reliably barrier a texture that goes write -> read ->
+// write across compute passes touching it only as a storage texture (a Jacobi chain came back as
+// garbage on real hardware while passing on Vulkan). The host therefore clears scratch textures
+// per spot and copies each Jacobi sweep back rather than swapping roles -- see heal.rs.
+//
 // Reading and writing the frame in different passes (never one read_write storage texture) is what
 // keeps this off the optional `read_write` storage-texture format feature. Every entry point
 // mirrors `heal.rs`'s CPU reference exactly -- keep the two in sync.
@@ -34,11 +39,20 @@ struct Params {
     _pad: u32,
 }
 
-@group(0) @binding(0) var tex0: texture_storage_2d<rgba16float, read>;
+// Inputs are ordinary sampled textures read with `textureLoad` (an SRV); only the outputs are
+// storage textures, and write-only. Declaring the inputs as `texture_storage_2d<.., read>` (a UAV)
+// made wgpu's Dx12 backend's resource-state tracking disagree with the shader's binding and
+// produced wrong results on real hardware; keeping reads and writes in different binding kinds
+// makes every hand-off between passes an unambiguous state transition.
+@group(0) @binding(0) var tex0: texture_2d<f32>;
 @group(0) @binding(1) var tex1_w: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(2) var tex2: texture_storage_2d<rgba16float, read>;
+@group(0) @binding(2) var tex2: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> p: Params;
-@group(0) @binding(4) var tex4: texture_storage_2d<rgba16float, read>;
+@group(0) @binding(4) var tex4: texture_2d<f32>;
+
+fn ld0(c: vec2<i32>) -> vec4<f32> { return textureLoad(tex0, c, 0); }
+fn ld2(c: vec2<i32>) -> vec4<f32> { return textureLoad(tex2, c, 0); }
+fn ld4(c: vec2<i32>) -> vec4<f32> { return textureLoad(tex4, c, 0); }
 
 fn feather_weight(dist: f32, radius: f32, feather_in: f32) -> f32 {
     if (radius <= 0.0) { return 0.0; }
@@ -56,7 +70,7 @@ fn in_patch(gid: vec3<u32>) -> bool {
 fn frame_px(base: vec2<i32>, gid: vec3<u32>) -> vec4<f32> {
     let c = base + vec2<i32>(i32(gid.x) - p.half, i32(gid.y) - p.half);
     let cc = vec2<i32>(clamp(c.x, 0, p.frame_w - 1), clamp(c.y, 0, p.frame_h - 1));
-    return textureLoad(tex0, cc);
+    return ld0(cc);
 }
 
 // tex0 = frame (read); tex1_w = dst patch (write); the guidance patch is written by
@@ -82,35 +96,35 @@ fn jacobi(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_patch(gid)) { return; }
     let x = i32(gid.x);
     let y = i32(gid.y);
-    let here = textureLoad(tex0, vec2<i32>(x, y));
+    let here = ld0(vec2<i32>(x, y));
     let fx = f32(x - p.half);
     let fy = f32(y - p.half);
     if (sqrt(fx * fx + fy * fy) >= p.radius) {
         textureStore(tex1_w, vec2<i32>(x, y), here);
         return;
     }
-    let g_here = textureLoad(tex2, vec2<i32>(x, y)).xyz;
+    let g_here = ld2(vec2<i32>(x, y)).xyz;
     var sum_f = vec3<f32>(0.0);
     var sum_g = vec3<f32>(0.0);
     var n = 0.0;
     if (x > 0) {
-        sum_f += textureLoad(tex0, vec2<i32>(x - 1, y)).xyz;
-        sum_g += g_here - textureLoad(tex2, vec2<i32>(x - 1, y)).xyz;
+        sum_f += ld0(vec2<i32>(x - 1, y)).xyz;
+        sum_g += g_here - ld2(vec2<i32>(x - 1, y)).xyz;
         n += 1.0;
     }
     if (x + 1 < p.side) {
-        sum_f += textureLoad(tex0, vec2<i32>(x + 1, y)).xyz;
-        sum_g += g_here - textureLoad(tex2, vec2<i32>(x + 1, y)).xyz;
+        sum_f += ld0(vec2<i32>(x + 1, y)).xyz;
+        sum_g += g_here - ld2(vec2<i32>(x + 1, y)).xyz;
         n += 1.0;
     }
     if (y > 0) {
-        sum_f += textureLoad(tex0, vec2<i32>(x, y - 1)).xyz;
-        sum_g += g_here - textureLoad(tex2, vec2<i32>(x, y - 1)).xyz;
+        sum_f += ld0(vec2<i32>(x, y - 1)).xyz;
+        sum_g += g_here - ld2(vec2<i32>(x, y - 1)).xyz;
         n += 1.0;
     }
     if (y + 1 < p.side) {
-        sum_f += textureLoad(tex0, vec2<i32>(x, y + 1)).xyz;
-        sum_g += g_here - textureLoad(tex2, vec2<i32>(x, y + 1)).xyz;
+        sum_f += ld0(vec2<i32>(x, y + 1)).xyz;
+        sum_g += g_here - ld2(vec2<i32>(x, y + 1)).xyz;
         n += 1.0;
     }
     if (n > 0.0) {
@@ -132,8 +146,8 @@ fn composite_patch(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(0.0));
         return;
     }
-    let dst = textureLoad(tex0, fp);
-    let fill = textureLoad(tex2, vec2<i32>(i32(gid.x), i32(gid.y)));
+    let dst = ld0(fp);
+    let fill = ld2(vec2<i32>(i32(gid.x), i32(gid.y)));
     let w = clamp(fill.w, 0.0, 1.0) * p.opacity;
     textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(dst.xyz + (fill.xyz - dst.xyz) * w, dst.w));
 }
@@ -150,8 +164,8 @@ fn composite(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(0.0));
         return;
     }
-    let dst = textureLoad(tex0, fp);
-    let solved = textureLoad(tex2, vec2<i32>(i32(gid.x), i32(gid.y)));
+    let dst = ld0(fp);
+    let solved = ld2(vec2<i32>(i32(gid.x), i32(gid.y)));
     let dist = sqrt(f32(dx * dx + dy * dy));
     let w = feather_weight(dist, p.radius, p.feather) * p.opacity;
     textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), dst + (solved - dst) * w);
@@ -177,7 +191,7 @@ fn boundary_mean(@builtin(local_invocation_index) lid: u32) {
         let fy = f32(y - p.half);
         let d = sqrt(fx * fx + fy * fy);
         if (d >= p.radius && d < p.radius + RING_WIDTH) {
-            sum += textureLoad(tex0, vec2<i32>(x, y)) - textureLoad(tex2, vec2<i32>(x, y));
+            sum += ld0(vec2<i32>(x, y)) - ld2(vec2<i32>(x, y));
             count += 1.0;
         }
     }
@@ -205,14 +219,14 @@ fn init_heal(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_patch(gid)) { return; }
     let x = i32(gid.x);
     let y = i32(gid.y);
-    let dst = textureLoad(tex0, vec2<i32>(x, y));
+    let dst = ld0(vec2<i32>(x, y));
     let fx = f32(x - p.half);
     let fy = f32(y - p.half);
     if (sqrt(fx * fx + fy * fy) >= p.radius) {
         textureStore(tex1_w, vec2<i32>(x, y), dst);
         return;
     }
-    let g = textureLoad(tex2, vec2<i32>(x, y));
-    let mean = textureLoad(tex4, vec2<i32>(0, 0)).xyz;
+    let g = ld2(vec2<i32>(x, y));
+    let mean = ld4(vec2<i32>(0, 0)).xyz;
     textureStore(tex1_w, vec2<i32>(x, y), vec4<f32>(g.xyz + mean, dst.w));
 }

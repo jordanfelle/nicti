@@ -45,6 +45,29 @@ reference used in the parity tests: centers round to whole pixels, out-of-frame 
 edge (the spike zero-filled, which would have painted black into a heal near a border), only
 in-frame patch pixels are written back, and spots apply in list order.
 
+**Dx12 correctness — found only by running on real hardware.** The whole heal suite passed on
+Linux's software rasteriser and on Vulkan, then failed on the RTX 5080 under Dx12 (a Jacobi chain
+came back as garbage from the third sweep on; Clone was flaky in the same way once the scratch
+textures were reused). Reproduced in isolation: 1–2 chained sweeps were right, 3+ were wrong. Two
+changes made it correct on Vulkan, Dx12 and lavapipe:
+
+1. The shader reads its inputs through ordinary sampled textures (`texture_2d` + `textureLoad`) and
+   only *writes* storage textures. Declaring the inputs `texture_storage_2d<.., read>` (as the
+   crate's other shaders do) gave wgpu's Dx12 backend a resource state that disagreed with the
+   shader's binding.
+2. Scratch textures are reset by a copy from a never-written zero texture at the start of each spot,
+   and each Jacobi sweep is copied back rather than swapping the two textures' roles. A copy is a
+   transfer use, so it forces an explicit state transition (`clear_texture` would need a device
+   feature we don't require).
+
+The *mechanism* is inferred from the symptoms and the experiments (bind-group reuse/freshness made
+no difference; copies did), not confirmed in wgpu's source — but the behaviour is pinned by tests.
+`each_heal_pass_matches_the_reference_in_isolation` compares each pass on its own, and the whole
+`heal::` suite was run on the RTX 5080 under both backends. **CI's Windows job runs on `windows-latest`
+(WARP/Dx12), so this class of bug fails the required check rather than reaching users** — and the
+other crates' shaders that read `texture_storage_2d<.., read>` (`detail_blur`, `present_sample`, …)
+have not been audited for it.
+
 `impl_version` is a real value here, so a change to the algorithm invalidates cached bakes. A render
 applies at most `MAX_SPOTS` (256) spots and `MAX_JACOBI_PASSES` (12 000) Jacobi passes in total —
 a heal spot that would exceed the budget is skipped — and centres are clamped to ±10⁹ px, because
@@ -158,20 +181,21 @@ why instead of leaving a spot pending forever.
 
 **Classic heal, end to end** (submit + GPU fence, frame copy included), release build cross-compiled
 for Windows and run on the real reference machine — NVIDIA GeForce RTX 5080, Vulkan — via
-`heal::tests::throughput`. Median of 5 after 1 warm-up, **range over three runs**: this is a shared
+`heal::tests::throughput` (Vulkan and Dx12 both measured; they land in the same ranges). Median
+of 5 after 1 warm-up, **range over several runs**: this is a shared
 desktop GPU and run-to-run variance is large (one run measured the unchanged AI-patch row at 25 ms
 against 4.7 ms in the others), so treat these as ranges, not points:
 
 | | 3840×2560 | 8280×5520 |
 |---|---|---|
 | frame copy only (0 spots) | 0.2–0.3 ms | 0.5–0.7 ms |
-| 1 heal, r=24 | 1.7–2.2 ms | 1.2–2.1 ms |
+| 1 heal, r=24 | 1.1–2.2 ms | 1.2–2.1 ms (one 5.6 ms outlier) |
 | 10 heal, r=24 | 8.9–17 ms | 7.4–18 ms |
-| 1 heal, r=100 | 3.1–5.7 ms | 3.1–5.1 ms |
-| 1 heal, r=300 | 7.8–15 ms | 7.7–28 ms |
-| 1 clone, r=100 | 0.4–0.8 ms | 0.7–1.7 ms |
-| 10 clone, r=24 | 2.4–3.0 ms | 1.1–3.4 ms |
-| 1 AI patch, 513×513 | 4.9–10 ms | 4.7–25 ms |
+| 1 heal, r=100 | 3.1–7.9 ms | 3.1–6.7 ms |
+| 1 heal, r=300 | 7.8–17 ms | 7.7–17 ms (28 ms in one noisy run) |
+| 1 clone, r=100 | 0.4–0.8 ms | 0.5–1.7 ms |
+| 10 clone, r=24 | 0.7–3.0 ms | 1.0–3.4 ms |
+| 1 AI patch, 513×513 | 3.5–10 ms | 3.9–25 ms |
 
 A single heal spot up to r≈100 is well inside ADR-0050's 16 ms interactive budget. **A very large
 spot (r=300) and ten heal spots each reach or exceed it** on a busy GPU, so dragging one of those

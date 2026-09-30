@@ -257,12 +257,30 @@ pub fn stamp_removal_state(doc: &mut nicti_pawprint::EditDocument, removals: &Re
     }
 }
 
+/// A copy source/destination covering a texture from its origin.
+fn whole(texture: &wgpu::Texture) -> wgpu::TexelCopyTextureInfo<'_> {
+    wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d::ZERO,
+        aspect: wgpu::TextureAspect::All,
+    }
+}
+
 /// The scratch textures one `encode_spots` call reuses across its spots.
 struct Scratch {
+    /// The destination patch (read by `boundary_mean`/`init_heal`).
     patch_a: FrameTexture,
+    /// The Jacobi state: `init_heal` writes it and each sweep is copied back into it.
     patch_b: FrameTexture,
+    /// Where each sweep writes before being copied back into `patch_b`.
+    patch_c: FrameTexture,
     guidance: FrameTexture,
     result: FrameTexture,
+    /// Never written (wgpu zero-initialises textures): the source of the copies that reset the
+    /// scratch textures between spots, since `clear_texture` needs a device feature we don't
+    /// require.
+    zero: FrameTexture,
     /// 1x1: the mean boundary offset `boundary_mean` reduces to.
     mean: FrameTexture,
 }
@@ -334,8 +352,10 @@ impl HealKernel {
         let scratch_bufs = Scratch {
             patch_a: FrameTexture::new(gpu, scratch),
             patch_b: FrameTexture::new(gpu, scratch),
+            patch_c: FrameTexture::new(gpu, scratch),
             guidance: FrameTexture::new(gpu, scratch),
             result: FrameTexture::new(gpu, scratch),
+            zero: FrameTexture::new(gpu, scratch),
             mean: FrameTexture::new(
                 gpu,
                 Extent {
@@ -412,14 +432,49 @@ impl HealKernel {
         );
         let groups = (g.side as u32).div_ceil(8);
 
-        self.dispatch(
-            gpu,
-            encoder,
-            &self.extract_dst,
-            &[(0, &frame.view), (1, &s.patch_a.view)],
-            &ubuf,
-            groups,
-        );
+        // Reset every scratch texture this spot writes. wgpu's Dx12 backend does not reliably emit
+        // a barrier when a texture goes write -> read -> write between compute passes that only
+        // touch it as a storage texture (Vulkan does): the third use reads stale data, and a
+        // Jacobi sweep chain came back as garbage on the RTX 5080 under Dx12 while passing on
+        // Vulkan. A copy (here from a zero texture, and in the sweep loop below) is a transfer use, which forces
+        // an explicit resource-state transition and so a barrier. Scratch is reused across spots,
+        // so without this a later spot would hit the same hazard on textures an earlier one used.
+        let is_heal = spot.kind == SpotKind::Heal;
+        let mut to_reset = vec![&s.guidance];
+        if is_heal {
+            to_reset.extend([&s.patch_a, &s.patch_b, &s.patch_c]);
+        }
+        let region = wgpu::Extent3d {
+            width: g.side as u32,
+            height: g.side as u32,
+            depth_or_array_layers: 1,
+        };
+        for tex in to_reset {
+            encoder.copy_texture_to_texture(whole(&s.zero.texture), whole(&tex.texture), region);
+        }
+        if is_heal {
+            // The 1x1 mean texture, likewise.
+            encoder.copy_texture_to_texture(
+                whole(&s.zero.texture),
+                whole(&s.mean.texture),
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        if is_heal {
+            self.dispatch(
+                gpu,
+                encoder,
+                &self.extract_dst,
+                &[(0, &frame.view), (1, &s.patch_a.view)],
+                &ubuf,
+                groups,
+            );
+        }
         self.dispatch(
             gpu,
             encoder,
@@ -467,48 +522,35 @@ impl HealKernel {
                 groups,
             );
 
-            // The starting guess is in `patch_b`, so the sweeps run b -> a first.
-            let b_to_a = self.bind(
+            // Sweeps: read `patch_b`, write `patch_c`, copy `patch_c` back over `patch_b`. The copy
+            // (rather than swapping the two roles) is what keeps Dx12 correct -- see above.
+            let sweep = self.bind(
                 gpu,
                 &self.jacobi,
                 &[
                     (0, &s.patch_b.view),
-                    (1, &s.patch_a.view),
+                    (1, &s.patch_c.view),
                     (2, &s.guidance.view),
                 ],
                 &ubuf,
             );
-            let a_to_b = self.bind(
-                gpu,
-                &self.jacobi,
-                &[
-                    (0, &s.patch_a.view),
-                    (1, &s.patch_b.view),
-                    (2, &s.guidance.view),
-                ],
-                &ubuf,
-            );
-            for i in 0..iterations {
-                let bind = if i.is_multiple_of(2) {
-                    &b_to_a
-                } else {
-                    &a_to_b
-                };
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("heal jacobi"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.jacobi);
-                pass.set_bind_group(0, bind, &[]);
-                pass.dispatch_workgroups(groups, groups, 1);
+            for _ in 0..iterations {
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("heal jacobi"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.jacobi);
+                    pass.set_bind_group(0, &sweep, &[]);
+                    pass.dispatch_workgroups(groups, groups, 1);
+                }
+                encoder.copy_texture_to_texture(
+                    whole(&s.patch_c.texture),
+                    whole(&s.patch_b.texture),
+                    region,
+                );
             }
-            // The first sweep writes `patch_a`, so an odd count ends there and an even one in
-            // `patch_b`.
-            if iterations.is_multiple_of(2) {
-                &s.patch_b
-            } else {
-                &s.patch_a
-            }
+            &s.patch_b
         } else {
             &s.guidance
         };
@@ -756,7 +798,7 @@ pub(crate) mod reference {
 
     /// `heal.wgsl`'s `boundary_mean` + `init_heal`: interior := guidance + mean(dst - guidance) over
     /// the ring [radius, radius + 1.5).
-    fn init_from_boundary(
+    pub(crate) fn init_from_boundary(
         cur: &mut [[f32; 4]],
         guidance: &[[f32; 4]],
         side: i32,
@@ -792,7 +834,7 @@ pub(crate) mod reference {
     }
 
     /// One Jacobi sweep, identical update rule to `heal.wgsl::jacobi`.
-    fn jacobi_step(
+    pub(crate) fn jacobi_step(
         input: &[[f32; 4]],
         guidance: &[[f32; 4]],
         side: i32,
@@ -1527,6 +1569,168 @@ mod tests {
         reference::apply_spots(&mut cpu, w, h, &spots);
         let out = run_gpu(&gpu, w as u32, h as u32, &data, &spots);
         assert!(max_diff(&cpu, &out) < 0.02);
+    }
+
+    /// Runs each Heal pass in isolation on a small patch and compares it to the CPU reference, so
+    /// a backend-specific shader problem is pinned to one pass instead of only showing up as a
+    /// wrong final image. (Found necessary when Heal passed on Vulkan but failed on Dx12.)
+    #[test]
+    fn each_heal_pass_matches_the_reference_in_isolation() {
+        let Some(gpu) = test_gpu() else { return };
+        let (side, half, radius) = (21i32, 10i32, 8.0f32);
+        let n = (side * side) as usize;
+        let f16r = |v: f32| half::f16::from_f32(v).to_f32();
+        let mk = |k: f32| -> Vec<[f32; 4]> {
+            (0..n)
+                .map(|i| {
+                    let (x, y) = ((i as i32 % side) as f32, (i as i32 / side) as f32);
+                    [
+                        f16r(0.2 + 0.02 * x + 0.01 * k),
+                        f16r(0.3 + 0.015 * y),
+                        f16r(0.5 + 0.005 * (x + y) * k),
+                        1.0,
+                    ]
+                })
+                .collect()
+        };
+        let (dst, guid) = (mk(1.0), mk(3.0));
+        let ext = Extent {
+            width: side as u32,
+            height: side as u32,
+        };
+        let dst_t = upload_frame(&gpu, ext, &dst);
+        let guid_t = upload_frame(&gpu, ext, &guid);
+        let mean_t = FrameTexture::new(
+            &gpu,
+            Extent {
+                width: 1,
+                height: 1,
+            },
+        );
+        let init_t = FrameTexture::new(&gpu, ext);
+        let jac_t = FrameTexture::new(&gpu, ext);
+        let kernel = HealKernel::new(&gpu);
+        let u = SpotUniforms {
+            center: [0, 0],
+            src_center: [0, 0],
+            side,
+            half,
+            radius,
+            feather: 0.0,
+            opacity: 1.0,
+            frame_w: 64,
+            frame_h: 64,
+            _pad: 0,
+        };
+        let ubuf = HealKernel::uniform_buffer(&gpu, &u);
+        let groups = (side as u32).div_ceil(8);
+
+        // 1. boundary_mean
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let bind = kernel.bind(
+            &gpu,
+            &kernel.boundary_mean,
+            &[(0, &dst_t.view), (1, &mean_t.view), (2, &guid_t.view)],
+            &ubuf,
+        );
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&kernel.boundary_mean);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        gpu.queue.submit(Some(enc.finish()));
+        let gpu_mean = read_frame(&gpu, &mean_t)[0];
+
+        let mut cpu_init = dst.clone();
+        reference::init_from_boundary(&mut cpu_init, &guid, side, half, radius);
+        // The CPU mean, recovered from any interior pixel: init = guidance + mean.
+        let i0 = ((half * side) + half) as usize;
+        let cpu_mean: Vec<f32> = (0..3).map(|c| cpu_init[i0][c] - guid[i0][c]).collect();
+        for c in 0..3 {
+            assert!(
+                (gpu_mean[c] - cpu_mean[c]).abs() < 0.005,
+                "boundary_mean channel {c}: gpu {} vs cpu {}",
+                gpu_mean[c],
+                cpu_mean[c]
+            );
+        }
+
+        // 2. init_heal
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        kernel.dispatch(
+            &gpu,
+            &mut enc,
+            &kernel.init_heal,
+            &[
+                (0, &dst_t.view),
+                (1, &init_t.view),
+                (2, &guid_t.view),
+                (4, &mean_t.view),
+            ],
+            &ubuf,
+            groups,
+        );
+        gpu.queue.submit(Some(enc.finish()));
+        let gpu_init = read_frame(&gpu, &init_t);
+        let d = max_diff(&gpu_init, &cpu_init);
+        assert!(d < 0.01, "init_heal differs from the reference by {d}");
+
+        // 3. one jacobi sweep from that state
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        kernel.dispatch(
+            &gpu,
+            &mut enc,
+            &kernel.jacobi,
+            &[(0, &init_t.view), (1, &jac_t.view), (2, &guid_t.view)],
+            &ubuf,
+            groups,
+        );
+        gpu.queue.submit(Some(enc.finish()));
+        let gpu_jac = read_frame(&gpu, &jac_t);
+        let cpu_jac = reference::jacobi_step(&cpu_init, &guid, side, half, radius);
+        let d = max_diff(&gpu_jac, &cpu_jac);
+        assert!(d < 0.01, "jacobi differs from the reference by {d}");
+
+        // 4. the real thing: boundary_mean -> init_heal -> jacobi, all in one command buffer.
+        let mean2 = FrameTexture::new(
+            &gpu,
+            Extent {
+                width: 1,
+                height: 1,
+            },
+        );
+        let start = FrameTexture::new(&gpu, ext);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let mean_bind = kernel.bind(
+            &gpu,
+            &kernel.boundary_mean,
+            &[(0, &dst_t.view), (1, &mean2.view), (2, &guid_t.view)],
+            &ubuf,
+        );
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&kernel.boundary_mean);
+            pass.set_bind_group(0, &mean_bind, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        kernel.dispatch(
+            &gpu,
+            &mut enc,
+            &kernel.init_heal,
+            &[
+                (0, &dst_t.view),
+                (1, &start.view),
+                (2, &guid_t.view),
+                (4, &mean2.view),
+            ],
+            &ubuf,
+            groups,
+        );
+        gpu.queue.submit(Some(enc.finish()));
+        let chained_init = read_frame(&gpu, &start);
+        let d = max_diff(&chained_init, &cpu_init);
+        assert!(d < 0.01, "mean->init in one command buffer differs by {d}");
     }
 
     #[test]

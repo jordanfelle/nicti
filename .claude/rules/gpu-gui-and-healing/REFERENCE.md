@@ -60,6 +60,14 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     model store = `nicti-stalk::models`. **RTX 5080 (noisy shared GPU, ranges): 1 heal r=24 ≈ 1.2-2.2 ms, r=100 ≈ 3-6 ms, r=300 ≈ 8-28 ms, 10 heals ≈ 7-18 ms** (end to end) — big/many heals reach the 16 ms budget.
     **AI removal on the CPU ORT build ≈ 3-4 s — misses the <2 s CUDA-EP target**; quality checked
     on synthetic scenes only. **LaMa = on-demand download only, owner sign-off 2026-09-29.**
+  - **Gotcha (#51, real hardware only)**: the heal suite passed on lavapipe + Vulkan and **failed on
+    the RTX 5080 under Dx12** (Jacobi chain garbage from sweep 3; CI's Windows job is WARP/Dx12, so
+    it would have failed the required check). Fixes: read inputs as sampled `texture_2d` +
+    `textureLoad` (NOT `texture_storage_2d<.., read>`), write-only storage outputs, reset scratch by
+    copy from a zero texture per spot, and copy each Jacobi sweep back instead of swapping roles.
+    Mechanism inferred, not confirmed. **Always run new GPU kernels on the reference machine under
+    BOTH backends** (`NICTI_WGPU_BACKEND=vulkan|dx12` with the cross-built `.exe`); other shaders
+    still using `read` storage textures (`detail_blur`, `present_sample`, ...) are unaudited.
   - **Gotcha (#51)**: **Jacobi must not start from the destination** — it needs ~side² sweeps to
     smooth a blemish and we run 50-400, so a blemish over ~half the spot survived (Heal was a
     near no-op). `boundary_mean`+`init_heal` start at source + mean ring offset. GPU-vs-CPU parity
