@@ -32,6 +32,11 @@ use crate::RenderStage;
 /// even though the params schema didn't.
 pub const IMPL_VERSION: u32 = 1;
 
+/// Most spots a single render applies. Each heal spot is up to 400 compute passes, so an
+/// unbounded list -- from a hand-edited or imported document -- could queue millions of passes and
+/// stall the GPU. Spots past the cap are ignored (the UI refuses to add beyond it).
+pub const MAX_SPOTS: usize = 256;
+
 /// Largest destination radius honored, in pixels: bounds a single spot's patch (and so its scratch
 /// textures and Jacobi cost) no matter what a hand-edited or imported document asks for.
 pub const MAX_RADIUS: f32 = 512.0;
@@ -272,6 +277,7 @@ impl HealKernel {
         }
         let ops: Vec<Op> = spots
             .iter()
+            .take(MAX_SPOTS)
             .filter_map(|s| match s.kind {
                 SpotKind::Clone | SpotKind::Heal => spot_geometry(s).map(|g| Op::Classic(s, g)),
                 SpotKind::Remove => removals
@@ -1293,6 +1299,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn spots_past_the_cap_are_ignored() {
+        let Some(gpu) = test_gpu() else { return };
+        let (w, h) = (48u32, 48u32);
+        let data = synthetic_frame(w, h);
+        // MAX_SPOTS spots that change nothing (each clones a pixel onto itself), then one real
+        // clone that must NOT be applied.
+        let filler = Spot::clone_spot((5.0, 5.0), 4.0, (0.0, 0.0), 0.0);
+        let mut spots = vec![filler; MAX_SPOTS];
+        spots.push(Spot::clone_spot((30.0, 30.0), 6.0, (-15.0, -15.0), 0.0));
+        let out = run_gpu(&gpu, w, h, &data, &spots);
+        assert!(
+            max_diff(&data, &out) < 1e-3,
+            "the spot past the cap was applied"
+        );
+        // The same spot within the cap does change the frame, so the test isn't vacuous.
+        let out = run_gpu(&gpu, w, h, &data, &spots[MAX_SPOTS..]);
+        assert!(max_diff(&data, &out) > 0.02);
     }
 
     #[test]

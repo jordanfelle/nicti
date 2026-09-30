@@ -28,7 +28,7 @@ use nicti_groom::FramePixels;
 use nicti_pounce::Pounce;
 use nicti_stalk::models::{self, HttpDownloader, ModelStore, RemovalModels};
 use nicti_tapetum::coat::{HealParams, MaskRecipe, Spot, SpotKind};
-use nicti_tapetum::heal::{spot_key, RemovalPatch, MAX_RADIUS};
+use nicti_tapetum::heal::{spot_key, RemovalPatch, MAX_RADIUS, MAX_SPOTS};
 use nicti_tapetum::stages::HEAL;
 
 use crate::develop_panel::{image_to_screen, screen_to_image};
@@ -251,7 +251,13 @@ impl RemovalService {
                 return Arc::clone(b);
             }
         }
-        let backend: SharedBackend = Arc::new(Mutex::new(LazyBackend::new(models.clone())));
+        let mut lazy = LazyBackend::new(models.clone());
+        if let Some(store) = self.store.clone() {
+            // The runtime is the store's own unless NICTI_ORT_DYLIB points elsewhere.
+            let ort_from_store = models.ort_dylib == store.path(&models::ORT_RUNTIME);
+            lazy = lazy.verified_by(move || models::verify_removal_install(&store, ort_from_store));
+        }
+        let backend: SharedBackend = Arc::new(Mutex::new(lazy));
         self.backend = Some((models, Arc::clone(&backend)));
         backend
     }
@@ -591,6 +597,12 @@ fn place_spot(
     source: (f32, f32),
     changed: &mut bool,
 ) {
+    if params.spots.len() >= MAX_SPOTS {
+        heal.status = Some(format!(
+            "That's the most spots one photo can hold ({MAX_SPOTS}). Delete some to add more."
+        ));
+        return;
+    }
     let radius = clamp_radius(heal.radius);
     let spot = match heal.kind {
         SpotKind::Clone | SpotKind::Heal => {

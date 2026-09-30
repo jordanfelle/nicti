@@ -39,6 +39,8 @@ pub enum RemovalError {
     RegionTooLarge(i32, i32),
     #[error("invalid removal request: {0}")]
     BadInput(String),
+    #[error("a downloaded model failed its integrity check: {0}")]
+    Integrity(String),
 }
 
 pub(crate) fn ort_err(e: impl std::fmt::Display) -> RemovalError {

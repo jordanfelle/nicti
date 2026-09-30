@@ -169,6 +169,32 @@ impl RemovalModels {
     }
 }
 
+/// Re-hashes every installed AI-removal artifact against its pinned SHA-256. [`ModelStore::status`]
+/// only checks sizes (cheap enough to call every frame), but these files are loaded into the process
+/// -- the ONNX Runtime library is native code, and the models are parsed by it -- so the first load
+/// should confirm they are exactly what was pinned. Hashes ~250 MB, so call it off the UI thread.
+///
+/// `ort_from_store` is false when `NICTI_ORT_DYLIB` supplies the runtime, which is the caller's own
+/// file and not something this store pinned.
+pub fn verify_removal_install(store: &ModelStore, ort_from_store: bool) -> Result<(), String> {
+    for artifact in removal_artifacts() {
+        if artifact.id == ORT_RUNTIME.id && !ort_from_store {
+            continue;
+        }
+        match store.verify(artifact) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(format!(
+                    "{} is missing or failed its SHA-256 check. Delete it and download again.",
+                    artifact.label
+                ))
+            }
+            Err(e) => return Err(format!("Couldn't read {}: {e}", artifact.label)),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     NotInstalled,
@@ -851,6 +877,40 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(ids.len(), unique.len());
+    }
+
+    #[test]
+    fn verify_removal_install_rejects_a_right_sized_file_with_the_wrong_content() {
+        // Sparse zero files at exactly the pinned sizes pass `status` but must fail the hash --
+        // the size check alone would happily hand a tampered library to dlopen.
+        let store = temp_store("verify-removal");
+        let a = &MOBILE_SAM_DECODER; // 16 MB, hashes quickly even in a debug build
+        fs::create_dir_all(store.path(a).parent().unwrap()).unwrap();
+        fs::File::create(store.path(a))
+            .unwrap()
+            .set_len(a.installed_size)
+            .unwrap();
+        assert_eq!(store.status(a), Status::Installed, "size alone is fooled");
+        assert!(!store.verify(a).unwrap());
+        // Skip the runtime (as when NICTI_ORT_DYLIB supplies it) and the first artifact checked
+        // is the encoder, which isn't installed at all.
+        let err = verify_removal_install(&store, false).unwrap_err();
+        assert!(err.contains("MobileSAM image encoder"), "{err}");
+        assert!(err.contains("SHA-256"), "{err}");
+    }
+
+    #[test]
+    fn verify_removal_install_names_the_runtime_first_when_it_comes_from_the_store() {
+        let store = temp_store("verify-runtime");
+        let err = verify_removal_install(&store, true).unwrap_err();
+        // The runtime is only a pinned artifact where Nicti ships one (Windows); elsewhere the
+        // first thing checked is the first model.
+        let first = if cfg!(windows) {
+            "ONNX Runtime"
+        } else {
+            "MobileSAM image encoder"
+        };
+        assert!(err.contains(first), "{err}");
     }
 
     #[test]

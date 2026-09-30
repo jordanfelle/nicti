@@ -232,3 +232,40 @@ fn a_click_removes_the_object_end_to_end() {
         "fill must be much closer to background than to the object"
     );
 }
+
+/// The manifest's pinned sizes and SHA-256s must describe the real files, or a genuine download
+/// would be rejected (or, worse, a wrong hash would never be noticed until a user hit it). Lays the
+/// real files out as a model store and runs the production verifier over them.
+#[test]
+#[ignore = "needs the real ONNX weights"]
+fn the_manifest_hashes_match_the_real_files() {
+    use nicti_stalk::models::{
+        verify_removal_install, ModelStore, Status, LAMA, MOBILE_SAM_DECODER, MOBILE_SAM_ENCODER,
+    };
+    let root = std::env::temp_dir().join(format!("nicti-real-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let store = ModelStore::new(&root);
+    for (artifact, env) in [
+        (&MOBILE_SAM_ENCODER, "NICTI_TEST_SAM_ENCODER"),
+        (&MOBILE_SAM_DECODER, "NICTI_TEST_SAM_DECODER"),
+        (&LAMA, "NICTI_TEST_LAMA"),
+    ] {
+        let dest = store.path(artifact);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(env_path(env), &dest).unwrap();
+        assert_eq!(
+            store.status(artifact),
+            Status::Installed,
+            "{} has the wrong size",
+            artifact.id
+        );
+        assert!(
+            store.verify(artifact).unwrap(),
+            "{} does not match its pinned SHA-256",
+            artifact.id
+        );
+    }
+    // ort_from_store = false: the Linux runtime here isn't a pinned artifact.
+    verify_removal_install(&store, false).expect("the whole install verifies");
+    let _ = std::fs::remove_dir_all(&root);
+}
