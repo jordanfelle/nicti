@@ -118,6 +118,8 @@ pub struct PeltApp {
     last_backup_summary: Option<String>,
     /// Destination *parent* folder typed for a verified folder move (#26).
     move_dest_input: String,
+    /// The folder panel's (#303) throttled read of roots/journal rows/mounted drives.
+    folder_cache: folder_panel::Cache,
     /// The in-flight `MoveJob`'s result slot, folded into `last_move_summary` once it resolves.
     pending_move_result: Option<ReportSlot<CarryOutcome>>,
     last_move_summary: Option<String>,
@@ -268,6 +270,7 @@ impl PeltApp {
             pending_backup_changes: None,
             last_backup_summary: None,
             move_dest_input: String::new(),
+            folder_cache: folder_panel::Cache::default(),
             pending_move_result: None,
             last_move_summary,
             decoder: Arc::new(LibRawDecoder),
@@ -522,8 +525,21 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
             _ => None,
         })
         .collect();
+    let leftovers: u64 = resumed
+        .iter()
+        .map(|r| match r {
+            Resumed::CleanedUp { leftover_count, .. } => *leftover_count,
+            _ => 0,
+        })
+        .sum();
     Some(if stuck.is_empty() {
-        format!("Recovered {} interrupted folder move(s).", resumed.len())
+        let mut msg = format!("Recovered {} interrupted folder move(s).", resumed.len());
+        if leftovers > 0 {
+            msg.push_str(&format!(
+                " {leftovers} file(s) couldn't be removed from the original location."
+            ));
+        }
+        msg
     } else {
         format!(
             "{} interrupted folder move(s) need attention: {}",
@@ -830,10 +846,16 @@ impl PeltApp {
     /// #303: the left-hand folder/drive tree; a drop on a drive or folder starts a verified move.
     fn show_folder_panel(&mut self, ui: &mut egui::Ui, store: &Arc<SqliteCatalog>) {
         let moving = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
-        let roots = store.list_roots().unwrap_or_default();
-        let tree = folder_panel::build_tree(&roots, &folder_panel::mounted_drives());
-        let open = store.open_root_moves().unwrap_or_default();
-        let attention = folder_panel::attention_lines(&open, moving);
+        let move_running = self.job_active(&[JobKind::Move]);
+        // Re-read on a busy edge or the cache's own cadence -- never per frame.
+        self.folder_cache.refresh(moving, || {
+            (
+                store.list_roots().unwrap_or_default(),
+                store.open_root_moves().unwrap_or_default(),
+            )
+        });
+        let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
+        let attention = folder_panel::attention_lines(&self.folder_cache.open_moves, move_running);
         let mut request = None;
         egui::Panel::left("folder_panel")
             .resizable(true)

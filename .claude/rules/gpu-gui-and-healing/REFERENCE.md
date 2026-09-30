@@ -191,8 +191,8 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 - **`crates/nicti-pelt`'s `folder_panel.rs`** (#303) — Library left panel: roots grouped by drive
   (`drive_of` derives the drive from the path — the shell still registers every root under one
   placeholder volume, so no real volume/offline tree until ADR-0071 identity lands), drag a folder
-  onto a drive or another folder → `PeltApp::submit_move_to` → `MoveJob`. Also lists still-open
-  `root_move` journal rows (`attention_lines`) so a `Resumed::Stuck` doesn't only flash once.
+  onto a drive → `PeltApp::submit_move_to` → `MoveJob`. Also lists still-open
+  `root_move` journal rows (`attention_lines`) so a `Resumed::Stuck` does not only flash once. Folder rows are drag sources only: `Carry` refuses a destination inside another registered root.
 - **`crates/nicti-tapetum`'s `heal.rs`** (#51) — the baked heal stage: `HealStage` (registry entry,
   `impl_version`), `HealKernel` (pipelines built once), `HealExec` (one render's spots),
   `RemovalPatch`/`RemovalSet`/`spot_key`/`stamp_removal_state` (AI patches), `spot_geometry` (integer

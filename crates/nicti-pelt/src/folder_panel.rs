@@ -31,6 +31,14 @@ pub struct DriveNode {
 /// The drive/mount a path lives on: a Windows drive letter, the first component under a
 /// conventional Unix mount parent (`/mnt`, `/media/<user>`, `/Volumes`), else `/`.
 pub fn drive_of(path: &str) -> String {
+    // `\\?\D:\x` (verbatim) is the same drive as `D:\x`; `\\?\UNC\srv\share` is a UNC share.
+    let path = match path.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => return unc_share(rest),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path),
+    };
+    if let Some(rest) = path.strip_prefix(r"\\") {
+        return unc_share(rest);
+    }
     let bytes = path.as_bytes();
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return format!("{}:\\", (bytes[0] as char).to_ascii_uppercase());
@@ -39,6 +47,16 @@ pub fn drive_of(path: &str) -> String {
     match parts.as_slice() {
         ["mnt", d, ..] | ["Volumes", d, ..] => format!("/{}/{d}", parts[0]),
         ["media", u, d, ..] => format!("/media/{u}/{d}"),
+        _ => "/".to_string(),
+    }
+}
+
+/// `\\server\share` for the part of a UNC path after its leading `\\`.
+fn unc_share(rest: &str) -> String {
+    let mut it = rest.split(['\\', '/']).filter(|p| !p.is_empty());
+    match (it.next(), it.next()) {
+        (Some(server), Some(share)) => format!(r"\\{server}\{share}"),
+        (Some(server), None) => format!(r"\\{server}"),
         _ => "/".to_string(),
     }
 }
@@ -99,6 +117,34 @@ pub fn mounted_drives() -> Vec<String> {
     }
 }
 
+/// How long a scan of the catalog/filesystem is reused: roots, journal rows and mounted drives
+/// are read on this cadence, not per frame (`mounted_drives` can stall on a dead network drive,
+/// and the catalog calls contend with import/sync/move jobs for the connection mutex).
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[derive(Default)]
+pub struct Cache {
+    at: Option<std::time::Instant>,
+    was_busy: bool,
+    pub roots: Vec<Root>,
+    pub drives: Vec<String>,
+    pub open_moves: Vec<RootMove>,
+}
+
+impl Cache {
+    /// Refreshes if stale, or right away when `busy` (an import/sync/move is running) just changed
+    /// -- a finishing move has just re-pointed a root.
+    pub fn refresh(&mut self, busy: bool, read: impl FnOnce() -> (Vec<Root>, Vec<RootMove>)) {
+        let force = std::mem::replace(&mut self.was_busy, busy) != busy;
+        if !force && self.at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
+            return;
+        }
+        (self.roots, self.open_moves) = read();
+        self.drives = mounted_drives();
+        self.at = Some(std::time::Instant::now());
+    }
+}
+
 /// True when moving `dragged` into `dest_parent` is obviously pointless or impossible, so the UI
 /// doesn't offer the drop at all: onto itself, into its own subtree, or into the folder it's
 /// already directly inside. (`Carry` re-checks and refuses the rest -- this is only the cheap
@@ -107,10 +153,11 @@ pub fn is_noop_or_cyclic(dragged: &Path, dest_parent: &Path) -> bool {
     dest_parent.starts_with(dragged) || dragged.parent() == Some(dest_parent)
 }
 
-/// What a finished or interrupted move needs the user to look at, for the panel's warning block.
-pub fn attention_lines(open: &[RootMove], moving: bool) -> Vec<String> {
+/// What an interrupted move needs the user to look at, for the panel's warning block.
+/// (Leftovers from a *finished* move aren't journal rows -- they're in the move summary.)
+pub fn attention_lines(open: &[RootMove], move_running: bool) -> Vec<String> {
     // While our own MoveJob runs its journal row is legitimately open.
-    if moving {
+    if move_running {
         return Vec::new();
     }
     open.iter()
@@ -133,7 +180,7 @@ fn folder_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-/// Draws the tree. Returns the drop the user made this frame, if any. `moving` disables dropping
+/// Draws the tree. Returns the drop the user made this frame, if any (only drives accept drops). `moving` disables dropping
 /// (a scan or another move is running -- same guard as the text-field path).
 pub fn show(
     ui: &mut egui::Ui,
@@ -153,14 +200,11 @@ pub fn show(
                 .default_open(true)
                 .show(ui, |ui| {
                     for root in &drive.roots {
-                        if let Some(r) = show_root(ui, root, moving) {
-                            request = Some(r);
-                        }
+                        show_root(ui, root, moving);
                     }
                 });
         });
-        // A drop on a folder row inside this drive was already claimed by that row.
-        if let (Some(root_id), false, true) = (dropped, moving, request.is_none()) {
+        if let (Some(root_id), false) = (dropped, moving) {
             if let Some(dragged) = find_root(tree, *root_id) {
                 let dest = PathBuf::from(&drive.path);
                 if !is_noop_or_cyclic(Path::new(&dragged.path), &dest) {
@@ -193,8 +237,9 @@ fn find_root(tree: &[DriveNode], id: i64) -> Option<&Root> {
     tree.iter().flat_map(|d| &d.roots).find(|r| r.id == id)
 }
 
-/// One draggable folder row that is also a drop target (drop = move *into* this folder).
-fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool) -> Option<DropRequest> {
+/// One draggable folder row. Deliberately not a drop target: `Carry` refuses any destination
+/// inside another registered root (overlapping roots), so "move into this folder" can only fail.
+fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool) {
     let id = egui::Id::new(("folder_panel_root", root.id));
     let label = folder_name(&root.path);
     let response = if moving {
@@ -204,24 +249,8 @@ fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool) -> Option<DropRequest
             ui.label(format!("\u{1F4C1} {label}"));
         })
         .response
-    }
-    .on_hover_text(&root.path);
-
-    if moving {
-        return None;
-    }
-    let dragged = response.dnd_hover_payload::<i64>()?;
-    let dragged_id = *dragged;
-    if dragged_id == root.id {
-        return None;
-    }
-    if response.dnd_release_payload::<i64>().is_some() {
-        return Some(DropRequest {
-            root_id: dragged_id,
-            dest_parent: PathBuf::from(&root.path),
-        });
-    }
-    None
+    };
+    response.on_hover_text(&root.path);
 }
 
 #[cfg(test)]
@@ -263,6 +292,13 @@ mod tests {
         let d: Vec<_> = tree[1].roots.iter().map(|r| r.id).collect();
         assert_eq!(d, [2, 1], "sorted by path, archived dropped");
         assert!(tree[2].roots.is_empty());
+    }
+
+    #[test]
+    fn drive_of_unc_and_verbatim() {
+        assert_eq!(drive_of(r"\\srv\share\x\y"), r"\\srv\share");
+        assert_eq!(drive_of(r"\\?\UNC\srv\share\x"), r"\\srv\share");
+        assert_eq!(drive_of(r"\\?\d:\x"), r"D:\");
     }
 
     #[test]
