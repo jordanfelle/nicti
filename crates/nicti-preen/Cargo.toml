@@ -4,10 +4,33 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Exporter extension point (ADR-0019 §8). Crate boundary only — resize/encode/metadata-write/watermark execution is owned by #56 (export stack research) and #57 (export pipeline)."
+description = "Export engine (ADR-0019 §8, ADR-0056, #57): the Exporter extension point plus everything format-independent about turning a rendered linear working-space frame into a delivered file -- export presets/spec (spec.rs), filename tokens (naming.rs), batch planning and collision-safe writes (plan.rs/write.rs), linear-light resize (resize.rs), orientation (orient.rs), output color conversion (color.rs), watermark (watermark.rs), EXIF/XMP/ICC metadata (metadata.rs) and the built-in JPEG/PNG/TIFF exporters (exporters.rs). Pure Rust and GPU-free: it consumes a host-memory frame, so it depends on neither nicti-tapetum nor nicti-lair."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
+nicti-calico = { path = "../nicti-calico" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Resize: Lanczos3 over linear f32 RGB. No `rayon` feature -- a rayon pool would bypass Pounce's
+# CPU-lane throttle (each export encode job is one Pounce CPU chunk).
+fast_image_resize = "6"
+bytemuck = "1"
+# Encoders/embedders, all as ADR-0056 picked them (spikes/prey -> promoted).
+jpeg-encoder = "0.6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tiff = "0.11"
+little_exif = "0.6.23"
+img-parts = "0.4.0"
+bytes = "1.12.1"
+# Watermark: SVG rasterization.
+resvg = "0.48.1"
+usvg = "0.48.1"
+tiny-skia = "0.12.0"
+# Source EXIF read (lens, exposure, ISO, orientation) at export time -- already a nicti-lair dep.
+kamadak-exif = "0.6"
 
 [dev-dependencies]
-serde_json = "1"
+tempfile = "3"
+# Decoders for round-trip assertions only (the shipped crate only encodes PNG).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
