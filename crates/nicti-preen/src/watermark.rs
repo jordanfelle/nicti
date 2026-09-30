@@ -36,7 +36,11 @@ pub enum WatermarkError {
 /// A decoded logo, ready to be scaled per photo. Load once per batch and share.
 #[derive(Debug, Clone)]
 pub enum WatermarkSource {
-    Svg(String),
+    /// `aspect` (height / width) is computed once in `from_svg`, which also validates the text.
+    Svg {
+        text: String,
+        aspect: f64,
+    },
     Png(RgbaImage),
 }
 
@@ -71,7 +75,8 @@ impl WatermarkSource {
         if !(size.width() > 0.0 && size.height() > 0.0) {
             return Err(WatermarkError::Empty);
         }
-        Ok(WatermarkSource::Svg(text))
+        let aspect = f64::from(size.height()) / f64::from(size.width());
+        Ok(WatermarkSource::Svg { text, aspect })
     }
 
     pub fn from_png(bytes: &[u8]) -> Result<Self, WatermarkError> {
@@ -88,11 +93,7 @@ impl WatermarkSource {
     fn aspect(&self) -> f64 {
         match self {
             WatermarkSource::Png(img) => img.height() as f64 / img.width() as f64,
-            WatermarkSource::Svg(text) => {
-                let tree =
-                    usvg::Tree::from_str(text, &svg_options()).expect("validated in from_svg");
-                tree.size().height() as f64 / tree.size().width() as f64
-            }
+            WatermarkSource::Svg { aspect, .. } => *aspect,
         }
     }
 
@@ -111,7 +112,7 @@ impl WatermarkSource {
                     ))
                 }
             }
-            WatermarkSource::Svg(text) => rasterize_svg(text, width, height),
+            WatermarkSource::Svg { text, .. } => rasterize_svg(text, width, height),
         }
     }
 }
@@ -396,7 +397,7 @@ mod tests {
         std::fs::write(&svg, WHITE_SVG).unwrap();
         assert!(matches!(
             WatermarkSource::load(&svg).unwrap(),
-            WatermarkSource::Svg(_)
+            WatermarkSource::Svg { .. }
         ));
 
         let png = dir.path().join("l.PNG");

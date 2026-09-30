@@ -1959,7 +1959,7 @@ impl PeltApp {
                     // viewport this frame) until the user explicitly says to discard those edits.
                     // #57: edits are saved to the catalog first, so this only blocks when the save
                     // itself failed.
-                    self.save_develop_edits_to(store.as_ref(), true);
+                    self.save_develop_edits_to(store.as_ref(), false);
                     let develop_has_unsaved_edits =
                         self.develop.as_ref().is_some_and(DevelopView::is_dirty);
                     if develop_has_unsaved_edits {
