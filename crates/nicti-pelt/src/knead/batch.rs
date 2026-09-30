@@ -63,6 +63,18 @@ impl LastBatch {
     }
 }
 
+/// The hash `undo` will see for `doc` once it's in the catalog: hashed after a round trip through
+/// the stored JSON, not from the in-memory value. `serde_json`'s default float parsing isn't
+/// guaranteed to return the exact bits it was given, so hashing `doc` directly could differ by an
+/// ULP from what a later read parses, and undo would skip an untouched photo. Both sides go
+/// through the same parse, so they always agree.
+fn stored_hash(doc: &EditDocument) -> Result<blake3::Hash, CatalogError> {
+    let bad = |e: String| CatalogError::Document(e);
+    let json = nicti_pawprint::to_canonical_json(doc).map_err(|e| bad(e.to_string()))?;
+    let as_stored: EditDocument = serde_json::from_str(&json).map_err(|e| bad(e.to_string()))?;
+    as_stored.content_hash().map_err(|e| bad(e.to_string()))
+}
+
 /// Reads every target's document, plans the paste, and writes all the changes in one transaction.
 /// Returns `None` for the undo handle when nothing changed. Nothing is written if the write fails.
 pub fn run_batch(
@@ -94,11 +106,7 @@ pub fn run_batch(
         .changes
         .into_iter()
         .map(|c| {
-            // The hash was just serialised by the write above, so it can't fail here.
-            let hash = c
-                .after
-                .content_hash()
-                .map_err(|e| CatalogError::Document(e.to_string()))?;
+            let hash = stored_hash(&c.after)?;
             Ok((c, hash))
         })
         .collect::<Result<Vec<_>, CatalogError>>()?;

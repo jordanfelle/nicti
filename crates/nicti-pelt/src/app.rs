@@ -1875,8 +1875,6 @@ impl PeltApp {
         self.export.request(ids, scope, samples);
     }
 
-    /// Draws the Export dialog while open; starting it builds the run's environment from live
-    /// app state.
     /// The photos a copy/paste/preset acts on. Develop edits the one photo `DevelopView` has
     /// loaded; everywhere else it's the marked targets (the photo on screen, in the Loupe).
     fn knead_targets(&self) -> Vec<i64> {
@@ -2071,10 +2069,13 @@ impl PeltApp {
                 develop.replace_document(doc);
                 // Selected corrections and spots may no longer exist.
                 self.mask_ui.selected = None;
+                self.heal_ui.clear_selection();
             }
         }
     }
 
+    /// Draws the Export dialog while open; starting it builds the run's environment from live
+    /// app state.
     fn show_export_dialog(&mut self, ctx: &egui::Context) {
         let CatalogOpenState::Open(store) = &self.catalog else {
             return;
