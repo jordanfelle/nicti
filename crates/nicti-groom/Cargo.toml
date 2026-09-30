@@ -22,7 +22,6 @@ sha2 = "0.11"
 # reproduces the real cross-crate `ort` environment race that motivated #179's fix, and #229's
 # shared-path-mismatch check, by driving every crate's `ensure_ort_environment` in one process.
 # None of these depend on nicti-groom, so this creates no cycle.
-siamese = { path = "../../spikes/siamese" }
 crouch = { path = "../../spikes/crouch" }
 rods = { path = "../../spikes/rods" }
 litter = { path = "../../spikes/litter" }
