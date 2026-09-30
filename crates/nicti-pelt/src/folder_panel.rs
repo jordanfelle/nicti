@@ -36,7 +36,7 @@ pub fn drive_of(path: &str) -> String {
         Some(rest) => return unc_share(rest),
         None => path.strip_prefix(r"\\?\").unwrap_or(path),
     };
-    if let Some(rest) = path.strip_prefix(r"\\") {
+    if let Some(rest) = path.strip_prefix(r"\\").or_else(|| path.strip_prefix("//")) {
         return unc_share(rest);
     }
     let bytes = path.as_bytes();
@@ -120,7 +120,7 @@ pub fn mounted_drives() -> Vec<String> {
 /// How long a scan of the catalog/filesystem is reused: roots, journal rows and mounted drives
 /// are read on this cadence, not per frame (`mounted_drives` can stall on a dead network drive,
 /// and the catalog calls contend with import/sync/move jobs for the connection mutex).
-const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct Cache {
@@ -299,6 +299,7 @@ mod tests {
         assert_eq!(drive_of(r"\\srv\share\x\y"), r"\\srv\share");
         assert_eq!(drive_of(r"\\?\UNC\srv\share\x"), r"\\srv\share");
         assert_eq!(drive_of(r"\\?\d:\x"), r"D:\");
+        assert_eq!(drive_of("//srv/share/x/y"), r"\\srv\share");
     }
 
     #[test]

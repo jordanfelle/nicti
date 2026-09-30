@@ -532,21 +532,21 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
             _ => 0,
         })
         .sum();
-    Some(if stuck.is_empty() {
-        let mut msg = format!("Recovered {} interrupted folder move(s).", resumed.len());
-        if leftovers > 0 {
-            msg.push_str(&format!(
-                " {leftovers} file(s) couldn't be removed from the original location."
-            ));
-        }
-        msg
+    let mut msg = if stuck.is_empty() {
+        format!("Recovered {} interrupted folder move(s).", resumed.len())
     } else {
         format!(
             "{} interrupted folder move(s) need attention: {}",
             stuck.len(),
             stuck.join("; ")
         )
-    })
+    };
+    if leftovers > 0 {
+        msg.push_str(&format!(
+            " {leftovers} file(s) couldn't be removed from the original location."
+        ));
+    }
+    Some(msg)
 }
 
 impl eframe::App for PeltApp {
@@ -848,6 +848,8 @@ impl PeltApp {
         let moving = self.job_active(&[JobKind::Import, JobKind::Sync, JobKind::Move]);
         let move_running = self.job_active(&[JobKind::Move]);
         // Re-read on a busy edge or the cache's own cadence -- never per frame.
+        // Nothing else repaints an idle window, so wake up when the cache goes stale.
+        ui.ctx().request_repaint_after(folder_panel::CACHE_TTL);
         self.folder_cache.refresh(moving, || {
             (
                 store.list_roots().unwrap_or_default(),
