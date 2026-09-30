@@ -23,6 +23,9 @@ mod folder_panel;
 mod grid;
 mod heal_tool;
 mod loupe;
+mod mask_edit;
+mod mask_panel;
+mod mask_tool;
 mod render;
 mod t2;
 #[cfg(test)]

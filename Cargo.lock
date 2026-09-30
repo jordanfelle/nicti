@@ -3686,7 +3686,6 @@ dependencies = [
  "rosette",
  "serde_json",
  "sha2 0.11.0",
- "siamese",
  "thiserror 2.0.21",
 ]
 
@@ -3757,6 +3756,7 @@ dependencies = [
  "nicti-pounce",
  "nicti-preen",
  "nicti-shed",
+ "nicti-siamese",
  "nicti-stalk",
  "nicti-tapetum",
  "raw-window-handle",
@@ -3826,6 +3826,22 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "nicti-siamese"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "nicti-claw",
+ "nicti-groom",
+ "nicti-haw",
+ "nicti-pounce",
+ "nicti-stalk",
+ "nicti-tapetum",
+ "ort",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5737,24 +5753,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "siamese"
-version = "0.0.0"
-dependencies = [
- "blake3",
- "bytemuck",
- "clap",
- "image",
- "nicti-haw",
- "ort",
- "pollster",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "wgpu",
-]
 
 [[package]]
 name = "simba"

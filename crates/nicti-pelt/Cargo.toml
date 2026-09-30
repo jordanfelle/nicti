@@ -33,6 +33,7 @@ nicti-shed = { path = "../nicti-shed" }
 nicti-claw = { path = "../nicti-claw" }
 nicti-pawprint = { path = "../nicti-pawprint" }
 nicti-groom = { path = "../nicti-groom" }
+nicti-siamese = { path = "../nicti-siamese" }
 nicti-preen = { path = "../nicti-preen" }
 thiserror = "2"
 nicti-stalk = { path = "../nicti-stalk" }

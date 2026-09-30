@@ -6,16 +6,18 @@
 //! already succeeded).
 //!
 //! The real bug is cross-crate: six crates (`groom` -- now `nicti-groom`, calling `nicti-haw` directly -- and the
-//! throwaway spikes `siamese`, `crouch`, `rods`, `litter`, `rosette`) each used to carry their own copy of `ensure_ort_environment`, but `ort`'s
+//! spikes `siamese` (since promoted to `nicti-siamese`, which also calls `nicti-haw` directly, and
+//! which depends on this crate so cannot be a dev-dependency of it), `crouch`, `rods`, `litter`,
+//! `rosette`) each used to carry their own copy of `ensure_ort_environment`, but `ort`'s
 //! environment is a single process-global (`G_ENV_OPTIONS`). Before #179's fix, whichever crate's
 //! copy lost the race -- i.e. called `EnvironmentBuilder::commit()` after any other crate already
 //! had -- treated `commit() == false` as a permanent, cached error, so every subsequent model load
 //! in that crate failed forever even though a perfectly usable environment was already active
-//! process-wide. `all_six_spikes_can_commit_the_shared_ort_environment_in_one_process` drives all
-//! six crates' `ensure_ort_environment` back-to-back in one process and asserts every one of them
+//! process-wide. `every_spike_can_commit_the_shared_ort_environment_in_one_process` drives every
+//! remaining caller's `ensure_ort_environment` back-to-back in one process and asserts every one of them
 //! succeeds when they all request the *same* dylib path.
 //!
-//! #229 closed a second gap #179 left open: none of those six copies could tell a *different*
+//! #229 closed a second gap #179 left open: none of those copies could tell a *different*
 //! dylib path apart from the one that actually won the race -- a losing caller just silently ran
 //! against whichever environment the winner loaded. All six now delegate to `nicti-haw`, which
 //! records the first path and rejects a later, different one with a typed error.
@@ -42,21 +44,19 @@
 
 #[test]
 #[ignore = "needs a real ONNX Runtime shared library on disk"]
-fn all_six_spikes_can_commit_the_shared_ort_environment_in_one_process() {
+fn every_spike_can_commit_the_shared_ort_environment_in_one_process() {
     let dylib_path = std::env::var("NICTI_TEST_ORT_DYLIB").expect("set NICTI_TEST_ORT_DYLIB");
     let dylib_path = std::path::Path::new(&dylib_path);
 
     // nicti-groom's own model loaders (sam.rs/lama.rs) call exactly this.
     nicti_haw::ensure_ort_environment(dylib_path).expect("nicti-groom (first caller) must succeed");
-    siamese::segment::ensure_ort_environment(dylib_path).expect(
-        "siamese (second caller, environment already committed by nicti-groom) must succeed",
+    crouch::ort_contend::ensure_ort_environment(dylib_path).expect(
+        "crouch (second caller, environment already committed by nicti-groom) must succeed",
     );
-    crouch::ort_contend::ensure_ort_environment(dylib_path)
-        .expect("crouch (third caller) must succeed");
-    rods::ai::ensure_ort_environment(dylib_path).expect("rods (fourth caller) must succeed");
-    litter::embed::ensure_ort_environment(dylib_path).expect("litter (fifth caller) must succeed");
+    rods::ai::ensure_ort_environment(dylib_path).expect("rods (third caller) must succeed");
+    litter::embed::ensure_ort_environment(dylib_path).expect("litter (fourth caller) must succeed");
     rosette::embed::ensure_ort_environment(dylib_path)
-        .expect("rosette (sixth caller) must succeed");
+        .expect("rosette (fifth caller) must succeed");
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn a_different_dylib_path_is_rejected_before_reaching_session_builder() {
     nicti_haw::ensure_ort_environment(absolute_path)
         .expect("nicti-groom (first caller) commits the absolute path");
 
-    let err = siamese::segment::ensure_ort_environment(&relative_path)
+    let err = crouch::ort_contend::ensure_ort_environment(&relative_path)
         .expect_err("a genuinely different path string must be rejected, not silently reused");
     let message = err.to_string();
     assert!(

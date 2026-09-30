@@ -11,7 +11,7 @@ use nicti_tapetum::coat::{
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    CROP, EXPOSURE, HEAL, HSL, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    CROP, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
 };
 
 use crate::heal_tool::{self, HealUi};
@@ -47,6 +47,7 @@ pub fn show(
     current_frame: &FrameTexture,
     hsl_band_selected: &mut usize,
     heal: &mut HealUi,
+    mask: &mut crate::mask_panel::MaskUi,
     pounce: &nicti_pounce::Pounce,
 ) {
     ui.heading("Develop");
@@ -204,6 +205,9 @@ pub fn show(
     if heal.heal_active() {
         heal_tool::show_panel(ui, develop, heal, pounce);
     }
+    if heal.mask_active() {
+        crate::mask_panel::show_panel(ui, develop, mask, pounce);
+    }
 
     ui.separator();
     if ui.button("Reset all").clicked() {
@@ -218,11 +222,15 @@ pub fn show(
             SHARPEN,
             NOISE_REDUCTION,
             CROP,
+            MASKS,
         ] {
             develop.reset_stage(id);
         }
-        // The heal spots are gone, so their finished removals (up to tens of MB each) are too.
+        // The heal spots are gone, so their finished removals (up to tens of MB each) are too --
+        // and so are the local corrections, whose finished AI alphas go with them.
         develop.prune_removals();
+        develop.prune_ai_alphas();
+        mask.selected = None;
     }
 }
 

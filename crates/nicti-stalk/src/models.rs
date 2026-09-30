@@ -122,6 +122,76 @@ pub const LAMA: Artifact = Artifact {
     payload: Payload::File,
 };
 
+/// BiRefNet (general checkpoint), fp32 ONNX export by onnx-community, for AI subject/background
+/// masks (#49, ADR-0048's default). Input `input_image` float32 `[1, 3, 1024, 1024]`, an RGB image
+/// resized to 1024x1024 and normalized with the ImageNet mean/std; output `output_image` float32
+/// `[1, 1, 1024, 1024]` **logits** (apply a sigmoid for alpha). The provider reads the real
+/// input/output names from the loaded graph rather than trusting these, and the tensor contract is
+/// re-verified by `nicti-siamese`'s `#[ignore]`d real-weight test.
+///
+/// **On-demand download only, never bundled** (ADR-0218): ~970 MB. MIT; the upstream model card
+/// (`ZhengPeng7/BiRefNet`, which this export names as its `base_model`) states it is "trained on
+/// DIS-TR", a dataset with no stated use restriction. What is *not* verified: this is a third-party
+/// ONNX conversion (onnx-community), and its weights were not independently compared to the upstream
+/// checkpoint -- recorded in `docs/licensing.md` and tracked as a follow-up rather than assumed.
+/// The fp16 export in the same repo (490 MB) is deliberately not used: ONNX Runtime's CPU provider
+/// has thin fp16 kernel coverage and falls back through casts, so it is *slower* there.
+pub const BIREFNET: Artifact = Artifact {
+    id: "birefnet",
+    label: "BiRefNet subject/background masking model",
+    file_name: "birefnet_fp32.onnx",
+    url: "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/534d3c82d3bb8b2f0867db6dfbc3a525b8e42f67/onnx/model.onnx",
+    download_size: 972_666_916,
+    download_sha256: "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
+    installed_size: 972_666_916,
+    installed_sha256: "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
+    license: "MIT (trained on DIS-TR per the upstream model card; a third-party ONNX conversion, see docs/licensing.md)",
+    payload: Payload::File,
+};
+
+/// Everything AI subject/background masking needs, in install order (the ONNX Runtime entry exists
+/// only where Nicti ships a runtime download, as for removal).
+pub fn mask_artifacts() -> Vec<&'static Artifact> {
+    let mut v: Vec<&'static Artifact> = Vec::new();
+    #[cfg(windows)]
+    v.push(&ORT_RUNTIME);
+    v.extend([&BIREFNET]);
+    v
+}
+
+/// Total bytes a user agrees to download for AI masks, for the confirmation prompt (skips anything
+/// already installed, e.g. a runtime AI removal already fetched).
+pub fn mask_download_bytes(store: &ModelStore) -> u64 {
+    mask_artifacts()
+        .iter()
+        .filter(|a| store.status(a) != Status::Installed)
+        .map(|a| a.download_size)
+        .sum()
+}
+
+/// Resolved on-disk locations of every file AI masks need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskModels {
+    pub ort_dylib: PathBuf,
+    pub birefnet: PathBuf,
+}
+
+impl MaskModels {
+    /// `Some` only when BiRefNet is installed and an ONNX Runtime library is available (the store's
+    /// own copy on Windows, or `NICTI_ORT_DYLIB`, which wins where set).
+    pub fn locate(store: &ModelStore) -> Option<Self> {
+        let ort_dylib = match std::env::var_os("NICTI_ORT_DYLIB") {
+            Some(p) if !p.is_empty() => PathBuf::from(p),
+            _ => store.ort_runtime_path()?,
+        };
+        let models = Self {
+            ort_dylib,
+            birefnet: store.installed_path(&BIREFNET)?,
+        };
+        models.ort_dylib.is_file().then_some(models)
+    }
+}
+
 /// Everything AI object removal needs, in install order. The ONNX Runtime entry exists only where
 /// Nicti ships a runtime download (Windows); elsewhere `NICTI_ORT_DYLIB` must point at one.
 pub fn removal_artifacts() -> Vec<&'static Artifact> {
@@ -177,7 +247,17 @@ impl RemovalModels {
 /// `ort_from_store` is false when `NICTI_ORT_DYLIB` supplies the runtime, which is the caller's own
 /// file and not something this store pinned.
 pub fn verify_removal_install(store: &ModelStore, ort_from_store: bool) -> Result<(), String> {
-    for artifact in removal_artifacts() {
+    verify_artifacts(store, &removal_artifacts(), ort_from_store)
+}
+
+/// [`verify_removal_install`] for any set of artifacts (AI masks use the same first-load check for
+/// BiRefNet). `ort_from_store` is false when `NICTI_ORT_DYLIB` supplies the runtime.
+pub fn verify_artifacts(
+    store: &ModelStore,
+    artifacts: &[&'static Artifact],
+    ort_from_store: bool,
+) -> Result<(), String> {
+    for artifact in artifacts.iter().copied() {
         if artifact.id == ORT_RUNTIME.id && !ort_from_store {
             continue;
         }
@@ -924,6 +1004,7 @@ mod tests {
             &MOBILE_SAM_ENCODER,
             &MOBILE_SAM_DECODER,
             &LAMA,
+            &BIREFNET,
         ] {
             assert_eq!(a.download_sha256.len(), 64, "{}", a.id);
             assert_eq!(a.installed_sha256.len(), 64, "{}", a.id);
@@ -941,6 +1022,48 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(ids.len(), unique.len());
+        let mask_ids: Vec<_> = mask_artifacts().iter().map(|a| a.id).collect();
+        assert!(mask_ids.contains(&BIREFNET.id));
+        // Ids double as directory names in one shared store, so no two artifacts may collide.
+        let mut all: Vec<_> = ids.into_iter().chain(mask_ids).collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 5 - usize::from(!cfg!(windows)), "{all:?}");
+    }
+
+    #[test]
+    fn birefnet_is_pinned_to_the_reviewed_revision_and_the_fp32_file() {
+        assert!(BIREFNET
+            .url
+            .contains("/resolve/534d3c82d3bb8b2f0867db6dfbc3a525b8e42f67/onnx/model.onnx"));
+        assert_eq!(BIREFNET.download_size, BIREFNET.installed_size);
+        assert_eq!(BIREFNET.download_sha256, BIREFNET.installed_sha256);
+        assert!(BIREFNET.license.starts_with("MIT"));
+        assert_eq!(BIREFNET.payload, Payload::File);
+    }
+
+    #[test]
+    fn mask_verify_names_birefnet_when_it_is_missing() {
+        let store = temp_store("verify-mask");
+        let err = verify_artifacts(&store, &mask_artifacts(), false).unwrap_err();
+        assert!(err.contains("BiRefNet"), "{err}");
+    }
+
+    #[test]
+    fn mask_download_size_counts_only_what_is_not_installed_yet() {
+        let store = temp_store("mask-size");
+        let total = mask_download_bytes(&store);
+        assert!(total >= BIREFNET.download_size);
+        assert!(
+            total <= BIREFNET.download_size + ORT_RUNTIME.download_size,
+            "{total}"
+        );
+    }
+
+    #[test]
+    fn mask_locate_needs_birefnet_and_a_runtime() {
+        let store = temp_store("mask-locate");
+        assert!(MaskModels::locate(&store).is_none());
     }
 
     #[test]

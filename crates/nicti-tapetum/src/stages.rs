@@ -51,6 +51,13 @@ pub const HSL: &str = "nicti.hsl";
 pub const SHARPEN: &str = "nicti.sharpen";
 pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
 pub const CROP: &str = "nicti.crop";
+/// Local corrections (#49): every mask + its adjustments, one stage so a whole set pastes/syncs as a
+/// unit and the graph stays fixed-shape. Live: its cost is uniforms, not bakes.
+pub const MASKS: &str = "nicti.masks";
+/// The fixed neutral render AI masks infer on (post-lens, pre-heal, default tone -- ADR-0049). A
+/// keying-only node: nothing renders it, it exists so an AI bake key chains from LENS and so a tone
+/// or white-balance edit provably cannot invalidate a model's output.
+pub const NEUTRAL: &str = "nicti.neutral";
 
 /// A `RenderStage` whose identity/kind/defaults are all fixed at construction -- every stage id
 /// in this module needs the same `Module`/`RenderStage` boilerplate, so one type serves all of
@@ -82,6 +89,20 @@ impl RenderStage for BasicStage {
     }
 }
 
+pub fn neutral_stage() -> BasicStage {
+    BasicStage {
+        id: NEUTRAL,
+        kind: StageKind::Baked,
+        default_params: || json!({}),
+    }
+}
+pub fn masks_stage() -> BasicStage {
+    BasicStage {
+        id: MASKS,
+        kind: StageKind::Live,
+        default_params: || json!({ "corrections": [] }),
+    }
+}
 pub fn decode_stage() -> BasicStage {
     BasicStage {
         id: DECODE,
@@ -456,6 +477,8 @@ struct CombineUniforms {
     nr: [f32; 4],
     /// amount, unused, detail, unused.
     sharpen: [f32; 4],
+    /// x = local sharpness/noise corrections are bound (#49); the rest is padding.
+    local: [f32; 4],
 }
 
 /// The live suffix's full per-render parameter set -- everything [`LiveSuffixKernel::set_params`]
@@ -579,7 +602,31 @@ pub struct LiveSuffixKernel {
     /// of each so `set_params` only re-uploads when content actually changed.
     profile_tables: std::sync::Mutex<ProfileTables>,
     profile_sampler: wgpu::Sampler,
+    /// Local corrections (#49): the uniform block (`count` + up to 16 corrections), the atlas
+    /// currently bound (a 1x1 dummy and count 0 when there are none) and its sampler.
+    mask_buf: wgpu::Buffer,
+    mask_state: std::sync::Mutex<MaskBinding>,
+    mask_sampler: wgpu::Sampler,
 }
+
+/// What the live shader's mask bindings currently point at.
+struct MaskBinding {
+    /// `None` = no local corrections: the dummy atlas below is bound and count is 0.
+    frame: Option<crate::mask::atlas::MaskFrame>,
+    /// True when some bound correction adjusts sharpness or noise, which forces the multi-pass
+    /// detail path even if the global Detail panel is untouched.
+    local_detail: bool,
+    dummy: Arc<crate::mask::atlas::Atlas>,
+    /// 1x1 stand-ins for the spatial bases (`bases_tex` / `haze_tex`), never read while their
+    /// header flag is 0.
+    dummy_bands: FrameTexture,
+    dummy_haze: crate::mask::kernels::FieldTexture,
+}
+
+/// Bytes of the mask uniform block: two `vec4` headers plus 16 corrections x 5 `vec4`s.
+const MASK_UNIFORM_BYTES: u64 = 32
+    + (crate::mask::params::MAX_CORRECTIONS as u64)
+        * std::mem::size_of::<crate::mask::local::LocalUniform>() as u64;
 
 struct ProfileTables {
     hue_sat_view: wgpu::TextureView,
@@ -718,7 +765,68 @@ impl LiveSuffixKernel {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             }),
+            mask_buf: make_uniform_buffer(gpu, "live_suffix mask uniforms", MASK_UNIFORM_BYTES),
+            mask_state: std::sync::Mutex::new(MaskBinding {
+                frame: None,
+                local_detail: false,
+                dummy: Arc::new(crate::mask::atlas::Atlas::new(gpu, 1, 1, 0)),
+                dummy_bands: FrameTexture::new(
+                    gpu,
+                    crate::frame::Extent {
+                        width: 1,
+                        height: 1,
+                    },
+                ),
+                dummy_haze: crate::mask::kernels::FieldTexture::new(gpu, 1, 1),
+            }),
+            // Clamp on every axis: unlike the DCP sampler, the mask must not wrap at the borders.
+            mask_sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("mask atlas sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         }
+    }
+
+    /// Binds this render's local corrections (`None` clears them). Call alongside
+    /// [`Self::set_params`] whenever the masks changed; it writes the mask uniform block and never
+    /// rebuilds a pipeline.
+    pub fn set_masks(&self, gpu: &GpuContext, frame: Option<&crate::mask::atlas::MaskFrame>) {
+        let count = frame.map_or(0, |f| {
+            f.uniforms.len().min(crate::mask::params::MAX_CORRECTIONS)
+        });
+        let mut block = vec![0u8; MASK_UNIFORM_BYTES as usize];
+        // header: (count, bands bound, haze bound, 0), then the airlight, then the corrections.
+        let header: [f32; 8] = match frame {
+            Some(f) => [
+                count as f32,
+                f32::from(f.bases.bands.is_some()),
+                f32::from(f.bases.haze.is_some()),
+                0.0,
+                f.bases.airlight[0],
+                f.bases.airlight[1],
+                f.bases.airlight[2],
+                0.0,
+            ],
+            None => [0.0; 8],
+        };
+        block[..32].copy_from_slice(bytemuck::cast_slice(&header));
+        if let Some(f) = frame {
+            let bytes: &[u8] = bytemuck::cast_slice(&f.uniforms[..count]);
+            block[32..32 + bytes.len()].copy_from_slice(bytes);
+        }
+        gpu.queue.write_buffer(&self.mask_buf, 0, &block);
+        let mut state = self.mask_state.lock().unwrap();
+        state.local_detail = frame.is_some_and(|f| {
+            f.uniforms[..count]
+                .iter()
+                .any(|u| u.d0[0] > 0.0 && (u.d2[3] != 0.0 || u.d3[3] != 0.0))
+        });
+        state.frame = frame.cloned();
     }
 
     /// Uploads this render's params -- call before `Renderer::render` whenever any of them
@@ -798,6 +906,27 @@ impl LiveSuffixKernel {
     ) {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
         let tables = self.profile_tables.lock().unwrap();
+        let mask_state = self.mask_state.lock().unwrap();
+        let atlas_view = match &mask_state.frame {
+            Some(f) => &f.atlas.array_view,
+            None => &mask_state.dummy.array_view,
+        };
+        let bands_view = match mask_state
+            .frame
+            .as_ref()
+            .and_then(|f| f.bases.bands.as_ref())
+        {
+            Some(b) => &b.view,
+            None => &mask_state.dummy_bands.view,
+        };
+        let haze_view = match mask_state
+            .frame
+            .as_ref()
+            .and_then(|f| f.bases.haze.as_ref())
+        {
+            Some(h) => &h.view,
+            None => &mask_state.dummy_haze.view,
+        };
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live_suffix bind group"),
             layout: &bind_group_layout,
@@ -826,8 +955,29 @@ impl LiveSuffixKernel {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(&self.profile_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.mask_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(bands_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(haze_view),
+                },
             ],
         });
+        drop(mask_state);
         drop(tables);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("live_suffix"),
@@ -954,7 +1104,8 @@ impl LiveExec for LiveSuffixKernel {
         output: &FrameTexture,
     ) {
         let detail = *self.detail_state.lock().unwrap();
-        if detail.sharpen.is_noop() && detail.noise_reduction.is_noop() {
+        let local_detail = self.mask_state.lock().unwrap().local_detail;
+        if detail.sharpen.is_noop() && detail.noise_reduction.is_noop() && !local_detail {
             self.dispatch_pointwise(gpu, encoder, input, output);
             return;
         }
@@ -990,10 +1141,16 @@ impl LiveExec for LiveSuffixKernel {
                 0.0,
             ],
             sharpen: [detail.sharpen.amount, 0.0, detail.sharpen.detail, 0.0],
+            local: [f32::from(local_detail), 0.0, 0.0, 0.0],
         };
         gpu.queue
             .write_buffer(&self.combine_buf, 0, bytemuck::bytes_of(&cu));
 
+        let mask_state = self.mask_state.lock().unwrap();
+        let atlas_view = match &mask_state.frame {
+            Some(f) => &f.atlas.array_view,
+            None => &mask_state.dummy.array_view,
+        };
         let bind_group_layout = self.combine_pipeline.get_bind_group_layout(0);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("detail_combine bind group"),
@@ -1019,8 +1176,21 @@ impl LiveExec for LiveSuffixKernel {
                     binding: 4,
                     resource: self.combine_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.mask_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
+                },
             ],
         });
+        drop(mask_state);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("detail_combine"),
             timestamp_writes: None,

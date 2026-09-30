@@ -66,8 +66,9 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     `textureLoad` (NOT `texture_storage_2d<.., read>`), write-only storage outputs, reset scratch by
     copy from a zero texture per spot, and copy each Jacobi sweep back instead of swapping roles.
     Mechanism inferred, not confirmed. **Always run new GPU kernels on the reference machine under
-    BOTH backends** (`NICTI_WGPU_BACKEND=vulkan|dx12` with the cross-built `.exe`); other shaders
-    still using `read` storage textures (`detail_blur`, `present_sample`, ...) are unaudited.
+    BOTH backends** (`NICTI_WGPU_BACKEND=vulkan|dx12` with the cross-built `.exe`); `detail_blur`/`live_suffix`/`detail_combine` were converted in #49 (it found
+    `stages::tests::full_pipeline_end_to_end...` already failing on the RTX 5080 under Dx12 **on `main`**; whole
+    tapetum suite now passes there on Vulkan and Dx12), but `present_sample` (crop) is still unaudited (#355).
   - **Gotcha (#51)**: **Jacobi must not start from the destination** — it needs ~side² sweeps to
     smooth a blemish and we run 50-400, so a blemish over ~half the spot survived (Heal was a
     near no-op). `boundary_mean`+`init_heal` start at source + mean ring offset. GPU-vs-CPU parity

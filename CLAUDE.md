@@ -22,7 +22,7 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
-`lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
+`lrc-migration` (0061, 0156, 0158), `masking` (0048, 0049), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
@@ -113,7 +113,9 @@ terse index: crate/spike → purpose → owning topic.
 - **`crates/nicti-iris`/`nicti-stalk`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `LensCorrection` (#39), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):
-  the on-demand, checksummed AI-model store + pinned manifest (ADR-0218)
+  the on-demand, checksummed AI-model store + pinned manifest (ADR-0218), and (#49) the backend-
+  agnostic `SegmentationProvider`/`Segmenter`/`SegmentationRegistry` layer that makes AI mask models
+  pluggable, plus the pinned BiRefNet artifact
 - **`crates/nicti-preen`** (#57, landed) — the export engine: `Exporter` (JPEG/PNG/TIFF) plus settings/
   presets, filename tokens, batch planning, collision-safe writes, linear-light resize, orientation,
   output color, watermark and EXIF/XMP/ICC metadata; `export_frame` is the entry point. GPU-free and
@@ -123,6 +125,10 @@ terse index: crate/spike → purpose → owning topic.
   → `RemovalPatch`), the clone/heal auto-source picker, and the `RemoveJob`/`InstallModelsJob`
   Pounce jobs; the GPU clone/heal itself is `nicti-tapetum`'s `heal.rs`, the UI is `nicti-pelt`'s
   `heal_tool.rs` → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
+- **`crates/nicti-siamese`** (#49, promoted from `spikes/siamese`) — AI masks: the BiRefNet and sky
+  (heuristic) `SegmentationProvider`s, the provider registry + target -> default-model table
+  (`providers.rs`; choosing a model is data), the neutral model image (`neutral.rs`), `RegistryBackend`
+  (lazy verified load, retried) and the Pounce GPU-lane `MaskBakeJob` → [`masking`](.claude/rules/masking/REFERENCE.md)
 - **`crates/nicti-tapetum`** — Tapetum's (#44/#45) stage-cached render graph, the real
   `RenderStage` execution trait, and the concrete decode/live-suffix/geometry pipeline: a DAG of
   stage nodes with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted
@@ -141,7 +147,11 @@ terse index: crate/spike → purpose → owning topic.
   (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`, and renamed from
   `nicti-render` to `nicti-tapetum` once the whole #45 stack merged, matching the naming-convention
   section above. `spine.rs` (#57) is the shared graph/registry/`resolve_inputs` Develop, export and
-  `bench/knead` all use. See [`render-graph`](.claude/rules/render-graph/REFERENCE.md).
+  `bench/knead` all use (#49 adds its keying-only `nicti.neutral` node and the `nicti.masks` live stage).
+  **`mask/`** (#49): the `nicti.masks` stage -- `params.rs` (data model), `raster.rs`/`compose.rs`
+  (CPU references, fold, AI bake key), `kernels.rs`/`guided.rs`/`bases.rs` (GPU kernels), `local.rs` (per-mask
+  adjustments' uniforms + CPU twin), `engine.rs` (`MaskEngine`, the caches) → [`masking`](.claude/rules/masking/REFERENCE.md).
+  See [`render-graph`](.claude/rules/render-graph/REFERENCE.md).
 - **`crates/nicti-pawprint`** — the non-destructive `EditDocument`/`StageEntry` (ADR-0021), its
   canonical-JSON + blake3 stage hashing (`canonical.rs`, feeding `nicti-tapetum::graph`'s cache
   key), and append-only edit history with slider-drag compaction (`history.rs`) — promoted from
@@ -203,6 +213,9 @@ terse index: crate/spike → purpose → owning topic.
   actual module breakdown, also covering `activity.rs` (#55, #70), `grid/` (#30) and
   [`jobs`](.claude/rules/jobs/REFERENCE.md) for Pounce. **#32 (culling, landed)**: `cull/` (marking keys, undo,
   survey/compare, delete prompt) and `grid/selection.rs` — see [`culling`](.claude/rules/culling/REFERENCE.md).
+  **#49 (masks, landed)**: `mask_panel.rs` (the Masks tool: panel, gestures, overlay), `mask_edit.rs` (its
+  egui-free editing ops + CPU overlay preview), `mask_tool.rs` (`MaskBakeService`: AI bakes + model
+  download) and `render.rs`'s `DevelopView` mask API — see [`masking`](.claude/rules/masking/REFERENCE.md).
   **#57 (export, landed)**: `export/` (`jobs.rs` the run, `dialog.rs`, `presets.rs`, `sink.rs`) and
   Develop autosave to the catalog — see [`export`](.claude/rules/export/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
@@ -214,7 +227,6 @@ terse index: crate/spike → purpose → owning topic.
   [`volume-identity`](.claude/rules/volume-identity/REFERENCE.md)
 - **`spikes/calico`** (#38/ADR-0038) → [`color`](.claude/rules/color/REFERENCE.md)
 - **`spikes/shed`** (#61/ADR-0061) → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
-- **`spikes/siamese`** (#48/ADR-0048) → [`masking`](.claude/rules/masking/REFERENCE.md)
 - **`spikes/litter`** (#33/ADR-0033) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/squint`** (#34/ADR-0034) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rosette`** (#35/ADR-0035) → [`culling`](.claude/rules/culling/REFERENCE.md)

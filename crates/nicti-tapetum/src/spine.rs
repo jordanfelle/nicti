@@ -24,8 +24,8 @@ use crate::frame::Extent;
 use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
-    self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION,
-    SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, MASKS, NEUTRAL,
+    NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -33,7 +33,7 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 9] = [
+pub const LIVE_IDS: [&str; 10] = [
     WB,
     WORKING_SPACE,
     EXPOSURE,
@@ -43,6 +43,8 @@ pub const LIVE_IDS: [&str; 9] = [
     HSL,
     SHARPEN,
     NOISE_REDUCTION,
+    // Local corrections (#49): applied inside the same fused live dispatch as everything above.
+    MASKS,
 ];
 
 /// The full graph: baked prefix -> live suffix -> crop.
@@ -60,6 +62,17 @@ pub fn build_graph() -> RenderGraph {
             .expect("static graph ids are unique");
         prev = Some(id);
     }
+    // The neutral render AI masks infer on (#49, ADR-0049): post-lens, *pre-heal*, so a heal edit
+    // never re-runs a model. A keying-only node -- nothing renders it (it is not in the baked
+    // chain), it exists so an AI bake key chains from LENS and can never depend on a slider.
+    graph
+        .add_node(StageNode {
+            id: NEUTRAL.to_string(),
+            kind: StageKind::Baked,
+            upstream: vec![LENS.to_string()],
+            own_hash: blake3::hash(NEUTRAL.as_bytes()),
+        })
+        .expect("static graph ids are unique");
     for id in LIVE_IDS {
         graph
             .add_node(StageNode {
@@ -104,13 +117,15 @@ render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(sharpen_factory, stages::sharpen_stage);
 render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
 render_stage_factory!(crop_factory, stages::crop_stage);
+render_stage_factory!(neutral_factory, stages::neutral_stage);
+render_stage_factory!(masks_factory, stages::masks_stage);
 
 type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 15] = [
+    let entries: [StageFactoryEntry; 17] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -126,6 +141,8 @@ pub fn build_registry() -> StageRegistry {
         (SHARPEN, sharpen_factory),
         (NOISE_REDUCTION, noise_reduction_factory),
         (CROP, crop_factory),
+        (NEUTRAL, neutral_factory),
+        (MASKS, masks_factory),
     ];
     for (id, factory) in entries {
         registry

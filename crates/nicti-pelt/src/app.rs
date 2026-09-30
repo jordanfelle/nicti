@@ -44,6 +44,7 @@ use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
 use crate::loupe::{asset_cache_key, LoupeSession};
+use crate::mask_panel::MaskUi;
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
@@ -116,6 +117,7 @@ pub struct PeltApp {
     hsl_band_selected: usize,
     /// The Heal / Remove tool's UI state and its AI-removal service (#51).
     heal_ui: HealUi,
+    mask_ui: MaskUi,
     pounce: Pounce,
     telemetry: TelemetrySampler,
     /// The bottleneck classifier's last verdict (#70/ADR-0070) -- kept across frames so
@@ -333,6 +335,7 @@ impl PeltApp {
             develop: Some(develop),
             hsl_band_selected: 0,
             heal_ui: HealUi::new(),
+            mask_ui: MaskUi::new(),
             pounce,
             telemetry,
             bottleneck: None,
@@ -1194,9 +1197,11 @@ impl eframe::App for PeltApp {
             // The heal tool works on the whole, uncropped image (see `heal_tool`'s docs). Set on
             // every frame and tied to the view: the Loupe renders the same `DevelopView`, and a
             // flag left over from Develop would show it without its crop and straighten.
-            d.uncropped_preview = self.view == View::Develop && self.heal_ui.heal_active();
+            d.uncropped_preview = self.view == View::Develop
+                && (self.heal_ui.heal_active() || self.heal_ui.mask_active());
             if self.view == View::Develop {
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
+                crate::mask_panel::poll(ui, d, &self.pounce, &mut self.mask_ui);
             }
         }
         let panel_frame = if self.view == View::Develop {
@@ -1216,6 +1221,7 @@ impl eframe::App for PeltApp {
                             frame,
                             &mut self.hsl_band_selected,
                             &mut self.heal_ui,
+                            &mut self.mask_ui,
                             &self.pounce,
                         );
                     }
@@ -1237,10 +1243,10 @@ impl eframe::App for PeltApp {
                 ui.heading("Develop");
                 if let Some(frame) = viewport_frame {
                     let available = ui.available_size();
-                    // Only the heal tool needs clicks. Sensing them makes egui report `drag_started`
-                    // after the pointer has crossed its drag threshold, which would offset the
-                    // crop tool's handle hit tests and lag every crop/rotate/pan drag.
-                    let sense = if self.heal_ui.heal_active() {
+                    // Only the heal and mask tools need clicks. Sensing them makes egui report
+                    // `drag_started` after the pointer has crossed its drag threshold, which would
+                    // offset the crop tool's handle hit tests and lag every crop/rotate/pan drag.
+                    let sense = if self.heal_ui.heal_active() || self.heal_ui.mask_active() {
                         egui::Sense::click_and_drag()
                     } else {
                         egui::Sense::drag()
@@ -1259,6 +1265,14 @@ impl eframe::App for PeltApp {
                                 develop,
                                 &mut self.heal_ui,
                                 &self.pounce,
+                            );
+                        } else if self.heal_ui.mask_active() {
+                            crate::mask_panel::handle_viewport(
+                                ui,
+                                &response,
+                                rect,
+                                develop,
+                                &mut self.mask_ui,
                             );
                         } else {
                             crate::develop_panel::handle_viewport_gesture(

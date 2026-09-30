@@ -33,7 +33,7 @@ struct Uniforms {
     profile1: vec4<f32>,
 }
 
-@group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u: Uniforms;
 // DCP tables (#42): 3D textures, width = saturation, height = hue (wraps), depth = value, texel =
@@ -41,6 +41,143 @@ struct Uniforms {
 @group(0) @binding(3) var hue_sat_map: texture_3d<f32>;
 @group(0) @binding(4) var look_table: texture_3d<f32>;
 @group(0) @binding(5) var profile_sampler: sampler;
+
+// Local corrections (#49, mask/local.rs is the CPU twin). `mask_atlas` packs four correction
+// composites per layer, one per channel, at the mask extent (sampled bilinearly). Each correction
+// is five vec4s: (amount, exposure, contrast, highlights), (shadows, whites, blacks, temp),
+// (tint, saturation, hue, noise), (tint multiplier rgb, sharpness), (clarity, texture, dehaze, _).
+// A 1x1 one-layer dummy and count 0 are bound when there are none, and every local step below is
+// skipped, so an unmasked image runs the exact pre-#49 path.
+struct MaskUniforms {
+    header: vec4<f32>,   // x = active correction count (<= 16), y = bands bound, z = haze bound
+    airlight: vec4<f32>, // camera-linear airlight colour (dehaze)
+    corr: array<vec4<f32>, 80>,
+}
+@group(0) @binding(6) var mask_atlas: texture_2d_array<f32>;
+@group(0) @binding(7) var<uniform> mu: MaskUniforms;
+@group(0) @binding(8) var mask_sampler: sampler;
+// Cached per-photo bases (mask/bases.rs). `bases_tex` (Rgba16Float, bilinear) = (fine band, mid
+// band, baked perceptual luma, _) for clarity/texture; `haze_tex` (R32Float, sampled by hand, 4-tap bilinear) = dehaze
+// transmission. 1x1 dummies are bound when not needed; the header flags gate every read.
+@group(0) @binding(9) var bases_tex: texture_2d<f32>;
+@group(0) @binding(10) var haze_tex: texture_2d<f32>;
+
+const CLARITY_GAIN: f32 = 1.5;
+const TEXTURE_GAIN: f32 = 1.5;
+const HAZE_T0: f32 = 0.1;
+const VEIL_MAX: f32 = 0.5;
+
+const TEMP_STOPS: f32 = 0.5;
+const TINT_STOPS: f32 = 0.25;
+const HUE_DEGREES: f32 = 30.0;
+
+struct LocalSums {
+    exposure: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    temp: f32,
+    tint: f32,
+    saturation: f32,
+    hue: f32,
+    tint_mult: vec3<f32>,
+    noise: f32,
+    sharpness: f32,
+    clarity: f32,
+    texture_amt: f32,
+    dehaze: f32,
+}
+
+fn channel_of(v: vec4<f32>, c: i32) -> f32 {
+    if (c == 0) { return v.x; }
+    if (c == 1) { return v.y; }
+    if (c == 2) { return v.z; }
+    return v.w;
+}
+
+// weight_i * amount_i * delta_i, summed over the active corrections (LRC's additive stacking).
+fn accumulate_locals(uv: vec2<f32>) -> LocalSums {
+    var s: LocalSums;
+    s.exposure = 0.0; s.contrast = 0.0; s.highlights = 0.0; s.shadows = 0.0; s.whites = 0.0;
+    s.blacks = 0.0; s.temp = 0.0; s.tint = 0.0; s.saturation = 0.0; s.hue = 0.0;
+    s.tint_mult = vec3<f32>(0.0);
+    s.noise = 0.0; s.sharpness = 0.0; s.clarity = 0.0; s.texture_amt = 0.0; s.dehaze = 0.0;
+    let n = i32(mu.header.x);
+    var layer = -1;
+    var texel = vec4<f32>(0.0);
+    for (var i: i32 = 0; i < n; i = i + 1) {
+        let l = i / 4;
+        if (l != layer) {
+            texel = textureSampleLevel(mask_atlas, mask_sampler, uv, l, 0.0);
+            layer = l;
+        }
+        let d0 = mu.corr[i * 5];
+        let d1 = mu.corr[i * 5 + 1];
+        let d2 = mu.corr[i * 5 + 2];
+        let d3 = mu.corr[i * 5 + 3];
+        let d4 = mu.corr[i * 5 + 4];
+        let f = channel_of(texel, i % 4) * d0.x;
+        s.exposure = s.exposure + f * d0.y;
+        s.contrast = s.contrast + f * d0.z;
+        s.highlights = s.highlights + f * d0.w;
+        s.shadows = s.shadows + f * d1.x;
+        s.whites = s.whites + f * d1.y;
+        s.blacks = s.blacks + f * d1.z;
+        s.temp = s.temp + f * d1.w;
+        s.tint = s.tint + f * d2.x;
+        s.saturation = s.saturation + f * d2.y;
+        s.hue = s.hue + f * d2.z;
+        s.tint_mult = s.tint_mult + f * d3.xyz;
+        s.noise = s.noise + f * d2.w;
+        s.sharpness = s.sharpness + f * d3.w;
+        s.clarity = s.clarity + f * d4.x;
+        s.texture_amt = s.texture_amt + f * d4.y;
+        s.dehaze = s.dehaze + f * d4.z;
+    }
+    return s;
+}
+
+// Mirrors mask/local.rs::apply_dehaze.
+fn apply_dehaze(rgb: vec3<f32>, transmission: f32, airlight: vec3<f32>, amount: f32) -> vec3<f32> {
+    if (amount > 0.0) {
+        let t = max(1.0 - amount * (1.0 - transmission), HAZE_T0);
+        return (rgb - airlight) / t + airlight;
+    }
+    let v = 1.0 - VEIL_MAX * min(-amount, 1.0);
+    return rgb * v + airlight * (1.0 - v);
+}
+
+// Mirrors mask/local.rs::apply_bands: shift the baked perceptual luma by the mid/fine bands and
+// apply the resulting brightness ratio (chroma-preserving), clamped to 0.25..4.
+fn apply_bands(rgb: vec3<f32>, bands: vec4<f32>, clarity: f32, texture_amt: f32) -> vec3<f32> {
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let g_now = clamp(pow(max(luma, 0.0), 1.0 / 3.0), 0.0, 1.0);
+    let mid = 4.0 * g_now * (1.0 - g_now);
+    let g_base = max(bands.z, 1e-3);
+    let g_new = max(g_base + clarity * CLARITY_GAIN * mid * bands.y + texture_amt * TEXTURE_GAIN * bands.x, 0.0);
+    let ratio = clamp(pow(g_new / g_base, 2.2), 0.25, 4.0);
+    return rgb * ratio;
+}
+
+// Rodrigues rotation about the grey axis (1,1,1)/sqrt(3) -- mirrors mask/local.rs::rotate_hue.
+fn rotate_hue(rgb: vec3<f32>, degrees: f32) -> vec3<f32> {
+    let a = radians(degrees);
+    let sn = sin(a);
+    let cs = cos(a);
+    let k = 0.5773502691896258;
+    let d = (rgb.x + rgb.y + rgb.z) * k;
+    let cr = vec3<f32>(k * (rgb.z - rgb.y), k * (rgb.x - rgb.z), k * (rgb.y - rgb.x));
+    return cs * rgb + sn * cr + vec3<f32>((1.0 - cs) * d * k);
+}
+
+// Luma-preserving chroma scale -- mirrors mask/local.rs::saturate.
+fn saturate_chroma(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let k = max(1.0 + amount, 0.0);
+    return vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * k;
+}
 
 const PI: f32 = 3.14159265358979;
 
@@ -314,22 +451,98 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) {
         return;
     }
-    let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)));
+    let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
     var rgb = m * px.rgb;
+
+    let has_locals = mu.header.x > 0.5;
+    var locals: LocalSums;
+    locals.exposure = 0.0; locals.contrast = 0.0; locals.highlights = 0.0; locals.shadows = 0.0;
+    locals.whites = 0.0; locals.blacks = 0.0; locals.temp = 0.0; locals.tint = 0.0;
+    locals.saturation = 0.0; locals.hue = 0.0; locals.tint_mult = vec3<f32>(0.0);
+    locals.noise = 0.0; locals.sharpness = 0.0; locals.clarity = 0.0; locals.texture_amt = 0.0;
+    locals.dehaze = 0.0;
+    var uv = vec2<f32>(0.0);
+    if (has_locals) {
+        uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
+        locals = accumulate_locals(uv);
+    }
+
     // DCP camera profile (ADR-0038 order): HueSatMap -> baseline exposure -> LookTable.
     if (u.profile0.x > 0.5) {
         rgb = dcp_apply_table(rgb, hue_sat_map, u.profile0.z > 0.5);
     }
     // Baseline exposure and the user's Exposure slider are one stage (Adobe's `dng_render`): the
-    // LookTable must see the exposed image. With no profile this is just the user exposure.
-    rgb = rgb * (u.profile1.x * u.tone0.x);
+    // LookTable must see the exposed image. With no profile this is just the user exposure. A
+    // local exposure is part of the same stage (its delta is in stops).
+    var exposure = u.profile1.x * u.tone0.x;
+    if (has_locals) {
+        exposure = exposure * exp2(locals.exposure);
+    }
+    rgb = rgb * exposure;
     if (u.profile0.y > 0.5) {
         rgb = dcp_apply_table(rgb, look_table, u.profile0.w > 0.5);
     }
-    rgb = apply_tone(rgb, u.tone0.y, u.tone0.z, u.tone0.w, u.tone1.x, u.tone1.y);
+    // Local dehaze: scene-linear, before white balance / tone. The airlight goes through the same
+    // matrix and exposure as the pixels it is subtracted from.
+    if (has_locals && mu.header.z > 0.5 && locals.dehaze != 0.0) {
+        // The transmission lives at the bases extent (<= 2048 px long edge) but the live pass runs
+        // at the frame extent, and the guided refine makes `t` change sharply at edges, so a
+        // nearest-texel load would step by one bases texel. R32Float isn't filterable: 4 taps by
+        // hand, with the same pixel-centre mapping as guided_apply (at equal extents this reduces
+        // exactly to the texel, so the CPU twin still matches).
+        let hd = vec2<f32>(textureDimensions(haze_tex));
+        let hmax = vec2<i32>(hd) - vec2<i32>(1);
+        let hf = uv * hd - vec2<f32>(0.5);
+        let hb = floor(hf);
+        let hr = hf - hb;
+        let h0 = clamp(vec2<i32>(hb), vec2<i32>(0), hmax);
+        let h1 = clamp(vec2<i32>(hb) + vec2<i32>(1), vec2<i32>(0), hmax);
+        let t00 = textureLoad(haze_tex, h0, 0).r;
+        let t10 = textureLoad(haze_tex, vec2<i32>(h1.x, h0.y), 0).r;
+        let t01 = textureLoad(haze_tex, vec2<i32>(h0.x, h1.y), 0).r;
+        let t11 = textureLoad(haze_tex, h1, 0).r;
+        let t = mix(mix(t00, t10, hr.x), mix(t01, t11, hr.x), hr.y);
+        rgb = apply_dehaze(rgb, t, (m * mu.airlight.xyz) * exposure, locals.dehaze);
+    }
+    var contrast = u.tone0.y;
+    var highlights = u.tone0.z;
+    var shadows = u.tone0.w;
+    var whites = u.tone1.x;
+    var blacks = u.tone1.y;
+    if (has_locals) {
+        // Local white balance: per-channel gains in linear working space, then the stacked tone.
+        rgb = rgb * vec3<f32>(
+            exp2(TEMP_STOPS * locals.temp),
+            exp2(-TINT_STOPS * locals.tint),
+            exp2(-TEMP_STOPS * locals.temp),
+        );
+        contrast = clamp(contrast + locals.contrast, -1.0, 2.0);
+        highlights = clamp(highlights + locals.highlights, -2.0, 2.0);
+        shadows = clamp(shadows + locals.shadows, -2.0, 2.0);
+        whites = clamp(whites + locals.whites, -2.0, 2.0);
+        blacks = clamp(blacks + locals.blacks, -2.0, 2.0);
+    }
+    rgb = apply_tone(rgb, contrast, highlights, shadows, whites, blacks);
     rgb = apply_tone_curve(rgb);
+    if (has_locals && mu.header.y > 0.5 && (locals.clarity != 0.0 || locals.texture_amt != 0.0)) {
+        let bands = textureSampleLevel(bases_tex, mask_sampler, uv, 0.0);
+        rgb = apply_bands(rgb, bands, locals.clarity, locals.texture_amt);
+    }
     rgb = apply_vibrance(rgb, u.tone1.z);
     rgb = apply_hsl(rgb);
+    if (has_locals) {
+        // Each is skipped when its stacked delta is exactly zero, so a mask that selects nothing
+        // (or has no such adjustment) leaves the pixel bit-identical, not merely close.
+        if (locals.saturation != 0.0) {
+            rgb = saturate_chroma(rgb, locals.saturation);
+        }
+        if (locals.hue != 0.0) {
+            rgb = rotate_hue(rgb, locals.hue * HUE_DEGREES);
+        }
+        if (any(locals.tint_mult != vec3<f32>(0.0))) {
+            rgb = rgb * max(vec3<f32>(1.0) + locals.tint_mult, vec3<f32>(0.0));
+        }
+    }
     textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(rgb, px.a));
 }

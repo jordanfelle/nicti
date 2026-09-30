@@ -51,6 +51,7 @@ use nicti_tapetum::geometry::Affine2D;
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::RenderGraph;
 use nicti_tapetum::heal::{HealExec, HealKernel, RemovalSet};
+use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::spine::{self, build_graph, build_registry, LIVE_IDS};
 use nicti_tapetum::stages::{
@@ -236,6 +237,30 @@ impl ExportRun {
         let plan_items: Vec<PlanItem> = prepared.iter().map(|p| p.plan_item.clone()).collect();
         let plan = plan_batch(&plan_items, &spec, exporter.extension(), &FsProbe)?;
         warnings.extend(plan.warnings);
+        // Local adjustments (#49) aren't rendered by the export path yet (#354): its live pass never
+        // gets a mask atlas. Say so rather than hand back an image that silently lacks them.
+        let with_masks: Vec<String> = prepared
+            .iter()
+            .filter(|p| {
+                spine::resolve::<MaskParams>(&p.edit, nicti_tapetum::stages::MASKS)
+                    .active()
+                    .next()
+                    .is_some()
+            })
+            .map(|p| {
+                p.source_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if !with_masks.is_empty() {
+            warnings.push(format!(
+                "{} photo(s) have local adjustments (masks), which are not applied to exports yet (#354): {}.",
+                with_masks.len(),
+                with_masks.join(", ")
+            ));
+        }
 
         let total = prepared.len() + failed_up_front.len();
         let items: Vec<Item> = prepared
@@ -1394,6 +1419,51 @@ mod tests {
             ExportRun::start(fx.env(), &[], fx.spec()),
             Err(StartError::NothingToExport)
         ));
+    }
+
+    #[test]
+    fn a_photo_with_active_masks_exports_with_a_warning_that_they_are_not_applied() {
+        use nicti_tapetum::mask::params::{
+            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+        };
+        let Some(fx) = fixture(&["a.NEF", "b.NEF"]) else {
+            return;
+        };
+        let mut doc = EditDocument::default();
+        let masks = MaskParams {
+            corrections: vec![LocalCorrection {
+                mask: MaskGroup {
+                    components: vec![MaskComponent {
+                        source: MaskSource::LinearGradient {
+                            p0: [0.0, 0.5],
+                            p1: [1.0, 0.5],
+                        },
+                        ..MaskComponent::default()
+                    }],
+                },
+                adjust: LocalAdjust {
+                    exposure: 1.0,
+                    ..LocalAdjust::default()
+                },
+                ..LocalCorrection::default()
+            }],
+        };
+        doc.stages.insert(
+            nicti_tapetum::stages::MASKS.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(&masks).unwrap(),
+            },
+        );
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(report.exported.len(), 2, "both still export: {report:?}");
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        assert!(report.warnings[0].contains("a.NEF"), "{report:?}");
+        assert!(
+            !report.warnings[0].contains("b.NEF"),
+            "only the masked photo"
+        );
     }
 
     #[test]
