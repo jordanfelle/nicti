@@ -18,137 +18,22 @@ use std::sync::Arc;
 
 use crate::camera_profiles::{self, ProfileEntry};
 use nicti_calico::dcp::DcpProfile;
-use nicti_calico::profile::ProfileSolution;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
-use nicti_tapetum::coat::{
-    self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
-    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
-};
-use nicti_tapetum::color;
+use nicti_tapetum::coat::{self, CameraProfileParams, CropParams, ExposureParams, HealParams};
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, output_encode};
 use nicti_tapetum::gpu::GpuContext;
-use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::graph::RenderGraph;
 use nicti_tapetum::heal::{self, HealExec, HealKernel, RemovalPatch, RemovalSet};
 use nicti_tapetum::histogram::{self, Histogram};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
+use nicti_tapetum::spine::{self, build_graph, build_registry, LIVE_IDS};
 use nicti_tapetum::stages::{
-    self, CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec,
-    CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION, SHARPEN, TONE,
-    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
+    DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, TONE, WORKING_SPACE,
 };
-use nicti_tapetum::{RenderStage, StageRegistry};
-
-const LIVE_IDS: [&str; 9] = [
-    WB,
-    WORKING_SPACE,
-    EXPOSURE,
-    TONE,
-    TONE_CURVE,
-    VIBRANCE,
-    HSL,
-    SHARPEN,
-    NOISE_REDUCTION,
-];
-
-fn build_graph() -> RenderGraph {
-    let mut graph = RenderGraph::new();
-    let baked_ids = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
-    let mut prev: Option<&str> = None;
-    for id in baked_ids {
-        graph
-            .add_node(StageNode {
-                id: id.to_string(),
-                kind: StageKind::Baked,
-                upstream: prev.map(|p| vec![p.to_string()]).unwrap_or_default(),
-                own_hash: blake3::hash(id.as_bytes()),
-            })
-            .unwrap();
-        prev = Some(id);
-    }
-    for id in LIVE_IDS {
-        graph
-            .add_node(StageNode {
-                id: id.to_string(),
-                kind: StageKind::Live,
-                upstream: vec![prev.unwrap().to_string()],
-                own_hash: blake3::hash(id.as_bytes()),
-            })
-            .unwrap();
-        prev = Some(id);
-    }
-    graph
-        .add_node(StageNode {
-            id: CROP.to_string(),
-            kind: StageKind::Geometry,
-            upstream: vec![prev.unwrap().to_string()],
-            own_hash: blake3::hash(CROP.as_bytes()),
-        })
-        .unwrap();
-    graph
-}
-
-macro_rules! render_stage_factory {
-    ($name:ident, $stage_fn:path) => {
-        fn $name() -> Arc<dyn RenderStage> {
-            Arc::new($stage_fn())
-        }
-    };
-}
-render_stage_factory!(decode_factory, stages::decode_stage);
-render_stage_factory!(demosaic_factory, stages::demosaic_stage);
-render_stage_factory!(denoise_factory, stages::denoise_stage);
-render_stage_factory!(lens_factory, stages::lens_stage);
-render_stage_factory!(heal_factory, stages::heal_stage);
-render_stage_factory!(wb_factory, stages::wb_stage);
-render_stage_factory!(working_space_factory, stages::working_space_stage);
-render_stage_factory!(exposure_factory, stages::exposure_stage);
-render_stage_factory!(tone_factory, stages::tone_stage);
-render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
-render_stage_factory!(vibrance_factory, stages::vibrance_stage);
-render_stage_factory!(hsl_factory, stages::hsl_stage);
-render_stage_factory!(sharpen_factory, stages::sharpen_stage);
-render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
-render_stage_factory!(crop_factory, stages::crop_stage);
-
-type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
-
-/// Every stage this crate's own render graph (`build_graph`) can reference -- `apply_document`
-/// errors on any graph node id missing from this registry, so this list must stay in sync with
-/// `build_graph`'s own node ids.
-fn build_registry() -> StageRegistry {
-    let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 15] = [
-        (DECODE, decode_factory),
-        (DEMOSAIC, demosaic_factory),
-        (DENOISE, denoise_factory),
-        (LENS, lens_factory),
-        (HEAL, heal_factory),
-        (WB, wb_factory),
-        (WORKING_SPACE, working_space_factory),
-        (EXPOSURE, exposure_factory),
-        (TONE, tone_factory),
-        (TONE_CURVE, tone_curve_factory),
-        (VIBRANCE, vibrance_factory),
-        (HSL, hsl_factory),
-        (SHARPEN, sharpen_factory),
-        (NOISE_REDUCTION, noise_reduction_factory),
-        (CROP, crop_factory),
-    ];
-    for (id, factory) in entries {
-        registry
-            .register(
-                nicti_claw::Descriptor {
-                    id,
-                    schema_version: 1,
-                },
-                factory,
-            )
-            .expect("every stage id above is namespaced and registered exactly once");
-    }
-    registry
-}
+use nicti_tapetum::StageRegistry;
 
 /// A synthetic 64x64 "RAW" gradient frame -- a real `LinearFrame`, real decode/normalize/live-
 /// suffix/crop dispatches, but no real file on disk (loading one is #31's job). Distinct per-
@@ -338,13 +223,6 @@ impl DevelopView {
         self.document.stages.remove(stage_id);
     }
 
-    fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id: &str) -> T {
-        match doc.stages.get(id) {
-            Some(entry) => coat::parse(&entry.params),
-            None => T::default(),
-        }
-    }
-
     /// Renders the current frame at its native extent, returning the final (post-crop) texture.
     /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
@@ -372,65 +250,23 @@ impl DevelopView {
             .apply_document(doc, &self.registry)
             .expect("build_registry covers every id build_graph adds");
 
-        let wb: WbParams = Self::resolve(doc, WB);
-        let exposure: ExposureParams = Self::resolve(doc, EXPOSURE);
-        let tone: ToneParams = Self::resolve(doc, TONE);
-        let tone_curve: ToneCurveParams = Self::resolve(doc, TONE_CURVE);
-        let vibrance: VibranceParams = Self::resolve(doc, VIBRANCE);
-        let hsl: HslParams = Self::resolve(doc, HSL);
-        let sharpen: SharpenParams = Self::resolve(doc, SHARPEN);
-        let noise_reduction: NoiseReductionParams = Self::resolve(doc, NOISE_REDUCTION);
-        let crop: CropParams = Self::resolve(doc, CROP);
-
-        let source_extent = (self.extent.width as f32, self.extent.height as f32);
-        let rect = crop.effective_rect(source_extent);
-        let transform = geometry::affine_for_crop(rect, crop.rotation_degrees);
-        self.crop_kernel.set_transform(transform);
-
-        // A selected DCP profile (#42) replaces the plain LibRaw matrix with its own
-        // illuminant-interpolated matrix (WB folded in per the DNG ForwardMatrix contract) and
-        // adds the HueSatMap / baseline exposure / LookTable stages. `doc` is empty under
-        // `show_before`, so the before view is always the plain matrix.
-        let chosen: CameraProfileParams = Self::resolve(doc, WORKING_SPACE);
-        let solution: Option<Arc<ProfileSolution>> =
-            match (&chosen.content_hash, &self.active_profile) {
-                (Some(_), Some(profile)) => {
-                    let gains =
-                        color::wb_gains_with_params(self.frame.cam_mul, &self.frame.cam_xyz, &wb);
-                    Some(Arc::new(profile.solve(gains.map(f64::from))))
-                }
-                _ => None,
-            };
-        let matrix = match &solution {
-            Some(s) => s.camera_to_working,
-            None => {
-                color::camera_to_working_space_matrix(self.frame.cam_mul, &self.frame.cam_xyz, &wb)
-            }
-        };
-        self.live_kernel.set_params(
-            &self.gpu,
-            &LiveParams {
-                working_space_matrix: matrix,
-                camera_profile: solution,
-                exposure,
-                tone,
-                tone_curve,
-                vibrance,
-                hsl,
-                sharpen,
-                noise_reduction,
-                pixel_scale: 1.0,
-            },
+        let inputs = spine::resolve_inputs(
+            doc,
+            &self.frame,
+            self.extent,
+            self.active_profile.as_deref(),
+            1.0,
         );
+        self.crop_kernel.set_transform(inputs.crop_transform);
+        self.live_kernel.set_params(&self.gpu, &inputs.live);
 
         let decode_exec = DecodeExec {
             kernel: &self.decode_kernel,
             frame: &self.frame,
         };
-        let heal: HealParams = Self::resolve(doc, HEAL);
         let heal_exec = HealExec {
             kernel: &self.heal_kernel,
-            params: &heal,
+            params: &inputs.heal,
             removals: &self.removals,
         };
         let passthrough = PassthroughExec;

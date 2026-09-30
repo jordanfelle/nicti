@@ -163,6 +163,25 @@ impl Renderer {
     /// live/geometry passes are each either a cache hit (their composite key matches the stored
     /// one from the previous render) or exactly one dispatch.
     pub fn render(&mut self, req: &RenderRequest<'_>) -> Result<Arc<FrameTexture>, RenderError> {
+        self.render_through(req, true)
+    }
+
+    /// Like [`Self::render`] but stops after the fused live suffix, returning its output without
+    /// running (or allocating a target for) the geometry pass -- what a tiled full-res export
+    /// (#57) wants, since `TiledRender` runs the crop itself one tile at a time against this
+    /// texture. `req.geometry`/`req.geometry_nodes` are ignored.
+    pub fn render_live(
+        &mut self,
+        req: &RenderRequest<'_>,
+    ) -> Result<Arc<FrameTexture>, RenderError> {
+        self.render_through(req, false)
+    }
+
+    fn render_through(
+        &mut self,
+        req: &RenderRequest<'_>,
+        with_geometry: bool,
+    ) -> Result<Arc<FrameTexture>, RenderError> {
         if req.baked_chain.is_empty() {
             return Err(RenderError::EmptyBakedChain);
         }
@@ -210,6 +229,12 @@ impl Renderer {
             self.live_output = Some(Arc::clone(&output));
             output
         };
+
+        if !with_geometry {
+            self.gpu.queue.submit(Some(encoder.finish()));
+            self.last_stats = stats;
+            return Ok(live_output);
+        }
 
         let geometry_key = composite_key(req.graph, req.geometry_nodes, live_key, req.extent)?;
         let geometry_output = if self.geometry_key == Some(geometry_key) {
@@ -359,6 +384,47 @@ mod tests {
             width: 4,
             height: 4,
         }
+    }
+
+    #[test]
+    fn render_live_dispatches_no_geometry_and_still_caches_the_live_output() {
+        let Some(gpu) = test_gpu() else { return };
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 1_000_000_000);
+        let g = hero_graph(&[]);
+        let chain = baked_chain(&g, &baked_exec);
+        let req = RenderRequest {
+            graph: &g,
+            baked_chain: &chain,
+            live: &live_exec,
+            live_nodes: &[],
+            geometry: &geom_exec,
+            geometry_nodes: &[],
+            extent: extent(),
+        };
+
+        renderer.render_live(&req).unwrap();
+        let first = renderer.last_stats();
+        assert_eq!(first.live_dispatches, 1);
+        assert_eq!(
+            first.geometry_dispatches, 0,
+            "no geometry pass for a live-only render"
+        );
+        assert_eq!(geom_exec.0.load(Ordering::SeqCst), 0);
+
+        renderer.render_live(&req).unwrap();
+        assert_eq!(
+            renderer.last_stats().live_dispatches,
+            0,
+            "second render is a cache hit"
+        );
+
+        // A following full render still runs geometry (and reuses the cached live output).
+        renderer.render(&req).unwrap();
+        assert_eq!(renderer.last_stats().live_dispatches, 0);
+        assert_eq!(renderer.last_stats().geometry_dispatches, 1);
     }
 
     #[test]

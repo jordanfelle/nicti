@@ -190,9 +190,10 @@ pub trait TileSink {
     fn write_tile(&mut self, core: Rect, pixels: &[[f32; 4]]);
 }
 
-/// The simplest `TileSink`: assembles the full frame in host memory. A file-encoder sink (writing
-/// each tile straight to a TIFF/PNG's own scanline range without ever holding the whole frame in
-/// RAM) is #57's scope.
+/// The simplest `TileSink`: assembles the full frame in host memory. #57's export accumulates a
+/// crop-sized linear buffer this way (`nicti-pelt`'s `export/sink.rs`); a file-encoder sink that
+/// streams tiles straight to a TIFF/PNG's scanline range without holding the whole frame in RAM
+/// is a filed follow-up.
 pub struct MemorySink {
     pub extent: Extent,
     pub pixels: Vec<[f32; 4]>,

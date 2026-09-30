@@ -1,0 +1,247 @@
+//! The one production render-graph shape and the "edit document -> kernel inputs" step, shared by
+//! everything that renders a photo: the interactive Develop view (`nicti-pelt::render`), the export
+//! pipeline (#57, `nicti-pelt::export`) and the real-NEF harness (`bench/knead`). Lifted out of
+//! `nicti-pelt/src/render.rs` (#57) so those callers can't drift apart -- a Develop preview and an
+//! export of the same document must resolve the same params, and before this module each had (or
+//! would have needed) its own copy of the graph, the registry and the params resolution.
+//!
+//! `build_graph`'s node ids and `build_registry`'s entries must stay in sync:
+//! `RenderGraph::apply_document` errors on any graph node id missing from the registry.
+
+use std::sync::Arc;
+
+use nicti_calico::dcp::DcpProfile;
+use nicti_calico::profile::ProfileSolution;
+use nicti_cornea::LinearFrame;
+use nicti_pawprint::EditDocument;
+
+use crate::coat::{
+    self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
+    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+};
+use crate::color;
+use crate::frame::Extent;
+use crate::geometry::{self, Affine2D, CropRect};
+use crate::graph::{RenderGraph, StageKind, StageNode};
+use crate::stages::{
+    self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION,
+    SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+};
+use crate::{RenderStage, StageRegistry};
+
+/// The baked prefix, in dependency order.
+pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
+
+/// The fused live suffix, in dependency order.
+pub const LIVE_IDS: [&str; 9] = [
+    WB,
+    WORKING_SPACE,
+    EXPOSURE,
+    TONE,
+    TONE_CURVE,
+    VIBRANCE,
+    HSL,
+    SHARPEN,
+    NOISE_REDUCTION,
+];
+
+/// The full graph: baked prefix -> live suffix -> crop.
+pub fn build_graph() -> RenderGraph {
+    let mut graph = RenderGraph::new();
+    let mut prev: Option<&str> = None;
+    for id in BAKED_IDS {
+        graph
+            .add_node(StageNode {
+                id: id.to_string(),
+                kind: StageKind::Baked,
+                upstream: prev.map(|p| vec![p.to_string()]).unwrap_or_default(),
+                own_hash: blake3::hash(id.as_bytes()),
+            })
+            .expect("static graph ids are unique");
+        prev = Some(id);
+    }
+    for id in LIVE_IDS {
+        graph
+            .add_node(StageNode {
+                id: id.to_string(),
+                kind: StageKind::Live,
+                upstream: vec![prev.expect("baked prefix is non-empty").to_string()],
+                own_hash: blake3::hash(id.as_bytes()),
+            })
+            .expect("static graph ids are unique");
+        prev = Some(id);
+    }
+    graph
+        .add_node(StageNode {
+            id: CROP.to_string(),
+            kind: StageKind::Geometry,
+            upstream: vec![prev.expect("live suffix is non-empty").to_string()],
+            own_hash: blake3::hash(CROP.as_bytes()),
+        })
+        .expect("static graph ids are unique");
+    graph
+}
+
+macro_rules! render_stage_factory {
+    ($name:ident, $stage_fn:path) => {
+        fn $name() -> Arc<dyn RenderStage> {
+            Arc::new($stage_fn())
+        }
+    };
+}
+render_stage_factory!(decode_factory, stages::decode_stage);
+render_stage_factory!(demosaic_factory, stages::demosaic_stage);
+render_stage_factory!(denoise_factory, stages::denoise_stage);
+render_stage_factory!(lens_factory, stages::lens_stage);
+render_stage_factory!(heal_factory, stages::heal_stage);
+render_stage_factory!(wb_factory, stages::wb_stage);
+render_stage_factory!(working_space_factory, stages::working_space_stage);
+render_stage_factory!(exposure_factory, stages::exposure_stage);
+render_stage_factory!(tone_factory, stages::tone_stage);
+render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
+render_stage_factory!(vibrance_factory, stages::vibrance_stage);
+render_stage_factory!(hsl_factory, stages::hsl_stage);
+render_stage_factory!(sharpen_factory, stages::sharpen_stage);
+render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
+render_stage_factory!(crop_factory, stages::crop_stage);
+
+type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
+
+/// Every stage [`build_graph`] can reference.
+pub fn build_registry() -> StageRegistry {
+    let mut registry = StageRegistry::new();
+    let entries: [StageFactoryEntry; 15] = [
+        (DECODE, decode_factory),
+        (DEMOSAIC, demosaic_factory),
+        (DENOISE, denoise_factory),
+        (LENS, lens_factory),
+        (HEAL, heal_factory),
+        (WB, wb_factory),
+        (WORKING_SPACE, working_space_factory),
+        (EXPOSURE, exposure_factory),
+        (TONE, tone_factory),
+        (TONE_CURVE, tone_curve_factory),
+        (VIBRANCE, vibrance_factory),
+        (HSL, hsl_factory),
+        (SHARPEN, sharpen_factory),
+        (NOISE_REDUCTION, noise_reduction_factory),
+        (CROP, crop_factory),
+    ];
+    for (id, factory) in entries {
+        registry
+            .register(
+                nicti_claw::Descriptor {
+                    id,
+                    schema_version: 1,
+                },
+                factory,
+            )
+            .expect("every stage id above is namespaced and registered exactly once");
+    }
+    registry
+}
+
+/// One stage's typed params out of a document (`T::default()` when the document has no entry).
+pub fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id: &str) -> T {
+    match doc.stages.get(id) {
+        Some(entry) => coat::parse(&entry.params),
+        None => T::default(),
+    }
+}
+
+/// Everything a render needs beyond the graph itself, resolved from one document.
+pub struct RenderInputs {
+    /// For `LiveSuffixKernel::set_params`.
+    pub live: LiveParams,
+    /// For `HealExec::params`.
+    pub heal: HealParams,
+    /// The crop rect in source pixels (the full frame for a default crop).
+    pub crop_rect: CropRect,
+    /// Rotation composed with the crop offset; for `CropKernel::set_transform` and, at export,
+    /// `TiledRender::new`'s base transform.
+    pub crop_transform: Affine2D,
+}
+
+/// Resolves `doc` into kernel inputs for `frame` at `extent` -- the "document -> params" half of a
+/// render, previously inlined in `DevelopView::render`.
+///
+/// `profile` is the DCP camera profile the caller has loaded and verified; it is only used when the
+/// document's `WORKING_SPACE` entry actually selects one (`content_hash` set), so an empty document
+/// (the before view) always gets the plain LibRaw matrix. `pixel_scale` is render long edge over
+/// source long edge (`1.0` for a native-extent render).
+pub fn resolve_inputs(
+    doc: &EditDocument,
+    frame: &LinearFrame,
+    extent: Extent,
+    profile: Option<&DcpProfile>,
+    pixel_scale: f32,
+) -> RenderInputs {
+    let wb: WbParams = resolve(doc, WB);
+    let crop: CropParams = resolve(doc, CROP);
+    let crop_rect = crop.effective_rect((extent.width as f32, extent.height as f32));
+    let crop_transform = geometry::affine_for_crop(crop_rect, crop.rotation_degrees);
+
+    // A selected DCP profile (#42) replaces the plain LibRaw matrix with its own
+    // illuminant-interpolated matrix (WB folded in per the DNG ForwardMatrix contract) and adds the
+    // HueSatMap / baseline exposure / LookTable stages.
+    let chosen: CameraProfileParams = resolve(doc, WORKING_SPACE);
+    let solution: Option<Arc<ProfileSolution>> = match (&chosen.content_hash, profile) {
+        (Some(_), Some(profile)) => {
+            let gains = color::wb_gains_with_params(frame.cam_mul, &frame.cam_xyz, &wb);
+            Some(Arc::new(profile.solve(gains.map(f64::from))))
+        }
+        _ => None,
+    };
+    let working_space_matrix = match &solution {
+        Some(s) => s.camera_to_working,
+        None => color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz, &wb),
+    };
+
+    let exposure: ExposureParams = resolve(doc, EXPOSURE);
+    let tone: ToneParams = resolve(doc, TONE);
+    let tone_curve: ToneCurveParams = resolve(doc, TONE_CURVE);
+    let vibrance: VibranceParams = resolve(doc, VIBRANCE);
+    let hsl: HslParams = resolve(doc, HSL);
+    let sharpen: SharpenParams = resolve(doc, SHARPEN);
+    let noise_reduction: NoiseReductionParams = resolve(doc, NOISE_REDUCTION);
+
+    RenderInputs {
+        live: LiveParams {
+            working_space_matrix,
+            camera_profile: solution,
+            exposure,
+            tone,
+            tone_curve,
+            vibrance,
+            hsl,
+            sharpen,
+            noise_reduction,
+            pixel_scale,
+        },
+        heal: resolve(doc, HEAL),
+        crop_rect,
+        crop_transform,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_registry_covers_every_graph_node() {
+        let mut graph = build_graph();
+        // `apply_document` errors on any node id the registry doesn't know.
+        graph
+            .apply_document(&EditDocument::default(), &build_registry())
+            .expect("registry covers the graph");
+    }
+
+    #[test]
+    fn graph_has_baked_then_live_then_crop() {
+        let graph = build_graph();
+        for id in BAKED_IDS.iter().chain(LIVE_IDS.iter()).chain([&CROP]) {
+            assert!(graph.node(id).is_some(), "missing node {id}");
+        }
+    }
+}

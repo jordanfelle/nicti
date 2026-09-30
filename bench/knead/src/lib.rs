@@ -16,12 +16,11 @@ use nicti_tapetum::color;
 use nicti_tapetum::frame::{read_frame, Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, Affine2D};
 use nicti_tapetum::gpu::{GpuContext, GpuPreference};
-use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::graph::RenderGraph;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, CROP,
-    DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, NOISE_REDUCTION, SHARPEN, TONE,
-    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    DECODE, DEMOSAIC, DENOISE, HEAL, LENS,
 };
 
 /// One real render of a NEF: decodes it, runs it through the full graph at full resolution and
@@ -38,65 +37,7 @@ pub struct RealRender {
     pub graph: RenderGraph,
 }
 
-fn build_graph() -> RenderGraph {
-    let mut graph = RenderGraph::new();
-    let baked_ids = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
-    let mut prev: Option<&str> = None;
-    for id in baked_ids {
-        graph
-            .add_node(StageNode {
-                id: id.to_string(),
-                kind: StageKind::Baked,
-                upstream: prev.map(|p| vec![p.to_string()]).unwrap_or_default(),
-                own_hash: blake3::hash(id.as_bytes()),
-            })
-            .unwrap();
-        prev = Some(id);
-    }
-    let live_ids = [
-        WB,
-        WORKING_SPACE,
-        EXPOSURE,
-        TONE,
-        TONE_CURVE,
-        VIBRANCE,
-        HSL,
-        SHARPEN,
-        NOISE_REDUCTION,
-    ];
-    for id in live_ids {
-        graph
-            .add_node(StageNode {
-                id: id.to_string(),
-                kind: StageKind::Live,
-                upstream: vec![prev.unwrap().to_string()],
-                own_hash: blake3::hash(id.as_bytes()),
-            })
-            .unwrap();
-        prev = Some(id);
-    }
-    graph
-        .add_node(StageNode {
-            id: CROP.to_string(),
-            kind: StageKind::Geometry,
-            upstream: vec![prev.unwrap().to_string()],
-            own_hash: blake3::hash(CROP.as_bytes()),
-        })
-        .unwrap();
-    graph
-}
-
-pub const LIVE_IDS: [&str; 9] = [
-    WB,
-    WORKING_SPACE,
-    EXPOSURE,
-    TONE,
-    TONE_CURVE,
-    VIBRANCE,
-    HSL,
-    SHARPEN,
-    NOISE_REDUCTION,
-];
+pub use nicti_tapetum::spine::{build_graph, LIVE_IDS};
 
 impl RealRender {
     /// Decodes `nef_path` via the real LibRaw-backed decoder and prepares every kernel this
