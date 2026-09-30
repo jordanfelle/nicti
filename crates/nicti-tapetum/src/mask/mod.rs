@@ -3,12 +3,14 @@
 //! - [`params`] -- the `nicti.masks` stage's typed, sanitized params (what is stored).
 //! - [`raster`] -- CPU reference rasterizers for geometry and range masks (what the GPU kernels
 //!   are checked against, and what tests/outcome checks use).
+//! - [`kernels`] -- the GPU kernels (gradients, brush stroke fold, compose, atlas pack).
 //! - [`compose`] -- the fold that combines components, the AI bake key, and the document stamp.
 //!
 //! A mask is a *weight field* in 0..=1 at some pixel extent. Geometry is rasterized live (it has
 //! no bake); an AI alpha is baked once per (neutral render, recipe) and only composed here.
 
 pub mod compose;
+pub mod kernels;
 pub mod params;
 pub mod raster;
 

@@ -174,6 +174,28 @@ pub fn color_range_weight(lab: [f32; 3], samples: &[[f32; 3]], tolerance: f32) -
     (1.0 - nearest / tolerance).clamp(0.0, 1.0)
 }
 
+/// The pixel box `[lo_x, hi_x) x [lo_y, hi_y)` a dab can touch, clamped to the frame; `None` when it
+/// is entirely outside. Shared by the CPU splat and the GPU tile binning so both visit exactly the
+/// same pixels.
+pub fn dab_box(d: &Dab, width: usize, height: usize) -> Option<(usize, usize, usize, usize)> {
+    let lo_x = (d.cx - d.radius).floor().max(0.0) as usize;
+    let lo_y = (d.cy - d.radius).floor().max(0.0) as usize;
+    let hi_x = ((d.cx + d.radius).ceil().max(0.0) as usize).min(width);
+    let hi_y = ((d.cy + d.radius).ceil().max(0.0) as usize).min(height);
+    (hi_x > lo_x && hi_y > lo_y).then_some((lo_x, lo_y, hi_x, hi_y))
+}
+
+/// The union of a stroke's dab boxes, `(x0, y0, x1, y1)`; `None` if nothing is on the frame.
+pub fn stroke_box(
+    dabs: &[Dab],
+    width: usize,
+    height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    dabs.iter()
+        .filter_map(|d| dab_box(d, width, height))
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+}
+
 /// Rasterizes a brush's strokes to a field. Each stroke is splatted by dab bounding box (cost is
 /// the painted area, not `pixels x dabs`), then folded in order: add = `max`, erase = subtract.
 pub fn rasterize_brush(strokes: &[Stroke], width: usize, height: usize) -> Field {
@@ -182,34 +204,16 @@ pub fn rasterize_brush(strokes: &[Stroke], width: usize, height: usize) -> Field
     for stroke in strokes {
         let dabs = dabs_for_stroke(stroke, width, height, budget);
         budget = budget.saturating_sub(dabs.len());
-        if dabs.is_empty() {
+        let Some((x0, y0, x1, y1)) = stroke_box(&dabs, width, height) else {
             continue;
-        }
-        // The stroke's own field, only over the box its dabs touch.
-        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
-        for d in &dabs {
-            let lo_x = (d.cx - d.radius).floor().max(0.0) as usize;
-            let lo_y = (d.cy - d.radius).floor().max(0.0) as usize;
-            let hi_x = ((d.cx + d.radius).ceil().max(0.0) as usize).min(width);
-            let hi_y = ((d.cy + d.radius).ceil().max(0.0) as usize).min(height);
-            if hi_x <= lo_x || hi_y <= lo_y {
-                continue;
-            }
-            x0 = x0.min(lo_x);
-            y0 = y0.min(lo_y);
-            x1 = x1.max(hi_x);
-            y1 = y1.max(hi_y);
-        }
-        if x1 <= x0 || y1 <= y0 {
-            continue;
-        }
+        };
         let (bw, bh) = (x1 - x0, y1 - y0);
+        // The stroke's own field, only over the box its dabs touch.
         let mut scratch = vec![0.0f32; bw * bh];
         for d in &dabs {
-            let lo_x = (d.cx - d.radius).floor().max(x0 as f32) as usize;
-            let lo_y = (d.cy - d.radius).floor().max(y0 as f32) as usize;
-            let hi_x = ((d.cx + d.radius).ceil().max(0.0) as usize).min(x1);
-            let hi_y = ((d.cy + d.radius).ceil().max(0.0) as usize).min(y1);
+            let Some((lo_x, lo_y, hi_x, hi_y)) = dab_box(d, width, height) else {
+                continue;
+            };
             for y in lo_y..hi_y {
                 for x in lo_x..hi_x {
                     let w = d.weight(x as f32 + 0.5, y as f32 + 0.5);
