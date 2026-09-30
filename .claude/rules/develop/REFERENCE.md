@@ -64,3 +64,7 @@ Full reasoning/history: `docs/decisions/develop.md`.
   (B1: ridge regression, an 8-slider generalization of `pupil::fit`), `mlp` (M1/M2: a CPU-only
   `candle` MLP), `eval` (per-slider MAE/p95/bias + the aggregate normalized-MAE metric ADR-0053's
   decision rule reads). See `docs/research/purr-ai-auto-tone.md` for the full module breakdown.
+- **Persistence (#57)**: Develop's `EditDocument` is now saved to the catalog's master edit row
+  (`DevelopView::is_dirty`/`mark_saved`, `load_real_frame(frame, identity, doc)`). `has_edits` is
+  test-only now. AI Remove spots' recipes persist but their patches don't (#324), so a reloaded
+  photo shows no removal until it is re-run.

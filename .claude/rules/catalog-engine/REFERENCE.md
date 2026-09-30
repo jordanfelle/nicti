@@ -76,6 +76,14 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   *before* files move to the Recycle Bin; `shred::resume_open_deletes` settles it at startup.
   Runs as `pounce_jobs::DeleteJob` (`JobKind::Delete`).
 
+- **Master edit document (#57, landed)**: `CatalogStore::get_master_edit(asset_id) -> Option<
+  EditDocument>` / `put_master_edit` on the existing `edit_variant` master row (canonical JSON via
+  `nicti_pawprint::to_canonical_json`, non-finite floats refused → `CatalogError::Document`; a fresh
+  asset reads an empty document, an unknown one `None`, `put` on an unknown asset errors). Survives
+  a re-ingest (`insert_asset` only creates the row once). `edit_history` (undo) is #324. `nicti-pelt`
+  saves Develop's edits (`PeltApp::save_develop_edits`) on pointer release, before switching photos or
+  exporting, and on exit.
+
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 landed; #25 landed) — the real production catalog

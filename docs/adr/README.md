@@ -59,6 +59,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0053](0053-ai-auto-tone.md) | — | AI auto-tone (MLP, per-user edit history) | Proposed |
 | [0054](0054-job-scheduler-pounce.md) | — | Job scheduler design (Pounce) | Proposed |
 | [0056](0056-export-stack.md) | — | Export stack | Proposed |
+| [0057](0057-export-pipeline.md) | — | Export pipeline (engine, chained Pounce jobs, naming/collisions, edit persistence) | Accepted |
 | [0059](0059-xmp-interop.md) | — | XMP interop with Lightroom Classic | Proposed |
 | [0061](0061-lrc-catalog-import-mapping.md) | 0023 | Lightroom Classic catalog import mapping | Accepted |
 | [0066](0066-outbound-license-agpl.md) | 0013 | Nicti's outbound license — AGPL-3.0-or-later | Accepted |

@@ -193,6 +193,16 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   `needs-physical-testing`). Failure/low-confidence behavior of auto-level: ADR-0101 (see the
   `develop` topic) — a low-confidence angle is skipped with a hint, not applied.
 
+- **`spine.rs` + `render_live` (#57)**: the production graph (`build_graph`), registry
+  (`build_registry`), `LIVE_IDS`/`BAKED_IDS` and `resolve_inputs(doc, frame, extent, profile,
+  pixel_scale) -> RenderInputs` (live params, heal params, crop rect, crop transform) — shared by
+  Develop, export and `bench/knead`; keep a new stage's id in `build_graph` *and* `build_registry`.
+  `Renderer::render_live` stops after the live suffix (export tiles the crop itself).
+- **Gotcha (#57)**: `apply_document` resets *every* node's `own_hash` (including DECODE) from the
+  document, so identity set with `set_own_hash(DECODE, ..)` does not survive a render. Use
+  `spine::stamp_source_identity(&mut render_copy, identity)` every render; never stamp the stored
+  document.
+
 ## Package contents
 
 - **`crates/nicti-tapetum`** (#45, landed) — `coat.rs` (#46: typed `WbParams`/`ExposureParams`/
