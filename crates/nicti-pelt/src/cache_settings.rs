@@ -2,8 +2,10 @@
 //! (default 8 GiB, persisted beside the cache), and purge / reclaim buttons.
 //!
 //! Every Larder touch from the UI thread uses `try_lock_larder`, never a blocking lock: a running
-//! `CompactJob` can hold it for minutes, and the panel must not freeze the window. A busy Larder
-//! shows the last stats it read and refuses an action with a message instead of queueing it.
+//! `CompactJob` can hold it for minutes, and the panel must not freeze the window on that. A busy
+//! Larder shows the last stats it read and refuses an action with a message instead of queueing
+//! it. Once the lock is held, a big cap shrink (per-entry eviction) or purge still runs inline
+//! on the UI thread -- a possible brief frame stall, tracked as a follow-up.
 //! Purging is "all T2" only -- T2 is the sole tier (`LarderTier`), and `purge_all` reclaims disk
 //! immediately where `purge_tier` would leave dead bytes for a later compaction. A T0 purge is a
 //! catalog `preview` table operation the Larder doesn't cover; left out on purpose (the ticket
@@ -25,6 +27,7 @@ pub const MIN_CAP_BYTES: u64 = 256 * MIB;
 /// Upper bound on the typed value: keeps `GiB * 1024^3` well inside `u64` and rejects typos.
 pub const MAX_CAP_BYTES: u64 = 4096 * GIB;
 const STATS_REFRESH: Duration = Duration::from_secs(1);
+const PURGE_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
 
 /// Parses the cap text box (GiB, decimals allowed) into bytes, enforcing the min/max bounds.
 pub fn parse_cap_gib(text: &str) -> Result<u64, String> {
@@ -67,9 +70,9 @@ pub fn format_bytes(bytes: u64) -> String {
 
 /// The cap text box shows GiB with no trailing noise: 8 -> "8", 1.5 -> "1.5".
 fn cap_text(cap_bytes: u64) -> String {
-    let gib = cap_bytes as f64 / GIB as f64;
-    let s = format!("{gib:.2}");
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
+    // `f64`'s Display is the shortest string that parses back to the same value, so an untouched
+    // box always re-applies the exact cap it was seeded from (no 2-decimal rounding).
+    (cap_bytes as f64 / GIB as f64).to_string()
 }
 
 /// Where the persisted cap lives: a sibling of the Larder directory (the Larder owns everything
@@ -120,11 +123,18 @@ pub struct CacheSettingsUi {
     last_refresh: Option<Instant>,
     message: Option<String>,
     /// Purge is destructive (the whole cache regenerates lazily), so it takes a second click.
-    confirm_purge: bool,
+    /// Armed at the first click; expires so leaving the Library view and coming back later never
+    /// finds the destructive button already showing.
+    confirm_purge: Option<Instant>,
     compaction: Option<ReportSlot<CompactResult>>,
 }
 
 impl CacheSettingsUi {
+    fn purge_armed(&self) -> bool {
+        self.confirm_purge
+            .is_some_and(|t| t.elapsed() < PURGE_CONFIRM_WINDOW)
+    }
+
     fn refresh_stats(&mut self, larder: &SharedLarder) {
         let due = self
             .last_refresh
@@ -159,7 +169,13 @@ impl CacheSettingsUi {
             self.message = Some("Preview cache is busy; try again in a moment.".into());
             return;
         };
+        let previous = guard.stats().ok().map(|s| s.cap_bytes);
         if let Err(e) = guard.set_cap(bytes) {
+            // `set_cap` assigns the new cap before evicting, so a mid-eviction error would leave
+            // the live cache on a cap that was never persisted; put the old one back.
+            if let Some(previous) = previous {
+                let _ = guard.set_cap(previous);
+            }
             self.message = Some(format!("Setting the cap failed: {e}"));
             return;
         }
@@ -264,19 +280,19 @@ pub fn show(
             state.compaction = Some(slot);
             state.message = Some("Reclaiming space in the background...".into());
         }
-        if state.confirm_purge {
+        if state.purge_armed() {
             if ui.button("Really purge all previews").clicked() {
-                state.confirm_purge = false;
+                state.confirm_purge = None;
                 state.purge(larder);
             }
             if ui.button("Cancel").clicked() {
-                state.confirm_purge = false;
+                state.confirm_purge = None;
             }
         } else if ui.button("Purge all previews").clicked() {
-            state.confirm_purge = true;
+            state.confirm_purge = Some(Instant::now());
         }
     });
-    if state.confirm_purge {
+    if state.purge_armed() {
         ui.label("Previews regenerate as you browse; nothing else is lost.");
     }
     if let Some(msg) = &state.message {
@@ -309,7 +325,7 @@ mod tests {
 
     #[test]
     fn cap_text_round_trips_through_parse() {
-        for cap in [8 * GIB, GIB + GIB / 2, MIN_CAP_BYTES] {
+        for cap in [8 * GIB, GIB + GIB / 2, MIN_CAP_BYTES, 300_000_007] {
             assert_eq!(parse_cap_gib(&cap_text(cap)).unwrap(), cap);
         }
         assert_eq!(cap_text(8 * GIB), "8");
@@ -337,6 +353,8 @@ mod tests {
             "{}",
             r#"{"cap_bytes":0}"#,
             r#"{"cap_bytes":-5}"#,
+            r#"{"cap_bytes":1}"#,
+            r#"{"cap_bytes":18446744073709551615}"#,
         ] {
             std::fs::write(cap_file_for(&catalog), bad).unwrap();
             assert_eq!(load_cap(&catalog), None, "{bad}");
@@ -360,6 +378,43 @@ mod tests {
         drop(larder);
         let reopened = t2::open_larder(&catalog).unwrap();
         assert_eq!(reopened.lock().unwrap().stats().unwrap().cap_bytes, GIB);
+    }
+
+    #[test]
+    fn shrinking_the_cap_evicts_entries_down_to_it() {
+        use nicti_lair::larder::{LarderKey, LarderTier};
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        let larder = t2::open_larder(&catalog).unwrap();
+        let payload = vec![7u8; MIB as usize];
+        {
+            let mut l = larder.lock().unwrap();
+            for id in 0..MIN_CAP_BYTES / MIB * 2 {
+                let key = LarderKey {
+                    asset_id: id as i64,
+                    tier: LarderTier::T2,
+                    render_hash: "h",
+                };
+                assert!(l.put(key, &payload).unwrap());
+            }
+            assert!(l.stats().unwrap().live_bytes > MIN_CAP_BYTES);
+        }
+        let mut ui = CacheSettingsUi::default();
+        ui.apply_cap(&larder, &catalog, MIN_CAP_BYTES);
+        let stats = larder.lock().unwrap().stats().unwrap();
+        assert_eq!(stats.cap_bytes, MIN_CAP_BYTES);
+        assert!(stats.live_bytes <= MIN_CAP_BYTES, "{stats:?}");
+        assert!(stats.entry_count > 0, "eviction must be LRU, not a wipe");
+    }
+
+    #[test]
+    fn purge_confirmation_expires() {
+        let mut ui = CacheSettingsUi::default();
+        assert!(!ui.purge_armed());
+        ui.confirm_purge = Some(Instant::now());
+        assert!(ui.purge_armed());
+        ui.confirm_purge = Some(Instant::now() - PURGE_CONFIRM_WINDOW - Duration::from_secs(1));
+        assert!(!ui.purge_armed());
     }
 
     #[test]
