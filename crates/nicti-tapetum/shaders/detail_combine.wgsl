@@ -10,9 +10,9 @@ struct Uniforms {
     sharpen: vec4<f32>,
 }
 
-@group(0) @binding(0) var original_tex: texture_storage_2d<rgba16float, read>;
-@group(0) @binding(1) var nr_blurred_tex: texture_storage_2d<rgba16float, read>;
-@group(0) @binding(2) var sharpen_blurred_tex: texture_storage_2d<rgba16float, read>;
+@group(0) @binding(0) var original_tex: texture_2d<f32>;
+@group(0) @binding(1) var nr_blurred_tex: texture_2d<f32>;
+@group(0) @binding(2) var sharpen_blurred_tex: texture_2d<f32>;
 @group(0) @binding(3) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(4) var<uniform> u: Uniforms;
 
@@ -50,9 +50,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-    let original = textureLoad(original_tex, coord);
-    let nr_blurred = textureLoad(nr_blurred_tex, coord);
-    let sharpen_blurred = textureLoad(sharpen_blurred_tex, coord);
+    let original = textureLoad(original_tex, coord, 0);
+    let nr_blurred = textureLoad(nr_blurred_tex, coord, 0);
+    let sharpen_blurred = textureLoad(sharpen_blurred_tex, coord, 0);
 
     let orig_luma = dot(original.rgb, LUMA_WEIGHTS);
     let nr_luma = dot(nr_blurred.rgb, LUMA_WEIGHTS);

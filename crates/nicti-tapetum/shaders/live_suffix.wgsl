@@ -33,7 +33,7 @@ struct Uniforms {
     profile1: vec4<f32>,
 }
 
-@group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u: Uniforms;
 // DCP tables (#42): 3D textures, width = saturation, height = hue (wraps), depth = value, texel =
@@ -314,7 +314,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) {
         return;
     }
-    let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)));
+    let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
     var rgb = m * px.rgb;
     // DCP camera profile (ADR-0038 order): HueSatMap -> baseline exposure -> LookTable.
