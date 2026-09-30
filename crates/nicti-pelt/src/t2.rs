@@ -19,7 +19,7 @@ use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
-use nicti_lair::larder::{Larder, LarderConfig, LarderKey, LarderTier};
+use nicti_lair::larder::{Larder, LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
@@ -74,7 +74,11 @@ pub fn larder_dir_for(catalog_path: &Path) -> PathBuf {
 
 /// Opens (creating if needed) the Larder beside `catalog_path`, or `None` if it can't be opened.
 pub fn open_larder(catalog_path: &Path) -> Option<SharedLarder> {
-    let mut larder = Larder::open(&larder_dir_for(catalog_path), LarderConfig::default()).ok()?;
+    let mut larder = Larder::open(
+        &larder_dir_for(catalog_path),
+        crate::cache_settings::larder_config_for(catalog_path),
+    )
+    .ok()?;
     // Compaction runs as a Pounce `CompactJob` (see `loupe::poll_t2`), never inline in `put`.
     larder.set_auto_compact(false);
     Some(Arc::new(Mutex::new(larder)))
@@ -407,6 +411,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::*;
     use super::*;
+    use nicti_lair::larder::LarderConfig;
 
     #[test]
     fn a_large_source_is_downscaled_to_the_t2_long_edge() {

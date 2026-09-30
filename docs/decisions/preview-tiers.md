@@ -89,5 +89,5 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   `try_lock` and treat a busy Larder as a miss for that frame. `app.rs` shows the T2 (upgrading from T0, never downgrading)
   as the fallback while the full RAW decode is still in flight. The Larder lives beside the
   catalog file (`<catalog>.larder/`), opened best-effort -- if it can't be opened the loupe just
-  falls back to T0 as before. Not built here: the settings/purge UI (#302).
+  falls back to T0 as before. Settings/purge UI landed in #302: `crates/nicti-pelt/src/cache_settings.rs` (cap persisted beside the Larder, `try_lock`-only from the UI thread; no T0 purge).
 
