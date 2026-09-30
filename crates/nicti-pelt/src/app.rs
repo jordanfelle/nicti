@@ -100,6 +100,9 @@ pub struct PeltApp {
     catalog_path: PathBuf,
     catalog: CatalogOpenState,
     develop: Option<DevelopView>,
+    /// A save of Develop's edits that failed, and the document it failed for: the autosave doesn't
+    /// retry the same document every frame, and the message shows in the top bar.
+    edit_save_failed: Option<(nicti_pawprint::EditDocument, String)>,
     /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
     /// part of any edit document.
     hsl_band_selected: usize,
@@ -338,6 +341,7 @@ impl PeltApp {
             decoder: Arc::new(LibRawDecoder),
             loupe: None,
             loupe_loaded_asset: None,
+            edit_save_failed: None,
             loupe_zoomed: false,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1006,12 +1010,20 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
 }
 
 impl eframe::App for PeltApp {
+    fn on_exit(&mut self) {
+        self.save_develop_edits(true);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.color.handle_shortcuts(ui.ctx());
         self.color.sync(frame);
         self.poll_backup();
         self.poll_move();
         self.poll_cull();
+        // Autosave Develop's edits once the pointer is up (not on every slider-drag frame).
+        if !ui.ctx().input(|i| i.pointer.any_down()) {
+            self.save_develop_edits(false);
+        }
         self.handle_cull_keys(ui.ctx());
         if self.facets_dirty_since.is_some() {
             // Nothing else repaints an otherwise idle window once marking stops.
@@ -1123,6 +1135,11 @@ impl eframe::App for PeltApp {
                         self.update.apply();
                     }
                 });
+            });
+        }
+        if let Some((_, err)) = &self.edit_save_failed {
+            egui::Panel::top("edit_save_error").show(ui, |ui| {
+                ui.colored_label(egui::Color32::RED, format!("Couldn't save edits: {err}"));
             });
         }
         if let Some(err) = self.update.last_error() {
@@ -1641,6 +1658,48 @@ impl PeltApp {
         self.view = View::Loupe;
     }
 
+    /// Persists Develop's edits for the photo it has loaded (#57) if they differ from what the
+    /// catalog holds. `Ok`/nothing-to-do -> `true`; a failed save -> `false` (the message is kept
+    /// in `edit_save_failed`). Unless `force`, a document that already failed to save isn't
+    /// retried until it changes -- the autosave calls this every frame.
+    fn save_develop_edits_to(&mut self, store: &dyn CatalogStore, force: bool) -> bool {
+        let (Some(develop), Some((asset_id, _))) = (self.develop.as_mut(), self.loupe_loaded_asset)
+        else {
+            return true;
+        };
+        if !develop.is_dirty() {
+            self.edit_save_failed = None;
+            return true;
+        }
+        if !force {
+            if let Some((doc, _)) = &self.edit_save_failed {
+                if doc == develop.document() {
+                    return false;
+                }
+            }
+        }
+        match store.put_master_edit(asset_id, develop.document()) {
+            Ok(()) => {
+                develop.mark_saved();
+                self.edit_save_failed = None;
+                true
+            }
+            Err(e) => {
+                self.edit_save_failed = Some((develop.document().clone(), e.to_string()));
+                false
+            }
+        }
+    }
+
+    /// [`Self::save_develop_edits_to`] against the app's own catalog.
+    fn save_develop_edits(&mut self, force: bool) -> bool {
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return true;
+        };
+        let store = store.clone();
+        self.save_develop_edits_to(store.as_ref(), force)
+    }
+
     /// #31: the Loupe view. Navigates with Left/Right (directional prefetch keeps the neighbors
     /// decoding ahead of the cursor, `LoupeSession`'s own job), toggles Fit/100% zoom with Space,
     /// and drags to pan while zoomed. Shows the T0 embedded preview instantly while a real decode
@@ -1757,12 +1816,21 @@ impl PeltApp {
                     // it the instant this decode landed -- no warning, no user action beyond
                     // having navigated in a different tab. Refuse to swap (and don't paint a
                     // viewport this frame) until the user explicitly says to discard those edits.
+                    // #57: edits are saved to the catalog first, so this only blocks when the save
+                    // itself failed.
+                    self.save_develop_edits_to(store.as_ref(), true);
                     let develop_has_unsaved_edits =
-                        self.develop.as_ref().is_some_and(DevelopView::has_edits);
+                        self.develop.as_ref().is_some_and(DevelopView::is_dirty);
                     if develop_has_unsaved_edits {
+                        let why = self
+                            .edit_save_failed
+                            .as_ref()
+                            .map_or("", |(_, msg)| msg.as_str());
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Develop has unsaved edits for a different photo or source revision.",
+                            format!(
+                                "Develop's edits for the previous photo couldn't be saved ({why})."
+                            ),
                         );
                         if ui
                             .button("Discard those edits and view this photo")
@@ -1772,15 +1840,18 @@ impl PeltApp {
                                 (self.develop.as_mut(), &current_asset)
                             {
                                 let identity = asset_cache_key(asset);
-                                develop.load_real_frame(frame, identity);
+                                let doc = stored_edit_document(store.as_ref(), asset_id);
+                                develop.load_real_frame(frame, identity, doc);
                                 self.loupe_loaded_asset = Some((asset_id, identity));
+                                self.edit_save_failed = None;
                             }
                         }
                         return;
                     }
                     if let (Some(develop), Some(asset)) = (self.develop.as_mut(), &current_asset) {
                         let identity = asset_cache_key(asset);
-                        develop.load_real_frame(frame, identity);
+                        let doc = stored_edit_document(store.as_ref(), asset_id);
+                        develop.load_real_frame(frame, identity, doc);
                         self.loupe_loaded_asset = Some((asset_id, identity));
                     }
                 }
@@ -1890,6 +1961,17 @@ impl PeltApp {
 
 /// Registers `path` as a root under the fixed placeholder volume this shell uses (see
 /// `PLACEHOLDER_VOLUME_IDENTITY_KEY`'s own doc comment) and returns its root id.
+/// The catalog's stored master edit document for `asset_id`, or an empty one when there is none or
+/// it can't be read (a corrupt document must not stop the photo from opening; Develop then starts
+/// fresh and the next save replaces it).
+fn stored_edit_document(store: &dyn CatalogStore, asset_id: i64) -> nicti_pawprint::EditDocument {
+    store
+        .get_master_edit(asset_id)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

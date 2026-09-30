@@ -191,6 +191,43 @@ pub fn load(path: &Path, camera_needles: Option<&[String]>) -> Result<LoadedProf
     })
 }
 
+/// Reloads the DCP profile an edit document refers to (its `WORKING_SPACE` entry), verifying the
+/// file still hashes to what the document recorded.
+///
+/// - `Ok(None)`: the document selects no profile.
+/// - `Ok(Some(_))`: the profile, ready for `spine::resolve_inputs`.
+/// - `Err`: the document selects a profile that is missing, unreadable, for another camera, or
+///   has changed on disk since the edit was made. Callers decide what that means -- Develop shows
+///   the message and renders with the plain matrix; **export fails that photo**, because silently
+///   rendering different colors than the user edited would be worse.
+pub fn load_for_document(
+    doc: &nicti_pawprint::EditDocument,
+    make: &str,
+    model: &str,
+) -> Result<Option<Arc<DcpProfile>>, String> {
+    let chosen: nicti_tapetum::coat::CameraProfileParams =
+        match doc.stages.get(nicti_tapetum::stages::WORKING_SPACE) {
+            Some(entry) => nicti_tapetum::coat::parse(&entry.params),
+            None => return Ok(None),
+        };
+    let Some(want_hash) = chosen.content_hash else {
+        return Ok(None);
+    };
+    let Some(path) = chosen.path else {
+        return Err(
+            "the edit selects a camera profile but doesn't record where it came from".into(),
+        );
+    };
+    let needles = camera_needles(make, model);
+    let loaded = load(Path::new(&path), Some(&needles))?;
+    if loaded.content_hash != want_hash {
+        return Err(format!(
+            "camera profile {path} has changed on disk since this photo was edited"
+        ));
+    }
+    Ok(Some(loaded.profile))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

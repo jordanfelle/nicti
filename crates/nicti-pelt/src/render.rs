@@ -85,9 +85,11 @@ pub struct DevelopView {
     extent: Extent,
     graph: RenderGraph,
     registry: StageRegistry,
-    /// The user's actual edits. Not yet persisted to a catalog (#31's scope, once a real asset
-    /// exists) -- lives only for this session/view's lifetime.
+    /// The user's actual edits. Persisted to the catalog by the app (`PeltApp::save_develop_edits`,
+    /// #57) whenever [`Self::is_dirty`].
     document: EditDocument,
+    /// The document as last loaded from / saved to the catalog: what `is_dirty` compares against.
+    saved: EditDocument,
     decode_kernel: DecodeKernel,
     live_kernel: LiveSuffixKernel,
     crop_kernel: CropKernel,
@@ -140,6 +142,7 @@ impl DevelopView {
             graph: build_graph(),
             registry: build_registry(),
             document: EditDocument::default(),
+            saved: EditDocument::default(),
             decode_kernel,
             live_kernel,
             crop_kernel,
@@ -334,27 +337,60 @@ impl DevelopView {
         !self.document.stages.is_empty()
     }
 
+    /// The current edits.
+    pub fn document(&self) -> &EditDocument {
+        &self.document
+    }
+
+    /// Whether the edits differ from what the catalog has (`load_real_frame`'s `doc` or the last
+    /// [`Self::mark_saved`]).
+    pub fn is_dirty(&self) -> bool {
+        self.document != self.saved
+    }
+
+    /// Records that the current edits are now persisted.
+    pub fn mark_saved(&mut self) {
+        self.saved = self.document.clone();
+    }
+
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
-    /// resetting `document` to a fresh default -- edits aren't persisted across a navigation
-    /// change yet (catalog persistence of edits is a documented follow-up, not this ticket's
-    /// scope, per this file's own module doc comment) -- and updating the `DECODE` stage's
-    /// `own_hash` to `identity` so Tapetum's baked-output cache doesn't collide between different
-    /// real photos at the same pixel extent. `identity` is the caller's job to compute
+    /// with `doc` as its edits (the catalog's stored master document, #57; pass
+    /// `EditDocument::default()` for none), and updating the `DECODE` stage's `own_hash` to
+    /// `identity` so Tapetum's baked-output cache doesn't collide between different real photos at
+    /// the same pixel extent. `identity` is the caller's job to compute
     /// (`crate::loupe::asset_cache_key`) -- this crate stays decoupled from `nicti-lair`. Callers
-    /// should check [`Self::has_edits`] first if silently discarding an active edit session would
-    /// be a surprise (the Loupe view does -- see its own caller-side guard).
-    pub fn load_real_frame(&mut self, frame: Arc<LinearFrame>, identity: blake3::Hash) {
+    /// must save (or deliberately discard) a dirty document first -- see [`Self::is_dirty`].
+    ///
+    /// A camera profile the document selects is reloaded and verified against the hash the
+    /// document recorded; on failure the profile is left off and [`Self::profile_error`] says why.
+    /// AI removals are not persisted (#324): `doc` keeps their recipes, but no patch exists until
+    /// the removal is re-run.
+    pub fn load_real_frame(
+        &mut self,
+        frame: Arc<LinearFrame>,
+        identity: blake3::Hash,
+        doc: EditDocument,
+    ) {
         self.extent = Extent {
             width: frame.width,
             height: frame.height,
         };
         self.frame = frame;
-        self.document = EditDocument::default();
+        self.saved = doc.clone();
+        self.document = doc;
         self.removals.clear();
         self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
         self.show_before = false;
         self.active_profile = None;
         self.profile_error = None;
+        match camera_profiles::load_for_document(
+            &self.document,
+            &self.frame.make,
+            &self.frame.model,
+        ) {
+            Ok(profile) => self.active_profile = profile,
+            Err(e) => self.profile_error = Some(e),
+        }
         let needles = camera_profiles::camera_needles(&self.frame.make, &self.frame.model);
         if self.profiles_for.as_ref() != Some(&needles) {
             self.profile_choices = camera_profiles::discover(&self.frame.make, &self.frame.model);
@@ -482,6 +518,70 @@ mod tests {
 
         view.reset_stage(EXPOSURE);
         assert!(!view.has_edits(), "the only edit was just reset away");
+    }
+
+    /// #57: edits are dirty relative to what the catalog holds, and loading a photo with its stored
+    /// document starts clean with exactly that document.
+    #[test]
+    fn dirty_tracking_and_loading_a_stored_document() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        assert!(!view.is_dirty());
+
+        let mut exposure: ExposureParams = view.stage_params(EXPOSURE);
+        exposure.stops = 0.75;
+        view.set_stage_params(EXPOSURE, &exposure);
+        assert!(view.is_dirty(), "an edit not yet saved");
+        let edited = view.document().clone();
+        view.mark_saved();
+        assert!(!view.is_dirty());
+
+        // Undoing back to the empty document is a change relative to what was saved.
+        view.reset_stage(EXPOSURE);
+        assert!(view.is_dirty());
+
+        // Loading another photo with a stored document: clean, and the document is exactly it.
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo"), edited.clone());
+        assert!(!view.is_dirty());
+        assert_eq!(view.document(), &edited);
+        let loaded: ExposureParams = view.stage_params(EXPOSURE);
+        assert_eq!(loaded.stops, 0.75);
+
+        // And a photo with no stored edits loads empty.
+        view.load_real_frame(
+            view.frame_arc(),
+            blake3::hash(b"other"),
+            EditDocument::default(),
+        );
+        assert!(!view.is_dirty() && !view.has_edits());
+    }
+
+    /// A stored document whose camera profile is gone must not silently render with the plain
+    /// matrix: Develop reports why.
+    #[test]
+    fn a_stored_profile_that_cannot_be_reloaded_is_reported() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            WORKING_SPACE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(CameraProfileParams {
+                    name: Some("Gone".into()),
+                    path: Some("/definitely/not/here.dcp".into()),
+                    content_hash: Some("00".repeat(32)),
+                })
+                .unwrap(),
+            },
+        );
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"x"), doc);
+        assert!(view.profile_error.is_some());
+        assert!(!view.is_dirty(), "loading never marks the view dirty");
     }
 
     /// Selecting a camera profile must (a) record its identity in the edit document, (b) change

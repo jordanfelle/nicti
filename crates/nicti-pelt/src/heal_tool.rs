@@ -1860,7 +1860,11 @@ mod tests {
         let gate = backend.lock().unwrap();
         h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
         let first_key = develop.frame_key();
-        develop.load_real_frame(develop.frame_arc(), blake3::hash(b"a different photo"));
+        develop.load_real_frame(
+            develop.frame_arc(),
+            blake3::hash(b"a different photo"),
+            nicti_pawprint::EditDocument::default(),
+        );
         assert_ne!(develop.frame_key(), first_key);
         assert!(
             spots(&develop).is_empty(),
