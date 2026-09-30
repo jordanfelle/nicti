@@ -57,7 +57,7 @@ struct MaskUniforms {
 @group(0) @binding(7) var<uniform> mu: MaskUniforms;
 @group(0) @binding(8) var mask_sampler: sampler;
 // Cached per-photo bases (mask/bases.rs). `bases_tex` (Rgba16Float, bilinear) = (fine band, mid
-// band, baked perceptual luma, _) for clarity/texture; `haze_tex` (R32Float, nearest) = dehaze
+// band, baked perceptual luma, _) for clarity/texture; `haze_tex` (R32Float, sampled by hand, 4-tap bilinear) = dehaze
 // transmission. 1x1 dummies are bound when not needed; the header flags gate every read.
 @group(0) @binding(9) var bases_tex: texture_2d<f32>;
 @group(0) @binding(10) var haze_tex: texture_2d<f32>;
@@ -486,9 +486,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Local dehaze: scene-linear, before white balance / tone. The airlight goes through the same
     // matrix and exposure as the pixels it is subtracted from.
     if (has_locals && mu.header.z > 0.5 && locals.dehaze != 0.0) {
+        // The transmission lives at the bases extent (<= 2048 px long edge) but the live pass runs
+        // at the frame extent, and the guided refine makes `t` change sharply at edges, so a
+        // nearest-texel load would step by one bases texel. R32Float isn't filterable: 4 taps by
+        // hand, with the same pixel-centre mapping as guided_apply (at equal extents this reduces
+        // exactly to the texel, so the CPU twin still matches).
         let hd = vec2<f32>(textureDimensions(haze_tex));
-        let hp = clamp(vec2<i32>(uv * hd), vec2<i32>(0), vec2<i32>(hd) - vec2<i32>(1));
-        let t = textureLoad(haze_tex, hp, 0).r;
+        let hmax = vec2<i32>(hd) - vec2<i32>(1);
+        let hf = uv * hd - vec2<f32>(0.5);
+        let hb = floor(hf);
+        let hr = hf - hb;
+        let h0 = clamp(vec2<i32>(hb), vec2<i32>(0), hmax);
+        let h1 = clamp(vec2<i32>(hb) + vec2<i32>(1), vec2<i32>(0), hmax);
+        let t00 = textureLoad(haze_tex, h0, 0).r;
+        let t10 = textureLoad(haze_tex, vec2<i32>(h1.x, h0.y), 0).r;
+        let t01 = textureLoad(haze_tex, vec2<i32>(h0.x, h1.y), 0).r;
+        let t11 = textureLoad(haze_tex, h1, 0).r;
+        let t = mix(mix(t00, t10, hr.x), mix(t01, t11, hr.x), hr.y);
         rgb = apply_dehaze(rgb, t, (m * mu.airlight.xyz) * exposure, locals.dehaze);
     }
     var contrast = u.tone0.y;

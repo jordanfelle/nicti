@@ -320,6 +320,8 @@ pub fn baked_ids_in_order(graph: &RenderGraph) -> Result<Vec<String>, GraphError
                 .node(id)
                 .map(|n| n.kind == crate::graph::StageKind::Baked)
                 == Some(true)
+                // `nicti.neutral` is Baked so keys can chain from it, but nothing renders it.
+                && id.as_str() != crate::stages::NEUTRAL
         })
         .collect())
 }
@@ -717,6 +719,20 @@ mod tests {
             "the last node stayed cached, so nothing upstream of it runs again"
         );
         assert_eq!(renderer.last_stats().bake_dispatches, 0);
+    }
+
+    #[test]
+    fn the_keying_only_neutral_node_is_not_part_of_the_baked_chain() {
+        let ids = baked_ids_in_order(&crate::spine::build_graph()).unwrap();
+        assert!(
+            !ids.iter().any(|id| id == crate::stages::NEUTRAL),
+            "{ids:?}"
+        );
+        assert_eq!(
+            ids,
+            crate::spine::BAKED_IDS,
+            "exactly the real baked prefix"
+        );
     }
 
     #[test]
