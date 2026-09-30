@@ -133,6 +133,15 @@ pub struct DevelopView {
     pub profile_error: Option<String>,
 }
 
+fn has_null(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => true,
+        serde_json::Value::Array(a) => a.iter().any(has_null),
+        serde_json::Value::Object(o) => o.values().any(has_null),
+        _ => false,
+    }
+}
+
 impl DevelopView {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
         let frame = Arc::new(synthetic_linear_frame());
@@ -226,14 +235,18 @@ impl DevelopView {
     /// Sets a stage's params from a typed value, replacing any existing entry -- the write half
     /// of [`Self::stage_params`].
     pub fn set_stage_params<T: serde::Serialize + 'static>(&mut self, stage_id: &str, params: &T) {
-        // Masks are scrubbed as a *typed* value: a NaN serializes to JSON `null`, which the
-        // canonical stage hasher refuses, and re-parsing that `null` would discard the whole
-        // document. Everything else serializes as given.
-        let value = match (params as &dyn std::any::Any).downcast_ref::<MaskParams>() {
-            Some(masks) if stage_id == MASKS => serde_json::to_value(masks.sanitized()),
-            _ => serde_json::to_value(params),
+        let mut value =
+            serde_json::to_value(params).expect("a coat params struct always serializes");
+        // A NaN serializes to JSON `null`, which the canonical stage hasher refuses, and
+        // re-parsing that `null` would discard the whole document -- so scrub masks as a *typed*
+        // value. Only when one is present: `sanitized()` also truncates (one document-wide brush
+        // budget), and doing that on every write would permanently drop points the UI is still
+        // adding to a stroke.
+        if stage_id == MASKS && has_null(&value) {
+            if let Some(masks) = (params as &dyn std::any::Any).downcast_ref::<MaskParams>() {
+                value = serde_json::to_value(masks.sanitized()).expect("mask params serialize");
+            }
         }
-        .expect("a coat params struct always serializes");
         self.document.stages.insert(
             stage_id.to_string(),
             StageEntry {
@@ -950,6 +963,39 @@ mod tests {
     /// A NaN serializes to JSON `null`, which the canonical stage hasher refuses; it would reach
     /// `hash_value` through `apply_document` on the next render. The setter must scrub it, the same
     /// way a document loaded from disk is scrubbed.
+    #[test]
+    fn writing_finite_mask_params_never_truncates_them() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(gpu);
+        // Two corrections whose brush points together exceed the document-wide budget: a write
+        // must keep them all (the UI is still appending to the second stroke).
+        let brush = |n: usize| {
+            let mut c = left_half(1.0);
+            c.mask.components[0].source = nicti_tapetum::mask::params::MaskSource::Brush {
+                strokes: vec![nicti_tapetum::mask::params::Stroke {
+                    points: vec![[0.5, 0.5]; n],
+                    ..Default::default()
+                }],
+            };
+            c
+        };
+        let n = nicti_tapetum::mask::params::MAX_BRUSH_POINTS;
+        view.set_stage_params(
+            MASKS,
+            &MaskParams {
+                corrections: vec![brush(n - 10), brush(100)],
+            },
+        );
+        let stored: MaskParams = view.stage_params(MASKS);
+        let len = |i: usize| match &stored.corrections[i].mask.components[0].source {
+            nicti_tapetum::mask::params::MaskSource::Brush { strokes } => strokes[0].points.len(),
+            _ => 0,
+        };
+        assert_eq!((len(0), len(1)), (n - 10, 100));
+    }
+
     #[test]
     fn a_nan_written_into_the_mask_params_cannot_reach_the_graph_hash() {
         let Some(gpu) = crate::test_gpu::shared() else {

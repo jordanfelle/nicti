@@ -283,9 +283,15 @@ impl MaskBakeService {
             if outcome.image_key != open {
                 continue;
             }
-            // Cancelled before it ran (from the activity panel): not a model failure, so don't
-            // remember it as one -- the next `request_missing` simply submits it again.
+            // Cancelled before it ran (from the activity panel). Remember it so the per-frame
+            // `request_missing` doesn't submit it straight back (which would make a queued bake
+            // uncancellable while the panel is open); Retry clears it like any other failure.
+            // No event: the user did this on purpose.
             if outcome.result.as_ref().err().map(String::as_str) == Some(CANCELLED) {
+                self.failed.insert(
+                    (outcome.image_key, outcome.bake_key),
+                    "Cancelled".to_owned(),
+                );
                 continue;
             }
             match &outcome.result {
@@ -553,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bake_cancelled_before_it_ran_is_not_a_failure_and_can_be_resubmitted() {
+    fn a_cancelled_bake_stays_cancelled_until_retry_and_is_not_an_event() {
         let Some(mut develop) = develop() else { return };
         let p = pounce();
         let (mut svc, _) = service(false);
@@ -579,16 +585,15 @@ mod tests {
 
         let events = svc.poll(&mut develop);
         assert!(events.is_empty(), "a cancel is not reported as an error");
-        assert!(
-            svc.failure_for(image, &key).is_none(),
-            "and never remembered as one"
-        );
         assert_eq!(svc.pending_count(), 0, "the slot is released");
         assert_eq!(
             svc.request_missing(&p, &develop),
-            1,
-            "so it simply runs again"
+            0,
+            "not resubmitted behind the user's back"
         );
+        assert!(!svc.needs_repair(), "a cancel is not an integrity failure");
+        svc.retry_failed();
+        assert_eq!(svc.request_missing(&p, &develop), 1, "Retry runs it again");
         drain(&p);
     }
 

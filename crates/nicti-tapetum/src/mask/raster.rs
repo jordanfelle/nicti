@@ -115,8 +115,10 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
             continue;
         }
         let mut at = spacing - carry;
-        while at <= seg && dabs.len() < cap {
-            let t = at / seg;
+        // A hair of tolerance: with a widened spacing the float walk can land the last dab a
+        // rounding error past the end of the path and lose it.
+        while at <= seg + spacing * 1e-3 && dabs.len() < cap {
+            let t = (at / seg).min(1.0);
             dabs.push(make((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)));
             at += spacing;
         }
@@ -461,6 +463,25 @@ mod tests {
             "{} tile entries",
             binned.tile_dabs.len()
         );
+    }
+
+    #[test]
+    fn a_binding_cap_still_reaches_the_end_of_the_path() {
+        let s = stroke(
+            &[[0.1, 0.5], [0.3, 0.5], [0.5, 0.5], [0.7, 0.5], [0.9, 0.5]],
+            0.02,
+            0.01,
+            false,
+        );
+        for cap in [2usize, 4, 8] {
+            let dabs = dabs_for_stroke(&s, 4096, 2731, cap);
+            assert_eq!(dabs.len(), cap, "cap {cap}");
+            let end = 0.9 * 4096.0;
+            assert!(
+                (dabs.last().unwrap().cx - end).abs() < 1.0,
+                "cap {cap}: stops short"
+            );
+        }
     }
 
     #[test]

@@ -112,8 +112,9 @@ pub fn ai_bake_key(source: &MaskSource, neutral_key: blake3::Hash) -> Option<bla
 pub fn hash_group(group: &MaskGroup) -> blake3::Hash {
     let mut h = blake3::Hasher::new();
     h.update(b"mask-group-2");
-    h.update(&(group.components.len() as u64).to_le_bytes());
-    for comp in &group.components {
+    let MaskGroup { components } = group;
+    h.update(&(components.len() as u64).to_le_bytes());
+    for comp in components {
         let MaskComponent {
             source,
             op,
