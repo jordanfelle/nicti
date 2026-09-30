@@ -1164,6 +1164,137 @@ mod tests {
         assert_eq!(spot_key(&a), spot_key(&a.clone()));
     }
 
+    /// Wall-clock cost of the heal stage (frame copy + spots + GPU sync) on the machine's own
+    /// adapter, per `docs/benchmarks.md`'s protocol (1 warm-up, 5 measured, p50/p95). Not run in
+    /// CI. Use a persistent kernel (ADR-0016's "never rebuild a pipeline in the timing loop"), and
+    /// a real adapter -- a software one (lavapipe/WARP) is refused as meaningless:
+    ///
+    /// ```text
+    /// NICTI_WGPU_BACKEND=vulkan cargo test -p nicti-tapetum --release heal::tests::throughput \
+    ///   -- --ignored --nocapture
+    /// ```
+    ///
+    /// The "0 spots" row is the fixed cost of copying the frame, so a spot's own cost is the
+    /// difference to it. This is end-to-end (submit + readback-free fence), unlike ADR-0050's
+    /// kernel-only `TIMESTAMP_QUERY` proxy for the Jacobi dispatches.
+    #[test]
+    #[ignore = "timing measurement; needs a real GPU adapter"]
+    fn throughput() {
+        use crate::gpu::GpuPreference;
+        let gpu = GpuContext::new(GpuPreference::Auto).expect("an adapter");
+        println!(
+            "adapter: {} ({:?}), software: {}",
+            gpu.adapter_name, gpu.backend, gpu.is_software
+        );
+        assert!(
+            !gpu.is_software,
+            "a software adapter's timings are meaningless"
+        );
+        let kernel = HealKernel::new(&gpu);
+
+        let frames = [
+            ("screen 3840x2560", 3840u32, 2560u32),
+            ("full 8280x5520", 8280, 5520),
+        ];
+        for (label, w, h) in frames {
+            let extent = Extent {
+                width: w,
+                height: h,
+            };
+            // Uniform gray input: content doesn't affect the cost of any pass.
+            let input = FrameTexture::new(&gpu, extent);
+            let output = FrameTexture::new(&gpu, extent);
+            let spot = |kind: SpotKind, i: u32, r: f32| {
+                let c = (400.0 + 90.0 * i as f32, 500.0 + 40.0 * i as f32);
+                let mut s = Spot::heal_spot(c, r, (300.0, 0.0), r * 0.3);
+                s.kind = kind;
+                s
+            };
+            let patch = |side: u32| {
+                let px = vec![[0.5, 0.5, 0.5, 1.0]; (side * side) as usize];
+                RemovalPatch::new((1000, 1000), side, px).unwrap()
+            };
+            let scenarios: Vec<(&str, Vec<Spot>, RemovalSet)> = vec![
+                ("0 spots (frame copy only)", vec![], RemovalSet::new()),
+                (
+                    "1 heal r=24",
+                    vec![spot(SpotKind::Heal, 0, 24.0)],
+                    RemovalSet::new(),
+                ),
+                (
+                    "10 heal r=24",
+                    (0..10).map(|i| spot(SpotKind::Heal, i, 24.0)).collect(),
+                    RemovalSet::new(),
+                ),
+                (
+                    "1 heal r=100",
+                    vec![spot(SpotKind::Heal, 0, 100.0)],
+                    RemovalSet::new(),
+                ),
+                (
+                    "1 heal r=300",
+                    vec![spot(SpotKind::Heal, 0, 300.0)],
+                    RemovalSet::new(),
+                ),
+                (
+                    "1 clone r=100",
+                    vec![spot(SpotKind::Clone, 0, 100.0)],
+                    RemovalSet::new(),
+                ),
+                (
+                    "10 clone r=24",
+                    (0..10).map(|i| spot(SpotKind::Clone, i, 24.0)).collect(),
+                    RemovalSet::new(),
+                ),
+                (
+                    "1 AI patch 513x513",
+                    {
+                        let mut s = spot(SpotKind::Remove, 0, 100.0);
+                        s.mask_recipe = Some(coat::MaskRecipe {
+                            model_id: "b".into(),
+                            model_version: "1".into(),
+                            params: serde_json::json!({}),
+                            seed: None,
+                        });
+                        vec![s]
+                    },
+                    RemovalSet::new(),
+                ),
+            ];
+            println!("--- {label} ---");
+            for (name, spots, mut removals) in scenarios {
+                if name.starts_with("1 AI patch") {
+                    removals.insert(spot_key(&spots[0]), std::sync::Arc::new(patch(513)));
+                }
+                let params = HealParams { spots };
+                let run = || {
+                    let t = std::time::Instant::now();
+                    let mut enc = gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    HealExec {
+                        kernel: &kernel,
+                        params: &params,
+                        removals: &removals,
+                    }
+                    .encode(&gpu, &mut enc, Some(&input), &output);
+                    gpu.queue.submit(Some(enc.finish()));
+                    gpu.device
+                        .poll(wgpu::PollType::wait_indefinitely())
+                        .expect("poll");
+                    t.elapsed().as_secs_f64() * 1000.0
+                };
+                let _warmup = run();
+                let mut ms: Vec<f64> = (0..5).map(|_| run()).collect();
+                ms.sort_by(|a, b| a.total_cmp(b));
+                println!(
+                    "{name:<28} p50 {:>8.2} ms   p95 {:>8.2} ms   max {:>8.2} ms",
+                    ms[2], ms[4], ms[4]
+                );
+            }
+        }
+    }
+
     #[test]
     fn spot_geometry_rounds_and_sizes_the_patch() {
         let g = spot_geometry(&Spot::clone_spot((10.4, 20.6), 4.2, (3.0, -2.0), 1.0)).unwrap();
