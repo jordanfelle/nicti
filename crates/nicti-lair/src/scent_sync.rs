@@ -79,6 +79,22 @@ pub struct Markers {
     pub keywords: BTreeSet<Vec<String>>,
 }
 
+/// One keyword path segment in canonical form: trimmed, and with `|` (the `lr:hierarchicalSubject`
+/// separator, which can't be escaped) replaced by `/`. Applied to *both* sides so a name that
+/// can't survive the XMP round trip still compares equal to itself instead of flapping forever.
+fn norm_segment(seg: &str) -> String {
+    seg.trim().replace('|', "/")
+}
+
+fn norm_path<I: IntoIterator<Item = String>>(segs: I) -> Option<Vec<String>> {
+    let p: Vec<String> = segs
+        .into_iter()
+        .map(|s| norm_segment(&s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!p.is_empty()).then_some(p)
+}
+
 impl Markers {
     fn is_empty(&self) -> bool {
         *self == Markers::default()
@@ -101,8 +117,7 @@ impl Markers {
         let mut keywords: BTreeSet<Vec<String>> = meta
             .hierarchical_keywords
             .iter()
-            .filter(|p| !p.is_empty())
-            .cloned()
+            .filter_map(|p| norm_path(p.iter().cloned()))
             .collect();
         let leaves: BTreeSet<&str> = keywords
             .iter()
@@ -112,7 +127,7 @@ impl Markers {
             .keywords
             .iter()
             .filter(|k| !leaves.contains(k.as_str()))
-            .map(|k| vec![k.clone()])
+            .filter_map(|k| norm_path([k.clone()]))
             .collect();
         keywords.extend(flat_only);
         Markers {
@@ -135,13 +150,10 @@ impl Markers {
             rating: Some(self.rating),
             label: Some(self.label.clone()),
             keywords: Some(flat),
-            hierarchical_keywords: Some(
-                self.keywords
-                    .iter()
-                    .filter(|p| p.len() > 1)
-                    .cloned()
-                    .collect(),
-            ),
+            // Every keyword goes in as a path, single-segment ones included: that is what lets a
+            // top-level "Anthrocon" and an "Events|Anthrocon" on one photo stay two keywords on
+            // read-back (a flat entry that is the leaf of any path is treated as that path's).
+            hierarchical_keywords: Some(self.keywords.iter().cloned().collect()),
             nicti_pick: Some(self.pick),
             ..Default::default()
         }
@@ -170,15 +182,15 @@ fn keyword_name_paths(
         .collect();
     Ok(tagged
         .iter()
-        .map(|k| {
-            k.path
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse::<i64>().ok())
-                .filter_map(|id| names.get(&id).cloned())
-                .collect::<Vec<_>>()
+        .filter_map(|k| {
+            norm_path(
+                k.path
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .filter_map(|id| names.get(&id).cloned()),
+            )
         })
-        .filter(|p| !p.is_empty())
         .collect())
 }
 
@@ -340,10 +352,21 @@ pub fn import_sidecar(
         return Ok(SyncOutcome::InSync);
     }
 
+    // A conflict already held for review stays held until someone resolves it (`resolve_review`):
+    // the catalog-dirty time recorded at hold time is when the *write was attempted*, not when
+    // the user's edit raced the file, so re-running newer-wins here would quietly overwrite the
+    // un-ingested edit the hold exists to protect.
+    if prior.as_ref().is_some_and(|p| p.needs_review) {
+        return Ok(SyncOutcome::NeedsReview);
+    }
+
     // Who wins? With no record of a prior sync, the catalog's edits are unknown: a pristine
     // catalog yields to the file, anything else is held for review rather than guessed at.
     let resolution = match (&prior, state.catalog_dirty_since_ms) {
         (None, _) if catalog.is_empty() => Resolution::PreferSidecar,
+        // The file carries no markers at all (e.g. only `crs:` develop data), so there is nothing
+        // in it to lose: the catalog's markers are simply added to it.
+        (None, _) if loaded.markers.is_empty() => Resolution::PreferCatalog,
         (None, _) => Resolution::FlagForManualReview,
         (Some(_), None) => Resolution::PreferSidecar,
         (Some(_), Some(dirty_ms)) => resolve_conflict(

@@ -451,3 +451,139 @@ fn a_corrupt_sidecar_is_reported_but_does_not_fail_the_ingest() {
     assert!(report.failed.is_empty());
     assert_eq!(report.sidecar_errors.len(), 1);
 }
+
+// ---- regression tests for the pre-PR adversarial review's confirmed findings ----
+
+fn tag_path(f: &Fixture, path: &[&str]) {
+    let mut parent = None;
+    for seg in path {
+        parent = Some(
+            match f
+                .catalog
+                .keyword_by_path(&path[..=path.iter().position(|s| s == seg).unwrap()])
+                .unwrap()
+            {
+                Some(k) => k.id,
+                None => f.catalog.create_keyword(parent, seg).unwrap(),
+            },
+        );
+    }
+    f.catalog.tag(&[f.asset_id], parent.unwrap()).unwrap();
+}
+
+#[test]
+fn special_characters_round_trip_through_a_write_and_a_reimport_without_renaming() {
+    let f = fixture();
+    set(&f, Some(2), Some("Tom & Jerry"));
+    tag_path(&f, &["Tom & Jerry"]);
+    tag_path(&f, &["a<b"]);
+    tag_path(&f, &["it's \"q\""]);
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    let before = catalog_markers(&f.catalog, f.asset_id).unwrap();
+
+    // LRC touches an unrelated attribute, so the hash changes and the file is re-read.
+    let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
+    fs::write(
+        sidecar(&f.raw),
+        text.replacen(
+            "<rdf:Description",
+            "<rdf:Description xmlns:foo=\"urn:foo\" foo:x=\"1\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let out = import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    assert_eq!(
+        out,
+        SyncOutcome::InSync,
+        "an unrelated change must not look like a marker change"
+    );
+    assert_eq!(catalog_markers(&f.catalog, f.asset_id).unwrap(), before);
+    assert_eq!(before.label.as_deref(), Some("Tom & Jerry"));
+}
+
+#[test]
+fn a_held_conflict_is_not_resolved_by_the_next_rescan() {
+    let f = fixture();
+    fs::write(sidecar(&f.raw), xmp("xmp:Rating=\"3\"", "")).unwrap();
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+
+    // LRC adds a keyword (un-ingested); nicti then changes the rating and is held.
+    let lrc = xmp("xmp:Rating=\"3\"", &bag("dc:subject", &["lrc-keyword"]));
+    fs::write(sidecar(&f.raw), &lrc).unwrap();
+    set(&f, Some(5), None);
+    assert_eq!(
+        write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms() + 30_000).unwrap(),
+        SyncOutcome::NeedsReview
+    );
+    // A rescan well after the file's mtime must not flip the hold into an overwrite.
+    assert_eq!(
+        import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms() + 60_000).unwrap(),
+        SyncOutcome::NeedsReview
+    );
+    assert_eq!(fs::read_to_string(sidecar(&f.raw)).unwrap(), lrc);
+}
+
+#[test]
+fn a_bad_rating_is_an_error_that_leaves_the_catalog_alone() {
+    for bad in ["6", "-2", "200", "abc", "3.5"] {
+        let f = fixture();
+        set(&f, Some(3), None);
+        mark_catalog_dirty(&f.catalog, f.asset_id, &f.raw, 1).unwrap();
+        fs::write(sidecar(&f.raw), xmp(&format!("xmp:Rating=\"{bad}\""), "")).unwrap();
+        assert!(
+            import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).is_err(),
+            "{bad}"
+        );
+        assert_eq!(
+            catalog_markers(&f.catalog, f.asset_id).unwrap().rating,
+            Some(3),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn a_top_level_keyword_and_a_nested_one_with_the_same_leaf_stay_distinct() {
+    let f = fixture();
+    tag_path(&f, &["Anthrocon"]);
+    tag_path(&f, &["Events", "Anthrocon"]);
+    let before = catalog_markers(&f.catalog, f.asset_id).unwrap();
+    assert_eq!(before.keywords.len(), 2);
+
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    // Reading back the file nicti wrote yields the same marker set, so nothing flaps.
+    let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
+    let back = nicti_lair::scent_sync::Markers::from_lrc(&lrc_fields::read(&text).unwrap());
+    assert_eq!(back.keywords, before.keywords);
+    assert_eq!(
+        write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::InSync
+    );
+}
+
+#[test]
+fn a_pipe_in_a_keyword_name_is_stable_not_a_perpetual_diff() {
+    let f = fixture();
+    tag_path(&f, &["x", "a|b"]);
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    assert_eq!(
+        write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::InSync
+    );
+}
+
+#[test]
+fn a_sidecar_with_no_markers_is_filled_from_a_rated_catalog_not_flagged() {
+    let f = fixture();
+    set(&f, Some(4), None);
+    fs::write(sidecar(&f.raw), xmp("crs:WhiteBalance=\"Custom\"", "")).unwrap();
+    assert_eq!(
+        import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::WroteSidecar
+    );
+    let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
+    assert!(text.contains("crs:WhiteBalance=\"Custom\""), "{text}");
+    assert_eq!(lrc_fields::read(&text).unwrap().rating, Some(4));
+    assert!(f.catalog.sidecar_review_assets().unwrap().is_empty());
+}

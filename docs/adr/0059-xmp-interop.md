@@ -331,7 +331,24 @@ confirms or amends them; #60 builds against them as written.
   (foreign namespaces, including `crs:`, preserved), go through `atomic_write`, and record the
   hash of the bytes written. A sidecar that can't be read or parsed is an error, never a blank
   packet. One process-wide lock covers the read-hash -> gate -> write -> record sequence.
-- **Known limits**: a sidecar that uses `lr:`/`dc:` elements without declaring the namespace
-  would get an unbound prefix if nicti adds keywords to it (LRC always declares them); no
-  keyword-tagging UI exists in pelt yet, so keywords only flow sidecar -> catalog in practice.
-
+- **Known limits** (deliberate, tracked as follow-ups rather than fixed in #60):
+  - Keywords are all written as `lr:hierarchicalSubject` paths, single-segment ones included, so a
+    top-level and a nested keyword sharing a leaf stay distinct; whether LRC writes top-level
+    keywords there too is unverified (#187). A `|` in a keyword name (the separator can't be
+    escaped) is replaced by `/` on both sides, so it compares stable but is renamed on import.
+  - `Markers` compares keyword names case-sensitively while the catalog folds case, so a
+    case-only difference converges on the next write rather than flagging forever.
+  - `apply_to_catalog` is not one transaction (rating/flag/label commit, then keywords); a
+    failure partway leaves a partial apply until the next sync. Bad ratings are rejected at parse
+    time so the known trigger is closed.
+  - A rescan can write a sidecar with auto-write **off** when the catalog is dirty and newer
+    (ADR-0021 newer-wins); turning auto-write back on doesn't flush already-dirty assets until
+    their next marker change. A sync that lands between a marker write and the writer thread
+    picking it up sees the catalog as clean.
+  - The stat-based mtime precheck can miss a rewrite that preserves the recorded mtime
+    (`rsync -t`, FAT's 2 s granularity).
+  - `keyword_name_paths` reads the whole keyword table per tagged asset: O(tagged assets x
+    keywords) per rescan. Only the first `rdf:Description` is patched while the reader merges all
+    of them. The write-back only covers culling markers; there is no keyword-tagging UI yet.
+  - A sidecar that uses `lr:`/`dc:` elements without declaring the namespace would get an unbound
+    prefix if nicti adds keywords to it (LRC always declares them).

@@ -175,10 +175,10 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         for attr in orig.attributes() {
             let attr = attr?;
             let key = attr.key;
-            if is_local(key, "Rating") && patch.rating.is_some() {
+            if key.as_ref() == b"xmp:Rating" && patch.rating.is_some() {
                 continue;
             }
-            if is_local(key, "Label") && patch.label.is_some() {
+            if key.as_ref() == b"xmp:Label" && patch.label.is_some() {
                 continue;
             }
             if is_local(key, "editDocument") && patch.nicti_edit_document.is_some() {
@@ -229,8 +229,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         while i < desc_end_idx {
             let is_subject = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "subject"));
             let is_hier = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "hierarchicalSubject"));
-            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Rating"));
-            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Label"));
+            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"xmp:Rating");
+            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"xmp:Label");
             if (is_subject && patch.keywords.is_some())
                 || (is_hier && patch.hierarchical_keywords.is_some())
                 || (is_rating && patch.rating.is_some())
@@ -565,5 +565,36 @@ mod tests {
         .unwrap();
         assert_eq!(out.matches("xmlns:nicti=").count(), 1, "{out}");
         assert!(lrc_fields::read(&out).unwrap().pick);
+    }
+
+    #[test]
+    fn patching_never_touches_foreign_rating_or_label_properties() {
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/" xmp:Rating="1" MicrosoftPhoto:Rating="75"/></rdf:RDF></x:xmpmeta>"#;
+        let out = apply(
+            xmp,
+            &Patch {
+                rating: Some(Some(4)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.contains("MicrosoftPhoto:Rating=\"75\""), "{out}");
+        assert_eq!(lrc_fields::read(&out).unwrap().rating, Some(4));
+    }
+
+    #[test]
+    fn special_characters_survive_a_write_then_read() {
+        let out = apply(
+            SAMPLE,
+            &Patch {
+                label: Some(Some("Tom & Jerry <\"x\">".into())),
+                keywords: Some(vec!["a&b".into(), "it's".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let meta = lrc_fields::read(&out).unwrap();
+        assert_eq!(meta.label.as_deref(), Some("Tom & Jerry <\"x\">"));
+        assert_eq!(meta.keywords, vec!["a&b", "it's"]);
     }
 }

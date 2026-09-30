@@ -108,6 +108,10 @@ impl XmpWriter {
                             scent_sync::mark_catalog_dirty(&*store, id, &raw, now_ms())
                         };
                         if let Err(e) = result {
+                            // A failed write (sidecar locked by LRC, unparseable at that moment)
+                            // must not look like "nothing changed": record that the catalog is
+                            // now newer, so a later rescan doesn't let the file silently win.
+                            let _ = scent_sync::mark_catalog_dirty(&*store, id, &raw, now_ms());
                             st.lock().unwrap().last_error = Some(e.to_string());
                         }
                     }

@@ -27,7 +27,11 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
         .into_owned();
     let tmp_path = dir.join(format!(".{file_name}.scent-tmp"));
     fs::write(&tmp_path, contents)?;
-    fs::rename(&tmp_path, path)?;
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        // e.g. Windows refusing to replace a sidecar LRC has open: don't leave the temp behind.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
     Ok(())
 }
 
