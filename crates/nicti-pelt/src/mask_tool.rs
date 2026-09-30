@@ -32,6 +32,9 @@ use crate::render::DevelopView;
 
 /// A bake that finished for the photo currently open.
 pub struct MaskEvent {
+    /// Which bake (`compose::ai_bake_key`); the app reads results back through the `DevelopView`,
+    /// so only tests and future status UI look at this.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub bake_key: blake3::Hash,
     pub result: Result<Arc<AiAlpha>, String>,
 }
@@ -84,7 +87,7 @@ impl MaskBakeService {
     }
 
     /// True when the model `model_id` names still has something to download.
-    fn model_missing(&self, model_id: &str) -> bool {
+    pub fn model_missing(&self, model_id: &str) -> bool {
         let Some(provider) = self.registry.get(model_id) else {
             return false; // an unknown model is a resolve error at bake time, not a download
         };
@@ -98,6 +101,12 @@ impl MaskBakeService {
                 .any(|a| store.status(a) != Status::Installed),
             None => true,
         }
+    }
+
+    /// True if a provider is registered under `model_id` (an edit from a newer build, or an
+    /// import, may name one this build doesn't have -- the panel shows it as unavailable).
+    pub fn knows_model(&self, model_id: &str) -> bool {
+        self.registry.get(model_id).is_some()
     }
 
     /// Bytes the user would download to satisfy the masks that are waiting on a model, or `None`
@@ -283,6 +292,11 @@ impl MaskBakeService {
     /// offers Repair).
     pub fn needs_repair(&self) -> bool {
         self.failed.values().any(|m| m.contains("integrity check"))
+    }
+
+    /// True if any bake has failed and not been retried.
+    pub fn has_failures(&self) -> bool {
+        !self.failed.is_empty()
     }
 
     /// Forgets every failure so the next `request_missing` tries again (the Retry button).

@@ -583,6 +583,11 @@ impl DevelopView {
         self.ai_alphas.insert(bake_key, alpha);
     }
 
+    /// The finished alpha for `bake_key`, if it has arrived (the overlay preview reads it).
+    pub fn ai_alpha(&self, bake_key: &blake3::Hash) -> Option<Arc<AiAlpha>> {
+        self.ai_alphas.get(bake_key).map(Arc::clone)
+    }
+
     /// True once `bake_key`'s alpha has arrived.
     pub fn has_ai_alpha(&self, bake_key: &blake3::Hash) -> bool {
         self.ai_alphas.contains_key(bake_key)

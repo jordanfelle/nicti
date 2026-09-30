@@ -115,12 +115,22 @@ pub struct BakeRequest {
     pub recipe: MaskRecipe,
 }
 
-/// Every distinct AI recipe the *active* corrections use, keyed by bake key, in first-use order.
+/// Every distinct AI recipe the *enabled* corrections use, keyed by bake key, in first-use order.
 /// A mask and its inverse (same recipe) yield one request.
+///
+/// *Enabled*, not *active*: a freshly added "Select Subject" has no adjustment yet (so the engine
+/// treats it as inert), but the user is looking at its selection and expects it to appear. Baking is
+/// what makes that selection exist, so it must not wait for the first slider move. A disabled
+/// correction is not baked.
 pub fn bake_requests(params: &MaskParams, neutral_key: blake3::Hash) -> Vec<BakeRequest> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for correction in params.sanitized().active() {
+    for correction in params
+        .sanitized()
+        .corrections
+        .iter()
+        .filter(|c| c.enabled && !c.mask.components.is_empty())
+    {
         for component in &correction.mask.components {
             if let (Some(key), Some(recipe)) = (
                 ai_bake_key(&component.source, neutral_key),
@@ -156,7 +166,7 @@ pub fn referenced_bake_keys(
 /// Stamps which AI alphas are ready into the document's masks entry as `"ai_alphas": {bake key hex
 /// -> alpha content hash hex}`. [`MaskParams`] ignores the unknown field when parsing, but
 /// `apply_document` hashes the whole entry, so an alpha arriving (or being replaced) changes the
-/// live composite's key through the normal path rather than a side channel. Only alphas an *active*
+/// live composite's key through the normal path rather than a side channel. Only alphas an *enabled*
 /// correction uses are stamped, so one arriving for a disabled mask can't thrash the cache. A
 /// no-op when the document has no masks entry or nothing it uses is ready.
 pub fn stamp_ai_alpha_state(
@@ -411,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn stamping_marks_only_alphas_an_active_correction_uses() {
+    fn stamping_marks_only_alphas_an_enabled_correction_uses() {
         let neutral = blake3::hash(b"neutral");
         let subject = MaskSource::Ai(recipe("subject"));
         let sky = MaskSource::Ai(recipe("sky"));
@@ -465,6 +475,24 @@ mod tests {
         let second = hash_with(&HashMap::from([(key, blake3::hash(b"b"))]));
         assert_ne!(none, first, "an alpha arriving must rebake the composite");
         assert_ne!(first, second, "a replaced alpha must rebake it too");
+    }
+
+    #[test]
+    fn a_freshly_added_ai_mask_with_no_adjustment_yet_is_still_baked() {
+        let neutral = blake3::hash(b"neutral");
+        let mut fresh = correction(vec![component(
+            MaskSource::Ai(recipe("subject")),
+            Op::Add,
+            false,
+            1.0,
+        )]);
+        fresh.adjust = LocalAdjust::default(); // nothing adjusted: inert to the engine...
+        let params = MaskParams {
+            corrections: vec![fresh],
+        };
+        assert_eq!(params.active().count(), 0);
+        // ...but the user is looking at its selection, so it must be baked now.
+        assert_eq!(bake_requests(&params, neutral).len(), 1);
     }
 
     #[test]

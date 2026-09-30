@@ -39,6 +39,8 @@ use crate::render::DevelopView;
 pub enum Tool {
     Crop,
     Heal,
+    /// Local-adjustment masks (#49).
+    Mask,
 }
 
 const MIN_RADIUS: f32 = 4.0;
@@ -430,6 +432,11 @@ impl HealUi {
     pub fn heal_active(&self) -> bool {
         self.tool == Tool::Heal
     }
+
+    /// True while the Masks tool owns the viewport (#49).
+    pub fn mask_active(&self) -> bool {
+        self.tool == Tool::Mask
+    }
 }
 
 /// Removes the spot at `index` and prunes patches that no longer belong to any spot.
@@ -797,6 +804,7 @@ pub fn tool_switch(ui: &mut egui::Ui, heal: &mut HealUi) {
         ui.label("Tool");
         ui.selectable_value(&mut heal.tool, Tool::Crop, "Crop");
         ui.selectable_value(&mut heal.tool, Tool::Heal, "Heal / Remove");
+        ui.selectable_value(&mut heal.tool, Tool::Mask, "Masks");
     });
 }
 
