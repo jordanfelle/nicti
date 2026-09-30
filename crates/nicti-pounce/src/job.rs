@@ -63,6 +63,8 @@ pub enum JobKind {
     Thumbnail,
     /// The library grid's ordered id snapshot (#30) -- one index-ordered catalog scan. CPU lane.
     Snapshot,
+    /// An explicit, user-initiated model download (#51, ADR-0218) -- network/disk-bound, CPU lane.
+    Download,
 }
 
 /// Static metadata a job declares up front, before it runs -- what the scheduler needs to make an

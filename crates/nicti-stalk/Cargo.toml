@@ -4,10 +4,22 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "AI model provider extension point (ADR-0019 §8). Crate boundary only — execution and the ort/load-dynamic ONNX runtime boundary (ADR-0019 §3) are owned by the AI-labeled tickets (#48-#53, #35, #34, #33, #36)."
+description = "AI model provider extension point (ADR-0019 §8) plus the on-demand model store (#51, ADR-0218/ADR-0051): a compiled-in manifest of pinned, checksummed model artifacts and the explicit, user-initiated download/verify/install path for them. Inference itself lives in the crates that own each model (e.g. nicti-groom for MobileSAM/LaMa)."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
+sha2 = "0.11"
+thiserror = "2"
+# Only the ORT runtime artifact ships as a zip (Windows); deflate via flate2's pure-Rust backend
+# keeps this off the C/zstd/bzip2 defaults, none of which a release zip needs.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# ureq's native-tls feature rides the OS trust store (Windows SChannel) rather than bundling
+# webpki-roots, whose CDLA-Permissive-2.0 license isn't on deny.toml's allowlist -- same choice,
+# same reason as nicti-shed (see its Cargo.toml). windows-only since that's the only platform
+# this download path runs on (ADR-0015's v1 scope).
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
 [dev-dependencies]
 serde_json = "1"

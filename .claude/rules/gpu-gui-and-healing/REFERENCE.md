@@ -1,7 +1,8 @@
 ---
 paths:
   - "spikes/glint/**"
-  - "spikes/groom/**"
+  - "crates/nicti-groom/**"
+  - "crates/nicti-stalk/**"
   - "crates/nicti-tapetum/**"
   - "crates/nicti-pelt/**"
 ---
@@ -45,14 +46,48 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   Ships both classic clone/heal (CPU Poisson-Jacobi + `wgpu` compute-shader twin) and AI removal
   (MobileSAM+LaMa via `ort`/`load-dynamic`) as two `SpotKind` variants of one `HealStage`.
   **GPU Poisson-solve validated on real RTX 5080 hardware: 0.386ms p50 (Vulkan) vs. the <16ms/
-  update target** — ~40x headroom; see #97's WSL-has-no-NVIDIA-Vulkan-ICD gotcha below. **AI
-  removal latency/quality still TBD** — real ONNX weights are #51's scope, not obtained here; the
-  wrappers prove only the loading/error-handling shape. LaMa's Places2 training-data license
-  status is still unresolved (unreachable primary source); MI-GAN investigated as an alternative,
-  not cleaner (same exposure). Proposed stage order for #44: after lens correction, before global
+  update target** — ~40x headroom; see #97's WSL-has-no-NVIDIA-Vulkan-ICD gotcha below. **(State
+  as of #50/#97 -- #51 has since measured AI removal and resolved the LaMa question by owner
+  sign-off; see the "Built in #51" bullet below.)** At the time, AI removal latency/quality was
+  TBD and LaMa's Places2 license status unresolved (unreachable primary source); MI-GAN was
+  investigated as an alternative and found not cleaner (same exposure). Proposed stage order for #44: after lens correction, before global
   tone, in linear space. **Model loading must follow ADR-0218**: offline inference by default, no
   telemetry, no hosted API; weight fetch only as an explicit user-initiated + checksummed
   download, never a silent auto-fetch.
+  - **Built in #51 (`docs/adr/0051`)**: `spikes/groom` deleted/promoted. Classic heal = real baked
+    stage `nicti-tapetum::heal` (`HealStage`/`HealKernel`/`HealExec`, `shaders/heal.wgsl`,
+    `coat::HealParams`); AI removal = `nicti-groom` (`remove::RemovalEngine` → `RemovalPatch`);
+    model store = `nicti-stalk::models`. **RTX 5080 (noisy shared GPU, ranges): 1 heal r=24 ≈ 1.2-2.2 ms, r=100 ≈ 3-6 ms, r=300 ≈ 8-28 ms, 10 heals ≈ 7-18 ms** (end to end) — big/many heals reach the 16 ms budget.
+    **AI removal on the CPU ORT build ≈ 3-4 s — misses the <2 s CUDA-EP target**; quality checked
+    on synthetic scenes only. **LaMa = on-demand download only, owner sign-off 2026-09-29.**
+  - **Gotcha (#51, real hardware only)**: the heal suite passed on lavapipe + Vulkan and **failed on
+    the RTX 5080 under Dx12** (Jacobi chain garbage from sweep 3; CI's Windows job is WARP/Dx12, so
+    it would have failed the required check). Fixes: read inputs as sampled `texture_2d` +
+    `textureLoad` (NOT `texture_storage_2d<.., read>`), write-only storage outputs, reset scratch by
+    copy from a zero texture per spot, and copy each Jacobi sweep back instead of swapping roles.
+    Mechanism inferred, not confirmed. **Always run new GPU kernels on the reference machine under
+    BOTH backends** (`NICTI_WGPU_BACKEND=vulkan|dx12` with the cross-built `.exe`); other shaders
+    still using `read` storage textures (`detail_blur`, `present_sample`, ...) are unaudited.
+  - **Gotcha (#51)**: **Jacobi must not start from the destination** — it needs ~side² sweeps to
+    smooth a blemish and we run 50-400, so a blemish over ~half the spot survived (Heal was a
+    near no-op). `boundary_mean`+`init_heal` start at source + mean ring offset. GPU-vs-CPU parity
+    tests can't catch this (reference shares the algorithm): keep `heal_actually_removes_the_blemish`
+    (asserts the outcome, mutation-checked). Also: bound per-render work (`MAX_SPOTS`,
+    `MAX_JACOBI_PASSES`) and clamp document coordinates (`COORD_LIMIT`) — documents are untrusted.
+  - **Gotcha (#51)**: a finished patch isn't a params change, so `heal::stamp_removal_state` stamps
+    `"removals": {spot key → patch hash}` into the heal entry the *render* sees (never the stored
+    one) — that is how a patch arriving rebakes the stage; overriding `own_hash` after
+    `apply_document` would thrash the memo (it resets the hash every render).
+  - **Gotcha (#51)**: `RemoveJob`/`InstallModelsJob` must return `Ok(Step::Done)` on a *removal or
+    download* failure and resolve their slot with the error — a `step()` `Err` makes Pounce drop
+    the job without touching the slot, leaving the UI waiting forever (same rule as `DecodeJob`).
+  - **Gotcha (#51)**: egui's `drag_started` fires *after* the pointer crosses the drag threshold, so
+    hit-test and anchor a drag at `ui.input(|i| i.pointer.press_origin())`, not
+    `interact_pointer_pos()`.
+  - **Dev/test**: models can be dropped in by hand at `$NICTI_MODELS_DIR/<id>/<file>` (exact
+    pinned size) with `NICTI_ORT_DYLIB` set; the real-weight tests are `#[ignore]`d in
+    `crates/nicti-groom/tests/real_models.rs` (env vars listed in its header); the heal
+    benchmark is `cargo test -p nicti-tapetum --release heal::tests::throughput -- --ignored`.
   - **Gotcha (#97)**: this WSL sandbox has no NVIDIA Vulkan ICD registered at all — `wgpu` here
     only reaches the software `llvmpipe` adapter (88ms p50, not real hardware), even though
     `libcuda.so`/D3D12 interop libs under `/usr/lib/wsl/lib/` give real CUDA/D3D12 access.
@@ -139,10 +174,22 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     release build (`cargo test -p nicti-lair --release --test scale -- --ignored --nocapture`):
     `hunt_ids` 37–270 ms (filename across all roots 1.1 s), first keyset page 0.19 ms,
     `get_previews` 64 × ~138 KB 6 ms. Not measured: real-machine grid frame time (#233).
-- **`spikes/groom`** (#50/ADR-0050) — healing/removal research: CPU clone-stamp/Poisson-heal +
-  auto-source-pick reference, a `wgpu` compute-shader Poisson twin proven correct against it,
-  `ort`/`load-dynamic` MobileSAM+LaMa wrapper scaffolding (no real ONNX weights in this sandbox,
-  and any real weight fetch must follow ADR-0218's user-initiated + checksummed download rule),
-  crop/resize/feather compositing, and the `HealStage`/`Spot` edit-model representation with a
-  pawprint-style `cache_key()`. See `docs/research/groom-healing-removal.md` for the LaMa/MI-GAN
-  licensing findings.
+- **`crates/nicti-tapetum`'s `heal.rs`** (#51) — the baked heal stage: `HealStage` (registry entry,
+  `impl_version`), `HealKernel` (pipelines built once), `HealExec` (one render's spots),
+  `RemovalPatch`/`RemovalSet`/`spot_key`/`stamp_removal_state` (AI patches), `spot_geometry` (integer
+  patch geometry shared with the CPU reference). `coat.rs` has `HealParams`/`Spot`/`SpotKind`/
+  `MaskRecipe`; `stages::normalize_pixels` is the public CPU twin of decode's normalize pass.
+- **`crates/nicti-groom`** (#51, promoted from `spikes/groom`) — AI removal + heal-source picking:
+  `sam.rs` (MobileSAM, real encoder/decoder contract, per-photo embedding cache), `lama.rs`,
+  `remove.rs` (`RemovalEngine`: prompt → mask → crop → inpaint → `RemovalPatch`), `space.rs`
+  (camera-linear ↔ model sRGB), `geom.rs` (resize, exact EDT, dilate/feather), `source.rs`
+  (`auto_source_pick`), `real.rs` (`LazyBackend`), `job.rs` (`RemoveJob`, Pounce GPU lane),
+  `install.rs` (`InstallModelsJob`, Pounce CPU lane). `tests/ort_cross_module.rs` is #179/#229's
+  cross-crate `ort` regression test, moved here from the deleted spike.
+- **`crates/nicti-stalk`'s `models.rs`** (#51) — the on-demand model store and pinned manifest
+  (`MOBILE_SAM_*`, `LAMA`, `ORT_RUNTIME`, `ModelStore`, `RemovalModels::locate`).
+- **`crates/nicti-pelt`'s `heal_tool.rs`** (#51) — the Crop | Heal tool: `HealUi`, gestures
+  (`handle_viewport`), panel (`show_panel`), `RemovalService` (install + backend + pending jobs).
+  `DevelopView` gained `uncropped_preview`, `set_removal`/`prune_removals`, `frame_arc`/`frame_key`.
+- ~~**`spikes/groom`**~~ (#50/ADR-0050) — deleted in #51; see `docs/research/groom-healing-removal.md`
+  for the LaMa/MI-GAN licensing findings it produced.

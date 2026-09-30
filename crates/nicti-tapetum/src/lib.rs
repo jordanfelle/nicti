@@ -15,6 +15,7 @@ pub mod frame;
 pub mod geometry;
 pub mod gpu;
 pub mod graph;
+pub mod heal;
 pub mod histogram;
 pub mod perk;
 pub mod prefetch;

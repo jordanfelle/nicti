@@ -73,3 +73,20 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
   latency stays gated on #51's weights, not on hardware access). Proposes (not commits)
   heal/remove's stage-order placement for #44: after lens correction, before global tone, in
   linear space.
+- **Healing/removal, the build (#51)**: `docs/adr/0051-healing-removal-build.md` — **Accepted**
+  (2026-09-29). `spikes/groom` is deleted and promoted: classic clone/heal became the real baked
+  `nicti.heal` stage in `nicti-tapetum::heal` (GPU passes on `Rgba16Float` textures, GPU-vs-CPU
+  parity-tested; **on the RTX 5080 (noisy shared GPU) 1 heal spot ≈ 1-6 ms up to r=100, r=300 ≈
+  8-28 ms, 10 heals ≈ 7-18 ms end to end** — large or numerous heals reach the 16 ms budget. The
+  adversarial review caught that the first Jacobi solve started from the destination and so left a
+  blemish in place; it now starts from source + mean boundary offset), and AI removal became `nicti-groom` (MobileSAM + LaMa against their **real**
+  tensor contracts, read from the ONNX files) producing a `RemovalPatch` the GPU blends in. A
+  finished patch reaches the render graph by being *stamped into the heal params the render sees*
+  (`heal::stamp_removal_state`), so it invalidates through the normal cache-key path. Models are
+  fetched only by an explicit click through `nicti-stalk::models` (pinned URL + size + SHA-256,
+  atomic, bounded, cancellable, per ADR-0218). **LaMa's Places2 flag was resolved by owner
+  sign-off for on-demand download only, never bundled — an accepted risk, not a legal conclusion.**
+  ONNX Runtime ships as the official CPU build (DirectML wasn't a single pinnable asset), so AI
+  removal measures ~3-4 s and **misses ADR-0050's <2 s target** (which assumed CUDA); quality was
+  verified on synthetic scenes only, never real photos. Deferred: GPU execution provider,
+  real-photo evaluation, undo/persistence (Develop-wide), LRC `RetouchInfo` import (#62).

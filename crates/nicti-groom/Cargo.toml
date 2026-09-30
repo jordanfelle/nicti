@@ -1,0 +1,29 @@
+[package]
+name = "nicti-groom"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "AI object removal (#51, ADR-0051), promoted from spikes/groom: MobileSAM click/box segmentation and LaMa inpainting over ort/load-dynamic with their real tensor contracts, the model-independent crop/resize/feather pipeline that turns a click into a RemovalPatch for nicti-tapetum's heal stage, the auto-source picker for clone/heal spots, and the Pounce GPU-lane RemoveJob. Named after a cat grooming debris out of its coat. Weights are never bundled -- see nicti-stalk's model store."
+
+[dependencies]
+nicti-cornea = { path = "../nicti-cornea" }
+nicti-haw = { path = "../nicti-haw" }
+nicti-pounce = { path = "../nicti-pounce" }
+nicti-stalk = { path = "../nicti-stalk" }
+nicti-tapetum = { path = "../nicti-tapetum" }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+sha2 = "0.11"
+# Only for tests/ort_cross_module.rs (#179/#229, moved here from the deleted spikes/groom): it
+# reproduces the real cross-crate `ort` environment race that motivated #179's fix, and #229's
+# shared-path-mismatch check, by driving every crate's `ensure_ort_environment` in one process.
+# None of these depend on nicti-groom, so this creates no cycle.
+siamese = { path = "../../spikes/siamese" }
+crouch = { path = "../../spikes/crouch" }
+rods = { path = "../../spikes/rods" }
+litter = { path = "../../spikes/litter" }
+rosette = { path = "../../spikes/rosette" }

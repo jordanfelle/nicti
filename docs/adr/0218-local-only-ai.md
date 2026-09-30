@@ -53,4 +53,7 @@ research) are the enforcement mechanism for that half of the requirement.
   module's own code to behave.
 - Deferred: the exact UI for the weight-installation flow and for the cloud-AI opt-in walkthrough
   are each their own ticket's scope (whichever of #49/#51/#53/#34-#36 ships the first real model),
-  not decided here.
+  not decided here. **Update (2026-09-29):** #51 shipped first. Its weight-installation flow is
+  `nicti-stalk::models` (a pinned, checksummed, atomic, user-initiated store) plus the Develop
+  panel's download prompt, which shows sources, size and license before the user agrees — see
+  [ADR-0051](0051-healing-removal-build.md). The cloud-AI opt-in walkthrough is still open.

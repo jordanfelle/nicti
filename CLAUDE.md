@@ -20,7 +20,7 @@ file under the line-count gate. Each topic has:
   of reasoning. Not auto-loaded by Claude Code, but a normal repo doc any contributor can read.
 
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
-`gpu-gui-and-healing` (0016/0068/0050), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
+`gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048), `culling` (0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101), `jobs` (0054), `export` (0056),
@@ -89,7 +89,7 @@ terse index: crate/spike → purpose → owning topic.
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
 - **`crates/nicti-haw`** (#229) — shared, process-wide `ort`/`load-dynamic` environment init,
-  replacing the six duplicated crate-local copies in `spikes/groom`/`siamese`/`crouch`/`rods`/
+  replacing the six duplicated crate-local copies in `groom` (now `nicti-groom`)/`siamese`/`crouch`/`rods`/
   `litter`/`rosette`; see its own doc comment for the cross-crate path-mismatch rationale.
 - **`crates/nicti-pounce`** (#55, landed) — Pounce: the production job scheduler, promoted from
   `spikes/crouch`'s research (#54/ADR-0054). `job.rs`/`cancel.rs`/`queue.rs`/`admission.rs`/
@@ -112,7 +112,12 @@ terse index: crate/spike → purpose → owning topic.
 - **`crates/nicti-iris`/`nicti-stalk`/`nicti-preen`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `LensCorrection` (#39),
-  `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57)
+  `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57). `nicti-stalk` also has `models.rs` (#51):
+  the on-demand, checksummed AI-model store + pinned manifest (ADR-0218)
+- **`crates/nicti-groom`** (#51, promoted from `spikes/groom`) — AI object removal (MobileSAM + LaMa
+  → `RemovalPatch`), the clone/heal auto-source picker, and the `RemoveJob`/`InstallModelsJob`
+  Pounce jobs; the GPU clone/heal itself is `nicti-tapetum`'s `heal.rs`, the UI is `nicti-pelt`'s
+  `heal_tool.rs` → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`crates/nicti-tapetum`** — Tapetum's (#44/#45) stage-cached render graph, the real
   `RenderStage` execution trait, and the concrete decode/live-suffix/geometry pipeline: a DAG of
   stage nodes with a blake3 cache key chained from upstream (`graph.rs`), byte-budgeted
@@ -121,7 +126,7 @@ terse index: crate/spike → purpose → owning topic.
   (`frame.rs`), `renderer.rs`'s graph-driven `Renderer` (proves ADR-0044's dispatch-count
   invariants against mock stages), and the real stages themselves (`stages.rs`): decode (uploads
   a `nicti_cornea::LinearFrame`, runs `normalize.wgsl`), passthrough slots for demosaic/denoise/
-  lens/heal (their own algorithms are #40/#39/#51), the fused live suffix (WB + camera→working
+  lens (their own algorithms are #40/#39; heal is real, #51, `heal.rs`), the fused live suffix (WB + camera→working
   -space color + exposure + tone + vibrance, `color.rs`, `live_suffix.wgsl`), and crop
   (`geometry.rs`, `present_sample.wgsl`) — every kernel has a GPU-vs-CPU parity test against a
   CPU reference, plus one end-to-end test wiring the whole chain through `Renderer`. These tests
@@ -191,7 +196,6 @@ terse index: crate/spike → purpose → owning topic.
   [`jobs`](.claude/rules/jobs/REFERENCE.md) for Pounce.
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
-- **`spikes/groom`** (#50/ADR-0050) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)
 - **`spikes/retina`** (#37/ADR-0037; own decode step promoted to `crates/nicti-cornea` in #41,
   see that bullet above) → [`raw-decoder`](.claude/rules/raw-decoder/REFERENCE.md)

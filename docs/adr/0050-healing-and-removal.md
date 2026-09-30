@@ -178,8 +178,8 @@ close doesn't reopen that decision.
 
 | Operation | Result |
 |---|---|
-| AI removal (MobileSAM + LaMa, CUDA EP) end-to-end latency | **TBD — real weights** (reference machine confirmed GPU-capable by #97; blocked on #51 obtaining actual checkpoints, not on hardware access) |
-| Quality (PSNR/LPIPS on synthetic holes) | **TBD — real weights** (same gate as above) |
+| AI removal (MobileSAM + LaMa, CUDA EP) end-to-end latency | **Measured by #51 on the CPU execution provider only: ~3.0 s (embedding cached) to ~4.3 s (first removal)** — the <2 s target was *not* evaluated on a GPU EP and the CPU build misses it. See [ADR-0051](0051-healing-removal-build.md) |
+| Quality (PSNR/LPIPS on synthetic holes) | **Partially measured by #51, synthetic scenes only** (fill within 0.005 mean abs. error of the true background; MobileSAM IoU 0.996). No PSNR/LPIPS and no real photographs yet — see ADR-0051 |
 
 <sup>Before the Windows run, the identical test compiled and run natively inside this WSL sandbox
 reported `backend=Vulkan adapter=llvmpipe (LLVM 21.1.8, 256 bits): p50_ms=88.4640` — a software
@@ -245,7 +245,7 @@ research this sandbox can't execute directly:
 
 ## Consequences
 
-- **Unblocks #51** (shipping AI removal): the `ort`/`load-dynamic` loading/error-handling shape is
+- **Unblocks #51** (shipping AI removal; built in [ADR-0051](0051-healing-removal-build.md)): the `ort`/`load-dynamic` loading/error-handling shape is
   proven; #51's real work is obtaining/validating actual MobileSAM+LaMa (or an alternative) ONNX
   weights and wiring their real multi-input contracts, which this spike deliberately simplified to
   a single input/output tensor (see `ai.rs`'s module doc comment) rather than guessing at a

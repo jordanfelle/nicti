@@ -110,12 +110,8 @@ pub fn lens_stage() -> BasicStage {
         default_params: || json!({}),
     }
 }
-pub fn heal_stage() -> BasicStage {
-    BasicStage {
-        id: HEAL,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
-    }
+pub fn heal_stage() -> crate::heal::HealStage {
+    crate::heal::HealStage
 }
 pub fn wb_stage() -> BasicStage {
     BasicStage {
@@ -361,6 +357,21 @@ impl BakedExec for DecodeExec<'_> {
             row_offset += strip_rows;
         }
     }
+}
+
+/// CPU twin of `normalize.wgsl`: the heal stage's exact input, as row-major linear camera RGBA
+/// (black level and per-channel `cblack` subtracted, scaled by `maximum - black` to roughly
+/// [0, 1]; alpha 1). The AI-removal path (#51) runs on this rather than reading a GPU texture
+/// back, so its patches are in precisely the space `heal.wgsl` composites them into. Kept honest
+/// by `decode_gpu_matches_cpu_reference`, which checks the GPU decode against this function.
+pub fn normalize_pixels(frame: &LinearFrame) -> Vec<[f32; 4]> {
+    let range = frame.maximum as f32 - frame.black as f32;
+    let sample = |i: usize, c: usize| {
+        (frame.pixels[i * 3 + c] as f32 - frame.black as f32 - frame.cblack[c] as f32) / range
+    };
+    (0..(frame.width * frame.height) as usize)
+        .map(|i| [sample(i, 0), sample(i, 1), sample(i, 2), 1.0])
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1234,23 +1245,11 @@ mod tests {
         }
     }
 
-    /// CPU reference for `normalize.wgsl`'s exact per-pixel formula.
+    /// CPU reference for `normalize.wgsl`'s exact per-pixel formula -- the production
+    /// `normalize_pixels`, so every decode parity test below also covers the function the AI
+    /// removal path relies on.
     fn normalize_cpu_reference(frame: &LinearFrame) -> Vec<[f32; 4]> {
-        let range = frame.maximum as f32 - frame.black as f32;
-        (0..(frame.width * frame.height) as usize)
-            .map(|i| {
-                let base = i * 3;
-                let r = (frame.pixels[base] as f32 - frame.black as f32 - frame.cblack[0] as f32)
-                    / range;
-                let g =
-                    (frame.pixels[base + 1] as f32 - frame.black as f32 - frame.cblack[1] as f32)
-                        / range;
-                let b =
-                    (frame.pixels[base + 2] as f32 - frame.black as f32 - frame.cblack[2] as f32)
-                        / range;
-                [r, g, b, 1.0]
-            })
-            .collect()
+        normalize_pixels(frame)
     }
 
     #[test]

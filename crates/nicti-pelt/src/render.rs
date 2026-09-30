@@ -22,14 +22,15 @@ use nicti_calico::profile::ProfileSolution;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::coat::{
-    self, CameraProfileParams, CropParams, ExposureParams, HslParams, NoiseReductionParams,
-    SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
+    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, output_encode};
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::{RenderGraph, StageKind, StageNode};
+use nicti_tapetum::heal::{self, HealExec, HealKernel, RemovalPatch, RemovalSet};
 use nicti_tapetum::histogram::{self, Histogram};
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
@@ -205,6 +206,17 @@ pub struct DevelopView {
     decode_kernel: DecodeKernel,
     live_kernel: LiveSuffixKernel,
     crop_kernel: CropKernel,
+    heal_kernel: HealKernel,
+    /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
+    /// photo changes: a patch is pixels inpainted from *this* frame and means nothing on another.
+    removals: RemovalSet,
+    /// Identity of the loaded photo as a `u64`, keying the removal engine's per-photo caches (its
+    /// model frame and SAM embedding). Changes whenever `load_real_frame` swaps the photo.
+    frame_key: u64,
+    /// When set, `render` shows the whole frame with no crop/straighten applied. The heal tool
+    /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
+    /// inverse crop transform in the way.
+    pub uncropped_preview: bool,
     renderer: Renderer,
     /// When true, `render()` renders with every stage at its default instead of `document`'s own
     /// values -- the before/after toggle.
@@ -233,6 +245,7 @@ impl DevelopView {
         let live_kernel = LiveSuffixKernel::new(&gpu);
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
+        let heal_kernel = HealKernel::new(&gpu);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
 
         Self {
@@ -245,6 +258,10 @@ impl DevelopView {
             decode_kernel,
             live_kernel,
             crop_kernel,
+            heal_kernel,
+            removals: RemovalSet::new(),
+            frame_key: 0,
+            uncropped_preview: false,
             renderer,
             show_before: false,
             profile_choices: Vec::new(),
@@ -334,11 +351,22 @@ impl DevelopView {
     /// gives a document with no entry for a stage, just applied to the whole document at once.
     pub fn render(&mut self) -> Arc<FrameTexture> {
         let empty;
+        let stamped;
         let doc = if self.show_before {
             empty = EditDocument::default();
             &empty
         } else {
-            &self.document
+            // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
+            // changing) rebakes the heal stage through the normal cache-key path.
+            let mut d = self.document.clone();
+            heal::stamp_removal_state(&mut d, &self.removals);
+            if self.uncropped_preview {
+                // Removing the entry (rather than only ignoring it below) also gives the crop node
+                // its default hash, so the cached cropped composite can't be served back.
+                d.stages.remove(CROP);
+            }
+            stamped = d;
+            &stamped
         };
         self.graph
             .apply_document(doc, &self.registry)
@@ -399,13 +427,19 @@ impl DevelopView {
             kernel: &self.decode_kernel,
             frame: &self.frame,
         };
+        let heal: HealParams = Self::resolve(doc, HEAL);
+        let heal_exec = HealExec {
+            kernel: &self.heal_kernel,
+            params: &heal,
+            removals: &self.removals,
+        };
         let passthrough = PassthroughExec;
         let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
             (DECODE, &decode_exec),
             (DEMOSAIC, &passthrough),
             (DENOISE, &passthrough),
             (LENS, &passthrough),
-            (HEAL, &passthrough),
+            (HEAL, &heal_exec),
         ];
         let req = RenderRequest {
             graph: &self.graph,
@@ -480,6 +514,8 @@ impl DevelopView {
         };
         self.frame = frame;
         self.document = EditDocument::default();
+        self.removals.clear();
+        self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
         self.show_before = false;
         self.active_profile = None;
         self.profile_error = None;
@@ -491,6 +527,34 @@ impl DevelopView {
         self.graph
             .set_own_hash(DECODE, identity)
             .expect("DECODE is always present -- build_graph always adds it");
+    }
+
+    /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).
+    pub fn frame_arc(&self) -> Arc<LinearFrame> {
+        Arc::clone(&self.frame)
+    }
+
+    /// Cache key for the loaded photo (see the `frame_key` field).
+    pub fn frame_key(&self) -> u64 {
+        self.frame_key
+    }
+
+    /// Records a finished AI removal for `spot_key` (see `heal::spot_key`); the next `render`
+    /// rebakes the heal stage with it. Replaces any earlier patch for the same spot.
+    pub fn set_removal(&mut self, spot_key: String, patch: Arc<RemovalPatch>) {
+        self.removals.insert(spot_key, patch);
+    }
+
+    /// Drops removal patches whose spot is no longer in the document's heal entry, so an edited
+    /// or deleted spot's stale fill can't linger (or be re-stamped into the cache key).
+    pub fn prune_removals(&mut self) {
+        let live: std::collections::HashSet<String> = self
+            .stage_params::<HealParams>(HEAL)
+            .spots
+            .iter()
+            .map(heal::spot_key)
+            .collect();
+        self.removals.retain(|k, _| live.contains(k));
     }
 
     /// The source frame's own extent, in pixels -- what a crop/straighten UI needs to map a

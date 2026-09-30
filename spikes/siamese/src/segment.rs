@@ -304,5 +304,5 @@ mod tests {
     // after a *successful* commit, so a same-path second call in this same test binary reuses
     // that recorded path and never re-runs `commit()` -- it can't distinguish the fixed code from
     // the original bug, or a same-path second call from a genuinely different-path one. The real
-    // races are cross-crate; `spikes/groom/tests/ort_cross_module.rs` reproduces those instead.
+    // races are cross-crate; `crates/nicti-groom/tests/ort_cross_module.rs` reproduces those instead.
 }
