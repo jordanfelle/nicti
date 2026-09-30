@@ -79,14 +79,16 @@ pub fn new_spot(
 }
 
 /// A source offset for when auto-pick finds nothing: three radii sideways, toward the middle of
-/// the image so it is more likely to stay in frame.
+/// the image, and never so far that the source centre leaves the frame (a source hanging off the
+/// edge would clone mostly edge-clamped pixels).
 pub fn fallback_offset(center: (f32, f32), radius: f32, source: (f32, f32)) -> (f32, f32) {
-    let dx = 3.0 * radius;
-    if center.0 < source.0 / 2.0 {
-        (dx, 0.0)
+    let reach = 3.0 * radius;
+    let target = if center.0 < source.0 / 2.0 {
+        center.0 + reach
     } else {
-        (-dx, 0.0)
-    }
+        center.0 - reach
+    };
+    (target.clamp(0.0, source.0) - center.0, 0.0)
 }
 
 /// The topmost (last-placed) spot whose destination circle contains `p` (source pixels).
@@ -140,6 +142,12 @@ pub struct RemovalService {
     install: Option<InstallHandle>,
     pending: Vec<Slot<RemoveOutcome>>,
     pending_keys: HashSet<String>,
+    /// Test seams: pretend the models are installed / substitute the backend, so gesture tests can
+    /// exercise the whole click -> job -> patch path without ~250 MB of weights.
+    #[cfg(test)]
+    models_override: Option<RemovalModels>,
+    #[cfg(test)]
+    backend_override: Option<SharedBackend>,
 }
 
 impl Default for RemovalService {
@@ -166,11 +174,19 @@ impl RemovalService {
             install: None,
             pending: Vec::new(),
             pending_keys: HashSet::new(),
+            #[cfg(test)]
+            models_override: None,
+            #[cfg(test)]
+            backend_override: None,
         }
     }
 
     /// Everything AI removal needs, if it is all installed.
     pub fn models(&self) -> Option<RemovalModels> {
+        #[cfg(test)]
+        if let Some(m) = &self.models_override {
+            return Some(m.clone());
+        }
         self.store.as_ref().and_then(RemovalModels::locate)
     }
 
@@ -251,6 +267,12 @@ impl RemovalService {
         let models = self
             .models()
             .ok_or("AI removal models aren't installed yet.")?;
+        #[cfg(test)]
+        let backend = self
+            .backend_override
+            .clone()
+            .unwrap_or_else(|| self.backend_for(models.clone()));
+        #[cfg(not(test))]
         let backend = self.backend_for(models);
         self.submit_with_backend(pounce, backend, develop, spot, prompt)
     }
@@ -480,7 +502,13 @@ pub fn handle_viewport(
     // Dragging a handle of the selected spot.
     if response.drag_started() {
         heal.drag = None;
-        if let (Some(i), Some(pointer)) = (heal.selected, response.interact_pointer_pos()) {
+        // Where the button went *down*: by the time egui reports `drag_started` the pointer has
+        // already moved past its drag threshold, so `interact_pointer_pos` would put the hit test
+        // (and the drag's anchor) a few pixels off -- enough to miss a small handle.
+        let pressed_at = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| response.interact_pointer_pos());
+        if let (Some(i), Some(pointer)) = (heal.selected, pressed_at) {
             let p = img(pointer);
             let s = &params.spots[i];
             if s.kind != SpotKind::Remove {
@@ -945,6 +973,20 @@ mod tests {
     }
 
     #[test]
+    fn fallback_offset_never_puts_the_source_outside_the_frame() {
+        // A 64 px frame with a 24 px brush: 3 radii sideways would land at x = 91.
+        let (dx, dy) = fallback_offset((19.0, 32.0), 24.0, (64.0, 64.0));
+        assert_eq!(dy, 0.0);
+        assert!(
+            (0.0..=64.0).contains(&(19.0 + dx)),
+            "source centre at {}",
+            19.0 + dx
+        );
+        let (dx, _) = fallback_offset((45.0, 32.0), 24.0, (64.0, 64.0));
+        assert!((0.0..=64.0).contains(&(45.0 + dx)));
+    }
+
+    #[test]
     fn removal_recipe_carries_the_prompt_and_pins_the_models() {
         let r = removal_recipe(Prompt::Click { x: 12.0, y: 34.0 });
         assert_eq!(r.model_id, RECIPE_MODEL_ID);
@@ -1139,5 +1181,499 @@ mod tests {
         let mut svc = RemovalService::with_store(None);
         assert!(svc.start_install(&p).is_err());
         assert!(!svc.is_installing());
+    }
+
+    // -- Gesture tests: real egui input driven through `handle_viewport` -----------------------
+
+    use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2, Rect};
+
+    /// A headless egui context that runs one frame at a time with scripted input.
+    struct Harness {
+        ctx: egui::Context,
+        rect: Rect,
+        time: f64,
+    }
+
+    impl Harness {
+        /// Registers the viewport widget (egui hit-tests against the previous frame's layout).
+        fn new(develop: &mut DevelopView, heal: &mut HealUi, pounce: &Pounce) -> Self {
+            let mut h = Self {
+                ctx: egui::Context::default(),
+                rect: Rect::NOTHING,
+                time: 0.0,
+            };
+            h.frame(vec![], develop, heal, pounce);
+            h
+        }
+
+        fn frame(
+            &mut self,
+            events: Vec<Event>,
+            develop: &mut DevelopView,
+            heal: &mut HealUi,
+            pounce: &Pounce,
+        ) {
+            self.time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut rect = self.rect;
+            let output = self.ctx.run_ui(input, |ui| {
+                let (r, response) =
+                    ui.allocate_exact_size(vec2(600.0, 450.0), egui::Sense::click_and_drag());
+                rect = r;
+                handle_viewport(ui, &response, r, develop, heal, pounce);
+            });
+            // Headless: there is no renderer to apply the frame's texture uploads to.
+            output.drop_without_applying_deltas();
+            self.rect = rect;
+        }
+
+        /// Screen position of a point given as a fraction of the viewport.
+        fn at(&self, fx: f32, fy: f32) -> Pos2 {
+            pos2(
+                self.rect.left() + fx * self.rect.width(),
+                self.rect.top() + fy * self.rect.height(),
+            )
+        }
+
+        fn button(pos: Pos2, pressed: bool) -> Event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }
+        }
+
+        fn click(&mut self, pos: Pos2, develop: &mut DevelopView, heal: &mut HealUi, p: &Pounce) {
+            self.frame(vec![Event::PointerMoved(pos)], develop, heal, p);
+            self.frame(vec![Self::button(pos, true)], develop, heal, p);
+            self.frame(vec![Self::button(pos, false)], develop, heal, p);
+        }
+
+        fn drag(
+            &mut self,
+            from: Pos2,
+            to: Pos2,
+            develop: &mut DevelopView,
+            heal: &mut HealUi,
+            p: &Pounce,
+        ) {
+            self.frame(vec![Event::PointerMoved(from)], develop, heal, p);
+            self.frame(vec![Self::button(from, true)], develop, heal, p);
+            // Several moves so egui's drag threshold is crossed and the drag keeps tracking.
+            for step in 1..=4 {
+                let t = step as f32 / 4.0;
+                let pos = from + (to - from) * t;
+                self.frame(vec![Event::PointerMoved(pos)], develop, heal, p);
+            }
+            self.frame(vec![Self::button(to, false)], develop, heal, p);
+        }
+
+        fn key(
+            &mut self,
+            key: egui::Key,
+            at: Pos2,
+            develop: &mut DevelopView,
+            heal: &mut HealUi,
+            p: &Pounce,
+        ) {
+            self.frame(vec![Event::PointerMoved(at)], develop, heal, p);
+            self.frame(
+                vec![Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                develop,
+                heal,
+                p,
+            );
+        }
+    }
+
+    fn spots(develop: &DevelopView) -> Vec<Spot> {
+        develop.stage_params::<HealParams>(HEAL).spots
+    }
+
+    /// (develop, heal ui, pounce, harness), or `None` when there is no GPU adapter.
+    fn rig() -> Option<(DevelopView, HealUi, Pounce, Harness)> {
+        let mut develop = gpu_develop()?;
+        let mut heal = HealUi::new();
+        heal.service = RemovalService::with_store(None);
+        heal.tool = Tool::Heal;
+        let pounce = pounce();
+        let harness = Harness::new(&mut develop, &mut heal, &pounce);
+        Some((develop, heal, pounce, harness))
+    }
+
+    #[test]
+    fn clicking_the_photo_places_a_heal_spot_there() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        let source = develop.source_extent();
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        let s = spots(&develop);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, SpotKind::Heal);
+        assert!(
+            (s[0].center.0 - source.0 / 2.0).abs() < 2.0,
+            "{:?}",
+            s[0].center
+        );
+        assert!(
+            (s[0].center.1 - source.1 / 2.0).abs() < 2.0,
+            "{:?}",
+            s[0].center
+        );
+        assert!(
+            s[0].source_offset.is_some(),
+            "a heal spot always has a source"
+        );
+        assert_eq!(s[0].radius, heal.radius);
+    }
+
+    #[test]
+    fn a_click_maps_through_the_stretch_to_the_right_source_pixel() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        let source = develop.source_extent();
+        h.click(h.at(0.25, 0.75), &mut develop, &mut heal, &p);
+        let c = spots(&develop)[0].center;
+        assert!(
+            (c.0 - 0.25 * source.0).abs() < 2.0 && (c.1 - 0.75 * source.1).abs() < 2.0,
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_an_existing_spot_selects_it_instead_of_adding_another() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        h.click(h.at(0.3, 0.3), &mut develop, &mut heal, &p);
+        h.click(h.at(0.7, 0.7), &mut develop, &mut heal, &p);
+        assert_eq!(spots(&develop).len(), 2);
+        assert_eq!(heal.selected, Some(1));
+        h.click(h.at(0.3, 0.3), &mut develop, &mut heal, &p);
+        assert_eq!(spots(&develop).len(), 2, "no third spot");
+        assert_eq!(heal.selected, Some(0));
+    }
+
+    #[test]
+    fn dragging_the_selected_spot_moves_its_destination_and_keeps_its_source_offset() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        let source = develop.source_extent();
+        h.click(h.at(0.4, 0.4), &mut develop, &mut heal, &p);
+        let before = spots(&develop)[0].clone();
+        h.drag(h.at(0.4, 0.4), h.at(0.6, 0.5), &mut develop, &mut heal, &p);
+        let after = spots(&develop)[0].clone();
+        assert!(
+            (after.center.0 - 0.6 * source.0).abs() < 2.0,
+            "{:?}",
+            after.center
+        );
+        assert!(
+            (after.center.1 - 0.5 * source.1).abs() < 2.0,
+            "{:?}",
+            after.center
+        );
+        assert_eq!(after.source_offset, before.source_offset);
+        assert_eq!(spots(&develop).len(), 1);
+    }
+
+    #[test]
+    fn dragging_the_source_handle_changes_only_the_offset() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        // The synthetic frame is only 64 px wide: a small brush keeps the source inside it.
+        heal.radius = 6.0;
+        let source = develop.source_extent();
+        h.click(h.at(0.3, 0.5), &mut develop, &mut heal, &p);
+        let before = spots(&develop)[0].clone();
+        let off = before.source_offset.unwrap();
+        // Screen position of the source handle.
+        let src_frac = (
+            (before.center.0 + off.0) / source.0,
+            (before.center.1 + off.1) / source.1,
+        );
+        // Grab the handle 3 screen px off its exact centre (a real click never lands dead-centre;
+        // this is well inside the 7 px hit radius, and would miss with a zero-size one). The drag
+        // is anchored where the button went down, so the offset changes by exactly the pointer's
+        // travel regardless of where on the handle it was grabbed.
+        let grab = h.at(src_frac.0, src_frac.1) + vec2(3.0, 2.0);
+        let travel = vec2(0.1 * h.rect.width(), 0.05 * h.rect.height());
+        h.drag(grab, grab + travel, &mut develop, &mut heal, &p);
+        let after = spots(&develop)[0].clone();
+        assert_eq!(after.center, before.center, "destination must not move");
+        let new_off = after.source_offset.unwrap();
+        assert!(
+            (new_off.0 - off.0 - 0.1 * source.0).abs() < 2.0,
+            "{new_off:?} vs {off:?}"
+        );
+        assert!(
+            (new_off.1 - off.1 - 0.05 * source.1).abs() < 2.0,
+            "{new_off:?} vs {off:?}"
+        );
+    }
+
+    #[test]
+    fn dragging_empty_space_moves_nothing() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        h.click(h.at(0.2, 0.2), &mut develop, &mut heal, &p);
+        let before = spots(&develop);
+        h.drag(h.at(0.8, 0.8), h.at(0.9, 0.9), &mut develop, &mut heal, &p);
+        assert_eq!(spots(&develop), before);
+    }
+
+    #[test]
+    fn delete_removes_the_selected_spot() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        h.click(h.at(0.3, 0.3), &mut develop, &mut heal, &p);
+        h.click(h.at(0.7, 0.7), &mut develop, &mut heal, &p);
+        assert_eq!(heal.selected, Some(1));
+        h.key(
+            egui::Key::Delete,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        let left = spots(&develop);
+        assert_eq!(left.len(), 1);
+        assert!((left[0].center.0 - 0.3 * develop.source_extent().0).abs() < 2.0);
+        assert_eq!(heal.selected, None);
+    }
+
+    #[test]
+    fn delete_with_nothing_selected_removes_nothing() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        h.click(h.at(0.3, 0.3), &mut develop, &mut heal, &p);
+        h.click(h.at(0.9, 0.1), &mut develop, &mut heal, &p); // places a 2nd, selects it
+        heal.selected = None;
+        h.key(
+            egui::Key::Delete,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        assert_eq!(spots(&develop).len(), 2);
+    }
+
+    #[test]
+    fn bracket_keys_resize_the_default_brush_when_no_spot_is_selected() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        let r0 = heal.radius;
+        h.key(
+            egui::Key::CloseBracket,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        assert!(heal.radius > r0);
+        let r1 = heal.radius;
+        h.key(
+            egui::Key::OpenBracket,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        h.key(
+            egui::Key::OpenBracket,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        assert!(heal.radius < r1);
+        for _ in 0..200 {
+            h.key(
+                egui::Key::OpenBracket,
+                h.at(0.5, 0.5),
+                &mut develop,
+                &mut heal,
+                &p,
+            );
+        }
+        assert_eq!(heal.radius, MIN_RADIUS, "size is clamped");
+    }
+
+    #[test]
+    fn bracket_keys_resize_the_selected_spot_and_scale_its_feather_with_it() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        let before = spots(&develop)[0].clone();
+        h.key(
+            egui::Key::CloseBracket,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        let after = spots(&develop)[0].clone();
+        assert!(after.radius > before.radius);
+        assert!((after.feather / after.radius - before.feather / before.radius).abs() < 1e-4);
+        assert_eq!(after.center, before.center);
+    }
+
+    #[test]
+    fn the_clone_kind_places_a_clone_spot() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Clone;
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        assert_eq!(spots(&develop)[0].kind, SpotKind::Clone);
+    }
+
+    #[test]
+    fn remove_without_models_places_no_spot_and_says_why() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Remove;
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        assert!(spots(&develop).is_empty());
+        assert!(heal
+            .status
+            .as_deref()
+            .unwrap_or("")
+            .contains("model download"));
+        assert_eq!(heal.service.pending_count(), 0);
+    }
+
+    fn fake_models() -> RemovalModels {
+        let f = std::path::PathBuf::from("/nonexistent/fake");
+        RemovalModels {
+            ort_dylib: f.clone(),
+            sam_encoder: f.clone(),
+            sam_decoder: f.clone(),
+            lama: f,
+        }
+    }
+
+    /// Reads back the current render, for "did the removal change the picture" assertions.
+    fn pixels(develop: &mut DevelopView) -> Vec<[f32; 4]> {
+        let gpu = crate::test_gpu::shared().unwrap();
+        let frame = develop.render();
+        nicti_tapetum::frame::read_frame(&gpu, &frame)
+    }
+
+    #[test]
+    fn a_remove_click_runs_a_job_and_the_patch_changes_the_render() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Remove;
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: false })));
+        let before = pixels(&mut develop);
+
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        let placed = spots(&develop);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].kind, SpotKind::Remove);
+        let prompt = Prompt::from_json(&placed[0].mask_recipe.as_ref().unwrap().params);
+        assert!(
+            matches!(prompt, Some(Prompt::Click { .. })),
+            "the recipe stores the click"
+        );
+        assert!(heal.service.is_pending(&spot_key(&placed[0])));
+
+        // Until the job lands the render is unchanged (pending spots pass through).
+        assert_eq!(pixels(&mut develop), before);
+
+        drain(&p);
+        let egui_ctx = egui::Context::default();
+        egui_ctx
+            .run_ui(egui::RawInput::default(), |ui| {
+                poll(ui, &mut develop, &mut heal)
+            })
+            .drop_without_applying_deltas();
+        assert_eq!(heal.status.as_deref(), Some("Object removed."));
+        assert_eq!(spots(&develop).len(), 1, "the spot stays");
+        assert_ne!(
+            pixels(&mut develop),
+            before,
+            "the fake patch (0.4 gray) must now show"
+        );
+    }
+
+    #[test]
+    fn a_failed_removal_drops_its_placeholder_spot_and_reports() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Remove;
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: true })));
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        assert_eq!(spots(&develop).len(), 1);
+        drain(&p);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert!(
+            spots(&develop).is_empty(),
+            "a failed removal must not leave a dead spot behind"
+        );
+        assert!(heal.status.as_deref().unwrap_or("").contains("no object"));
+    }
+
+    #[test]
+    fn deleting_a_pending_removal_discards_its_late_result() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        heal.kind = SpotKind::Remove;
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: false })));
+        let before = pixels(&mut develop);
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        h.key(
+            egui::Key::Delete,
+            h.at(0.5, 0.5),
+            &mut develop,
+            &mut heal,
+            &p,
+        );
+        assert!(spots(&develop).is_empty());
+        drain(&p);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(
+            pixels(&mut develop),
+            before,
+            "a deleted spot's patch must never be applied"
+        );
     }
 }
