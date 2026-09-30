@@ -23,20 +23,25 @@ pub enum RatingChoice {
     /// `rating >= n`, `n` in `1..=5`.
     AtLeast(i64),
     Rejected,
+    /// A loaded rule's rating shape the controls can't express (`include_unrated`, a `rating_max`,
+    /// a 0-star floor...). The raw fields live in `FilterBar::custom_rating` and are applied
+    /// untouched, so re-saving such a rule never widens or narrows it.
+    Custom,
 }
 
 impl RatingChoice {
     fn from_filter(f: &Filter) -> Self {
-        match (f.rating_min, f.rating_max) {
-            (Some(-1), Some(-1)) => Self::Rejected,
-            (Some(n @ 1..=5), None) => Self::AtLeast(n),
-            _ => Self::Any,
+        match (f.rating_min, f.rating_max, f.include_unrated) {
+            (None, None, false) => Self::Any,
+            (Some(-1), Some(-1), false) => Self::Rejected,
+            (Some(n @ 1..=5), None, false) => Self::AtLeast(n),
+            _ => Self::Custom,
         }
     }
 
     fn apply(self, f: &mut Filter) {
         match self {
-            Self::Any => {}
+            Self::Any | Self::Custom => {}
             Self::AtLeast(n) => f.rating_min = Some(n),
             Self::Rejected => {
                 f.rating_min = Some(-1);
@@ -65,15 +70,18 @@ fn parse_date(s: &str) -> Option<(u32, u32, u32)> {
     (1..=days).contains(&d).then_some((y, m, d))
 }
 
-/// EXIF `DateTimeOriginal` text (`2026:01:31 13:05:09`) -- what `captured_at` really holds, and
-/// what `Filter`'s lexicographic bounds compare against. `end_of_day` picks the inclusive upper
+/// `captured_at` text as ingest really stores it (`2026-01-31 13:05:09`: kamadak-exif's
+/// `display_value` for `DateTimeOriginal`, NOT the raw `2026:01:31` EXIF form) -- what `Filter`'s
+/// lexicographic bounds compare against. Mixing the two forms mis-sorts at the year's fourth
+/// character (`-` < `:`), silently deciding every same-year comparison. `end_of_day` picks the inclusive upper
 /// bound of the day rather than its start.
 fn exif_bound((y, m, d): (u32, u32, u32), end_of_day: bool) -> String {
     let time = if end_of_day { "23:59:59" } else { "00:00:00" };
-    format!("{y:04}:{m:02}:{d:02} {time}")
+    format!("{y:04}-{m:02}-{d:02} {time}")
 }
 
-/// The inverse for showing a loaded rule's bound in the date box: the date part only.
+/// The inverse for showing a loaded rule's bound in the date box: the date part only. Also reads
+/// colon-form bounds from rules saved before this was fixed.
 fn date_from_exif(s: &str) -> String {
     s.get(..10)
         .map_or_else(String::new, |d| d.replace(':', "-"))
@@ -129,8 +137,9 @@ impl FacetView {
 }
 
 /// Runs the (up to four) facet queries for `filter`, skipping any whose dimension-cleared filter
-/// equals one already run. Unfiltered queries hit ADR-0103's trigger cache, so this is cheap
-/// until the user actually narrows.
+/// equals one already run, so an untouched bar costs one `facets` call, not four. (Even an
+/// unfiltered `facets` still runs a live `by_flag` scan -- only model/rating come from ADR-0103's
+/// cache -- hence the memo, and the caller running this on a worker thread.)
 pub fn compute_facets(
     store: &dyn CatalogStore,
     filter: &Filter,
@@ -257,6 +266,8 @@ pub struct FilterBar {
     keyword_id: Option<i64>,
     include_subtree: bool,
     rating: RatingChoice,
+    /// `(rating_min, rating_max, include_unrated)` of a loaded `RatingChoice::Custom` rule.
+    custom_rating: (Option<i64>, Option<i64>, bool),
     picks_only: bool,
     label: Option<String>,
     make: Option<String>,
@@ -285,6 +296,9 @@ pub struct FilterBar {
     facets: Option<FacetView>,
     facets_for: Option<Filter>,
     facets_job: Option<Pending<Result<FacetView, String>>>,
+    /// The last background (options/facets) failure; cleared when that job next succeeds.
+    /// Separate from `error`, which belongs to a user action (load/save).
+    bg_error: Option<String>,
     error: Option<String>,
 }
 
@@ -304,6 +318,9 @@ impl FilterBar {
             ..Default::default()
         };
         self.rating.apply(&mut f);
+        if self.rating == RatingChoice::Custom {
+            (f.rating_min, f.rating_max, f.include_unrated) = self.custom_rating;
+        }
         f.captured_after = bound(&self.from, false, &self.raw_after);
         f.captured_before = bound(&self.to, true, &self.raw_before);
         f
@@ -314,6 +331,7 @@ impl FilterBar {
         self.keyword_id = f.keyword_id;
         self.include_subtree = f.include_subtree;
         self.rating = RatingChoice::from_filter(f);
+        self.custom_rating = (f.rating_min, f.rating_max, f.include_unrated);
         self.picks_only = f.flag == Some(1);
         self.label.clone_from(&f.label);
         self.make.clone_from(&f.make);
@@ -371,10 +389,23 @@ impl FilterBar {
         let options = self.options.clone().unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
             // Keyword (+ subtree).
-            let kw_label = self
-                .keyword_id
-                .and_then(|id| options.keywords.iter().find(|(_, k)| k.id == id))
-                .map_or("Any keyword", |(_, k)| k.name.as_str());
+            let kw_label = match self.keyword_id {
+                None => "Any keyword".to_string(),
+                Some(id) => options
+                    .keywords
+                    .iter()
+                    .find(|(_, k)| k.id == id)
+                    .map(|(_, k)| k.name.clone())
+                    // Never show "Any" while a keyword filter is live (options still loading, or
+                    // the rule's keyword was deleted -- which matches nothing).
+                    .unwrap_or_else(|| {
+                        if self.options.is_some() {
+                            format!("Missing keyword (#{id})")
+                        } else {
+                            "Loading…".to_string()
+                        }
+                    }),
+            };
             egui::ComboBox::from_id_salt("fb_keyword")
                 .selected_text(kw_label)
                 .show_ui(ui, |ui| {
@@ -400,6 +431,7 @@ impl FilterBar {
                 RatingChoice::Any => "Any rating".to_string(),
                 RatingChoice::AtLeast(n) => format!("{n}+ stars"),
                 RatingChoice::Rejected => "Rejected".to_string(),
+                RatingChoice::Custom => "Custom (saved rule)".to_string(),
             };
             egui::ComboBox::from_id_salt("fb_rating")
                 .selected_text(rating_text)
@@ -516,7 +548,7 @@ impl FilterBar {
         if let Some(status) = &self.status {
             ui.weak(status);
         }
-        if let Some(err) = &self.error {
+        for err in self.bg_error.iter().chain(&self.error) {
             ui.colored_label(ui.visuals().error_fg_color, err);
         }
 
@@ -540,11 +572,12 @@ impl FilterBar {
         if let Some(job) = &self.options_job {
             match job.poll() {
                 Ok(Some(Ok(o))) => {
+                    self.bg_error = None;
                     self.options = Some(o);
                     self.options_job = None;
                 }
                 Ok(Some(Err(e))) => {
-                    self.error = Some(format!("Couldn't read filter options: {e}"));
+                    self.bg_error = Some(format!("Couldn't read filter options: {e}"));
                     self.options = Some(Options::default());
                     self.options_job = None;
                 }
@@ -558,15 +591,20 @@ impl FilterBar {
         if let Some(job) = &self.facets_job {
             match job.poll() {
                 Ok(Some(Ok(f))) => {
+                    self.bg_error = None;
                     self.facets = Some(f);
                     self.facets_job = None;
                 }
                 Ok(Some(Err(e))) => {
-                    self.error = Some(format!("Couldn't count matches: {e}"));
+                    self.bg_error = Some(format!("Couldn't count matches: {e}"));
                     self.facets_job = None;
                 }
                 Ok(None) => {}
-                Err(_) => self.facets_job = None,
+                Err(_) => {
+                    // Don't leave the previous filter's counts on screen against the new one.
+                    self.facets = None;
+                    self.facets_job = None;
+                }
             }
         }
     }
@@ -707,8 +745,38 @@ mod tests {
         bar.from = "2026-01-05".into();
         bar.to = "2026-01-06".into();
         let f = bar.to_filter(None);
-        assert_eq!(f.captured_after.as_deref(), Some("2026:01:05 00:00:00"));
-        assert_eq!(f.captured_before.as_deref(), Some("2026:01:06 23:59:59"));
+        assert_eq!(f.captured_after.as_deref(), Some("2026-01-05 00:00:00"));
+        assert_eq!(f.captured_before.as_deref(), Some("2026-01-06 23:59:59"));
+    }
+
+    /// Regression: bounds were once built in raw-EXIF colon form while ingest stores the dashed
+    /// `display_value` form, so same-year comparisons were decided by `-` vs `:` alone.
+    #[test]
+    fn date_range_matches_captured_at_as_ingest_stores_it() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let v = store.upsert_volume("v", None, None, 0).unwrap();
+        let r = store.ensure_root(v, "").unwrap();
+        let mut ids = Vec::new();
+        for (name, at) in [
+            ("jan4", "2026-01-04 23:59:59"),
+            ("jan5", "2026-01-05 00:00:00"),
+            ("jan6", "2026-01-06 23:59:59"),
+            ("jan7", "2026-01-07 00:00:00"),
+            ("mar", "2026-03-01 10:00:00"),
+        ] {
+            let mut a = asset(&format!("{name}.NEF"), "Z8");
+            a.captured_at = Some(at.into());
+            ids.push(store.insert_asset(r, &a, None).unwrap());
+        }
+        let mut bar = FilterBar::default();
+        bar.from = "2026-01-05".into();
+        bar.to = "2026-01-06".into();
+        let sort = nicti_lair::Sort {
+            field: nicti_lair::SortField::Captured,
+            direction: nicti_lair::SortDirection::Asc,
+        };
+        let got = store.hunt_ids(&bar.to_filter(None), sort).unwrap();
+        assert_eq!(got, vec![ids[1], ids[2]]);
     }
 
     #[test]
@@ -766,8 +834,8 @@ mod tests {
             make: Some("NIKON".into()),
             model: Some("Z6".into()),
             // Not on a day boundary, and a prefix the bar has no control for.
-            captured_after: Some("2026:01:01 08:30:00".into()),
-            captured_before: Some("2026:02:01 00:00:00".into()),
+            captured_after: Some("2026-01-01 08:30:00".into()),
+            captured_before: Some("2026-02-01 00:00:00".into()),
             root_id: Some(4),
             rel_path_prefix: Some("2026/trip".into()),
             filename_contains: Some("dsc".into()),
@@ -781,18 +849,36 @@ mod tests {
         bar.from = "2026-01-02".into();
         assert_eq!(
             bar.to_filter(rule.root_id).captured_after.as_deref(),
-            Some("2026:01:02 00:00:00")
+            Some("2026-01-02 00:00:00")
         );
     }
 
     #[test]
-    fn a_rule_with_unsupported_rating_shape_loads_as_any_rating() {
-        let rule = Filter {
-            rating_min: Some(2),
-            rating_max: Some(4),
-            ..Default::default()
-        };
-        assert_eq!(RatingChoice::from_filter(&rule), RatingChoice::Any);
+    fn a_rule_with_an_unsupported_rating_shape_is_kept_verbatim() {
+        for (min, max, unrated) in [
+            (Some(2), Some(4), false),
+            (Some(3), None, true),
+            (Some(0), None, false),
+            (None, Some(2), false),
+        ] {
+            let rule = Filter {
+                rating_min: min,
+                rating_max: max,
+                include_unrated: unrated,
+                ..Default::default()
+            };
+            assert_eq!(RatingChoice::from_filter(&rule), RatingChoice::Custom);
+            let mut bar = FilterBar::default();
+            bar.load_filter(&rule);
+            assert_eq!(bar.to_filter(None), rule);
+            // Picking a real choice replaces the custom shape entirely.
+            bar.rating = RatingChoice::AtLeast(4);
+            let f = bar.to_filter(None);
+            assert_eq!(
+                (f.rating_min, f.rating_max, f.include_unrated),
+                (Some(4), None, false)
+            );
+        }
     }
 
     #[test]
@@ -864,21 +950,35 @@ mod tests {
         let filter = Filter {
             model: Some("Z8".into()),
             rating_min: Some(4),
+            flag: Some(1),
             ..Default::default()
         };
         let f = compute_facets(&store, &filter).unwrap();
-        // Full filter: only the 5-star Z8.
+        // Full filter: only the 5-star, picked Z8.
         assert_eq!(f.total, 1);
-        // Model counts ignore the model filter (but keep the rating one): both models have a
-        // 4+ star frame, so switching to Z6 would give 1.
+        // Model counts ignore the model filter but keep rating + flag: only the picked 5-star Z8
+        // qualifies, so switching to Z6 (unpicked) would give 0.
         assert_eq!(f.model_count("Z8"), 1);
-        assert_eq!(f.model_count("Z6"), 1);
-        // Rating counts ignore the rating filter (but keep model = Z8).
-        assert_eq!(f.at_least(1), 2);
+        assert_eq!(f.model_count("Z6"), 0);
+        // Rating counts ignore the rating filter but keep model = Z8 + flag: only `z8a`.
+        assert_eq!(f.at_least(1), 1);
         assert_eq!(f.at_least(5), 1);
-        assert_eq!(f.any(), 2);
-        // Picks ignore the flag filter: one Z8 pick within 4+ stars.
+        assert_eq!(f.any(), 1);
+        // Picks ignore the flag filter but keep model + rating: one Z8 pick within 4+ stars. If the
+        // flag weren't cleared this would still be 1, so also check the dimension with no picks:
+        // the unpicked 5-star Z6 must not be counted, the picked Z8 must.
         assert_eq!(f.picks, 1);
+        let z6_only = Filter {
+            model: Some("Z6".into()),
+            flag: Some(1),
+            ..Default::default()
+        };
+        let g = compute_facets(&store, &z6_only).unwrap();
+        assert_eq!(g.total, 0);
+        // Flag cleared for the picks count: Z6 has no picks either way -> 0; but rating counts
+        // (rating cleared, flag kept) are 0 while model counts (model cleared, flag kept) show Z8.
+        assert_eq!(g.picks, 0);
+        assert_eq!(g.model_count("Z8"), 1);
     }
 
     #[test]

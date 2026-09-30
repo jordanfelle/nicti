@@ -177,12 +177,13 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   - **#242 (Library filter bar, landed)**: `filter_bar.rs`'s `FilterBar` — keyword (+subtree), rating
     (any / N+ / rejected), picks, label, make, model, capture-date range, filename controls →
     `to_filter(root_id)` → `Filter` for `GridSession::set_query`; `load_filter` is its inverse and
-    round-trips a saved rule losslessly (raw date bounds + `rel_path_prefix` carried through). Facet
+    round-trips a saved rule losslessly (raw date bounds, `rel_path_prefix`, and any rating shape the
+    controls can't express via `RatingChoice::Custom` are carried through). Facet
     counts come from `compute_facets` (each dimension counted with its *own* filter cleared, so a
     picked model doesn't zero the others) on a worker thread (`Pending`), as do the option lists
     (`load_options`). Text fields commit on Enter/focus-loss, not per keystroke (filename is a
-    `GLOB` scan). Dates are typed `YYYY-MM-DD` but stored as EXIF `YYYY:MM:DD HH:MM:SS` text, the
-    format `captured_at` really holds; an invalid date is *no bound*, never an empty result. Save =
+    `GLOB` scan). Dates are typed `YYYY-MM-DD` and compared as `YYYY-MM-DD HH:MM:SS` text — the *dashed* form
+    kamadak-exif's `display_value` gives ingest (NOT raw-EXIF colons: mixing them mis-sorts at char 4); an invalid date is *no bound*, never an empty result. Save =
     `create_collection(Smart)` + `set_smart_rule`, rolled back if the second fails. `app.rs` reads
     `to_filter` even while the header is collapsed (a collapsed bar still filters) and calls
     `invalidate_options` on the import/sync/move busy → idle edge. Not verified by eye: no display

@@ -283,10 +283,142 @@ pub struct SqliteCatalog {
 }
 
 impl SqliteCatalog {
+    /// Runs a long read-only scan on its own snapshot connection when the catalog is file-backed
+    /// (WAL: consistent, never blocks a writer), else on the shared one. Holding the shared mutex
+    /// for a full-table scan would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
+    /// -- see `hunt_ids`.
+    fn with_scan_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogError> {
+        if self.path.is_some() {
+            f(&self.open_snapshot_reader()?)
+        } else {
+            f(&self.conn.lock().unwrap())
+        }
+    }
+
+    fn facets_on(conn: &Connection, filter: &Filter) -> Result<FacetCounts, CatalogError> {
+        // An unfiltered query reads the trigger-maintained cache (ADR-0103's own optimized case);
+        // any narrowing filter falls back to a live, exact GROUP BY, since the cache's
+        // (volume_id, model, rating) grain has no way to answer a keyword/date/etc-narrowed facet
+        // count on its own.
+        let is_unfiltered = *filter == Filter::default();
+
+        let (by_model, by_rating) = if is_unfiltered {
+            let mut stmt = conn.prepare(
+                "SELECT fc.model, SUM(fc.cnt) FROM facet_counts fc \
+                     JOIN volume v ON v.id = fc.volume_id \
+                     WHERE v.online = 1 GROUP BY fc.model",
+            )?;
+            let by_model = stmt
+                .query_map([], |row| {
+                    let model: String = row.get(0)?;
+                    let cnt: i64 = row.get(1)?;
+                    Ok((
+                        if model.is_empty() { None } else { Some(model) },
+                        cnt as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut stmt = conn.prepare(
+                "SELECT fc.rating, SUM(fc.cnt) FROM facet_counts fc \
+                     JOIN volume v ON v.id = fc.volume_id \
+                     WHERE v.online = 1 GROUP BY fc.rating",
+            )?;
+            let by_rating = stmt
+                .query_map([], |row| {
+                    let rating: i64 = row.get(0)?;
+                    let cnt: i64 = row.get(1)?;
+                    Ok((
+                        if rating == FACET_UNRATED_SENTINEL {
+                            None
+                        } else {
+                            Some(rating)
+                        },
+                        cnt as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (by_model, by_rating)
+        } else {
+            let filter_sql = build_filter_sql(conn, filter)?;
+            let base = format!(
+                "FROM asset a \
+                     JOIN root r ON r.id = a.root_id \
+                     JOIN volume v ON v.id = r.volume_id \
+                     WHERE {}",
+                filter_sql.where_clause
+            );
+
+            let sql = format!("SELECT a.model, COUNT(*) {base} GROUP BY a.model");
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let by_model = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)? as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let sql = format!("SELECT a.rating, COUNT(*) {base} GROUP BY a.rating");
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let by_rating = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (by_model, by_rating)
+        };
+
+        // `flag` has no trigger-maintained cache at all (it's a much lower-cardinality, cheaper
+        // aggregate than model/rating), so it's always a live GROUP BY, filtered or not.
+        let by_flag: Vec<(Option<i64>, u64)> = {
+            let filter_sql = build_filter_sql(conn, filter)?;
+            let sql = format!(
+                "SELECT a.flag, COUNT(*) FROM asset a \
+                 JOIN root r ON r.id = a.root_id \
+                 JOIN volume v ON v.id = r.volume_id \
+                 WHERE {} GROUP BY a.flag",
+                filter_sql.where_clause
+            );
+            let param_refs: Vec<&dyn ToSql> =
+                filter_sql.params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let total: u64 = by_model.iter().map(|(_, cnt)| cnt).sum();
+
+        Ok(FacetCounts {
+            by_model,
+            by_rating,
+            by_flag,
+            total,
+        })
+    }
+
     /// Distinct non-empty values of one `asset` text column, online volumes only. `column` is
     /// always a compile-time literal from this file, never caller input.
     fn distinct_asset_column(&self, column: &str) -> Result<Vec<String>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        self.with_scan_conn(|conn| Self::distinct_asset_column_on(conn, column))
+    }
+
+    fn distinct_asset_column_on(
+        conn: &Connection,
+        column: &str,
+    ) -> Result<Vec<String>, CatalogError> {
         let sql = format!(
             "SELECT DISTINCT a.{column} FROM asset a \
              JOIN root r ON r.id = a.root_id \
@@ -1385,115 +1517,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn facets(&self, filter: &Filter) -> Result<FacetCounts, CatalogError> {
-        let conn = self.conn.lock().unwrap();
-        // An unfiltered query reads the trigger-maintained cache (ADR-0103's own optimized case);
-        // any narrowing filter falls back to a live, exact GROUP BY, since the cache's
-        // (volume_id, model, rating) grain has no way to answer a keyword/date/etc-narrowed facet
-        // count on its own.
-        let is_unfiltered = *filter == Filter::default();
-
-        let (by_model, by_rating) = if is_unfiltered {
-            let mut stmt = conn.prepare(
-                "SELECT fc.model, SUM(fc.cnt) FROM facet_counts fc \
-                     JOIN volume v ON v.id = fc.volume_id \
-                     WHERE v.online = 1 GROUP BY fc.model",
-            )?;
-            let by_model = stmt
-                .query_map([], |row| {
-                    let model: String = row.get(0)?;
-                    let cnt: i64 = row.get(1)?;
-                    Ok((
-                        if model.is_empty() { None } else { Some(model) },
-                        cnt as u64,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let mut stmt = conn.prepare(
-                "SELECT fc.rating, SUM(fc.cnt) FROM facet_counts fc \
-                     JOIN volume v ON v.id = fc.volume_id \
-                     WHERE v.online = 1 GROUP BY fc.rating",
-            )?;
-            let by_rating = stmt
-                .query_map([], |row| {
-                    let rating: i64 = row.get(0)?;
-                    let cnt: i64 = row.get(1)?;
-                    Ok((
-                        if rating == FACET_UNRATED_SENTINEL {
-                            None
-                        } else {
-                            Some(rating)
-                        },
-                        cnt as u64,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            (by_model, by_rating)
-        } else {
-            let filter_sql = build_filter_sql(&conn, filter)?;
-            let base = format!(
-                "FROM asset a \
-                     JOIN root r ON r.id = a.root_id \
-                     JOIN volume v ON v.id = r.volume_id \
-                     WHERE {}",
-                filter_sql.where_clause
-            );
-
-            let sql = format!("SELECT a.model, COUNT(*) {base} GROUP BY a.model");
-            let param_refs: Vec<&dyn ToSql> =
-                filter_sql.params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let by_model = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, i64>(1)? as u64,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let sql = format!("SELECT a.rating, COUNT(*) {base} GROUP BY a.rating");
-            let param_refs: Vec<&dyn ToSql> =
-                filter_sql.params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let by_rating = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            (by_model, by_rating)
-        };
-
-        // `flag` has no trigger-maintained cache at all (it's a much lower-cardinality, cheaper
-        // aggregate than model/rating), so it's always a live GROUP BY, filtered or not.
-        let by_flag: Vec<(Option<i64>, u64)> = {
-            let filter_sql = build_filter_sql(&conn, filter)?;
-            let sql = format!(
-                "SELECT a.flag, COUNT(*) FROM asset a \
-                 JOIN root r ON r.id = a.root_id \
-                 JOIN volume v ON v.id = r.volume_id \
-                 WHERE {} GROUP BY a.flag",
-                filter_sql.where_clause
-            );
-            let param_refs: Vec<&dyn ToSql> =
-                filter_sql.params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? as u64))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-
-        let total: u64 = by_model.iter().map(|(_, cnt)| cnt).sum();
-
-        Ok(FacetCounts {
-            by_model,
-            by_rating,
-            by_flag,
-            total,
-        })
+        self.with_scan_conn(|conn| Self::facets_on(conn, filter))
     }
 
     fn collection(&self, collection_id: i64) -> Result<Option<Collection>, CatalogError> {

@@ -750,9 +750,15 @@ impl PeltApp {
         let mut root_sel = self.grid_root;
         let mut sort = self.grid_sort;
         ui.horizontal(|ui| {
-            let root_label = root_sel
-                .and_then(|id| roots.iter().find(|r| r.id == id))
-                .map_or("All folders", |r| r.path.as_str());
+            // Never read "All folders" while a root filter is live (a loaded smart collection can
+            // name a folder that's no longer registered -- that matches nothing).
+            let root_label = match root_sel {
+                None => "All folders".to_string(),
+                Some(id) => roots
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map_or_else(|| format!("Missing folder (#{id})"), |r| r.path.clone()),
+            };
             egui::ComboBox::from_id_salt("grid_root")
                 .selected_text(root_label)
                 .show_ui(ui, |ui| {
