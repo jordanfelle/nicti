@@ -283,6 +283,24 @@ pub struct SqliteCatalog {
 }
 
 impl SqliteCatalog {
+    /// Distinct non-empty values of one `asset` text column, online volumes only. `column` is
+    /// always a compile-time literal from this file, never caller input.
+    fn distinct_asset_column(&self, column: &str) -> Result<Vec<String>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT DISTINCT a.{column} FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE v.online = 1 AND a.{column} IS NOT NULL AND a.{column} <> '' \
+             ORDER BY a.{column} COLLATE NOCASE ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn open(path: &Path) -> Result<Self, CatalogError> {
         let conn = Connection::open(path)?;
         Self::init(conn, Some(path.to_path_buf()))
@@ -1203,6 +1221,36 @@ impl CatalogStore for SqliteCatalog {
         Ok(rows)
     }
 
+    fn list_keywords(&self) -> Result<Vec<Keyword>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, name, path FROM keyword ORDER BY name_fold ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], row_to_keyword)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn list_collections(&self) -> Result<Vec<Collection>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, kind, name FROM collection ORDER BY name_fold ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], row_to_collection)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn distinct_makes(&self) -> Result<Vec<String>, CatalogError> {
+        self.distinct_asset_column("make")
+    }
+
+    fn distinct_labels(&self) -> Result<Vec<String>, CatalogError> {
+        self.distinct_asset_column("label")
+    }
+
     fn keyword_by_path(&self, segments: &[&str]) -> Result<Option<Keyword>, CatalogError> {
         let conn = self.conn.lock().unwrap();
         let mut parent_id: Option<i64> = None;
@@ -1733,6 +1781,67 @@ mod tests {
         assert_eq!(asset.id, id);
         assert_eq!(asset.rel_path, "a.NEF");
         assert_eq!(asset.model, Some("Z8".to_string()));
+    }
+
+    #[test]
+    fn list_keywords_and_collections_are_name_sorted_and_flat() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let zoo = store.create_keyword(None, "Zoo").unwrap();
+        let apple = store.create_keyword(None, "apple").unwrap();
+        let cat = store.create_keyword(Some(zoo), "Cats").unwrap();
+        let names: Vec<_> = store
+            .list_keywords()
+            .unwrap()
+            .into_iter()
+            .map(|k| (k.id, k.parent_id))
+            .collect();
+        assert_eq!(names, vec![(apple, None), (cat, Some(zoo)), (zoo, None)]);
+
+        let smart = store
+            .create_collection(None, "Picks", CollectionKind::Smart)
+            .unwrap();
+        let manual = store
+            .create_collection(Some(smart), "Album", CollectionKind::Manual)
+            .unwrap();
+        let ids: Vec<_> = store
+            .list_collections()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, vec![manual, smart]);
+    }
+
+    #[test]
+    fn distinct_makes_and_labels_skip_empty_and_offline_volumes() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let v1 = store.upsert_volume("v1", None, None, 0).unwrap();
+        let v2 = store.upsert_volume("v2", None, None, 0).unwrap();
+        let r1 = store.ensure_root(v1, "").unwrap();
+        let r2 = store.ensure_root(v2, "").unwrap();
+        let mut a = new_asset("a.NEF", Some("Z8"));
+        a.make = Some("NIKON".to_string());
+        let mut b = new_asset("b.NEF", Some("Z6"));
+        b.make = Some("NIKON".to_string());
+        let mut c = new_asset("c.NEF", None);
+        c.make = Some("Canon".to_string());
+        let mut d = new_asset("d.NEF", None);
+        d.make = Some("Sony".to_string()); // on the offline volume below
+        let a_id = store.insert_asset(r1, &a, None).unwrap();
+        let b_id = store.insert_asset(r1, &b, None).unwrap();
+        store.insert_asset(r1, &c, None).unwrap();
+        let d_id = store.insert_asset(r2, &d, None).unwrap();
+        store.set_label(&[a_id, d_id], Some("Red")).unwrap();
+        store.set_label(&[b_id], Some("")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE volume SET online = 0 WHERE id = ?1", params![v2])
+            .unwrap();
+
+        assert_eq!(store.distinct_makes().unwrap(), vec!["Canon", "NIKON"]);
+        assert_eq!(store.distinct_labels().unwrap(), vec!["Red"]);
     }
 
     #[test]

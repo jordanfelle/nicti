@@ -287,6 +287,21 @@ pub trait CatalogStore: Module {
     /// format and hands this method plain segments.
     fn keyword_by_path(&self, segments: &[&str]) -> Result<Option<Keyword>, CatalogError>;
 
+    /// Every keyword, ordered by case-folded name then id. Flat: the filter bar's (#242) keyword
+    /// picker rebuilds the tree from `parent_id`, so siblings come out name-sorted.
+    fn list_keywords(&self) -> Result<Vec<Keyword>, CatalogError>;
+
+    /// Every collection (manual and smart), ordered by name, for the filter bar's (#242)
+    /// "load smart collection" picker.
+    fn list_collections(&self) -> Result<Vec<Collection>, CatalogError>;
+
+    /// Distinct non-empty EXIF `make` values across online volumes, sorted -- the filter bar's
+    /// (#242) make dropdown. `model` already has `facets().by_model`.
+    fn distinct_makes(&self) -> Result<Vec<String>, CatalogError>;
+
+    /// Distinct non-empty `label` values across online volumes, sorted.
+    fn distinct_labels(&self) -> Result<Vec<String>, CatalogError>;
+
     /// Runs a `Filter`/`Sort` query, keyset-paginated (`Page::after` echoes the last row's own
     /// sort-key + id back in, never an `OFFSET` — O(n) at 2M rows per ADR-0067). Always scoped to
     /// online volumes only, the same as `facet_count`.

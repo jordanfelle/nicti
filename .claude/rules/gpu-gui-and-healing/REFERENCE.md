@@ -174,6 +174,19 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     release build (`cargo test -p nicti-lair --release --test scale -- --ignored --nocapture`):
     `hunt_ids` 37–270 ms (filename across all roots 1.1 s), first keyset page 0.19 ms,
     `get_previews` 64 × ~138 KB 6 ms. Not measured: real-machine grid frame time (#233).
+  - **#242 (Library filter bar, landed)**: `filter_bar.rs`'s `FilterBar` — keyword (+subtree), rating
+    (any / N+ / rejected), picks, label, make, model, capture-date range, filename controls →
+    `to_filter(root_id)` → `Filter` for `GridSession::set_query`; `load_filter` is its inverse and
+    round-trips a saved rule losslessly (raw date bounds + `rel_path_prefix` carried through). Facet
+    counts come from `compute_facets` (each dimension counted with its *own* filter cleared, so a
+    picked model doesn't zero the others) on a worker thread (`Pending`), as do the option lists
+    (`load_options`). Text fields commit on Enter/focus-loss, not per keystroke (filename is a
+    `GLOB` scan). Dates are typed `YYYY-MM-DD` but stored as EXIF `YYYY:MM:DD HH:MM:SS` text, the
+    format `captured_at` really holds; an invalid date is *no bound*, never an empty result. Save =
+    `create_collection(Smart)` + `set_smart_rule`, rolled back if the second fails. `app.rs` reads
+    `to_filter` even while the header is collapsed (a collapsed bar still filters) and calls
+    `invalidate_options` on the import/sync/move busy → idle edge. Not verified by eye: no display
+    in the dev sandbox, only unit tests over the state/query logic.
 - **`crates/nicti-tapetum`'s `heal.rs`** (#51) — the baked heal stage: `HealStage` (registry entry,
   `impl_version`), `HealKernel` (pipelines built once), `HealExec` (one render's spots),
   `RemovalPatch`/`RemovalSet`/`spot_key`/`stamp_removal_state` (AI patches), `spot_geometry` (integer

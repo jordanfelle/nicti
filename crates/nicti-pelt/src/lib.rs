@@ -6,7 +6,8 @@
 //! `nicti-ui` name #241 was filed under.
 //!
 //! The Library view's virtualized thumbnail grid is `grid` (#30). Explicitly out of scope here
-//! (each has, or will have, its own ticket): culling UX (#32), the filter bar (#242).
+//! (each has, or will have, its own ticket): culling UX (#32). The Library filter bar is
+//! `filter_bar` (#242).
 
 mod activity;
 mod app;
@@ -16,6 +17,7 @@ mod catalog;
 mod color_mgmt;
 mod decode_job;
 mod develop_panel;
+mod filter_bar;
 mod grid;
 mod heal_tool;
 mod loupe;
