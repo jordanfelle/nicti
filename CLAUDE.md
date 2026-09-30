@@ -23,7 +23,7 @@ Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
 `lrc-migration` (0061, 0156, 0158), `masking` (0048, 0049), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
-`xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101), `jobs` (0054), `export` (0056),
+`xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
@@ -102,20 +102,25 @@ terse index: crate/spike → purpose → owning topic.
   a live-adjustable `Throttle`), a `JobId`-keyed status map for an activity panel to poll
   (`snapshot`), and an independent `CancelToken` registry (`Pounce::cancel` can't just delegate to
   `Scheduler::cancel`, which only finds a job still sitting in its queue — most of a fast-yielding
-  job's lifetime is spent checked out by a worker thread instead). `telemetry/`/`hackles.rs` are
+  job's lifetime is spent checked out by a worker thread instead). `Pounce::submitter()` (#57) is a
+  weak handle so a job can chain a follow-up. `telemetry/`/`hackles.rs` are
   #70's build (bottleneck indicator) — see [`jobs`](.claude/rules/jobs/REFERENCE.md).
 - **`crates/nicti-calico`** (#42, landed) — color management: output spaces, runtime ICC profiles,
   the display/proof transform, Windows monitor-profile lookup; see [`color`](.claude/rules/color/REFERENCE.md).
   Also the DCP camera-profile machinery (`dcp.rs`/`cct.rs`/`huesatmap.rs`/`profile.rs`, promoted from
   `spikes/calico`) and the `ColorProfile` extension point. `nicti-pelt`'s `camera_profiles.rs`
   discovers/loads the user's Adobe `.dcp` files for the Develop panel
-- **`crates/nicti-iris`/`nicti-stalk`/`nicti-preen`**
+- **`crates/nicti-iris`/`nicti-stalk`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
-  `LensCorrection` (#39),
-  `ModelProvider` (#48-#53/#33-#36), `Exporter` (#56/#57). `nicti-stalk` also has `models.rs` (#51):
+  `LensCorrection` (#39), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):
   the on-demand, checksummed AI-model store + pinned manifest (ADR-0218), and (#49) the backend-
   agnostic `SegmentationProvider`/`Segmenter`/`SegmentationRegistry` layer that makes AI mask models
   pluggable, plus the pinned BiRefNet artifact
+- **`crates/nicti-preen`** (#57, landed) — the export engine: `Exporter` (JPEG/PNG/TIFF) plus settings/
+  presets, filename tokens, batch planning, collision-safe writes, linear-light resize, orientation,
+  output color, watermark and EXIF/XMP/ICC metadata; `export_frame` is the entry point. GPU-free and
+  catalog-free (the render + Pounce wiring is `nicti-pelt`'s `export/`) →
+  [`export`](.claude/rules/export/REFERENCE.md)
 - **`crates/nicti-groom`** (#51, promoted from `spikes/groom`) — AI object removal (MobileSAM + LaMa
   → `RemovalPatch`), the clone/heal auto-source picker, and the `RemoveJob`/`InstallModelsJob`
   Pounce jobs; the GPU clone/heal itself is `nicti-tapetum`'s `heal.rs`, the UI is `nicti-pelt`'s
@@ -141,7 +146,9 @@ terse index: crate/spike → purpose → owning topic.
   `tile.rs` (`TilePlanner`/`TiledRender`) tiles the output-side geometry pass for a full-res render
   (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`, and renamed from
   `nicti-render` to `nicti-tapetum` once the whole #45 stack merged, matching the naming-convention
-  section above. **`mask/`** (#49): the `nicti.masks` stage -- `params.rs` (data model), `raster.rs`/`compose.rs`
+  section above. `spine.rs` (#57) is the shared graph/registry/`resolve_inputs` Develop, export and
+  `bench/knead` all use (#49 adds its keying-only `nicti.neutral` node and the `nicti.masks` live stage).
+  **`mask/`** (#49): the `nicti.masks` stage -- `params.rs` (data model), `raster.rs`/`compose.rs`
   (CPU references, fold, AI bake key), `kernels.rs`/`guided.rs`/`bases.rs` (GPU kernels), `local.rs` (per-mask
   adjustments' uniforms + CPU twin), `engine.rs` (`MaskEngine`, the caches) → [`masking`](.claude/rules/masking/REFERENCE.md).
   See [`render-graph`](.claude/rules/render-graph/REFERENCE.md).
@@ -191,7 +198,8 @@ terse index: crate/spike → purpose → owning topic.
   (`Carry`/`resume_open_moves`, verified folder move) + `pounce_jobs::MoveJob`, wired into
   `nicti-pelt`'s Library view. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
   **#301** wires it into the loupe via `nicti-pelt`'s `t2.rs`, **#302** adds `cache_settings.rs`) — see `preview-tiers`. **#32** adds `shred.rs` (`Shred`/`resume_open_deletes`,
-  delete-to-Recycle-Bin with a journal) + `pounce_jobs::DeleteJob` — see `culling`.
+  delete-to-Recycle-Bin with a journal) + `pounce_jobs::DeleteJob` — see `culling`. **#57** adds
+  `CatalogStore::get_master_edit`/`put_master_edit` (the Develop edit document) — see `catalog-engine`.
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,
@@ -208,6 +216,8 @@ terse index: crate/spike → purpose → owning topic.
   **#49 (masks, landed)**: `mask_panel.rs` (the Masks tool: panel, gestures, overlay), `mask_edit.rs` (its
   egui-free editing ops + CPU overlay preview), `mask_tool.rs` (`MaskBakeService`: AI bakes + model
   download) and `render.rs`'s `DevelopView` mask API — see [`masking`](.claude/rules/masking/REFERENCE.md).
+  **#57 (export, landed)**: `export/` (`jobs.rs` the run, `dialog.rs`, `presets.rs`, `sink.rs`) and
+  Develop autosave to the catalog — see [`export`](.claude/rules/export/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)

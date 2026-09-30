@@ -23,6 +23,8 @@ use nicti_lair::{
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
 use nicti_pounce::{JobKind, JobState, Pounce};
+use nicti_preen::exporters::builtin_registry;
+use nicti_preen::ExporterRegistry;
 use nicti_tapetum::gpu::GpuContext;
 
 use nicti_shed::state::Channel as UpdateChannel;
@@ -37,6 +39,7 @@ use crate::cull::previews::{preview_texture, TilePreviews};
 use crate::cull::survey::{self as cull_survey, SurveySession};
 use crate::cull::worker::CatalogMeta;
 use crate::cull::CullState;
+use crate::export::{facts_for, ExportEnv, ExportUi};
 use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
@@ -101,6 +104,14 @@ pub struct PeltApp {
     catalog_path: PathBuf,
     catalog: CatalogOpenState,
     develop: Option<DevelopView>,
+    /// The device Develop and export both render on (one shared device, ADR-0016).
+    gpu: Arc<GpuContext>,
+    /// Export (#57): dialog, presets, the active run and its report.
+    export: ExportUi,
+    export_registry: Arc<ExporterRegistry>,
+    /// A save of Develop's edits that failed, and the document it failed for: the autosave doesn't
+    /// retry the same document every frame, and the message shows in the top bar.
+    edit_save_failed: Option<(nicti_pawprint::EditDocument, String)>,
     /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
     /// part of any edit document.
     hsl_band_selected: usize,
@@ -224,7 +235,7 @@ impl PeltApp {
             render_state.device.clone(),
             render_state.queue.clone(),
         ));
-        let develop = DevelopView::new(gpu);
+        let develop = DevelopView::new(gpu.clone());
 
         let resources = ViewportResources::new(&render_state.device, render_state.target_format);
         render_state
@@ -248,6 +259,7 @@ impl PeltApp {
         // The T2 preview cache (#301) lives beside the catalog. Failing to open it (read-only
         // location, another instance holding its lock) only costs the T2 upgrade, never the loupe.
         let larder = t2::open_larder(&catalog_path);
+        let export = ExportUi::new(&catalog_path);
 
         // A crash mid-move (#26) leaves a `root_move` journal row: finish or roll it back before
         // anything else touches that root.
@@ -341,6 +353,10 @@ impl PeltApp {
             decoder: Arc::new(LibRawDecoder),
             loupe: None,
             loupe_loaded_asset: None,
+            gpu,
+            export,
+            export_registry: Arc::new(builtin_registry()),
+            edit_save_failed: None,
             loupe_zoomed: false,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -520,6 +536,7 @@ impl PeltApp {
             JobKind::Sync,
             JobKind::Move,
             JobKind::Delete,
+            JobKind::Export,
         ]) {
             self.last_move_summary =
                 Some("Wait for the running import/sync/move/delete to finish first.".into());
@@ -725,6 +742,7 @@ impl PeltApp {
             JobKind::Sync,
             JobKind::Move,
             JobKind::Delete,
+            JobKind::Export,
         ]) {
             self.delete.last_summary =
                 Some("Wait for the running import, sync, move or delete to finish first.".into());
@@ -746,6 +764,7 @@ impl PeltApp {
             JobKind::Sync,
             JobKind::Move,
             JobKind::Delete,
+            JobKind::Export,
         ]) {
             self.delete.last_summary =
                 Some("Wait for the running import, sync, move or delete to finish first.".into());
@@ -1009,12 +1028,37 @@ fn summarize_resumed(resumed: &[Resumed]) -> Option<String> {
 }
 
 impl eframe::App for PeltApp {
+    fn on_exit(&mut self) {
+        self.export.cancel();
+        self.save_develop_edits(true);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.color.handle_shortcuts(ui.ctx());
         self.color.sync(frame);
         self.poll_backup();
         self.poll_move();
         self.poll_cull();
+        self.export.poll();
+        if self.export.is_running() {
+            // Progress text; nothing else repaints an otherwise idle window.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.ctx().input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::E,
+                ))
+            })
+        {
+            self.request_export();
+        }
+        // Autosave Develop's edits once the pointer is up (not on every slider-drag frame).
+        if !ui.ctx().input(|i| i.pointer.any_down()) {
+            self.save_develop_edits(false);
+        }
         self.handle_cull_keys(ui.ctx());
         if self.facets_dirty_since.is_some() {
             // Nothing else repaints an otherwise idle window once marking stops.
@@ -1128,6 +1172,14 @@ impl eframe::App for PeltApp {
                 });
             });
         }
+        if self.export.has_status() {
+            egui::Panel::top("export_status").show(ui, |ui| self.export.show_status(ui));
+        }
+        if let Some((_, err)) = &self.edit_save_failed {
+            egui::Panel::top("edit_save_error").show(ui, |ui| {
+                ui.colored_label(egui::Color32::RED, format!("Couldn't save edits: {err}"));
+            });
+        }
         if let Some(err) = self.update.last_error() {
             egui::Panel::top("update_error").show(ui, |ui| {
                 ui.colored_label(egui::Color32::RED, format!("Update failed: {err}"));
@@ -1233,6 +1285,7 @@ impl eframe::App for PeltApp {
         });
 
         self.show_delete_modal(ui.ctx());
+        self.show_export_dialog(ui.ctx());
     }
 }
 
@@ -1337,8 +1390,10 @@ impl PeltApp {
             JobKind::Sync,
             JobKind::Move,
             JobKind::Delete,
+            JobKind::Export,
         ]);
-        let (mut select_all, mut delete, mut survey, mut compare) = (false, false, false, false);
+        let (mut select_all, mut delete, mut survey, mut compare, mut export) =
+            (false, false, false, false, false);
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(total > 0, egui::Button::new("Select all"))
@@ -1375,6 +1430,18 @@ impl PeltApp {
             {
                 compare = true;
             }
+            if ui
+                .add_enabled(
+                    targets > 0 && !busy && !self.export.is_running(),
+                    egui::Button::new(format!("Export {targets}\u{2026}")),
+                )
+                .on_hover_text(
+                    "Ctrl+Shift+E. Render these photos with their edits to JPEG, PNG or TIFF.",
+                )
+                .clicked()
+            {
+                export = true;
+            }
         });
         if select_all {
             if let Some(grid) = self.grid.as_mut() {
@@ -1389,6 +1456,9 @@ impl PeltApp {
         }
         if compare {
             self.open_compare();
+        }
+        if export {
+            self.request_export();
         }
         if let Some(notice) = &self.cull_notice {
             ui.colored_label(egui::Color32::YELLOW, notice);
@@ -1423,6 +1493,7 @@ impl PeltApp {
             JobKind::Sync,
             JobKind::Move,
             JobKind::Delete,
+            JobKind::Export,
         ]);
         let move_running = self.job_active(&[JobKind::Move]);
         // Re-read on a busy edge or the cache's own cadence -- never per frame.
@@ -1550,7 +1621,7 @@ impl PeltApp {
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.job_active(&[JobKind::Move, JobKind::Delete]) {
+        if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
             self.last_move_summary = Some(
                 "A folder move or delete is running; import/sync waits until it finishes.".into(),
             );
@@ -1582,7 +1653,7 @@ impl PeltApp {
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.job_active(&[JobKind::Move, JobKind::Delete]) {
+        if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
             self.last_move_summary =
                 Some("A folder move or delete is running; wait for it to finish first.".into());
             return;
@@ -1600,7 +1671,7 @@ impl PeltApp {
     /// Opens the loupe on the grid's current ordering (#30), starting at `index` -- so Left/Right
     /// in the loupe walk the same sequence the grid shows, in its sort and filter.
     fn open_from_grid(&mut self, store: &Arc<SqliteCatalog>, index: usize) {
-        if self.job_active(&[JobKind::Move, JobKind::Delete]) {
+        if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
             self.last_move_summary =
                 Some("A folder move or delete is running; wait for it to finish first.".into());
             return;
@@ -1653,6 +1724,135 @@ impl PeltApp {
         self.loupe_preview = None;
         self.loupe_t2_undecodable = None;
         self.view = View::Loupe;
+    }
+
+    /// The photos an export acts on in the current view. Unlike `mark_targets`, Develop counts:
+    /// it exports the photo it has loaded.
+    fn export_targets(&self) -> Vec<i64> {
+        match self.view {
+            View::Develop => self
+                .loupe_loaded_asset
+                .map(|(id, _)| id)
+                .into_iter()
+                .collect(),
+            _ => self.mark_targets(),
+        }
+    }
+
+    /// Opens the Export dialog for the current view's photos (#57).
+    fn request_export(&mut self) {
+        if self.export.is_running() {
+            return;
+        }
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+        ]) || self.delete.is_confirming()
+        {
+            self.cull_notice = Some(
+                "Wait for the running import, sync, move or delete to finish before exporting."
+                    .into(),
+            );
+            return;
+        }
+        let ids = self.export_targets();
+        if ids.is_empty() {
+            return;
+        }
+        // Export renders what the catalog holds, so put Develop's pending edits there first.
+        // If that save fails, export would silently render the older stored edits: stop instead.
+        if !self.save_develop_edits(true) {
+            self.cull_notice = Some(
+                "Couldn't save Develop's edits, so nothing was exported (see the message above)."
+                    .into(),
+            );
+            return;
+        }
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return;
+        };
+        let samples = ids
+            .iter()
+            .take(3)
+            .filter_map(|&id| {
+                let asset = store.get_asset(id).ok().flatten()?;
+                let root = store.get_root_path(asset.root_id).ok().flatten()?;
+                Some(facts_for(
+                    &asset,
+                    &PathBuf::from(root).join(&asset.rel_path),
+                ))
+            })
+            .collect();
+        let scope = match ids.len() {
+            1 => "1 photo".to_string(),
+            n => format!("{n} photos"),
+        };
+        self.export.request(ids, scope, samples);
+    }
+
+    /// Draws the Export dialog while open; starting it builds the run's environment from live
+    /// app state.
+    fn show_export_dialog(&mut self, ctx: &egui::Context) {
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return;
+        };
+        let store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+        let env = || {
+            Some(ExportEnv {
+                submitter: self.pounce.submitter(),
+                store: store.clone(),
+                decoder: self.decoder.clone(),
+                gpu: self.gpu.clone(),
+                registry: self.export_registry.clone(),
+                software: format!("Nicti {}", self.version),
+            })
+        };
+        self.export.show_dialog(ctx, &env);
+    }
+
+    /// Persists Develop's edits for the photo it has loaded (#57) if they differ from what the
+    /// catalog holds. `Ok`/nothing-to-do -> `true`; a failed save -> `false` (the message is kept
+    /// in `edit_save_failed`). Unless `force`, a document that already failed to save isn't
+    /// retried until it changes -- the autosave calls this every frame.
+    fn save_develop_edits_to(&mut self, store: &dyn CatalogStore, force: bool) -> bool {
+        let (Some(develop), Some((asset_id, _))) = (self.develop.as_mut(), self.loupe_loaded_asset)
+        else {
+            return true;
+        };
+        if !develop.is_dirty() {
+            self.edit_save_failed = None;
+            return true;
+        }
+        if !force {
+            if let Some((doc, _)) = &self.edit_save_failed {
+                if doc == develop.document() {
+                    return false;
+                }
+            }
+        }
+        match store.put_master_edit(asset_id, develop.document()) {
+            Ok(()) => {
+                develop.mark_saved();
+                self.edit_save_failed = None;
+                true
+            }
+            Err(e) => {
+                self.edit_save_failed = Some((develop.document().clone(), e.to_string()));
+                false
+            }
+        }
+    }
+
+    /// [`Self::save_develop_edits_to`] against the app's own catalog.
+    fn save_develop_edits(&mut self, force: bool) -> bool {
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return true;
+        };
+        let store = store.clone();
+        self.save_develop_edits_to(store.as_ref(), force)
     }
 
     /// #31: the Loupe view. Navigates with Left/Right (directional prefetch keeps the neighbors
@@ -1771,12 +1971,21 @@ impl PeltApp {
                     // it the instant this decode landed -- no warning, no user action beyond
                     // having navigated in a different tab. Refuse to swap (and don't paint a
                     // viewport this frame) until the user explicitly says to discard those edits.
+                    // #57: edits are saved to the catalog first, so this only blocks when the save
+                    // itself failed.
+                    self.save_develop_edits_to(store.as_ref(), false);
                     let develop_has_unsaved_edits =
-                        self.develop.as_ref().is_some_and(DevelopView::has_edits);
+                        self.develop.as_ref().is_some_and(DevelopView::is_dirty);
                     if develop_has_unsaved_edits {
+                        let why = self
+                            .edit_save_failed
+                            .as_ref()
+                            .map_or("", |(_, msg)| msg.as_str());
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Develop has unsaved edits for a different photo or source revision.",
+                            format!(
+                                "Develop's edits for the previous photo couldn't be saved ({why})."
+                            ),
                         );
                         if ui
                             .button("Discard those edits and view this photo")
@@ -1786,15 +1995,18 @@ impl PeltApp {
                                 (self.develop.as_mut(), &current_asset)
                             {
                                 let identity = asset_cache_key(asset);
-                                develop.load_real_frame(frame, identity);
+                                let doc = stored_edit_document(store.as_ref(), asset_id);
+                                develop.load_real_frame(frame, identity, doc);
                                 self.loupe_loaded_asset = Some((asset_id, identity));
+                                self.edit_save_failed = None;
                             }
                         }
                         return;
                     }
                     if let (Some(develop), Some(asset)) = (self.develop.as_mut(), &current_asset) {
                         let identity = asset_cache_key(asset);
-                        develop.load_real_frame(frame, identity);
+                        let doc = stored_edit_document(store.as_ref(), asset_id);
+                        develop.load_real_frame(frame, identity, doc);
                         self.loupe_loaded_asset = Some((asset_id, identity));
                     }
                 }
@@ -1904,6 +2116,17 @@ impl PeltApp {
 
 /// Registers `path` as a root under the fixed placeholder volume this shell uses (see
 /// `PLACEHOLDER_VOLUME_IDENTITY_KEY`'s own doc comment) and returns its root id.
+/// The catalog's stored master edit document for `asset_id`, or an empty one when there is none or
+/// it can't be read (a corrupt document must not stop the photo from opening; Develop then starts
+/// fresh and the next save replaces it).
+fn stored_edit_document(store: &dyn CatalogStore, asset_id: i64) -> nicti_pawprint::EditDocument {
+    store
+        .get_master_edit(asset_id)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

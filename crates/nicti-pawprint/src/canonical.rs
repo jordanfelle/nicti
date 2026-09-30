@@ -85,20 +85,35 @@ fn contains_null(value: &serde_json::Value) -> bool {
     }
 }
 
-/// Canonical hash of any serializable value -- the "this stage's own params" half of a cache key.
-///
-/// Returns `Err(CanonicalError::NonFinite)` if the value contains (or, via a non-finite
-/// `f32`/`f64` field, silently becomes) a JSON `null` anywhere -- see this module's doc comment
-/// for why that's treated as a hard error rather than silently hashing it.
-pub fn hash_value<T: Serialize>(value: &T) -> Result<blake3::Hash, CanonicalError> {
+/// Canonical (sorted-key, `-0.0`-normalized, null-free) JSON bytes of any serializable value --
+/// the single serialization both `hash_value` and `to_canonical_json` build on.
+fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CanonicalError> {
     let mut v =
         serde_json::to_value(value).map_err(|e| CanonicalError::Serialization(e.to_string()))?;
     canonicalize(&mut v);
     if contains_null(&v) {
         return Err(CanonicalError::NonFinite);
     }
-    let bytes = serde_json::to_vec(&v).expect("canonicalized JSON value always serializes");
-    Ok(blake3::hash(&bytes))
+    Ok(serde_json::to_vec(&v).expect("canonicalized JSON value always serializes"))
+}
+
+/// Canonical hash of any serializable value -- the "this stage's own params" half of a cache key.
+///
+/// Returns `Err(CanonicalError::NonFinite)` if the value contains (or, via a non-finite
+/// `f32`/`f64` field, silently becomes) a JSON `null` anywhere -- see this module's doc comment
+/// for why that's treated as a hard error rather than silently hashing it.
+pub fn hash_value<T: Serialize>(value: &T) -> Result<blake3::Hash, CanonicalError> {
+    Ok(blake3::hash(&canonical_bytes(value)?))
+}
+
+/// Canonical JSON text of any serializable value -- what the catalog stores as an asset's master
+/// edit document (#57), so the same edits always serialize byte-identically and a non-finite
+/// float is refused at save time instead of silently becoming `null` on disk.
+///
+/// Same refusal rule as `hash_value` (`Err(CanonicalError::NonFinite)` on any JSON `null`).
+pub fn to_canonical_json<T: Serialize>(value: &T) -> Result<String, CanonicalError> {
+    let bytes = canonical_bytes(value)?;
+    Ok(String::from_utf8(bytes).expect("serde_json output is always valid UTF-8"))
 }
 
 /// Chains `own_hash` with every `upstream_hashes` entry, in the order given. This is Tapetum's
@@ -119,6 +134,26 @@ pub fn chain(upstream_hashes: &[blake3::Hash], own_hash: blake3::Hash) -> blake3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_canonical_json_sorts_keys_and_normalizes_negative_zero() {
+        let a = to_canonical_json(&serde_json::json!({ "b": -0.0, "a": 1 })).unwrap();
+        let b = to_canonical_json(&serde_json::json!({ "a": 1, "b": 0.0 })).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, r#"{"a":1,"b":0.0}"#);
+    }
+
+    #[test]
+    fn to_canonical_json_refuses_non_finite_floats() {
+        #[derive(serde::Serialize)]
+        struct P {
+            x: f32,
+        }
+        assert_eq!(
+            to_canonical_json(&P { x: f32::NAN }),
+            Err(CanonicalError::NonFinite)
+        );
+    }
 
     #[test]
     fn hash_value_is_stable_across_insertion_order() {

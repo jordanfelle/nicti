@@ -924,6 +924,54 @@ impl CatalogStore for SqliteCatalog {
             .optional()?)
     }
 
+    fn get_master_edit(
+        &self,
+        asset_id: i64,
+    ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT document FROM edit_variant WHERE asset_id = ?1 AND is_master = 1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match json {
+            Some(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| CatalogError::Document(e.to_string())),
+            None => {
+                // No master row: an existing asset still reads as "no edits yet"; a missing
+                // asset reads as `None`.
+                let exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM asset WHERE id = ?1)",
+                    params![asset_id],
+                    |row| row.get(0),
+                )?;
+                Ok(exists.then(nicti_pawprint::EditDocument::default))
+            }
+        }
+    }
+
+    fn put_master_edit(
+        &self,
+        asset_id: i64,
+        doc: &nicti_pawprint::EditDocument,
+    ) -> Result<(), CatalogError> {
+        let json = nicti_pawprint::to_canonical_json(doc)
+            .map_err(|e| CatalogError::Document(e.to_string()))?;
+        let conn = self.conn.lock().unwrap();
+        // Upsert on the (asset_id, name) key ingest also uses, so an asset whose master row is
+        // somehow missing still gets one. A nonexistent asset trips the FK and errors.
+        conn.execute(
+            "INSERT INTO edit_variant (asset_id, name, is_master, document) \
+             VALUES (?1, 'master', 1, ?2) \
+             ON CONFLICT(asset_id, name) DO UPDATE SET document = excluded.document",
+            params![asset_id, json],
+        )?;
+        Ok(())
+    }
+
     fn get_root_path(&self, root_id: i64) -> Result<Option<String>, CatalogError> {
         let conn = self.conn.lock().unwrap();
         Ok(conn
@@ -1959,6 +2007,81 @@ mod tests {
         assert_eq!(asset.id, id);
         assert_eq!(asset.rel_path, "a.NEF");
         assert_eq!(asset.model, Some("Z8".to_string()));
+    }
+
+    fn edit_doc(exposure: f64) -> nicti_pawprint::EditDocument {
+        let mut doc = nicti_pawprint::EditDocument::default();
+        doc.stages.insert(
+            "nicti.exposure".to_string(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "ev": exposure }),
+            },
+        );
+        doc
+    }
+
+    #[test]
+    fn master_edit_round_trips_and_a_fresh_asset_reads_empty() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+
+        assert_eq!(
+            store.get_master_edit(id).unwrap(),
+            Some(nicti_pawprint::EditDocument::default())
+        );
+        store.put_master_edit(id, &edit_doc(0.75)).unwrap();
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.75)));
+        // A second put replaces, never duplicates, the master row.
+        store.put_master_edit(id, &edit_doc(-1.0)).unwrap();
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(-1.0)));
+    }
+
+    #[test]
+    fn master_edit_is_none_for_an_unknown_asset_and_put_errors() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        assert_eq!(store.get_master_edit(4242).unwrap(), None);
+        assert!(store.put_master_edit(4242, &edit_doc(0.0)).is_err());
+    }
+
+    #[test]
+    fn put_master_edit_refuses_a_non_finite_float_without_touching_the_row() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        store.put_master_edit(id, &edit_doc(0.5)).unwrap();
+
+        let mut bad = edit_doc(0.0);
+        bad.stages.get_mut("nicti.exposure").unwrap().params = serde_json::Value::Null; // what a NaN becomes after serde_json::to_value
+        assert!(matches!(
+            store.put_master_edit(id, &bad),
+            Err(CatalogError::Document(_))
+        ));
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.5)));
+    }
+
+    #[test]
+    fn master_edit_survives_a_reingest_of_the_same_asset() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        let id = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        store.put_master_edit(id, &edit_doc(2.0)).unwrap();
+
+        let again = store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap();
+        assert_eq!(again, id);
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(2.0)));
     }
 
     #[test]

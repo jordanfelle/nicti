@@ -153,3 +153,21 @@ full-res export path (landed in #45 PR4) already supports an arbitrary decoupled
 crop *does* actually resize the framing at export time.
 
 - **Auto-level degradation (#101, cross-ref)**: `docs/adr/0101-auto-op-graceful-degradation.md` (full text in `develop.md`) defines what `detect_level_angle` returning no or weak evidence must do: `NoResult` shows a hint, `LowConfidence` is skipped with a distinct hint, neither creates a history step. Implementation: #311.
+
+## #57: the shared spine, `render_live`, and a photo-identity bug
+
+Export needed the same graph/registry/params resolution Develop has, so they moved into
+`nicti_tapetum::spine` (`build_graph`, `build_registry`, `resolve_inputs`) and `nicti-pelt`'s
+`render.rs` and `bench/knead` now use it. `Renderer::render_live` was split out of `render` so a
+tiled full-resolution export doesn't allocate a full-size geometry target it never reads.
+
+Building it exposed that `RenderGraph::apply_document` recomputes every node's `own_hash` from the
+document — including DECODE's, whose only "params" are the stage default. `DevelopView::
+load_real_frame` had set DECODE's hash to the photo's identity with `set_own_hash`, and the next
+`render()`'s `apply_document` silently reset it, so two photos of the same pixel size shared baked
+and live cache keys and could be served each other's pixels. Fix: `spine::stamp_source_identity`
+puts the identity into the DECODE entry of the render-time copy of the document (the stored one is
+never stamped), which `apply_document` then reapplies identically every frame (no per-frame
+invalidation). Regression tests: `render.rs::two_photos_of_the_same_size_never_share_cached_pixels`
+and `export/jobs.rs::exports_every_photo_with_planned_names_and_distinct_pixels`, both confirmed to
+fail when the stamp is removed.

@@ -148,14 +148,31 @@ pub fn show(
                 // scrolling fast -- one summary line instead of a row each. (The counts above
                 // already include them, and `Cancel` on a batch is meaningless: the grid
                 // re-queues whatever is on screen.)
-                let is_grid_job =
-                    |s: &JobStatus| matches!(s.kind, JobKind::Thumbnail | JobKind::Snapshot);
-                let grid_active = statuses
-                    .iter()
-                    .filter(|s| {
-                        is_grid_job(s) && matches!(s.state, JobState::Queued | JobState::Running)
-                    })
-                    .count();
+                // Export (#57) queues three jobs per photo (decode, render, encode); its own status
+                // line (with Cancel) is the place to follow it, so fold those here too.
+                let is_grid_job = |s: &JobStatus| {
+                    matches!(
+                        s.kind,
+                        JobKind::Thumbnail | JobKind::Snapshot | JobKind::Export
+                    )
+                };
+                let active_of = |pred: fn(&JobKind) -> bool| {
+                    statuses
+                        .iter()
+                        .filter(|s| {
+                            pred(&s.kind) && matches!(s.state, JobState::Queued | JobState::Running)
+                        })
+                        .count()
+                };
+                let grid_active =
+                    active_of(|k| matches!(k, JobKind::Thumbnail | JobKind::Snapshot));
+                let export_active = active_of(|k| matches!(k, JobKind::Export));
+                if export_active > 0 {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Export: {export_active} stage job(s) active"));
+                    });
+                }
                 if grid_active > 0 {
                     ui.horizontal(|ui| {
                         ui.spinner();

@@ -3,6 +3,9 @@ paths:
   - "spikes/prey/**"
   - "docs/adr/0056-export-stack.md"
   - "crates/nicti-preen/**"
+  - "crates/nicti-pelt/src/export/**"
+  - "crates/nicti-tapetum/src/spine.rs"
+  - "docs/adr/0057-export-pipeline.md"
 ---
 # Export Stack — Quick Reference
 
@@ -10,7 +13,7 @@ Full reasoning/history: `docs/decisions/export.md`.
 
 - **Export stack (#56)** — `docs/adr/0056`: **Proposed**, JPEG-encoder pick now confirmed
   (#223), still pending a real full-resolution GPU-resize measurement on the reference RTX 5080;
-  wiring into a real export pipeline is #57's build.
+  the pipeline built on it landed in #57 (see below).
 - **Resize**: `fast_image_resize` Lanczos3 over a hand-converted linear-light `f32x3` buffer
   (`resize::resize_fast_linear`) is v1's pick, not `image::imageops`'s naive gamma-space resize —
   the naive path is faster but measurably wrong on high-contrast content. A `wgpu` compute
@@ -49,6 +52,32 @@ Full reasoning/history: `docs/decisions/export.md`.
   the Windows target), and a real-NEF re-measurement of #223's whole comparison once #41's render
   pipeline exists (synthetic-image-only so far).
 
+- **Export pipeline (#57, landed)** — `docs/adr/0057`: **Accepted**. Engine = `crates/nicti-preen`
+  (GPU-free, catalog-free: `export_frame(WorkingFrame, ExportContext, ExporterRegistry)` does
+  size → linear-light resize → orient → output matrix → watermark → quantize → encode); render +
+  jobs = `crates/nicti-pelt/src/export/` (`jobs.rs` `ExportRun`, `dialog.rs` `ExportUi`,
+  `presets.rs`, `sink.rs`). Per photo: decode (CPU lane) → render (GPU lane, one tile/step, `vram_bytes: 0`)
+  → encode+write (CPU lane), chained through `Pounce::submitter()`; one `Ticket` per photo settles
+  exactly once, so the report always adds up. Memory bounded by `advance()` (~2.4 GB worst case at
+  45 MP full size).
+- **Gotcha (#57)**: `RenderGraph::apply_document` recomputes *every* node's hash from the document,
+  so `set_own_hash(DECODE, identity)` is undone on the next render and two same-size photos share
+  cache keys. Always `spine::stamp_source_identity` on the render-time document copy (Develop and
+  export both do; regression tests in `nicti-pelt` `render.rs` and `export/jobs.rs`).
+- **Names/collisions (#57)**: tokens `{Filename} {Sequence[:N]} {Date[:fmt]} {Rating} {Make} {Model}
+  {Folder}`; sequence = start + selection position, fixed at plan time (failures leave gaps);
+  batch de-duplicated on a case-folded path under every policy; `write_output` claims the name with
+  `create_new`, writes a unique temp, renames. Every component sanitized on every OS.
+- **Formats (#57)**: JPEG = `jpeg-encoder` (subsampling pinned, JFIF density, ICC native, XMP APP1,
+  EXIF via `little_exif`). PNG = `image` + one `img-parts` pass (iCCP, pHYs, iTXt, `eXIf` from the
+  raw TIFF block — `little_exif`'s own PNG writer emits a non-standard zTXt and rewrites XMP).
+  TIFF = `tiff` crate with resolution/ICC (UNDEFINED type)/XMP tags, no EXIF. EXIF `ColorSpace` is
+  0xFFFF for non-sRGB. exiftool `-validate` clean, except two known TIFF quirks (Adobe-Deflate
+  flag; odd IFD offsets after an odd compressed strip).
+- **Edits (#57)**: read from `CatalogStore::get_master_edit`; Develop autosaves. AI Remove spots
+  are skipped at export (patches aren't persisted, #324); a missing/changed DCP profile fails that
+  photo rather than exporting different colors. Export rotates by the file's EXIF Orientation.
+
 ## Package contents
 
 - **`spikes/prey`** (#56/ADR-0056's export-stack research) — `resize.rs`/`gpu_resize.rs` (CPU/GPU
@@ -61,3 +90,12 @@ Full reasoning/history: `docs/decisions/export.md`.
   `resize`/`encode`/`metadata`/`watermark`/`pipeline`/`quality-sweep` subcommands, each measured
   via `nicti-prowl::perf::Protocol`. Unit tests all use synthetic images (no real NEF/render
   pipeline exists yet), not path-gated. See `docs/research/prey-export-stack.md`.
+- **`crates/nicti-preen`** (#57) — `spec.rs` (`ExportSpec`/`ExportPreset`, `validate`), `naming.rs`
+  (`Template`, `sanitize_component`), `plan.rs` (`plan_batch`), `write.rs` (`write_output`),
+  `resize.rs`, `orient.rs`, `color.rs`, `watermark.rs` (SVG/PNG logos), `metadata.rs` (source EXIF
+  read, EXIF/XMP build + embed), `exporters.rs` (`JpegExporter`/`PngExporter`/`TiffExporter`,
+  `builtin_registry`), and `lib.rs` (`Exporter`, `export_frame`). `tests/exiftool_validate.rs`
+  skips when `exiftool` isn't on PATH.
+- **`crates/nicti-pelt/src/export/`** (#57) — see the Export pipeline bullet above. Presets are
+  `<catalog>.export-presets.json` (temp+rename), three built-ins never written. Ctrl+Shift+E or the
+  Library toolbar's "Export N…" opens the dialog.

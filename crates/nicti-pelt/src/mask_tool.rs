@@ -384,7 +384,11 @@ mod tests {
     fn develop() -> Option<DevelopView> {
         crate::test_gpu::shared().map(|gpu| {
             let mut d = DevelopView::new(gpu);
-            d.load_real_frame(d.frame_arc(), blake3::hash(b"photo"));
+            d.load_real_frame(
+                d.frame_arc(),
+                blake3::hash(b"photo"),
+                nicti_pawprint::EditDocument::default(),
+            );
             d
         })
     }
@@ -457,7 +461,11 @@ mod tests {
         );
         assert_eq!(svc.request_missing(&p, &develop), 1);
         // The user moves to another photo before the bake lands.
-        develop.load_real_frame(develop.frame_arc(), blake3::hash(b"another photo"));
+        develop.load_real_frame(
+            develop.frame_arc(),
+            blake3::hash(b"another photo"),
+            nicti_pawprint::EditDocument::default(),
+        );
         drain(&p);
         let events = svc.poll(&mut develop);
         assert!(events.is_empty(), "a stale result must not be reported...");

@@ -17,6 +17,7 @@ mod color_mgmt;
 mod cull;
 mod decode_job;
 mod develop_panel;
+mod export;
 mod filter_bar;
 mod folder_panel;
 mod grid;

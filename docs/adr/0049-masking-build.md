@@ -97,7 +97,7 @@ test asserting it with counters (`MaskStats`):
 | Undo back to an earlier state | zero recomposes (composites are still cached) |
 
 Masks render at the frame extent **capped at 4096 px on the long edge** (~45 MB per `R32Float` field);
-the bilinear sample hides it on screen. Export should build them at full size (#354).
+the bilinear sample hides it on screen. Export should build them at full size (#354). **Until then the export pipeline (#57) applies no local adjustments at all**: its live pass is never given a mask atlas, so an exported photo silently lacks its masks. `ExportRun::start` therefore adds a warning naming every photo in the batch with an active mask (`export/jobs.rs`, tested), which the export dialog already shows.
 
 **Brush rasterization.** The spike's kernel looped over *every dab for every pixel*. Here a stroke is a
 stored polyline (small documents; dabs are derived at `radius/4` spacing, widened rather than truncated

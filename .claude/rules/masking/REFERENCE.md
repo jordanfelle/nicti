@@ -64,6 +64,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **Real-weights test**: `crates/nicti-siamese/tests/real_models.rs` (`#[ignore]`; needs
   `NICTI_MODELS_DIR=<root>` with `birefnet/birefnet_fp32.onnx` at the exact pinned bytes +
   `NICTI_TEST_ORT_DYLIB`).
+- **Export ignores masks** (its live pass never gets an atlas): `export/jobs.rs` warns per batch naming the masked photos (tested) until #354 lands -- don't remove the warning before then.
 - **Not done**: Moire/Defringe (#351), undo (#324), full-res export masks (#354), post-lens neutral image
   when lens is real (#358), real-photo quality (#171).
 

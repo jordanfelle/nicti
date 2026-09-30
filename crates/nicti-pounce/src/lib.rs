@@ -18,4 +18,4 @@ pub mod telemetry;
 pub mod throttle;
 
 pub use job::{ChunkedJob, JobError, JobId, JobKind, JobSpec, Lane, Priority, Progress, Step};
-pub use runtime::{JobState, JobStatus, Pounce};
+pub use runtime::{JobState, JobStatus, Pounce, Submitter};

@@ -3754,6 +3754,7 @@ dependencies = [
  "nicti-lair",
  "nicti-pawprint",
  "nicti-pounce",
+ "nicti-preen",
  "nicti-shed",
  "nicti-siamese",
  "nicti-stalk",
@@ -3763,6 +3764,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "wgpu",
 ]
 
@@ -3779,8 +3781,24 @@ dependencies = [
 name = "nicti-preen"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
+ "bytes",
+ "fast_image_resize",
+ "image",
+ "img-parts",
+ "jpeg-encoder",
+ "kamadak-exif",
+ "little_exif",
+ "nicti-calico",
  "nicti-claw",
+ "resvg",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tiff",
+ "tiny-skia",
+ "usvg",
 ]
 
 [[package]]

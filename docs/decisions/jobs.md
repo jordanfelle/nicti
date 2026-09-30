@@ -226,3 +226,14 @@ cleanup happens on the *next* run's own first chunk instead (`ninelives::cleanup
 Not a defect in this ticket, just a real, previously-undocumented consequence of the "cooperative,
 between-chunks-only" cancellation model #54/#55 chose — recorded here since it's this crate's own
 scheduling contract, not something #25's own ADR should have to re-derive.
+
+## #57: `Pounce::submitter()` for chained jobs
+
+The export pipeline chains decode → render → encode jobs, so a running job has to submit its
+successor. Handing it a `Pounce` clone is unsafe: `Drop for Pounce` joins the worker threads when it
+sees the last live handle, and a queued job dropped on a worker thread (cancel, shutdown) could be
+that last handle and join itself. `Submitter` holds a `Weak` to the inner state instead: it never
+keeps the runtime alive, never joins anything, and `submit` returns `None` once the runtime has shut
+down (the un-run job is dropped, so its `Drop` still settles anything it owns). `Pounce::submit`'s
+body moved into `Inner::submit` so both share it. Tests cover chaining, `None` after shutdown/drop,
+and dropping the last `Pounce` while a queued job holds a `Submitter`.

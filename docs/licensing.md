@@ -423,6 +423,18 @@ scope for this pass** (see the research doc) — same class of gap ADR-0059 alre
 DNG/TIFF: no crate in this workspace builds arbitrary TIFF tags, so embedding any of the three
 into a TIFF export needs a dedicated writer this spike didn't build.
 
+**Update (2026-09-30, [#57](https://github.com/jordanfelle/nicti/issues/57), export pipeline,
+`docs/adr/0057-export-pipeline.md`):** no new crates in `Cargo.lock` — the export engine
+(`crates/nicti-preen`) promotes `spikes/prey`'s already-reviewed dependencies into a **shipped**
+crate: `fast_image_resize` v6.1.0 (`MIT OR Apache-2.0`, built without its `rayon` feature),
+`jpeg-encoder` v0.6.1 (`(MIT OR Apache-2.0) AND IJG`), `img-parts` v0.4.0, `little_exif` v0.6.23,
+`resvg`/`usvg` v0.48.1, `tiny-skia` v0.12.0, `moxcms` (via `nicti-calico`), `kamadak-exif` v0.6.1
+(`BSD-2-Clause`, already a `nicti-lair` dependency), and `bytemuck`. **`tiff` v0.11.3 (`MIT`) is now
+a direct dependency** (previously only reachable through `spikes/prey`'s `image` features): it
+writes TIFF export with resolution, ICC and XMP tags. All licenses confirmed via `cargo metadata`;
+`cargo deny check licenses bans` passes clean with no `deny.toml` changes. `mozjpeg` stays behind
+`spikes/prey`'s non-default `native` feature and is not part of the shipped build.
+
 **Update (2026-09-29, [#42](https://github.com/jordanfelle/nicti/issues/42), DCP camera profiles):**
 no new crates in `Cargo.lock`. `nicti-calico` now depends directly on `thiserror` and `byteorder`
 (both already in the lock via `spikes/calico`, reviewed above), `nicti-tapetum` on `nicti-calico`,

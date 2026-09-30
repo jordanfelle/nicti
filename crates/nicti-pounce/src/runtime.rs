@@ -98,6 +98,43 @@ struct Inner {
 }
 
 impl Inner {
+    fn submit(&self, job: Box<dyn ChunkedJob>) -> JobId {
+        let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let spec = job.spec();
+        let status = JobStatus {
+            id,
+            label: job.label(),
+            kind: spec.kind,
+            lane: spec.lane,
+            state: JobState::Queued,
+            progress: job.progress(),
+        };
+        self.set_status(status);
+
+        let lane = self.lane(spec.lane);
+        {
+            // Register the cancel token *before* releasing the lane lock -- once it's released,
+            // a worker can immediately take this job, run it to `Done` (a real one-chunk job
+            // can finish before this thread ever reaches the `insert` below), and call
+            // `finish_status`, which removes a token that isn't in the registry yet -- a no-op.
+            // `submit` then inserts it anyway, and nothing ever removes it again: a permanent
+            // leak for every fast job that hits this window (found by CodeRabbit's review).
+            let mut scheduler = lane.scheduler.lock().unwrap();
+            let cancel_token = scheduler.submit(id, job);
+            self.cancel_tokens.lock().unwrap().insert(id, cancel_token);
+        }
+        lane.notify();
+        (self.on_change)();
+        id
+    }
+
+    fn cancel(&self, id: JobId) {
+        if let Some(token) = self.cancel_tokens.lock().unwrap().get(&id) {
+            token.cancel();
+        }
+        self.notify_all_lanes();
+    }
+
     fn set_status(&self, status: JobStatus) {
         let mut statuses = self.statuses.lock().unwrap();
         statuses.insert(status.id, status);
@@ -218,37 +255,7 @@ impl Pounce {
     }
 
     pub fn submit(&self, job: Box<dyn ChunkedJob>) -> JobId {
-        let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
-        let spec = job.spec();
-        let status = JobStatus {
-            id,
-            label: job.label(),
-            kind: spec.kind,
-            lane: spec.lane,
-            state: JobState::Queued,
-            progress: job.progress(),
-        };
-        self.inner.set_status(status);
-
-        let lane = self.inner.lane(spec.lane);
-        {
-            // Register the cancel token *before* releasing the lane lock -- once it's released,
-            // a worker can immediately take this job, run it to `Done` (a real one-chunk job
-            // can finish before this thread ever reaches the `insert` below), and call
-            // `finish_status`, which removes a token that isn't in the registry yet -- a no-op.
-            // `submit` then inserts it anyway, and nothing ever removes it again: a permanent
-            // leak for every fast job that hits this window (found by CodeRabbit's review).
-            let mut scheduler = lane.scheduler.lock().unwrap();
-            let cancel_token = scheduler.submit(id, job);
-            self.inner
-                .cancel_tokens
-                .lock()
-                .unwrap()
-                .insert(id, cancel_token);
-        }
-        lane.notify();
-        (self.inner.on_change)();
-        id
+        self.inner.submit(job)
     }
 
     /// Cancels a job regardless of whether it's currently queued or being stepped by a worker
@@ -256,10 +263,18 @@ impl Pounce {
     /// delegate to `queue::Scheduler::cancel`. A cancelled job stops at its *next* chunk boundary,
     /// never mid-chunk (this crate's cooperative-cancellation contract throughout).
     pub fn cancel(&self, id: JobId) {
-        if let Some(token) = self.inner.cancel_tokens.lock().unwrap().get(&id) {
-            token.cancel();
+        self.inner.cancel(id);
+    }
+
+    /// A handle a *job* can hold to submit follow-up jobs (#57's export stages chain
+    /// decode -> render -> encode this way). Deliberately not a `Pounce` clone: `Drop for Pounce`
+    /// joins the worker threads when it sees the last live handle, so a queued job holding a
+    /// `Pounce` clone could become the last holder on a worker thread and join itself. This holds
+    /// only a `Weak<Inner>`, so it never keeps the runtime alive and never joins anything.
+    pub fn submitter(&self) -> Submitter {
+        Submitter {
+            inner: Arc::downgrade(&self.inner),
         }
-        self.inner.notify_all_lanes();
     }
 
     /// Re-orders both lanes' pending background jobs by `key` -- called on every cursor move
@@ -330,6 +345,31 @@ impl Pounce {
         let mut cpu_handles = self.cpu_handles.lock().unwrap();
         for handle in cpu_handles.drain(..) {
             let _ = handle.join();
+        }
+    }
+}
+
+/// A weak, job-safe handle for submitting follow-up jobs -- see [`Pounce::submitter`].
+#[derive(Clone)]
+pub struct Submitter {
+    inner: std::sync::Weak<Inner>,
+}
+
+impl Submitter {
+    /// Submits `job`, or returns `None` if the runtime has shut down or been dropped (the job is
+    /// dropped un-run, so its `Drop` still gets to settle any result slot it owns).
+    pub fn submit(&self, job: Box<dyn ChunkedJob>) -> Option<JobId> {
+        let inner = self.inner.upgrade()?;
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(inner.submit(job))
+    }
+
+    /// Cancels a job by id; a no-op once the runtime is gone.
+    pub fn cancel(&self, id: JobId) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.cancel(id);
         }
     }
 }
@@ -942,5 +982,105 @@ mod tests {
             ));
             pounce.shutdown();
         }
+    }
+
+    /// A job that, on its one step, submits a follow-up through its `Submitter`.
+    struct ChainJob {
+        submitter: Submitter,
+        next: Option<Box<dyn ChunkedJob>>,
+        submitted: Arc<Mutex<Option<Option<JobId>>>>,
+    }
+
+    impl ChunkedJob for ChainJob {
+        fn spec(&self) -> JobSpec {
+            cpu_spec()
+        }
+        fn label(&self) -> String {
+            "chain".into()
+        }
+        fn progress(&self) -> Progress {
+            Progress::default()
+        }
+        fn step(&mut self) -> Result<Step, crate::job::JobError> {
+            let next = self.next.take().expect("stepped once");
+            *self.submitted.lock().unwrap() = Some(self.submitter.submit(next));
+            Ok(Step::Done)
+        }
+    }
+
+    #[test]
+    fn a_job_can_chain_a_follow_up_through_its_submitter() {
+        let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran2 = ran.clone();
+        let submitted = Arc::new(Mutex::new(None));
+        pounce.submit(Box::new(ChainJob {
+            submitter: pounce.submitter(),
+            next: Some(Box::new(StepJob {
+                spec: cpu_spec(),
+                label: "follow-up".into(),
+                remaining: 1,
+                on_step: Some(Box::new(move || {
+                    ran2.fetch_add(1, Ordering::SeqCst);
+                })),
+            })),
+            submitted: submitted.clone(),
+        }));
+        assert!(wait_until(
+            || ran.load(Ordering::SeqCst) == 1,
+            Duration::from_secs(2)
+        ));
+        assert!(matches!(*submitted.lock().unwrap(), Some(Some(_))));
+        pounce.shutdown();
+    }
+
+    #[test]
+    fn a_submitter_returns_none_after_shutdown_and_after_the_runtime_is_dropped() {
+        let pounce = Pounce::new(u64::MAX, 1, 1, || {});
+        let submitter = pounce.submitter();
+        let job = || {
+            Box::new(StepJob {
+                spec: cpu_spec(),
+                label: "late".into(),
+                remaining: 1,
+                on_step: None,
+            })
+        };
+        assert!(submitter.submit(job()).is_some());
+        pounce.shutdown();
+        assert!(submitter.submit(job()).is_none());
+        drop(pounce);
+        assert!(submitter.submit(job()).is_none());
+        submitter.cancel(JobId(0)); // no-op, must not panic
+    }
+
+    #[test]
+    fn dropping_the_last_pounce_while_a_queued_job_holds_a_submitter_does_not_deadlock() {
+        // A queued job holds a Submitter (not a Pounce): when the last Pounce handle drops,
+        // shutdown joins the workers and returns; the job -- and its Submitter -- are dropped
+        // afterwards without ever joining anything from a worker thread.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let pounce = Pounce::new(u64::MAX, 1, 1, || {});
+            // Occupy the only CPU worker so the chain job stays queued.
+            pounce.submit(Box::new(StepJob {
+                spec: cpu_spec(),
+                label: "blocker".into(),
+                remaining: 1,
+                on_step: Some(Box::new(|| std::thread::sleep(Duration::from_millis(100)))),
+            }));
+            pounce.submit(Box::new(ChainJob {
+                submitter: pounce.submitter(),
+                next: None,
+                submitted: Arc::new(Mutex::new(None)),
+            }));
+            drop(pounce);
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "dropping the last Pounce handle hung"
+        );
+        handle.join().unwrap();
     }
 }
