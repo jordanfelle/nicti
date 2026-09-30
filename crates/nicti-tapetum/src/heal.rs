@@ -124,11 +124,122 @@ struct SpotUniforms {
     _pad: u32,
 }
 
+/// The largest AI-removal patch side honored: a 1025-px LaMa crop plus its context margin, doubled
+/// for headroom. Bounds the scratch textures a malformed patch could demand.
+pub const MAX_PATCH_SIDE: u32 = 2049;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PatchError {
+    #[error("removal patch side {0} must be odd and between 1 and {MAX_PATCH_SIDE}")]
+    BadSide(u32),
+    #[error("removal patch has {got} pixels, expected {expected}")]
+    WrongPixelCount { got: usize, expected: usize },
+}
+
+/// A finished AI removal (#51): a square patch of already-inpainted pixels, in the same space as
+/// the heal stage's input (linear camera RGB), ready to be blended over the frame.
+///
+/// `pixels` is row-major `side * side`; `.rgb` is the fill and `.a` the fill weight in `[0, 1]`
+/// (the object mask, already feathered -- so the shader needs no radius or feather of its own).
+/// The patch is centered on `center`: patch pixel `(px, py)` covers frame pixel
+/// `(center.0 + px - side/2, center.1 + py - side/2)`. Producing a *square* patch is the
+/// producer's job (pad with zero weight); it keeps the GPU side to one shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemovalPatch {
+    pub center: (i32, i32),
+    pub side: u32,
+    pub pixels: Vec<[f32; 4]>,
+}
+
+impl RemovalPatch {
+    pub fn new(center: (i32, i32), side: u32, pixels: Vec<[f32; 4]>) -> Result<Self, PatchError> {
+        if side == 0 || side.is_multiple_of(2) || side > MAX_PATCH_SIDE {
+            return Err(PatchError::BadSide(side));
+        }
+        let expected = side as usize * side as usize;
+        if pixels.len() != expected {
+            return Err(PatchError::WrongPixelCount {
+                got: pixels.len(),
+                expected,
+            });
+        }
+        Ok(Self {
+            center,
+            side,
+            pixels,
+        })
+    }
+
+    /// Content hash: what identifies "this exact fill" in the heal stage's cache key.
+    pub fn content_hash(&self) -> blake3::Hash {
+        let mut h = blake3::Hasher::new();
+        h.update(&self.center.0.to_le_bytes());
+        h.update(&self.center.1.to_le_bytes());
+        h.update(&self.side.to_le_bytes());
+        h.update(bytemuck::cast_slice(&self.pixels));
+        h.finalize()
+    }
+}
+
+/// Finished removals, keyed by [`spot_key`]. Owned by whoever runs the removal jobs (the Develop
+/// view); the render only reads it.
+pub type RemovalSet = std::collections::HashMap<String, std::sync::Arc<RemovalPatch>>;
+
+/// A stable identity for a spot: the canonical hash of its full definition (kind, geometry and
+/// mask recipe), so editing a spot yields a new key and its old patch can never be reused for it.
+pub fn spot_key(spot: &Spot) -> String {
+    nicti_pawprint::hash_value(spot)
+        .expect("a Spot serializes without nulls (Option fields skip when None)")
+        .to_hex()
+        .to_string()
+}
+
+/// Stamps which removals are ready into the document's heal entry, as an extra `"removals"` map
+/// (`spot key -> patch content hash`). [`HealParams`] ignores the unknown field when parsing, but
+/// `apply_document` hashes the whole entry, so a patch arriving -- or being replaced -- changes the
+/// heal stage's cache key and rebakes it, through the normal path rather than a side channel. A
+/// no-op when the document has no heal entry or no removal is ready for one of its spots.
+pub fn stamp_removal_state(doc: &mut nicti_pawprint::EditDocument, removals: &RemovalSet) {
+    let Some(entry) = doc.stages.get_mut(HEAL) else {
+        return;
+    };
+    let params: HealParams = coat::parse(&entry.params);
+    let ready: std::collections::BTreeMap<String, String> = params
+        .spots
+        .iter()
+        .filter(|s| s.kind == SpotKind::Remove)
+        .filter_map(|s| {
+            let key = spot_key(s);
+            removals
+                .get(&key)
+                .map(|p| (key, p.content_hash().to_hex().to_string()))
+        })
+        .collect();
+    if ready.is_empty() {
+        return;
+    }
+    if let Value::Object(map) = &mut entry.params {
+        map.insert(
+            "removals".to_owned(),
+            serde_json::to_value(ready).expect("a string map serializes"),
+        );
+    }
+}
+
+/// The scratch textures one `encode_spots` call reuses across its spots.
+struct Scratch {
+    patch_a: FrameTexture,
+    patch_b: FrameTexture,
+    guidance: FrameTexture,
+    result: FrameTexture,
+}
+
 pub struct HealKernel {
     extract_dst: wgpu::ComputePipeline,
     extract_guidance: wgpu::ComputePipeline,
     jacobi: wgpu::ComputePipeline,
     composite: wgpu::ComputePipeline,
+    composite_patch: wgpu::ComputePipeline,
 }
 
 impl HealKernel {
@@ -139,37 +250,92 @@ impl HealKernel {
             extract_guidance: make_compute_pipeline(&gpu.device, src, "extract_guidance"),
             jacobi: make_compute_pipeline(&gpu.device, src, "jacobi"),
             composite: make_compute_pipeline(&gpu.device, src, "composite"),
+            composite_patch: make_compute_pipeline(&gpu.device, src, "composite_patch"),
         }
     }
 
-    /// Records every applicable Clone/Heal spot in `spots` onto `frame`, in list order. `frame`
-    /// must already hold the upstream stage's output.
+    /// Records every applicable spot in `spots` onto `frame`, in list order: Clone/Heal spots run
+    /// on the GPU, and a Remove spot composites its pre-inpainted patch from `removals` (a Remove
+    /// spot with no ready patch is skipped, i.e. passes through). `frame` must already hold the
+    /// upstream stage's output.
     pub fn encode_spots(
         &self,
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameTexture,
         spots: &[Spot],
+        removals: &RemovalSet,
     ) {
-        let work: Vec<(&Spot, SpotGeometry)> = spots
+        enum Op<'a> {
+            Classic(&'a Spot, SpotGeometry),
+            Patch(&'a Spot, &'a RemovalPatch),
+        }
+        let ops: Vec<Op> = spots
             .iter()
-            .filter(|s| matches!(s.kind, SpotKind::Clone | SpotKind::Heal))
-            .filter_map(|s| spot_geometry(s).map(|g| (s, g)))
+            .filter_map(|s| match s.kind {
+                SpotKind::Clone | SpotKind::Heal => spot_geometry(s).map(|g| Op::Classic(s, g)),
+                SpotKind::Remove => removals
+                    .get(&spot_key(s))
+                    .map(|patch| Op::Patch(s, patch.as_ref())),
+            })
             .collect();
-        let Some(max_side) = work.iter().map(|(_, g)| g.side).max() else {
+        let Some(max_side) = ops
+            .iter()
+            .map(|op| match op {
+                Op::Classic(_, g) => g.side,
+                Op::Patch(_, p) => p.side as i32,
+            })
+            .max()
+        else {
             return;
         };
         let scratch = Extent {
             width: max_side as u32,
             height: max_side as u32,
         };
-        let patch_a = FrameTexture::new(gpu, scratch);
-        let patch_b = FrameTexture::new(gpu, scratch);
-        let guidance = FrameTexture::new(gpu, scratch);
-        let result = FrameTexture::new(gpu, scratch);
+        let scratch_bufs = Scratch {
+            patch_a: FrameTexture::new(gpu, scratch),
+            patch_b: FrameTexture::new(gpu, scratch),
+            guidance: FrameTexture::new(gpu, scratch),
+            result: FrameTexture::new(gpu, scratch),
+        };
 
-        for (spot, g) in work {
-            let uniforms = SpotUniforms {
+        for op in ops {
+            match op {
+                Op::Classic(spot, g) => {
+                    self.encode_classic(gpu, encoder, frame, &scratch_bufs, spot, g)
+                }
+                Op::Patch(spot, patch) => {
+                    self.encode_patch(gpu, encoder, frame, &scratch_bufs, spot, patch)
+                }
+            }
+        }
+    }
+
+    fn uniform_buffer(gpu: &GpuContext, u: &SpotUniforms) -> wgpu::Buffer {
+        // A dedicated uniform buffer per spot: every `write`/init lands before the render's single
+        // `queue.submit`, so a shared buffer would leave every spot reading the last spot's values
+        // (the #46 gotcha in `render-graph`'s REFERENCE.md).
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("heal spot uniforms"),
+                contents: bytemuck::bytes_of(u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+    }
+
+    fn encode_classic(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameTexture,
+        s: &Scratch,
+        spot: &Spot,
+        g: SpotGeometry,
+    ) {
+        let ubuf = Self::uniform_buffer(
+            gpu,
+            &SpotUniforms {
                 center: [g.center.0, g.center.1],
                 src_center: [g.src_center.0, g.src_center.1],
                 side: g.side,
@@ -180,120 +346,201 @@ impl HealKernel {
                 frame_w: frame.extent.width as i32,
                 frame_h: frame.extent.height as i32,
                 _pad: 0,
-            };
-            // A dedicated uniform buffer per spot: every `write`/init lands before the render's
-            // single `queue.submit`, so a shared buffer would leave every spot reading the last
-            // spot's values (the #46 gotcha in `render-graph`'s REFERENCE.md).
-            let ubuf = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("heal spot uniforms"),
-                    contents: bytemuck::bytes_of(&uniforms),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-            let groups = (g.side as u32).div_ceil(8);
+            },
+        );
+        let groups = (g.side as u32).div_ceil(8);
 
-            self.dispatch(
-                gpu,
-                encoder,
-                &self.extract_dst,
-                &[(0, &frame.view), (1, &patch_a.view)],
-                &ubuf,
-                groups,
-            );
-            self.dispatch(
-                gpu,
-                encoder,
-                &self.extract_guidance,
-                &[(0, &frame.view), (1, &guidance.view)],
-                &ubuf,
-                groups,
-            );
+        self.dispatch(
+            gpu,
+            encoder,
+            &self.extract_dst,
+            &[(0, &frame.view), (1, &s.patch_a.view)],
+            &ubuf,
+            groups,
+        );
+        self.dispatch(
+            gpu,
+            encoder,
+            &self.extract_guidance,
+            &[(0, &frame.view), (1, &s.guidance.view)],
+            &ubuf,
+            groups,
+        );
 
-            let solved = if spot.kind == SpotKind::Heal {
-                let iterations = jacobi_iterations(g.side);
-                let a_to_b = self.bind(
-                    gpu,
-                    &self.jacobi,
-                    &[(0, &patch_a.view), (1, &patch_b.view), (2, &guidance.view)],
-                    &ubuf,
-                );
-                let b_to_a = self.bind(
-                    gpu,
-                    &self.jacobi,
-                    &[(0, &patch_b.view), (1, &patch_a.view), (2, &guidance.view)],
-                    &ubuf,
-                );
-                for i in 0..iterations {
-                    let bind = if i.is_multiple_of(2) {
-                        &a_to_b
-                    } else {
-                        &b_to_a
-                    };
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("heal jacobi"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(&self.jacobi);
-                    pass.set_bind_group(0, bind, &[]);
-                    pass.dispatch_workgroups(groups, groups, 1);
-                }
-                // Even sweep count ends back in `patch_a`, odd in `patch_b`.
-                if iterations.is_multiple_of(2) {
-                    &patch_a
+        let solved = if spot.kind == SpotKind::Heal {
+            let iterations = jacobi_iterations(g.side);
+            let a_to_b = self.bind(
+                gpu,
+                &self.jacobi,
+                &[
+                    (0, &s.patch_a.view),
+                    (1, &s.patch_b.view),
+                    (2, &s.guidance.view),
+                ],
+                &ubuf,
+            );
+            let b_to_a = self.bind(
+                gpu,
+                &self.jacobi,
+                &[
+                    (0, &s.patch_b.view),
+                    (1, &s.patch_a.view),
+                    (2, &s.guidance.view),
+                ],
+                &ubuf,
+            );
+            for i in 0..iterations {
+                let bind = if i.is_multiple_of(2) {
+                    &a_to_b
                 } else {
-                    &patch_b
-                }
-            } else {
-                &guidance
-            };
-
-            self.dispatch(
-                gpu,
-                encoder,
-                &self.composite,
-                &[(0, &frame.view), (1, &result.view), (2, &solved.view)],
-                &ubuf,
-                groups,
-            );
-
-            // Copy the in-bounds part of the composited patch back into the frame.
-            let x0 = g.center.0 - g.half;
-            let y0 = g.center.1 - g.half;
-            let cx0 = x0.max(0);
-            let cy0 = y0.max(0);
-            let cx1 = (x0 + g.side).min(frame.extent.width as i32);
-            let cy1 = (y0 + g.side).min(frame.extent.height as i32);
-            if cx1 > cx0 && cy1 > cy0 {
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &result.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: (cx0 - x0) as u32,
-                            y: (cy0 - y0) as u32,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &frame.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: cx0 as u32,
-                            y: cy0 as u32,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d {
-                        width: (cx1 - cx0) as u32,
-                        height: (cy1 - cy0) as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                    &b_to_a
+                };
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("heal jacobi"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.jacobi);
+                pass.set_bind_group(0, bind, &[]);
+                pass.dispatch_workgroups(groups, groups, 1);
             }
+            // Even sweep count ends back in `patch_a`, odd in `patch_b`.
+            if iterations.is_multiple_of(2) {
+                &s.patch_a
+            } else {
+                &s.patch_b
+            }
+        } else {
+            &s.guidance
+        };
+
+        self.dispatch(
+            gpu,
+            encoder,
+            &self.composite,
+            &[(0, &frame.view), (1, &s.result.view), (2, &solved.view)],
+            &ubuf,
+            groups,
+        );
+        Self::copy_back(encoder, frame, &s.result, g.center, g.half, g.side);
+    }
+
+    fn encode_patch(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameTexture,
+        s: &Scratch,
+        spot: &Spot,
+        patch: &RemovalPatch,
+    ) {
+        let side = patch.side as i32;
+        let half = side / 2;
+        // Upload the patch as an Rgba16Float texture (rgb = fill, a = fill weight).
+        let extent = Extent {
+            width: patch.side,
+            height: patch.side,
+        };
+        let tex = FrameTexture::new(gpu, extent);
+        let bytes: Vec<u8> = patch
+            .pixels
+            .iter()
+            .flat_map(|px| {
+                px.iter()
+                    .flat_map(|&c| half::f16::from_f32(c).to_le_bytes())
+            })
+            .collect();
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(patch.side * 8),
+                rows_per_image: Some(patch.side),
+            },
+            wgpu::Extent3d {
+                width: patch.side,
+                height: patch.side,
+                depth_or_array_layers: 1,
+            },
+        );
+        let ubuf = Self::uniform_buffer(
+            gpu,
+            &SpotUniforms {
+                center: [patch.center.0, patch.center.1],
+                src_center: [0, 0],
+                side,
+                half,
+                radius: 0.0,
+                feather: 0.0,
+                opacity: spot.opacity.clamp(0.0, 1.0),
+                frame_w: frame.extent.width as i32,
+                frame_h: frame.extent.height as i32,
+                _pad: 0,
+            },
+        );
+        let groups = patch.side.div_ceil(8);
+        self.dispatch(
+            gpu,
+            encoder,
+            &self.composite_patch,
+            &[(0, &frame.view), (1, &s.result.view), (2, &tex.view)],
+            &ubuf,
+            groups,
+        );
+        Self::copy_back(encoder, frame, &s.result, patch.center, half, side);
+    }
+
+    /// Copies the in-bounds part of a composited `side` x `side` patch (centered on `center`)
+    /// from `result` back into `frame`.
+    fn copy_back(
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameTexture,
+        result: &FrameTexture,
+        center: (i32, i32),
+        half: i32,
+        side: i32,
+    ) {
+        let x0 = center.0 - half;
+        let y0 = center.1 - half;
+        let cx0 = x0.max(0);
+        let cy0 = y0.max(0);
+        let cx1 = (x0 + side).min(frame.extent.width as i32);
+        let cy1 = (y0 + side).min(frame.extent.height as i32);
+        if cx1 <= cx0 || cy1 <= cy0 {
+            return;
         }
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &result.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: (cx0 - x0) as u32,
+                    y: (cy0 - y0) as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &frame.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: cx0 as u32,
+                    y: cy0 as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: (cx1 - cx0) as u32,
+                height: (cy1 - cy0) as u32,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     fn bind(
@@ -345,6 +592,8 @@ impl HealKernel {
 pub struct HealExec<'a> {
     pub kernel: &'a HealKernel,
     pub params: &'a HealParams,
+    /// Finished AI removals for the spots in `params` (empty when none are ready).
+    pub removals: &'a RemovalSet,
 }
 
 impl BakedExec for HealExec<'_> {
@@ -357,7 +606,7 @@ impl BakedExec for HealExec<'_> {
     ) {
         PassthroughExec.encode(gpu, encoder, input, output);
         self.kernel
-            .encode_spots(gpu, encoder, output, &self.params.spots);
+            .encode_spots(gpu, encoder, output, &self.params.spots, self.removals);
     }
 }
 
@@ -445,6 +694,26 @@ pub(crate) mod reference {
         out
     }
 
+    /// Blends a finished removal patch onto `frame` -- the formula `heal.wgsl::composite_patch`
+    /// implements: `dst + (fill - dst) * clamp(weight) * opacity` on rgb, alpha untouched.
+    pub fn apply_patch(frame: &mut [[f32; 4]], w: i32, h: i32, patch: &RemovalPatch, opacity: f32) {
+        let half = patch.side as i32 / 2;
+        for py in 0..patch.side as i32 {
+            for px in 0..patch.side as i32 {
+                let (fx, fy) = (patch.center.0 + px - half, patch.center.1 + py - half);
+                if fx < 0 || fy < 0 || fx >= w || fy >= h {
+                    continue;
+                }
+                let fill = patch.pixels[(py * patch.side as i32 + px) as usize];
+                let wgt = fill[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0);
+                let dst = &mut frame[(fy * w + fx) as usize];
+                for c in 0..3 {
+                    dst[c] += (fill[c] - dst[c]) * wgt;
+                }
+            }
+        }
+    }
+
     /// Applies every Clone/Heal spot in order onto `frame` (row-major, `w` x `h`).
     pub fn apply_spots(frame: &mut [[f32; 4]], w: i32, h: i32, spots: &[Spot]) {
         for spot in spots {
@@ -523,6 +792,17 @@ mod tests {
         data: &[[f32; 4]],
         spots: &[Spot],
     ) -> Vec<[f32; 4]> {
+        run_gpu_with(gpu, w, h, data, spots, &RemovalSet::new())
+    }
+
+    fn run_gpu_with(
+        gpu: &GpuContext,
+        w: u32,
+        h: u32,
+        data: &[[f32; 4]],
+        spots: &[Spot],
+        removals: &RemovalSet,
+    ) -> Vec<[f32; 4]> {
         let extent = Extent {
             width: w,
             height: h,
@@ -539,6 +819,7 @@ mod tests {
         HealExec {
             kernel: &kernel,
             params: &params,
+            removals,
         }
         .encode(gpu, &mut encoder, Some(&input), &output);
         gpu.queue.submit(Some(encoder.finish()));
@@ -632,6 +913,255 @@ mod tests {
         ];
         let out = run_gpu(&gpu, 32, 32, &data, &bad);
         assert!(max_diff(&data, &out) < 1e-3);
+    }
+
+    /// A `side` x `side` patch of a constant fill, with a weight ramp so partial weights matter.
+    fn ramp_patch(center: (i32, i32), side: u32, fill: [f32; 3]) -> RemovalPatch {
+        let pixels = (0..side * side)
+            .map(|i| {
+                let x = (i % side) as f32 / (side - 1) as f32;
+                let f = |c: f32| half::f16::from_f32(c).to_f32();
+                [f(fill[0]), f(fill[1]), f(fill[2]), f(0.25 + 0.75 * x)]
+            })
+            .collect();
+        RemovalPatch::new(center, side, pixels).unwrap()
+    }
+
+    fn remove_spot_for_test(center: (f32, f32), opacity: f32) -> Spot {
+        let mut s = Spot::remove_spot(
+            center,
+            9.0,
+            2.0,
+            coat::MaskRecipe {
+                model_id: "test".into(),
+                model_version: "1".into(),
+                params: serde_json::json!({ "click": [center.0, center.1] }),
+                seed: None,
+            },
+        );
+        s.opacity = opacity;
+        s
+    }
+
+    fn removals_for(spot: &Spot, patch: RemovalPatch) -> RemovalSet {
+        let mut set = RemovalSet::new();
+        set.insert(spot_key(spot), std::sync::Arc::new(patch));
+        set
+    }
+
+    #[test]
+    fn a_removal_patch_matches_the_cpu_blend() {
+        let Some(gpu) = test_gpu() else { return };
+        let (w, h) = (64u32, 48u32);
+        let data = synthetic_frame(w, h);
+        let spot = remove_spot_for_test((30.0, 20.0), 1.0);
+        let patch = ramp_patch((30, 20), 21, [0.9, 0.1, 0.4]);
+        let mut expected = data.clone();
+        reference::apply_patch(&mut expected, w as i32, h as i32, &patch, 1.0);
+        let actual = run_gpu_with(
+            &gpu,
+            w,
+            h,
+            &data,
+            std::slice::from_ref(&spot),
+            &removals_for(&spot, patch),
+        );
+        assert!(max_diff(&expected, &actual) < 0.01);
+        assert!(
+            max_diff(&data, &actual) > 0.05,
+            "the patch must visibly change the frame"
+        );
+    }
+
+    #[test]
+    fn removal_opacity_scales_the_blend() {
+        let Some(gpu) = test_gpu() else { return };
+        let (w, h) = (64u32, 48u32);
+        let data = synthetic_frame(w, h);
+        let spot = remove_spot_for_test((30.0, 20.0), 0.5);
+        let patch = ramp_patch((30, 20), 21, [0.9, 0.1, 0.4]);
+        let mut expected = data.clone();
+        reference::apply_patch(&mut expected, w as i32, h as i32, &patch, 0.5);
+        let actual = run_gpu_with(
+            &gpu,
+            w,
+            h,
+            &data,
+            std::slice::from_ref(&spot),
+            &removals_for(&spot, patch),
+        );
+        assert!(max_diff(&expected, &actual) < 0.01);
+    }
+
+    #[test]
+    fn a_removal_patch_hanging_off_the_frame_edge_is_clipped() {
+        let Some(gpu) = test_gpu() else { return };
+        let (w, h) = (40u32, 30u32);
+        let data = synthetic_frame(w, h);
+        let spot = remove_spot_for_test((2.0, 27.0), 1.0);
+        let patch = ramp_patch((2, 27), 21, [0.2, 0.8, 0.5]);
+        let mut expected = data.clone();
+        reference::apply_patch(&mut expected, w as i32, h as i32, &patch, 1.0);
+        let actual = run_gpu_with(
+            &gpu,
+            w,
+            h,
+            &data,
+            std::slice::from_ref(&spot),
+            &removals_for(&spot, patch),
+        );
+        assert!(max_diff(&expected, &actual) < 0.01);
+    }
+
+    #[test]
+    fn a_removal_with_no_ready_patch_passes_through() {
+        let Some(gpu) = test_gpu() else { return };
+        let data = synthetic_frame(32, 32);
+        let out = run_gpu(
+            &gpu,
+            32,
+            32,
+            &data,
+            &[remove_spot_for_test((16.0, 16.0), 1.0)],
+        );
+        assert!(max_diff(&data, &out) < 1e-3);
+    }
+
+    #[test]
+    fn a_patch_for_a_different_spot_is_not_applied() {
+        let Some(gpu) = test_gpu() else { return };
+        let data = synthetic_frame(32, 32);
+        let ready = remove_spot_for_test((10.0, 10.0), 1.0);
+        let asked = remove_spot_for_test((20.0, 20.0), 1.0);
+        let removals = removals_for(&ready, ramp_patch((10, 10), 11, [1.0, 0.0, 0.0]));
+        let out = run_gpu_with(&gpu, 32, 32, &data, &[asked], &removals);
+        assert!(max_diff(&data, &out) < 1e-3);
+    }
+
+    #[test]
+    fn removals_and_classic_spots_apply_in_list_order() {
+        let Some(gpu) = test_gpu() else { return };
+        let (w, h) = (64u32, 48u32);
+        let data = synthetic_frame(w, h);
+        let remove = remove_spot_for_test((30.0, 20.0), 1.0);
+        let patch = ramp_patch((30, 20), 21, [0.9, 0.1, 0.4]);
+        // Cloned *after* the removal, from inside the removed area: it must copy the filled pixels.
+        let clone = Spot::clone_spot((50.0, 36.0), 6.0, (-20.0, -16.0), 0.0);
+        let mut expected = data.clone();
+        reference::apply_patch(&mut expected, w as i32, h as i32, &patch, 1.0);
+        reference::apply_spots(
+            &mut expected,
+            w as i32,
+            h as i32,
+            std::slice::from_ref(&clone),
+        );
+        let actual = run_gpu_with(
+            &gpu,
+            w,
+            h,
+            &data,
+            &[remove.clone(), clone],
+            &removals_for(&remove, patch),
+        );
+        assert!(max_diff(&expected, &actual) < 0.02);
+    }
+
+    #[test]
+    fn removal_patch_validation() {
+        assert_eq!(
+            RemovalPatch::new((0, 0), 4, vec![[0.0; 4]; 16]),
+            Err(PatchError::BadSide(4))
+        );
+        assert_eq!(
+            RemovalPatch::new((0, 0), 0, vec![]),
+            Err(PatchError::BadSide(0))
+        );
+        assert_eq!(
+            RemovalPatch::new((0, 0), MAX_PATCH_SIDE + 2, vec![]),
+            Err(PatchError::BadSide(MAX_PATCH_SIDE + 2))
+        );
+        assert_eq!(
+            RemovalPatch::new((0, 0), 3, vec![[0.0; 4]; 8]),
+            Err(PatchError::WrongPixelCount {
+                got: 8,
+                expected: 9
+            })
+        );
+        assert!(RemovalPatch::new((0, 0), 3, vec![[0.0; 4]; 9]).is_ok());
+    }
+
+    fn doc_with(spots: Vec<Spot>) -> nicti_pawprint::EditDocument {
+        let mut doc = nicti_pawprint::EditDocument::default();
+        doc.stages.insert(
+            HEAL.to_owned(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(HealParams { spots }).unwrap(),
+            },
+        );
+        doc
+    }
+
+    fn contribution(doc: &nicti_pawprint::EditDocument) -> blake3::Hash {
+        HealStage.cache_contribution(&doc.stages[HEAL]).unwrap()
+    }
+
+    #[test]
+    fn a_ready_patch_changes_the_heal_cache_key_and_a_new_patch_changes_it_again() {
+        let spot = remove_spot_for_test((30.0, 20.0), 1.0);
+        let base = doc_with(vec![spot.clone()]);
+
+        let mut none_ready = base.clone();
+        stamp_removal_state(&mut none_ready, &RemovalSet::new());
+        assert_eq!(contribution(&base), contribution(&none_ready));
+
+        let mut first = base.clone();
+        stamp_removal_state(
+            &mut first,
+            &removals_for(&spot, ramp_patch((30, 20), 21, [0.9, 0.1, 0.4])),
+        );
+        assert_ne!(
+            contribution(&base),
+            contribution(&first),
+            "a patch arriving must rebake"
+        );
+
+        let mut second = base.clone();
+        stamp_removal_state(
+            &mut second,
+            &removals_for(&spot, ramp_patch((30, 20), 21, [0.1, 0.9, 0.4])),
+        );
+        assert_ne!(
+            contribution(&first),
+            contribution(&second),
+            "a changed fill must rebake"
+        );
+    }
+
+    #[test]
+    fn stamping_does_not_disturb_how_the_params_parse() {
+        let spot = remove_spot_for_test((30.0, 20.0), 1.0);
+        let mut doc = doc_with(vec![spot.clone()]);
+        stamp_removal_state(
+            &mut doc,
+            &removals_for(&spot, ramp_patch((30, 20), 21, [0.9, 0.1, 0.4])),
+        );
+        let parsed: HealParams = coat::parse(&doc.stages[HEAL].params);
+        assert_eq!(parsed.spots, vec![spot]);
+        // And the stamped entry is still hashable (no nulls sneaked in).
+        HealStage.cache_contribution(&doc.stages[HEAL]).unwrap();
+    }
+
+    #[test]
+    fn spot_keys_change_with_any_edit_to_the_spot() {
+        let a = remove_spot_for_test((30.0, 20.0), 1.0);
+        let mut b = a.clone();
+        b.radius += 1.0;
+        let mut c = a.clone();
+        c.mask_recipe.as_mut().unwrap().params = serde_json::json!({ "click": [31.0, 20.0] });
+        assert_ne!(spot_key(&a), spot_key(&b));
+        assert_ne!(spot_key(&a), spot_key(&c));
+        assert_eq!(spot_key(&a), spot_key(&a.clone()));
     }
 
     #[test]

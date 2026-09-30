@@ -16,6 +16,7 @@ mod color_mgmt;
 mod decode_job;
 mod develop_panel;
 mod grid;
+mod heal_tool;
 mod loupe;
 mod render;
 mod t2;

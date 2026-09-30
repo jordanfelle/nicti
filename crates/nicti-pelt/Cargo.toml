@@ -32,6 +32,8 @@ nicti-pounce = { path = "../nicti-pounce" }
 nicti-shed = { path = "../nicti-shed" }
 nicti-claw = { path = "../nicti-claw" }
 nicti-pawprint = { path = "../nicti-pawprint" }
+nicti-groom = { path = "../nicti-groom" }
+nicti-stalk = { path = "../nicti-stalk" }
 
 [dev-dependencies]
 tempfile = "3"

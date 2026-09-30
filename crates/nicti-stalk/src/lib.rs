@@ -12,6 +12,8 @@
 //! hosted API; weight fetches are explicit, user-initiated, and checksum-verified, never a silent
 //! auto-fetch; cloud AI is a separate opt-in feature, not a buried toggle.
 
+pub mod models;
+
 use nicti_claw::{Module, Registry};
 
 /// An AI model provider (e.g. a masking model, a denoise model). No inference method is

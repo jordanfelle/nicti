@@ -3691,6 +3691,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nicti-groom"
+version = "0.0.0"
+dependencies = [
+ "nicti-cornea",
+ "nicti-haw",
+ "nicti-pounce",
+ "nicti-stalk",
+ "nicti-tapetum",
+ "ort",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nicti-haw"
 version = "0.0.0"
 dependencies = [
@@ -3750,10 +3765,12 @@ dependencies = [
  "nicti-calico",
  "nicti-claw",
  "nicti-cornea",
+ "nicti-groom",
  "nicti-lair",
  "nicti-pawprint",
  "nicti-pounce",
  "nicti-shed",
+ "nicti-stalk",
  "nicti-tapetum",
  "raw-window-handle",
  "semver",
@@ -3813,6 +3830,10 @@ version = "0.0.0"
 dependencies = [
  "nicti-claw",
  "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+ "ureq",
+ "zip",
 ]
 
 [[package]]
@@ -7954,6 +7975,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
 dependencies = [
  "crc32fast",
+ "flate2",
  "indexmap 2.14.2",
  "memchr",
  "typed-path",

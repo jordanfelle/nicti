@@ -114,6 +114,24 @@ fn jacobi(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
+// AI removal (#51): tex0 = frame (read), tex2 = a pre-inpainted patch (read; rgb = the fill, in the
+// frame's own space, a = per-pixel fill weight already carrying the mask's feather), tex1_w =
+// result patch (write). Same patch <-> frame mapping as `composite`; only the weight differs --
+// it comes from the patch's alpha (times the spot's opacity) instead of a radial feather.
+@compute @workgroup_size(8, 8, 1)
+fn composite_patch(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (!in_patch(gid)) { return; }
+    let fp = p.center + vec2<i32>(i32(gid.x) - p.half, i32(gid.y) - p.half);
+    if (fp.x < 0 || fp.y < 0 || fp.x >= p.frame_w || fp.y >= p.frame_h) {
+        textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(0.0));
+        return;
+    }
+    let dst = textureLoad(tex0, fp);
+    let fill = textureLoad(tex2, vec2<i32>(i32(gid.x), i32(gid.y)));
+    let w = clamp(fill.w, 0.0, 1.0) * p.opacity;
+    textureStore(tex1_w, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(dst.xyz + (fill.xyz - dst.xyz) * w, dst.w));
+}
+
 // tex0 = frame (read), tex2 = solved patch (read), tex1_w = result patch (write). Out-of-frame
 // patch pixels are written as zeros and never copied back.
 @compute @workgroup_size(8, 8, 1)

@@ -11,9 +11,10 @@ use nicti_tapetum::coat::{
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    CROP, EXPOSURE, HSL, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    CROP, EXPOSURE, HEAL, HSL, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
 };
 
+use crate::heal_tool::{self, HealUi};
 use crate::render::DevelopView;
 
 const HSL_BAND_NAMES: [&str; 8] = ["R", "O", "Y", "G", "A", "B", "P", "M"];
@@ -45,8 +46,11 @@ pub fn show(
     develop: &mut DevelopView,
     current_frame: &FrameTexture,
     hsl_band_selected: &mut usize,
+    heal: &mut HealUi,
+    pounce: &nicti_pounce::Pounce,
 ) {
     ui.heading("Develop");
+    heal_tool::tool_switch(ui, heal);
 
     ui.horizontal(|ui| {
         let before_label = if develop.show_before {
@@ -197,9 +201,14 @@ pub fn show(
         develop.set_stage_params(NOISE_REDUCTION, &nr);
     });
 
+    if heal.heal_active() {
+        heal_tool::show_panel(ui, develop, heal, pounce);
+    }
+
     ui.separator();
     if ui.button("Reset all").clicked() {
         for id in [
+            HEAL,
             WB,
             EXPOSURE,
             TONE,
@@ -246,14 +255,14 @@ const ROTATE_HANDLE_OFFSET_PX: f32 = 28.0;
 /// uncropped-canvas render is painted stretched to fill `rect` (see `app.rs`'s
 /// `ui.allocate_exact_size`), so this can be anisotropic when `rect`'s aspect ratio doesn't match
 /// the source's.
-fn screen_to_image(rect: egui::Rect, source: (f32, f32), p: egui::Pos2) -> (f32, f32) {
+pub(crate) fn screen_to_image(rect: egui::Rect, source: (f32, f32), p: egui::Pos2) -> (f32, f32) {
     (
         (p.x - rect.left()) / rect.width().max(1.0) * source.0,
         (p.y - rect.top()) / rect.height().max(1.0) * source.1,
     )
 }
 
-fn image_to_screen(rect: egui::Rect, source: (f32, f32), p: (f32, f32)) -> egui::Pos2 {
+pub(crate) fn image_to_screen(rect: egui::Rect, source: (f32, f32), p: (f32, f32)) -> egui::Pos2 {
     egui::pos2(
         rect.left() + p.0 / source.0.max(1.0) * rect.width(),
         rect.top() + p.1 / source.1.max(1.0) * rect.height(),

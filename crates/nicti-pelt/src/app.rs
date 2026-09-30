@@ -27,6 +27,7 @@ use nicti_shed::state::Channel as UpdateChannel;
 
 use crate::color_mgmt::ColorManagement;
 use crate::grid::{self, GridSession};
+use crate::heal_tool::HealUi;
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
@@ -86,6 +87,8 @@ pub struct PeltApp {
     /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
     /// part of any edit document.
     hsl_band_selected: usize,
+    /// The Heal / Remove tool's UI state and its AI-removal service (#51).
+    heal_ui: HealUi,
     pounce: Pounce,
     telemetry: TelemetrySampler,
     /// The bottleneck classifier's last verdict (#70/ADR-0070) -- kept across frames so
@@ -246,6 +249,7 @@ impl PeltApp {
             catalog,
             develop: Some(develop),
             hsl_band_selected: 0,
+            heal_ui: HealUi::new(),
             pounce,
             telemetry,
             bottleneck: None,
@@ -618,6 +622,13 @@ impl eframe::App for PeltApp {
         // frame (the histogram itself still reflects the pre-edit state at this point in the
         // frame; a real re-render for it too would need restructuring the panel to render at its
         // own end instead of its own start, not worth it for a histogram bar's one-frame lag).
+        if self.view == View::Develop {
+            if let Some(d) = self.develop.as_mut() {
+                // The heal tool works on the whole, uncropped image (see `heal_tool`'s docs).
+                d.uncropped_preview = self.heal_ui.heal_active();
+                crate::heal_tool::poll(ui, d, &mut self.heal_ui);
+            }
+        }
         let panel_frame = if self.view == View::Develop {
             self.develop.as_mut().map(|d| d.render())
         } else {
@@ -629,7 +640,14 @@ impl eframe::App for PeltApp {
                 .min_size(280.0)
                 .show(ui, |ui| {
                     if let Some(develop) = self.develop.as_mut() {
-                        crate::develop_panel::show(ui, develop, frame, &mut self.hsl_band_selected);
+                        crate::develop_panel::show(
+                            ui,
+                            develop,
+                            frame,
+                            &mut self.hsl_band_selected,
+                            &mut self.heal_ui,
+                            &self.pounce,
+                        );
                     }
                 });
         }
@@ -647,13 +665,27 @@ impl eframe::App for PeltApp {
                 ui.heading("Develop");
                 if let Some(frame) = viewport_frame {
                     let available = ui.available_size();
-                    let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
+                    let (rect, response) =
+                        ui.allocate_exact_size(available, egui::Sense::click_and_drag());
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
                         ViewportCallback::identity(frame),
                     ));
                     if let Some(develop) = self.develop.as_mut() {
-                        crate::develop_panel::handle_viewport_gesture(ui, &response, rect, develop);
+                        if self.heal_ui.heal_active() {
+                            crate::heal_tool::handle_viewport(
+                                ui,
+                                &response,
+                                rect,
+                                develop,
+                                &mut self.heal_ui,
+                                &self.pounce,
+                            );
+                        } else {
+                            crate::develop_panel::handle_viewport_gesture(
+                                ui, &response, rect, develop,
+                            );
+                        }
                     }
                 }
             }
