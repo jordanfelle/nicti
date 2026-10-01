@@ -15,6 +15,10 @@ use nicti_pounce::{
 };
 
 /// `Some(bytes)` = the sidecar's JPEG; `None` = no readable sidecar.
+/// Most sidecar reads in flight from one reader at a time. Each can block a pool worker for the
+/// OS timeout on a dead network drive; the cap keeps a page of archived tiles from parking them all.
+pub const MAX_IN_FLIGHT: usize = 4;
+
 pub type FetchSlot = ReportSlot<Option<Vec<u8>>>;
 
 pub struct SidecarJob {
@@ -31,7 +35,9 @@ impl ChunkedJob for SidecarJob {
             kind: JobKind::Preview,
             lane: Lane::Cpu,
             vram_bytes: 0,
-            image_index: None,
+            // A thumbnail someone is looking at right now: front of the background queue (a
+            // `None` index sorts behind every finite one).
+            image_index: Some(0),
         }
     }
 
@@ -110,6 +116,51 @@ mod tests {
         let (j, slot) = job(d.path().join("b.NEF"));
         drop(j);
         assert_eq!(*slot.lock().unwrap(), Some(None), "never left pending");
+    }
+
+    #[test]
+    fn request_runs_through_pounce_and_a_catalog() {
+        use nicti_lair::{NewAsset, SqliteCatalog};
+        let d = tempfile::tempdir().unwrap();
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let vol = store.upsert_volume("v", None, None, 0).unwrap();
+        let root = store.ensure_root(vol, &d.path().to_string_lossy()).unwrap();
+        let asset = store
+            .insert_asset(
+                root,
+                &NewAsset {
+                    rel_path: "a.NEF".into(),
+                    rel_path_fold: "a.nef".into(),
+                    size_bytes: 0,
+                    mtime_unix: 0,
+                    fingerprint: None,
+                    natural_key: None,
+                    make: None,
+                    model: None,
+                    captured_at: None,
+                    width: None,
+                    height: None,
+                    imported_at: 0,
+                },
+                None,
+            )
+            .unwrap();
+        let jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xC0, 0, 0x0B, 8, 0, 3, 0, 4, 1, 1, 0x11, 0, 0xFF, 0xD9,
+        ];
+        std::fs::write(d.path().join("a.NEF.thumb.jpg"), &jpeg).unwrap();
+        let pounce = Pounce::new(0, 2, 2, || {});
+        let slot = request(&pounce, &store, asset).expect("asset has a known RAW path");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let got = loop {
+            if let Some(v) = slot.lock().unwrap().take() {
+                break v;
+            }
+            assert!(std::time::Instant::now() < deadline, "job never reported");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(got, Some(jpeg));
+        assert!(request(&pounce, &store, 99_999).is_none(), "unknown asset");
     }
 
     #[test]

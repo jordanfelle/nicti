@@ -194,6 +194,10 @@ impl TilePreviews {
                         );
                     }
                 }
+                _ if self.sidecar_fetch.len() >= crate::t0_fetch::MAX_IN_FLIGHT => {
+                    // At the cap (a read can block on a dead drive): try again shortly.
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
                 _ => match crate::t0_fetch::request(pounce, store, id) {
                     Some(slot) => {
                         self.sidecar_fetch.insert(id, slot);
