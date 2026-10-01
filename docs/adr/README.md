@@ -64,6 +64,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0057](0057-export-pipeline.md) | — | Export pipeline (engine, chained Pounce jobs, naming/collisions, edit persistence) | Accepted |
 | [0059](0059-xmp-interop.md) | — | XMP interop with Lightroom Classic | Proposed |
 | [0061](0061-lrc-catalog-import-mapping.md) | 0023 | Lightroom Classic catalog import mapping | Accepted |
+| [0062](0062-lrc-catalog-import.md) | — | Lightroom Classic catalog import (the build) | Accepted |
 | [0066](0066-outbound-license-agpl.md) | 0013 | Nicti's outbound license — AGPL-3.0-or-later | Accepted |
 | [0067](0067-catalog-database-engine.md) | 0008 | Catalog database engine | Accepted |
 | [0068](0068-gui-framework.md) | 0006 | GUI framework | Accepted |

@@ -66,3 +66,18 @@ is the per-topic summary; those two are the full research trail.
   just moved onto the real crates).
 - **Version support**: only v13 (the user's current LRC) was available to measure; older-version
   support is a follow-up if/when needed, not built speculatively.
+
+## The import build (#62, ADR-0062)
+
+`crates/nicti-stray` runs the import as one cancellable Pounce job: ingest each root through
+Scruff, match LRC images to assets by `(root, folded rel_path)`, add keywords/collections, then
+apply markers, virtual copies (extra non-master variants), the translated edit and a provenance row
+per image in 500-image transactions, and finally mark the changed assets catalog-dirty so the XMP
+sync does not revert them. Re-runs are idempotent and never overwrite a later nicti edit (BLAKE3 of
+what the import last wrote, in `lrc_provenance`). Develop translation covers Basic/WB/parametric
+curve/HSL/Detail/crop and `MaskGroupBasedCorrections` (gradients, Subject/Sky/Background AI masks);
+everything else is counted and kept verbatim. Real-catalog findings: `LocalExposure2012` is stops/4;
+a radial's `MaskInverted=true` means the effect is applied outside; AI mask rasters use the
+uncropped frame; `fileWidth`/`fileHeight` are `REAL`. Measured on the 380,228-image backup: 0 parse
+failures, 13 s to translate everything. See ADR-0062 for the full list of what is not translated.
+

@@ -22,7 +22,7 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
-`lrc-migration` (0061, 0156, 0158), `masking` (0048, 0049), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
+`lrc-migration` (0061, 0062, 0156, 0158), `masking` (0048, 0049), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
@@ -237,6 +237,9 @@ terse index: crate/spike → purpose → owning topic.
   packet patcher, sidecar/embedded I/O, conflict rule. Catalog glue is `nicti-lair`'s
   `scent_sync.rs` (hooked into `scruff.rs`), write-back + review panel is `nicti-pelt`'s
   `xmp_sync.rs` → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
+- **`crates/nicti-stray`** (#62, ADR-0062) — Lightroom Classic catalog import: `LrcImportJob` (ingest →
+  match → keywords/collections → markers/variants/develop translation → provenance); UI in
+  `nicti-pelt`'s `lrc_import.rs` → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)
 - **`spikes/pupil`** (#99/ADR-0099) → [`develop`](.claude/rules/develop/REFERENCE.md)
 - **`spikes/purr`** (#53/ADR-0053) → [`develop`](.claude/rules/develop/REFERENCE.md)
 - **`spikes/crouch`** (#54/ADR-0054) → [`jobs`](.claude/rules/jobs/REFERENCE.md)

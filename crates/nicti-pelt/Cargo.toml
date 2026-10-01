@@ -27,6 +27,7 @@ raw-window-handle = "0.6"
 nicti-calico = { path = "../nicti-calico" }
 nicti-tapetum = { path = "../nicti-tapetum" }
 nicti-lair = { path = "../nicti-lair" }
+nicti-stray = { path = "../nicti-stray" }
 nicti-cornea = { path = "../nicti-cornea", features = ["libraw"] }
 nicti-pounce = { path = "../nicti-pounce" }
 nicti-shed = { path = "../nicti-shed" }
@@ -40,5 +41,6 @@ nicti-stalk = { path = "../nicti-stalk" }
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }
 # PNG decode for export round-trip assertions.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
