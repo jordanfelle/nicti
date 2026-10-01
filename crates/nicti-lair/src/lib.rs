@@ -30,6 +30,8 @@ pub mod pounce_jobs;
 pub mod scent_sync;
 pub mod scruff;
 pub mod shred;
+pub mod thumb_sidecar;
+pub mod tier;
 pub mod verify;
 
 pub use clowder::{Collection, CollectionKind};
@@ -109,7 +111,22 @@ pub trait CatalogStore: Module {
     /// The move's catalog commit, **one transaction**: re-points the root at the journal's
     /// `dest_path`, records each `(asset_id, blake3_hex)` as that asset's `content_hash`, and
     /// flips the journal to `committed`. Idempotent on an already-`committed` move.
-    fn commit_root_move(&self, move_id: i64, hashes: &[(i64, String)]) -> Result<(), CatalogError>;
+    fn commit_root_move(&self, move_id: i64, hashes: &[(i64, String)]) -> Result<(), CatalogError> {
+        self.commit_root_move_archived(move_id, hashes, None)
+    }
+
+    /// [`commit_root_move`](Self::commit_root_move) that also sets the root's `archived` flag in
+    /// the same transaction when `archived` is `Some` (#72), so the new location and the
+    /// SSD/archive tier can't disagree after a crash.
+    fn commit_root_move_archived(
+        &self,
+        move_id: i64,
+        hashes: &[(i64, String)],
+        archived: Option<bool>,
+    ) -> Result<(), CatalogError>;
+
+    /// Sets `root.archived` (#72, ADR-0072). Idempotent.
+    fn set_root_archived(&self, root_id: i64, archived: bool) -> Result<(), CatalogError>;
 
     /// Moves an open journal row to `state` (`Copying` <-> `Renaming`; `Committed` only via
     /// `commit_root_move`).

@@ -866,7 +866,21 @@ impl CatalogStore for SqliteCatalog {
         Ok(id)
     }
 
-    fn commit_root_move(&self, move_id: i64, hashes: &[(i64, String)]) -> Result<(), CatalogError> {
+    fn set_root_archived(&self, root_id: i64, archived: bool) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE root SET archived = ?1 WHERE id = ?2",
+            params![archived as i64, root_id],
+        )?;
+        Ok(())
+    }
+
+    fn commit_root_move_archived(
+        &self,
+        move_id: i64,
+        hashes: &[(i64, String)],
+        archived: Option<bool>,
+    ) -> Result<(), CatalogError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let (root_id, dest_path, state): (i64, String, String) = tx
@@ -884,6 +898,12 @@ impl CatalogStore for SqliteCatalog {
             "UPDATE root SET rel_path = ?1 WHERE id = ?2",
             params![dest_path, root_id],
         )?;
+        if let Some(a) = archived {
+            tx.execute(
+                "UPDATE root SET archived = ?1 WHERE id = ?2",
+                params![a as i64, root_id],
+            )?;
+        }
         {
             let mut stmt =
                 tx.prepare("UPDATE asset SET content_hash = ?1 WHERE id = ?2 AND root_id = ?3")?;

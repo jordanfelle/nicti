@@ -50,6 +50,12 @@ pub struct CarryOptions {
     /// Skip the `fs::rename` fast path and always copy + verify -- for tests (CI runs on one
     /// filesystem, where the fast path would otherwise mask the copy path).
     pub force_copy: bool,
+    /// Moving onto an archive drive (#72, ADR-0072): before anything moves, write each asset's
+    /// catalog T0 thumbnail as a `.thumb.jpg` sidecar in the source folder, so it travels with the
+    /// folder. A sidecar that can't be written fails the move before it starts.
+    pub export_sidecars: bool,
+    /// Set the root's `archived` flag in the commit transaction (`None` leaves it alone).
+    pub set_archived: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +104,10 @@ enum Stage {
 
 enum Phase {
     Start,
+    /// Writes thumbnail sidecars into the source, one asset per step, then launches the move.
+    Export {
+        pending: VecDeque<crate::Asset>,
+    },
     Copy {
         pending: VecDeque<PathBuf>,
         current: Option<Box<Current>>,
@@ -114,12 +124,22 @@ enum Phase {
         dirs: Vec<PathBuf>,
         renamed: bool,
     },
+    /// After the move is committed and cleaned up: fold thumbnails to the new tier, one asset per
+    /// step (`tier::settle_asset`). Skipped when the options ask for no tier change.
+    Settle {
+        pending: VecDeque<crate::Asset>,
+        archived: bool,
+        renamed: bool,
+    },
     Finished,
 }
 
 /// Test-only hook fired after a copy's destination is written, before it's re-read for verify.
 #[cfg(test)]
 pub(crate) type DestWrittenHook = Box<dyn FnMut(&Path) + Send>;
+
+/// See [`Carry::set_archived_hook`].
+pub type ArchivedHook = Box<dyn FnMut(&[i64]) + Send>;
 
 pub struct Carry {
     store: Arc<dyn CatalogStore + Send + Sync>,
@@ -142,6 +162,10 @@ pub struct Carry {
     total_files: Option<u64>,
     files_done: u64,
     bytes_done: u64,
+    settle_report: crate::tier::SettleReport,
+    /// Called once with the root's asset ids when it lands on an archive drive, so the app can
+    /// drop their (now redundant) T2 cache entries.
+    on_archived: Option<ArchivedHook>,
     #[cfg(test)]
     pub(crate) after_dest_written: Option<DestWrittenHook>,
 }
@@ -173,9 +197,16 @@ impl Carry {
             total_files: None,
             files_done: 0,
             bytes_done: 0,
+            settle_report: Default::default(),
+            on_archived: None,
             #[cfg(test)]
             after_dest_written: None,
         }
+    }
+
+    /// See [`Carry::on_archived`]'s field doc.
+    pub fn set_archived_hook(&mut self, hook: ArchivedHook) {
+        self.on_archived = Some(hook);
     }
 
     /// `true` once the catalog points at the destination (a dropped job's message differs).
@@ -205,6 +236,7 @@ impl Carry {
         let phase = std::mem::replace(&mut self.phase, Phase::Finished);
         match phase {
             Phase::Start => self.start(),
+            Phase::Export { pending } => self.export_step(pending),
             Phase::Copy {
                 pending,
                 current,
@@ -221,6 +253,11 @@ impl Carry {
                 dirs,
                 renamed,
             } => self.cleanup(done, dirs, renamed),
+            Phase::Settle {
+                pending,
+                archived,
+                renamed,
+            } => self.settle_step(pending, archived, renamed),
             Phase::Finished => panic!("Carry::step called again after it already finished"),
         }
     }
@@ -259,6 +296,37 @@ impl Carry {
         };
         self.move_id = Some(move_id);
 
+        if self.opts.export_sidecars {
+            match self.store.list_assets_by_root(self.root_id) {
+                Ok(assets) => {
+                    self.total_files = None;
+                    self.phase = Phase::Export {
+                        pending: assets.into(),
+                    };
+                    return None;
+                }
+                Err(e) => return Some(self.abort_failed(e.to_string())),
+            }
+        }
+        self.launch(move_id)
+    }
+
+    fn export_step(&mut self, mut pending: VecDeque<crate::Asset>) -> Option<CarryOutcome> {
+        let move_id = self.move_id.expect("journal is open before export");
+        for _ in 0..16 {
+            let Some(asset) = pending.pop_front() else {
+                return self.launch(move_id);
+            };
+            if let Err(e) = crate::tier::export_asset_sidecar(&*self.store, &self.src, &asset) {
+                return Some(self.abort_failed(format!("writing thumbnail sidecar: {e}")));
+            }
+        }
+        self.phase = Phase::Export { pending };
+        None
+    }
+
+    /// Rename fast path, else walk the source for the copy phase.
+    fn launch(&mut self, move_id: i64) -> Option<CarryOutcome> {
         if !self.opts.force_copy {
             match self.try_rename(move_id) {
                 Ok(true) => {
@@ -593,7 +661,10 @@ impl Carry {
                 Err(e) => return Some(self.abort_failed(e.to_string())),
             }
         }
-        if let Err(e) = self.store.commit_root_move(move_id, &hashes) {
+        if let Err(e) =
+            self.store
+                .commit_root_move_archived(move_id, &hashes, self.opts.set_archived)
+        {
             if renamed {
                 // The folder already moved on disk but the catalog didn't follow: leave the
                 // journal open so `resume_open_moves` finishes the commit on next start.
@@ -653,17 +724,68 @@ impl Carry {
             }
             let _ = fs::remove_dir(&self.src);
         }
+        if let Some(archived) = self.opts.set_archived {
+            // Keep the journal open through settling: a crash here resumes as "committed, clean
+            // up", and the startup reconcile re-runs the (idempotent) settle.
+            // Best effort: on a catalog error skip settling; the startup reconcile covers it.
+            if let Ok(assets) = self.store.list_assets_by_root(self.root_id) {
+                if archived {
+                    if let Some(hook) = self.on_archived.as_mut() {
+                        let ids: Vec<i64> = assets.iter().map(|a| a.id).collect();
+                        hook(&ids);
+                    }
+                }
+                self.phase = Phase::Settle {
+                    pending: assets.into(),
+                    archived,
+                    renamed,
+                };
+                return None;
+            }
+        }
+        Some(self.finish_moved(renamed))
+    }
+
+    fn settle_step(
+        &mut self,
+        mut pending: VecDeque<crate::Asset>,
+        archived: bool,
+        renamed: bool,
+    ) -> Option<CarryOutcome> {
+        for _ in 0..16 {
+            let Some(asset) = pending.pop_front() else {
+                return Some(self.finish_moved(renamed));
+            };
+            // Best effort: a failure leaves the other tier in place, which the read path
+            // still serves; the startup reconcile retries.
+            let _ = crate::tier::settle_asset(
+                &*self.store,
+                &self.dest,
+                archived,
+                &asset,
+                &mut self.settle_report,
+            );
+        }
+        self.phase = Phase::Settle {
+            pending,
+            archived,
+            renamed,
+        };
+        None
+    }
+
+    fn finish_moved(&mut self, renamed: bool) -> CarryOutcome {
         if let Some(id) = self.move_id.take() {
             let _ = self.store.finish_root_move(id);
         }
         self.phase = Phase::Finished;
-        Some(CarryOutcome::Moved {
+        CarryOutcome::Moved {
             files: self.files_done,
             bytes: self.bytes_done,
             renamed,
             leftovers: std::mem::take(&mut self.leftovers),
             leftover_count: self.leftover_count,
-        })
+        }
     }
 
     // ---- abort paths (before commit only) ----
@@ -699,7 +821,11 @@ impl Drop for Carry {
         if !self.committed && self.renamed_landed {
             // The folder already moved by rename: point the catalog at it now rather than leave
             // the two split until the next start. On failure the `renaming` row stays for resume.
-            if self.store.commit_root_move(id, &[]).is_ok() {
+            if self
+                .store
+                .commit_root_move_archived(id, &[], self.opts.set_archived)
+                .is_ok()
+            {
                 let _ = self.store.finish_root_move(id);
             }
         } else if self.committed {
@@ -707,6 +833,10 @@ impl Drop for Carry {
             let _ = self.store.finish_root_move(id);
         } else if self.copy_started {
             self.discard_dest();
+        } else {
+            // Cancelled while exporting sidecars (nothing moved yet): close the journal. The
+            // sidecars stay; `tier::settle_root` folds them back into the catalog.
+            let _ = self.store.finish_root_move(id);
         }
     }
 }
@@ -1028,7 +1158,10 @@ mod tests {
             f.cat.clone(),
             f.root_id,
             &f.dest_parent,
-            CarryOptions { force_copy },
+            CarryOptions {
+                force_copy,
+                ..Default::default()
+            },
             1,
         )
     }
@@ -1043,6 +1176,143 @@ mod tests {
 
     fn no_journal(f: &Fixture) {
         assert!(f.cat.open_root_moves().unwrap().is_empty());
+    }
+
+    fn fake_jpeg(tag: u8) -> crate::Preview {
+        let mut b = vec![
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 8, 0, 30, 0, 40, 1, 1, 0x11, 0,
+        ];
+        b.extend([tag; 64]);
+        b.extend([0xFF, 0xD9]);
+        crate::Preview {
+            width: Some(40),
+            height: Some(30),
+            bytes: b,
+        }
+    }
+
+    /// The #72 exit criterion, both move paths: archive exports sidecars that travel with the
+    /// folder and drops the catalog blobs; moving back restores byte-identical blobs and removes
+    /// the sidecars.
+    #[test]
+    fn archive_then_reactivate_round_trips_thumbnails() {
+        for force_copy in [true, false] {
+            let f = fixture();
+            let pv_a = fake_jpeg(1);
+            let pv_b = fake_jpeg(2);
+            let b_id = f
+                .cat
+                .find_asset_by_path(f.root_id, "day1/b.NEF")
+                .unwrap()
+                .unwrap()
+                .id;
+            f.cat
+                .put_preview(f.asset_id, crate::PreviewTier::T0, &pv_a)
+                .unwrap();
+            f.cat
+                .put_preview(b_id, crate::PreviewTier::T0, &pv_b)
+                .unwrap();
+
+            let mut c = Carry::new(
+                f.cat.clone(),
+                f.root_id,
+                &f.dest_parent,
+                CarryOptions {
+                    force_copy,
+                    export_sidecars: true,
+                    set_archived: Some(true),
+                },
+                1,
+            );
+            assert!(matches!(run(&mut c), CarryOutcome::Moved { .. }));
+            let dest = f.dest_parent.join("event-2026");
+            assert_eq!(
+                fs::read(dest.join("a.NEF.thumb.jpg")).unwrap(),
+                pv_a.bytes,
+                "force_copy={force_copy}"
+            );
+            assert!(dest.join("day1/b.NEF.thumb.jpg").exists());
+            let root = f.cat.list_roots().unwrap().remove(0);
+            assert!(root.archived);
+
+            // Carry settled the tier itself: blobs gone, sidecars kept.
+            assert!(f
+                .cat
+                .get_preview(f.asset_id, crate::PreviewTier::T0)
+                .unwrap()
+                .is_none());
+            // The read path serves the sidecar with the catalog blob gone.
+            let a = f.cat.get_asset(f.asset_id).unwrap().unwrap();
+            let got = crate::tier::load_t0(&*f.cat, Path::new(&root.path), true, &a)
+                .unwrap()
+                .unwrap();
+            assert_eq!(got.bytes, pv_a.bytes);
+
+            // Back to the SSD.
+            let mut c = Carry::new(
+                f.cat.clone(),
+                f.root_id,
+                &f.src_parent,
+                CarryOptions {
+                    force_copy,
+                    export_sidecars: false,
+                    set_archived: Some(false),
+                },
+                2,
+            );
+            assert!(matches!(run(&mut c), CarryOutcome::Moved { .. }));
+            let back = f
+                .cat
+                .get_preview(f.asset_id, crate::PreviewTier::T0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(back.bytes, pv_a.bytes);
+            assert_eq!((back.width, back.height), (Some(40), Some(30)));
+            assert!(!f.src.join("a.NEF.thumb.jpg").exists());
+            assert!(!f.cat.list_roots().unwrap()[0].archived);
+            no_journal(&f);
+        }
+    }
+
+    #[test]
+    fn settle_never_drops_a_blob_without_its_sidecar() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &fake_jpeg(3))
+            .unwrap();
+        f.cat.set_root_archived(f.root_id, true).unwrap();
+        let rep = crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert_eq!((rep.blobs_dropped, rep.kept), (0, 1));
+        assert!(f
+            .cat
+            .get_preview(f.asset_id, crate::PreviewTier::T0)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn a_failed_sidecar_write_aborts_the_move_before_anything_moves() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &fake_jpeg(4))
+            .unwrap();
+        // A directory squatting on the sidecar path makes the rename-into-place fail.
+        fs::create_dir(f.src.join("a.NEF.thumb.jpg")).unwrap();
+        let mut c = Carry::new(
+            f.cat.clone(),
+            f.root_id,
+            &f.dest_parent,
+            CarryOptions {
+                force_copy: true,
+                export_sidecars: true,
+                set_archived: Some(true),
+            },
+            1,
+        );
+        assert!(matches!(run(&mut c), CarryOutcome::Failed(_)));
+        assert!(f.src.join("a.NEF").exists());
+        assert!(!f.cat.list_roots().unwrap()[0].archived);
+        no_journal(&f);
     }
 
     #[test]

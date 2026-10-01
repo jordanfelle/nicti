@@ -70,6 +70,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0068](0068-gui-framework.md) | 0006 | GUI framework | Accepted |
 | [0069](0069-rapidraw-adopt-or-fork.md) | 0018 | RapidRAW as an adopt/fork candidate | Proposed (not adopted, study-only) |
 | [0071](0071-volume-identity-and-remapping.md) | 0020 | Volume identity and drive remapping | Proposed |
+| [0072](0072-tiered-thumbnail-storage.md) | — | Tiered thumbnail storage (SSD catalog / archive sidecars) | Accepted |
 | [0099](0099-classic-auto-tone.md) | — | Classic (non-AI) auto-tone algorithm | Proposed |
 | [0101](0101-auto-op-graceful-degradation.md) | — | Graceful degradation for automatic develop operations | Accepted |
 | [0102](0102-turso-database-evaluation.md) | 0009 | Turso Database (catalog store candidate) | Rejected |

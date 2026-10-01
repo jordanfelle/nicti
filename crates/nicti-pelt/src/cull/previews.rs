@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use egui::TextureHandle;
 use nicti_lair::larder::{LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
-use nicti_lair::{CatalogStore, PreviewTier};
+use nicti_lair::CatalogStore;
 use nicti_pounce::{JobId, Pounce};
 
 use crate::loupe::asset_cache_key;
@@ -130,7 +130,7 @@ impl TilePreviews {
             self.try_upgrade(ctx, store, pounce, id);
         }
         if !self.tiles.contains_key(&id) {
-            if let Ok(Some(preview)) = store.get_preview(id, PreviewTier::T0) {
+            if let Ok(Some(preview)) = nicti_lair::tier::load_t0_by_id(store, id) {
                 if let Some(texture) = preview_texture(ctx, format!("tile-t0-{id}"), &preview.bytes)
                 {
                     self.insert(

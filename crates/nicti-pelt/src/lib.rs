@@ -10,6 +10,7 @@
 
 mod activity;
 mod app;
+mod archive_drives;
 mod cache_settings;
 mod camera_profiles;
 mod catalog;

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use nicti_lair::{MoveState, Root, RootMove};
 
+use crate::archive_drives::ArchiveDrives;
+
 /// A move the user asked for by dropping `root_id` on a drive or another folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropRequest {
@@ -81,7 +83,7 @@ pub fn build_tree(roots: &[Root], extra_drives: &[String]) -> Vec<DriveNode> {
     for d in extra_drives {
         node_for(&mut nodes, d.clone());
     }
-    for root in roots.iter().filter(|r| !r.archived) {
+    for root in roots {
         let i = node_for(&mut nodes, drive_of(&root.path));
         nodes[i].roots.push(root.clone());
     }
@@ -188,17 +190,32 @@ pub fn show(
     attention: &[String],
     status: Option<&str>,
     moving: bool,
+    archive: &ArchiveDrives,
+    set_archive: &mut Option<(String, bool)>,
 ) -> Option<DropRequest> {
     let mut request = None;
     if tree.is_empty() {
         ui.weak("No folders yet -- import one.");
     }
     for drive in tree {
+        let is_archive = archive.is_location(&drive.path);
+        let badge = if is_archive { " \u{1F5C4} archive" } else { "" };
         let (_, dropped) = ui.dnd_drop_zone::<i64, ()>(egui::Frame::group(ui.style()), |ui| {
-            egui::CollapsingHeader::new(format!("\u{1F4BF} {}", drive.path))
+            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive.path))
                 .id_salt(("folder_panel_drive", &drive.path))
                 .default_open(true)
                 .show(ui, |ui| {
+                    let mut flag = is_archive;
+                    if ui
+                        .checkbox(&mut flag, "Archive drive")
+                        .on_hover_text(
+                            "Folders moved here keep their thumbnails as .thumb.jpg files \
+                             next to the photos instead of in the catalog.",
+                        )
+                        .changed()
+                    {
+                        *set_archive = Some((drive.path.clone(), flag));
+                    }
                     for root in &drive.roots {
                         show_root(ui, root, moving);
                     }
@@ -242,11 +259,16 @@ fn find_root(tree: &[DriveNode], id: i64) -> Option<&Root> {
 fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool) {
     let id = egui::Id::new(("folder_panel_root", root.id));
     let label = folder_name(&root.path);
+    let icon = if root.archived {
+        "\u{1F5C4}"
+    } else {
+        "\u{1F4C1}"
+    };
     let response = if moving {
-        ui.label(format!("\u{1F4C1} {label}"))
+        ui.label(format!("{icon} {label}"))
     } else {
         ui.dnd_drag_source(id, root.id, |ui| {
-            ui.label(format!("\u{1F4C1} {label}"));
+            ui.label(format!("{icon} {label}"));
         })
         .response
     };
@@ -277,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_groups_by_drive_keeps_empty_extra_drives_and_skips_archived() {
+    fn tree_groups_by_drive_keeps_empty_extra_drives_and_shows_archived() {
         let mut archived = root(4, r"D:\old");
         archived.archived = true;
         let roots = [
@@ -290,7 +312,7 @@ mod tests {
         let paths: Vec<_> = tree.iter().map(|n| n.path.as_str()).collect();
         assert_eq!(paths, [r"C:\", r"D:\", r"E:\"]);
         let d: Vec<_> = tree[1].roots.iter().map(|r| r.id).collect();
-        assert_eq!(d, [2, 1], "sorted by path, archived dropped");
+        assert_eq!(d, [2, 1, 4], "sorted by path, archived roots still shown");
         assert!(tree[2].roots.is_empty());
     }
 

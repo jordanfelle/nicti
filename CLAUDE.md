@@ -21,7 +21,7 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
-`preview-tiers` (0029, 0143), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
+`preview-tiers` (0029, 0143, 0072), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
 `lrc-migration` (0061, 0062, 0156, 0158), `masking` (0048, 0049), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
@@ -196,7 +196,7 @@ terse index: crate/spike → purpose → owning topic.
   see the `catalog-engine` topic's own "Package contents" section (also covers **#25**'s
   `ninelives.rs`/`BackupJob`), not duplicated here. **#26** adds `carry.rs`
   (`Carry`/`resume_open_moves`, verified folder move) + `pounce_jobs::MoveJob`, wired into
-  `nicti-pelt`'s Library view. **#304** adds `verify.rs` (`Verify`, re-hash a root against `asset.content_hash`) + `pounce_jobs::VerifyJob`. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
+  `nicti-pelt`'s Library view. **#72** adds `tier.rs`/`thumb_sidecar.rs` (archive-drive thumbnail sidecars; `Carry`'s `export_sidecars`/`Settle`, `nicti-pelt`'s `archive_drives.rs`) — see `preview-tiers`. **#304** adds `verify.rs` (`Verify`, re-hash a root against `asset.content_hash`) + `pounce_jobs::VerifyJob`. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
   **#301** wires it into the loupe via `nicti-pelt`'s `t2.rs`, **#302** adds `cache_settings.rs`) — see `preview-tiers`. **#32** adds `shred.rs` (`Shred`/`resume_open_deletes`,
   delete-to-Recycle-Bin with a journal) + `pounce_jobs::DeleteJob` — see `culling`. **#57** adds
   `CatalogStore::get_master_edit`/`put_master_edit` (the Develop edit document) — see `catalog-engine`. **#52** adds the batch

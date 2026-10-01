@@ -17,9 +17,7 @@ use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, SyncJob};
 use nicti_lair::shred;
-use nicti_lair::{
-    CatalogError, CatalogStore, PreviewTier, Sort, SortDirection, SortField, SqliteCatalog,
-};
+use nicti_lair::{CatalogError, CatalogStore, Sort, SortDirection, SortField, SqliteCatalog};
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
 use nicti_pounce::{JobKind, JobState, Pounce};
@@ -146,6 +144,8 @@ pub struct PeltApp {
     move_dest_input: String,
     /// The folder panel's (#303) throttled read of roots/journal rows/mounted drives.
     folder_cache: folder_panel::Cache,
+    /// Drives/folders whose contents are archived (thumbnails as sidecars) -- #72.
+    archive_drives: crate::archive_drives::ArchiveDrives,
     /// The in-flight `MoveJob`'s result slot, folded into `last_move_summary` once it resolves.
     pending_move_result: Option<ReportSlot<CarryOutcome>>,
     last_move_summary: Option<String>,
@@ -270,8 +270,22 @@ impl PeltApp {
 
         // A crash mid-move (#26) leaves a `root_move` journal row: finish or roll it back before
         // anything else touches that root.
+        let archive_drives = crate::archive_drives::ArchiveDrives::load(&catalog_path);
         let last_move_summary = match &catalog {
-            CatalogOpenState::Open(store) => summarize_resumed(&carry::resume_open_moves(&**store)),
+            CatalogOpenState::Open(store) => {
+                let resumed = carry::resume_open_moves(&**store);
+                // #72: a move that finished its commit during recovery may have lost the
+                // archived flag / thumbnail settle (those ride on the live job). Re-derive both
+                // from the archive-drive setting for just the roots recovery touched.
+                for r in &resumed {
+                    if let carry::Resumed::Committed { root_id }
+                    | carry::Resumed::CleanedUp { root_id, .. } = r
+                    {
+                        reconcile_tier(&**store, *root_id, &archive_drives);
+                    }
+                }
+                summarize_resumed(&resumed)
+            }
             CatalogOpenState::Error(_) => None,
         };
 
@@ -365,6 +379,7 @@ impl PeltApp {
             last_backup_summary: None,
             move_dest_input: String::new(),
             folder_cache: folder_panel::Cache::default(),
+            archive_drives,
             pending_move_result: None,
             last_move_summary,
             decoder: Arc::new(LibRawDecoder),
@@ -564,13 +579,23 @@ impl PeltApp {
             return;
         }
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-        let (job, result) = MoveJob::new(
-            dyn_store,
-            root_id,
-            &dest,
-            CarryOptions::default(),
-            now_unix(),
-        );
+        // #72: moving across the archive boundary changes where thumbnails live.
+        let src_archived = store
+            .get_root_path(root_id)
+            .ok()
+            .flatten()
+            .map(|p| self.archive_drives.is_archive(Path::new(&p)));
+        let dest_archived = self.archive_drives.is_archive(&dest);
+        let opts = CarryOptions {
+            export_sidecars: dest_archived && src_archived != Some(true),
+            set_archived: (src_archived != Some(dest_archived)).then_some(dest_archived),
+            ..CarryOptions::default()
+        };
+        let (job, result) = MoveJob::new(dyn_store, root_id, &dest, opts, now_unix());
+        let larder = self.larder.clone();
+        let job = job.with_archived_hook(Box::new(move |ids| {
+            crate::cull::delete::purge_previews(larder.as_ref(), ids);
+        }));
         self.pounce.submit(Box::new(job));
         self.pending_move_result = Some(result);
         self.last_move_summary = Some("Moving\u{2026}".into());
@@ -978,6 +1003,27 @@ fn summarize_backup(report: &BackupReport) -> String {
             format!("Backup failed: {msg}")
         }
     }
+}
+
+/// Re-derives `root_id`'s archived flag from the archive-drive setting and settles its
+/// thumbnails to match (#72). Best effort and idempotent.
+fn reconcile_tier(
+    store: &dyn CatalogStore,
+    root_id: i64,
+    archive_drives: &crate::archive_drives::ArchiveDrives,
+) {
+    let Some(root) = store
+        .list_roots()
+        .ok()
+        .and_then(|r| r.into_iter().find(|r| r.id == root_id))
+    else {
+        return;
+    };
+    let want = archive_drives.is_archive(Path::new(&root.path));
+    if want != root.archived && store.set_root_archived(root_id, want).is_err() {
+        return;
+    }
+    let _ = nicti_lair::tier::settle_root(store, root_id);
 }
 
 /// One line for the Library view once a `MoveJob`'s report is ready (#26).
@@ -1604,6 +1650,7 @@ impl PeltApp {
         let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
         let attention = folder_panel::attention_lines(&self.folder_cache.open_moves, move_running);
         let mut request = None;
+        let mut set_archive = None;
         egui::Panel::left("folder_panel")
             .resizable(true)
             .show(ui, |ui| {
@@ -1615,9 +1662,17 @@ impl PeltApp {
                         &attention,
                         self.last_move_summary.as_deref(),
                         moving,
+                        &self.archive_drives,
+                        &mut set_archive,
                     );
                 });
             });
+        if let Some((drive, archive)) = set_archive {
+            if let Err(e) = self.archive_drives.set(&drive, archive) {
+                self.last_move_summary =
+                    Some(format!("Couldn't save the archive-drive setting: {e}"));
+            }
+        }
         if let Some(r) = request {
             self.submit_move_to(store, r.root_id, r.dest_parent);
         }
@@ -2409,7 +2464,7 @@ impl PeltApp {
             }
         }
         if self.loupe_preview.is_none() {
-            if let Ok(Some(preview)) = store.get_preview(asset_id, PreviewTier::T0) {
+            if let Ok(Some(preview)) = nicti_lair::tier::load_t0_by_id(store, asset_id) {
                 if let Some(texture) =
                     preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &preview.bytes)
                 {

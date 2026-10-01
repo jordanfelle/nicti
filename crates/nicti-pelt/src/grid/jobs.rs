@@ -186,7 +186,13 @@ impl ChunkedJob for ThumbBatchJob {
             Ok(previews) => {
                 let mut by_id: std::collections::HashMap<i64, _> = previews.into_iter().collect();
                 for &id in chunk {
-                    let outcome = match by_id.remove(&id) {
+                    // Not in the catalog: an archived folder's thumbnail lives in a sidecar (#72).
+                    let preview = by_id.remove(&id).or_else(|| {
+                        nicti_lair::tier::load_t0_by_id(&*self.store, id)
+                            .ok()
+                            .flatten()
+                    });
+                    let outcome = match preview {
                         Some(preview) => {
                             make_thumbnail(&preview.bytes).map_err(ThumbError::Permanent)
                         }
