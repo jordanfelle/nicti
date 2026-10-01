@@ -7,9 +7,9 @@ publish = false
 description = "XMP interop with Lightroom Classic (#60, ADR-0059): LRC-convention rating/label/keyword mapping, a preserve-everything XMP packet patcher, RAW-sidecar and JPEG-embedded read/write, and the newer-wins conflict + crs: write-gate logic. Promoted from spikes/scent (#59)."
 
 [dependencies]
-quick-xml = "0.41"
+quick-xml = "0.42"
 serde = { version = "1", features = ["derive"] }
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1"
 thiserror = "2"
 
