@@ -1706,8 +1706,14 @@ impl PeltApp {
         if let CatalogOpenState::Open(store) = &self.catalog {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
             let blocked = self
-                .job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export])
-                .then_some("A folder move, delete or export is running; import waits for it.");
+                .job_active(&[
+                    JobKind::Import,
+                    JobKind::Sync,
+                    JobKind::Move,
+                    JobKind::Delete,
+                    JobKind::Export,
+                ])
+                .then_some("An import, sync, move, delete or export is running; wait for it.");
             lrc_import::show(ui, &mut self.lrc_ui, &dyn_store, &self.pounce, blocked);
             ui.separator();
         }

@@ -210,6 +210,9 @@ pub struct LrcChunkOutcome {
     /// Same guard for rating/flag/label.
     pub kept_local_meta: u64,
     pub variants_created: u64,
+    /// Items left untouched because their variant already belongs to a different LRC image, or the
+    /// image now resolves to a different asset than last time.
+    pub skipped_conflicts: u64,
     /// Assets whose rating/flag/label actually changed -- the caller marks these catalog-dirty so
     /// the XMP sidecar sync does not revert them.
     pub meta_changed_assets: Vec<i64>,

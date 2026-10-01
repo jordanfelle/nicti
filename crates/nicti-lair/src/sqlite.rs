@@ -1066,14 +1066,28 @@ impl CatalogStore for SqliteCatalog {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         for (item, doc) in items.iter().zip(&docs) {
-            let existing: Option<(i64, Option<String>, Option<String>)> = tx
+            let existing: Option<(i64, Option<String>, Option<String>, i64)> = tx
                 .query_row(
-                    "SELECT variant_id, applied_doc_hash, applied_meta_hash \
+                    "SELECT variant_id, applied_doc_hash, applied_meta_hash, asset_id \
                      FROM lrc_provenance WHERE lrc_image_global = ?1",
                     params![item.provenance.image_global],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
                 )
                 .optional()?;
+            // The same LRC image now resolves to a different asset (a changed remap): its
+            // document and markers would land on different assets, so leave it alone.
+            if existing.as_ref().is_some_and(|e| e.3 != item.asset_id) {
+                out.skipped_conflicts += 1;
+                continue;
+            }
+            let existing = existing.map(|(v, d, m, _)| (v, d, m));
 
             let variant_id = match &existing {
                 Some((id, _, _)) => *id,
@@ -1115,6 +1129,22 @@ impl CatalogStore for SqliteCatalog {
                     }
                 },
             };
+
+            // Two different LRC masters resolving to one asset (two roots remapped to the same
+            // folder): the variant already belongs to another LRC image's provenance row.
+            if existing.is_none() {
+                let owner: Option<String> = tx
+                    .query_row(
+                        "SELECT lrc_image_global FROM lrc_provenance WHERE variant_id = ?1",
+                        params![variant_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if owner.is_some_and(|g| g != item.provenance.image_global) {
+                    out.skipped_conflicts += 1;
+                    continue;
+                }
+            }
 
             // Document: written only while the variant still holds what the import last wrote
             // (or, first time, is still empty) -- never over the user's own edit.
@@ -1166,15 +1196,23 @@ impl CatalogStore for SqliteCatalog {
                     None => true,
                 };
                 if allowed {
-                    if &current != meta {
+                    // LRC's *absence* of a rating/flag/label never erases one nicti already has
+                    // (rated in nicti, or newer XMP) -- only a value LRC actually carries
+                    // overrides, on the first run and on every re-run.
+                    let target = AssetMeta {
+                        rating: meta.rating.or(current.rating),
+                        flag: meta.flag.or(current.flag),
+                        label: meta.label.clone().or_else(|| current.label.clone()),
+                    };
+                    if current != target {
                         tx.execute(
                             "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
-                            params![meta.rating, meta.flag, meta.label, item.asset_id],
+                            params![target.rating, target.flag, target.label, item.asset_id],
                         )?;
                         out.meta_applied += 1;
                         out.meta_changed_assets.push(item.asset_id);
                     }
-                    applied_meta_hash = Some(meta_hash(meta));
+                    applied_meta_hash = Some(meta_hash(&target));
                 } else {
                     out.kept_local_meta += 1;
                 }
@@ -4266,5 +4304,96 @@ mod tests {
             .unwrap();
         store.remove_assets(&[id]).unwrap();
         assert!(store.lrc_provenance("G1").unwrap().is_none());
+    }
+
+    #[test]
+    fn first_import_never_erases_a_marker_nicti_already_has_when_lrc_has_none() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        store.set_rating(&[id], Some(3)).unwrap();
+        store.set_label(&[id], Some("Blue")).unwrap();
+        // LRC: unrated, unflagged, unlabelled -- but flagged pick.
+        let none = AssetMeta {
+            rating: None,
+            flag: Some(1),
+            label: None,
+        };
+        let out = store
+            .apply_lrc_chunk(&[lrc_item(id, "G1", Some(none), None, None)])
+            .unwrap();
+        let got = store.get_meta(&[id]).unwrap()[&id].clone();
+        assert_eq!(
+            got,
+            AssetMeta {
+                rating: Some(3),
+                flag: Some(1),
+                label: Some("Blue".into())
+            }
+        );
+        assert_eq!(out.meta_changed_assets, vec![id]);
+        // The re-run is stable (the merged result is what the import recorded).
+        let again = store
+            .apply_lrc_chunk(&[lrc_item(
+                id,
+                "G1",
+                Some(AssetMeta {
+                    rating: None,
+                    flag: Some(1),
+                    label: None,
+                }),
+                None,
+                None,
+            )])
+            .unwrap();
+        assert_eq!((again.meta_applied, again.kept_local_meta), (0, 0));
+    }
+
+    #[test]
+    fn two_lrc_masters_on_one_asset_do_not_corrupt_each_others_provenance() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        let first = lrc_item(id, "G1", None, Some(edit_doc(0.5)), None);
+        let second = lrc_item(id, "G3", None, Some(edit_doc(0.9)), None);
+        let out = store.apply_lrc_chunk(&[first.clone(), second]).unwrap();
+        assert_eq!(out.skipped_conflicts, 1);
+        assert!(store.lrc_provenance("G3").unwrap().is_none());
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.5)));
+        // G1 is still recognised on a re-run.
+        let again = store.apply_lrc_chunk(&[first]).unwrap();
+        assert_eq!((again.skipped_conflicts, again.kept_local_docs), (0, 0));
+    }
+
+    #[test]
+    fn an_lrc_image_that_now_resolves_to_another_asset_is_left_alone() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let a = one_asset(&store);
+        let root = store.list_roots().unwrap()[0].id;
+        let b = store
+            .insert_asset(root, &new_asset("b.NEF", None), None)
+            .unwrap();
+        store
+            .apply_lrc_chunk(&[lrc_item(
+                a,
+                "G1",
+                Some(lrc_meta(Some(4))),
+                Some(edit_doc(0.5)),
+                None,
+            )])
+            .unwrap();
+        let moved = store
+            .apply_lrc_chunk(&[lrc_item(
+                b,
+                "G1",
+                Some(lrc_meta(Some(1))),
+                Some(edit_doc(0.1)),
+                None,
+            )])
+            .unwrap();
+        assert_eq!(moved.skipped_conflicts, 1);
+        assert_eq!(store.get_meta(&[b]).unwrap()[&b].rating, None);
+        assert_eq!(
+            store.get_master_edit(b).unwrap(),
+            Some(nicti_pawprint::EditDocument::default())
+        );
     }
 }

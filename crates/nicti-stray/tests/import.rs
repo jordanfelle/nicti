@@ -383,3 +383,63 @@ fn only_the_selected_roots_are_ingested_and_imported() {
     );
     assert!(store.lrc_provenance("G50").unwrap().is_some());
 }
+
+#[test]
+fn a_root_with_a_trailing_separator_reuses_the_root_the_import_button_registered() {
+    let w = world();
+    // The Import button registers the folder as typed: no trailing slash.
+    let store = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let volume = store
+        .upsert_volume(
+            nicti_lair::scruff::PLACEHOLDER_VOLUME_IDENTITY_KEY,
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+    store.ensure_root(volume, w.root.to_str().unwrap()).unwrap();
+    // LRC wrote the same folder with a trailing separator.
+    let conn = Connection::open(&w.lrcat).unwrap();
+    conn.execute(
+        "UPDATE AgLibraryRootFolder SET absolutePath = absolutePath || '/'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = run(&store, &w.lrcat);
+    assert_eq!(report.error, None);
+    assert_eq!(store.list_roots().unwrap().len(), 1, "one root, not two");
+    assert_eq!(store.asset_count().unwrap(), 3, "no file is ingested twice");
+}
+
+#[test]
+fn an_unrated_lrc_photo_never_erases_a_rating_already_in_nicti() {
+    let w = world();
+    let store = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    // The user already has the folder in nicti and has rated `b` five stars there.
+    let volume = store
+        .upsert_volume(
+            nicti_lair::scruff::PLACEHOLDER_VOLUME_IDENTITY_KEY,
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+    let root = store.ensure_root(volume, w.root.to_str().unwrap()).unwrap();
+    nicti_lair::scruff::ingest_root(store.as_ref(), root, &w.root).unwrap();
+    let b = asset_id(&store, &w.root, "2026/Event/b.NEF");
+    store.set_rating(&[b], Some(5)).unwrap();
+
+    // LRC has `b` unrated; a first import must keep the user's rating.
+    let conn = Connection::open(&w.lrcat).unwrap();
+    conn.execute(
+        "UPDATE Adobe_images SET rating = NULL WHERE id_local = 2",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let report = run(&store, &w.lrcat);
+    assert_eq!(report.error, None);
+    assert_eq!(store.get_meta(&[b]).unwrap()[&b].rating, Some(5));
+}

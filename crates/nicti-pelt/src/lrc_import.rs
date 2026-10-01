@@ -33,6 +33,9 @@ pub struct RootRow {
 #[derive(Default)]
 pub struct LrcImportUi {
     pub path: String,
+    /// The catalog path the current `preview` was read from: editing `path` afterwards makes the
+    /// preview (its roots and remaps) stale, and Import refuses until it is previewed again.
+    previewed_path: String,
     /// `Err` = why the catalog could not be previewed (live catalog, wrong version ...).
     pub preview: Option<Result<Vec<RootRow>, String>>,
     pending: Option<ReportSlot<LrcImportReport>>,
@@ -91,6 +94,9 @@ impl LrcImportUi {
             Some(Ok(rows)) => rows,
             _ => return Err("Preview the catalog first.".into()),
         };
+        if self.path.trim() != self.previewed_path {
+            return Err("The catalog path changed since the preview; preview it again.".into());
+        }
         let only_roots: Vec<i64> = rows.iter().filter(|r| r.include).map(|r| r.id).collect();
         if only_roots.is_empty() {
             return Err("Tick at least one folder to import.".into());
@@ -152,6 +158,7 @@ pub fn show(
             ui.text_edit_singleline(&mut state.path);
             if ui.button("Preview").clicked() {
                 state.preview = Some(preview_roots(&state.path));
+                state.previewed_path = state.path.trim().to_string();
                 state.note = None;
             }
         });
@@ -294,6 +301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         ui.path = fixture(dir.path()).display().to_string();
         ui.preview = Some(preview_roots(&ui.path));
+        ui.previewed_path = ui.path.trim().to_string();
         if let Some(Ok(rows)) = &mut ui.preview {
             rows[0].remap = " /mnt/g/photos ".into();
         }
@@ -310,6 +318,12 @@ mod tests {
             rows[0].include = false;
         }
         assert!(ui.build_config().unwrap_err().contains("at least one"));
+        // Editing the path after the preview makes the ticked roots stale.
+        if let Some(Ok(rows)) = &mut ui.preview {
+            rows[0].include = true;
+        }
+        ui.path.push('x');
+        assert!(ui.build_config().unwrap_err().contains("preview it again"));
     }
 
     #[test]

@@ -100,7 +100,16 @@ fn wsl_path(drive_letter_path: &str) -> Option<PathBuf> {
 /// means nothing to a Windows process). An already-absolute Unix path passes through, which is what
 /// lets tests point a fixture root at a temp directory.
 pub fn resolve_root_path(lrc_absolute: &str, remaps: &[RootRemap]) -> PathBuf {
+    // LRC keeps a trailing separator (`D:\Photos\`); the Import button registers the folder as
+    // typed, without one. `ensure_root` matches the exact string, so normalise or the same folder
+    // becomes two roots and every file is ingested twice.
     let remapped = apply_remaps(lrc_absolute, remaps);
+    let trimmed = remapped.trim_end_matches(['/', '\\']);
+    let remapped = if trimmed.is_empty() || trimmed.ends_with(':') {
+        remapped
+    } else {
+        trimmed.to_string()
+    };
     if cfg!(target_os = "windows") {
         return PathBuf::from(remapped);
     }
@@ -163,6 +172,17 @@ mod tests {
             "D:\\PhotosOld\\x"
         );
         assert_eq!(apply_remaps("E:\\Other", &remaps), "E:\\Other");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_trailing_separator_is_dropped_so_the_root_matches_the_import_button() {
+        assert_eq!(
+            resolve_root_path("D:\\Photos\\", &[]),
+            PathBuf::from("/mnt/d/Photos")
+        );
+        assert_eq!(resolve_root_path("/tmp/x/", &[]), PathBuf::from("/tmp/x"));
+        assert_eq!(resolve_root_path("D:\\", &[]), PathBuf::from("/mnt/d/"));
     }
 
     #[cfg(not(target_os = "windows"))]

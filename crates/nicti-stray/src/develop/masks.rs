@@ -33,7 +33,6 @@ use agprefs::Value;
 pub(super) fn apply(tx: &mut Tx) {
     let root = tx.root;
     let enabled = tx.enabled("EnableMaskGroupBasedCorrections");
-    tx.take("MaskGroupBasedCorrections");
     let Some(list) = field(root, "MaskGroupBasedCorrections") else {
         return;
     };
@@ -44,6 +43,7 @@ pub(super) fn apply(tx: &mut Tx) {
         .is_some_and(|o| o.eq_ignore_ascii_case("AB"));
     let dims = tx.ctx.width.zip(tx.ctx.height);
 
+    let skipped_before = tx.stats.mask_corrections_skipped;
     let mut params = MaskParams::default();
     for (index, correction) in items(list).into_iter().enumerate() {
         if params.corrections.len() >= MAX_CORRECTIONS {
@@ -61,6 +61,11 @@ pub(super) fn apply(tx: &mut Tx) {
                 tx.stats.mask_components_skipped += components;
             }
         }
+    }
+    // Only a fully translated group counts as consumed: a skipped correction must stay visible in
+    // the per-image untranslated list and the histogram, not only in the counters.
+    if tx.stats.mask_corrections_skipped == skipped_before {
+        tx.take("MaskGroupBasedCorrections");
     }
     if enabled && !params.corrections.is_empty() {
         tx.put(MASKS, params.sanitized());
@@ -167,6 +172,12 @@ fn component_for(
         ),
         "Mask/CircularGradient" if upright => {
             let (w, h) = dims?;
+            // A rotated or non-round radial can't be expressed (nicti's ellipse is axis-aligned
+            // and LRC's Roundness reshapes it): skip the correction rather than misplace it.
+            if num("Angle").is_some_and(|a| a != 0.0) || num("Roundness").is_some_and(|r| r != 0.0)
+            {
+                return None;
+            }
             let long = w.max(h);
             let (left, top, right, bottom) =
                 (num("Left")?, num("Top")?, num("Right")?, num("Bottom")?);
@@ -406,5 +417,24 @@ mod tests {
         let t = translate(&many, &upright()).unwrap();
         assert_eq!(masks(&t).corrections.len(), 16);
         assert_eq!(t.stats.mask_corrections_skipped, 4);
+    }
+
+    #[test]
+    fn a_rotated_or_non_round_radial_skips_the_correction_and_stays_listed_untranslated() {
+        for extra in ["Angle = 30,", "Roundness = 40,"] {
+            let t = translate(
+                &format!(
+                    r#"s = {{ MaskGroupBasedCorrections = {{ {{ CorrectionAmount = 1,
+                CorrectionMasks = {{ {{ Bottom = 0.75, Feather = 50, Left = 0.25, {extra}
+                  MaskBlendMode = 0, Right = 0.75, Top = 0.25, What = "Mask/CircularGradient" }} }},
+                LocalExposure2012 = -0.25, What = "Correction" }} }} }}"#
+                ),
+                &upright(),
+            )
+            .unwrap();
+            assert!(t.document.stages.is_empty(), "{extra}");
+            assert_eq!(t.stats.mask_corrections_skipped, 1, "{extra}");
+            assert_eq!(t.untranslated, vec!["MaskGroupBasedCorrections"], "{extra}");
+        }
     }
 }

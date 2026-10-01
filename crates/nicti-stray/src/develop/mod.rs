@@ -246,10 +246,25 @@ fn is_identity_curve(v: &Value<'_>) -> bool {
 
 /// Whether an untranslated key is just LRC's untouched-image noise.
 fn is_noise(key: &str, v: &Value<'_>) -> bool {
-    if is_noop(v) || is_bookkeeping(key) {
+    if is_bookkeeping(key) {
         return true;
     }
     if key.starts_with("ToneCurvePV2012") && is_identity_curve(v) {
+        return true;
+    }
+    // A key with a known non-zero default: only that exact default is noise -- a user-set 0 is a
+    // real edit and must stay visible.
+    if DEFAULTS.iter().any(|(k, _)| *k == key) {
+        return DEFAULTS.iter().any(|(k, d)| {
+            *k == key
+                && match d {
+                    Known::Num(n) => number(v).is_some_and(|x| (x - n).abs() < 1e-9),
+                    Known::Text(t) => v.get_string() == Some(t),
+                    Known::Flag(b) => matches!(v, Value::Bool(x) if x == b),
+                }
+        });
+    }
+    if is_noop(v) {
         return true;
     }
     DEFAULTS.iter().any(|(k, d)| {
@@ -279,10 +294,13 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
         stats: Stats::default(),
     };
 
+    // PV2003/2010 are "10.0" and below; PV2012 and every later version (11.x ... 15.x, and whatever
+    // Adobe ships next) use the keys translated here. An unparsable version counts as current.
     if ctx
         .process_version
         .as_deref()
-        .is_some_and(|p| !p.starts_with("15"))
+        .and_then(|p| p.trim().parse::<f64>().ok())
+        .is_some_and(|v| v < 11.0)
     {
         // PV2003/2010 use different slider keys and curves (Brightness, FillLight, ...): not
         // translated; the provenance text keeps everything.
@@ -324,4 +342,42 @@ pub(crate) fn close(value: &serde_json::Value, expected: f64) -> bool {
     value
         .as_f64()
         .is_some_and(|v| (v - expected).abs() <= 1e-4 * expected.abs().max(1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_pv2003_and_2010_are_legacy_not_every_version_that_isnt_15() {
+        let text = "s = { Exposure2012 = 1 }";
+        for (pv, translated) in [
+            ("10.0", false),
+            ("11.0", true),
+            ("15.4", true),
+            ("16.1", true),
+        ] {
+            let ctx = Context {
+                process_version: Some(pv.into()),
+                ..Context::default()
+            };
+            let t = translate(text, &ctx).unwrap();
+            assert_eq!(!t.document.stages.is_empty(), translated, "{pv}");
+            assert_eq!(
+                t.stats.legacy_process_version,
+                u64::from(!translated),
+                "{pv}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_set_zero_on_a_key_with_a_nonzero_default_stays_visible_but_the_default_is_noise() {
+        let t = translate(
+            "s = { ColorGradeBlending = 0, GrainSize = 25, GrainFrequency = 10 }",
+            &Context::default(),
+        )
+        .unwrap();
+        assert_eq!(t.untranslated, vec!["ColorGradeBlending", "GrainFrequency"]);
+    }
 }

@@ -165,10 +165,17 @@ impl LrcImportJob {
     }
 
     fn run(&mut self, conn: &Connection) -> Result<Step, StrayError> {
+        // Ingest runs one file per step (hundreds of thousands of steps) and Dirty never reads the
+        // LRC catalog: neither pays for `Reader::new`'s schema probes.
+        match std::mem::replace(&mut self.state, State::Done) {
+            State::Ingest { root, ingest } => return self.ingest(root, ingest),
+            State::Dirty { ids, next } => return self.dirty(ids, next),
+            State::Done => return Ok(Step::Done),
+            other => self.state = other,
+        }
         let reader = Reader::new(conn)?;
         match std::mem::replace(&mut self.state, State::Done) {
             State::Open => self.open(&reader),
-            State::Ingest { root, ingest } => self.ingest(root, ingest),
             State::Match {
                 root,
                 after,
@@ -177,8 +184,9 @@ impl LrcImportJob {
             State::Keywords { list, next } => self.keywords(&reader, list, next),
             State::Collections { plan, next } => self.collections(&reader, plan, next),
             State::Items { after } => self.items(&reader, after),
-            State::Dirty { ids, next } => self.dirty(ids, next),
-            State::Done => Ok(Step::Done),
+            State::Ingest { .. } | State::Dirty { .. } | State::Done => {
+                unreachable!("handled above")
+            }
         }
     }
 
@@ -340,7 +348,16 @@ impl LrcImportJob {
             .map(|s| norm_segment(s))
             .filter(|s| !s.is_empty())
             .collect();
-        if !segs.is_empty() {
+        let mut ids: Vec<i64> = reader
+            .keyword_images(kw.id)?
+            .into_iter()
+            .filter_map(|image| self.image_asset.get(&image).copied())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        // Importing a subset of roots must not create the whole keyword tree for nothing.
+        let wanted = !segs.is_empty() && (self.config.only_roots.is_empty() || !ids.is_empty());
+        if wanted {
             let mut parent: Option<i64> = None;
             for i in 0..segs.len() {
                 let path: Vec<&str> = segs[..=i].iter().map(String::as_str).collect();
@@ -353,13 +370,6 @@ impl LrcImportJob {
                 }
             }
             if let Some(keyword_id) = parent {
-                let mut ids: Vec<i64> = reader
-                    .keyword_images(kw.id)?
-                    .into_iter()
-                    .filter_map(|image| self.image_asset.get(&image).copied())
-                    .collect();
-                ids.sort_unstable();
-                ids.dedup();
                 for chunk in ids.chunks(5000) {
                     self.store.tag(chunk, keyword_id)?;
                 }
@@ -382,8 +392,34 @@ impl LrcImportJob {
         let mut plan = match plan {
             Some(p) => p,
             None => {
-                let (all, smart) = reader.collections()?;
+                let (mut all, smart) = reader.collections()?;
                 self.report.smart_collections_skipped = smart;
+                if !self.config.only_roots.is_empty() {
+                    // A subset import keeps only collections that hold a matched photo, and the
+                    // sets above them -- not every collection in the catalog, mostly empty.
+                    let mut keep: HashSet<i64> = HashSet::new();
+                    for c in all.iter().filter(|c| c.kind == CollectionKind::Manual) {
+                        if reader
+                            .collection_images(c.id)?
+                            .iter()
+                            .any(|image| self.image_asset.contains_key(image))
+                        {
+                            keep.insert(c.id);
+                        }
+                    }
+                    let parents: HashMap<i64, Option<i64>> =
+                        all.iter().map(|c| (c.id, c.parent)).collect();
+                    for id in keep.clone() {
+                        let mut at = parents.get(&id).copied().flatten();
+                        while let Some(p) = at {
+                            if !keep.insert(p) {
+                                break;
+                            }
+                            at = parents.get(&p).copied().flatten();
+                        }
+                    }
+                    all.retain(|c| keep.contains(&c.id));
+                }
                 CollectionPlan {
                     order: parents_first(all),
                     made: HashMap::new(),
@@ -486,14 +522,16 @@ impl LrcImportJob {
         if is_copy {
             self.report.virtual_copies += 1;
         }
-        let (width, height) = self
-            .asset_dims
-            .get(&asset_id)
-            .map(|&(w, h)| (w as f32, h as f32))
+        // LRC's own file size first: `asset.width/height` is the T0 *preview's* declared size,
+        // which is smaller than the sensor frame the crop pixels refer to.
+        let (width, height) = img
+            .file_width
+            .zip(img.file_height)
+            .map(|(w, h)| (w as f32, h as f32))
             .or_else(|| {
-                img.file_width
-                    .zip(img.file_height)
-                    .map(|(w, h)| (w as f32, h as f32))
+                self.asset_dims
+                    .get(&asset_id)
+                    .map(|&(w, h)| (w as f32, h as f32))
             })
             .map_or((None, None), |(w, h)| (Some(w), Some(h)));
 

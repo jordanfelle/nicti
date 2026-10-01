@@ -25,14 +25,17 @@ LRC-reading half is promoted from `spikes/shed` (`open_backup`'s live-catalog gu
 the Import button, via `nicti_lair::scruff::register_root`) and ingested by the normal Scruff pass,
 so fingerprints, previews and EXIF are computed fresh. LRC images are then matched to cataloged
 assets by `(root, case-folded rel_path)`. A root whose folder is absent on this machine, or an
-image with no file, is counted **missing and skipped** — never invented. A user-supplied prefix
-remap handles moved drives; a drive-letter path maps to `/mnt/<x>/` off Windows.
+image with no file, is counted **missing and skipped** — never invented. Root paths are normalised (no trailing separator) so the same folder is the same `root` row as the
+Import button's, not a second one that would ingest every file twice. A user-supplied prefix remap
+handles moved drives; a drive-letter path maps to `/mnt/<x>/` off Windows.
 
 **Phases** (one bounded chunk per `step()`): open → ingest → match → keywords → collections →
 items → mark-dirty. Keywords and collections are found-or-created and only ever *added*.
 `CatalogStore::apply_lrc_chunk` writes each 500-image chunk in one transaction.
 
-**Markers.** `rating` NULL → unrated; `pick = -1` → reject (stored on `rating`, stars kept in
+**Markers.** LRC's *absence* of a value never erases one nicti already has (a photo rated in nicti,
+or newer XMP): only a rating/flag/label LRC actually carries overrides, on the first run and on
+re-runs. `rating` NULL → no change; `pick = -1` → reject (stored on `rating`, stars kept in
 provenance); `pick = 1` → flag; `colorLabels` → label. Virtual copies become extra non-master
 `edit_variant` rows named by `copyName`; only the master image's markers apply (nicti's are per
 asset). Imported assets are marked catalog-dirty (`mark_catalog_dirty_many`) so the XMP sidecar sync
@@ -43,7 +46,11 @@ unique on `Adobe_images.id_global`) holding the verbatim develop text, `importHa
 mask/AI/big-data flags, IPTC caption/copyright (no nicti field yet), raw rating/pick, the
 untranslated-key list, and the BLAKE3 of the document/markers the import last wrote. A re-run
 overwrites a document or marker set only while it still equals that hash; otherwise the user's
-edit in nicti is kept and counted (`kept_local_*`). The first import does override what XMP ingest
+edit in nicti is kept and counted (`kept_local_*`). Two LRC masters that resolve to one asset (two
+roots remapped to one folder), or an LRC image that now resolves to a different asset than last
+time, are left untouched and counted (`skipped_conflicts`) rather than corrupting the provenance
+row. Crop pixels use LRC's own `fileWidth`/`fileHeight` (`asset.width/height` is only the T0
+preview's declared size). The first import does override what XMP ingest
 filled in, but never a master that already carries edits.
 
 **Failure model.** `step()` never returns `Err` (Pounce would drop the job without resolving the
@@ -56,8 +63,10 @@ Slider units: LRC's global sliders are -100..100 → nicti's -1..1; exposure sta
 Translated: Exposure2012, Contrast/Highlights/Shadows/Whites/Blacks2012, Vibrance, white balance
 (`As Shot` is left to nicti; any other preset is an explicit override), the four parametric
 tone-curve sliders, the eight HSL bands, Sharpness/Radius/Detail, luminance/colour noise
-reduction, and the crop rectangle; plus `MaskGroupBasedCorrections` → `nicti.masks`. Panel
-`Enable*` toggles zero what they gate. LRC's untouched-image defaults (Sharpness 40,
+reduction, and the crop rectangle; plus `MaskGroupBasedCorrections` → `nicti.masks`. The
+`Enable*` toggles that exist in real catalogs (Color adjustments, Detail, Mask corrections)
+zero what they gate; a panel with no toggle key is simply always on. Only `processVersion` below 11 (PV2003/2010) skips translation; every later version uses the
+PV2012 keys. LRC's untouched-image defaults (Sharpness 40,
 ColorNoiseReduction 25 …) are imported faithfully — that is what the photo looks like in LRC.
 
 **Conventions verified against the real v13 catalog** (not just the #49 note):
@@ -76,11 +85,15 @@ ColorNoiseReduction 25 …) are imported faithfully — that is what the photo l
 **Not translated** (kept in provenance, counted in the report, listed in the untranslated-key
 histogram): brushes, People/object masks, range masks, **the whole correction** when any component
 is untranslatable (a partial selection would be wrong); geometric masks and crops on rotated
-originals or with a straighten angle (LRC's sign/orientation convention is unpinned); retouch
+originals or with a straighten angle (LRC's sign/orientation convention is unpinned), and radials with a non-zero `Angle` or `Roundness`;
+a radial's `Feather` is applied as nicti's outward feather (not verified against LRC renders); a
+skipped correction also leaves `MaskGroupBasedCorrections` in the untranslated list; retouch
 areas; global Clarity/Texture/Dehaze/Saturation, point curves, colour grading, calibration, lens,
 transform/Upright, grain/vignette, `CameraProfile` (a name with no resolvable `.dcp` has no render
 effect, so no stage is written), `FilterList` (counted per `Title`: Denoise / removal / Super
-Resolution), PV2003/2010 images. Smart collections are counted, not imported (rule mapping
+Resolution), PV2003/2010 images. Non-RAW originals (JPEG/TIFF/PSD/video) are not Scruff candidates, so they match nothing and are
+reported as missing. A subset import (`only_roots`) creates only the keywords and collections that
+hold a matched photo. Smart collections are counted, not imported (rule mapping
 unverified, ADR-0061 Q3). `.lrcat-data` is never read.
 
 ## Measured (real 380,228-image v13 backup, `tests/real_catalog.rs`, ignored by default)
