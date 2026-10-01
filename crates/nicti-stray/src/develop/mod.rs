@@ -264,17 +264,7 @@ fn is_noise(key: &str, v: &Value<'_>) -> bool {
                 }
         });
     }
-    if is_noop(v) {
-        return true;
-    }
-    DEFAULTS.iter().any(|(k, d)| {
-        *k == key
-            && match d {
-                Known::Num(n) => number(v).is_some_and(|x| (x - n).abs() < 1e-9),
-                Known::Text(t) => v.get_string() == Some(t),
-                Known::Flag(b) => matches!(v, Value::Bool(x) if x == b),
-            }
-    })
+    is_noop(v)
 }
 
 /// Translates one image's develop-settings Lua text. A parse failure is an `Err` the caller counts;

@@ -211,7 +211,30 @@ pub const PLACEHOLDER_VOLUME_IDENTITY_KEY: &str = "nicti-pelt-local-placeholder"
 /// and the LRC catalog import (#62) so both land on the same `root` row for the same folder.
 pub fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
     let volume_id = store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now_unix())?;
-    store.ensure_root(volume_id, &path.to_string_lossy())
+    store.ensure_root(volume_id, &canonical_root_string(path))
+}
+
+/// The one spelling a root is registered under. `ensure_root` matches the exact string, so the
+/// Import field's typed path and an LRC-derived path for the same folder must agree byte for byte:
+/// no trailing separator (except a bare root), and on Windows one separator style (`\`) and an
+/// upper-case drive letter.
+pub fn canonical_root_string(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut out = if cfg!(windows) {
+        raw.replace('/', "\\")
+    } else {
+        raw.to_string()
+    };
+    let trimmed = out.trim_end_matches(['/', '\\']);
+    if !trimmed.is_empty() && !trimmed.ends_with(':') {
+        out.truncate(trimmed.len());
+    }
+    if cfg!(windows) && out.as_bytes().get(1) == Some(&b':') {
+        if let Some(first) = out.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+    }
+    out
 }
 
 /// Scans `root_path` (already registered as `root_id` via [`CatalogStore::ensure_root`]) and
@@ -512,5 +535,19 @@ mod tests {
         std::fs::write(dir.path().join("c.jpg"), b"x").unwrap();
         let found: Vec<_> = candidate_files(dir.path()).collect();
         assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn canonical_root_string_drops_trailing_separators_but_keeps_a_bare_root() {
+        let c = |p: &str| canonical_root_string(Path::new(p));
+        if cfg!(windows) {
+            assert_eq!(c("d:/Photos/"), "D:\\Photos");
+            assert_eq!(c("D:\\Photos"), "D:\\Photos");
+            assert_eq!(c("D:\\"), "D:\\");
+        } else {
+            assert_eq!(c("/data/Photos/"), "/data/Photos");
+            assert_eq!(c("/data/Photos"), "/data/Photos");
+            assert_eq!(c("/"), "/");
+        }
     }
 }
