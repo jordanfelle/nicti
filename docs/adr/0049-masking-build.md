@@ -181,8 +181,9 @@ the pinned revision, so swapping the export forces a new edit.
 
 **Provenance, stated precisely** (and corrected during this work — an earlier draft of the artifact
 claimed the weights were trained on "several research datasets with unreviewed terms"): the upstream
-model card says the model is *"trained on DIS-TR"*, matching `docs/licensing.md`; this is MIT. What is
-**not verified** is that the third-party conversion's weights equal the upstream checkpoint (#348).
+model card says the model is *"trained on DIS-TR"*, matching `docs/licensing.md`; this is MIT. What was **not verified at the time** was that the third-party conversion equals the upstream checkpoint;
+#348 later compared them (`bench/birefnet-verify`, result in `docs/licensing.md`): the conversion's
+alpha masks closely match upstream PyTorch fp32 (mask IoU >= 0.997 on 4 images, with isolated pixel disagreements; output-level evidence, not a weight proof).
 
 Sky is ADR-0048's interim flood-filled heuristic (#347), an ordinary provider with nothing to download,
 labelled *beta*.
