@@ -1373,6 +1373,9 @@ impl CatalogStore for SqliteCatalog {
                 imported_at) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
              ON CONFLICT(root_id, rel_path) DO UPDATE SET \
+                content_hash = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.content_hash ELSE NULL END, \
                 rel_path_fold = excluded.rel_path_fold, \
                 size_bytes = excluded.size_bytes, \
                 mtime_unix = excluded.mtime_unix, \
@@ -2678,6 +2681,39 @@ mod tests {
     fn get_root_path_returns_none_for_a_root_id_that_does_not_exist() {
         let store = SqliteCatalog::open_in_memory().unwrap();
         assert_eq!(store.get_root_path(999).unwrap(), None);
+    }
+
+    #[test]
+    fn reingest_clears_content_hash_only_when_the_file_changed() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let vol = store.upsert_volume("v", None, None, 0).unwrap();
+        let root = store.ensure_root(vol, "/ssd/e").unwrap();
+        let mk = |size: u64, mtime: i64| NewAsset {
+            rel_path: "a.NEF".into(),
+            rel_path_fold: "a.nef".into(),
+            size_bytes: size,
+            mtime_unix: mtime,
+            fingerprint: None,
+            natural_key: None,
+            make: None,
+            model: None,
+            captured_at: None,
+            width: None,
+            height: None,
+            imported_at: 0,
+        };
+        let asset = store.insert_asset(root, &mk(10, 5), None).unwrap();
+        let mv = store.begin_root_move(root, "/archive/e", 1).unwrap();
+        store
+            .commit_root_move(mv, &[(asset, "abc".into())])
+            .unwrap();
+
+        // Same stat: the hash survives a rescan.
+        store.insert_asset(root, &mk(10, 5), None).unwrap();
+        assert_eq!(store.content_hash(asset).unwrap().as_deref(), Some("abc"));
+        // Changed file (edited in place): the stored hash is stale, so it is dropped.
+        store.insert_asset(root, &mk(11, 5), None).unwrap();
+        assert_eq!(store.content_hash(asset).unwrap(), None);
     }
 
     #[test]
