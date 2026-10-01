@@ -1,0 +1,23 @@
+[package]
+name = "nicti-stray"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Lightroom Classic catalog import (#62, ADR-0061/0156/0158): reads a closed .lrcat backup read-only and brings its folders, ratings/flags/labels, keywords, collections, virtual copies and develop settings into nicti's catalog as a Pounce job. Named for a stray cat taken into a new home. The LRC-reading side is promoted from spikes/shed."
+
+[dependencies]
+nicti-lair = { path = "../nicti-lair" }
+nicti-pawprint = { path = "../nicti-pawprint" }
+nicti-pounce = { path = "../nicti-pounce" }
+nicti-siamese = { path = "../nicti-siamese" }
+nicti-stalk = { path = "../nicti-stalk" }
+nicti-tapetum = { path = "../nicti-tapetum" }
+agprefs = "0.3"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

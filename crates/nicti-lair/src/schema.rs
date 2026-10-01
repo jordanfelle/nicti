@@ -450,6 +450,40 @@ CREATE TABLE asset_sidecar (
 CREATE INDEX asset_sidecar_review ON asset_sidecar(asset_id) WHERE needs_review = 1;
 "#;
 
+/// Lightroom Classic import provenance (#62, ADR-0061/0156/0158): one row per imported LRC image,
+/// keyed by the `edit_variant` it landed on (the master, or a virtual copy's own variant). Keeps
+/// everything the import does not (or cannot yet) translate -- the verbatim develop-settings Lua
+/// text, `importHash` (opaque, ADR-0158), the AI-mask/big-data flags (ADR-0156), IPTC caption and
+/// copyright (no nicti field yet), and the raw rating/pick -- so nothing LRC knew is lost, and a
+/// later ticket's translator can re-run against `develop_text` without the `.lrcat`.
+/// `lrc_image_global` is the idempotency key (`Adobe_images.id_global`): a re-run finds the row it
+/// wrote last time. `applied_doc_hash`/`applied_meta_hash` are what the import itself last wrote
+/// (BLAKE3 hex), so a re-run can tell an untouched import from a document or marker set the user
+/// has since edited in nicti, and leave the latter alone.
+const MIGRATION_V10: &str = r#"
+CREATE TABLE lrc_provenance (
+    variant_id        INTEGER PRIMARY KEY REFERENCES edit_variant(id) ON DELETE CASCADE,
+    asset_id          INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    lrc_image_global  TEXT NOT NULL UNIQUE,
+    lrc_image_local   INTEGER NOT NULL,
+    import_hash       TEXT,
+    process_version   TEXT,
+    develop_text      TEXT,
+    has_masks         INTEGER,
+    has_ai_masks      INTEGER,
+    has_big_data      INTEGER,
+    iptc_caption      TEXT,
+    iptc_copyright    TEXT,
+    lrc_rating        REAL,
+    lrc_pick          REAL,
+    untranslated      TEXT NOT NULL,
+    applied_doc_hash  TEXT,
+    applied_meta_hash TEXT,
+    imported_at       INTEGER NOT NULL
+);
+CREATE INDEX lrc_provenance_asset ON lrc_provenance(asset_id);
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -464,6 +498,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V7,
     MIGRATION_V8,
     MIGRATION_V9,
+    MIGRATION_V10,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call
@@ -541,6 +576,72 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
+    }
+
+    /// V10 (#62) is purely additive: a catalog already at V9 with data keeps every row, gains the
+    /// provenance table, and a provenance row dies with its variant (`ON DELETE CASCADE`).
+    #[test]
+    fn upgrading_from_v9_adds_lrc_provenance_and_keeps_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS[..9].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {}", i + 1))
+                .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO volume (identity_key, online, last_seen_at) VALUES ('v', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO root (volume_id, rel_path) VALUES (1, 'x')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO asset (root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
+             imported_at) VALUES (1, 'a.nef', 'a.nef', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edit_variant (asset_id, name, is_master, document) \
+             VALUES (1, 'master', 1, '{}')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        let assets: i64 = conn
+            .query_row("SELECT COUNT(*) FROM asset", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(assets, 1);
+        conn.execute(
+            "INSERT INTO lrc_provenance (variant_id, asset_id, lrc_image_global, lrc_image_local, \
+             untranslated, imported_at) VALUES (1, 1, 'G', 1, '[]', 0)",
+            [],
+        )
+        .unwrap();
+        // Same image twice is refused (the idempotency key is unique)...
+        conn.execute("INSERT INTO edit_variant (asset_id, name, is_master, document) VALUES (1, 'copy', 0, '{}')", [])
+            .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lrc_provenance (variant_id, asset_id, lrc_image_global, \
+                 lrc_image_local, untranslated, imported_at) VALUES (2, 1, 'G', 2, '[]', 0)",
+                [],
+            )
+            .is_err());
+        // ...and removing the variant removes its provenance.
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        conn.execute("DELETE FROM edit_variant WHERE id = 1", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM lrc_provenance", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     /// A catalog created under V1 alone (before #24), then migrated forward, must end up with

@@ -2,7 +2,9 @@
 paths:
   - "spikes/shed/**"
   - "crates/nicti-lair/**"
+  - "crates/nicti-stray/**"
   - "docs/adr/0061*"
+  - "docs/adr/0062*"
 ---
 
 # LRC Migration — Quick Reference
@@ -55,6 +57,17 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   (`brew install rocksdb`) — no `rocksdb` Cargo dependency, same `links = "sqlite3"`-style
   workspace-uniqueness risk `lrcat-extractor` already hit.
 
+- **The import build (#62, ADR-0062)**: `crates/nicti-stray`'s `LrcImportJob` — open (live-catalog
+  guard) → ingest roots via Scruff → match by `(root, folded rel_path)` → keywords/collections
+  (additive) → items (`apply_lrc_chunk`, one transaction per 500) → mark catalog-dirty (so XMP sync
+  doesn't revert). Schema v10 `lrc_provenance` keeps verbatim develop text + what the import last
+  wrote, so a re-run never overwrites a later nicti edit. **`step()` never returns `Err`** (slot must
+  resolve; `Drop` = cancelled). Real-catalog gotchas: `fileWidth`/`fileHeight` are `REAL` (read
+  numeric columns by stored value); `LocalExposure2012` is stops/4; a radial's `MaskInverted=true`
+  = effect outside; AI mask space = uncropped frame; legacy PV2003 keys (`Contrast`, `Shadows`,
+  `Exposure` …) sit beside PV2012 ones in every image. Not translated: brushes, People masks, rotated
+  crops/geometric masks, retouch, Clarity/Texture/Dehaze, point curves (all in provenance).
+
 ## Package contents
 
 - **`spikes/shed`** (#61/ADR-0061's `.lrcat` schema-mapping research) — schema/inventory/
@@ -68,3 +81,9 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   unconfirmed). Real, tested (38 unit tests on Unix, 37 on Windows — the one Unix-only test,
   `open.rs`'s pre-existing URI-special-character case, predates #158 and is unrelated to it), not
   path-gated. See `docs/research/shed-lrcat-schema.md` and `docs/adr/0158-lrc-hash-relink-seeding.md`.
+- **`crates/nicti-stray`** (#62/ADR-0062) — `open.rs` (guarded read-only open + v13 schema check,
+  promoted from the spike), `read.rs` (paged `Reader`), `paths.rs` (remap, drive-letter mapping),
+  `develop/` (Lua → `EditDocument`: `basic`/`hsl`/`detail`/`crop`/`masks`/`heal`/`filters`),
+  `job.rs` (`LrcImportJob`), `report.rs`; `tests/import.rs` end to end on a synthetic `.lrcat`,
+  `tests/real_catalog.rs` (`#[ignore]`, `NICTI_TEST_LRCAT=<closed backup>`) against a real one.
+  UI: `nicti-pelt`'s `lrc_import.rs` (Library controls).

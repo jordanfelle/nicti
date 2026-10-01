@@ -34,8 +34,8 @@ pub mod shred;
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
 pub use model::{
-    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, MoveState, NewAsset, Preview, PreviewTier,
-    Root, RootMove, SidecarState,
+    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, LrcChunkOutcome, LrcItem, LrcProvenance,
+    MoveState, NewAsset, Preview, PreviewTier, Root, RootMove, SidecarState,
 };
 pub use sqlite::SqliteCatalog;
 
@@ -167,6 +167,28 @@ pub trait CatalogStore: Module {
         &self,
         edits: &[(i64, nicti_pawprint::EditDocument)],
     ) -> Result<(), CatalogError>;
+
+    /// Applies a chunk of Lightroom Classic images (#62) in **one transaction**: each item's
+    /// markers (master only), edit document and provenance row. Idempotent per
+    /// `LrcProvenance::image_global`: a re-run overwrites a document/marker set only while it still
+    /// equals what the import last wrote, otherwise the user's own edit is kept (counted in
+    /// [`LrcChunkOutcome`]). An item naming a missing asset fails the whole chunk (FK error),
+    /// writing nothing.
+    fn apply_lrc_chunk(&self, items: &[LrcItem]) -> Result<LrcChunkOutcome, CatalogError>;
+
+    /// The `lrc_provenance` row for an LRC image, `None` if it was never imported (#62).
+    fn lrc_provenance(&self, image_global: &str) -> Result<Option<LrcProvenance>, CatalogError>;
+
+    /// Names of every edit variant of an asset (master first), in id order (#62: a virtual copy
+    /// is an extra non-master variant).
+    fn variant_names(&self, asset_id: i64) -> Result<Vec<String>, CatalogError>;
+
+    /// Reads one named variant's edit document, `None` if the asset has no such variant (#62).
+    fn get_variant_edit(
+        &self,
+        asset_id: i64,
+        name: &str,
+    ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError>;
 
     /// Reads a root's own `rel_path` (which callers store as an absolute folder path under
     /// ADR-0071's placeholder-volume-identity stand-in — see `nicti-pelt::register_root`) by its

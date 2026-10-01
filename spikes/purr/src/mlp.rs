@@ -58,6 +58,47 @@ impl Mlp {
         })
     }
 
+    /// Overwrites every weight and bias with deterministic values from `seed` (a PCG-style LCG,
+    /// uniform in `+-1/sqrt(fan_in)`, the same bound `candle_nn::linear` uses). `Mlp::new`'s own
+    /// initialisation draws from candle's unseeded CPU rng, so a ReLU net trained from it can
+    /// start with dead units and fail to fit -- a rare, run-to-run flake (it failed once on CI,
+    /// #377) that a test asserting a fit can't tolerate. Tests call this right after `new`.
+    pub fn reseed(&mut self, seed: u64) -> anyhow::Result<()> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
+        };
+        let named: Vec<(String, Vec<usize>)> = self
+            .varmap
+            .data()
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, var)| (name.clone(), var.dims().to_vec()))
+            .collect();
+        let fan_in = |name: &str| -> usize {
+            let layer = name.rsplit_once('.').map_or(name, |(l, _)| l);
+            named
+                .iter()
+                .find(|(n, d)| n.starts_with(layer) && n.ends_with("weight") && d.len() == 2)
+                .map_or(1, |(_, d)| d[1])
+        };
+        // Visit in name order so the result doesn't depend on HashMap iteration order.
+        let mut sorted = named.clone();
+        sorted.sort();
+        for (name, dims) in &sorted {
+            let bound = 1.0 / (fan_in(name) as f32).sqrt();
+            let n: usize = dims.iter().product();
+            let values: Vec<f32> = (0..n).map(|_| next() * bound).collect();
+            let tensor = Tensor::from_vec(values, dims.clone(), &self.device)?;
+            self.varmap.set_one(name, tensor)?;
+        }
+        Ok(())
+    }
+
     /// The final `tanh` bounds output to `-1.0..=1.0`, matching `scale_targets`'s scaling -- without
     /// it, `unscale`'s linear remap of an unbounded raw output could land far outside a slider's
     /// documented range on an out-of-distribution input.
@@ -240,6 +281,8 @@ mod tests {
         let (train_t, val_t) = targets.split_at(48);
 
         let mut model = Mlp::new(3, 16).unwrap();
+        // Deterministic init: candle's own is unseeded, and a ReLU net occasionally starts dead.
+        model.reseed(7).unwrap();
         let report = model
             .train(
                 train_f,
@@ -264,6 +307,17 @@ mod tests {
                 predicted[0]
             );
         }
+    }
+
+    #[test]
+    fn reseed_makes_initialisation_deterministic_and_seed_dependent() {
+        let predict = |seed: u64| {
+            let mut m = Mlp::new(3, 8).unwrap();
+            m.reseed(seed).unwrap();
+            m.predict(&[0.3, -0.2, 0.9]).unwrap()
+        };
+        assert_eq!(predict(1), predict(1));
+        assert_ne!(predict(1), predict(2));
     }
 
     #[test]

@@ -46,6 +46,7 @@ use crate::knead::batch::run_batch;
 use crate::knead::ui::{Command as KneadCommand, KneadUi, PanelAction};
 use crate::knead::Clipboard;
 use crate::loupe::{asset_cache_key, LoupeSession};
+use crate::lrc_import::{self, LrcImportUi};
 use crate::mask_panel::MaskUi;
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
@@ -61,12 +62,6 @@ const PLACEHOLDER_VRAM_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 /// Telemetry is throttled independently of egui's own repaint rate -- see `telemetry.rs`'s own
 /// doc comment for why re-sampling `sysinfo`/DXGI on every frame would be wasteful.
 const TELEMETRY_MIN_INTERVAL: Duration = Duration::from_millis(500);
-/// This shell has no real volume-identity system wired in yet (ADR-0071 is Proposed, and
-/// `catalog::resolve_path`'s own doc comment already flags "a real per-platform app-data default
-/// ... is left to whichever ticket adds catalog-picker UI" as out of scope here) -- every
-/// Import/Sync root registers under one fixed placeholder volume, with the folder's own full path
-/// as its `rel_path`, rather than inventing volume-mount detection prematurely.
-const PLACEHOLDER_VOLUME_IDENTITY_KEY: &str = "nicti-pelt-local-placeholder";
 /// RAM budget for the loupe's decoded-frame cache (#31) -- a placeholder pending real tuning
 /// against actual machine RAM, matching `PLACEHOLDER_VRAM_BUDGET_BYTES`'s own "not measured yet"
 /// status.
@@ -191,6 +186,8 @@ pub struct PeltApp {
     /// the catalog failed to open.
     xmp: Option<XmpWriter>,
     xmp_ui: XmpUi,
+    /// The Lightroom Classic catalog import panel (#62).
+    lrc_ui: LrcImportUi,
     /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
     /// re-read and re-decode them every frame.
     loupe_t2_undecodable: Option<i64>,
@@ -385,6 +382,7 @@ impl PeltApp {
             cache_settings: CacheSettingsUi::default(),
             xmp,
             xmp_ui: XmpUi::default(),
+            lrc_ui: LrcImportUi::default(),
             loupe_t2_undecodable: None,
             grid: None,
             grid_view: grid::ViewState::default(),
@@ -1705,6 +1703,20 @@ impl PeltApp {
             xmp_sync::show(ui, &mut self.xmp_ui, &dyn_store, xmp, &self.catalog_path);
             ui.separator();
         }
+        if let CatalogOpenState::Open(store) = &self.catalog {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+            let blocked = self
+                .job_active(&[
+                    JobKind::Import,
+                    JobKind::Sync,
+                    JobKind::Move,
+                    JobKind::Delete,
+                    JobKind::Export,
+                ])
+                .then_some("An import, sync, move, delete or export is running; wait for it.");
+            lrc_import::show(ui, &mut self.lrc_ui, &dyn_store, &self.pounce, blocked);
+            ui.separator();
+        }
         if let Some(summary) = &self.last_backup_summary {
             ui.label(summary);
         }
@@ -2430,12 +2442,7 @@ fn stored_edit_document(store: &dyn CatalogStore, asset_id: i64) -> nicti_pawpri
 }
 
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let volume_id = store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now)?;
-    store.ensure_root(volume_id, &path.to_string_lossy())
+    nicti_lair::scruff::register_root(store, path)
 }
 
 #[cfg(test)]

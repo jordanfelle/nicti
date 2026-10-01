@@ -161,6 +161,63 @@ pub struct SidecarState {
     pub needs_review: bool,
 }
 
+/// Everything an LRC import keeps about one source image beyond what nicti models (#62, the
+/// `lrc_provenance` table, schema v10). `develop_text` is the verbatim Lua so a later translator
+/// can re-run without the `.lrcat`; `untranslated` is the list of develop keys the import saw but
+/// could not map to a nicti stage.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LrcProvenance {
+    /// `Adobe_images.id_global` -- the idempotency key for re-runs.
+    pub image_global: String,
+    /// `Adobe_images.id_local`.
+    pub image_local: i64,
+    pub import_hash: Option<String>,
+    pub process_version: Option<String>,
+    pub develop_text: Option<String>,
+    pub has_masks: Option<bool>,
+    pub has_ai_masks: Option<bool>,
+    pub has_big_data: Option<bool>,
+    pub iptc_caption: Option<String>,
+    pub iptc_copyright: Option<String>,
+    pub lrc_rating: Option<f64>,
+    pub lrc_pick: Option<f64>,
+    pub untranslated: Vec<String>,
+}
+
+/// One LRC image to apply in [`crate::CatalogStore::apply_lrc_chunk`].
+#[derive(Debug, Clone)]
+pub struct LrcItem {
+    pub asset_id: i64,
+    /// `None` for a virtual copy: nicti's markers are per asset, so only the master image's
+    /// rating/flag/label are applied (the copy's own go to provenance only).
+    pub meta: Option<AssetMeta>,
+    /// `None` = the asset's master edit variant; `Some(name)` = a virtual copy's own variant
+    /// (created on first apply, found again by provenance on a re-run).
+    pub variant_name: Option<String>,
+    /// The translated edit document. `None` leaves the variant's document untouched.
+    pub document: Option<nicti_pawprint::EditDocument>,
+    pub provenance: LrcProvenance,
+}
+
+/// What [`crate::CatalogStore::apply_lrc_chunk`] did, for the import report.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LrcChunkOutcome {
+    pub docs_written: u64,
+    /// A re-run found the variant's document no longer matches what the import last wrote (or, on
+    /// a first import, the master already carries edits) and left it alone.
+    pub kept_local_docs: u64,
+    pub meta_applied: u64,
+    /// Same guard for rating/flag/label.
+    pub kept_local_meta: u64,
+    pub variants_created: u64,
+    /// Items left untouched because their variant already belongs to a different LRC image, or the
+    /// image now resolves to a different asset than last time.
+    pub skipped_conflicts: u64,
+    /// Assets whose rating/flag/label actually changed -- the caller marks these catalog-dirty so
+    /// the XMP sidecar sync does not revert them.
+    pub meta_changed_assets: Vec<i64>,
+}
+
 /// One open `delete_item` journal row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteItem {

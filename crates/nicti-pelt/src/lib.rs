@@ -24,6 +24,7 @@ mod grid;
 mod heal_tool;
 mod knead;
 mod loupe;
+mod lrc_import;
 mod mask_edit;
 mod mask_panel;
 mod mask_tool;

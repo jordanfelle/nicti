@@ -3765,8 +3765,10 @@ dependencies = [
  "nicti-shed",
  "nicti-siamese",
  "nicti-stalk",
+ "nicti-stray",
  "nicti-tapetum",
  "raw-window-handle",
+ "rusqlite",
  "semver",
  "serde",
  "serde_json",
@@ -3873,6 +3875,24 @@ dependencies = [
  "thiserror 2.0.21",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "nicti-stray"
+version = "0.0.0"
+dependencies = [
+ "agprefs",
+ "nicti-lair",
+ "nicti-pawprint",
+ "nicti-pounce",
+ "nicti-siamese",
+ "nicti-stalk",
+ "nicti-tapetum",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
