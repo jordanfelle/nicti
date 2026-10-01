@@ -54,7 +54,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   SHA-256, input `input_image` `[1,3,1024,1024]` ImageNet-normalized planar, output logits `[1,1,1024,1024]`
   (sigmoid); names read from the graph. On-demand download only. **CPU bake = 9.2 s warm / 15.3 s cold on the
   Windows reference machine** (ADR-0048's <=1 s assumed CUDA) -> #345. Provenance: upstream "trained on
-  DIS-TR"; the *conversion* vs upstream is unverified (#348).
+  DIS-TR"; the *conversion* matches upstream on outputs (#348, `bench/birefnet-verify`, mask IoU >= 0.997).
 - **Sky** = interim flood-filled heuristic (`nicti-siamese/src/sky.rs`), beta (#347).
 - **Real-hardware numbers (RTX 5080, 45 MP)**: 16 stacked masks +1.4 ms (Vulkan)/+1.9 ms (Dx12) over the
   no-mask live pass; 2.5/3.2 ms p95 in total with spatial adjustments -- inside the 4 ms rule, so no
