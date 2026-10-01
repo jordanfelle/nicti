@@ -150,7 +150,13 @@ impl TilePreviews {
             let outcome = slot.lock().unwrap().take();
             if let Some(bytes) = outcome {
                 self.sidecar_fetch.remove(&id);
-                match bytes.and_then(|b| preview_texture(ctx, format!("tile-t0-{id}"), &b)) {
+                // Never downgrade: T2 may have been installed while the sidecar read ran.
+                let has_t2 = self.tiles.get(&id).is_some_and(|t| t.is_t2);
+                let texture = bytes
+                    .filter(|_| !has_t2 && !self.tiles.contains_key(&id))
+                    .and_then(|b| preview_texture(ctx, format!("tile-t0-{id}"), &b));
+                match texture {
+                    _ if has_t2 || self.tiles.contains_key(&id) => {}
                     Some(texture) => self.insert(
                         id,
                         Tile {

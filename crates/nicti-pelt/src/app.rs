@@ -2479,9 +2479,12 @@ impl PeltApp {
                 self.loupe_t0_fetch = None;
             } else if let Some(bytes) = outcome {
                 self.loupe_t0_fetch = None;
-                match bytes
-                    .and_then(|b| preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &b))
-                {
+                // Never downgrade: T2 may have been installed while the sidecar read ran.
+                let texture = bytes
+                    .filter(|_| self.loupe_preview.is_none())
+                    .and_then(|b| preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &b));
+                match texture {
+                    _ if self.loupe_preview.is_some() => {}
                     Some(texture) => self.loupe_preview = Some((asset_id, false, texture)),
                     None => self.loupe_t0_miss = Some((asset_id, std::time::Instant::now())),
                 }
