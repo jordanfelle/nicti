@@ -55,7 +55,7 @@ pub struct IngestReport {
 /// Normalizes an absolute path's tail (relative to `root_path`) into the canonical form stored in
 /// `asset.rel_path`: forward slashes, NFC-composed, no leading/trailing slash. Same rule
 /// `spikes/homing/src/path.rs` uses for ADR-0071's identity scheme.
-fn normalize_rel_path(path: &Path) -> String {
+pub fn normalize_rel_path(path: &Path) -> String {
     let raw = path.to_string_lossy().replace('\\', "/");
     let composed: String = raw.nfc().collect();
     composed.trim_matches('/').to_string()
@@ -64,7 +64,7 @@ fn normalize_rel_path(path: &Path) -> String {
 /// Case-folded form for the `rel_path_fold` lookup column -- NTFS/exFAT are case-insensitive but
 /// case-preserving, so a lookup by path must not depend on which case a file happened to be
 /// written in.
-fn fold(rel_path: &str) -> String {
+pub fn fold(rel_path: &str) -> String {
     rel_path.to_lowercase()
 }
 
@@ -199,6 +199,19 @@ fn candidate_files(root_path: &Path) -> impl Iterator<Item = Result<PathBuf, wal
             .is_some_and(|ext| RAW_EXTENSIONS.contains(&ext.to_lowercase().as_str()));
         is_raw.then(|| Ok(entry.into_path()))
     })
+}
+
+/// This shell has no real volume-identity system wired in yet (ADR-0071 is Proposed) -- every
+/// Import/Sync root registers under one fixed placeholder volume, with the folder's own full path
+/// as its `rel_path`, rather than inventing volume-mount detection prematurely.
+pub const PLACEHOLDER_VOLUME_IDENTITY_KEY: &str = "nicti-pelt-local-placeholder";
+
+/// Registers `path` as a root under the fixed placeholder volume (see
+/// [`PLACEHOLDER_VOLUME_IDENTITY_KEY`]) and returns its root id. Shared by `nicti-pelt`'s Import
+/// and the LRC catalog import (#62) so both land on the same `root` row for the same folder.
+pub fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
+    let volume_id = store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now_unix())?;
+    store.ensure_root(volume_id, &path.to_string_lossy())
 }
 
 /// Scans `root_path` (already registered as `root_id` via [`CatalogStore::ensure_root`]) and

@@ -82,7 +82,7 @@ pub struct Markers {
 /// One keyword path segment in canonical form: trimmed, and with `|` (the `lr:hierarchicalSubject`
 /// separator, which can't be escaped) replaced by `/`. Applied to *both* sides so a name that
 /// can't survive the XMP round trip still compares equal to itself instead of flapping forever.
-fn norm_segment(seg: &str) -> String {
+pub fn norm_segment(seg: &str) -> String {
     seg.trim().replace('|', "/")
 }
 
@@ -434,6 +434,23 @@ pub fn mark_catalog_dirty(
     let mut state = state_for(&path, store.sidecar_state(asset_id)?);
     state.catalog_dirty_since_ms = Some(now_ms);
     store.record_sidecar(asset_id, &state)?;
+    Ok(())
+}
+
+/// [`mark_catalog_dirty`] for many assets under one lock acquisition (#62: a catalog import
+/// changes thousands of markers at once). Each item is `(asset_id, raw_path)`.
+pub fn mark_catalog_dirty_many(
+    store: &dyn CatalogStore,
+    items: &[(i64, std::path::PathBuf)],
+    now_ms: i64,
+) -> Result<(), ScentSyncError> {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    for (asset_id, raw_path) in items {
+        let path = sidecar_path(raw_path);
+        let mut state = state_for(&path, store.sidecar_state(*asset_id)?);
+        state.catalog_dirty_since_ms = Some(now_ms);
+        store.record_sidecar(*asset_id, &state)?;
+    }
     Ok(())
 }
 

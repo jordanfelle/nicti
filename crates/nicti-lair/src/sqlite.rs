@@ -12,10 +12,25 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     Asset, AssetMeta, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, DeleteItem,
-    DeleteState, FacetCounts, Filter, Keyword, MoveState, NewAsset, Page, Preview, PreviewTier,
-    Root, RootMove, SidecarState, Sort, SortDirection, SortField,
+    DeleteState, FacetCounts, Filter, Keyword, LrcChunkOutcome, LrcItem, LrcProvenance, MoveState,
+    NewAsset, Page, Preview, PreviewTier, Root, RootMove, SidecarState, Sort, SortDirection,
+    SortField,
 };
 use nicti_claw::Module;
+
+/// An edit document's canonical JSON, mapped into this crate's error type.
+fn canonical_doc(doc: &nicti_pawprint::EditDocument) -> Result<String, CatalogError> {
+    nicti_pawprint::to_canonical_json(doc).map_err(|e| CatalogError::Document(e.to_string()))
+}
+
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// Stable hash of a marker set, for `lrc_provenance.applied_meta_hash`.
+fn meta_hash(meta: &AssetMeta) -> String {
+    blake3_hex(format!("{:?}|{:?}|{:?}", meta.rating, meta.flag, meta.label).as_bytes())
+}
 
 /// `hunt`'s `rating` sort key stand-in for NULL/unrated -- distinct from `FACET_UNRATED_SENTINEL`
 /// (a different table, different constraint), but the same idea: well outside the real `-1..=5`
@@ -1022,6 +1037,262 @@ impl CatalogStore for SqliteCatalog {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    fn apply_lrc_chunk(&self, items: &[LrcItem]) -> Result<LrcChunkOutcome, CatalogError> {
+        let mut out = LrcChunkOutcome::default();
+        if items.is_empty() {
+            return Ok(out);
+        }
+        // Serialise every document up front: a non-finite float is refused before a transaction
+        // opens, the same as `put_master_edits`.
+        let docs = items
+            .iter()
+            .map(|item| {
+                item.document
+                    .as_ref()
+                    .map(canonical_doc)
+                    .transpose()
+                    .map(|json| json.map(|j| (blake3_hex(j.as_bytes()), j)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let empty_hash =
+            blake3_hex(canonical_doc(&nicti_pawprint::EditDocument::default())?.as_bytes());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for (item, doc) in items.iter().zip(&docs) {
+            let existing: Option<(i64, Option<String>, Option<String>)> = tx
+                .query_row(
+                    "SELECT variant_id, applied_doc_hash, applied_meta_hash \
+                     FROM lrc_provenance WHERE lrc_image_global = ?1",
+                    params![item.provenance.image_global],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+
+            let variant_id = match &existing {
+                Some((id, _, _)) => *id,
+                None => match &item.variant_name {
+                    None => {
+                        tx.execute(
+                            "INSERT INTO edit_variant (asset_id, name, is_master, document) \
+                             VALUES (?1, 'master', 1, ?2) ON CONFLICT(asset_id, name) DO NOTHING",
+                            params![item.asset_id, empty_edit_document()],
+                        )?;
+                        tx.query_row(
+                            "SELECT id FROM edit_variant WHERE asset_id = ?1 AND is_master = 1",
+                            params![item.asset_id],
+                            |row| row.get(0),
+                        )?
+                    }
+                    Some(base) => {
+                        let mut created = None;
+                        for n in 0..1000 {
+                            let name = if n == 0 {
+                                base.clone()
+                            } else {
+                                format!("{base} ({n})")
+                            };
+                            let inserted = tx.execute(
+                                "INSERT INTO edit_variant (asset_id, name, is_master, document) \
+                                 VALUES (?1, ?2, 0, ?3) ON CONFLICT(asset_id, name) DO NOTHING",
+                                params![item.asset_id, name, empty_edit_document()],
+                            )?;
+                            if inserted == 1 {
+                                created = Some(tx.last_insert_rowid());
+                                break;
+                            }
+                        }
+                        out.variants_created += 1;
+                        created.ok_or_else(|| {
+                            CatalogError::Io(format!("no free variant name for {base:?}"))
+                        })?
+                    }
+                },
+            };
+
+            // Document: written only while the variant still holds what the import last wrote
+            // (or, first time, is still empty) -- never over the user's own edit.
+            let mut applied_doc_hash = existing.as_ref().and_then(|e| e.1.clone());
+            if let Some((new_hash, new_json)) = doc {
+                let current: String = tx.query_row(
+                    "SELECT document FROM edit_variant WHERE id = ?1",
+                    params![variant_id],
+                    |row| row.get(0),
+                )?;
+                let current_canon = serde_json::from_str::<nicti_pawprint::EditDocument>(&current)
+                    .ok()
+                    .and_then(|d| canonical_doc(&d).ok());
+                let baseline = applied_doc_hash
+                    .clone()
+                    .unwrap_or_else(|| empty_hash.clone());
+                match current_canon {
+                    Some(canon) if blake3_hex(canon.as_bytes()) == baseline => {
+                        if &canon != new_json {
+                            tx.execute(
+                                "UPDATE edit_variant SET document = ?1 WHERE id = ?2",
+                                params![new_json, variant_id],
+                            )?;
+                            out.docs_written += 1;
+                        }
+                        applied_doc_hash = Some(new_hash.clone());
+                    }
+                    _ => out.kept_local_docs += 1,
+                }
+            }
+
+            // Markers: master only. First import overrides what XMP ingest filled in; a re-run
+            // only while the catalog still equals what the import last wrote.
+            let mut applied_meta_hash = existing.as_ref().and_then(|e| e.2.clone());
+            if let Some(meta) = &item.meta {
+                let current: AssetMeta = tx.query_row(
+                    "SELECT rating, flag, label FROM asset WHERE id = ?1",
+                    params![item.asset_id],
+                    |row| {
+                        Ok(AssetMeta {
+                            rating: row.get(0)?,
+                            flag: row.get(1)?,
+                            label: row.get(2)?,
+                        })
+                    },
+                )?;
+                let allowed = match &applied_meta_hash {
+                    Some(h) => *h == meta_hash(&current),
+                    None => true,
+                };
+                if allowed {
+                    if &current != meta {
+                        tx.execute(
+                            "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
+                            params![meta.rating, meta.flag, meta.label, item.asset_id],
+                        )?;
+                        out.meta_applied += 1;
+                        out.meta_changed_assets.push(item.asset_id);
+                    }
+                    applied_meta_hash = Some(meta_hash(meta));
+                } else {
+                    out.kept_local_meta += 1;
+                }
+            }
+
+            let p = &item.provenance;
+            let untranslated = serde_json::to_string(&p.untranslated)
+                .map_err(|e| CatalogError::Document(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO lrc_provenance (variant_id, asset_id, lrc_image_global, \
+                 lrc_image_local, import_hash, process_version, develop_text, has_masks, \
+                 has_ai_masks, has_big_data, iptc_caption, iptc_copyright, lrc_rating, lrc_pick, \
+                 untranslated, applied_doc_hash, applied_meta_hash, imported_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+                 ?17, ?18) \
+                 ON CONFLICT(variant_id) DO UPDATE SET \
+                 lrc_image_local = excluded.lrc_image_local, import_hash = excluded.import_hash, \
+                 process_version = excluded.process_version, develop_text = excluded.develop_text, \
+                 has_masks = excluded.has_masks, has_ai_masks = excluded.has_ai_masks, \
+                 has_big_data = excluded.has_big_data, iptc_caption = excluded.iptc_caption, \
+                 iptc_copyright = excluded.iptc_copyright, lrc_rating = excluded.lrc_rating, \
+                 lrc_pick = excluded.lrc_pick, untranslated = excluded.untranslated, \
+                 applied_doc_hash = excluded.applied_doc_hash, \
+                 applied_meta_hash = excluded.applied_meta_hash, imported_at = excluded.imported_at",
+                params![
+                    variant_id,
+                    item.asset_id,
+                    p.image_global,
+                    p.image_local,
+                    p.import_hash,
+                    p.process_version,
+                    p.develop_text,
+                    p.has_masks,
+                    p.has_ai_masks,
+                    p.has_big_data,
+                    p.iptc_caption,
+                    p.iptc_copyright,
+                    p.lrc_rating,
+                    p.lrc_pick,
+                    untranslated,
+                    applied_doc_hash,
+                    applied_meta_hash,
+                    now,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
+    fn lrc_provenance(&self, image_global: &str) -> Result<Option<LrcProvenance>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT lrc_image_local, import_hash, process_version, develop_text, has_masks, \
+                 has_ai_masks, has_big_data, iptc_caption, iptc_copyright, lrc_rating, lrc_pick, \
+                 untranslated FROM lrc_provenance WHERE lrc_image_global = ?1",
+                params![image_global],
+                |row| {
+                    Ok((
+                        LrcProvenance {
+                            image_global: image_global.to_string(),
+                            image_local: row.get(0)?,
+                            import_hash: row.get(1)?,
+                            process_version: row.get(2)?,
+                            develop_text: row.get(3)?,
+                            has_masks: row.get(4)?,
+                            has_ai_masks: row.get(5)?,
+                            has_big_data: row.get(6)?,
+                            iptc_caption: row.get(7)?,
+                            iptc_copyright: row.get(8)?,
+                            lrc_rating: row.get(9)?,
+                            lrc_pick: row.get(10)?,
+                            untranslated: Vec::new(),
+                        },
+                        row.get::<_, String>(11)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((mut p, untranslated)) => {
+                p.untranslated = serde_json::from_str(&untranslated)
+                    .map_err(|e| CatalogError::Document(e.to_string()))?;
+                Ok(Some(p))
+            }
+        }
+    }
+
+    fn variant_names(&self, asset_id: i64) -> Result<Vec<String>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name FROM edit_variant WHERE asset_id = ?1 ORDER BY is_master DESC, id",
+        )?;
+        let names = stmt
+            .query_map(params![asset_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(names)
+    }
+
+    fn get_variant_edit(
+        &self,
+        asset_id: i64,
+        name: &str,
+    ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT document FROM edit_variant WHERE asset_id = ?1 AND name = ?2",
+                params![asset_id, name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|text| {
+            serde_json::from_str(&text).map_err(|e| CatalogError::Document(e.to_string()))
+        })
+        .transpose()
     }
 
     fn get_root_path(&self, root_id: i64) -> Result<Option<String>, CatalogError> {
@@ -3835,5 +4106,165 @@ mod tests {
         let f: Filter = serde_json::from_str(old).unwrap();
         assert_eq!(f.rating_min, Some(2));
         assert!(!f.unflagged && !f.no_label && !f.unrated);
+    }
+
+    fn lrc_item(
+        asset_id: i64,
+        global: &str,
+        meta: Option<AssetMeta>,
+        doc: Option<nicti_pawprint::EditDocument>,
+        variant: Option<&str>,
+    ) -> LrcItem {
+        LrcItem {
+            asset_id,
+            meta,
+            variant_name: variant.map(str::to_string),
+            document: doc,
+            provenance: LrcProvenance {
+                image_global: global.to_string(),
+                image_local: 1,
+                develop_text: Some("s = { Exposure2012 = 0.5 }".to_string()),
+                untranslated: vec!["Clarity2012".to_string()],
+                ..LrcProvenance::default()
+            },
+        }
+    }
+
+    fn lrc_meta(rating: Option<i64>) -> AssetMeta {
+        AssetMeta {
+            rating,
+            flag: Some(1),
+            label: Some("Red".to_string()),
+        }
+    }
+
+    fn one_asset(store: &SqliteCatalog) -> i64 {
+        let volume_id = store.upsert_volume("v", None, None, 0).unwrap();
+        let root_id = store.ensure_root(volume_id, "").unwrap();
+        store
+            .insert_asset(root_id, &new_asset("a.NEF", None), None)
+            .unwrap()
+    }
+
+    #[test]
+    fn apply_lrc_chunk_writes_markers_document_and_provenance_then_is_idempotent() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        let item = lrc_item(id, "G1", Some(lrc_meta(Some(4))), Some(edit_doc(0.5)), None);
+
+        let first = store.apply_lrc_chunk(std::slice::from_ref(&item)).unwrap();
+        assert_eq!((first.docs_written, first.meta_applied), (1, 1));
+        assert_eq!(first.meta_changed_assets, vec![id]);
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.5)));
+        assert_eq!(store.get_meta(&[id]).unwrap()[&id], lrc_meta(Some(4)));
+        let prov = store.lrc_provenance("G1").unwrap().unwrap();
+        assert_eq!(
+            prov.develop_text.as_deref(),
+            Some("s = { Exposure2012 = 0.5 }")
+        );
+        assert_eq!(prov.untranslated, vec!["Clarity2012".to_string()]);
+
+        let again = store.apply_lrc_chunk(std::slice::from_ref(&item)).unwrap();
+        assert_eq!(again, LrcChunkOutcome::default());
+        assert_eq!(store.variant_names(id).unwrap(), vec!["master".to_string()]);
+    }
+
+    #[test]
+    fn apply_lrc_chunk_keeps_a_users_later_edit_but_not_the_first_import_over_xmp_values() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        // XMP ingest already filled in a rating: the first import overrides it.
+        store.set_rating(&[id], Some(1)).unwrap();
+        let item = lrc_item(id, "G1", Some(lrc_meta(Some(4))), Some(edit_doc(0.5)), None);
+        store.apply_lrc_chunk(std::slice::from_ref(&item)).unwrap();
+        assert_eq!(store.get_meta(&[id]).unwrap()[&id].rating, Some(4));
+
+        // The user edits in nicti afterwards; a re-run with different LRC data leaves both alone.
+        store.set_rating(&[id], Some(2)).unwrap();
+        store.put_master_edit(id, &edit_doc(-1.0)).unwrap();
+        let changed = lrc_item(id, "G1", Some(lrc_meta(Some(5))), Some(edit_doc(0.9)), None);
+        let out = store.apply_lrc_chunk(&[changed]).unwrap();
+        assert_eq!((out.kept_local_docs, out.kept_local_meta), (1, 1));
+        assert_eq!((out.docs_written, out.meta_applied), (0, 0));
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(-1.0)));
+        assert_eq!(store.get_meta(&[id]).unwrap()[&id].rating, Some(2));
+    }
+
+    #[test]
+    fn apply_lrc_chunk_does_not_overwrite_a_master_that_already_has_edits_on_first_import() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        store.put_master_edit(id, &edit_doc(2.0)).unwrap();
+        let out = store
+            .apply_lrc_chunk(&[lrc_item(id, "G1", None, Some(edit_doc(0.5)), None)])
+            .unwrap();
+        assert_eq!((out.docs_written, out.kept_local_docs), (0, 1));
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(2.0)));
+    }
+
+    #[test]
+    fn apply_lrc_chunk_makes_a_virtual_copy_variant_without_touching_markers() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        let master = lrc_item(id, "G1", Some(lrc_meta(Some(3))), Some(edit_doc(0.1)), None);
+        let copy = lrc_item(id, "G2", None, Some(edit_doc(0.7)), Some("Copy 1"));
+        let out = store.apply_lrc_chunk(&[master, copy.clone()]).unwrap();
+        assert_eq!(out.variants_created, 1);
+        assert_eq!(
+            store.variant_names(id).unwrap(),
+            vec!["master".to_string(), "Copy 1".to_string()]
+        );
+        assert_eq!(
+            store.get_variant_edit(id, "Copy 1").unwrap(),
+            Some(edit_doc(0.7))
+        );
+        assert_eq!(store.get_master_edit(id).unwrap(), Some(edit_doc(0.1)));
+        assert_eq!(store.get_meta(&[id]).unwrap()[&id], lrc_meta(Some(3)));
+        // Re-run finds the copy by provenance instead of minting "Copy 1 (1)".
+        let again = store.apply_lrc_chunk(&[copy]).unwrap();
+        assert_eq!(again.variants_created, 0);
+        assert_eq!(store.variant_names(id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn apply_lrc_chunk_disambiguates_a_duplicate_copy_name() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        store
+            .apply_lrc_chunk(&[
+                lrc_item(id, "G1", None, None, Some("Copy")),
+                lrc_item(id, "G2", None, None, Some("Copy")),
+            ])
+            .unwrap();
+        assert_eq!(
+            store.variant_names(id).unwrap(),
+            vec![
+                "master".to_string(),
+                "Copy".to_string(),
+                "Copy (1)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_lrc_chunk_rolls_back_the_whole_chunk_on_a_missing_asset() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        let ok = lrc_item(id, "G1", Some(lrc_meta(Some(2))), None, None);
+        let bad = lrc_item(9999, "G2", None, None, None);
+        assert!(store.apply_lrc_chunk(&[ok, bad]).is_err());
+        assert!(store.lrc_provenance("G1").unwrap().is_none());
+        assert_eq!(store.get_meta(&[id]).unwrap()[&id].rating, None);
+    }
+
+    #[test]
+    fn removing_an_asset_drops_its_lrc_provenance() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let id = one_asset(&store);
+        store
+            .apply_lrc_chunk(&[lrc_item(id, "G1", None, Some(edit_doc(0.5)), None)])
+            .unwrap();
+        store.remove_assets(&[id]).unwrap();
+        assert!(store.lrc_provenance("G1").unwrap().is_none());
     }
 }
