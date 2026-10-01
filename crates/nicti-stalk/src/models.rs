@@ -133,7 +133,7 @@ pub const LAMA: Artifact = Artifact {
 /// (`ZhengPeng7/BiRefNet`, which this export names as its `base_model`) states it is "trained on
 /// DIS-TR", a dataset with no stated use restriction. This is a third-party ONNX conversion
 /// (onnx-community); #348 compared it to the upstream checkpoint (`bench/birefnet-verify`): alpha
-/// masks agree (IoU >= 0.997 at 0.5), see `docs/licensing.md` for the result and its limits.
+/// masks closely agree (IoU >= 0.997 at 0.5; output-level, not a weight proof), see `docs/licensing.md` for the result and its limits.
 /// The fp16 export in the same repo (490 MB) is deliberately not used: ONNX Runtime's CPU provider
 /// has thin fp16 kernel coverage and falls back through casts, so it is *slower* there.
 pub const BIREFNET: Artifact = Artifact {

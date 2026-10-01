@@ -5,8 +5,10 @@ Nicti ships `onnx-community/BiRefNet-ONNX` (a third-party conversion) pinned to 
 (`crates/nicti-stalk/src/models.rs::BIREFNET`). That the conversion's weights equal the upstream
 `ZhengPeng7/BiRefNet` checkpoint was never checked. This script checks it two independent ways:
 
-  1. Weights: every upstream state_dict tensor must be found, value-for-value, among the ONNX
-     initializers (exact shape, max |diff| reported).
+  1. Weights (partial, informational): each upstream state_dict tensor is matched by sorted
+     values against equal-size ONNX initializers and its max |diff| reported. Sorting ignores
+     element order, so this is a coarse provenance signal, not a layer-wise proof; nothing here
+     asserts a threshold.
   2. Outputs: upstream PyTorch fp32 vs the ONNX file under onnxruntime on a fixed image set at the
      1024x1024 input nicti uses; max/mean |diff| of the sigmoid alpha and IoU of the 0.5 masks.
 
@@ -85,6 +87,8 @@ def weight_check(state, onnx_path):
         "median_max_abs_diff": float(np.median(diffs)),
         "worst_max_abs_diff": float(diffs.max()),
         "no_equal_size_initializer": missing,
+        "count_over_2e-3": int((diffs > 2e-3).sum()),
+        "unmatched_name_suffixes": sorted({m["name"].rsplit(".", 1)[-1] for m in missing}),
         "over_2e-3": sorted((r for r in rows if r["max_abs_diff"] > 2e-3), key=lambda r: -r["max_abs_diff"])[:20],
     }
 
@@ -110,7 +114,13 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     net.to(dev)
 
+    from safetensors import safe_open
+
+    st = hf_hub_download(UPSTREAM, "model.safetensors", revision=UPSTREAM_REV)
+    with safe_open(st, "pt") as f:
+        dtypes = sorted({str(f.get_slice(k).get_dtype()) for k in f.keys()})
     result = {
+        "upstream_stored_dtypes": dtypes,
         "upstream": f"{UPSTREAM}@{UPSTREAM_REV}",
         "conversion": f"{CONVERSION}@{CONVERSION_REV}",
         "onnx_sha256": got,
@@ -127,8 +137,10 @@ def main():
         onx = 1.0 / (1.0 + np.exp(-sess.run(None, {in_name: x})[0]))
         d = np.abs(ref - onx)
         a, b = ref > 0.5, onx > 0.5
+        k = np.unravel_index(int(d.argmax()), d.shape)
         result["outputs"].append(
             {
+                "max_diff_pixel_ref_vs_onnx": [float(ref[k]), float(onx[k])],
                 "image": name,
                 "max_abs_diff": float(d.max()),
                 "mean_abs_diff": float(d.mean()),
