@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use egui::TextureHandle;
 use nicti_lair::larder::{LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
-use nicti_lair::{CatalogStore, PreviewTier};
+use nicti_lair::CatalogStore;
 use nicti_pounce::{JobId, Pounce};
 
 use crate::loupe::asset_cache_key;
@@ -55,8 +55,16 @@ pub struct TilePreviews {
     /// Photos that can never produce a T2 (no embedded preview, corrupt JPEG) or whose stored T2
     /// wouldn't decode: stay on T0 for the session rather than retrying.
     t2_gave_up: HashSet<i64>,
+    /// Photos with no T0 in the catalog *or* as a sidecar, and when we last looked: don't hit the
+    /// catalog and the disk for them every frame (#72's sidecar fallback made a miss costly).
+    no_t0: std::collections::HashMap<i64, std::time::Instant>,
+    /// Sidecar reads in flight on a worker (an archived folder's T0).
+    sidecar_fetch: HashMap<i64, crate::t0_fetch::FetchSlot>,
     next_check: HashMap<i64, Instant>,
 }
+
+/// How long a photo with no thumbnail anywhere is left alone before looking again.
+const NO_T0_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl TilePreviews {
     pub fn new(larder: Option<SharedLarder>) -> Self {
@@ -66,6 +74,8 @@ impl TilePreviews {
             larder,
             t2_jobs: HashMap::new(),
             t2_gave_up: HashSet::new(),
+            no_t0: std::collections::HashMap::new(),
+            sidecar_fetch: HashMap::new(),
             next_check: HashMap::new(),
         }
     }
@@ -102,6 +112,7 @@ impl TilePreviews {
         self.tiles.clear();
         self.order.clear();
         self.next_check.clear();
+        self.sidecar_fetch.clear();
     }
 
     /// Drops one photo's texture (it was deleted).
@@ -110,6 +121,8 @@ impl TilePreviews {
         self.order.retain(|i| *i != id);
         self.t2_jobs.remove(&id);
         self.t2_gave_up.remove(&id);
+        self.no_t0.remove(&id);
+        self.sidecar_fetch.remove(&id);
         self.next_check.remove(&id);
     }
 
@@ -129,18 +142,71 @@ impl TilePreviews {
         if needs_t2 {
             self.try_upgrade(ctx, store, pounce, id);
         }
-        if !self.tiles.contains_key(&id) {
-            if let Ok(Some(preview)) = store.get_preview(id, PreviewTier::T0) {
-                if let Some(texture) = preview_texture(ctx, format!("tile-t0-{id}"), &preview.bytes)
-                {
-                    self.insert(
+        // A sidecar read finished on a worker.
+        if self.sidecar_fetch.contains_key(&id) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if let Some(slot) = self.sidecar_fetch.get(&id) {
+            let outcome = slot.lock().unwrap().take();
+            if let Some(bytes) = outcome {
+                self.sidecar_fetch.remove(&id);
+                // Never downgrade: T2 may have been installed while the sidecar read ran.
+                let has_t2 = self.tiles.get(&id).is_some_and(|t| t.is_t2);
+                let texture = bytes
+                    .filter(|_| !has_t2 && !self.tiles.contains_key(&id))
+                    .and_then(|b| preview_texture(ctx, format!("tile-t0-{id}"), &b));
+                match texture {
+                    _ if has_t2 || self.tiles.contains_key(&id) => {}
+                    Some(texture) => self.insert(
                         id,
                         Tile {
                             texture,
                             is_t2: false,
                         },
-                    );
+                    ),
+                    None => {
+                        self.no_t0.insert(id, std::time::Instant::now());
+                    }
                 }
+            }
+        }
+        let recently_missed = self
+            .no_t0
+            .get(&id)
+            .is_some_and(|t| t.elapsed() < NO_T0_RETRY);
+        if !self.tiles.contains_key(&id)
+            && !recently_missed
+            && !self.sidecar_fetch.contains_key(&id)
+        {
+            // Catalog only here (a local query). The sidecar half touches the archive drive, so
+            // it runs on a worker and is picked up above on a later frame.
+            match store.get_preview(id, nicti_lair::PreviewTier::T0) {
+                Ok(Some(preview)) => {
+                    if let Some(texture) =
+                        preview_texture(ctx, format!("tile-t0-{id}"), &preview.bytes)
+                    {
+                        self.insert(
+                            id,
+                            Tile {
+                                texture,
+                                is_t2: false,
+                            },
+                        );
+                    }
+                }
+                _ if self.sidecar_fetch.len() >= crate::t0_fetch::MAX_IN_FLIGHT => {
+                    // At the cap (a read can block on a dead drive): try again shortly.
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                _ => match crate::t0_fetch::request(pounce, store, id) {
+                    Some(slot) => {
+                        self.sidecar_fetch.insert(id, slot);
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                    }
+                    None => {
+                        self.no_t0.insert(id, std::time::Instant::now());
+                    }
+                },
             }
         }
         self.tiles.get(&id).map(|t| &t.texture)

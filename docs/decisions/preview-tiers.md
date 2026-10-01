@@ -90,4 +90,8 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   as the fallback while the full RAW decode is still in flight. The Larder lives beside the
   catalog file (`<catalog>.larder/`), opened best-effort -- if it can't be opened the loupe just
   falls back to T0 as before. Settings/purge UI landed in #302: `crates/nicti-pelt/src/cache_settings.rs` (cap persisted beside the Larder, `try_lock`-only from the UI thread; no T0 purge).
-
+- **Tiered thumbnail storage (#72)**: `docs/adr/0072-tiered-thumbnail-storage.md` -- folders on an
+  archive drive keep their T0 thumbnails as `.thumb.jpg` sidecars next to the RAWs (the T0 JPEG
+  bytes unchanged; lossy WebP stays rejected per ADR-0143), active folders keep them in the catalog.
+  The Move gesture is the trigger, with the archive role a path-prefix setting until ADR-0071's
+  volume identity is wired into the app.

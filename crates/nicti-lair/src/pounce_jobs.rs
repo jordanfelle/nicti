@@ -375,6 +375,13 @@ impl MoveJob {
         };
         (job, result)
     }
+
+    /// Registers a callback for when the move lands the folder on an archive drive (#72): it
+    /// gets the folder's asset ids, e.g. to drop their T2 cache entries.
+    pub fn with_archived_hook(mut self, hook: crate::carry::ArchivedHook) -> Self {
+        self.carry.set_archived_hook(hook);
+        self
+    }
 }
 
 impl ChunkedJob for MoveJob {

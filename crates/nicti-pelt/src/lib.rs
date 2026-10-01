@@ -10,6 +10,7 @@
 
 mod activity;
 mod app;
+mod archive_drives;
 mod cache_settings;
 mod camera_profiles;
 mod catalog;
@@ -29,6 +30,7 @@ mod mask_edit;
 mod mask_panel;
 mod mask_tool;
 mod render;
+mod t0_fetch;
 mod t2;
 #[cfg(test)]
 mod test_gpu;
