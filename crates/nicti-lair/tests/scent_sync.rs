@@ -56,6 +56,13 @@ fn fixture() -> Fixture {
     }
 }
 
+/// Moves `path`'s mtime 10 s forward so a rewrite is always distinguishable by its stat.
+fn bump_mtime(path: &Path) {
+    let file = fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(SystemTime::now() + std::time::Duration::from_secs(10))
+        .unwrap();
+}
+
 fn sidecar(raw: &Path) -> PathBuf {
     raw.with_extension("xmp")
 }
@@ -158,6 +165,9 @@ fn missing_rating_stays_unrated_and_reject_maps_to_minus_one() {
     );
 
     fs::write(sidecar(&f.raw), xmp("xmp:Rating=\"-1\"", "")).unwrap();
+    // Two writes inside one filesystem-timestamp tick (coarse on Windows) share an mtime, and the
+    // import's stat-only precheck then skips the second -- a CI flake, not what this test covers.
+    bump_mtime(&sidecar(&f.raw));
     // Catalog now holds a label the file dropped: both sides changed since the last look, but
     // the catalog was never dirtied, so the file wins.
     import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();

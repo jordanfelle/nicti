@@ -196,7 +196,7 @@ terse index: crate/spike → purpose → owning topic.
   see the `catalog-engine` topic's own "Package contents" section (also covers **#25**'s
   `ninelives.rs`/`BackupJob`), not duplicated here. **#26** adds `carry.rs`
   (`Carry`/`resume_open_moves`, verified folder move) + `pounce_jobs::MoveJob`, wired into
-  `nicti-pelt`'s Library view. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
+  `nicti-pelt`'s Library view. **#304** adds `verify.rs` (`Verify`, re-hash a root against `asset.content_hash`) + `pounce_jobs::VerifyJob`. **#27** adds `larder.rs` (`Larder`, T2 preview cache;
   **#301** wires it into the loupe via `nicti-pelt`'s `t2.rs`, **#302** adds `cache_settings.rs`) — see `preview-tiers`. **#32** adds `shred.rs` (`Shred`/`resume_open_deletes`,
   delete-to-Recycle-Bin with a journal) + `pounce_jobs::DeleteJob` — see `culling`. **#57** adds
   `CatalogStore::get_master_edit`/`put_master_edit` (the Develop edit document) — see `catalog-engine`. **#52** adds the batch
