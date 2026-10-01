@@ -191,6 +191,8 @@ pub struct PeltApp {
     /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
     /// re-read and re-decode them every frame.
     loupe_t2_undecodable: Option<i64>,
+    /// The loupe photo with no T0 anywhere, and when we last looked (see `TilePreviews::no_t0`).
+    loupe_t0_miss: Option<(i64, std::time::Instant)>,
     /// The Library view's virtualized grid (#30). Created lazily on first show, once the catalog
     /// is known to be open.
     grid: Option<GridSession>,
@@ -399,6 +401,7 @@ impl PeltApp {
             xmp_ui: XmpUi::default(),
             lrc_ui: LrcImportUi::default(),
             loupe_t2_undecodable: None,
+            loupe_t0_miss: None,
             grid: None,
             grid_view: grid::ViewState::default(),
             grid_root: None,
@@ -2463,8 +2466,16 @@ impl PeltApp {
                 }
             }
         }
-        if self.loupe_preview.is_none() {
-            if let Ok(Some(preview)) = nicti_lair::tier::load_t0_by_id(store, asset_id) {
+        let recently_missed = matches!(
+            self.loupe_t0_miss,
+            Some((id, t)) if id == asset_id && t.elapsed() < std::time::Duration::from_secs(5)
+        );
+        if self.loupe_preview.is_none() && !recently_missed {
+            let loaded = nicti_lair::tier::load_t0_by_id(store, asset_id);
+            if !matches!(loaded, Ok(Some(_))) {
+                self.loupe_t0_miss = Some((asset_id, std::time::Instant::now()));
+            }
+            if let Ok(Some(preview)) = loaded {
                 if let Some(texture) =
                     preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &preview.bytes)
                 {

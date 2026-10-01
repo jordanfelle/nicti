@@ -67,7 +67,8 @@ impl ArchiveDrives {
         let p = norm(&path.to_string_lossy());
         self.locations.iter().any(|l| {
             let l = norm(l);
-            p == l || p.starts_with(&format!("{l}/"))
+            // A bare "/" normalises to "" and would match every path: not a usable location.
+            !l.is_empty() && (p == l || p.starts_with(&format!("{l}/")))
         })
     }
 
@@ -79,6 +80,11 @@ impl ArchiveDrives {
     /// Adds or removes `location` and saves. The in-memory change sticks even if the save fails.
     pub fn set(&mut self, location: &str, archive: bool) -> std::io::Result<()> {
         let l = norm(location);
+        if archive && l.is_empty() {
+            return Err(std::io::Error::other(
+                "the filesystem root can't be an archive drive; pick a mounted drive or folder",
+            ));
+        }
         self.locations.retain(|x| norm(x) != l);
         if archive {
             self.locations.push(location.to_string());
@@ -110,6 +116,13 @@ mod tests {
         assert!(a.is_archive(Path::new("/mnt/archive")));
         assert!(!a.is_archive(Path::new("/mnt/archive2/x")));
         assert!(!a.is_archive(Path::new("C:\\events")));
+    }
+
+    #[test]
+    fn the_filesystem_root_is_not_a_usable_location() {
+        let mut a = ArchiveDrives::with_locations(&["/"]);
+        assert!(!a.is_archive(Path::new("/home/x")));
+        assert!(a.set("/", true).is_err());
     }
 
     #[test]

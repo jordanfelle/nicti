@@ -48,7 +48,17 @@ pub fn export(raw: &Path, preview: &Preview, codec: SidecarCodec) -> io::Result<
         ".{}.thumb-tmp",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
-    fs::write(&tmp, &preview.bytes)?;
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        io::Write::write_all(&mut f, &preview.bytes)?;
+        // The rename path of a move doesn't re-read the sidecar, so make the bytes durable
+        // before the name can be.
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     if let Err(e) = fs::rename(&tmp, &path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
@@ -60,13 +70,15 @@ pub fn export(raw: &Path, preview: &Preview, codec: SidecarCodec) -> io::Result<
 /// reads as `None` (never trust a truncated write).
 pub fn read(raw: &Path, codec: SidecarCodec) -> Option<Preview> {
     let bytes = fs::read(sidecar_path(raw, codec)).ok()?;
-    if !bytes.starts_with(&[0xFF, 0xD8]) {
+    // A whole JPEG: SOI first, EOI last, and a frame header in between. A truncated write must
+    // read as absent, since this is the gate for dropping the catalog's copy.
+    if !bytes.starts_with(&[0xFF, 0xD8]) || !bytes.ends_with(&[0xFF, 0xD9]) {
         return None;
     }
-    let dims = jpeg_dimensions(&bytes);
+    let (w, h) = jpeg_dimensions(&bytes)?;
     Some(Preview {
-        width: dims.map(|d| d.0),
-        height: dims.map(|d| d.1),
+        width: Some(w),
+        height: Some(h),
         bytes,
     })
 }
@@ -145,6 +157,24 @@ mod tests {
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1, "no temp left");
         remove(&raw, SidecarCodec::Jpeg);
         assert!(read(&raw, SidecarCodec::Jpeg).is_none());
+    }
+
+    #[test]
+    fn a_truncated_jpeg_reads_as_none() {
+        let d = tempfile::tempdir().unwrap();
+        let raw = d.path().join("a.NEF");
+        let full = jpeg(40, 30);
+        fs::write(
+            sidecar_path(&raw, SidecarCodec::Jpeg),
+            &full[..full.len() - 2],
+        )
+        .unwrap();
+        assert!(read(&raw, SidecarCodec::Jpeg).is_none(), "no EOI");
+        fs::write(sidecar_path(&raw, SidecarCodec::Jpeg), &full[..6]).unwrap();
+        assert!(
+            read(&raw, SidecarCodec::Jpeg).is_none(),
+            "cut before the frame header"
+        );
     }
 
     #[test]

@@ -55,8 +55,14 @@ pub struct TilePreviews {
     /// Photos that can never produce a T2 (no embedded preview, corrupt JPEG) or whose stored T2
     /// wouldn't decode: stay on T0 for the session rather than retrying.
     t2_gave_up: HashSet<i64>,
+    /// Photos with no T0 in the catalog *or* as a sidecar, and when we last looked: don't hit the
+    /// catalog and the disk for them every frame (#72's sidecar fallback made a miss costly).
+    no_t0: std::collections::HashMap<i64, std::time::Instant>,
     next_check: HashMap<i64, Instant>,
 }
+
+/// How long a photo with no thumbnail anywhere is left alone before looking again.
+const NO_T0_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl TilePreviews {
     pub fn new(larder: Option<SharedLarder>) -> Self {
@@ -66,6 +72,7 @@ impl TilePreviews {
             larder,
             t2_jobs: HashMap::new(),
             t2_gave_up: HashSet::new(),
+            no_t0: std::collections::HashMap::new(),
             next_check: HashMap::new(),
         }
     }
@@ -110,6 +117,7 @@ impl TilePreviews {
         self.order.retain(|i| *i != id);
         self.t2_jobs.remove(&id);
         self.t2_gave_up.remove(&id);
+        self.no_t0.remove(&id);
         self.next_check.remove(&id);
     }
 
@@ -129,8 +137,16 @@ impl TilePreviews {
         if needs_t2 {
             self.try_upgrade(ctx, store, pounce, id);
         }
-        if !self.tiles.contains_key(&id) {
-            if let Ok(Some(preview)) = nicti_lair::tier::load_t0_by_id(store, id) {
+        let recently_missed = self
+            .no_t0
+            .get(&id)
+            .is_some_and(|t| t.elapsed() < NO_T0_RETRY);
+        if !self.tiles.contains_key(&id) && !recently_missed {
+            let loaded = nicti_lair::tier::load_t0_by_id(store, id);
+            if !matches!(loaded, Ok(Some(_))) {
+                self.no_t0.insert(id, std::time::Instant::now());
+            }
+            if let Ok(Some(preview)) = loaded {
                 if let Some(texture) = preview_texture(ctx, format!("tile-t0-{id}"), &preview.bytes)
                 {
                     self.insert(

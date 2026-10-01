@@ -318,7 +318,14 @@ impl Carry {
                 return self.launch(move_id);
             };
             if let Err(e) = crate::tier::export_asset_sidecar(&*self.store, &self.src, &asset) {
-                return Some(self.abort_failed(format!("writing thumbnail sidecar: {e}")));
+                // Nothing has been copied, so `dest` (possibly a pre-existing empty folder the
+                // user picked) is not ours to remove -- just close the journal.
+                if let Some(id) = self.move_id.take() {
+                    let _ = self.store.finish_root_move(id);
+                }
+                return Some(CarryOutcome::Failed(format!(
+                    "writing thumbnail sidecar: {e}"
+                )));
             }
         }
         self.phase = Phase::Export { pending };
@@ -830,7 +837,11 @@ impl Drop for Carry {
             }
         } else if self.committed {
             cleanup_matching(&self.src, &self.dest);
-            let _ = self.store.finish_root_move(id);
+            // Cancelled mid-settle: leave the journal open so the next start's recovery reports
+            // the root and re-runs the (idempotent) thumbnail settle for it.
+            if !matches!(self.phase, Phase::Settle { .. }) {
+                let _ = self.store.finish_root_move(id);
+            }
         } else if self.copy_started {
             self.discard_dest();
         } else {
@@ -1224,7 +1235,10 @@ mod tests {
                 },
                 1,
             );
-            assert!(matches!(run(&mut c), CarryOutcome::Moved { .. }));
+            let CarryOutcome::Moved { renamed, .. } = run(&mut c) else {
+                panic!("archive move failed");
+            };
+            assert_eq!(renamed, !force_copy, "expected path taken");
             let dest = f.dest_parent.join("event-2026");
             assert_eq!(
                 fs::read(dest.join("a.NEF.thumb.jpg")).unwrap(),
@@ -1247,6 +1261,13 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(got.bytes, pv_a.bytes);
+            let by_id = crate::tier::load_t0_by_id(&*f.cat, f.asset_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                by_id.bytes, pv_a.bytes,
+                "id-based read path serves the sidecar"
+            );
 
             // Back to the SSD.
             let mut c = Carry::new(
@@ -1288,6 +1309,90 @@ mod tests {
             .get_preview(f.asset_id, crate::PreviewTier::T0)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn settle_keeps_a_blob_that_differs_from_its_sidecar() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &fake_jpeg(5))
+            .unwrap();
+        f.cat.set_root_archived(f.root_id, true).unwrap();
+        crate::thumb_sidecar::export(
+            &f.src.join("a.NEF"),
+            &fake_jpeg(6),
+            crate::thumb_sidecar::SidecarCodec::Jpeg,
+        )
+        .unwrap();
+        let rep = crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert_eq!((rep.blobs_dropped, rep.kept), (0, 1));
+    }
+
+    #[test]
+    fn a_missing_raw_does_not_block_an_archive_move() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &fake_jpeg(7))
+            .unwrap();
+        fs::remove_file(f.src.join("a.NEF")).unwrap();
+        let mut c = Carry::new(
+            f.cat.clone(),
+            f.root_id,
+            &f.dest_parent,
+            CarryOptions {
+                force_copy: true,
+                export_sidecars: true,
+                set_archived: Some(true),
+            },
+            1,
+        );
+        assert!(matches!(run(&mut c), CarryOutcome::Moved { .. }));
+        // No sidecar was possible, so the catalog keeps the only copy.
+        assert!(f
+            .cat
+            .get_preview(f.asset_id, crate::PreviewTier::T0)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn cancelling_during_settle_leaves_the_journal_open_for_recovery() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &fake_jpeg(8))
+            .unwrap();
+        let mut c = Carry::new(
+            f.cat.clone(),
+            f.root_id,
+            &f.dest_parent,
+            CarryOptions {
+                force_copy: true,
+                export_sidecars: true,
+                set_archived: Some(true),
+            },
+            1,
+        );
+        loop {
+            if matches!(c.phase, Phase::Settle { .. }) {
+                break;
+            }
+            assert!(c.step().is_none());
+        }
+        drop(c);
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+        let resumed = resume_open_moves(&*f.cat);
+        assert!(matches!(
+            resumed[0],
+            Resumed::CleanedUp { .. } | Resumed::Committed { .. }
+        ));
+        // Recovery's follow-up: settle finishes the job.
+        crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert!(f
+            .cat
+            .get_preview(f.asset_id, crate::PreviewTier::T0)
+            .unwrap()
+            .is_none());
+        no_journal(&f);
     }
 
     #[test]

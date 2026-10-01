@@ -29,6 +29,10 @@ pub fn export_asset_sidecar(
         return Ok(false);
     };
     let raw = root_path.join(&asset.rel_path);
+    if !raw.is_file() {
+        // Gone from disk since the last sync: nothing to sit next to, and not this move's problem.
+        return Ok(false);
+    }
     sidecar::export(&raw, &pv, CODEC).map_err(|e| format!("{}: {e}", raw.display()))?;
     Ok(true)
 }
@@ -77,11 +81,13 @@ pub fn settle_asset(
     let blob = store.get_preview(asset.id, PreviewTier::T0)?;
     if archived {
         match (side, blob) {
-            (Some(_), Some(_)) => {
+            // Only drop a blob its sidecar exactly reproduces; anything else is kept and the
+            // read path (catalog first) keeps serving it.
+            (Some(side), Some(blob)) if side.bytes == blob.bytes => {
                 store.clear_preview(asset.id, PreviewTier::T0)?;
                 report.blobs_dropped += 1;
             }
-            (None, Some(_)) => report.kept += 1,
+            (_, Some(_)) => report.kept += 1,
             _ => {}
         }
     } else if let Some(side) = side {
