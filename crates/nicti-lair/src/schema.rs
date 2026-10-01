@@ -431,6 +431,25 @@ CREATE TABLE delete_item (
 );
 "#;
 
+/// Per-asset XMP sidecar sync state (#60, ADR-0059): what nicti last saw and last wrote in the
+/// asset's `.xmp`, so the newer-wins conflict rule (ADR-0021) and the same-hash no-op check have
+/// something to compare against. `catalog_dirty_since_ms` is when the catalog's markers last
+/// diverged from the sidecar without the sidecar being updated (auto-write off, or a write held
+/// for review) -- the catalog side's "mtime" for the newer-wins rule. `needs_review` is set when
+/// both sides changed and neither can be safely preferred, instead of silently overwriting either.
+const MIGRATION_V9: &str = r#"
+CREATE TABLE asset_sidecar (
+    asset_id           INTEGER PRIMARY KEY REFERENCES asset(id) ON DELETE CASCADE,
+    path               TEXT NOT NULL,
+    last_seen_hash     BLOB,
+    last_seen_mtime_ms INTEGER,
+    last_written_hash  BLOB,
+    catalog_dirty_since_ms INTEGER,
+    needs_review       INTEGER NOT NULL DEFAULT 0 CHECK (needs_review IN (0, 1))
+);
+CREATE INDEX asset_sidecar_review ON asset_sidecar(asset_id) WHERE needs_review = 1;
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -444,6 +463,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V6,
     MIGRATION_V7,
     MIGRATION_V8,
+    MIGRATION_V9,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call

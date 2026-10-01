@@ -37,7 +37,6 @@ use crate::cull::input::KeyCommand;
 use crate::cull::keys::CullAction;
 use crate::cull::previews::{preview_texture, TilePreviews};
 use crate::cull::survey::{self as cull_survey, SurveySession};
-use crate::cull::worker::CatalogMeta;
 use crate::cull::CullState;
 use crate::export::{facts_for, ExportEnv, ExportUi};
 use crate::filter_bar::FilterBar;
@@ -52,6 +51,7 @@ use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
 use crate::viewport::{fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
+use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
 use crate::{catalog, CatalogOpenState};
 
 /// VRAM Pounce's GPU-lane admission control (ADR-0054 decision rule #5) budgets against -- a
@@ -187,6 +187,10 @@ pub struct PeltApp {
     larder: Option<SharedLarder>,
     /// The preview-cache settings panel's UI state (#302).
     cache_settings: CacheSettingsUi,
+    /// Sidecar write-back for marker changes and its settings/review panel (#60); `None` when
+    /// the catalog failed to open.
+    xmp: Option<XmpWriter>,
+    xmp_ui: XmpUi,
     /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
     /// re-read and re-decode them every frame.
     loupe_t2_undecodable: Option<i64>,
@@ -298,16 +302,26 @@ impl PeltApp {
         }
 
         let egui_ctx = cc.egui_ctx.clone();
-        let cull = match &catalog {
+        let xmp = match &catalog {
             CatalogOpenState::Open(store) => {
                 let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-                let ctx = egui_ctx.clone();
-                Some(CullState::new(
-                    Arc::new(CatalogMeta(dyn_store)),
-                    move || ctx.request_repaint(),
+                Some(XmpWriter::spawn(
+                    dyn_store,
+                    xmp_sync::load_autowrite(&catalog_path),
                 ))
             }
             CatalogOpenState::Error(_) => None,
+        };
+        let cull = match (&catalog, &xmp) {
+            (CatalogOpenState::Open(store), Some(xmp)) => {
+                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                let ctx = egui_ctx.clone();
+                Some(CullState::new(
+                    Arc::new(XmpMeta::new(dyn_store, xmp.clone())),
+                    move || ctx.request_repaint(),
+                ))
+            }
+            _ => None,
         };
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -369,6 +383,8 @@ impl PeltApp {
             loupe_preview: None,
             larder: larder.clone(),
             cache_settings: CacheSettingsUi::default(),
+            xmp,
+            xmp_ui: XmpUi::default(),
             loupe_t2_undecodable: None,
             grid: None,
             grid_view: grid::ViewState::default(),
@@ -1684,6 +1700,11 @@ impl PeltApp {
             &self.pounce,
         );
         ui.separator();
+        if let (CatalogOpenState::Open(store), Some(xmp)) = (&self.catalog, &self.xmp) {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+            xmp_sync::show(ui, &mut self.xmp_ui, &dyn_store, xmp, &self.catalog_path);
+            ui.separator();
+        }
         if let Some(summary) = &self.last_backup_summary {
             ui.label(summary);
         }

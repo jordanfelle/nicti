@@ -11,6 +11,7 @@ nicti-claw = { path = "../nicti-claw" }
 nicti-cornea = { path = "../nicti-cornea" }
 nicti-pawprint = { path = "../nicti-pawprint" }
 nicti-pounce = { path = "../nicti-pounce" }
+nicti-scent = { path = "../nicti-scent" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 blake3 = "1"
 kamadak-exif = "0.6"

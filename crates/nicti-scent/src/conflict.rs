@@ -64,6 +64,14 @@ pub fn resolve_conflict(catalog: &Side, sidecar: &Side, ambiguity_window_ms: u12
 /// newer-wins comparison against a file with a corrupted timestamp instead
 /// of surfacing the problem.
 pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
+    let (_, hash, mtime_ms) = read_hashed(path)?;
+    Ok((hash, mtime_ms))
+}
+
+/// Like [`hash_and_mtime`], but also returns the bytes it hashed, so a caller that needs to parse
+/// the file (the `.xmp` sidecar sync, #60) gets content, hash and mtime all from the same single
+/// opened handle -- never a second read that could observe different bytes than the hash covers.
+pub fn read_hashed(path: &Path) -> io::Result<(Vec<u8>, blake3::Hash, u128)> {
     let mut file = File::open(path)?;
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
@@ -74,7 +82,7 @@ pub fn hash_and_mtime(path: &Path) -> io::Result<(blake3::Hash, u128)> {
         .duration_since(UNIX_EPOCH)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         .as_millis();
-    Ok((hash, mtime_ms))
+    Ok((contents, hash, mtime_ms))
 }
 
 /// ADR-0021's layer-(c) `crs:` write gate, resolved by #59 as: **write

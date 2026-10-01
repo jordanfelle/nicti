@@ -27,6 +27,7 @@ pub mod larder;
 pub mod ninelives;
 pub mod patrol;
 pub mod pounce_jobs;
+pub mod scent_sync;
 pub mod scruff;
 pub mod shred;
 
@@ -34,7 +35,7 @@ pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
 pub use model::{
     Asset, AssetMeta, DeleteItem, DeleteState, Keyword, MoveState, NewAsset, Preview, PreviewTier,
-    Root, RootMove,
+    Root, RootMove, SidecarState,
 };
 pub use sqlite::SqliteCatalog;
 
@@ -298,6 +299,15 @@ pub trait CatalogStore: Module {
 
     /// Every open `delete_item` journal row, in asset-id order, for crash recovery at startup.
     fn open_delete_items(&self) -> Result<Vec<DeleteItem>, CatalogError>;
+
+    /// The XMP sidecar sync state for one asset (#60), `None` if nicti has never synced it.
+    fn sidecar_state(&self, asset_id: i64) -> Result<Option<SidecarState>, CatalogError>;
+
+    /// Upserts the XMP sidecar sync state for one asset (#60).
+    fn record_sidecar(&self, asset_id: i64, state: &SidecarState) -> Result<(), CatalogError>;
+
+    /// Asset ids whose sidecar is flagged `needs_review`, in id order (#60).
+    fn sidecar_review_assets(&self) -> Result<Vec<i64>, CatalogError>;
 
     /// Every asset registered under this root, in `id` order. `patrol::sync_root` (#24) uses this
     /// to find rows whose file it needs to check for, since ingest only ever walks the disk and

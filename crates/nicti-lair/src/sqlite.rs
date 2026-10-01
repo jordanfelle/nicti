@@ -13,7 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::{
     Asset, AssetMeta, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, DeleteItem,
     DeleteState, FacetCounts, Filter, Keyword, MoveState, NewAsset, Page, Preview, PreviewTier,
-    Root, RootMove, Sort, SortDirection, SortField,
+    Root, RootMove, SidecarState, Sort, SortDirection, SortField,
 };
 use nicti_claw::Module;
 
@@ -1326,7 +1326,7 @@ impl CatalogStore for SqliteCatalog {
                 ),
                 bound.as_slice(),
             )?;
-            for table in ["edit_variant", "preview", "delete_item"] {
+            for table in ["edit_variant", "preview", "delete_item", "asset_sidecar"] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE asset_id IN ({ph})"),
                     bound.as_slice(),
@@ -1432,6 +1432,63 @@ impl CatalogStore for SqliteCatalog {
                 },
             })
         })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn sidecar_state(&self, asset_id: i64) -> Result<Option<SidecarState>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT path, last_seen_hash, last_seen_mtime_ms, last_written_hash, catalog_dirty_since_ms, needs_review \
+                 FROM asset_sidecar WHERE asset_id = ?1",
+                [asset_id],
+                |row| {
+                    Ok(SidecarState {
+                        path: row.get(0)?,
+                        last_seen_hash: row.get(1)?,
+                        last_seen_mtime_ms: row.get(2)?,
+                        last_written_hash: row.get(3)?,
+                        catalog_dirty_since_ms: row.get(4)?,
+                        needs_review: row.get::<_, i64>(5)? != 0,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn record_sidecar(&self, asset_id: i64, state: &SidecarState) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO asset_sidecar \
+                 (asset_id, path, last_seen_hash, last_seen_mtime_ms, last_written_hash, \
+                  catalog_dirty_since_ms, needs_review) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(asset_id) DO UPDATE SET \
+                 path = excluded.path, \
+                 last_seen_hash = excluded.last_seen_hash, \
+                 last_seen_mtime_ms = excluded.last_seen_mtime_ms, \
+                 last_written_hash = excluded.last_written_hash, \
+                 catalog_dirty_since_ms = excluded.catalog_dirty_since_ms, \
+                 needs_review = excluded.needs_review",
+            params![
+                asset_id,
+                state.path,
+                state.last_seen_hash,
+                state.last_seen_mtime_ms,
+                state.last_written_hash,
+                state.catalog_dirty_since_ms,
+                state.needs_review as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn sidecar_review_assets(&self) -> Result<Vec<i64>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT asset_id FROM asset_sidecar WHERE needs_review = 1 ORDER BY asset_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 

@@ -44,6 +44,12 @@ pub struct IngestReport {
     pub skipped_unchanged: u64,
     pub moved: u64,
     pub failed: Vec<(PathBuf, String)>,
+    /// Assets whose `.xmp` sidecar was flagged for review this run (#60): both sides changed and
+    /// neither was overwritten.
+    pub sidecar_review: u64,
+    /// Sidecars that couldn't be read or parsed (#60). The asset itself was still ingested; its
+    /// markers are simply left as they were.
+    pub sidecar_errors: Vec<(PathBuf, String)>,
 }
 
 /// Normalizes an absolute path's tail (relative to `root_path`) into the canonical form stored in
@@ -272,6 +278,23 @@ impl Ingest {
     }
 }
 
+/// Reads the asset's `.xmp` sidecar into the catalog (#60). Never fails the ingest: a sidecar
+/// problem is reported, not propagated, since the RAW itself was cataloged fine.
+fn sync_sidecar(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+    raw_path: &Path,
+    report: &mut IngestReport,
+) {
+    match crate::scent_sync::import_sidecar(store, asset_id, raw_path, now_unix() * 1000) {
+        Ok(crate::scent_sync::SyncOutcome::NeedsReview) => report.sidecar_review += 1,
+        Ok(_) => {}
+        Err(e) => report
+            .sidecar_errors
+            .push((crate::scent_sync::sidecar_path(raw_path), e.to_string())),
+    }
+}
+
 fn ingest_one(
     store: &dyn CatalogStore,
     root_id: i64,
@@ -296,6 +319,8 @@ fn ingest_one(
     if let Some(existing) = &existing {
         if existing.size_bytes == size_bytes && existing.mtime_unix == mtime_unix {
             report.skipped_unchanged += 1;
+            // The RAW is unchanged, but LRC may have rewritten its sidecar since the last scan.
+            sync_sidecar(store, existing.id, path, report);
             return Ok(());
         }
     }
@@ -332,6 +357,7 @@ fn ingest_one(
                 mtime_unix,
             )?;
             report.moved += 1;
+            sync_sidecar(store, matched.id, path, report);
             return Ok(());
         }
     }
@@ -362,7 +388,8 @@ fn ingest_one(
     // The asset row and its T0 preview (written, or cleared if extraction found none this time)
     // commit together in one transaction -- see `CatalogStore::insert_asset`'s own doc comment
     // for why that atomicity matters (found by CodeRabbit's review).
-    store.insert_asset(root_id, &new_asset, preview.as_ref())?;
+    let asset_id = store.insert_asset(root_id, &new_asset, preview.as_ref())?;
+    sync_sidecar(store, asset_id, path, report);
 
     if existing.is_some() {
         report.updated += 1;

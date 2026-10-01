@@ -60,9 +60,14 @@ pub struct Patch {
     pub keywords: Option<Vec<String>>,
     pub hierarchical_keywords: Option<Vec<Vec<String>>>,
     pub nicti_edit_document: Option<Option<String>>,
+    /// `Some(true)` writes `nicti:pick="1"`; `Some(false)` removes it.
+    pub nicti_pick: Option<bool>,
 }
 
 const NICTI_NS: &str = "https://nicti.dev/xmp/1.0/";
+const XMP_NS: &str = "http://ns.adobe.com/xap/1.0/";
+const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
+const LR_NS: &str = "http://ns.adobe.com/lightroom/1.0/";
 
 fn local_name(qname: QName) -> Vec<u8> {
     match qname.as_ref().iter().position(|&b| b == b':') {
@@ -169,18 +174,28 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         };
         let mut new_tag =
             BytesStart::new(String::from_utf8_lossy(orig.name().as_ref()).into_owned());
-        let mut saw_nicti_ns = false;
+        let (mut saw_nicti_ns, mut saw_xmp_ns, mut saw_dc_ns, mut saw_lr_ns) =
+            (false, false, false, false);
         for attr in orig.attributes() {
             let attr = attr?;
             let key = attr.key;
-            if is_local(key, "Rating") && patch.rating.is_some() {
+            if key.as_ref() == b"xmp:Rating" && patch.rating.is_some() {
                 continue;
             }
-            if is_local(key, "Label") && patch.label.is_some() {
+            if key.as_ref() == b"xmp:Label" && patch.label.is_some() {
                 continue;
             }
             if is_local(key, "editDocument") && patch.nicti_edit_document.is_some() {
                 continue;
+            }
+            if key.as_ref() == b"nicti:pick" && patch.nicti_pick.is_some() {
+                continue;
+            }
+            match key.as_ref() {
+                b"xmlns:xmp" => saw_xmp_ns = true,
+                b"xmlns:dc" => saw_dc_ns = true,
+                b"xmlns:lr" => saw_lr_ns = true,
+                _ => {}
             }
             if key.as_ref() == b"xmlns:nicti" {
                 saw_nicti_ns = true;
@@ -198,6 +213,31 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 new_tag.push_attribute(("xmlns:nicti", NICTI_NS));
             }
             new_tag.push_attribute(("nicti:editDocument", v.as_str()));
+        }
+        if patch.nicti_pick == Some(true) {
+            if !saw_nicti_ns && !matches!(&patch.nicti_edit_document, Some(Some(_))) {
+                new_tag.push_attribute(("xmlns:nicti", NICTI_NS));
+            }
+            new_tag.push_attribute(("nicti:pick", "1"));
+        }
+        // Every prefix this write emits must be bound. A rating-only packet (the shape LRC and the
+        // in-repo SAMPLE use) may declare `xmp` but not `dc`/`lr`; redeclaring the standard URI on
+        // the Description is harmless if an ancestor already binds it.
+        let writes_scalar =
+            matches!(&patch.rating, Some(Some(_))) || matches!(&patch.label, Some(Some(_)));
+        if writes_scalar && !saw_xmp_ns {
+            new_tag.push_attribute(("xmlns:xmp", XMP_NS));
+        }
+        if patch.keywords.as_deref().is_some_and(|k| !k.is_empty()) && !saw_dc_ns {
+            new_tag.push_attribute(("xmlns:dc", DC_NS));
+        }
+        if patch
+            .hierarchical_keywords
+            .as_deref()
+            .is_some_and(|k| !k.is_empty())
+            && !saw_lr_ns
+        {
+            new_tag.push_attribute(("xmlns:lr", LR_NS));
         }
         (was_start, new_tag)
     };
@@ -218,8 +258,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         while i < desc_end_idx {
             let is_subject = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "subject"));
             let is_hier = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "hierarchicalSubject"));
-            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Rating"));
-            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "Label"));
+            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"xmp:Rating");
+            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"xmp:Label");
             if (is_subject && patch.keywords.is_some())
                 || (is_hier && patch.hierarchical_keywords.is_some())
                 || (is_rating && patch.rating.is_some())
@@ -500,5 +540,123 @@ mod tests {
             "{patched}"
         );
         assert!(patched.contains("crs:WhiteBalance=\"Custom\""), "{patched}");
+    }
+
+    #[test]
+    fn pick_round_trips_and_clears() {
+        let picked = apply(
+            SAMPLE,
+            &Patch {
+                nicti_pick: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(picked.contains("xmlns:nicti="), "{picked}");
+        assert!(picked.contains("nicti:pick=\"1\""), "{picked}");
+        assert!(picked.contains("crs:WhiteBalance=\"Custom\""), "{picked}");
+        assert!(lrc_fields::read(&picked).unwrap().pick);
+
+        // Re-picking doesn't duplicate the attribute or the namespace.
+        let again = apply(
+            &picked,
+            &Patch {
+                nicti_pick: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(again.matches("nicti:pick=").count(), 1, "{again}");
+        assert_eq!(again.matches("xmlns:nicti=").count(), 1, "{again}");
+
+        let cleared = apply(
+            &picked,
+            &Patch {
+                nicti_pick: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!cleared.contains("nicti:pick"), "{cleared}");
+        assert!(!lrc_fields::read(&cleared).unwrap().pick);
+    }
+
+    #[test]
+    fn pick_with_edit_document_declares_namespace_once() {
+        let out = apply(
+            SAMPLE,
+            &Patch {
+                nicti_edit_document: Some(Some("e30=".into())),
+                nicti_pick: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches("xmlns:nicti=").count(), 1, "{out}");
+        assert!(lrc_fields::read(&out).unwrap().pick);
+    }
+
+    #[test]
+    fn patching_never_touches_foreign_rating_or_label_properties() {
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/" xmp:Rating="1" MicrosoftPhoto:Rating="75"/></rdf:RDF></x:xmpmeta>"#;
+        let out = apply(
+            xmp,
+            &Patch {
+                rating: Some(Some(4)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.contains("MicrosoftPhoto:Rating=\"75\""), "{out}");
+        assert_eq!(lrc_fields::read(&out).unwrap().rating, Some(4));
+    }
+
+    #[test]
+    fn special_characters_survive_a_write_then_read() {
+        let out = apply(
+            SAMPLE,
+            &Patch {
+                label: Some(Some("Tom & Jerry <\"x\">".into())),
+                keywords: Some(vec!["a&b".into(), "it's".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let meta = lrc_fields::read(&out).unwrap();
+        assert_eq!(meta.label.as_deref(), Some("Tom & Jerry <\"x\">"));
+        assert_eq!(meta.keywords, vec!["a&b", "it's"]);
+    }
+
+    #[test]
+    fn keyword_blocks_and_scalars_never_use_an_unbound_prefix() {
+        // Declares neither xmp, dc nor lr anywhere.
+        let bare = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>"#;
+        let out = apply(
+            bare,
+            &Patch {
+                rating: Some(Some(3)),
+                keywords: Some(vec!["fox".into()]),
+                hierarchical_keywords: Some(vec![vec!["Events".into(), "Con".into()]]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for decl in ["xmlns:xmp=", "xmlns:dc=", "xmlns:lr="] {
+            assert_eq!(out.matches(decl).count(), 1, "{decl} in {out}");
+        }
+
+        // A packet that already declares them is not given a second copy.
+        let again = apply(
+            &out,
+            &Patch {
+                rating: Some(Some(4)),
+                keywords: Some(vec!["fox".into(), "cat".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for decl in ["xmlns:xmp=", "xmlns:dc=", "xmlns:lr="] {
+            assert_eq!(again.matches(decl).count(), 1, "{decl} in {again}");
+        }
     }
 }

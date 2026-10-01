@@ -63,6 +63,10 @@ pub struct LrcMeta {
     /// `["Events", "Anthrocon 2025"]` for `lr:hierarchicalSubject`'s
     /// `Events|Anthrocon 2025`.
     pub hierarchical_keywords: Vec<Vec<String>>,
+    /// Pick flag. ADR-0059 defers an LRC-side mapping (#187), so this lives
+    /// only in nicti's own `nicti:pick` attribute (`"1"` = picked); absent
+    /// means not picked.
+    pub pick: bool,
 }
 
 #[derive(Debug, Error)]
@@ -73,6 +77,10 @@ pub enum ReadError {
     Attr(#[from] quick_xml::events::attributes::AttrError),
     #[error("non-utf8 text content")]
     Utf8,
+    #[error("xmp:Rating {0:?} is not an integer in -1..=5")]
+    BadRating(String),
+    #[error("unresolvable XML entity &{0};")]
+    UnknownEntity(String),
 }
 
 fn local_name(qname: &[u8]) -> &[u8] {
@@ -93,7 +101,10 @@ fn local_eq(qname: &[u8], target: &str) -> bool {
 /// the photographic sense, only "not present in this packet".
 pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
     let mut reader = Reader::from_str(xmp);
-    reader.config_mut().trim_text(true);
+    // Text is accumulated across `Text` and `GeneralRef` events (quick-xml delivers `&amp;` etc. as
+    // separate events), so trimming per event would eat the space in `Tom &amp; Jerry`. Values are
+    // trimmed once, when their element ends.
+    reader.config_mut().trim_text(false);
 
     let mut meta = LrcMeta::default();
     // Tracks which list property (if any) we're currently inside, so `Text`/
@@ -101,9 +112,9 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
     // itself skipped -- only the parent property name matters.
     let mut in_list: Option<ListKind> = None;
     let mut current_li = String::new();
-    // Element-form scalar in progress, e.g. `<xmp:Rating>4</xmp:Rating>` --
-    // the value arrives in the next Text event, before the matching End.
+    // Element-form scalar in progress, e.g. `<xmp:Rating>4</xmp:Rating>`.
     let mut pending_scalar: Option<ScalarKind> = None;
+    let mut scalar_buf = String::new();
 
     loop {
         match reader.read_event()? {
@@ -117,22 +128,8 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
                 // reader sees as "inside a list". An empty container has no
                 // keywords to collect either way, so this is just a no-op:
                 // scalar attributes on it (rare, but XMP allows them on any
-                // element) are still read below like any other tag.
-                for attr in e.attributes() {
-                    let attr = attr?;
-                    let key = attr.key.as_ref();
-                    if local_eq(key, "Rating") {
-                        if let Ok(val) = std::str::from_utf8(&attr.value) {
-                            meta.rating = val.trim().parse::<i8>().ok();
-                        }
-                    } else if local_eq(key, "Label") {
-                        if let Ok(val) = std::str::from_utf8(&attr.value) {
-                            if !val.is_empty() {
-                                meta.label = Some(val.to_string());
-                            }
-                        }
-                    }
-                }
+                // element) are still read like any other tag.
+                read_attrs(&e, &mut meta)?;
             }
             Event::Start(e) => {
                 let name = e.name();
@@ -143,48 +140,51 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
                     in_list = Some(ListKind::Hierarchical);
                 } else if local_eq(name, "li") {
                     current_li.clear();
-                } else if in_list.is_none() && local_eq(name, "Rating") {
+                } else if in_list.is_none() && name == RATING_KEY {
                     pending_scalar = Some(ScalarKind::Rating);
-                } else if in_list.is_none() && local_eq(name, "Label") {
+                    scalar_buf.clear();
+                } else if in_list.is_none() && name == LABEL_KEY {
                     pending_scalar = Some(ScalarKind::Label);
+                    scalar_buf.clear();
                 }
 
                 // Attribute form: scalar properties written directly on this
                 // element (typically `rdf:Description`).
-                for attr in e.attributes() {
-                    let attr = attr?;
-                    let key = attr.key.as_ref();
-                    if local_eq(key, "Rating") {
-                        if let Ok(val) = std::str::from_utf8(&attr.value) {
-                            meta.rating = val.trim().parse::<i8>().ok();
-                        }
-                    } else if local_eq(key, "Label") {
-                        if let Ok(val) = std::str::from_utf8(&attr.value) {
-                            if !val.is_empty() {
-                                meta.label = Some(val.to_string());
-                            }
-                        }
-                    }
-                }
+                read_attrs(&e, &mut meta)?;
             }
             Event::Text(t) => {
                 let text = t
                     .xml_content(XmlVersion::Implicit1_0)
-                    .map_err(quick_xml::Error::from)?
-                    .into_owned();
-                if in_list.is_some() {
-                    current_li.push_str(&text);
-                } else if let Some(kind) = pending_scalar {
-                    match kind {
-                        ScalarKind::Rating => meta.rating = text.trim().parse::<i8>().ok(),
-                        ScalarKind::Label => {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                meta.label = Some(trimmed.to_string());
-                            }
-                        }
-                    }
-                }
+                    .map_err(quick_xml::Error::from)?;
+                push_text(
+                    &text,
+                    in_list.is_some(),
+                    pending_scalar,
+                    &mut current_li,
+                    &mut scalar_buf,
+                );
+            }
+            Event::GeneralRef(r) => {
+                let resolved: String = match r.resolve_char_ref()? {
+                    Some(c) => c.to_string(),
+                    None => match r.decode().map_err(quick_xml::Error::from)?.as_ref() {
+                        "amp" => "&".into(),
+                        "lt" => "<".into(),
+                        "gt" => ">".into(),
+                        "quot" => "\"".into(),
+                        "apos" => "'".into(),
+                        // An undeclared entity can't be resolved; dropping it silently would
+                        // rename the value, so refuse the packet instead.
+                        other => return Err(ReadError::UnknownEntity(other.to_string())),
+                    },
+                };
+                push_text(
+                    &resolved,
+                    in_list.is_some(),
+                    pending_scalar,
+                    &mut current_li,
+                    &mut scalar_buf,
+                );
             }
             Event::End(e) => {
                 let name = e.name();
@@ -215,8 +215,18 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
                         && matches!(in_list, Some(ListKind::Hierarchical)))
                 {
                     in_list = None;
-                } else if local_eq(name, "Rating") || local_eq(name, "Label") {
-                    pending_scalar = None;
+                } else if name == RATING_KEY || name == LABEL_KEY {
+                    match pending_scalar.take() {
+                        Some(ScalarKind::Rating) => meta.rating = parse_rating(&scalar_buf)?,
+                        Some(ScalarKind::Label) => {
+                            let trimmed = scalar_buf.trim();
+                            if !trimmed.is_empty() {
+                                meta.label = Some(trimmed.to_string());
+                            }
+                        }
+                        None => {}
+                    }
+                    scalar_buf.clear();
                 }
             }
             _ => {}
@@ -224,6 +234,59 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
     }
 
     Ok(meta)
+}
+
+/// Exact qualified names, not local names: `MicrosoftPhoto:Rating` (0-100) and other foreign
+/// `*:Rating`/`*:Label` properties must never be mistaken for `xmp:Rating`/`xmp:Label`.
+const RATING_KEY: &[u8] = b"xmp:Rating";
+const LABEL_KEY: &[u8] = b"xmp:Label";
+const PICK_KEY: &[u8] = b"nicti:pick";
+
+fn push_text(
+    text: &str,
+    in_list: bool,
+    pending: Option<ScalarKind>,
+    li: &mut String,
+    scalar: &mut String,
+) {
+    if in_list {
+        li.push_str(text);
+    } else if pending.is_some() {
+        scalar.push_str(text);
+    }
+}
+
+/// `-1..=5` only. Anything else (`6`, `200`, `abc`, `3.5`) is an error, not "unrated" -- treating
+/// garbage as a missing rating would make a sync silently clear a real catalog rating, and an
+/// out-of-range number would violate the catalog's own CHECK constraint.
+fn parse_rating(text: &str) -> Result<Rating, ReadError> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    match t.parse::<i8>() {
+        Ok(v) if (-1..=5).contains(&v) => Ok(Some(v)),
+        _ => Err(ReadError::BadRating(t.to_string())),
+    }
+}
+
+fn read_attrs(e: &quick_xml::events::BytesStart<'_>, meta: &mut LrcMeta) -> Result<(), ReadError> {
+    for attr in e.attributes() {
+        let attr = attr?;
+        let key = attr.key.as_ref();
+        if key == RATING_KEY {
+            meta.rating = parse_rating(&attr.normalized_value(XmlVersion::Implicit1_0)?)?;
+        } else if key == LABEL_KEY {
+            let val = attr.normalized_value(XmlVersion::Implicit1_0)?;
+            let val = val.trim();
+            if !val.is_empty() {
+                meta.label = Some(val.to_string());
+            }
+        } else if key == PICK_KEY {
+            meta.pick = attr.value.as_ref() == b"1";
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,5 +387,57 @@ mod tests {
             "Rating after an empty list container must still be read"
         );
         assert!(meta.keywords.is_empty());
+    }
+
+    const WRAP_OPEN: &str = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">"#;
+
+    #[test]
+    fn entities_in_keywords_and_labels_are_decoded_without_losing_spaces() {
+        let xmp = format!(
+            r#"{WRAP_OPEN}<rdf:Description xmp:Label="Tom &amp; Jerry"><dc:subject><rdf:Bag><rdf:li>Tom &amp; Jerry</rdf:li><rdf:li>a&lt;b</rdf:li><rdf:li>it&apos;s &quot;q&quot; &#38; &#x26;</rdf:li></rdf:Bag></dc:subject></rdf:Description></rdf:RDF>"#
+        );
+        let meta = read(&xmp).unwrap();
+        assert_eq!(meta.label.as_deref(), Some("Tom & Jerry"));
+        assert_eq!(meta.keywords, vec!["Tom & Jerry", "a<b", "it's \"q\" & &"]);
+    }
+
+    #[test]
+    fn element_form_label_decodes_entities() {
+        let xmp = format!(
+            r#"{WRAP_OPEN}<rdf:Description><xmp:Label>Tom &amp; Jerry</xmp:Label><xmp:Rating>3</xmp:Rating></rdf:Description></rdf:RDF>"#
+        );
+        let meta = read(&xmp).unwrap();
+        assert_eq!(meta.label.as_deref(), Some("Tom & Jerry"));
+        assert_eq!(meta.rating, Some(3));
+    }
+
+    #[test]
+    fn an_undeclared_entity_is_refused_not_dropped() {
+        let xmp = format!(
+            r#"{WRAP_OPEN}<rdf:Description><dc:subject><rdf:Bag><rdf:li>x&nbsp;y</rdf:li></rdf:Bag></dc:subject></rdf:Description></rdf:RDF>"#
+        );
+        assert!(matches!(read(&xmp), Err(ReadError::UnknownEntity(_))));
+    }
+
+    #[test]
+    fn out_of_range_or_garbage_ratings_are_errors_not_unrated() {
+        for bad in ["6", "-2", "127", "200", "abc", "3.5"] {
+            let xmp = format!(r#"{WRAP_OPEN}<rdf:Description xmp:Rating="{bad}"/></rdf:RDF>"#);
+            assert!(
+                matches!(read(&xmp), Err(ReadError::BadRating(_))),
+                "{bad} should be rejected"
+            );
+        }
+        let ok = format!(r#"{WRAP_OPEN}<rdf:Description xmp:Rating=""/></rdf:RDF>"#);
+        assert_eq!(read(&ok).unwrap().rating, None);
+    }
+
+    #[test]
+    fn foreign_rating_and_label_properties_are_ignored() {
+        let xmp = format!(
+            r#"{WRAP_OPEN}<rdf:Description xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/" MicrosoftPhoto:Rating="75" MicrosoftPhoto:Label="x"/></rdf:RDF>"#
+        );
+        let meta = read(&xmp).unwrap();
+        assert_eq!((meta.rating, meta.label), (None, None));
     }
 }

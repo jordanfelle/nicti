@@ -233,7 +233,10 @@ terse index: crate/spike → purpose → owning topic.
 - **`spikes/squint`** (#34/ADR-0034) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rosette`** (#35/ADR-0035) → [`culling`](.claude/rules/culling/REFERENCE.md)
 - **`spikes/rods`** (#40/ADR-0040) → [`denoise`](.claude/rules/denoise/REFERENCE.md)
-- **`spikes/scent`** (#59/ADR-0059) → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
+- **`crates/nicti-scent`** (#60, promoted from `spikes/scent`) — XMP interop with LRC: field mapping,
+  packet patcher, sidecar/embedded I/O, conflict rule. Catalog glue is `nicti-lair`'s
+  `scent_sync.rs` (hooked into `scruff.rs`), write-back + review panel is `nicti-pelt`'s
+  `xmp_sync.rs` → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
 - **`spikes/pupil`** (#99/ADR-0099) → [`develop`](.claude/rules/develop/REFERENCE.md)
 - **`spikes/purr`** (#53/ADR-0053) → [`develop`](.claude/rules/develop/REFERENCE.md)
 - **`spikes/crouch`** (#54/ADR-0054) → [`jobs`](.claude/rules/jobs/REFERENCE.md)

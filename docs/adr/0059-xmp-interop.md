@@ -301,3 +301,52 @@ Explicitly unverified, pending the follow-up hands-on LRC session (tracked as a 
 - **Explicitly deferred**: DNG/TIFF embedded-XMP write (see above); the `crs:` field-level mask
   mapping itself (masking's own territory, #48/ADR-0048); LRC's Pick-flag XMP mapping (unverified,
   above).
+
+## Implemented in #60 (phase-1 coexistence)
+
+The `scent` spike was promoted to `crates/nicti-scent` (spike deleted); `nicti-lair`'s
+`scent_sync.rs` is the one place the catalog and XMP meet. **This ADR is still Proposed** -- the
+Reject=`-1`, Pick and label-text mappings below are the best guess until #187's hands-on LRC pass
+confirms or amends them; #60 builds against them as written.
+
+- **Scope**: `.xmp` sidecars for NEF/NRW only (Scruff doesn't ingest JPEG/DNG yet, so the embedded
+  JPEG writer is ported but has no caller). Layer (a) only -- rating/reject, label, keywords --
+  plus Pick as `nicti:pick="1"` on the Description (no LRC-side mapping, per above). Layers (b)
+  (`nicti:editDocument`) and (c) (`crs:`) are not wired.
+- **Sides compare by meaning, not bytes**: both are reduced to a canonical marker set
+  (`scent_sync::Markers`), so LRC reformatting a packet is never a conflict and an unchanged
+  state never touches the file. A flat `dc:subject` entry that is the leaf of an
+  `lr:hierarchicalSubject` path is the same keyword, not a second top-level one.
+- **State**: schema v9 `asset_sidecar` (what nicti last saw and wrote, and
+  `catalog_dirty_since_ms` -- when the catalog last diverged from the sidecar unwritten, which is
+  the catalog side's "mtime" for the ADR-0021 rule, since the catalog has no metadata-modified
+  time of its own).
+- **Read path (ingest, and Synchronize Folder via Scruff's rescan)**: sidecar changed since last
+  seen -> if the catalog isn't dirty the file wins; if it is, ADR-0021's newer-wins applies with
+  `AMBIGUITY_WINDOW_MS = 2000` (inside it: flagged for review, neither side overwritten). No prior
+  record: a pristine catalog yields to the file, a non-pristine one is flagged, never guessed.
+- **Write path (after every marker change, auto-write on by default)**: stricter than the read
+  path -- if the sidecar changed under nicti and that change was never ingested, the write is
+  **held for review** rather than clobbering it. Writes patch the existing packet in place
+  (foreign namespaces, including `crs:`, preserved), go through `atomic_write`, and record the
+  hash of the bytes written. A sidecar that can't be read or parsed is an error, never a blank
+  packet. One process-wide lock covers the read-hash -> gate -> write -> record sequence.
+- **Known limits** (deliberate, tracked as follow-ups rather than fixed in #60):
+  - Keywords are all written as `lr:hierarchicalSubject` paths, single-segment ones included, so a
+    top-level and a nested keyword sharing a leaf stay distinct; whether LRC writes top-level
+    keywords there too is unverified (#187). A `|` in a keyword name (the separator can't be
+    escaped) is replaced by `/` on both sides, so it compares stable but is renamed on import.
+  - `Markers` compares keyword names case-sensitively while the catalog folds case, so a
+    case-only difference converges on the next write rather than flagging forever.
+  - `apply_to_catalog` is not one transaction (rating/flag/label commit, then keywords); a
+    failure partway leaves a partial apply until the next sync. Bad ratings are rejected at parse
+    time so the known trigger is closed.
+  - A rescan can write a sidecar with auto-write **off** when the catalog is dirty and newer
+    (ADR-0021 newer-wins); turning auto-write back on doesn't flush already-dirty assets until
+    their next marker change. A sync that lands between a marker write and the writer thread
+    picking it up sees the catalog as clean.
+  - The stat-based mtime precheck can miss a rewrite that preserves the recorded mtime
+    (`rsync -t`, FAT's 2 s granularity).
+  - `keyword_name_paths` reads the whole keyword table per tagged asset: O(tagged assets x
+    keywords) per rescan. Only the first `rdf:Description` is patched while the reader merges all
+    of them. The write-back only covers culling markers; there is no keyword-tagging UI yet.
