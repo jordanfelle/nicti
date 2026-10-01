@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
-use crate::carry::{Carry, CarryOptions, CarryOutcome};
+use crate::carry::{Carry, CarryOptions, CarryOutcome, ResumeMoves, Resumed};
 use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
 use crate::scruff::{Ingest, IngestReport};
@@ -581,6 +581,93 @@ impl Drop for VerifyJob {
                 report.cancelled = true;
                 *slot = Some(report);
             }
+        }
+    }
+}
+
+/// Startup crash recovery for interrupted folder moves (#307): steps [`ResumeMoves`] one bounded
+/// unit (one journal row's metadata check, or one file of a `committed` row's source cleanup) per
+/// call, so a big interrupted move's hash-and-delete pass runs off the UI thread. Never returns
+/// `Err`. A cancelled job is dropped without finishing: `Drop` hands over what it did settle, and
+/// the rest stay journaled for the next start. Reports under [`JobKind::Move`] so every existing
+/// "a move is running" guard (import, sync, move, delete, loupe open) also covers it.
+pub struct ResumeMovesJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    resume: Option<ResumeMoves>,
+    progress: Progress,
+    result: ReportSlot<Vec<Resumed>>,
+}
+
+impl ResumeMovesJob {
+    /// `None` if the journal has no open rows (nothing to submit).
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+    ) -> Option<(Self, ReportSlot<Vec<Resumed>>)> {
+        let resume = ResumeMoves::new(store.as_ref());
+        if resume.is_empty() {
+            return None;
+        }
+        let result = Arc::new(Mutex::new(None));
+        let job = ResumeMovesJob {
+            store,
+            resume: Some(resume),
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        Some((job, result))
+    }
+}
+
+impl ChunkedJob for ResumeMovesJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Move,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        "Recovering an interrupted folder move".into()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let resume = self
+            .resume
+            .as_mut()
+            .expect("ResumeMovesJob::step called again after it already reported Done");
+        let more = resume.step(self.store.as_ref());
+        let (done, total) = resume.progress();
+        self.progress = Progress {
+            done,
+            total: Some(total),
+        };
+        if more {
+            Ok(Step::Yield)
+        } else {
+            let report = self.resume.take().unwrap().into_report();
+            *self.result.lock().unwrap() = Some(report);
+            Ok(Step::Done)
+        }
+    }
+}
+
+impl Drop for ResumeMovesJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(
+                self.resume
+                    .take()
+                    .map(|r| r.into_report())
+                    .unwrap_or_default(),
+            );
         }
     }
 }

@@ -30,7 +30,7 @@ use std::time::SystemTime;
 
 use walkdir::WalkDir;
 
-use crate::{CatalogStore, MoveState};
+use crate::{CatalogStore, MoveState, RootMove};
 
 /// Bytes read/written per [`Carry::step`] on a single file (also the hash-verify read size), so a
 /// cancel lands within one chunk even on a multi-GB file.
@@ -912,96 +912,205 @@ pub enum Resumed {
     Stuck { root_id: i64, reason: String },
 }
 
-/// Crash recovery: call once at startup, before any import/sync. Idempotent.
+/// Crash recovery: call once at startup, before any import/sync. Idempotent. Runs
+/// [`ResumeMoves`] to completion on the calling thread; the app steps it as a Pounce job instead
+/// (#307) so a big interrupted move's cleanup can't stall startup.
 pub fn resume_open_moves(store: &dyn CatalogStore) -> Vec<Resumed> {
-    let moves = match store.open_root_moves() {
-        Ok(m) => m,
-        Err(_) => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for m in moves {
-        let src = PathBuf::from(&m.src_path);
-        let dest = PathBuf::from(&m.dest_path);
-        match m.state {
-            MoveState::Copying => {
-                // `Copying` means the fast-path rename was never attempted (or was reverted), so
-                // `dest` only ever holds our own half-built copy.
-                if src.is_dir() && !dest_covered_by_src(&src, &dest) {
-                    // The destination holds something the source doesn't: e.g. the commit and the
-                    // source cleanup both happened but the (WAL, non-fsynced) commit was lost to a
-                    // power cut. Deleting `dest` could delete the only copy.
-                    out.push(Resumed::Stuck {
-                        root_id: m.root_id,
-                        reason: "the destination has files the source no longer has; not \
-                                 deleting it -- check both folders"
-                            .into(),
-                    });
-                } else if src.is_dir() {
-                    let _ = fs::remove_dir_all(&dest);
-                    let _ = store.finish_root_move(m.id);
-                    out.push(Resumed::RolledBack { root_id: m.root_id });
-                } else {
-                    out.push(Resumed::Stuck {
-                        root_id: m.root_id,
-                        reason: "neither the source nor the destination folder exists".into(),
-                    });
+    let mut run = ResumeMoves::new(store);
+    while run.step(store) {}
+    run.into_report()
+}
+
+/// [`resume_open_moves`], one bounded unit of work per [`ResumeMoves::step`]: a `copying`/
+/// `renaming` row is one step (metadata only), a `committed` row is a walk step, then one file's
+/// hash-compare-delete per step, then a prune step (#307). Dropping it part-way is safe: a row's
+/// journal entry is only closed once that row is fully settled, so the next start redoes it.
+pub struct ResumeMoves {
+    pending: VecDeque<RootMove>,
+    cleanup: Option<Cleanup>,
+    out: Vec<Resumed>,
+    rows_total: u64,
+    rows_done: u64,
+}
+
+/// A `committed` row's source cleanup, split into steps (see [`cleanup_matching`]).
+struct Cleanup {
+    journal_id: i64,
+    root_id: i64,
+    src: PathBuf,
+    dest: PathBuf,
+    walked: bool,
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+    next: usize,
+    remaining: u64,
+}
+
+impl Cleanup {
+    /// One unit of work; `Some(files still left in the source)` once the row is fully settled.
+    fn step(&mut self) -> Option<u64> {
+        if !self.walked {
+            self.walked = true;
+            if self.src.is_dir() {
+                for entry in WalkDir::new(&self.src).min_depth(1).into_iter().flatten() {
+                    if entry.file_type().is_dir() {
+                        self.dirs.push(entry.into_path());
+                    } else {
+                        self.files.push(entry.into_path());
+                    }
                 }
             }
-            MoveState::Renaming => {
-                // Never delete either side here: the rename may or may not have landed, and the
-                // source path may have been recreated since.
-                match (src.is_dir(), dest.is_dir()) {
-                    (false, true) if dir_is_empty(&dest) => out.push(Resumed::Stuck {
-                        root_id: m.root_id,
-                        reason: "the source is missing and the destination is empty; not \
-                                 re-pointing the catalog at an empty folder"
-                            .into(),
-                    }),
-                    (false, true) => {
-                        match store
-                            .commit_root_move(m.id, &[])
-                            .and_then(|_| store.finish_root_move(m.id))
-                        {
-                            Ok(()) => out.push(Resumed::Committed { root_id: m.root_id }),
-                            Err(e) => out.push(Resumed::Stuck {
-                                root_id: m.root_id,
-                                reason: e.to_string(),
-                            }),
-                        }
-                    }
-                    (true, false) => {
-                        // The rename never happened; nothing moved.
-                        let _ = store.finish_root_move(m.id);
-                        out.push(Resumed::RolledBack { root_id: m.root_id });
-                    }
-                    (true, true) if dir_is_empty(&dest) => {
-                        // The rename never landed; `dest` is just the empty folder we emptied.
-                        let _ = store.finish_root_move(m.id);
-                        out.push(Resumed::RolledBack { root_id: m.root_id });
-                    }
-                    (true, true) => out.push(Resumed::Stuck {
-                        root_id: m.root_id,
-                        reason: "the folder exists at both locations after an interrupted \
-                                 rename; check both before continuing"
-                            .into(),
-                    }),
-                    (false, false) => out.push(Resumed::Stuck {
-                        root_id: m.root_id,
-                        reason: "neither the source nor the destination folder exists".into(),
-                    }),
-                }
+            return None;
+        }
+        if let Some(file) = self.files.get(self.next) {
+            self.next += 1;
+            if !remove_if_matching(file, &self.src, &self.dest) {
+                self.remaining += 1;
             }
-            MoveState::Committed => {
-                let leftover_count = cleanup_matching(&src, &dest);
-                let _ = store.finish_root_move(m.id);
-                out.push(Resumed::CleanedUp {
-                    root_id: m.root_id,
+            return None;
+        }
+        prune_dirs(std::mem::take(&mut self.dirs), &self.src);
+        Some(self.remaining)
+    }
+}
+
+impl ResumeMoves {
+    pub fn new(store: &dyn CatalogStore) -> Self {
+        let pending: VecDeque<RootMove> = store.open_root_moves().unwrap_or_default().into();
+        ResumeMoves {
+            rows_total: pending.len() as u64,
+            pending,
+            cleanup: None,
+            out: Vec::new(),
+            rows_done: 0,
+        }
+    }
+
+    /// `true` if there is nothing (left) to recover.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.cleanup.is_none()
+    }
+
+    /// `(journal rows settled, journal rows in total)`.
+    pub fn progress(&self) -> (u64, u64) {
+        (self.rows_done, self.rows_total)
+    }
+
+    /// Does one unit of work; `true` while more remains.
+    pub fn step(&mut self, store: &dyn CatalogStore) -> bool {
+        if let Some(c) = self.cleanup.as_mut() {
+            if let Some(leftover_count) = c.step() {
+                let c = self.cleanup.take().expect("just stepped it");
+                let _ = store.finish_root_move(c.journal_id);
+                self.out.push(Resumed::CleanedUp {
+                    root_id: c.root_id,
                     leftover_count,
+                });
+                self.rows_done += 1;
+            }
+        } else if let Some(m) = self.pending.pop_front() {
+            if m.state == MoveState::Committed {
+                self.cleanup = Some(Cleanup {
+                    journal_id: m.id,
+                    root_id: m.root_id,
+                    src: PathBuf::from(&m.src_path),
+                    dest: PathBuf::from(&m.dest_path),
+                    walked: false,
+                    files: Vec::new(),
+                    dirs: Vec::new(),
+                    next: 0,
+                    remaining: 0,
+                });
+            } else {
+                resume_unfinished(store, &m, &mut self.out);
+                self.rows_done += 1;
+            }
+        }
+        !self.is_empty()
+    }
+
+    /// What was recovered so far (everything, once [`ResumeMoves::step`] returned `false`).
+    pub fn into_report(self) -> Vec<Resumed> {
+        self.out
+    }
+}
+
+/// Settles a `copying`/`renaming` row (no file contents are read, so it is one step). A
+/// `committed` row is [`Cleanup`]'s job.
+fn resume_unfinished(store: &dyn CatalogStore, m: &RootMove, out: &mut Vec<Resumed>) {
+    let src = PathBuf::from(&m.src_path);
+    let dest = PathBuf::from(&m.dest_path);
+    match m.state {
+        MoveState::Copying => {
+            // `Copying` means the fast-path rename was never attempted (or was reverted), so
+            // `dest` only ever holds our own half-built copy.
+            if src.is_dir() && !dest_covered_by_src(&src, &dest) {
+                // The destination holds something the source doesn't: e.g. the commit and the
+                // source cleanup both happened but the (WAL, non-fsynced) commit was lost to a
+                // power cut. Deleting `dest` could delete the only copy.
+                out.push(Resumed::Stuck {
+                    root_id: m.root_id,
+                    reason: "the destination has files the source no longer has; not \
+                             deleting it -- check both folders"
+                        .into(),
+                });
+            } else if src.is_dir() {
+                let _ = fs::remove_dir_all(&dest);
+                let _ = store.finish_root_move(m.id);
+                out.push(Resumed::RolledBack { root_id: m.root_id });
+            } else {
+                out.push(Resumed::Stuck {
+                    root_id: m.root_id,
+                    reason: "neither the source nor the destination folder exists".into(),
                 });
             }
         }
+        MoveState::Renaming => {
+            // Never delete either side here: the rename may or may not have landed, and the
+            // source path may have been recreated since.
+            match (src.is_dir(), dest.is_dir()) {
+                (false, true) if dir_is_empty(&dest) => out.push(Resumed::Stuck {
+                    root_id: m.root_id,
+                    reason: "the source is missing and the destination is empty; not \
+                             re-pointing the catalog at an empty folder"
+                        .into(),
+                }),
+                (false, true) => {
+                    match store
+                        .commit_root_move(m.id, &[])
+                        .and_then(|_| store.finish_root_move(m.id))
+                    {
+                        Ok(()) => out.push(Resumed::Committed { root_id: m.root_id }),
+                        Err(e) => out.push(Resumed::Stuck {
+                            root_id: m.root_id,
+                            reason: e.to_string(),
+                        }),
+                    }
+                }
+                (true, false) => {
+                    // The rename never happened; nothing moved.
+                    let _ = store.finish_root_move(m.id);
+                    out.push(Resumed::RolledBack { root_id: m.root_id });
+                }
+                (true, true) if dir_is_empty(&dest) => {
+                    // The rename never landed; `dest` is just the empty folder we emptied.
+                    let _ = store.finish_root_move(m.id);
+                    out.push(Resumed::RolledBack { root_id: m.root_id });
+                }
+                (true, true) => out.push(Resumed::Stuck {
+                    root_id: m.root_id,
+                    reason: "the folder exists at both locations after an interrupted \
+                             rename; check both before continuing"
+                        .into(),
+                }),
+                (false, false) => out.push(Resumed::Stuck {
+                    root_id: m.root_id,
+                    reason: "neither the source nor the destination folder exists".into(),
+                }),
+            }
+        }
+        MoveState::Committed => {}
     }
-    out
 }
 
 /// Deletes every file under `src` whose counterpart under `dest` has identical content, then
@@ -1017,22 +1126,33 @@ fn cleanup_matching(src: &Path, dest: &Path) -> u64 {
             dirs.push(entry.path().to_path_buf());
             continue;
         }
-        let rel = entry.path().strip_prefix(src).expect("under src");
-        let twin = dest.join(rel);
-        let same = match (hash_file(entry.path()), hash_file(&twin)) {
-            (Some(a), Some(b)) => a == b,
-            _ => false,
-        };
-        if !(same && fs::remove_file(entry.path()).is_ok()) {
+        if !remove_if_matching(entry.path(), src, dest) {
             remaining += 1;
         }
     }
+    prune_dirs(dirs, src);
+    remaining
+}
+
+/// Deletes `file` (under `src`) if its twin under `dest` has identical content; `true` if it is
+/// gone.
+fn remove_if_matching(file: &Path, src: &Path, dest: &Path) -> bool {
+    let rel = file.strip_prefix(src).expect("under src");
+    let twin = dest.join(rel);
+    let same = match (hash_file(file), hash_file(&twin)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    same && fs::remove_file(file).is_ok()
+}
+
+/// Removes the (now hopefully empty) `dirs` deepest-first, then `src` itself.
+fn prune_dirs(mut dirs: Vec<PathBuf>, src: &Path) {
     dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     for d in dirs {
         let _ = fs::remove_dir(d);
     }
     let _ = fs::remove_dir(src);
-    remaining
 }
 
 fn hash_file(p: &Path) -> Option<String> {
@@ -1645,6 +1765,65 @@ mod tests {
         assert!(!f.src.exists());
         assert!(f.dest_parent.join("event-2026/a.NEF").is_file());
         no_journal(&f);
+    }
+
+    fn source_file_count(f: &Fixture) -> usize {
+        WalkDir::new(&f.src)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .count()
+    }
+
+    /// #307: a committed row's cleanup is one file per step, and a run dropped part-way (the
+    /// Pounce job cancelled) leaves the journal row open so the next start finishes the rest.
+    #[test]
+    fn resume_steps_a_committed_cleanup_one_file_at_a_time_and_survives_a_drop() {
+        let f = fixture();
+        let mut c = carry(&f, true);
+        loop {
+            assert!(c.step().is_none());
+            if c.committed {
+                break;
+            }
+        }
+        std::mem::forget(c);
+        assert_eq!(source_file_count(&f), 3);
+
+        let mut run = ResumeMoves::new(&*f.cat);
+        assert!(!run.is_empty());
+        assert!(run.step(&*f.cat)); // picks the committed row up
+        assert!(run.step(&*f.cat)); // walks the source tree
+        assert_eq!(source_file_count(&f), 3, "walking deletes nothing");
+        assert!(run.step(&*f.cat)); // first file
+        assert_eq!(source_file_count(&f), 2);
+        assert!(run.step(&*f.cat)); // second file
+        assert_eq!(source_file_count(&f), 1);
+        // Cancelled here: nothing reported, the journal row still open.
+        let partial = run.into_report();
+        assert!(partial.is_empty());
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+
+        // The next start finishes the remaining file and closes the journal.
+        let r = resume_open_moves(&*f.cat);
+        assert_eq!(
+            r,
+            vec![Resumed::CleanedUp {
+                root_id: f.root_id,
+                leftover_count: 0
+            }]
+        );
+        assert!(!f.src.exists());
+        no_journal(&f);
+    }
+
+    #[test]
+    fn resume_has_nothing_to_step_without_an_open_journal_row() {
+        let f = fixture();
+        let mut run = ResumeMoves::new(&*f.cat);
+        assert!(run.is_empty());
+        assert!(!run.step(&*f.cat));
+        assert!(run.into_report().is_empty());
     }
 
     #[test]
