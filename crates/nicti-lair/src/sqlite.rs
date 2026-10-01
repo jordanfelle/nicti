@@ -1454,6 +1454,8 @@ impl CatalogStore for SqliteCatalog {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3, \
+                content_hash = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN content_hash ELSE NULL END, \
                 size_bytes = ?4, mtime_unix = ?5, missing_since = NULL WHERE id = ?6",
             params![
                 new_root_id,
@@ -2707,11 +2709,27 @@ mod tests {
         store
             .commit_root_move(mv, &[(asset, "abc".into())])
             .unwrap();
+        store.finish_root_move(mv).unwrap();
 
         // Same stat: the hash survives a rescan.
         store.insert_asset(root, &mk(10, 5), None).unwrap();
         assert_eq!(store.content_hash(asset).unwrap().as_deref(), Some("abc"));
+        // Relink with the same stat keeps it; a changed stat drops it.
+        store
+            .relink_asset(asset, root, "a.NEF", "a.nef", 10, 5)
+            .unwrap();
+        assert_eq!(store.content_hash(asset).unwrap().as_deref(), Some("abc"));
+        store
+            .relink_asset(asset, root, "a.NEF", "a.nef", 10, 6)
+            .unwrap();
+        assert_eq!(store.content_hash(asset).unwrap(), None);
+
         // Changed file (edited in place): the stored hash is stale, so it is dropped.
+        store.insert_asset(root, &mk(10, 5), None).unwrap();
+        let mv = store.begin_root_move(root, "/archive/e2", 2).unwrap();
+        store
+            .commit_root_move(mv, &[(asset, "def".into())])
+            .unwrap();
         store.insert_asset(root, &mk(11, 5), None).unwrap();
         assert_eq!(store.content_hash(asset).unwrap(), None);
     }
