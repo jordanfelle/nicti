@@ -143,3 +143,22 @@ pub fn load_t0_by_id(
         CODEC,
     ))
 }
+
+/// The RAW's path for `asset_id` (catalog lookups only, no disk access), so a caller can hand the
+/// sidecar read -- which touches a possibly offline archive drive -- to a worker thread.
+pub fn raw_path_for(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+) -> Result<Option<std::path::PathBuf>, CatalogError> {
+    let Some(asset) = store.get_asset(asset_id)? else {
+        return Ok(None);
+    };
+    Ok(store
+        .get_root_path(asset.root_id)?
+        .map(|root| Path::new(&root).join(&asset.rel_path)))
+}
+
+/// Reads the sidecar for `raw` (the disk half of [`load_t0_by_id`]).
+pub fn read_sidecar(raw: &Path) -> Option<Preview> {
+    sidecar::read(raw, CODEC)
+}

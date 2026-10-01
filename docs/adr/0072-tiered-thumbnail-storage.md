@@ -46,6 +46,9 @@ than AVIF at the same size, ~3x JPEG's decode p95, native C dependency).
 7. **Read path** (`tier::load_t0_by_id`, used by the grid, cull and loupe readers): catalog first,
    then the sidecar. A settled archived folder has no catalog blobs by construction, so its reads
    land on the sidecar; a folder mid-transition is served from whichever tier still has the bytes.
+   The UI-thread readers (cull tiles, loupe fallback) only query the catalog; on a miss the sidecar
+   read -- which can block on an offline archive drive -- runs on a Pounce worker
+   (`nicti-pelt/src/t0_fetch.rs`). The grid's thumbnail job already runs on a worker.
    T2 for archived folders isn't cached (ADR-0029: don't populate for an archive drive).
 8. **Scruff only ingests `nef`/`nrw`**, so sidecars aren't picked up as assets today;
    `thumb_sidecar::is_sidecar_name` is the guard for when JPEG ingest lands.

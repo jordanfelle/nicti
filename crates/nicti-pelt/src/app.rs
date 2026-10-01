@@ -193,6 +193,8 @@ pub struct PeltApp {
     loupe_t2_undecodable: Option<i64>,
     /// The loupe photo with no T0 anywhere, and when we last looked (see `TilePreviews::no_t0`).
     loupe_t0_miss: Option<(i64, std::time::Instant)>,
+    /// A sidecar read for the loupe photo in flight on a worker (#72).
+    loupe_t0_fetch: Option<(i64, crate::t0_fetch::FetchSlot)>,
     /// The Library view's virtualized grid (#30). Created lazily on first show, once the catalog
     /// is known to be open.
     grid: Option<GridSession>,
@@ -402,6 +404,7 @@ impl PeltApp {
             lrc_ui: LrcImportUi::default(),
             loupe_t2_undecodable: None,
             loupe_t0_miss: None,
+            loupe_t0_fetch: None,
             grid: None,
             grid_view: grid::ViewState::default(),
             grid_root: None,
@@ -583,11 +586,13 @@ impl PeltApp {
         }
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
         // #72: moving across the archive boundary changes where thumbnails live.
+        // The stored tier (root.archived), not the current setting: the thumbnails are wherever
+        // the last move/recovery left them.
         let src_archived = store
-            .get_root_path(root_id)
+            .list_roots()
             .ok()
-            .flatten()
-            .map(|p| self.archive_drives.is_archive(Path::new(&p)));
+            .and_then(|r| r.into_iter().find(|r| r.id == root_id))
+            .map(|r| r.archived);
         let dest_archived = self.archive_drives.is_archive(&dest);
         let opts = CarryOptions {
             export_sidecars: dest_archived && src_archived != Some(true),
@@ -2466,21 +2471,43 @@ impl PeltApp {
                 }
             }
         }
+        // A sidecar read for this photo finished on a worker.
+        if let Some((id, slot)) = &self.loupe_t0_fetch {
+            let id = *id;
+            let outcome = slot.lock().unwrap().take();
+            if id != asset_id {
+                self.loupe_t0_fetch = None;
+            } else if let Some(bytes) = outcome {
+                self.loupe_t0_fetch = None;
+                match bytes
+                    .and_then(|b| preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &b))
+                {
+                    Some(texture) => self.loupe_preview = Some((asset_id, false, texture)),
+                    None => self.loupe_t0_miss = Some((asset_id, std::time::Instant::now())),
+                }
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
         let recently_missed = matches!(
             self.loupe_t0_miss,
             Some((id, t)) if id == asset_id && t.elapsed() < std::time::Duration::from_secs(5)
         );
-        if self.loupe_preview.is_none() && !recently_missed {
-            let loaded = nicti_lair::tier::load_t0_by_id(store, asset_id);
-            if !matches!(loaded, Ok(Some(_))) {
-                self.loupe_t0_miss = Some((asset_id, std::time::Instant::now()));
-            }
-            if let Ok(Some(preview)) = loaded {
-                if let Some(texture) =
-                    preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &preview.bytes)
-                {
-                    self.loupe_preview = Some((asset_id, false, texture));
+        if self.loupe_preview.is_none() && !recently_missed && self.loupe_t0_fetch.is_none() {
+            // Catalog only on the UI thread; an archived folder's sidecar is read on a worker.
+            match store.get_preview(asset_id, nicti_lair::PreviewTier::T0) {
+                Ok(Some(preview)) => {
+                    if let Some(texture) =
+                        preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &preview.bytes)
+                    {
+                        self.loupe_preview = Some((asset_id, false, texture));
+                    }
                 }
+                _ => match crate::t0_fetch::request(&self.pounce, store, asset_id) {
+                    Some(slot) => self.loupe_t0_fetch = Some((asset_id, slot)),
+                    None => self.loupe_t0_miss = Some((asset_id, std::time::Instant::now())),
+                },
             }
         }
 

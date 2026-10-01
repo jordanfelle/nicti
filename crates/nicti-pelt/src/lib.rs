@@ -30,6 +30,7 @@ mod mask_edit;
 mod mask_panel;
 mod mask_tool;
 mod render;
+mod t0_fetch;
 mod t2;
 #[cfg(test)]
 mod test_gpu;

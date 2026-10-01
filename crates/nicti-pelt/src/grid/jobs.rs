@@ -187,16 +187,18 @@ impl ChunkedJob for ThumbBatchJob {
                 let mut by_id: std::collections::HashMap<i64, _> = previews.into_iter().collect();
                 for &id in chunk {
                     // Not in the catalog: an archived folder's thumbnail lives in a sidecar (#72).
-                    let preview = by_id.remove(&id).or_else(|| {
-                        nicti_lair::tier::load_t0_by_id(&*self.store, id)
-                            .ok()
-                            .flatten()
-                    });
+                    // A catalog error here is transient (a momentary lock), not "no preview".
+                    let preview = match by_id.remove(&id) {
+                        Some(preview) => Ok(Some(preview)),
+                        None => nicti_lair::tier::load_t0_by_id(&*self.store, id)
+                            .map_err(|e| ThumbError::Transient(e.to_string())),
+                    };
                     let outcome = match preview {
-                        Some(preview) => {
+                        Ok(Some(preview)) => {
                             make_thumbnail(&preview.bytes).map_err(ThumbError::Permanent)
                         }
-                        None => Err(ThumbError::Permanent("no stored preview".to_string())),
+                        Ok(None) => Err(ThumbError::Permanent("no stored preview".to_string())),
+                        Err(e) => Err(e),
                     };
                     results.push((id, outcome));
                 }
