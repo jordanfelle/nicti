@@ -15,7 +15,7 @@ use nicti_cornea::{LibRawDecoder, RawDecoder};
 use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
-use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, SyncJob};
+use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, ResumeMovesJob, SyncJob};
 use nicti_lair::shred;
 use nicti_lair::{CatalogError, CatalogStore, Sort, SortDirection, SortField, SqliteCatalog};
 use nicti_pounce::hackles;
@@ -149,6 +149,8 @@ pub struct PeltApp {
     /// The in-flight `MoveJob`'s result slot, folded into `last_move_summary` once it resolves.
     pending_move_result: Option<ReportSlot<CarryOutcome>>,
     last_move_summary: Option<String>,
+    /// The startup `ResumeMovesJob`'s result slot (#307), folded in by `poll_recovery`.
+    pending_recovery_result: Option<ReportSlot<Vec<Resumed>>>,
     /// The real RAW decoder every `LoupeSession` (#31) this app creates shares -- constructed
     /// once here rather than per-session, since `LibRawDecoder` is a stateless unit struct with
     /// no per-session setup.
@@ -272,26 +274,10 @@ impl PeltApp {
         let export = ExportUi::new(&catalog_path);
         let knead = KneadUi::new(&catalog_path);
 
-        // A crash mid-move (#26) leaves a `root_move` journal row: finish or roll it back before
-        // anything else touches that root.
+        // A crash mid-move (#26) leaves a `root_move` journal row; it's finished or rolled back
+        // by a Pounce job submitted once Pounce exists below (#307), not here, so a big
+        // interrupted move's cleanup can't stall startup.
         let archive_drives = crate::archive_drives::ArchiveDrives::load(&catalog_path);
-        let last_move_summary = match &catalog {
-            CatalogOpenState::Open(store) => {
-                let resumed = carry::resume_open_moves(&**store);
-                // #72: a move that finished its commit during recovery may have lost the
-                // archived flag / thumbnail settle (those ride on the live job). Re-derive both
-                // from the archive-drive setting for just the roots recovery touched.
-                for r in &resumed {
-                    if let carry::Resumed::Committed { root_id }
-                    | carry::Resumed::CleanedUp { root_id, .. } = r
-                    {
-                        reconcile_tier(&**store, *root_id, &archive_drives);
-                    }
-                }
-                summarize_resumed(&resumed)
-            }
-            CatalogOpenState::Error(_) => None,
-        };
 
         // A crash mid-delete (#32) leaves `delete_item` journal rows: settle them (finish the ones
         // whose files are in the Recycle Bin, keep the ones whose files are still on disk) before
@@ -347,6 +333,25 @@ impl PeltApp {
             (cpu_threads / 2).max(1),
             move || egui_ctx.request_repaint(),
         );
+        // #307: recovery runs under `JobKind::Move`, so every "a move is running" guard (import,
+        // sync, move, delete, loupe open) holds until it's done; `poll_recovery` folds in the
+        // result.
+        let (pending_recovery_result, last_move_summary) = match &catalog {
+            CatalogOpenState::Open(store) => {
+                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                match ResumeMovesJob::new(dyn_store) {
+                    Some((job, result)) => {
+                        pounce.submit(Box::new(job));
+                        (
+                            Some(result),
+                            Some("Recovering an interrupted folder move\u{2026}".to_string()),
+                        )
+                    }
+                    None => (None, None),
+                }
+            }
+            CatalogOpenState::Error(_) => (None, None),
+        };
         let telemetry_ctx = cc.egui_ctx.clone();
         let telemetry = TelemetrySampler::spawn(
             default_vram_source(),
@@ -385,6 +390,7 @@ impl PeltApp {
             folder_cache: folder_panel::Cache::default(),
             archive_drives,
             pending_move_result: None,
+            pending_recovery_result,
             last_move_summary,
             decoder: Arc::new(LibRawDecoder),
             loupe: None,
@@ -509,6 +515,29 @@ impl PeltApp {
                 self.pending_move_result = None;
             }
         }
+    }
+
+    /// Folds the startup `ResumeMovesJob`'s report (#307) into `last_move_summary`, and re-derives
+    /// the archived flag / thumbnail settle for the roots recovery finished committing (#72): that
+    /// work rides on a live `MoveJob`, which a crashed move no longer has.
+    fn poll_recovery(&mut self) {
+        let Some(slot) = self.pending_recovery_result.clone() else {
+            return;
+        };
+        let Some(resumed) = slot.lock().unwrap().take() else {
+            return;
+        };
+        self.pending_recovery_result = None;
+        if let CatalogOpenState::Open(store) = &self.catalog {
+            for r in &resumed {
+                if let carry::Resumed::Committed { root_id }
+                | carry::Resumed::CleanedUp { root_id, .. } = r
+                {
+                    reconcile_tier(&**store, *root_id, &self.archive_drives);
+                }
+            }
+        }
+        self.last_move_summary = summarize_resumed(&resumed);
     }
 
     /// Keeps the grid's snapshot in step with catalog-changing jobs (#30), whichever view is
@@ -1116,6 +1145,7 @@ impl eframe::App for PeltApp {
         self.color.sync(frame);
         self.poll_backup();
         self.poll_move();
+        self.poll_recovery();
         self.poll_cull();
         self.export.poll();
         if self.export.is_running() {

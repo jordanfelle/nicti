@@ -67,7 +67,11 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   `root` row (assets/edits/keywords follow, ids unchanged) and records `asset.content_hash`;
   source deleted only after commit. `fs::rename` fast path on the same volume. `root_move` journal
   + `carry::resume_open_moves` at startup for crash recovery; cancel = drop discards the
-  destination. Runs as `pounce_jobs::MoveJob` (`JobKind::Move`). Not a backup copy, no
+  destination. Runs as `pounce_jobs::MoveJob` (`JobKind::Move`). Startup recovery (#307) is
+  `carry::ResumeMoves` (one journal row / one file per step) run as `pounce_jobs::ResumeMovesJob`
+  under `JobKind::Move`, so every existing "a move is running" guard (import/sync/move/delete/loupe)
+  holds until it finishes; `PeltApp::poll_recovery` folds in the report. `resume_open_moves` is the
+  same stepper run to completion (tests). Not a backup copy, no
   archive-drive behavior (#72). Drag-a-folder-onto-a-drive UI: #303, `nicti-pelt`'s `folder_panel.rs`.
 
 - **Folder bit-rot check (#304, landed)**: `verify.rs` `Verify` + `pounce_jobs::VerifyJob`

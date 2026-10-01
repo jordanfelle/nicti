@@ -215,7 +215,11 @@ being renamed into place. One catalog transaction re-points the `root` row and r
 cataloged asset's full-file hash in the new `asset.content_hash`; only then is the source deleted
 (skipping files that changed since being copied). A `root_move` journal (schema v6) plus
 `resume_open_moves` at startup recovers a crash at any point; cancelling a job drops it, and
-`Carry`'s `Drop` discards the half-built destination. `fs::rename` is tried first for same-volume
+`Carry`'s `Drop` discards the half-built destination. Startup recovery runs as a Pounce job
+(#307): `carry::ResumeMoves` does one journal row, or one file of a `committed` row's hash-and-delete
+cleanup, per step (`pounce_jobs::ResumeMovesJob`, reporting as `JobKind::Move` so the existing
+import/sync/move/delete/loupe guards cover it); a cancelled run leaves unsettled rows journaled for
+the next start. `fs::rename` is tried first for same-volume
 moves. Also: `SqliteCatalog::quick_check` now reports a corrupt-database error from the pragma as
 a problem string rather than a generic `Err`.
 

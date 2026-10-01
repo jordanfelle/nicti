@@ -120,3 +120,80 @@ fn sync_job_driven_through_pounce_flags_a_deleted_file_as_missing() {
     assert!(!report.root_unreachable);
     assert_eq!(report.newly_missing, 1);
 }
+
+/// #307: a `committed` journal row's source cleanup (the part that BLAKE3-hashes the whole tree)
+/// runs as a `ResumeMovesJob` on Pounce's CPU lane, and ends the same place the synchronous
+/// `resume_open_moves` does.
+#[test]
+fn resume_moves_job_driven_through_pounce_finishes_a_committed_cleanup() {
+    use nicti_lair::carry::{Carry, CarryOptions, Resumed};
+    use nicti_lair::pounce_jobs::ResumeMovesJob;
+
+    let concrete = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let store: Arc<dyn CatalogStore + Send + Sync> = concrete.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("ssd").join("event");
+    let dest_parent = tmp.path().join("archive");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dest_parent).unwrap();
+    write_fake_nef(&src, "a.nef");
+    write_fake_nef(&src, "b.nef");
+
+    let volume_id = concrete
+        .upsert_volume("test-volume", None, None, 0)
+        .unwrap();
+    let root_id = concrete
+        .ensure_root(volume_id, &src.to_string_lossy())
+        .unwrap();
+
+    // Nothing journaled yet: nothing to submit.
+    assert!(ResumeMovesJob::new(store.clone()).is_none());
+
+    // Crash right after the catalog commit, before the source cleanup.
+    let mut carry = Carry::new(
+        store.clone(),
+        root_id,
+        &dest_parent,
+        CarryOptions {
+            force_copy: true,
+            ..Default::default()
+        },
+        0,
+    );
+    while !carry.is_committed() {
+        assert!(carry.step().is_none());
+    }
+    std::mem::forget(carry);
+    assert!(src.join("a.nef").is_file());
+
+    let (job, result) = ResumeMovesJob::new(store).expect("an open journal row");
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let id = pounce.submit(Box::new(job));
+    assert!(
+        wait_until(
+            || pounce
+                .snapshot()
+                .into_iter()
+                .any(|s| s.id == id && s.state == JobState::Done),
+            Duration::from_secs(5)
+        ),
+        "ResumeMovesJob never reached Done"
+    );
+    pounce.shutdown();
+
+    let report = result
+        .lock()
+        .unwrap()
+        .take()
+        .expect("a Done job leaves its report");
+    assert_eq!(
+        report,
+        vec![Resumed::CleanedUp {
+            root_id,
+            leftover_count: 0
+        }]
+    );
+    assert!(!src.exists());
+    assert!(dest_parent.join("event").join("b.nef").is_file());
+    assert!(concrete.open_root_moves().unwrap().is_empty());
+}
