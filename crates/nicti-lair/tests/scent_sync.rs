@@ -587,3 +587,22 @@ fn a_sidecar_with_no_markers_is_filled_from_a_rated_catalog_not_flagged() {
     assert_eq!(lrc_fields::read(&text).unwrap().rating, Some(4));
     assert!(f.catalog.sidecar_review_assets().unwrap().is_empty());
 }
+
+#[test]
+fn a_dirty_catalog_is_pushed_to_an_unchanged_sidecar_on_rescan() {
+    let f = fixture();
+    set(&f, Some(2), None);
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    // Auto-write off (or a failed write): the catalog moves on, the file does not, and the
+    // catalog is recorded as newer than the file. Nothing about the sidecar changes afterwards.
+    set(&f, Some(5), None);
+    mark_catalog_dirty(&f.catalog, f.asset_id, &f.raw, now_ms() + 60_000).unwrap();
+
+    assert_eq!(
+        import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::WroteSidecar,
+        "the stat/hash early returns must not hide a dirty catalog"
+    );
+    let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
+    assert_eq!(lrc_fields::read(&text).unwrap().rating, Some(5));
+}

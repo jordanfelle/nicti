@@ -65,6 +65,9 @@ pub struct Patch {
 }
 
 const NICTI_NS: &str = "https://nicti.dev/xmp/1.0/";
+const XMP_NS: &str = "http://ns.adobe.com/xap/1.0/";
+const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
+const LR_NS: &str = "http://ns.adobe.com/lightroom/1.0/";
 
 fn local_name(qname: QName) -> Vec<u8> {
     match qname.as_ref().iter().position(|&b| b == b':') {
@@ -171,7 +174,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         };
         let mut new_tag =
             BytesStart::new(String::from_utf8_lossy(orig.name().as_ref()).into_owned());
-        let mut saw_nicti_ns = false;
+        let (mut saw_nicti_ns, mut saw_xmp_ns, mut saw_dc_ns, mut saw_lr_ns) =
+            (false, false, false, false);
         for attr in orig.attributes() {
             let attr = attr?;
             let key = attr.key;
@@ -186,6 +190,12 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             }
             if key.as_ref() == b"nicti:pick" && patch.nicti_pick.is_some() {
                 continue;
+            }
+            match key.as_ref() {
+                b"xmlns:xmp" => saw_xmp_ns = true,
+                b"xmlns:dc" => saw_dc_ns = true,
+                b"xmlns:lr" => saw_lr_ns = true,
+                _ => {}
             }
             if key.as_ref() == b"xmlns:nicti" {
                 saw_nicti_ns = true;
@@ -209,6 +219,25 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 new_tag.push_attribute(("xmlns:nicti", NICTI_NS));
             }
             new_tag.push_attribute(("nicti:pick", "1"));
+        }
+        // Every prefix this write emits must be bound. A rating-only packet (the shape LRC and the
+        // in-repo SAMPLE use) may declare `xmp` but not `dc`/`lr`; redeclaring the standard URI on
+        // the Description is harmless if an ancestor already binds it.
+        let writes_scalar =
+            matches!(&patch.rating, Some(Some(_))) || matches!(&patch.label, Some(Some(_)));
+        if writes_scalar && !saw_xmp_ns {
+            new_tag.push_attribute(("xmlns:xmp", XMP_NS));
+        }
+        if patch.keywords.as_deref().is_some_and(|k| !k.is_empty()) && !saw_dc_ns {
+            new_tag.push_attribute(("xmlns:dc", DC_NS));
+        }
+        if patch
+            .hierarchical_keywords
+            .as_deref()
+            .is_some_and(|k| !k.is_empty())
+            && !saw_lr_ns
+        {
+            new_tag.push_attribute(("xmlns:lr", LR_NS));
         }
         (was_start, new_tag)
     };
@@ -596,5 +625,38 @@ mod tests {
         let meta = lrc_fields::read(&out).unwrap();
         assert_eq!(meta.label.as_deref(), Some("Tom & Jerry <\"x\">"));
         assert_eq!(meta.keywords, vec!["a&b", "it's"]);
+    }
+
+    #[test]
+    fn keyword_blocks_and_scalars_never_use_an_unbound_prefix() {
+        // Declares neither xmp, dc nor lr anywhere.
+        let bare = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>"#;
+        let out = apply(
+            bare,
+            &Patch {
+                rating: Some(Some(3)),
+                keywords: Some(vec!["fox".into()]),
+                hierarchical_keywords: Some(vec![vec!["Events".into(), "Con".into()]]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for decl in ["xmlns:xmp=", "xmlns:dc=", "xmlns:lr="] {
+            assert_eq!(out.matches(decl).count(), 1, "{decl} in {out}");
+        }
+
+        // A packet that already declares them is not given a second copy.
+        let again = apply(
+            &out,
+            &Patch {
+                rating: Some(Some(4)),
+                keywords: Some(vec!["fox".into(), "cat".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for decl in ["xmlns:xmp=", "xmlns:dc=", "xmlns:lr="] {
+            assert_eq!(again.matches(decl).count(), 1, "{decl} in {again}");
+        }
     }
 }

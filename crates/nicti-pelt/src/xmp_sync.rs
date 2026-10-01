@@ -59,13 +59,15 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Absolute path of an asset's RAW, or `None` when the asset/root is gone or the file is missing
-/// (an offline volume must never get a stray sidecar created in a non-existent directory).
-fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<PathBuf> {
+/// An asset's RAW path as the catalog resolves it, and whether the file is actually there. The
+/// path is still meaningful when it isn't (an offline volume): dirtiness is recorded against it
+/// without ever creating a sidecar in a directory that may not exist.
+fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<(PathBuf, bool)> {
     let asset = store.get_asset(asset_id).ok()??;
     let root = store.get_root_path(asset.root_id).ok()??;
     let raw = Path::new(&root).join(&asset.rel_path);
-    raw.exists().then_some(raw)
+    let exists = raw.exists();
+    Some((raw, exists))
 }
 
 #[derive(Default)]
@@ -99,10 +101,12 @@ impl XmpWriter {
                         ids.extend(more);
                     }
                     for id in ids {
-                        let Some(raw) = raw_path_for(&*store, id) else {
+                        let Some((raw, exists)) = raw_path_for(&*store, id) else {
                             continue;
                         };
-                        let result = if flag.load(Ordering::Relaxed) {
+                        // An offline RAW can't get a sidecar, but the edit must still be recorded
+                        // as newer so a later rescan doesn't let a changed sidecar win over it.
+                        let result = if flag.load(Ordering::Relaxed) && exists {
                             scent_sync::write_sidecar(&*store, id, &raw, now_ms()).map(|_| ())
                         } else {
                             scent_sync::mark_catalog_dirty(&*store, id, &raw, now_ms())
@@ -274,8 +278,8 @@ pub fn show(
         ));
     }
     if let Some((id, use_catalog)) = resolve {
-        state.message = match raw_path_for(&**store, id) {
-            Some(raw) => scent_sync::resolve_review(&**store, id, &raw, use_catalog, now_ms())
+        state.message = match raw_path_for(&**store, id).filter(|(_, exists)| *exists) {
+            Some((raw, _)) => scent_sync::resolve_review(&**store, id, &raw, use_catalog, now_ms())
                 .map(|out| match out {
                     SyncOutcome::NeedsReview => Some("Still in conflict.".to_string()),
                     _ => None,
@@ -396,6 +400,23 @@ mod tests {
         let ok = XmpMeta::wrapping(Arc::new(CatalogMeta(store.clone())), meta.writer.clone());
         ok.set_meta(&[(id, rated(2))]).unwrap();
         assert!(eventually(|| store.sidecar_state(id).unwrap().is_some()));
+        assert!(!raw.with_extension("xmp").exists());
+    }
+
+    #[test]
+    fn an_offline_raw_still_records_the_catalog_as_newer_without_creating_a_sidecar() {
+        let (_dir, store, id, raw) = fixture();
+        std::fs::remove_file(&raw).unwrap();
+        let meta = XmpMeta::new(store.clone(), XmpWriter::spawn(store.clone(), true));
+        meta.set_meta(&[(id, rated(3))]).unwrap();
+
+        assert!(
+            eventually(|| store
+                .sidecar_state(id)
+                .unwrap()
+                .is_some_and(|s| s.catalog_dirty_since_ms.is_some())),
+            "an offline photo's edit was never recorded as dirty"
+        );
         assert!(!raw.with_extension("xmp").exists());
     }
 

@@ -350,5 +350,3 @@ confirms or amends them; #60 builds against them as written.
   - `keyword_name_paths` reads the whole keyword table per tagged asset: O(tagged assets x
     keywords) per rescan. Only the first `rdf:Description` is patched while the reader merges all
     of them. The write-back only covers culling markers; there is no keyword-tagging UI yet.
-  - A sidecar that uses `lr:`/`dc:` elements without declaring the namespace would get an unbound
-    prefix if nicti adds keywords to it (LRC always declares them).

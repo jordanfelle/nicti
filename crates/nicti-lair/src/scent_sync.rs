@@ -320,7 +320,12 @@ pub fn import_sidecar(
     let prior = store.sidecar_state(asset_id)?;
     // Cheap precheck for rescans of a large library: a stat, not a read + hash, when the sidecar's
     // mtime is exactly what nicti last recorded and nothing is pending.
-    if let Some(p) = &prior {
+    // A dirty catalog (auto-write off, or a write that failed) must never take either early return:
+    // the newer-wins comparison below is what pushes its markers to the sidecar.
+    if let Some(p) = prior
+        .as_ref()
+        .filter(|p| p.catalog_dirty_since_ms.is_none())
+    {
         if !p.needs_review {
             let on_disk = fs::metadata(&path)
                 .and_then(|m| m.modified())
@@ -335,7 +340,10 @@ pub fn import_sidecar(
     let Some(loaded) = load(&path)? else {
         return Ok(SyncOutcome::NoSidecar);
     };
-    if let Some(p) = &prior {
+    if let Some(p) = prior
+        .as_ref()
+        .filter(|p| p.catalog_dirty_since_ms.is_none())
+    {
         // Unchanged since nicti last looked, and nothing pending: nothing to do.
         if hash_is(&p.last_seen_hash, &loaded.hash) && !p.needs_review {
             return Ok(SyncOutcome::InSync);
