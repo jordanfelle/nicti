@@ -70,6 +70,12 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   destination. Runs as `pounce_jobs::MoveJob` (`JobKind::Move`). Not a backup copy, no
   archive-drive behavior (#72). Drag-a-folder-onto-a-drive UI: #303, `nicti-pelt`'s `folder_panel.rs`.
 
+- **Folder bit-rot check (#304, landed)**: `verify.rs` `Verify` + `pounce_jobs::VerifyJob`
+  (`JobKind::Verify`, CPU lane). Re-reads every asset under a root that has `asset.content_hash`
+  (16 MiB slice per step, cancellable) and reports mismatched / missing / unreadable; assets with
+  no stored hash are only counted (`unhashed`). Read-only. `CatalogStore::content_hashes_by_root`.
+  No UI trigger and no `content_hash` backfill yet -- follow-ups.
+
 - **Batch delete (#32, landed)**: `docs/adr/0032`, "Shred". `remove_assets` (chunked, one
   transaction, also clears the `delete_item` journal row) + `get_meta`/`set_meta` (batch marker
   read, and per-photo *mixed*-value restore for undo). Journal `delete_item` (schema v8) is written

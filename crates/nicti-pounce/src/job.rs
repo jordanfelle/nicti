@@ -54,6 +54,8 @@ pub enum JobKind {
     /// A batch delete of assets, optionally moving their files to the Recycle Bin (#32) --
     /// CPU/disk-bound, CPU lane.
     Delete,
+    /// A re-hash of a folder against its stored content hashes (#304) -- disk-bound, CPU lane.
+    Verify,
     /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
     /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
     Decode,

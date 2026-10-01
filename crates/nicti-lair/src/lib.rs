@@ -30,6 +30,7 @@ pub mod pounce_jobs;
 pub mod scent_sync;
 pub mod scruff;
 pub mod shred;
+pub mod verify;
 
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
@@ -335,6 +336,11 @@ pub trait CatalogStore: Module {
     /// to find rows whose file it needs to check for, since ingest only ever walks the disk and
     /// has no way to notice a path that used to be there and now isn't.
     fn list_assets_by_root(&self, root_id: i64) -> Result<Vec<Asset>, CatalogError>;
+
+    /// `(asset_id, blake3_hex)` for every asset under `root_id` that has a recorded
+    /// `content_hash` (#26), in `id` order. Assets that were never copy-moved have none and are
+    /// absent here -- the verify pass (#304) counts them as unhashed.
+    fn content_hashes_by_root(&self, root_id: i64) -> Result<Vec<(i64, String)>, CatalogError>;
 
     /// Sets or clears an asset's `missing_since` (#24). `Some(now_unix)` flags it as missing as of
     /// that time; `None` marks it present again (a file that reappeared at its cataloged path).

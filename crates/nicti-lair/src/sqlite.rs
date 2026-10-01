@@ -1595,6 +1595,18 @@ impl CatalogStore for SqliteCatalog {
         Ok(rows)
     }
 
+    fn content_hashes_by_root(&self, root_id: i64) -> Result<Vec<(i64, String)>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, content_hash FROM asset \
+             WHERE root_id = ?1 AND content_hash IS NOT NULL ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map([root_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn set_asset_missing(
         &self,
         asset_id: i64,
