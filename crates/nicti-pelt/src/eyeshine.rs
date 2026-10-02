@@ -308,7 +308,9 @@ impl Settle {
 impl Drop for Settle {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
-            let outcome = if self.panicked.load(Ordering::SeqCst) {
+            // `thread::panicking()` covers a panic that is still unwinding through `begin` (which
+            // owns the `Settle`): the flag is only set after `catch_unwind` returns, too late.
+            let outcome = if self.panicked.load(Ordering::SeqCst) || std::thread::panicking() {
                 T2Outcome::Failed("preview render panicked".into())
             } else {
                 T2Outcome::Retry("cancelled".into())
@@ -373,10 +375,15 @@ fn spec(lane: Lane, task: &Task) -> JobSpec {
         priority: Priority::Background,
         kind: JobKind::Preview,
         lane,
+        // The GPU stage deliberately has no cursor index: Pounce re-queues a yielded job ahead of
+        // anything with a larger key, so a render *waiting* for the claim at a nearer index would
+        // be picked forever and starve the claim holder at a farther one (the claim never
+        // released, the worker spinning). With no index every render sorts equal and equal keys
+        // are FIFO, so the holder and the waiters take turns. The CPU decode keeps the index.
         // Deliberately 0, like export's render job: a 45 MP frame's textures exceed the
         // placeholder VRAM budget and Pounce drops a job over the *total* budget.
         vram_bytes: 0,
-        image_index: Some(task.req.image_index),
+        image_index: (lane == Lane::Cpu).then_some(task.req.image_index),
     }
 }
 
@@ -870,8 +877,16 @@ impl EyeshineService {
             let identity = asset_cache_key(&asset);
             // A failed read is *not* "unedited": caching an empty document would show (and
             // render) the photo as unedited until the next invalidation.
-            let edit = store.get_master_edit(asset_id).ok()?.unwrap_or_default();
-            let hash = rendered_hash(&identity, &edit);
+            let (edit, hash) = match store.get_master_edit(asset_id) {
+                Ok(doc) => {
+                    let edit = doc.unwrap_or_default();
+                    let hash = rendered_hash(&identity, &edit);
+                    (edit, hash)
+                }
+                // Cached for the TTL with no hash: nothing is rendered or badged for a document
+                // that can't be read, and the catalog isn't re-queried every frame.
+                Err(_) => (EditDocument::default(), None),
+            };
             self.resolved.insert(
                 asset_id,
                 Resolved {
@@ -1629,5 +1644,52 @@ mod tests {
         t.svc.resolved.get_mut(&t.id).unwrap().at =
             std::time::Instant::now() - Duration::from_secs(2);
         assert_ne!(t.svc.resolve(&t.store, t.id).unwrap().hash, first);
+    }
+
+    #[test]
+    fn a_settle_dropped_while_panicking_resolves_failed_not_retry() {
+        let slot: ReportSlot<T2Outcome> = Arc::new(Mutex::new(None));
+        let settle = Settle {
+            slot: Some(slot.clone()),
+            panicked: Arc::new(AtomicBool::new(false)),
+        };
+        let _ = catch_unwind(AssertUnwindSafe(move || {
+            let _owned = settle;
+            panic!("boom in begin");
+        }));
+        assert!(matches!(
+            slot.lock().unwrap().take(),
+            Some(T2Outcome::Failed(_))
+        ));
+        // A plain drop is still a quiet retry.
+        let slot: ReportSlot<T2Outcome> = Arc::new(Mutex::new(None));
+        drop(Settle {
+            slot: Some(slot.clone()),
+            panicked: Arc::new(AtomicBool::new(false)),
+        });
+        assert!(matches!(
+            slot.lock().unwrap().take(),
+            Some(T2Outcome::Retry(_))
+        ));
+    }
+
+    #[test]
+    fn the_gpu_stage_has_no_cursor_index_so_waiters_cannot_starve_the_holder() {
+        let Some(fx) = fx() else { return };
+        let task = Task {
+            req: Request {
+                asset_id: 1,
+                identity: blake3::hash(b"x"),
+                hash: "h".into(),
+                path: PathBuf::from("x"),
+                edit: EditDocument::default(),
+                image_index: 7,
+            },
+            env: fx.env.clone(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            panicked: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(spec(Lane::Gpu, &task).image_index, None);
+        assert_eq!(spec(Lane::Cpu, &task).image_index, Some(7));
     }
 }

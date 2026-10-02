@@ -35,7 +35,8 @@ Nothing rendered an edited photo to a screen-size image or cached one, and the L
 4. **`EyeshineService`** keeps at most one render per photo in flight (a newer edit sets a
    cancel flag every later stage checks and cancels the queued first stage; the encode step
    re-checks it under the Larder lock so a superseded render can't overwrite the newer one) and
-   only one photo renders on the GPU at a time. A render that returns `Retry` (unreachable file,
+   only one photo renders on the GPU at a time (a claim; the GPU stage carries no cursor index so
+   waiters and the holder share the lane FIFO instead of the nearer waiter starving the holder). A render that returns `Retry` (unreachable file,
    busy Larder) or `Failed` (a decode error, a panic, a full disk) backs off (5 s / 60 s) per
    `(asset, hash)` rather than being retried every frame or never. A photo's edit document is
    re-read after a 1 s TTL, so edits written by paste/sync, undo or an LRC import are picked up
