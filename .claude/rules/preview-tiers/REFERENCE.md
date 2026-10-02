@@ -45,6 +45,15 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   (unmounted archive drive) / busy Larder = quiet `Retry`; unfixable ones `Failed` once per identity. Compaction is a
   Pounce `CompactJob` (`open_larder` sets `set_auto_compact(false)`; `compaction_due`), not inline in `put`.
   UI reads use `try_lock` (busy = miss). `app.rs` upgrades T0 → T2 as the pre-decode fallback.
+- **Rendered screen tier (#145, built)** — `docs/adr/0145`: `LarderTier::Rendered` (`"r2"`) beside the camera T2
+  (primary key is `(asset_id, tier)`, so both coexist); `Larder::get_latest` = stale-while-revalidate read
+  (hash returned, entry kept), `stored_hash` = index-only check. `nicti-pelt/src/eyeshine.rs`: `rendered_hash`
+  (`:partial` suffix for masks/AI removals), `choose_preview`/`Badge` (pure display rule), 3-job chain (decode CPU →
+  tiled render GPU → encode CPU; render shared with export via `export/render_core.rs`), `EyeshineService`
+  (dedupe/supersede). Settings `preview_settings.rs` (`<catalog>.previews.json`: Off/Edited/All + loupe/grid).
+  Loupe fallback swaps the render in, never downgrades; grid only flags edited photos (`ThumbImage.edited`,
+  `cull::badges::paint_stale`); survey/compare unchanged (ADR-0032). Gotcha: `Larder::get` with a *different* hash
+  deletes the entry -- use `get_latest`/`stored_hash` when comparing hashes.
 
 ## Package contents
 

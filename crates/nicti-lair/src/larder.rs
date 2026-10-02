@@ -32,12 +32,17 @@ use crate::CatalogError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LarderTier {
     T2,
+    /// A screen-size render of the photo *with its develop edits* (#145). Kept beside the camera
+    /// `T2` (the primary key is `(asset_id, tier)`) so a stale camera preview survives until the
+    /// render lands.
+    Rendered,
 }
 
 impl LarderTier {
     pub fn as_str(self) -> &'static str {
         match self {
             LarderTier::T2 => "t2",
+            LarderTier::Rendered => "r2",
         }
     }
 }
@@ -386,6 +391,61 @@ impl Larder {
         Ok(Some(buf))
     }
 
+    /// Returns whatever payload is stored for `(asset_id, tier)` together with the `render_hash` it
+    /// was stored under, **without** dropping it when that hash is out of date -- the
+    /// stale-while-revalidate read (#145): the caller compares the hash itself and may still show
+    /// an older render while a new one is made. An unreadable or checksum-failing entry is dropped
+    /// and reported as a miss, as in [`Larder::get`]. Marks the entry most-recently-used.
+    pub fn get_latest(
+        &mut self,
+        asset_id: i64,
+        tier: LarderTier,
+    ) -> Result<Option<(String, Vec<u8>)>, CatalogError> {
+        let tier = tier.as_str();
+        let row: Option<(String, i64, i64, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT render_hash, offset, len, checksum FROM entry
+                 WHERE asset_id = ?1 AND tier = ?2",
+                params![asset_id, tier],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((render_hash, offset, len, checksum)) = row else {
+            return Ok(None);
+        };
+        let mut buf = vec![0u8; len as usize];
+        let intact = read_exact_at(&self.pack, &mut buf, offset as u64).is_ok()
+            && blake3::hash(&buf).as_bytes().as_slice() == checksum.as_slice();
+        if !intact {
+            self.remove_entry(asset_id, tier)?;
+            return Ok(None);
+        }
+        let seq = self.bump_seq()?;
+        self.conn.execute(
+            "UPDATE entry SET seq = ?3 WHERE asset_id = ?1 AND tier = ?2",
+            params![asset_id, tier, seq],
+        )?;
+        Ok(Some((render_hash, buf)))
+    }
+
+    /// The `render_hash` stored for `(asset_id, tier)`, if any -- a cheap index-only lookup (no
+    /// payload read, no recency bump) for "is a current render already cached?" checks.
+    pub fn stored_hash(
+        &self,
+        asset_id: i64,
+        tier: LarderTier,
+    ) -> Result<Option<String>, CatalogError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT render_hash FROM entry WHERE asset_id = ?1 AND tier = ?2",
+                params![asset_id, tier.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn contains(&self, key: LarderKey<'_>) -> Result<bool, CatalogError> {
         let stored: Option<String> = self
             .conn
@@ -679,6 +739,75 @@ mod tests {
         assert!(!l.contains(newer).unwrap());
         assert_eq!(l.get(newer).unwrap(), None);
         assert_eq!(l.stats().unwrap().entry_count, 0);
+    }
+
+    fn rendered(asset_id: i64, hash: &'static str) -> LarderKey<'static> {
+        LarderKey {
+            asset_id,
+            tier: LarderTier::Rendered,
+            render_hash: hash,
+        }
+    }
+
+    #[test]
+    fn a_rendered_entry_and_the_camera_t2_coexist_for_one_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
+        l.put(key(1), b"camera").unwrap();
+        l.put(rendered(1, "r:a"), b"edited").unwrap();
+        assert_eq!(l.get(key(1)).unwrap().as_deref(), Some(&b"camera"[..]));
+        assert_eq!(
+            l.get(rendered(1, "r:a")).unwrap().as_deref(),
+            Some(&b"edited"[..])
+        );
+        // Asking for a *newer* render drops only the rendered entry, never the camera one.
+        assert_eq!(l.get(rendered(1, "r:b")).unwrap(), None);
+        assert_eq!(l.get(key(1)).unwrap().as_deref(), Some(&b"camera"[..]));
+    }
+
+    #[test]
+    fn get_latest_returns_a_stale_entry_without_dropping_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
+        l.put(rendered(1, "r:old"), b"old").unwrap();
+        let (hash, bytes) = l.get_latest(1, LarderTier::Rendered).unwrap().unwrap();
+        assert_eq!((hash.as_str(), bytes.as_slice()), ("r:old", &b"old"[..]));
+        // Still there afterwards, and replaceable by the newer render.
+        assert_eq!(
+            l.stored_hash(1, LarderTier::Rendered).unwrap().as_deref(),
+            Some("r:old")
+        );
+        l.put(rendered(1, "r:new"), b"new").unwrap();
+        let (hash, _) = l.get_latest(1, LarderTier::Rendered).unwrap().unwrap();
+        assert_eq!(hash, "r:new");
+        assert_eq!(l.stats().unwrap().entry_count, 1);
+        assert_eq!(l.get_latest(2, LarderTier::Rendered).unwrap(), None);
+    }
+
+    #[test]
+    fn get_latest_drops_a_corrupted_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
+        l.put(rendered(1, "r:a"), &[7; 16]).unwrap();
+        drop(l);
+        let pack = pack_path(dir.path(), 0);
+        let mut bytes = std::fs::read(&pack).unwrap();
+        bytes[3] ^= 0xff;
+        std::fs::write(&pack, bytes).unwrap();
+        let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
+        assert_eq!(l.get_latest(1, LarderTier::Rendered).unwrap(), None);
+        assert_eq!(l.stats().unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn purge_tier_rendered_leaves_the_camera_t2() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
+        l.put(key(1), &[1; 10]).unwrap();
+        l.put(rendered(1, "r:a"), &[2; 10]).unwrap();
+        assert_eq!(l.purge_tier(LarderTier::Rendered).unwrap(), 10);
+        assert!(l.get(key(1)).unwrap().is_some());
+        assert_eq!(l.stored_hash(1, LarderTier::Rendered).unwrap(), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! Larder shows the last stats it read and refuses an action with a message instead of queueing
 //! it. Once the lock is held, a big cap shrink (per-entry eviction) or purge still runs inline
 //! on the UI thread -- a possible brief frame stall, tracked as a follow-up.
-//! Purging is "all T2" only -- T2 is the sole tier (`LarderTier`), and `purge_all` reclaims disk
+//! Purging empties the whole Larder -- the camera T2 and (#145) the rendered tier -- and `purge_all` reclaims disk
 //! immediately where `purge_tier` would leave dead bytes for a later compaction. A T0 purge is a
 //! catalog `preview` table operation the Larder doesn't cover; left out on purpose (the ticket
 //! marks it optional).
@@ -211,7 +211,7 @@ pub fn show(
     catalog_path: &Path,
     pounce: &Pounce,
 ) {
-    ui.label("Preview cache (T2 screen-size previews for the loupe):");
+    ui.label("Preview cache (screen-size previews for the loupe: camera and rendered):");
     let Some(larder) = larder else {
         ui.label("The preview cache could not be opened (read-only location, or another Nicti instance holds it).");
         return;

@@ -45,22 +45,14 @@ use nicti_preen::spec::{ExportSpec, SpecError};
 use nicti_preen::watermark::{WatermarkError, WatermarkSource};
 use nicti_preen::write::{write_output, WriteOutcome};
 use nicti_preen::{export_frame, ExportContext, ExporterRegistry, WorkingFrame};
-use nicti_tapetum::coat::HealParams;
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::Affine2D;
 use nicti_tapetum::gpu::GpuContext;
-use nicti_tapetum::graph::RenderGraph;
-use nicti_tapetum::heal::{HealExec, HealKernel, RemovalSet};
 use nicti_tapetum::mask::params::MaskParams;
-use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
-use nicti_tapetum::spine::{self, build_graph, build_registry, LIVE_IDS};
-use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
-    DEMOSAIC, DENOISE, HEAL, LENS,
-};
+use nicti_tapetum::spine;
 use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
-use nicti_tapetum::StageRegistry;
 
+use super::render_core::{render_live_frame, ExportRenderer, LiveRender};
 use super::sink::AccumSink;
 use crate::camera_profiles;
 use crate::loupe::asset_cache_key;
@@ -667,33 +659,6 @@ fn decode_one(
 
 // --- stage 2: render ---------------------------------------------------------------------------
 
-/// The kernels/graph/renderer one batch reuses across photos. Built once, on the GPU lane.
-struct ExportRenderer {
-    decode_kernel: DecodeKernel,
-    live_kernel: LiveSuffixKernel,
-    crop_kernel: CropKernel,
-    heal_kernel: HealKernel,
-    graph: RenderGraph,
-    registry: StageRegistry,
-    renderer: Renderer,
-}
-
-impl ExportRenderer {
-    fn new(gpu: &Arc<GpuContext>) -> Self {
-        ExportRenderer {
-            decode_kernel: DecodeKernel::new(gpu),
-            live_kernel: LiveSuffixKernel::new(gpu),
-            crop_kernel: CropKernel::new(gpu),
-            heal_kernel: HealKernel::new(gpu),
-            graph: build_graph(),
-            registry: build_registry(),
-            // A zero baked-cache budget: consecutive photos never share baked output, and a full
-            // frame texture is ~350 MB of VRAM not worth keeping.
-            renderer: Renderer::new(Arc::clone(gpu), 0),
-        }
-    }
-}
-
 /// A photo mid-render: the live suffix is done, tiles are being read back.
 struct RenderPhase {
     ticket: Ticket,
@@ -749,57 +714,18 @@ impl RenderJob {
             .take()
             .unwrap_or_else(|| ExportRenderer::new(&shared.gpu));
 
-        // The photo's identity goes into the render document, not `set_own_hash` -- see
-        // `spine::stamp_source_identity` for why the latter is silently undone.
-        let mut doc = item.edit.clone();
-        spine::stamp_source_identity(&mut doc, item.identity);
-        if let Err(e) = ctx.graph.apply_document(&doc, &ctx.registry) {
-            self.give_back(ctx);
-            return Err((ticket, format!("internal error applying the edit: {e:?}")));
-        }
-        let extent = Extent {
-            width: frame.width,
-            height: frame.height,
-        };
-        // Export always renders at full resolution: pixel_scale 1.0.
-        let inputs = spine::resolve_inputs(&doc, &frame, extent, profile.as_deref(), 1.0);
-        ctx.live_kernel.set_params(&shared.gpu, &inputs.live);
-
-        let decode_exec = DecodeExec {
-            kernel: &ctx.decode_kernel,
-            frame: &frame,
-        };
-        // Clone/heal spots render from the document; AI removal patches aren't persisted (#324),
-        // so an empty set means those spots are skipped.
-        let no_removals = RemovalSet::new();
-        let heal_params: HealParams = inputs.heal;
-        let heal_exec = HealExec {
-            kernel: &ctx.heal_kernel,
-            params: &heal_params,
-            removals: &no_removals,
-        };
-        let passthrough = PassthroughExec;
-        let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
-            (DECODE, &decode_exec),
-            (DEMOSAIC, &passthrough),
-            (DENOISE, &passthrough),
-            (LENS, &passthrough),
-            (HEAL, &heal_exec),
-        ];
-        let req = RenderRequest {
-            graph: &ctx.graph,
-            baked_chain: &baked_chain,
-            live: &ctx.live_kernel,
-            live_nodes: &LIVE_IDS,
-            geometry: &ctx.crop_kernel,
-            geometry_nodes: &[CROP],
-            extent,
-        };
-        let live = match ctx.renderer.render_live(&req) {
-            Ok(live) => live,
-            Err(e) => {
+        let LiveRender { live, inputs } = match render_live_frame(
+            &mut ctx,
+            &shared.gpu,
+            &item.edit,
+            item.identity,
+            &frame,
+            profile.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(why) => {
                 self.give_back(ctx);
-                return Err((ticket, format!("render failed: {e:?}")));
+                return Err((ticket, why));
             }
         };
         // The decoded frame (~270 MB at 45 MP) isn't needed past this point.
@@ -1079,7 +1005,7 @@ mod tests {
         ResizeMode, ResizeSpec, WatermarkSpec,
     };
     use nicti_tapetum::coat::{CameraProfileParams, CropParams};
-    use nicti_tapetum::stages::WORKING_SPACE;
+    use nicti_tapetum::stages::{CROP, WORKING_SPACE};
 
     /// Decodes every path to the synthetic 64x64 gradient, rolled by the file name so different
     /// photos have different pixels at the *same* size. A name containing "bad" fails to decode.

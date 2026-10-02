@@ -81,7 +81,9 @@ Cross-cutting design points:
   #44/#41, out of scope here). Once an image has real develop edits, its T2/T3 tiers should show
   the embedded-camera version stale-while-revalidate until Tapetum produces a real rendered
   screen-tier — flagged, not solved, by this ADR. The camera's own Picture-Control-vs-Nicti-default
-  render color mismatch is the same kind of flagged-not-solved gap.
+  render color mismatch is the same kind of flagged-not-solved gap. **Both addressed by ADR-0145** (#145): a rendered
+  screen tier beside the camera T2, shown stale-while-revalidate, and an "All photos" mode that
+  renders unedited photos in Nicti's own colour.
 - **Preview store is separate from the catalog DB** (`previews.db`/pack file, not
   `catalog.db`) — fully regenerable from source files, explicitly excluded from #25's backup
   scope.

@@ -95,3 +95,13 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   bytes unchanged; lossy WebP stays rejected per ADR-0143), active folders keep them in the catalog.
   The Move gesture is the trigger, with the archive role a path-prefix setting until ADR-0071's
   volume identity is wired into the app.
+- **Rendered screen tier (#145)**: `docs/adr/0145-rendered-screen-tier.md` -- the stale-while-revalidate
+  gap ADR-0029 flagged is built. A `Rendered` Larder tier sits beside the camera T2 (the Larder keeps one
+  entry per `(asset, tier)` and `get` drops an entry on a hash mismatch, so the camera preview could not
+  have shared a tier). `Larder::get_latest` returns the stored entry with its hash without dropping it;
+  the loupe fallback swaps a render in when one exists and never downgrades. Renders are produced by
+  three chained Pounce jobs (CPU decode, GPU tiled render straight to a 3840px long edge, CPU encode) and
+  deduped/superseded by `EyeshineService`; masks and AI removals are not rendered (hash suffix
+  `:partial`, badged). Settings can restrict rendering to edited photos, render everything (which also
+  fixes the Picture Control colour gap), or turn it off. The library grid only flags edited photos;
+  rendered thumbnails need a small rendered tier (follow-up).

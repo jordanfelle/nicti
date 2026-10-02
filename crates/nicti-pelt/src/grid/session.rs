@@ -78,6 +78,13 @@ pub struct GridSession {
     transient_failed: HashMap<i64, Instant>,
     inflight: HashMap<usize, InflightBatch>,
     pending_uploads: VecDeque<(i64, ThumbImage)>,
+    /// Photos with develop edits (#145), read alongside their thumbnails: the cell is flagged
+    /// because its camera-derived thumbnail doesn't show those edits.
+    edited: HashSet<i64>,
+    /// Photos whose edited flag was set explicitly (their edits were just saved / pasted / undone).
+    /// A thumbnail job that read the document *before* that write must not restore its older
+    /// value when its result is applied; cleared on refresh.
+    edit_overrides: HashSet<i64>,
     /// The ids in `pending_uploads`: decoded but not yet textured (uploads are capped per frame).
     /// `needs_thumbnail` must skip them, or `request_visible` -- which runs after `poll` in the
     /// same frame, once the batch has left `inflight` -- resubmits work whose result is already
@@ -119,6 +126,8 @@ impl GridSession {
             transient_failed: HashMap::new(),
             inflight: HashMap::new(),
             pending_uploads: VecDeque::new(),
+            edited: HashSet::new(),
+            edit_overrides: HashSet::new(),
             pending_ids: HashSet::new(),
             cursor: None,
             cursor_id: None,
@@ -324,6 +333,7 @@ impl GridSession {
             (w * h * 4) as u64
         });
         self.failed.clear();
+        self.edit_overrides.clear();
         self.transient_failed.clear();
         self.pending_uploads.clear();
         self.pending_ids.clear();
@@ -431,6 +441,13 @@ impl GridSession {
                 return;
             };
             self.pending_ids.remove(&id);
+            if !self.edit_overrides.contains(&id) {
+                if thumb.edited {
+                    self.edited.insert(id);
+                } else {
+                    self.edited.remove(&id);
+                }
+            }
             let handle = ctx.load_texture(
                 format!("grid-thumb-{id}"),
                 thumb.image,
@@ -440,6 +457,22 @@ impl GridSession {
         }
         if !self.pending_uploads.is_empty() {
             ctx.request_repaint();
+        }
+    }
+
+    /// Whether `asset_id` has develop edits its thumbnail doesn't show (#145).
+    pub fn is_edited(&self, asset_id: i64) -> bool {
+        self.edited.contains(&asset_id)
+    }
+
+    /// Updates one photo's edited flag right away (its edits were just saved), without waiting for
+    /// its thumbnail to be re-read.
+    pub fn mark_edited(&mut self, asset_id: i64, edited: bool) {
+        self.edit_overrides.insert(asset_id);
+        if edited {
+            self.edited.insert(asset_id);
+        } else {
+            self.edited.remove(&asset_id);
         }
     }
 

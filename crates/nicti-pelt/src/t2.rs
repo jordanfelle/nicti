@@ -296,7 +296,7 @@ impl ChunkedJob for T2Job {
 /// (or a UI-thread `get`) don't cost a finished payload.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn lock_larder_within(
+pub(crate) fn lock_larder_within(
     larder: &SharedLarder,
     wait: std::time::Duration,
 ) -> Option<MutexGuard<'_, Larder>> {

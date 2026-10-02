@@ -9,6 +9,7 @@
 pub mod dialog;
 pub mod jobs;
 pub mod presets;
+pub(crate) mod render_core;
 pub mod sink;
 
 pub use dialog::ExportUi;
