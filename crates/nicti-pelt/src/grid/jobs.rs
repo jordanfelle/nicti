@@ -221,16 +221,29 @@ impl ChunkedJob for ThumbBatchJob {
 
         // #145: which of these photos have edits, one batch read for the chunk. A failed read just
         // leaves them unflagged -- a missing badge, never a failed thumbnail.
-        if let Ok(docs) = self.store.get_master_edits(chunk) {
-            let edited: std::collections::HashSet<i64> = docs
+        // One unparseable stored document fails the whole batch call, so on error fall back to
+        // per-photo reads rather than dropping the badge for every photo in the chunk.
+        let edited: std::collections::HashSet<i64> = match self.store.get_master_edits(chunk) {
+            Ok(docs) => docs
                 .into_iter()
                 .filter(|(_, doc)| doc.as_ref().is_some_and(|d| !d.stages.is_empty()))
                 .map(|(id, _)| id)
-                .collect();
-            for (id, outcome) in &mut results {
-                if let Ok(thumb) = outcome {
-                    thumb.edited = edited.contains(id);
-                }
+                .collect(),
+            Err(_) => chunk
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    self.store
+                        .get_master_edit(id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|d| !d.stages.is_empty())
+                })
+                .collect(),
+        };
+        for (id, outcome) in &mut results {
+            if let Ok(thumb) = outcome {
+                thumb.edited = edited.contains(id);
             }
         }
 

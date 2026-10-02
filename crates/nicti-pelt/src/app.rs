@@ -195,6 +195,10 @@ pub struct PeltApp {
     loupe_rendered: Option<(i64, String)>,
     /// What the loupe fallback's current preview should be flagged with (#145).
     loupe_badge: Badge,
+    /// A stored render whose bytes wouldn't decode, so it isn't re-read every frame.
+    loupe_render_undecodable: Option<(i64, String)>,
+    /// Switching to `Off` empties the rendered tier; retried each frame while the Larder is busy.
+    purge_rendered_pending: bool,
     /// Sidecar write-back for marker changes and its settings/review panel (#60); `None` when
     /// the catalog failed to open.
     xmp: Option<XmpWriter>,
@@ -430,6 +434,8 @@ impl PeltApp {
             eyeshine,
             loupe_rendered: None,
             loupe_badge: Badge::None,
+            loupe_render_undecodable: None,
+            purge_rendered_pending: false,
             xmp,
             xmp_ui: XmpUi::default(),
             lrc_ui: LrcImportUi::default(),
@@ -2532,16 +2538,30 @@ impl PeltApp {
         self.eyeshine.invalidate_all();
         self.loupe_rendered = None;
         self.loupe_preview = None;
-        if self.preview_settings.policy == crate::eyeshine::RenderPolicy::Off {
-            if let Some(mut guard) = self.larder.as_ref().and_then(crate::t2::try_lock_larder) {
+        self.purge_rendered_pending = self.preview_settings.policy == eyeshine::RenderPolicy::Off;
+        self.try_purge_rendered();
+    }
+
+    /// Empties the rendered tier once switched to `Off`; a busy Larder (a compaction holds it for
+    /// minutes) leaves the request pending and it is retried from `poll_eyeshine`.
+    fn try_purge_rendered(&mut self) {
+        if !self.purge_rendered_pending {
+            return;
+        }
+        match self.larder.as_ref().map(crate::t2::try_lock_larder) {
+            Some(Some(mut guard)) => {
                 let _ = guard.purge_tier(nicti_lair::larder::LarderTier::Rendered);
+                self.purge_rendered_pending = false;
             }
+            Some(None) => {}
+            None => self.purge_rendered_pending = false,
         }
     }
 
     /// Collects finished rendered previews (#145). A render landing needs a repaint to be picked
     /// up; while any is running, poll again shortly since nothing else wakes an idle window.
     fn poll_eyeshine(&mut self, ctx: &egui::Context) {
+        self.try_purge_rendered();
         if !self.eyeshine.poll().is_empty() {
             ctx.request_repaint();
         }
@@ -2574,6 +2594,15 @@ impl PeltApp {
         let resolved = self
             .eyeshine
             .request(&self.pounce, store, asset_id, index, policy);
+        // A render shown for edits that no longer apply (Reset all, rendering switched off) must
+        // not linger: drop it so the camera preview is reinstalled below. ("Never downgrade"
+        // protects against a *slower* source winning, not against edits going away.)
+        if let Some(r) = &resolved {
+            if self.loupe_rendered.is_some() && !policy.wants_render(r.edited) {
+                self.loupe_rendered = None;
+                self.loupe_preview = None;
+            }
+        }
         if let (Some(r), Some(larder)) = (&resolved, &self.larder) {
             if policy.wants_render(r.edited) {
                 let installed = self.loupe_rendered.as_ref().map(|(_, h)| h.clone());
@@ -2582,16 +2611,21 @@ impl PeltApp {
                         .stored_hash(asset_id, nicti_lair::larder::LarderTier::Rendered)
                         .ok()
                         .flatten();
-                    if stored.is_some() && stored != installed {
+                    let known_bad = self
+                        .loupe_render_undecodable
+                        .as_ref()
+                        .is_some_and(|(id, h)| *id == asset_id && Some(h) == stored.as_ref());
+                    if stored.is_some() && stored != installed && !known_bad {
                         if let Ok(Some((hash, bytes))) =
                             guard.get_latest(asset_id, nicti_lair::larder::LarderTier::Rendered)
                         {
                             drop(guard);
-                            if let Some(texture) =
-                                preview_texture(ui.ctx(), format!("loupe-r-{asset_id}"), &bytes)
-                            {
-                                self.loupe_preview = Some((asset_id, true, texture));
-                                self.loupe_rendered = Some((asset_id, hash));
+                            match preview_texture(ui.ctx(), format!("loupe-r-{asset_id}"), &bytes) {
+                                Some(texture) => {
+                                    self.loupe_preview = Some((asset_id, true, texture));
+                                    self.loupe_rendered = Some((asset_id, hash));
+                                }
+                                None => self.loupe_render_undecodable = Some((asset_id, hash)),
                             }
                         }
                     }

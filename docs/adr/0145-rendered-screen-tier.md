@@ -33,22 +33,29 @@ Nothing rendered an edited photo to a screen-size image or cached one, and the L
    ~540 MB full-crop linear buffer export needs is never allocated. Encode is JPEG q85 sRGB through
    `nicti_preen::export_frame`, which also applies the file's EXIF orientation.
 4. **`EyeshineService`** keeps at most one render per photo in flight (a newer edit sets a
-   cancel flag every later stage checks and cancels the queued first stage), remembers
-   `(asset, hash)` pairs that failed so they are not retried each frame, and treats an unreachable
-   file or busy Larder as a quiet `Retry`, like `T2Job`.
+   cancel flag every later stage checks and cancels the queued first stage; the encode step
+   re-checks it under the Larder lock so a superseded render can't overwrite the newer one) and
+   only one photo renders on the GPU at a time. A render that returns `Retry` (unreachable file,
+   busy Larder) or `Failed` (a decode error, a panic, a full disk) backs off (5 s / 60 s) per
+   `(asset, hash)` rather than being retried every frame or never. A photo's edit document is
+   re-read after a 1 s TTL, so edits written by paste/sync, undo or an LRC import are picked up
+   without each of those writers having to invalidate.
 5. **`choose_preview`** (pure, tested) is the display rule: a current render wins; an older render
    beats the camera previews and is badged "updating"; otherwise the camera T2/T0 is shown, badged
-   "stale" when the photo has edits.
+   "stale" when the photo has edits *and rendering is on for that view* (with rendering off the
+   camera preview is simply what is shown, with no promise of a render). A render that no longer
+   applies (Reset all, rendering switched off) is dropped so the camera preview returns.
 6. **Settings** (`<catalog>.previews.json`): render `Off` / `Edited photos` (default) / `All photos`,
    and per-view switches. `All photos` also renders unedited photos, which closes the Picture
    Control gap: every preview then uses Nicti's own colour. Switching to `Off` empties the rendered
-   tier.
+   tier (retried each frame while the Larder is busy, e.g. during a compaction).
 
 ## Surfaces
 
 - **Loupe pre-decode fallback**: full behaviour (render queued, swapped in, never downgraded, badge
   text).
-- **Library grid**: a dot on cells whose photo has edits (thumbnails stay camera-derived). Showing a
+- **Library grid**: a dot on every cell whose photo has edits, because its thumbnail is camera-derived
+  and never shows them (it does not go away when a render exists). Showing a
   *rendered* thumbnail would need a small rendered tier -- decoding a 3840px JPEG per cell is far
   too slow -- so it is a follow-up.
 - **Survey/compare**: unchanged by design (ADR-0032: culling runs on embedded previews and never

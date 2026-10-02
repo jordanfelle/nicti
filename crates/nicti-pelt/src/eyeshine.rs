@@ -10,7 +10,7 @@
 //! This module is the pure part: the render hash, the "has edits / partial" tests and
 //! [`choose_preview`]. The render job and the display wiring build on it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,13 +202,12 @@ pub fn choose_preview(policy: RenderPolicy, edited: bool, have: Available) -> (S
     if source == Source::None {
         return (source, Badge::None);
     }
-    let badge = if edited {
-        // The photo has edits and the preview is the camera's, whatever the policy: say so.
-        Badge::Stale
-    } else if render_expected {
-        Badge::CameraRendering
-    } else {
-        Badge::None
+    // Only promise a render that is actually coming: with rendering off for this view the camera
+    // preview is simply what is shown.
+    let badge = match (render_expected, edited) {
+        (true, true) => Badge::Stale,
+        (true, false) => Badge::CameraRendering,
+        (false, _) => Badge::None,
     };
     (source, badge)
 }
@@ -249,6 +248,27 @@ pub struct Env {
     pub submitter: Submitter,
     /// The batch's kernels, reused across photos (one GPU worker, so one at a time).
     pub render_ctx: Arc<Mutex<Option<ExportRenderer>>>,
+    /// Held by the one photo whose render is in progress. Pounce may interleave two GPU jobs
+    /// between tiles; without this a second photo would build its own kernels and hold a second
+    /// full-extent frame texture (~350 MB at 45 MP) while `vram_bytes` says 0.
+    render_busy: Arc<AtomicBool>,
+}
+
+/// RAII claim on [`Env::render_busy`].
+struct RenderClaim(Arc<AtomicBool>);
+
+impl RenderClaim {
+    fn try_acquire(busy: &Arc<AtomicBool>) -> Option<RenderClaim> {
+        busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| RenderClaim(busy.clone()))
+    }
+}
+
+impl Drop for RenderClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Env {
@@ -264,6 +284,7 @@ impl Env {
             larder,
             submitter,
             render_ctx: Arc::new(Mutex::new(None)),
+            render_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -271,6 +292,9 @@ impl Env {
 /// Resolves a photo's result slot exactly once.
 struct Settle {
     slot: Option<ReportSlot<T2Outcome>>,
+    /// Set when a stage panicked: the dropped `Settle` then resolves `Failed`, not `Retry`, so a
+    /// deterministic panic can't loop forever.
+    panicked: Arc<AtomicBool>,
 }
 
 impl Settle {
@@ -284,8 +308,12 @@ impl Settle {
 impl Drop for Settle {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(T2Outcome::Retry("cancelled".into()));
+            let outcome = if self.panicked.load(Ordering::SeqCst) {
+                T2Outcome::Failed("preview render panicked".into())
+            } else {
+                T2Outcome::Retry("cancelled".into())
+            };
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         }
     }
 }
@@ -296,6 +324,7 @@ struct Task {
     env: Env,
     /// Set by the service when a newer edit supersedes this render.
     cancelled: Arc<AtomicBool>,
+    panicked: Arc<AtomicBool>,
 }
 
 impl Task {
@@ -325,13 +354,16 @@ pub fn submit(
         req,
         env: env.clone(),
         cancelled,
+        panicked: Arc::new(AtomicBool::new(false)),
     });
+    let settle = Settle {
+        slot: Some(slot.clone()),
+        panicked: task.panicked.clone(),
+    };
     let job = DecodeJob {
         label: format!("Render preview: {}", task.req.path.display()),
         task,
-        settle: Some(Settle {
-            slot: Some(slot.clone()),
-        }),
+        settle: Some(settle),
     };
     (pounce.submit(Box::new(job)), slot)
 }
@@ -438,6 +470,7 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
 // stage 2: render ---------------------------------------------------------------------------------
 
 struct RenderPhase {
+    _claim: RenderClaim,
     exif: SourceExif,
     ctx: ExportRenderer,
     live: Arc<FrameTexture>,
@@ -467,7 +500,7 @@ impl RenderJob {
     }
 
     /// First step: the whole-frame live suffix, then a screen-size tile grid over the crop.
-    fn begin(&mut self, decoded: Decoded, settle: Settle) {
+    fn begin(&mut self, decoded: Decoded, settle: Settle, claim: RenderClaim) {
         let task = self.task.clone();
         let Decoded {
             frame,
@@ -532,6 +565,7 @@ impl RenderJob {
         );
         self.tiles_total = tiles.len() as u64;
         self.phase = Some(RenderPhase {
+            _claim: claim,
             exif,
             ctx,
             live,
@@ -581,13 +615,35 @@ impl ChunkedJob for RenderJob {
             total: Some(self.tiles_total.max(1)),
         }
     }
+    /// Never returns `Err`, and a panic settles the slot as `Failed` (see [`Settle`]).
     fn step(&mut self) -> Result<Step, JobError> {
+        match catch_unwind(AssertUnwindSafe(|| self.step_inner())) {
+            Ok(r) => r,
+            Err(_) => {
+                self.task.panicked.store(true, Ordering::SeqCst);
+                // Dropping these settles the slot (`Failed`) and releases the render claim; the
+                // kernels were taken out of the pool, so the next photo builds fresh ones.
+                self.ready = None;
+                self.phase = None;
+                Ok(Step::Done)
+            }
+        }
+    }
+}
+
+impl RenderJob {
+    fn step_inner(&mut self) -> Result<Step, JobError> {
         if let Some((decoded, settle)) = self.ready.take() {
             if self.task.is_cancelled() {
                 settle.settle(T2Outcome::Retry("superseded".into()));
                 return Ok(Step::Done);
             }
-            self.begin(decoded, settle);
+            let Some(claim) = RenderClaim::try_acquire(&self.task.env.render_busy) else {
+                // Another photo is mid-render: wait our turn, holding only the decoded frame.
+                self.ready = Some((decoded, settle));
+                return Ok(Step::Yield);
+            };
+            self.begin(decoded, settle, claim);
             return Ok(if self.phase.is_some() {
                 Step::Yield
             } else {
@@ -713,6 +769,11 @@ fn encode_and_store(task: &Task, frame: WorkingFrame, exif: SourceExif) -> T2Out
     let Some(mut larder) = lock_larder_within(&task.env.larder, LOCK_WAIT) else {
         return T2Outcome::Retry("larder busy".into());
     };
+    // Re-check under the lock: a render superseded while it was encoding must not overwrite the
+    // newer one (`put` replaces by `(asset, tier)` without comparing hashes).
+    if task.is_cancelled() {
+        return T2Outcome::Retry("superseded".into());
+    }
     match larder.put(task.key(), &exported.bytes) {
         Ok(true) => T2Outcome::Stored,
         Ok(false) => T2Outcome::Failed("preview larger than the whole cache cap".into()),
@@ -721,6 +782,19 @@ fn encode_and_store(task: &Task, frame: WorkingFrame, exif: SourceExif) -> T2Out
 }
 
 // --- the service: who needs a render, dedupe, supersede -----------------------------------------
+
+/// How long a photo's resolution (edit document, hash) is trusted before the catalog is read
+/// again. Edits reach the catalog from several writers (Develop save, paste/sync, undo, LRC
+/// import); explicit invalidation covers Develop, and this bound makes every other writer
+/// self-heal within a second instead of leaving a stale render forever.
+const RESOLVE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Back-off before a render that returned `Retry` (unreachable file, busy Larder) is tried again.
+const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+/// Back-off after a render `Failed`. Not permanent: a locked file, a camera profile installed
+/// later or a full disk can all clear up; an unchanged document is simply retried rarely.
+const FAILED_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+/// Bound on remembered back-offs (expired ones are pruned past this).
+const MAX_BLOCKED: usize = 256;
 
 /// What the UI needs to know about one photo's preview state.
 #[derive(Debug, Clone)]
@@ -731,6 +805,14 @@ pub struct Resolved {
     pub edited: bool,
     /// The hash a *current* render would be stored under (`None` when the document can't be
     /// canonicalised).
+    pub hash: Option<String>,
+    at: std::time::Instant,
+}
+
+/// The cheap, per-frame view of a photo's preview state (no document clone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Info {
+    pub edited: bool,
     pub hash: Option<String>,
 }
 
@@ -747,8 +829,9 @@ struct Inflight {
 pub struct EyeshineService {
     env: Option<Env>,
     inflight: HashMap<i64, Inflight>,
-    /// `(asset, hash)` pairs whose render failed for a reason a retry won't fix.
-    failed: HashSet<(i64, String)>,
+    /// `(asset, hash)` pairs not to be retried until the instant (see `RETRY_BACKOFF` /
+    /// `FAILED_BACKOFF`).
+    blocked: HashMap<(i64, String), std::time::Instant>,
     /// Per-asset resolution cache (a catalog read each); dropped by [`Self::invalidate`].
     resolved: HashMap<i64, Resolved>,
 }
@@ -759,7 +842,7 @@ impl EyeshineService {
         EyeshineService {
             env,
             inflight: HashMap::new(),
-            failed: HashSet::new(),
+            blocked: HashMap::new(),
             resolved: HashMap::new(),
         }
     }
@@ -777,32 +860,36 @@ impl EyeshineService {
     /// The photo's identity, edit document and current render hash, cached. `None` when the asset
     /// or its root is unknown.
     pub fn resolve(&mut self, store: &dyn CatalogStore, asset_id: i64) -> Option<&Resolved> {
-        use std::collections::hash_map::Entry;
-        match self.resolved.entry(asset_id) {
-            Entry::Occupied(e) => Some(e.into_mut()),
-            Entry::Vacant(v) => {
-                let asset = store.get_asset(asset_id).ok().flatten()?;
-                let root = store.get_root_path(asset.root_id).ok().flatten()?;
-                let identity = asset_cache_key(&asset);
-                let edit = store
-                    .get_master_edit(asset_id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                let hash = rendered_hash(&identity, &edit);
-                Some(v.insert(Resolved {
+        let fresh = self
+            .resolved
+            .get(&asset_id)
+            .is_some_and(|r| r.at.elapsed() < RESOLVE_TTL);
+        if !fresh {
+            let asset = store.get_asset(asset_id).ok().flatten()?;
+            let root = store.get_root_path(asset.root_id).ok().flatten()?;
+            let identity = asset_cache_key(&asset);
+            // A failed read is *not* "unedited": caching an empty document would show (and
+            // render) the photo as unedited until the next invalidation.
+            let edit = store.get_master_edit(asset_id).ok()?.unwrap_or_default();
+            let hash = rendered_hash(&identity, &edit);
+            self.resolved.insert(
+                asset_id,
+                Resolved {
                     identity,
                     path: PathBuf::from(root).join(&asset.rel_path),
                     edited: has_edits(&edit),
                     edit,
                     hash,
-                }))
-            }
+                    at: std::time::Instant::now(),
+                },
+            );
         }
+        self.resolved.get(&asset_id)
     }
 
-    /// Queues a render for `asset_id` when `policy` wants one and none is cached or running for its
-    /// current document. Returns the photo's resolution for the caller's display decision.
+    /// Queues a render for `asset_id` when `policy` wants one and none is cached, running or
+    /// backing off for its current document. Returns the photo's state for the caller's display
+    /// decision.
     pub fn request(
         &mut self,
         pounce: &Pounce,
@@ -810,18 +897,28 @@ impl EyeshineService {
         asset_id: i64,
         image_index: usize,
         policy: RenderPolicy,
-    ) -> Option<Resolved> {
-        let resolved = self.resolve(store, asset_id)?.clone();
-        let (Some(env), Some(hash)) = (&self.env, resolved.hash.clone()) else {
-            return Some(resolved);
+    ) -> Option<Info> {
+        let resolved = self.resolve(store, asset_id)?;
+        let info = Info {
+            edited: resolved.edited,
+            hash: resolved.hash.clone(),
         };
-        if !policy.wants_render(resolved.edited) {
-            return Some(resolved);
+        let (Some(env), Some(hash)) = (&self.env, info.hash.clone()) else {
+            return Some(info);
+        };
+        if !policy.wants_render(info.edited) {
+            return Some(info);
         }
-        if self.inflight.get(&asset_id).is_some_and(|f| f.hash == hash)
-            || self.failed.contains(&(asset_id, hash.clone()))
+        if self.inflight.get(&asset_id).is_some_and(|f| f.hash == hash) {
+            return Some(info);
+        }
+        let key = (asset_id, hash.clone());
+        if self
+            .blocked
+            .get(&key)
+            .is_some_and(|until| std::time::Instant::now() < *until)
         {
-            return Some(resolved);
+            return Some(info);
         }
         // Already cached? `try_lock`: a busy Larder just means the job re-checks on its worker.
         if let Some(larder) = try_lock_larder(&env.larder) {
@@ -832,9 +929,11 @@ impl EyeshineService {
                 .as_deref()
                 == Some(hash.as_str())
             {
-                return Some(resolved);
+                return Some(info);
             }
         }
+        let resolved = self.resolved.get(&asset_id)?.clone();
+        let env = self.env.as_ref()?;
         if let Some(old) = self.inflight.remove(&asset_id) {
             old.cancelled.store(true, Ordering::SeqCst);
             pounce.cancel(old.job);
@@ -847,8 +946,8 @@ impl EyeshineService {
                 asset_id,
                 identity: resolved.identity,
                 hash: hash.clone(),
-                path: resolved.path.clone(),
-                edit: resolved.edit.clone(),
+                path: resolved.path,
+                edit: resolved.edit,
                 image_index,
             },
             cancelled.clone(),
@@ -862,7 +961,7 @@ impl EyeshineService {
                 cancelled,
             },
         );
-        Some(resolved)
+        Some(info)
     }
 
     /// Collects finished renders; call once per frame. Returns the assets that now have a new
@@ -875,16 +974,23 @@ impl EyeshineService {
             let Some(outcome) = outcome else { continue };
             done.push((*asset, f.hash.clone(), outcome));
         }
+        let now = std::time::Instant::now();
         for (asset, hash, outcome) in done {
             self.inflight.remove(&asset);
             match outcome {
                 T2Outcome::Stored => stored.push(asset),
-                // Nothing wrong with the photo: the next request retries.
-                T2Outcome::Retry(_) => {}
+                // Nothing wrong with the photo (unreachable drive, busy Larder, superseded):
+                // retry, but not on the very next frame.
+                T2Outcome::Retry(_) => {
+                    self.blocked.insert((asset, hash), now + RETRY_BACKOFF);
+                }
                 T2Outcome::Failed(_) => {
-                    self.failed.insert((asset, hash));
+                    self.blocked.insert((asset, hash), now + FAILED_BACKOFF);
                 }
             }
+        }
+        if self.blocked.len() > MAX_BLOCKED {
+            self.blocked.retain(|_, until| *until > now);
         }
         stored
     }
@@ -1026,7 +1132,7 @@ mod tests {
     fn with_rendering_off_the_camera_preview_is_shown_and_a_cached_render_is_ignored() {
         assert_eq!(
             choose_preview(RenderPolicy::Off, true, have(Some(false), true, true, true)),
-            (Source::CameraT2, Badge::Stale)
+            (Source::CameraT2, Badge::None)
         );
         assert_eq!(
             choose_preview(RenderPolicy::Off, false, have(None, false, true, true)),
@@ -1480,12 +1586,48 @@ mod tests {
         t.svc
             .request(&t.fx.pounce, &t.store, bad, 0, RenderPolicy::EditedOnly);
         drain(&mut t.svc);
-        assert_eq!(t.svc.failed.len(), 1);
+        assert_eq!(t.svc.blocked.len(), 1);
         t.svc
             .request(&t.fx.pounce, &t.store, bad, 0, RenderPolicy::EditedOnly);
         assert!(
             !t.svc.busy(),
             "a known-bad (asset, hash) isn't queued again"
         );
+    }
+
+    #[test]
+    fn a_retry_outcome_backs_off_instead_of_resubmitting_every_frame() {
+        let Some(mut t) = svc_fx() else { return };
+        t.store.put_master_edit(t.id, &exposure(1.0)).unwrap();
+        // Make the source unreachable: the job settles as a quiet Retry.
+        std::fs::remove_file(t.fx.dir.path().join("a.NEF")).unwrap();
+        t.svc
+            .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
+        drain(&mut t.svc);
+        assert_eq!(t.svc.blocked.len(), 1);
+        // The very next "frame" must not queue it again.
+        t.svc
+            .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
+        assert!(!t.svc.busy());
+        // ...until the back-off lapses.
+        for until in t.svc.blocked.values_mut() {
+            *until = std::time::Instant::now() - Duration::from_secs(1);
+        }
+        t.svc
+            .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
+        assert!(t.svc.busy());
+    }
+
+    #[test]
+    fn edits_written_behind_the_services_back_are_picked_up_after_the_ttl() {
+        let Some(mut t) = svc_fx() else { return };
+        t.store.put_master_edit(t.id, &exposure(1.0)).unwrap();
+        let first = t.svc.resolve(&t.store, t.id).unwrap().hash.clone();
+        // A paste/undo/LRC import writes the catalog without calling `invalidate`.
+        t.store.put_master_edit(t.id, &exposure(2.0)).unwrap();
+        assert_eq!(t.svc.resolve(&t.store, t.id).unwrap().hash, first, "cached");
+        t.svc.resolved.get_mut(&t.id).unwrap().at =
+            std::time::Instant::now() - Duration::from_secs(2);
+        assert_ne!(t.svc.resolve(&t.store, t.id).unwrap().hash, first);
     }
 }
