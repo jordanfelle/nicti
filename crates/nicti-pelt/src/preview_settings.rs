@@ -94,8 +94,9 @@ pub fn show(ui: &mut egui::Ui, settings: &mut PreviewSettings) -> bool {
     ui.collapsing("Rendered previews", |ui| {
         ui.label(
             "Edited photos are shown from a render of their edits instead of the camera's \
-             preview. \"All photos\" also renders unedited photos so every preview uses Nicti's \
-             own colour (costs a RAW decode per photo, in the background).",
+             preview. \"All photos\" also renders unedited photos, so the loupe's preview uses Nicti's \
+             own colour (costs a RAW decode per photo, in the background); grid thumbnails and \
+             survey/compare keep the camera's.",
         );
         egui::ComboBox::from_label("Render previews for")
             .selected_text(policy_name(settings.policy))

@@ -48,7 +48,8 @@ Nothing rendered an edited photo to a screen-size image or cached one, and the L
    applies (Reset all, rendering switched off) is dropped so the camera preview returns.
 6. **Settings** (`<catalog>.previews.json`): render `Off` / `Edited photos` (default) / `All photos`,
    and per-view switches. `All photos` also renders unedited photos, which closes the Picture
-   Control gap: every preview then uses Nicti's own colour. Switching to `Off` empties the rendered
+   Control gap: the loupe's preview then uses Nicti's own colour (grid thumbnails and
+   survey/compare keep the camera's). Switching to `Off` empties the rendered
    tier (retried each frame while the Larder is busy, e.g. during a compaction).
 
 ## Surfaces

@@ -79,13 +79,26 @@ pub fn is_partial(doc: &EditDocument) -> bool {
 pub fn rendered_hash(identity: &blake3::Hash, doc: &EditDocument) -> Option<String> {
     let doc_hash = doc.content_hash().ok()?;
     let mut h = blake3::Hasher::new();
-    h.update(identity.as_bytes());
     h.update(doc_hash.as_bytes());
-    let mut out = format!("rendered:v{EYESHINE_VERSION}:{}", h.finalize().to_hex());
+    // `rendered:v{N}:{identity}:{document}`: the identity segment lets a reader tell an older
+    // render of the *same file* (fine to show while updating) from one of a file that was
+    // replaced under the same asset id (never to be shown).
+    let mut out = format!(
+        "rendered:v{EYESHINE_VERSION}:{}:{}",
+        identity.to_hex(),
+        h.finalize().to_hex()
+    );
     if is_partial(doc) {
         out.push_str(PARTIAL_SUFFIX);
     }
     Some(out)
+}
+
+/// Whether two rendered hashes are renders of the same file (same identity segment), whatever
+/// their edit documents.
+pub fn same_file(a: &str, b: &str) -> bool {
+    let id = |h: &str| h.split(':').nth(2).map(str::to_owned);
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Whether a stored rendered hash carries the "partial" flag.
@@ -823,7 +836,13 @@ pub struct Info {
     pub hash: Option<String>,
 }
 
+/// Renders in flight at once. Each decoded frame is ~270 MB at 45 MP and waits for the single GPU
+/// claim while holding it, so the bound is on frames, not just on the GPU.
+const MAX_INFLIGHT: usize = 2;
+
 struct Inflight {
+    /// Submission order, so the oldest render can be evicted for the photo being looked at.
+    seq: u64,
     hash: String,
     job: JobId,
     slot: ReportSlot<T2Outcome>,
@@ -839,6 +858,7 @@ pub struct EyeshineService {
     /// `(asset, hash)` pairs not to be retried until the instant (see `RETRY_BACKOFF` /
     /// `FAILED_BACKOFF`).
     blocked: HashMap<(i64, String), std::time::Instant>,
+    next_seq: u64,
     /// Per-asset resolution cache (a catalog read each); dropped by [`Self::invalidate`].
     resolved: HashMap<i64, Resolved>,
 }
@@ -850,6 +870,7 @@ impl EyeshineService {
             env,
             inflight: HashMap::new(),
             blocked: HashMap::new(),
+            next_seq: 0,
             resolved: HashMap::new(),
         }
     }
@@ -921,10 +942,19 @@ impl EyeshineService {
         let (Some(env), Some(hash)) = (&self.env, info.hash.clone()) else {
             return Some(info);
         };
+        // A render in flight for an out-of-date document is obsolete whatever happens next --
+        // including the early returns below (edit A -> B -> A: A is already stored, so B's render
+        // finishing would overwrite it with the wrong pixels).
+        if self.inflight.get(&asset_id).is_some_and(|f| f.hash != hash) {
+            if let Some(old) = self.inflight.remove(&asset_id) {
+                old.cancelled.store(true, Ordering::SeqCst);
+                pounce.cancel(old.job);
+            }
+        }
         if !policy.wants_render(info.edited) {
             return Some(info);
         }
-        if self.inflight.get(&asset_id).is_some_and(|f| f.hash == hash) {
+        if self.inflight.contains_key(&asset_id) {
             return Some(info);
         }
         let key = (asset_id, hash.clone());
@@ -949,10 +979,24 @@ impl EyeshineService {
         }
         let resolved = self.resolved.get(&asset_id)?.clone();
         let env = self.env.as_ref()?;
-        if let Some(old) = self.inflight.remove(&asset_id) {
-            old.cancelled.store(true, Ordering::SeqCst);
-            pounce.cancel(old.job);
+        // Bound the decoded frames in flight: make room for the photo being looked at by evicting
+        // the oldest render (the loupe re-requests it if the user comes back).
+        while self.inflight.len() >= MAX_INFLIGHT {
+            let Some(oldest) = self
+                .inflight
+                .iter()
+                .min_by_key(|(_, f)| f.seq)
+                .map(|(a, _)| *a)
+            else {
+                break;
+            };
+            if let Some(old) = self.inflight.remove(&oldest) {
+                old.cancelled.store(true, Ordering::SeqCst);
+                pounce.cancel(old.job);
+            }
         }
+        let seq = self.next_seq;
+        self.next_seq += 1;
         let cancelled = Arc::new(AtomicBool::new(false));
         let (job, slot) = submit(
             env,
@@ -970,6 +1014,7 @@ impl EyeshineService {
         self.inflight.insert(
             asset_id,
             Inflight {
+                seq,
                 hash,
                 job,
                 slot,
@@ -1691,5 +1736,86 @@ mod tests {
         };
         assert_eq!(spec(Lane::Gpu, &task).image_index, None);
         assert_eq!(spec(Lane::Cpu, &task).image_index, Some(7));
+    }
+
+    #[test]
+    fn same_file_compares_only_the_identity_segment() {
+        let a1 = rendered_hash(&id(1), &exposure(1.0)).unwrap();
+        let a2 = rendered_hash(&id(1), &exposure(2.0)).unwrap();
+        let b = rendered_hash(&id(2), &exposure(1.0)).unwrap();
+        assert!(same_file(&a1, &a2));
+        assert!(!same_file(&a1, &b));
+        assert!(!same_file("garbage", &a1));
+    }
+
+    fn add_asset(t: &SvcFx, name: &str) -> i64 {
+        let root = t.store.list_roots().unwrap()[0].id;
+        std::fs::write(t.fx.dir.path().join(name), b"x").unwrap();
+        t.store
+            .insert_asset(
+                root,
+                &NewAsset {
+                    rel_path: name.into(),
+                    rel_path_fold: name.to_lowercase(),
+                    size_bytes: 1,
+                    mtime_unix: 1,
+                    fingerprint: Some(format!("fp-{name}")),
+                    natural_key: None,
+                    make: None,
+                    model: None,
+                    captured_at: None,
+                    width: Some(64),
+                    height: Some(64),
+                    imported_at: 0,
+                },
+                None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn an_obsolete_render_is_cancelled_even_when_the_current_hash_is_already_stored() {
+        let Some(mut t) = svc_fx() else { return };
+        // A is rendered and stored.
+        t.store.put_master_edit(t.id, &exposure(1.0)).unwrap();
+        t.svc
+            .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
+        drain(&mut t.svc);
+        // Edit to B: its render starts.
+        t.store.put_master_edit(t.id, &exposure(2.0)).unwrap();
+        t.svc.invalidate(t.id);
+        t.svc
+            .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
+        let b_flag = t.svc.inflight[&t.id].cancelled.clone();
+        // Back to A (already stored): the request returns early, but B must still be cancelled so
+        // it can't overwrite A's render with the wrong pixels.
+        t.store.put_master_edit(t.id, &exposure(1.0)).unwrap();
+        t.svc.invalidate(t.id);
+        t.svc
+            .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
+        assert!(b_flag.load(Ordering::SeqCst));
+        assert!(!t.svc.inflight.contains_key(&t.id));
+    }
+
+    #[test]
+    fn decoded_frames_in_flight_are_bounded_by_evicting_the_oldest() {
+        let Some(mut t) = svc_fx() else { return };
+        let ids = [t.id, add_asset(&t, "b.NEF"), add_asset(&t, "c.NEF")];
+        let mut flags = Vec::new();
+        for id in ids {
+            t.store.put_master_edit(id, &exposure(1.0)).unwrap();
+            t.svc
+                .request(&t.fx.pounce, &t.store, id, 0, RenderPolicy::EditedOnly);
+            if let Some(f) = t.svc.inflight.get(&id) {
+                flags.push((id, f.cancelled.clone()));
+            }
+            assert!(t.svc.inflight.len() <= MAX_INFLIGHT);
+        }
+        assert_eq!(t.svc.inflight.len(), MAX_INFLIGHT);
+        assert!(
+            flags[0].1.load(Ordering::SeqCst),
+            "the oldest render was evicted for the newest"
+        );
+        assert!(t.svc.inflight.contains_key(&ids[2]));
     }
 }

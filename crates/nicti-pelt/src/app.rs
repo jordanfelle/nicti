@@ -2219,6 +2219,16 @@ impl PeltApp {
             }
         };
         self.refresh_loaded_develop(store.as_ref(), &touched);
+        // #145: paste / sync / preset / undo rewrote these photos' edits without going through
+        // Develop's save, so their grid dots and cached render state must be re-read too.
+        for id in &touched {
+            self.eyeshine.invalidate(*id);
+        }
+        if let (Some(grid), Ok(docs)) = (self.grid.as_mut(), store.get_master_edits(&touched)) {
+            for (id, doc) in docs {
+                grid.mark_edited(id, doc.is_some_and(|d| !d.stages.is_empty()));
+            }
+        }
     }
 
     /// Re-reads the loaded photo's document into `DevelopView` if a batch touched it.
@@ -2550,8 +2560,14 @@ impl PeltApp {
         }
         match self.larder.as_ref().map(crate::t2::try_lock_larder) {
             Some(Some(mut guard)) => {
-                let _ = guard.purge_tier(nicti_lair::larder::LarderTier::Rendered);
-                self.purge_rendered_pending = false;
+                match guard.purge_tier(nicti_lair::larder::LarderTier::Rendered) {
+                    Ok(_) => self.purge_rendered_pending = false,
+                    // Stay pending (retried next frame) and say so.
+                    Err(e) => {
+                        self.cull_notice =
+                            Some(format!("Couldn't empty the rendered previews yet: {e}"))
+                    }
+                }
             }
             Some(None) => {}
             None => self.purge_rendered_pending = false,
@@ -2583,7 +2599,11 @@ impl PeltApp {
         if self.loupe_preview.as_ref().map(|(id, _, _)| *id) != Some(asset_id) {
             self.loupe_preview = None;
         }
-        if self.loupe_rendered.as_ref().map(|(id, _)| *id) != Some(asset_id) {
+        // `loupe_rendered` describes `loupe_preview`'s texture: if that was cleared (a reopened
+        // loupe), the render must be re-read, not assumed installed.
+        if self.loupe_preview.is_none()
+            || self.loupe_rendered.as_ref().map(|(id, _)| *id) != Some(asset_id)
+        {
             self.loupe_rendered = None;
         }
         // #145: an edited photo's screen preview is a render of its edits. Queue one if none is
@@ -2598,7 +2618,17 @@ impl PeltApp {
         // not linger: drop it so the camera preview is reinstalled below. ("Never downgrade"
         // protects against a *slower* source winning, not against edits going away.)
         if let Some(r) = &resolved {
-            if self.loupe_rendered.is_some() && !policy.wants_render(r.edited) {
+            // Drop a shown render that no longer applies: rendering is off for this photo, or the
+            // photo is now unedited while the installed render is of something else (Reset all
+            // under "All photos" still wants a render, but the old edited one must not linger as
+            // "updating").
+            let installed_is_current = self
+                .loupe_rendered
+                .as_ref()
+                .is_some_and(|(_, h)| Some(h.as_str()) == r.hash.as_deref());
+            if self.loupe_rendered.is_some()
+                && (!policy.wants_render(r.edited) || (!r.edited && !installed_is_current))
+            {
                 self.loupe_rendered = None;
                 self.loupe_preview = None;
             }
@@ -2620,7 +2650,18 @@ impl PeltApp {
                             guard.get_latest(asset_id, nicti_lair::larder::LarderTier::Rendered)
                         {
                             drop(guard);
-                            match preview_texture(ui.ctx(), format!("loupe-r-{asset_id}"), &bytes) {
+                            // A render of a *replaced* file (a re-ingest keeps the asset id) must
+                            // never be shown, even as an "older" one.
+                            let usable = r
+                                .hash
+                                .as_deref()
+                                .is_some_and(|cur| hash == cur || eyeshine::same_file(&hash, cur));
+                            let texture = usable
+                                .then(|| {
+                                    preview_texture(ui.ctx(), format!("loupe-r-{asset_id}"), &bytes)
+                                })
+                                .flatten();
+                            match texture {
                                 Some(texture) => {
                                     self.loupe_preview = Some((asset_id, true, texture));
                                     self.loupe_rendered = Some((asset_id, hash));
