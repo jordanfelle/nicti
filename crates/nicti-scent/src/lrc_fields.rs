@@ -83,15 +83,15 @@ pub enum ReadError {
     UnknownEntity(String),
 }
 
-fn local_name(qname: &[u8]) -> &[u8] {
-    match qname.iter().position(|&b| b == b':') {
+fn local_name(qname: &str) -> &str {
+    match qname.find(':') {
         Some(i) => &qname[i + 1..],
         None => qname,
     }
 }
 
-fn local_eq(qname: &[u8], target: &str) -> bool {
-    local_name(qname) == target.as_bytes()
+fn local_eq(qname: &str, target: &str) -> bool {
+    local_name(qname) == target
 }
 
 /// Parses whatever LRC-convention properties are present in a full XMP
@@ -153,9 +153,7 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
                 read_attrs(&e, &mut meta)?;
             }
             Event::Text(t) => {
-                let text = t
-                    .xml_content(XmlVersion::Implicit1_0)
-                    .map_err(quick_xml::Error::from)?;
+                let text = t.xml_content(XmlVersion::Implicit1_0);
                 push_text(
                     &text,
                     in_list.is_some(),
@@ -167,7 +165,7 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
             Event::GeneralRef(r) => {
                 let resolved: String = match r.resolve_char_ref()? {
                     Some(c) => c.to_string(),
-                    None => match r.decode().map_err(quick_xml::Error::from)?.as_ref() {
+                    None => match r.as_ref() {
                         "amp" => "&".into(),
                         "lt" => "<".into(),
                         "gt" => ">".into(),
@@ -238,9 +236,9 @@ pub fn read(xmp: &str) -> Result<LrcMeta, ReadError> {
 
 /// Exact qualified names, not local names: `MicrosoftPhoto:Rating` (0-100) and other foreign
 /// `*:Rating`/`*:Label` properties must never be mistaken for `xmp:Rating`/`xmp:Label`.
-const RATING_KEY: &[u8] = b"xmp:Rating";
-const LABEL_KEY: &[u8] = b"xmp:Label";
-const PICK_KEY: &[u8] = b"nicti:pick";
+const RATING_KEY: &str = "xmp:Rating";
+const LABEL_KEY: &str = "xmp:Label";
+const PICK_KEY: &str = "nicti:pick";
 
 fn push_text(
     text: &str,
@@ -283,7 +281,7 @@ fn read_attrs(e: &quick_xml::events::BytesStart<'_>, meta: &mut LrcMeta) -> Resu
                 meta.label = Some(val.to_string());
             }
         } else if key == PICK_KEY {
-            meta.pick = attr.value.as_ref() == b"1";
+            meta.pick = attr.value.as_ref() == "1";
         }
     }
     Ok(())
