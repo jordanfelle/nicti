@@ -69,19 +69,20 @@ const XMP_NS: &str = "http://ns.adobe.com/xap/1.0/";
 const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
 const LR_NS: &str = "http://ns.adobe.com/lightroom/1.0/";
 
-fn local_name(qname: QName) -> Vec<u8> {
-    match qname.as_ref().iter().position(|&b| b == b':') {
-        Some(i) => qname.as_ref()[i + 1..].to_vec(),
-        None => qname.as_ref().to_vec(),
+fn local_name(qname: QName) -> String {
+    let name: &str = qname.as_ref();
+    match name.find(':') {
+        Some(i) => name[i + 1..].to_owned(),
+        None => name.to_owned(),
     }
 }
 
 fn is_local(qname: QName, target: &str) -> bool {
-    local_name(qname) == target.as_bytes()
+    local_name(qname) == target
 }
 
 fn has_crs_prefix(qname: QName) -> bool {
-    qname.as_ref().starts_with(b"crs:")
+    qname.as_ref().starts_with("crs:")
 }
 
 /// Whether this packet already carries any `crs:`-namespaced property --
@@ -172,35 +173,41 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             Event::Empty(s) => (false, s.clone()),
             _ => unreachable!(),
         };
-        let mut new_tag =
-            BytesStart::new(String::from_utf8_lossy(orig.name().as_ref()).into_owned());
+        let mut new_tag = BytesStart::new(orig.name().as_ref().to_owned());
         let (mut saw_nicti_ns, mut saw_xmp_ns, mut saw_dc_ns, mut saw_lr_ns) =
             (false, false, false, false);
         for attr in orig.attributes() {
             let attr = attr?;
             let key = attr.key;
-            if key.as_ref() == b"xmp:Rating" && patch.rating.is_some() {
+            if key.as_ref() == "xmp:Rating" && patch.rating.is_some() {
                 continue;
             }
-            if key.as_ref() == b"xmp:Label" && patch.label.is_some() {
+            if key.as_ref() == "xmp:Label" && patch.label.is_some() {
                 continue;
             }
             if is_local(key, "editDocument") && patch.nicti_edit_document.is_some() {
                 continue;
             }
-            if key.as_ref() == b"nicti:pick" && patch.nicti_pick.is_some() {
+            if key.as_ref() == "nicti:pick" && patch.nicti_pick.is_some() {
                 continue;
             }
             match key.as_ref() {
-                b"xmlns:xmp" => saw_xmp_ns = true,
-                b"xmlns:dc" => saw_dc_ns = true,
-                b"xmlns:lr" => saw_lr_ns = true,
+                "xmlns:xmp" => saw_xmp_ns = true,
+                "xmlns:dc" => saw_dc_ns = true,
+                "xmlns:lr" => saw_lr_ns = true,
                 _ => {}
             }
-            if key.as_ref() == b"xmlns:nicti" {
+            if key.as_ref() == "xmlns:nicti" {
                 saw_nicti_ns = true;
             }
-            new_tag.push_attribute((key.as_ref(), attr.value.as_ref()));
+            // `Attribute` itself, not a `(&str, &str)` tuple: the tuple form escapes the value, and
+            // `attr.value` is already the raw (escaped) text, so it would double-escape.
+            // push_attribute always wraps in double quotes, so a literal `"` from a
+            // single-quoted source attribute must become `&quot;` or the output is malformed.
+            new_tag.push_attribute(quick_xml::events::attributes::Attribute {
+                key: attr.key,
+                value: attr.value.replace('"', "&quot;").into(),
+            });
         }
         if let Some(Some(v)) = &patch.rating {
             new_tag.push_attribute(("xmp:Rating", v.to_string().as_str()));
@@ -258,8 +265,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         while i < desc_end_idx {
             let is_subject = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "subject"));
             let is_hier = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "hierarchicalSubject"));
-            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"xmp:Rating");
-            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"xmp:Label");
+            let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == "xmp:Rating");
+            let is_label = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == "xmp:Label");
             if (is_subject && patch.keywords.is_some())
                 || (is_hier && patch.hierarchical_keywords.is_some())
                 || (is_rating && patch.rating.is_some())
@@ -393,6 +400,24 @@ mod tests {
                 || patched.contains("Tom &amp; Jerry said &#34;hi&#34;"),
             "unrelated attribute value was not preserved exactly: {patched}"
         );
+    }
+
+    #[test]
+    fn single_quoted_attribute_with_literal_double_quote_stays_well_formed() {
+        let xmp = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" crs:Note='said "hi"'/>"#;
+        let patched = apply(
+            xmp,
+            &Patch {
+                rating: Some(Some(5)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            patched.contains("crs:Note=\"said &quot;hi&quot;\""),
+            "{patched}"
+        );
+        assert!(apply(&patched, &Patch::default()).is_ok());
     }
 
     #[test]
