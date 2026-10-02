@@ -199,6 +199,8 @@ pub struct PeltApp {
     loupe_render_undecodable: Option<(i64, String)>,
     /// Switching to `Off` empties the rendered tier; retried each frame while the Larder is busy.
     purge_rendered_pending: bool,
+    /// The current pending purge's failure was already shown (see `try_purge_rendered`).
+    purge_error_reported: bool,
     /// Sidecar write-back for marker changes and its settings/review panel (#60); `None` when
     /// the catalog failed to open.
     xmp: Option<XmpWriter>,
@@ -436,6 +438,7 @@ impl PeltApp {
             loupe_badge: Badge::None,
             loupe_render_undecodable: None,
             purge_rendered_pending: false,
+            purge_error_reported: false,
             xmp,
             xmp_ui: XmpUi::default(),
             lrc_ui: LrcImportUi::default(),
@@ -2549,6 +2552,7 @@ impl PeltApp {
         self.loupe_rendered = None;
         self.loupe_preview = None;
         self.purge_rendered_pending = self.preview_settings.policy == eyeshine::RenderPolicy::Off;
+        self.purge_error_reported = false;
         self.try_purge_rendered();
     }
 
@@ -2564,8 +2568,13 @@ impl PeltApp {
                     Ok(_) => self.purge_rendered_pending = false,
                     // Stay pending (retried next frame) and say so.
                     Err(e) => {
-                        self.cull_notice =
-                            Some(format!("Couldn't empty the rendered previews yet: {e}"))
+                        // Once per pending purge: this retries every frame and must not keep
+                        // replacing whatever other notice the user hasn't read yet.
+                        if !self.purge_error_reported {
+                            self.purge_error_reported = true;
+                            self.cull_notice =
+                                Some(format!("Couldn't empty the rendered previews yet: {e}"));
+                        }
                     }
                 }
             }

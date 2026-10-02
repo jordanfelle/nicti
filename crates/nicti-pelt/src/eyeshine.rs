@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nicti_calico::dcp::DcpProfile;
@@ -265,6 +265,10 @@ pub struct Env {
     /// between tiles; without this a second photo would build its own kernels and hold a second
     /// full-extent frame texture (~350 MB at 45 MP) while `vram_bytes` says 0.
     render_busy: Arc<AtomicBool>,
+    /// Pipelines submitted and not yet settled -- including ones the service evicted from its own
+    /// table whose queued job hasn't been reached by a worker (and so still holds a decoded
+    /// frame). New work is admitted against this, not just against the service's table.
+    live: Arc<AtomicUsize>,
 }
 
 /// RAII claim on [`Env::render_busy`].
@@ -298,6 +302,7 @@ impl Env {
             submitter,
             render_ctx: Arc::new(Mutex::new(None)),
             render_busy: Arc::new(AtomicBool::new(false)),
+            live: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -308,11 +313,14 @@ struct Settle {
     /// Set when a stage panicked: the dropped `Settle` then resolves `Failed`, not `Retry`, so a
     /// deterministic panic can't loop forever.
     panicked: Arc<AtomicBool>,
+    /// Decremented exactly once, when the slot resolves (see [`Env::live`]).
+    live: Arc<AtomicUsize>,
 }
 
 impl Settle {
     fn settle(mut self, outcome: T2Outcome) {
         if let Some(slot) = self.slot.take() {
+            self.live.fetch_sub(1, Ordering::SeqCst);
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         }
     }
@@ -321,6 +329,7 @@ impl Settle {
 impl Drop for Settle {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
+            self.live.fetch_sub(1, Ordering::SeqCst);
             // `thread::panicking()` covers a panic that is still unwinding through `begin` (which
             // owns the `Settle`): the flag is only set after `catch_unwind` returns, too late.
             let outcome = if self.panicked.load(Ordering::SeqCst) || std::thread::panicking() {
@@ -371,9 +380,11 @@ pub fn submit(
         cancelled,
         panicked: Arc::new(AtomicBool::new(false)),
     });
+    env.live.fetch_add(1, Ordering::SeqCst);
     let settle = Settle {
         slot: Some(slot.clone()),
         panicked: task.panicked.clone(),
+        live: env.live.clone(),
     };
     let job = DecodeJob {
         label: format!("Render preview: {}", task.req.path.display()),
@@ -839,6 +850,9 @@ pub struct Info {
 /// Renders in flight at once. Each decoded frame is ~270 MB at 45 MP and waits for the single GPU
 /// claim while holding it, so the bound is on frames, not just on the GPU.
 const MAX_INFLIGHT: usize = 2;
+/// Pipelines alive (including evicted ones still draining out of Pounce's queues) before new work
+/// waits for them to settle.
+const MAX_LIVE: usize = MAX_INFLIGHT + 1;
 
 struct Inflight {
     /// Submission order, so the oldest render can be evicted for the photo being looked at.
@@ -995,6 +1009,11 @@ impl EyeshineService {
                 pounce.cancel(old.job);
             }
         }
+        // Evicted pipelines still hold a decoded frame until a worker reaches their cancelled job;
+        // don't pile new ones on top. The loupe re-requests every frame, so this just waits.
+        if env.live.load(Ordering::SeqCst) >= MAX_LIVE {
+            return Some(info);
+        }
         let seq = self.next_seq;
         self.next_seq += 1;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1058,6 +1077,10 @@ impl EyeshineService {
     /// True while any render is queued or running.
     pub fn busy(&self) -> bool {
         !self.inflight.is_empty()
+            || self
+                .env
+                .as_ref()
+                .is_some_and(|e| e.live.load(Ordering::SeqCst) > 0)
     }
 
     /// Cancels everything in flight (a view switch, shutdown).
@@ -1697,6 +1720,7 @@ mod tests {
         let settle = Settle {
             slot: Some(slot.clone()),
             panicked: Arc::new(AtomicBool::new(false)),
+            live: Arc::new(AtomicUsize::new(1)),
         };
         let _ = catch_unwind(AssertUnwindSafe(move || {
             let _owned = settle;
@@ -1711,6 +1735,7 @@ mod tests {
         drop(Settle {
             slot: Some(slot.clone()),
             panicked: Arc::new(AtomicBool::new(false)),
+            live: Arc::new(AtomicUsize::new(1)),
         });
         assert!(matches!(
             slot.lock().unwrap().take(),
@@ -1817,5 +1842,28 @@ mod tests {
             "the oldest render was evicted for the newest"
         );
         assert!(t.svc.inflight.contains_key(&ids[2]));
+    }
+
+    #[test]
+    fn the_live_pipeline_count_returns_to_zero_once_everything_settles() {
+        let Some(mut t) = svc_fx() else { return };
+        let ids = [t.id, add_asset(&t, "b.NEF"), add_asset(&t, "c.NEF")];
+        for id in ids {
+            t.store.put_master_edit(id, &exposure(1.0)).unwrap();
+            t.svc
+                .request(&t.fx.pounce, &t.store, id, 0, RenderPolicy::EditedOnly);
+            let live = t.fx.env.live.load(Ordering::SeqCst);
+            assert!(live <= MAX_LIVE, "live={live}");
+        }
+        drain(&mut t.svc);
+        let start = Instant::now();
+        while t.fx.env.live.load(Ordering::SeqCst) != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "evicted jobs never settled"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!t.svc.busy());
     }
 }
