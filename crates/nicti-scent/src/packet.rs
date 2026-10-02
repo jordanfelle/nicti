@@ -202,7 +202,12 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             }
             // `Attribute` itself, not a `(&str, &str)` tuple: the tuple form escapes the value, and
             // `attr.value` is already the raw (escaped) text, so it would double-escape.
-            new_tag.push_attribute(attr);
+            // push_attribute always wraps in double quotes, so a literal `"` from a
+            // single-quoted source attribute must become `&quot;` or the output is malformed.
+            new_tag.push_attribute(quick_xml::events::attributes::Attribute {
+                key: attr.key,
+                value: attr.value.replace('"', "&quot;").into(),
+            });
         }
         if let Some(Some(v)) = &patch.rating {
             new_tag.push_attribute(("xmp:Rating", v.to_string().as_str()));
@@ -395,6 +400,24 @@ mod tests {
                 || patched.contains("Tom &amp; Jerry said &#34;hi&#34;"),
             "unrelated attribute value was not preserved exactly: {patched}"
         );
+    }
+
+    #[test]
+    fn single_quoted_attribute_with_literal_double_quote_stays_well_formed() {
+        let xmp = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" crs:Note='said "hi"'/>"#;
+        let patched = apply(
+            xmp,
+            &Patch {
+                rating: Some(Some(5)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            patched.contains("crs:Note=\"said &quot;hi&quot;\""),
+            "{patched}"
+        );
+        assert!(apply(&patched, &Patch::default()).is_ok());
     }
 
     #[test]
