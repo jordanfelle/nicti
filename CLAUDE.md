@@ -21,7 +21,7 @@ file under the line-count gate. Each topic has:
 
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
-`preview-tiers` (0029, 0143, 0072), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
+`preview-tiers` (0029, 0143, 0072, 0145), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
 `lrc-migration` (0061, 0062, 0156, 0158), `masking` (0048, 0049), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
@@ -220,6 +220,7 @@ terse index: crate/spike → purpose → owning topic.
   **#57 (export, landed)**: `export/` (`jobs.rs` the run, `dialog.rs`, `presets.rs`, `sink.rs`) and
   Develop autosave to the catalog — see [`export`](.claude/rules/export/REFERENCE.md).
   **#52 (presets/copy/paste/sync, landed)**: `knead/` — see [`develop`](.claude/rules/develop/REFERENCE.md).
+  **#145 (rendered previews, landed)**: `eyeshine.rs` (render job + display rule), `preview_settings.rs`, `export/render_core.rs` — see [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
 - **`spikes/sniff`** (#28/#29/ADR-0029) → [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md)

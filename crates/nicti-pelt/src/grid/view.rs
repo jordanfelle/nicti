@@ -114,6 +114,7 @@ pub fn show(
     state: &mut ViewState,
     cull: &mut CullState,
     pounce: &Pounce,
+    flag_stale: bool,
 ) -> GridOutcome {
     let mut outcome = GridOutcome::default();
     session.poll(ui.ctx(), pounce);
@@ -219,6 +220,7 @@ pub fn show(
                         cursor: cursor == Some(index),
                         selected: session.is_selected(index),
                         meta: cull.meta(id),
+                        stale: flag_stale && session.is_edited(id),
                     };
                     paint_cell(ui, session, id, rect, &marks);
                     if response.clicked() {
@@ -262,6 +264,8 @@ struct Marks<'a> {
     selected: bool,
     /// Rating, pick/reject and label, once read; `None` draws nothing (never a guess).
     meta: Option<&'a AssetMeta>,
+    /// The photo has edits its camera-derived thumbnail doesn't show (#145).
+    stale: bool,
 }
 
 fn paint_cell(ui: &egui::Ui, session: &mut GridSession, id: i64, rect: Rect, marks: &Marks<'_>) {
@@ -296,6 +300,9 @@ fn paint_cell(ui: &egui::Ui, session: &mut GridSession, id: i64, rect: Rect, mar
 
     if let Some(meta) = marks.meta {
         paint_marks(&painter, inner, meta);
+    }
+    if marks.stale {
+        crate::cull::badges::paint_stale(&painter, inner, crate::eyeshine::Badge::Stale);
     }
 
     if marks.selected {

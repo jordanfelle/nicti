@@ -82,6 +82,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0115](0115-rocksdb-evaluation.md) | 0015 | RocksDB (catalog store candidate) | Rejected |
 | [0116](0116-fjall-evaluation.md) | 0016 | fjall (catalog store candidate) | Rejected |
 | [0143](0143-preview-codec-followup.md) | 0022 | T2 preview-codec follow-up (faster AVIF speeds + lossy WebP) | Accepted |
+| [0145](0145-rendered-screen-tier.md) | — | Rendered screen-preview tier (stale-while-revalidate) | Accepted |
 | [0156](0156-lrcat-data-rocksdb-blob-linkage.md) | — | `.lrcat-data` blob linkage and #62 import policy | Accepted |
 | [0158](0158-lrc-hash-relink-seeding.md) | — | LRC `md5`/`importHash` vs homing's relink fingerprints | Accepted |
 | [0214](0214-claw-plugin-manifest-and-kill-switch.md) | — | Claw v2 plugin manifest, disclosure UX, and kill switch (Collar/Hiss) | Proposed |

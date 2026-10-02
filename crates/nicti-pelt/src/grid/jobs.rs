@@ -89,6 +89,9 @@ const IMAGES_PER_STEP: usize = 8;
 /// One decoded thumbnail's RGBA pixels, ready for `egui::Context::load_texture` on the UI thread.
 pub struct ThumbImage {
     pub image: egui::ColorImage,
+    /// The photo has develop edits (#145): this camera-derived thumbnail doesn't show them, so
+    /// the grid can flag it. Set by [`ThumbBatchJob`], `false` from [`make_thumbnail`] alone.
+    pub edited: bool,
 }
 
 /// Why a cell has no thumbnail. The split decides whether the grid ever asks again: a missing or
@@ -216,6 +219,21 @@ impl ChunkedJob for ThumbBatchJob {
             }
         }
 
+        // #145: which of these photos have edits, one batch read for the chunk. A failed read just
+        // leaves them unflagged -- a missing badge, never a failed thumbnail.
+        if let Ok(docs) = self.store.get_master_edits(chunk) {
+            let edited: std::collections::HashSet<i64> = docs
+                .into_iter()
+                .filter(|(_, doc)| doc.as_ref().is_some_and(|d| !d.stages.is_empty()))
+                .map(|(id, _)| id)
+                .collect();
+            for (id, outcome) in &mut results {
+                if let Ok(thumb) = outcome {
+                    thumb.edited = edited.contains(id);
+                }
+            }
+        }
+
         self.next = end;
         let finished = self.next >= self.ids.len();
         {
@@ -247,6 +265,7 @@ pub fn make_thumbnail(bytes: &[u8]) -> Result<ThumbImage, String> {
     let size = [rgba.width() as usize, rgba.height() as usize];
     Ok(ThumbImage {
         image: egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+        edited: false,
     })
 }
 

@@ -23,7 +23,7 @@ left decisions open for Tapetum to make, rather than deciding them itself:
 - **ADR-0050**: proposes heal/remove after lens correction, before global tone, in linear space —
   "#44 has the final say."
 - **ADR-0029/0143**: T2/T3 tiers go stale-while-baking once an image has edits, until Tapetum
-  renders a real screen tier (#145).
+  renders a real screen tier (#145; built in ADR-0145).
 - **ADR-0038**: the render graph's overall stage order is #44's decision; ADR-0038 only fixes the
   order *within* color.
 - **ADR-0048**: proposes AI masks bake after color/tone, before masked local adjustments; masks at

@@ -37,6 +37,7 @@ use crate::cull::previews::{preview_texture, TilePreviews};
 use crate::cull::survey::{self as cull_survey, SurveySession};
 use crate::cull::CullState;
 use crate::export::{facts_for, ExportEnv, ExportUi};
+use crate::eyeshine::{self, Badge, EyeshineService};
 use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
@@ -46,6 +47,7 @@ use crate::knead::Clipboard;
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::lrc_import::{self, LrcImportUi};
 use crate::mask_panel::MaskUi;
+use crate::preview_settings::{self, PreviewSettings, Surface};
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
@@ -184,6 +186,15 @@ pub struct PeltApp {
     larder: Option<SharedLarder>,
     /// The preview-cache settings panel's UI state (#302).
     cache_settings: CacheSettingsUi,
+    /// Rendered previews (#145): which photos get one and which views use it.
+    preview_settings: PreviewSettings,
+    /// Queues/dedupes the background renders of edited photos' screen previews (#145).
+    eyeshine: EyeshineService,
+    /// The loupe fallback's installed *rendered* preview: `(asset, render hash)`. Lets the fallback
+    /// swap in a newer render without ever downgrading to a camera preview.
+    loupe_rendered: Option<(i64, String)>,
+    /// What the loupe fallback's current preview should be flagged with (#145).
+    loupe_badge: Badge,
     /// Sidecar write-back for marker changes and its settings/review panel (#60); `None` when
     /// the catalog failed to open.
     xmp: Option<XmpWriter>,
@@ -366,6 +377,16 @@ impl PeltApp {
         // signal that an update exists, just a background nicety.
         update.spawn_check(&version, false);
 
+        let preview_settings = preview_settings::load(&catalog_path);
+        let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
+            eyeshine::Env::new(
+                Arc::new(LibRawDecoder),
+                gpu.clone(),
+                l.clone(),
+                pounce.submitter(),
+            )
+        }));
+
         Self {
             view: View::Library,
             color: ColorManagement::new(),
@@ -405,6 +426,10 @@ impl PeltApp {
             loupe_preview: None,
             larder: larder.clone(),
             cache_settings: CacheSettingsUi::default(),
+            preview_settings,
+            eyeshine,
+            loupe_rendered: None,
+            loupe_badge: Badge::None,
             xmp,
             xmp_ui: XmpUi::default(),
             lrc_ui: LrcImportUi::default(),
@@ -1147,6 +1172,7 @@ impl eframe::App for PeltApp {
         self.poll_move();
         self.poll_recovery();
         self.poll_cull();
+        self.poll_eyeshine(ui.ctx());
         self.export.poll();
         if self.export.is_running() {
             // Progress text; nothing else repaints an otherwise idle window.
@@ -1654,9 +1680,14 @@ impl PeltApp {
         ui.separator();
 
         let outcome = match (self.grid.as_mut(), self.cull.as_mut()) {
-            (Some(grid), Some(cull)) => {
-                grid::view::show(ui, grid, &mut self.grid_view, cull, &self.pounce)
-            }
+            (Some(grid), Some(cull)) => grid::view::show(
+                ui,
+                grid,
+                &mut self.grid_view,
+                cull,
+                &self.pounce,
+                self.preview_settings.policy_for(Surface::Grid) != eyeshine::RenderPolicy::Off,
+            ),
             _ => grid::view::GridOutcome::default(),
         };
         if let Some(index) = outcome.open {
@@ -1790,6 +1821,9 @@ impl PeltApp {
             &self.catalog_path,
             &self.pounce,
         );
+        if preview_settings::show(ui, &mut self.preview_settings) {
+            self.apply_preview_settings();
+        }
         ui.separator();
         if let (CatalogOpenState::Open(store), Some(xmp)) = (&self.catalog, &self.xmp) {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -2242,8 +2276,17 @@ impl PeltApp {
         }
         match store.put_master_edit(asset_id, develop.document()) {
             Ok(()) => {
+                let edited = eyeshine::has_edits(develop.document());
                 develop.mark_saved();
                 self.edit_save_failed = None;
+                if let Some(grid) = self.grid.as_mut() {
+                    grid.mark_edited(asset_id, edited);
+                }
+                // #145: the saved edits supersede any cached/queued render of this photo.
+                self.eyeshine.invalidate(asset_id);
+                let policy = self.preview_settings.effective_policy();
+                self.eyeshine
+                    .request(&self.pounce, store, asset_id, 0, policy);
                 true
             }
             Err(e) => {
@@ -2479,6 +2522,34 @@ impl PeltApp {
         ));
     }
 
+    /// Persists a changed rendered-preview setting and applies it: in-flight renders are dropped,
+    /// per-photo resolutions re-read, and switching to `Off` empties the rendered tier.
+    fn apply_preview_settings(&mut self) {
+        if let Err(e) = preview_settings::save(&self.catalog_path, &self.preview_settings) {
+            self.cull_notice = Some(format!("Couldn't save the preview settings: {e}"));
+        }
+        self.eyeshine.cancel_all(&self.pounce);
+        self.eyeshine.invalidate_all();
+        self.loupe_rendered = None;
+        self.loupe_preview = None;
+        if self.preview_settings.policy == crate::eyeshine::RenderPolicy::Off {
+            if let Some(mut guard) = self.larder.as_ref().and_then(crate::t2::try_lock_larder) {
+                let _ = guard.purge_tier(nicti_lair::larder::LarderTier::Rendered);
+            }
+        }
+    }
+
+    /// Collects finished rendered previews (#145). A render landing needs a repaint to be picked
+    /// up; while any is running, poll again shortly since nothing else wakes an idle window.
+    fn poll_eyeshine(&mut self, ctx: &egui::Context) {
+        if !self.eyeshine.poll().is_empty() {
+            ctx.request_repaint();
+        }
+        if self.eyeshine.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
     /// The instant fallback while a real decode is still in flight: shows the asset's T2 preview
     /// from the Larder when one is cached (#301), else its T0 embedded preview (extracted at
     /// import time, `nicti_lair::scruff::Ingest`). The texture is cached per asset, so each tier
@@ -2491,6 +2562,41 @@ impl PeltApp {
     ) {
         if self.loupe_preview.as_ref().map(|(id, _, _)| *id) != Some(asset_id) {
             self.loupe_preview = None;
+        }
+        if self.loupe_rendered.as_ref().map(|(id, _)| *id) != Some(asset_id) {
+            self.loupe_rendered = None;
+        }
+        // #145: an edited photo's screen preview is a render of its edits. Queue one if none is
+        // cached, and swap a stored one in the moment it exists -- never downgrading to a camera
+        // preview. Until then the camera preview stays, flagged stale.
+        let policy = self.preview_settings.policy_for(Surface::Loupe);
+        let index = self.loupe.as_ref().map_or(0, |l| l.cursor());
+        let resolved = self
+            .eyeshine
+            .request(&self.pounce, store, asset_id, index, policy);
+        if let (Some(r), Some(larder)) = (&resolved, &self.larder) {
+            if policy.wants_render(r.edited) {
+                let installed = self.loupe_rendered.as_ref().map(|(_, h)| h.clone());
+                if let Some(mut guard) = crate::t2::try_lock_larder(larder) {
+                    let stored = guard
+                        .stored_hash(asset_id, nicti_lair::larder::LarderTier::Rendered)
+                        .ok()
+                        .flatten();
+                    if stored.is_some() && stored != installed {
+                        if let Ok(Some((hash, bytes))) =
+                            guard.get_latest(asset_id, nicti_lair::larder::LarderTier::Rendered)
+                        {
+                            drop(guard);
+                            if let Some(texture) =
+                                preview_texture(ui.ctx(), format!("loupe-r-{asset_id}"), &bytes)
+                            {
+                                self.loupe_preview = Some((asset_id, true, texture));
+                                self.loupe_rendered = Some((asset_id, hash));
+                            }
+                        }
+                    }
+                }
+            }
         }
         let has_t2 = matches!(&self.loupe_preview, Some((_, true, _)));
         if !has_t2 && self.loupe_t2_undecodable != Some(asset_id) {
@@ -2545,6 +2651,21 @@ impl PeltApp {
         }
 
         ui.label("Decoding full-resolution image...");
+        if let Some(r) = &resolved {
+            let rendered = self.loupe_rendered.as_ref().map(|(_, h)| h.as_str());
+            let have = eyeshine::Available {
+                rendered_current: rendered
+                    .filter(|h| Some(*h) == r.hash.as_deref())
+                    .map(eyeshine::hash_is_partial),
+                rendered_older: rendered.is_some() && rendered != r.hash.as_deref(),
+                camera_t2: rendered.is_none() && matches!(&self.loupe_preview, Some((_, true, _))),
+                camera_t0: rendered.is_none() && matches!(&self.loupe_preview, Some((_, false, _))),
+            };
+            self.loupe_badge = eyeshine::choose_preview(policy, r.edited, have).1;
+            if let Some(text) = self.loupe_badge.label() {
+                ui.colored_label(egui::Color32::from_rgb(0xf2, 0xa3, 0x3b), text);
+            }
+        }
         if let Some((_, _, texture)) = &self.loupe_preview {
             let available = ui.available_size();
             ui.centered_and_justified(|ui| {

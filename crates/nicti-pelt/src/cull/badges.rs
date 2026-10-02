@@ -64,6 +64,29 @@ pub fn paint_marks(painter: &egui::Painter, inner: Rect, meta: &AssetMeta) {
     }
 }
 
+/// A small dot at the cell's top-left for a preview that doesn't match the photo's edits (#145):
+/// amber = camera version while the render is made, blue = an older render being updated, grey
+/// ring = the render lacks local adjustments. Drawn as shapes, not a glyph, so it needs no font.
+pub fn paint_stale(painter: &egui::Painter, inner: Rect, badge: crate::eyeshine::Badge) {
+    use crate::eyeshine::Badge;
+    let center = inner.left_top() + Vec2::new(10.0, 10.0);
+    let (fill, ring) = match badge {
+        Badge::Stale => (Some(Color32::from_rgb(0xf2, 0xa3, 0x3b)), Color32::WHITE),
+        Badge::Updating => (Some(Color32::from_rgb(0x4a, 0x9b, 0xe0)), Color32::WHITE),
+        Badge::Partial => (None, Color32::from_rgb(0xc8, 0xc8, 0xc8)),
+        Badge::CameraRendering | Badge::None => return,
+    };
+    painter.circle_filled(center, 8.0, Color32::from_black_alpha(150));
+    match fill {
+        Some(c) => {
+            painter.circle_filled(center, 4.5, c);
+        }
+        None => {
+            painter.circle_stroke(center, 4.5, egui::Stroke::new(1.5, ring));
+        }
+    }
+}
+
 /// A photo's markers as inline text, for a header row (the loupe): stars, pick/reject, label.
 /// Draws nothing while the markers are still being read (`None`), never a guess.
 pub fn show_marks_inline(ui: &mut egui::Ui, meta: Option<&AssetMeta>) {
