@@ -55,6 +55,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   (sigmoid); names read from the graph. On-demand download only. **CPU bake = 9.2 s warm / 15.3 s cold on the
   Windows reference machine** (ADR-0048's <=1 s assumed CUDA) -> #345. Provenance: upstream "trained on
   DIS-TR"; the *conversion* matches upstream on outputs (#348, `bench/birefnet-verify`, mask IoU >= 0.997).
+- **CPU-viable model (#349)**: nothing is both interactive and BiRefNet-grade -- fp16 BiRefNet is *slower* on CPU (9.9 vs 8.0 s), BiRefNet-lite 4.9 s (near-identical masks, 1.6x), IS-Net 0.56 s (right subject, soft/leaky edges). GPU EP (#345) is the path; lite/IS-Net are optional extra providers (not registered; need pin+licence row+#171 pass). `docs/research/cpu-subject-model.md`, `bench/subject-model-bench`.
 - **Sky** = interim flood-filled heuristic (`nicti-siamese/src/sky.rs`), beta (#347).
 - **Real-hardware numbers (RTX 5080, 45 MP)**: 16 stacked masks +1.4 ms (Vulkan)/+1.9 ms (Dx12) over the
   no-mask live pass; 2.5/3.2 ms p95 in total with spatial adjustments -- inside the 4 ms rule, so no
