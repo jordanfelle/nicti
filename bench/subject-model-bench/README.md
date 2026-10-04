@@ -12,4 +12,4 @@ BENCH_DIR=<dir> python bench/subject-model-bench/bench.py [model ...]  # needs <
 Always extract upright: sideways inputs badly understate the small models. Model files: `birefnet_fp32/fp16.onnx`,
 `birefnet_lite_fp32/fp16.onnx` (onnx-community `BiRefNet-ONNX` / `BiRefNet_lite-ONNX`, `onnx/model*.onnx`),
 `isnet-general-use.onnx`, `u2net.onnx`, `u2netp.onnx` (rembg release `v0.0.0`). Writes `masks_run.npy` and
-`lat_run.json` into `BENCH_DIR`.
+`lat_run.json` into `BENCH_DIR` (a subset run overwrites a full run's files).

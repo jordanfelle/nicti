@@ -32,8 +32,8 @@ test; #171 remains the real-quality pass. Inputs need the NictiBench NEFs (not i
 | BiRefNet-lite fp32 | 224 MB | 4.9 s | 1.6x | 0.95 / 0.99 / 0.51 |
 | BiRefNet-lite fp16 | 115 MB | 5.2 s | 1.5x | 0.95 / 0.99 / 0.51 |
 | IS-Net general-use | 179 MB | 0.56 s | 14x | 0.90 / 0.92 / 0.66 |
-| U²-Net | 176 MB | 0.34 s | 24x | 0.81 / 0.92 / 0.37 |
-| U²-Netp | 4.6 MB | 0.14 s | 57x | 0.83 / 0.88 / 0.53 |
+| U²-Net | 176 MB | 0.34 s | 23x | 0.81 / 0.92 / 0.37 |
+| U²-Netp | 4.6 MB | 0.14 s | 59x | 0.83 / 0.88 / 0.53 |
 
 No int8 BiRefNet exists in the onnx-community conversions (fp32/fp16 only); quantizing it ourselves is a
 separate piece of work and was not attempted.
@@ -42,13 +42,15 @@ separate piece of work and was not attempted.
 
 - **fp16 is a loss on CPU**, as #49 predicted: the ORT CPU provider has thin fp16 kernels, so BiRefNet fp16
   is *slower* (9.9 vs 8.0 s) for half the size, with the same masks. Not worth shipping on CPU.
-- **BiRefNet-lite is near-identical to BiRefNet on 15 of 16 images** (median IoU 0.99, same crisp fur-aware
-  edges) at 1.6x the speed and a quarter of the download -- but 4.9 s is still not interactive. Its one
-  weak image (IoU 0.51) covers about half BiRefNet's area (5% vs 10% of the frame), i.e. it drops part of
-  the subject.
-- **IS-Net general-use is the only interactive candidate (0.56 s) and it picks the right subject**
-  (mean IoU 0.90, worst 0.66), but its mask is visibly worse than BiRefNet's: soft edges (5.5% of
-  pixels between 0.1-0.9 alpha vs 0.7%), grey/leaky interiors on dark or busy fursuits, and halo around
+- **BiRefNet-lite has high agreement with BiRefNet** (median IoU 0.99, same crisp fur-aware edges) at 1.6x
+  the speed and a quarter of the download -- but 4.9 s is still not interactive. It under-segments large
+  subjects slightly (~8% less area on the two biggest, IoU 0.90/0.92) and has one weak image (IoU 0.51,
+  5% vs 10% of the frame -- an ambiguous crowded scene where U²-Net also disagrees with BiRefNet, so the
+  reference itself may be the odd one out).
+- **IS-Net general-use is the only interactive candidate (0.56 s) and agrees with BiRefNet on most
+  images** (mean IoU 0.90, worst 0.66 where it loses about a third of the subject), but its mask looks
+  worse (judged by eye on a contact sheet that is not committed): soft edges (5.5% of all pixels
+  between 0.1-0.9 alpha, pooled over frames, vs 0.7%), grey/leaky interiors on dark or busy fursuits, and halo around
   limbs. U²-Net and U²-Netp are faster still but fragment or miss more (min IoU 0.37 / 0.53).
 - So the real tradeoff is **BiRefNet-lite (quality, ~5 s) vs IS-Net (rough, ~0.5 s)**; nothing is both
   fast and BiRefNet-grade.
