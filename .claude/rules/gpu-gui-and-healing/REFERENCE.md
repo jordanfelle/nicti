@@ -192,6 +192,9 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     `to_filter` even while the header is collapsed (a collapsed bar still filters) and calls
     `invalidate_options` on the import/sync/move busy → idle edge. Not verified by eye: no display
     in the dev sandbox, only unit tests over the state/query logic.
+- **`crates/nicti-pelt`'s `app.rs` Folder-field feedback** (#367) — `validate_folder_input` (blank / not
+  found / not a folder) + `PeltApp::import_status`, a red line under the Folder field that Import,
+  Sync and Open in Loupe set instead of silently returning (also on `register_root` / listing errors).
 - **`crates/nicti-pelt`'s `folder_panel.rs`** (#303) — Library left panel: roots grouped by drive
   (`drive_of` derives the drive from the path — the shell still registers every root under one
   placeholder volume, so no real volume/offline tree until ADR-0071 identity lands), drag a folder

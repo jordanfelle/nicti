@@ -225,11 +225,18 @@ impl Scheduler {
     /// found by CodeRabbit review against the original `spikes/crouch` version, which appended to
     /// the end of the vec instead, silently degrading nearest-to-cursor-first into round-robin --
     /// or drops it (`Outcome::Done`, or a cancelled `Yielded` job).
-    pub fn finish(&mut self, taken: Taken, outcome: Outcome) {
+    ///
+    /// Returns `true` when a `Yielded` job was dropped because it was cancelled. `cancel` doesn't
+    /// take this lock, so it can land *after* the caller's own last `is_cancelled` check but before
+    /// this one; the caller must then record the job as `Cancelled` itself, since nothing else
+    /// ever will (it is no longer queued, so `take_cancelled_while_queued` never sees it).
+    #[must_use = "a dropped cancelled job must be recorded as Cancelled by the caller"]
+    pub fn finish(&mut self, taken: Taken, outcome: Outcome) -> bool {
         if taken.priority == Priority::Background {
             self.admission.release(taken.id);
         }
-        if outcome == Outcome::Yielded && !taken.cancel.is_cancelled() {
+        let cancelled = taken.cancel.is_cancelled();
+        if outcome == Outcome::Yielded && !cancelled {
             let entry = Entry {
                 id: taken.id,
                 job: taken.job,
@@ -240,6 +247,7 @@ impl Scheduler {
                 Priority::Background => self.insert_background_sorted(entry),
             }
         }
+        outcome == Outcome::Yielded && cancelled
     }
 
     pub fn foreground_len(&self) -> usize {
@@ -313,7 +321,7 @@ mod tests {
         } else {
             Outcome::Done
         };
-        scheduler.finish(taken, outcome);
+        let _ = scheduler.finish(taken, outcome);
         Some((id, step))
     }
 
@@ -560,10 +568,51 @@ mod tests {
         );
         scheduler.reprioritize_background(|spec| spec.image_index.unwrap_or(usize::MAX));
 
-        scheduler.finish(taken, Outcome::Yielded);
+        let _ = scheduler.finish(taken, Outcome::Yielded);
 
         // "near" (image_index 0) must now be ahead of "mid" (image_index 5, still 1 chunk left).
         run_one(&mut scheduler);
         assert_eq!(ticks.lock().unwrap().last(), Some(&"near"));
+    }
+
+    #[test]
+    fn finish_reports_a_yielded_job_dropped_because_it_was_cancelled() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let token = scheduler.submit(
+            JobId(0),
+            Box::new(CountingJob {
+                spec: spec(Priority::Background, 0),
+                remaining: 3,
+                ticks,
+                label: "job",
+            }),
+        );
+        let taken = scheduler.take_next().unwrap();
+        // The race: a cancel lands after the worker's own check, before `finish` reads the token.
+        token.cancel();
+        assert!(scheduler.finish(taken, Outcome::Yielded));
+        assert!(
+            scheduler.is_idle(),
+            "a cancelled job must not be re-enqueued"
+        );
+    }
+
+    #[test]
+    fn finish_requeues_and_reports_false_for_an_uncancelled_yield() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        scheduler.submit(
+            JobId(0),
+            Box::new(CountingJob {
+                spec: spec(Priority::Background, 0),
+                remaining: 3,
+                ticks,
+                label: "job",
+            }),
+        );
+        let taken = scheduler.take_next().unwrap();
+        assert!(!scheduler.finish(taken, Outcome::Yielded));
+        assert!(!scheduler.is_idle());
     }
 }

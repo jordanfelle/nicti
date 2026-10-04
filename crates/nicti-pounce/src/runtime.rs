@@ -496,8 +496,11 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
             if terminal.is_none() {
                 inner.update_state(id, JobState::Queued, progress);
             }
-            scheduler.finish(taken, outcome);
-            terminal
+            // `finish` re-reads the token, so a cancel landing after the re-check above is only
+            // visible here: it drops the job, and without this the status would stay `Queued`
+            // forever (the flake in `cancelling_mid_job_stops_it_at_the_next_boundary`).
+            let dropped_cancelled = scheduler.finish(taken, outcome);
+            terminal.or(dropped_cancelled.then_some(JobState::Cancelled))
         };
 
         if let Some(state) = terminal {
