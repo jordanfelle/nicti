@@ -126,6 +126,9 @@ pub struct PeltApp {
     /// returns `None` that whole time), distinct from a classified `Idle`.
     bottleneck: Option<hackles::Verdict>,
     import_path_input: String,
+    /// #367: why the last Import/Sync/Open in Loupe click did nothing (blank, missing or
+    /// non-directory path, registration failure). Cleared on the next valid submit.
+    import_status: Option<String>,
     update: UpdateChecker,
     /// Nine Lives' (#25) own scheduler, `None` when the catalog itself failed to open (nothing to
     /// back up). See `poll_backup`'s own doc comment for how this gets checked and acted on.
@@ -407,6 +410,7 @@ impl PeltApp {
             telemetry,
             bottleneck: None,
             import_path_input: String::new(),
+            import_status: None,
             update,
             nine_lives,
             last_backup_poll: None,
@@ -1764,7 +1768,12 @@ impl PeltApp {
                 let store = store.clone();
                 ui.horizontal(|ui| {
                     ui.label("Folder:");
-                    ui.text_edit_singleline(&mut self.import_path_input);
+                    if ui
+                        .text_edit_singleline(&mut self.import_path_input)
+                        .changed()
+                    {
+                        self.import_status = None;
+                    }
                     if ui.button("Import").clicked() {
                         self.submit_root_job(&store, RootAction::Import);
                     }
@@ -1778,6 +1787,9 @@ impl PeltApp {
                         self.open_in_loupe(&store);
                     }
                 });
+                if let Some(msg) = &self.import_status {
+                    ui.colored_label(egui::Color32::RED, msg);
+                }
 
                 // #26: verified folder move. Copies and hash-verifies every file, re-points the
                 // catalog, then removes the original -- edits/ratings/keywords follow the folder.
@@ -1861,25 +1873,42 @@ impl PeltApp {
         }
     }
 
+    /// Validates the Folder field (#367): a trimmed, non-blank path; with `must_exist`, also an
+    /// existing directory (Import/Sync read the disk; Open in Loupe is catalog-only, so an
+    /// unplugged drive's cached assets must still open). On failure sets `import_status` and returns `None`, so a click is never silent.
+    fn checked_import_path(&mut self, must_exist: bool) -> Option<PathBuf> {
+        match validate_folder_input(&self.import_path_input, must_exist) {
+            Ok(path) => {
+                self.import_status = None;
+                Some(path)
+            }
+            Err(msg) => {
+                self.import_status = Some(msg);
+                None
+            }
+        }
+    }
+
     /// Registers `self.import_path_input` as a root under the placeholder volume (see this
     /// module's own `PLACEHOLDER_VOLUME_IDENTITY_KEY` doc comment) and submits an
-    /// `IngestJob`/`SyncJob` for it to Pounce's CPU lane. A blank path or a registration failure
-    /// is a no-op -- there's no toast/error-banner mechanism in this placeholder shell yet to
-    /// surface it more visibly than the catalog-open error label above already does for a bad
-    /// catalog path.
+    /// `IngestJob`/`SyncJob` for it to Pounce's CPU lane. A blank/invalid path or a registration
+    /// failure is reported on the `import_status` line under the Folder field.
     fn submit_root_job(&mut self, store: &Arc<SqliteCatalog>, action: RootAction) {
-        let path = PathBuf::from(self.import_path_input.trim());
-        if path.as_os_str().is_empty() {
+        let Some(path) = self.checked_import_path(true) else {
             return;
-        }
+        };
         if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
             self.last_move_summary = Some(
                 "A folder move or delete is running; import/sync waits until it finishes.".into(),
             );
             return;
         }
-        let Ok(root_id) = register_root(store.as_ref(), &path) else {
-            return;
+        let root_id = match register_root(store.as_ref(), &path) {
+            Ok(id) => id,
+            Err(e) => {
+                self.import_status = Some(format!("Couldn't register {}: {e}", path.display()));
+                return;
+            }
         };
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
         match action {
@@ -1898,22 +1927,29 @@ impl PeltApp {
     /// Registers `self.import_path_input` the same way `submit_root_job` does, then builds a
     /// fresh `LoupeSession` over every asset already cataloged under that root (in `id` order --
     /// a real grid/filter-driven ordering is #30/#242's job) and switches to the Loupe view. A
-    /// blank path or a registration/listing failure is a no-op, same as `submit_root_job`'s own.
+    /// blank/invalid path or a registration/listing failure is reported on `import_status`.
     fn open_in_loupe(&mut self, store: &Arc<SqliteCatalog>) {
-        let path = PathBuf::from(self.import_path_input.trim());
-        if path.as_os_str().is_empty() {
+        let Some(path) = self.checked_import_path(false) else {
             return;
-        }
+        };
         if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
             self.last_move_summary =
                 Some("A folder move or delete is running; wait for it to finish first.".into());
             return;
         }
-        let Ok(root_id) = register_root(store.as_ref(), &path) else {
-            return;
+        let root_id = match register_root(store.as_ref(), &path) {
+            Ok(id) => id,
+            Err(e) => {
+                self.import_status = Some(format!("Couldn't register {}: {e}", path.display()));
+                return;
+            }
         };
-        let Ok(assets) = store.list_assets_by_root(root_id) else {
-            return;
+        let assets = match store.list_assets_by_root(root_id) {
+            Ok(a) => a,
+            Err(e) => {
+                self.import_status = Some(format!("Couldn't list {}: {e}", path.display()));
+                return;
+            }
         };
         let ids: Vec<i64> = assets.iter().map(|a| a.id).collect();
         self.start_loupe(store, ids, 0, false);
@@ -2772,6 +2808,26 @@ fn stored_edit_document(store: &dyn CatalogStore, asset_id: i64) -> nicti_pawpri
         .unwrap_or_default()
 }
 
+/// The Folder field's check (#367), pure so it's unit-testable: trimmed, non-blank and, when
+/// `must_exist`, exists and is a directory. `Err` is the user-facing message.
+fn validate_folder_input(raw: &str, must_exist: bool) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a folder path first.".into());
+    }
+    let path = PathBuf::from(trimmed);
+    if !must_exist {
+        return Ok(path);
+    }
+    if !path.exists() {
+        return Err(format!("Folder not found: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("Not a folder: {}", path.display()));
+    }
+    Ok(path)
+}
+
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
     nicti_lair::scruff::register_root(store, path)
 }
@@ -2820,5 +2876,38 @@ mod cull_wiring_tests {
         ] {
             assert!(!cull_keys_active(view, true), "{view:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod folder_input_tests {
+    use super::validate_folder_input;
+
+    #[test]
+    fn blank_and_whitespace_are_rejected() {
+        assert!(validate_folder_input("", false).is_err());
+        assert!(validate_folder_input("   ", true).is_err());
+    }
+
+    #[test]
+    fn missing_path_and_plain_file_are_rejected_with_distinct_messages() {
+        let dir = std::env::temp_dir().join(format!("nicti-367-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let missing = validate_folder_input(dir.join("nope").to_str().unwrap(), true).unwrap_err();
+        let not_dir = validate_folder_input(file.to_str().unwrap(), true).unwrap_err();
+        assert!(missing.starts_with("Folder not found"), "{missing}");
+        assert!(not_dir.starts_with("Not a folder"), "{not_dir}");
+        // A real directory, with surrounding whitespace, is accepted and trimmed.
+        let ok = validate_folder_input(&format!("  {}  ", dir.display()), true).unwrap();
+        assert_eq!(ok, dir);
+        // Open in Loupe is catalog-only: a path that is gone (unplugged drive) still passes.
+        let gone = dir.join("nope");
+        assert_eq!(
+            validate_folder_input(gone.to_str().unwrap(), false).unwrap(),
+            gone
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
