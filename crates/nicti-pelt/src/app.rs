@@ -1940,10 +1940,13 @@ impl PeltApp {
         // Catalog-only, so an already-registered root on an unplugged drive still opens -- but an
         // unregistered path must be a real folder, or a typo would register a junk root.
         let canonical = nicti_lair::scruff::canonical_root_string(&path);
-        let registered = store
-            .list_roots()
-            .map(|roots| roots.iter().any(|r| r.path == canonical))
-            .unwrap_or(false);
+        let registered = match store.list_roots() {
+            Ok(roots) => roots.iter().any(|r| r.path == canonical),
+            Err(e) => {
+                self.import_status = Some(format!("Couldn't read the folder list: {e}"));
+                return;
+            }
+        };
         if !registered {
             if let Err(msg) = check_is_dir(&path) {
                 self.import_status = Some(msg);
