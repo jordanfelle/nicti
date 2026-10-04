@@ -46,5 +46,7 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   (`lib.rs`), canonical-JSON + blake3 stage hashing generalized to Tapetum's DAG (`canonical.rs`,
   merges `spikes/pawprint`'s original one-upstream `hash_stage`/`cache_key` with
   `spikes/loaf/src/hash.rs`'s DAG-generalized `chain`), and append-only edit history with
-  slider-drag compaction (`history.rs`) — promoted from `spikes/pawprint` (now deleted). Its XMP
+  slider-drag compaction (`history.rs`; #312: `push_delta` skips a delta whose every change is
+  `before == after`, no step and redo kept, and `compact` drops a run netting to no change — strict
+  compare, the caller resolves absent stages to defaults, ADR-0101 rule 6) — promoted from `spikes/pawprint` (now deleted). Its XMP
   round-trip proof stayed with #59/`spikes/scent` rather than being promoted here.

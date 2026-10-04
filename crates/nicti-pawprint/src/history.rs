@@ -114,9 +114,10 @@ impl History {
         self.push_delta(batch_id, changes, None, now_ms());
     }
 
-    // ADR-0101 rule 6 (#312): a delta whose every change has `before == after` should append no
-    // step and leave the redo tail alone (absent entry == stage default), and `compact` should drop
-    // a merged run that nets to before == after; neither is implemented here yet.
+    /// ADR-0101 rule 6 (#312): a delta whose every change has `before == after` appends no step and
+    /// leaves the redo tail alone. Comparison is strict (`before` is `None` for an absent stage), so
+    /// the schema-aware caller resolves an absent entry to its stage default first -- this crate
+    /// doesn't know the defaults.
     fn push_delta(
         &mut self,
         batch_id: Uuid,
@@ -124,6 +125,12 @@ impl History {
         control: Option<&str>,
         timestamp_ms: u128,
     ) {
+        let unchanged = changes
+            .iter()
+            .all(|(id, after)| self.document.stages.get(id) == Some(after));
+        if unchanged {
+            return;
+        }
         self.log.truncate(self.cursor);
         let mut recorded = Vec::with_capacity(changes.len());
         for (stage_id, after) in changes {
@@ -229,7 +236,8 @@ impl History {
     /// anything, so a bulk paste always stays exactly one entry, and never accidentally absorbs
     /// an unrelated slider tick. Only compacts the applied prefix (`..cursor`) -- refuses if
     /// there's a pending redo, so compaction never corrupts a redo chain the user might still walk
-    /// forward into. Snapshots are never merged across or away.
+    /// forward into. Snapshots are never merged across or away. A run that nets to no change is
+    /// dropped (ADR-0101 rule 6).
     pub fn compact(&mut self, window_ms: u128) {
         if self.cursor != self.log.len() {
             return;
@@ -255,6 +263,11 @@ impl History {
                 merged.push(entry);
             }
         }
+        // A merged run that nets to before == after (a drag returning to its start) is dropped.
+        merged.retain(|e| match e {
+            LogEntry::Delta(d) => d.changes.iter().any(|c| c.before != c.after),
+            LogEntry::Snapshot { .. } => true,
+        });
         self.cursor = merged.len();
         self.log = merged;
     }
@@ -333,6 +346,64 @@ mod tests {
             h.len(),
             len_before,
             "compact must not run with a pending redo"
+        );
+    }
+
+    #[test]
+    fn unchanged_delta_appends_no_step_and_keeps_redo() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 0);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(2), 10);
+        assert!(h.undo());
+        assert_eq!(h.len(), 2);
+
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 20);
+        h.apply_batch(
+            Uuid::new_v4(),
+            vec![("nicti.exposure".to_string(), entry(1))],
+        );
+        assert_eq!(h.len(), 2, "no-op deltas must not append or truncate redo");
+        assert!(h.redo(), "redo tail must survive a no-op delta");
+        assert_eq!(
+            h.document().stages["nicti.exposure"].params,
+            serde_json::json!({ "v": 2 })
+        );
+    }
+
+    #[test]
+    fn partially_changed_batch_still_records() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_batch(Uuid::new_v4(), vec![("a".to_string(), entry(1))]);
+        h.apply_batch(
+            Uuid::new_v4(),
+            vec![("a".to_string(), entry(1)), ("b".to_string(), entry(2))],
+        );
+        assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn absent_stage_is_not_equal_to_a_present_one() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_batch(Uuid::new_v4(), vec![("a".to_string(), entry(0))]);
+        assert_eq!(h.len(), 1, "None -> Some is a change at this layer");
+    }
+
+    #[test]
+    fn compact_drops_a_run_that_returns_to_its_start() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 0);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(2), 1000);
+        h.apply_at("nicti.exposure", "exposure_slider", entry(1), 1010);
+        assert_eq!(h.len(), 3);
+        h.compact(50);
+        assert_eq!(
+            h.len(),
+            1,
+            "drag 1 -> 2 -> 1 nets to nothing, first entry stays"
+        );
+        assert_eq!(
+            h.document().stages["nicti.exposure"].params,
+            serde_json::json!({ "v": 1 })
         );
     }
 }
