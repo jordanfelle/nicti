@@ -1937,6 +1937,19 @@ impl PeltApp {
                 Some("A folder move or delete is running; wait for it to finish first.".into());
             return;
         }
+        // Catalog-only, so an already-registered root on an unplugged drive still opens -- but an
+        // unregistered path must be a real folder, or a typo would register a junk root.
+        let canonical = nicti_lair::scruff::canonical_root_string(&path);
+        let registered = store
+            .list_roots()
+            .map(|roots| roots.iter().any(|r| r.path == canonical))
+            .unwrap_or(false);
+        if !registered {
+            if let Err(msg) = check_is_dir(&path) {
+                self.import_status = Some(msg);
+                return;
+            }
+        }
         let root_id = match register_root(store.as_ref(), &path) {
             Ok(id) => id,
             Err(e) => {
@@ -2816,16 +2829,23 @@ fn validate_folder_input(raw: &str, must_exist: bool) -> Result<PathBuf, String>
         return Err("Enter a folder path first.".into());
     }
     let path = PathBuf::from(trimmed);
-    if !must_exist {
-        return Ok(path);
-    }
-    if !path.exists() {
-        return Err(format!("Folder not found: {}", path.display()));
-    }
-    if !path.is_dir() {
-        return Err(format!("Not a folder: {}", path.display()));
+    if must_exist {
+        check_is_dir(&path)?;
     }
     Ok(path)
+}
+
+/// One `metadata` call so a real inspection failure (permission denied on a parent, a dead share)
+/// is reported as such instead of being flattened to "not found" the way `Path::exists` does.
+fn check_is_dir(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => Err(format!("Not a folder: {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("Folder not found: {}", path.display()))
+        }
+        Err(e) => Err(format!("Can't access {}: {e}", path.display())),
+    }
 }
 
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
@@ -2891,8 +2911,8 @@ mod folder_input_tests {
 
     #[test]
     fn missing_path_and_plain_file_are_rejected_with_distinct_messages() {
-        let dir = std::env::temp_dir().join(format!("nicti-367-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
         let file = dir.join("f.txt");
         std::fs::write(&file, b"x").unwrap();
         let missing = validate_folder_input(dir.join("nope").to_str().unwrap(), true).unwrap_err();
@@ -2908,6 +2928,5 @@ mod folder_input_tests {
             validate_folder_input(gone.to_str().unwrap(), false).unwrap(),
             gone
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
