@@ -17,6 +17,8 @@ MODELS = {
 }
 only = sys.argv[1:] or list(MODELS)
 imgs = sorted(glob.glob(S + "/img/p*.jpg"), key=lambda p: int(re.search(r"p(\d+)\.jpg$", os.path.basename(p)).group(1)))
+if len(imgs) < 2:  # the first run is a warm-up and excluded from the median
+    sys.exit(f"need at least 2 images matching {S}/img/p*.jpg, found {len(imgs)} (see extract.py)")
 threads = 8
 
 
