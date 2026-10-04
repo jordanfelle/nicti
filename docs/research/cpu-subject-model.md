@@ -6,62 +6,63 @@ model make it interactive on CPU, and is fp16/int8 BiRefNet any faster?
 
 ## Method
 
-`bench/subject-model-bench/bench.py`. 16 photos from the NictiBench subset (anthrocon 2024/2025, mff2024,
-Nikon Z 8 NEFs, a mix of single fursuiters, groups and crowded halls), using each NEF's embedded
-full-size JPEG (8256x5504, unrotated). Each model gets its own documented preprocessing
-(1024 px for BiRefNet/IS-Net, 320 px for U²-Net), ONNX Runtime CPU provider, 8 intra-op threads,
-one session per model, first run excluded from the warm median. Agreement = IoU of the >0.5 mask
-against BiRefNet fp32 at 512x512, plus a visual contact sheet of the worst/median/best images.
+`bench/subject-model-bench/` (`extract.py` builds the inputs, `bench.py` runs them). 16 photos from the
+NictiBench subset (anthrocon 2024/2025, mff2024; Nikon Z 8 NEFs; single fursuiters, groups, crowded
+halls), using each NEF's embedded full-size JPEG (45 MP) **rotated upright per the NEF's EXIF
+Orientation** (13 of the 16 are portrait; an earlier run that skipped this fed them sideways and badly
+understated the small models -- IS-Net's mean IoU went 0.71 -> 0.90 once upright). Each model gets its
+documented preprocessing (1024 px square for BiRefNet/IS-Net, 320 px for U²-Net; aspect squashed),
+ONNX Runtime CPU provider, 8 intra-op threads, one session per model, first run excluded from the warm
+median. Agreement = IoU of the >0.5 mask against BiRefNet fp32 at 512x512, plus a visual contact sheet of
+the worst/median/best images. IS-Net/U²-Net outputs are min-max rescaled per image (rembg's
+convention); thresholding the raw sigmoid instead gives the same IoU to 3 digits.
 
-**Caveats.** Run on the WSL2 dev box (32 logical cores), not the Windows reference machine -- but BiRefNet
-fp32 measured 7.9 s warm here vs 9.2 s there, so absolute numbers carry over within ~15%. There is no
-hand-labelled ground truth: IoU measures agreement with BiRefNet, not correctness, and a "subject"
-in a crowded hall is ambiguous. Previews are unrotated (orientation does not affect the models'
-relative behaviour). 16 images is a smoke test, not a benchmark; #171 remains the real-quality pass.
+**Caveats.** Run on the WSL2 dev box (32 logical cores), not the Windows reference machine. BiRefNet fp32
+measured 8.0 s warm here vs 9.2 s there (~15% apart), so model-to-model *ratios* should carry over; absolute
+times on the reference machine are not established. No hand-labelled ground truth: IoU measures agreement
+with BiRefNet, not correctness, and "the subject" in a crowded hall is ambiguous. 16 images is a smoke
+test; #171 remains the real-quality pass. Inputs need the NictiBench NEFs (not in the repo).
 
 ## Results
 
-| Model | Size | Warm median | vs BiRefNet | IoU mean (min) |
+| Model | Size | Warm median | Speedup | IoU vs BiRefNet, mean / median / min |
 |---|---|---|---|---|
-| BiRefNet fp32 (shipped) | 973 MB | 7.9 s | 1.0x | 1.00 |
-| BiRefNet fp16 | 490 MB | 10.0 s | 0.8x (slower) | 1.00 (0.998) |
-| BiRefNet-lite fp32 | 224 MB | 4.8 s | 1.7x | 0.88 (0.50) |
-| BiRefNet-lite fp16 | 115 MB | 5.3 s | 1.5x | 0.88 (0.50) |
-| IS-Net general-use | 179 MB | 0.42 s | 19x | 0.71 (0.11) |
-| U²-Net | 176 MB | 0.24 s | 33x | 0.62 (0.09) |
-| U²-Netp | 4.6 MB | 0.12 s | 66x | 0.69 (0.01) |
+| BiRefNet fp32 (shipped) | 973 MB | 8.0 s | 1.0x | -- |
+| BiRefNet fp16 | 490 MB | 9.9 s | 0.8x (slower) | 1.00 / 1.00 / 1.00 |
+| BiRefNet-lite fp32 | 224 MB | 4.9 s | 1.6x | 0.95 / 0.99 / 0.51 |
+| BiRefNet-lite fp16 | 115 MB | 5.2 s | 1.5x | 0.95 / 0.99 / 0.51 |
+| IS-Net general-use | 179 MB | 0.56 s | 14x | 0.90 / 0.92 / 0.66 |
+| U²-Net | 176 MB | 0.34 s | 24x | 0.81 / 0.92 / 0.37 |
+| U²-Netp | 4.6 MB | 0.14 s | 57x | 0.83 / 0.88 / 0.53 |
 
-No int8 BiRefNet exists in the onnx-community conversions (only fp32/fp16); quantizing it ourselves
-would be a separate piece of work and was not attempted.
+No int8 BiRefNet exists in the onnx-community conversions (fp32/fp16 only); quantizing it ourselves is a
+separate piece of work and was not attempted.
 
 ## Findings
 
-- **fp16 is a loss on CPU**, as #49 predicted: the ORT CPU provider has thin fp16 kernels, so it is
-  *slower* (10.0 vs 7.9 s) for half the disk size, with masks identical to fp32 (IoU >= 0.998). Not worth
-  shipping. (fp16 only makes sense on a GPU provider -- fold into #345.)
-- **BiRefNet-lite is the only candidate that matches BiRefNet's edge quality** (crisp, binary, fur-aware
-  boundaries; on the 5 sheet images it was near-identical on the single-subject shots). Its low-IoU
-  cases are crowded scenes where it also segments a second person/group that BiRefNet drops -- a
-  different notion of "subject", not garbage masks. But at ~4.8 s warm it is only ~40% faster: still not
-  interactive.
-- **The interactive models fail on the subject we care about.** IS-Net, U²-Net and U²-Netp run in
-  0.1-0.4 s but produce soft, unsaturated alphas, miss or fragment fursuiters (fur interiors go
-  semi-transparent, a heavily-furred subject can nearly vanish), and have min IoU of 0.01-0.11. They
-  would need heavy post-processing and would still be visibly worse than the current mask.
-- Nothing is both fast enough (< ~1 s) and good enough. Per the ticket ("if one qualifies, register it")
-  **no model is registered**; the registry stays additive for when one appears.
+- **fp16 is a loss on CPU**, as #49 predicted: the ORT CPU provider has thin fp16 kernels, so BiRefNet fp16
+  is *slower* (9.9 vs 8.0 s) for half the size, with the same masks. Not worth shipping on CPU.
+- **BiRefNet-lite is near-identical to BiRefNet on 15 of 16 images** (median IoU 0.99, same crisp fur-aware
+  edges) at 1.6x the speed and a quarter of the download -- but 4.9 s is still not interactive. Its one
+  weak image (IoU 0.51) covers about half BiRefNet's area (5% vs 10% of the frame), i.e. it drops part of
+  the subject.
+- **IS-Net general-use is the only interactive candidate (0.56 s) and it picks the right subject**
+  (mean IoU 0.90, worst 0.66), but its mask is visibly worse than BiRefNet's: soft edges (5.5% of
+  pixels between 0.1-0.9 alpha vs 0.7%), grey/leaky interiors on dark or busy fursuits, and halo around
+  limbs. U²-Net and U²-Netp are faster still but fragment or miss more (min IoU 0.37 / 0.53).
+- So the real tradeoff is **BiRefNet-lite (quality, ~5 s) vs IS-Net (rough, ~0.5 s)**; nothing is both
+  fast and BiRefNet-grade.
 
 ## Recommendation
 
-1. Treat #345 (GPU execution provider) as the path to interactive Select Subject; fold fp16 BiRefNet into
-   that ticket's measurements.
-2. Optionally offer BiRefNet-lite as a "faster, slightly rougher" model for no-GPU machines: a ~1.7x
-   speedup and a 4x smaller download, behind the existing `SegmentationProvider` registry. This needs a
-   pinned artifact + `docs/licensing.md` row (MIT per the onnx-community card; confirm training-data
-   provenance first) and a #171-style quality pass on real photos before it is worth shipping --
-   not done here.
-3. Re-open if a distilled/smaller matting-class model with BiRefNet-grade edges appears; the harness
-   makes a re-run one command.
-
-Not licence-reviewed (no row added to `docs/licensing.md`): none of these models is adopted. IS-Net and
-U²-Net are Apache-2.0 upstream; BiRefNet-lite is MIT per its card. Verify before any adoption.
+1. **Don't replace BiRefNet.** The GPU execution provider (#345) remains the route to interactive,
+   full-quality Select Subject; fold fp16 BiRefNet into that ticket's measurements (it only helps on GPU).
+2. **Two optional, additive providers** behind the existing `SegmentationProvider` registry, for machines
+   without a capable GPU -- neither registered here because each needs a pinned artifact, a
+   `docs/licensing.md` row (confirm training-data provenance first; IS-Net/U²-Net are Apache-2.0 upstream,
+   BiRefNet-lite MIT per its card) and a #171-style real-photo quality pass first:
+   - *BiRefNet-lite* as a "faster, same-looking" model (1.6x, 224 MB).
+   - *IS-Net general-use* as a "quick rough mask" mode for interactive previews. Its soft edges may
+     clean up under the engine's existing guided-filter refine against the photo (untested -- worth a
+     spike before judging it).
+3. Re-run the harness if a smaller matting-class model with BiRefNet-grade edges appears.
