@@ -14,7 +14,7 @@ Full reasoning/history: `docs/decisions/color.md`.
 
 - **One ProPhoto→sRGB matrix (#318)** — `nicti_calico::space::OutputSpace::from_working` is the sole source
   (display shader, export, and `nicti_tapetum::geometry::output_encode`'s CPU readback); do not
-  re-introduce a published-constant copy. Pinned by `viewport.rs`'s `display_matrix_is_the_cpu_references_matrix` (1e-6).
+  re-introduce a published-constant copy. Pinned by `viewport.rs`'s `export_and_display_matrix_is_the_cpu_references_matrix` (1e-6).
 - **Color pipeline (#38)** — `docs/adr/0038`: **Proposed**, pending a reference-machine ΔE
   measurement run against real LRC exports (no LRC install / real Adobe profile / reference image
   exists in this sandbox — ADR-0018 forbids adding one). Stage order: linearize (LibRaw's own

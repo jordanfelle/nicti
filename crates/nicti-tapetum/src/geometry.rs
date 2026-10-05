@@ -216,8 +216,8 @@ static PROPHOTO_TO_SRGB: LazyLock<color::Mat3> =
     LazyLock::new(|| OutputSpace::Srgb.from_working_f32());
 
 /// Linear ProPhoto RGB (the working space) -> linear sRGB -> sRGB OETF, for readback/golden-image
-/// comparison only -- the live suffix and geometry pass themselves never touch this. Unlike the
-/// display/export path it does not clip to [0, 1].
+/// comparison only -- the live suffix and geometry pass themselves never touch this. The matrix
+/// result is unclamped, but `srgb_oetf` clamps to [0, 1], so out-of-gamut channels clip.
 pub fn output_encode(prophoto_linear: [f32; 3]) -> [f32; 3] {
     let srgb_linear = color::mat3_apply(*PROPHOTO_TO_SRGB, prophoto_linear);
     srgb_linear.map(color::srgb_oetf)

@@ -868,12 +868,11 @@ mod tests {
     }
 
     #[test]
-    fn display_matrix_is_the_cpu_references_matrix() {
+    fn export_and_display_matrix_is_the_cpu_references_matrix() {
         // #318: `geometry::output_encode` (the CPU readback reference) takes its ProPhoto -> sRGB
         // matrix from calico, the same `OutputSpace::Srgb.from_working_f32()` the display shader
         // is fed, so the two agree to f32 rounding (they used to differ by ~3e-4, moving ~1.6% of
-        // pixels by one 8-bit code). Pinned on the encoded result, including an out-of-gamut input.
-        let m = OutputSpace::Srgb.from_working_f32();
+        // pixels by one 8-bit code). Pinned on the encoded result (out-of-gamut channels clip to 0/1 in the OETF on both sides).
         let inputs = [
             [1.0, 1.0, 1.0],
             [0.18, 0.18, 0.18],
@@ -883,14 +882,16 @@ mod tests {
             [0.6, 0.3, 0.1],
         ];
         for px in inputs {
-            let ours: [f32; 3] = std::array::from_fn(|i| {
-                nicti_tapetum::color::srgb_oetf(m[i][0] * px[0] + m[i][1] * px[1] + m[i][2] * px[2])
-            });
+            // Export's own entry point, so a file, the screen and the CPU reference are tied
+            // together here rather than by inspection.
+            let mut exported = px;
+            nicti_preen::color::to_output_linear(&mut exported, OutputSpace::Srgb);
+            let ours = exported.map(nicti_tapetum::color::srgb_oetf);
             let theirs = nicti_tapetum::geometry::output_encode(px);
             for c in 0..3 {
                 assert!(
                     (ours[c] - theirs[c]).abs() < 1e-6,
-                    "{px:?}[{c}] display {} vs CPU reference {}",
+                    "{px:?}[{c}] export {} vs CPU reference {}",
                     ours[c],
                     theirs[c]
                 );
