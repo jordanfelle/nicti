@@ -36,11 +36,13 @@ enum AutoOp {
 /// Never a modal dialog.
 #[derive(Default)]
 pub struct AutoHintUi {
-    hint: Option<(AutoOp, &'static str, Instant)>,
-    /// The exposure/tone a low-confidence Auto wrote. The marker shows while the document still
-    /// holds exactly these values, so any slider move, reset, undo or photo switch clears it with
-    /// no extra plumbing.
-    tone_marker: Option<(ExposureParams, ToneParams)>,
+    /// (op, text, when, photo): the photo is `DevelopView::frame_key`, so a hint never follows the
+    /// user onto a different photo.
+    hint: Option<(AutoOp, &'static str, Instant, u64)>,
+    /// The exposure/tone a low-confidence Auto wrote, and the photo it was written for. The marker
+    /// shows while that photo's document still holds exactly these values, so any slider move,
+    /// reset, undo or photo switch clears it.
+    tone_marker: Option<(ExposureParams, ToneParams, u64)>,
 }
 
 /// The wording of the hint an outcome earns (`None` = silent success). Wording follows ADR-0101's
@@ -70,13 +72,26 @@ fn hint_text(op: AutoOp, result: AutoApplied) -> Option<&'static str> {
 }
 
 impl AutoHintUi {
-    /// Records what an auto op just did: sets (or clears) the hint, and arms the low-confidence
-    /// tone marker with the values now in the document.
-    fn record(&mut self, op: AutoOp, result: AutoApplied, develop: &DevelopView) {
-        self.hint = hint_text(op, result).map(|text| (op, text, Instant::now()));
+    /// Records what an auto op just did on `photo`: sets (or clears) the hint, and -- only when
+    /// Auto actually wrote something -- arms or clears the low-confidence tone marker. An
+    /// `Unchanged`/`Skipped` result leaves the document, and so the marker, as it was: a repeat
+    /// click on a still-low-confidence result must not make it look confident.
+    fn record(
+        &mut self,
+        op: AutoOp,
+        result: AutoApplied,
+        photo: u64,
+        tone_now: (ExposureParams, ToneParams),
+    ) {
+        self.hint = hint_text(op, result).map(|text| (op, text, Instant::now(), photo));
         if op == AutoOp::Tone {
-            self.tone_marker = matches!(result, AutoApplied::AppliedLowConfidence(_))
-                .then(|| (develop.stage_params(EXPOSURE), develop.stage_params(TONE)));
+            match result {
+                AutoApplied::AppliedLowConfidence(_) => {
+                    self.tone_marker = Some((tone_now.0, tone_now.1, photo));
+                }
+                AutoApplied::Applied => self.tone_marker = None,
+                AutoApplied::Unchanged | AutoApplied::Skipped { .. } => {}
+            }
         }
     }
 
@@ -85,7 +100,8 @@ impl AutoHintUi {
         let Some(marker) = self.tone_marker else {
             return;
         };
-        let still_current = marker.0 == develop.stage_params::<ExposureParams>(EXPOSURE)
+        let still_current = marker.2 == develop.frame_key()
+            && marker.0 == develop.stage_params::<ExposureParams>(EXPOSURE)
             && marker.1 == develop.stage_params::<ToneParams>(TONE);
         if !still_current {
             self.tone_marker = None;
@@ -96,12 +112,12 @@ impl AutoHintUi {
     }
 
     /// The transient hint for `op`, if one is live; schedules the repaint that clears it.
-    fn show_hint(&mut self, ui: &mut egui::Ui, op: AutoOp) {
-        let Some((hint_op, text, since)) = self.hint else {
+    fn show_hint(&mut self, ui: &mut egui::Ui, op: AutoOp, photo: u64) {
+        let Some((hint_op, text, since, hint_photo)) = self.hint else {
             return;
         };
         let age = since.elapsed();
-        if age >= HINT_LIFETIME {
+        if age >= HINT_LIFETIME || hint_photo != photo {
             self.hint = None;
             return;
         }
@@ -159,11 +175,12 @@ pub fn show(
         }
         if ui.button("Auto").clicked() {
             let result = develop.apply_auto_tone();
-            auto_hint.record(AutoOp::Tone, result, develop);
+            let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
+            auto_hint.record(AutoOp::Tone, result, develop.frame_key(), tone_now);
         }
         auto_hint.show_tone_marker(ui, develop);
     });
-    auto_hint.show_hint(ui, AutoOp::Tone);
+    auto_hint.show_hint(ui, AutoOp::Tone, develop.frame_key());
 
     show_histogram(ui, develop, current_frame);
 
@@ -260,10 +277,11 @@ pub fn show(
         });
         if ui.button("Auto-level").clicked() {
             let result = develop.apply_auto_straighten();
-            auto_hint.record(AutoOp::Straighten, result, develop);
+            let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
+            auto_hint.record(AutoOp::Straighten, result, develop.frame_key(), tone_now);
             crop = develop.stage_params(CROP);
         }
-        auto_hint.show_hint(ui, AutoOp::Straighten);
+        auto_hint.show_hint(ui, AutoOp::Straighten, develop.frame_key());
         develop.set_stage_params(CROP, &crop);
 
         ui.separator();
@@ -812,5 +830,43 @@ mod auto_hint_tests {
                 Some("Photo still loading")
             );
         }
+    }
+
+    fn tone(stops: f32) -> (ExposureParams, ToneParams) {
+        (ExposureParams { stops }, ToneParams::default())
+    }
+
+    #[test]
+    fn a_repeat_click_on_a_low_confidence_result_keeps_the_marker() {
+        let mut ui = AutoHintUi::default();
+        let low = AutoApplied::AppliedLowConfidence(AutoReason::AtypicalInput);
+        ui.record(AutoOp::Tone, low, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some());
+        ui.record(AutoOp::Tone, AutoApplied::Unchanged, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some(), "Unchanged must not clear it");
+        let skipped = AutoApplied::Skipped {
+            reason: AutoReason::DecodeIncomplete,
+            low_confidence: false,
+        };
+        ui.record(AutoOp::Tone, skipped, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some(), "Skipped must not clear it");
+    }
+
+    #[test]
+    fn a_confident_apply_clears_the_marker_and_straighten_never_touches_it() {
+        let mut ui = AutoHintUi::default();
+        let low = AutoApplied::AppliedLowConfidence(AutoReason::AtypicalInput);
+        ui.record(AutoOp::Tone, low, 7, tone(1.0));
+        ui.record(AutoOp::Straighten, AutoApplied::Applied, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some());
+        ui.record(AutoOp::Tone, AutoApplied::Applied, 7, tone(2.0));
+        assert!(ui.tone_marker.is_none());
+    }
+
+    #[test]
+    fn a_hint_remembers_which_photo_it_was_for() {
+        let mut ui = AutoHintUi::default();
+        ui.record(AutoOp::Straighten, AutoApplied::Unchanged, 7, tone(0.0));
+        assert_eq!(ui.hint.map(|h| h.3), Some(7));
     }
 }

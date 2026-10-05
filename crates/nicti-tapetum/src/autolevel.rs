@@ -36,8 +36,8 @@ const MAX_AXIS_DEVIATION_DEGREES: f32 = 30.0;
 /// trigger. No real-photo measurement exists; #273 tunes this.
 const MIN_SUPPORTING_LINES: usize = 1;
 
-/// If any qualifying line's deviation differs from the median by more than this many degrees, the
-/// lines disagree about which way is level (ADR-0101). A documented starting point -- tuned by #273.
+/// If the qualifying lines' deviations span more than this many degrees (max - min), they disagree
+/// about which way is level (ADR-0101). A documented starting point -- tuned by #273.
 const MAX_ANGLE_DISAGREEMENT_DEGREES: f32 = 3.0;
 
 /// One Hough-detected line's deviation from level, in degrees, or `None` if it's not close enough
@@ -138,12 +138,10 @@ pub fn detect_level_angle(pixels: &[[f32; 4]], width: u32, height: u32) -> AutoO
     let Some(angle) = median(&mut deviations) else {
         return AutoOutcome::NoResult(AutoReason::NoFeatures);
     };
-    let max_disagreement = deviations
-        .iter()
-        .map(|d| (d - angle).abs())
-        .fold(0.0_f32, f32::max);
-    if deviations.len() < MIN_SUPPORTING_LINES || max_disagreement > MAX_ANGLE_DISAGREEMENT_DEGREES
-    {
+    // `median` sorted `deviations` ascending, so the spread is last - first. Spread (not distance
+    // from the median) so two lines 5 degrees apart can't pass by the median landing between them.
+    let spread = deviations[deviations.len() - 1] - deviations[0];
+    if deviations.len() < MIN_SUPPORTING_LINES || spread > MAX_ANGLE_DISAGREEMENT_DEGREES {
         AutoOutcome::LowConfidence(angle, AutoReason::WeakEvidence)
     } else {
         AutoOutcome::Confident(angle)
@@ -228,7 +226,7 @@ mod tests {
     }
 
     /// Two thick lines at clearly different tilts (2 and 12 degrees): the median lands between
-    /// them and each is well over `MAX_ANGLE_DISAGREEMENT_DEGREES` from it.
+    /// them and their spread is well over `MAX_ANGLE_DISAGREEMENT_DEGREES`.
     fn two_line_image(size: u32, tilt_a: f32, tilt_b: f32) -> Vec<[f32; 4]> {
         let (a, b) = (line_image(size, tilt_a), line_image(size, tilt_b));
         a.iter()
