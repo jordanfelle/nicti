@@ -12,6 +12,7 @@
 //! (this repo's spikes stay self-contained, the same convention `spikes/rods`/`spikes/pupil`
 //! already follow for each other).
 
+use crate::auto::{AutoOutcome, AutoReason};
 use crate::coat::{ExposureParams, ToneParams};
 use crate::histogram::Histogram;
 
@@ -25,6 +26,10 @@ const REFERENCE_SPREAD: f64 = 0.35;
 const NEAR_WHITE_TARGET: f64 = 0.99;
 const NEAR_BLACK_TARGET: f64 = 0.01;
 const CLIP_POINT_SCALE: f64 = 2000.0;
+/// Share of pixels at either extreme at or above which a histogram counts as degenerate (ADR-0101).
+const CLIPPED_FRACTION: f64 = 0.5;
+/// Share of pixels in the single tallest luma bin at or above which a histogram counts as degenerate.
+const SPIKE_FRACTION: f64 = 0.9;
 
 /// Candidate A's six PV2012 Basic-panel targets, normalized into this crate's own [`ExposureParams`]/
 /// [`ToneParams`] convention (`coat.rs`'s -1.0..=1.0 for every Contrast/Highlights/Shadows/
@@ -33,9 +38,34 @@ const CLIP_POINT_SCALE: f64 = 2000.0;
 /// stage defaults) -- the same thing ADR-0099 analyzes; running this against an already-edited
 /// render would have Auto chase the user's own prior edits instead of the original image.
 ///
-/// **Degradation contract (ADR-0101)**: this always yields a value today; #311 wraps it in
-/// `AutoOutcome`, flagging degenerate histograms as `LowConfidence` (still applied, with a marker).
-pub fn estimate(histogram: &Histogram) -> (ExposureParams, ToneParams) {
+/// **Degradation contract (ADR-0101)**: always yields a value (matching LRC's Auto), never
+/// `NoResult` -- `DecodeIncomplete` is the orchestration layer's call, this only sees a
+/// `Histogram`. A degenerate histogram (see [`is_degenerate`]) is `LowConfidence`: still applied,
+/// with a marker on the control.
+pub fn estimate(histogram: &Histogram) -> AutoOutcome<(ExposureParams, ToneParams)> {
+    let value = estimate_values(histogram);
+    if is_degenerate(histogram) {
+        AutoOutcome::LowConfidence(value, AutoReason::AtypicalInput)
+    } else {
+        AutoOutcome::Confident(value)
+    }
+}
+
+/// Near-empty, heavily clipped (more than `CLIPPED_FRACTION` of pixels at either extreme) or
+/// single-spike (one luma bin holds at least `SPIKE_FRACTION` of all pixels) -- a histogram the
+/// percentile heuristic has little to say about. Untuned starting points, like the rest of this
+/// module until #202.
+fn is_degenerate(histogram: &Histogram) -> bool {
+    let total = histogram.total();
+    if total == 0 {
+        return true;
+    }
+    let clipped = histogram.luma_fraction_above(0.98) + histogram.luma_fraction_below(0.02);
+    let tallest_bin = histogram.luma.iter().copied().max().unwrap_or(0);
+    clipped >= CLIPPED_FRACTION || f64::from(tallest_bin) >= SPIKE_FRACTION * f64::from(total)
+}
+
+fn estimate_values(histogram: &Histogram) -> (ExposureParams, ToneParams) {
     let median = histogram.luma_percentile(50.0) as f64;
     let exposure_stops = (MID_GRAY / median.max(1e-4)).log2().clamp(-5.0, 5.0);
 
@@ -85,17 +115,58 @@ mod tests {
         from_display_pixels(&pixels)
     }
 
+    /// The estimated values regardless of confidence (every histogram yields a value).
+    fn est(histogram: &Histogram) -> (ExposureParams, ToneParams) {
+        *estimate(histogram)
+            .value()
+            .expect("auto-tone always yields a value")
+    }
+
+    #[test]
+    fn a_spread_out_histogram_is_confident() {
+        let ramp = uniform_histogram(0.05, 0.95, 200);
+        assert!(matches!(estimate(&ramp), AutoOutcome::Confident(_)));
+    }
+
+    #[test]
+    fn an_empty_histogram_is_low_confidence_but_still_yields_a_value() {
+        let empty = from_display_pixels(&[]);
+        assert!(matches!(
+            estimate(&empty),
+            AutoOutcome::LowConfidence(_, AutoReason::AtypicalInput)
+        ));
+    }
+
+    #[test]
+    fn a_half_black_half_white_histogram_is_low_confidence() {
+        let mut pixels = vec![[0.0, 0.0, 0.0, 1.0]; 500];
+        pixels.extend(vec![[1.0, 1.0, 1.0, 1.0]; 500]);
+        assert!(matches!(
+            estimate(&from_display_pixels(&pixels)),
+            AutoOutcome::LowConfidence(_, AutoReason::AtypicalInput)
+        ));
+    }
+
+    #[test]
+    fn a_single_spike_histogram_is_low_confidence() {
+        let flat = from_display_pixels(&vec![[0.5, 0.5, 0.5, 1.0]; 400]);
+        assert!(matches!(
+            estimate(&flat),
+            AutoOutcome::LowConfidence(_, AutoReason::AtypicalInput)
+        ));
+    }
+
     #[test]
     fn dark_image_gets_positive_exposure() {
         let dark = uniform_histogram(0.05, 0.25, 200);
-        let (exposure, _) = estimate(&dark);
+        let (exposure, _) = est(&dark);
         assert!(exposure.stops > 0.0, "stops={}", exposure.stops);
     }
 
     #[test]
     fn bright_image_gets_negative_exposure() {
         let bright = uniform_histogram(0.7, 0.95, 200);
-        let (exposure, _) = estimate(&bright);
+        let (exposure, _) = est(&bright);
         assert!(exposure.stops < 0.0, "stops={}", exposure.stops);
     }
 
@@ -109,7 +180,7 @@ mod tests {
             .collect();
         pixels.extend(std::iter::repeat_n([1.0, 1.0, 1.0, 1.0], 100));
         let clipped = from_display_pixels(&pixels);
-        let (_, tone) = estimate(&clipped);
+        let (_, tone) = est(&clipped);
         assert!(tone.highlights < 0.0, "highlights={}", tone.highlights);
         assert!(tone.whites < 0.0, "whites={}", tone.whites);
     }
@@ -124,7 +195,7 @@ mod tests {
             .collect();
         pixels.extend(std::iter::repeat_n([0.0, 0.0, 0.0, 1.0], 100));
         let crushed = from_display_pixels(&pixels);
-        let (_, tone) = estimate(&crushed);
+        let (_, tone) = est(&crushed);
         assert!(tone.shadows > 0.0, "shadows={}", tone.shadows);
         assert!(tone.blacks > 0.0, "blacks={}", tone.blacks);
     }
@@ -132,7 +203,7 @@ mod tests {
     #[test]
     fn flat_low_contrast_image_gets_positive_contrast() {
         let flat = uniform_histogram(0.45, 0.55, 200);
-        let (_, tone) = estimate(&flat);
+        let (_, tone) = est(&flat);
         assert!(tone.contrast > 0.0, "contrast={}", tone.contrast);
     }
 
@@ -141,7 +212,7 @@ mod tests {
         let mut pixels = vec![[0.0, 0.0, 0.0, 1.0]; 500];
         pixels.extend(vec![[1.0, 1.0, 1.0, 1.0]; 500]);
         let extreme = from_display_pixels(&pixels);
-        let (exposure, tone) = estimate(&extreme);
+        let (exposure, tone) = est(&extreme);
         assert!((-5.0..=5.0).contains(&exposure.stops));
         for v in [
             tone.contrast,

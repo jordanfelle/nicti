@@ -12,6 +12,7 @@ use image::{GrayImage, Luma};
 use imageproc::edges::canny;
 use imageproc::hough::{detect_lines, LineDetectionOptions, PolarLine};
 
+use crate::auto::{AutoOutcome, AutoReason};
 use crate::geometry::straighten_delta_degrees;
 
 /// The long edge a source image is downscaled to before edge/line detection -- large enough to
@@ -27,6 +28,17 @@ pub const DOWNSCALE_LONG_EDGE: u32 = 800;
 /// own auto-straighten has an equivalent "near-axis" gate; this value is a documented, reasonable
 /// starting point.
 const MAX_AXIS_DEVIATION_DEGREES: f32 = 30.0;
+
+/// Fewer qualifying lines than this is too little evidence to trust the median (ADR-0101). Set to
+/// 1 for now because Hough's `suppression_radius` merges a single thick synthetic line into one
+/// detection (measured: that fixture yields exactly 1 line), and a lone dominant line (a horizon)
+/// is legitimate evidence -- so today the disagreement check below is the live low-confidence
+/// trigger. No real-photo measurement exists; #273 tunes this.
+const MIN_SUPPORTING_LINES: usize = 1;
+
+/// If any qualifying line's deviation differs from the median by more than this many degrees, the
+/// lines disagree about which way is level (ADR-0101). A documented starting point -- tuned by #273.
+const MAX_ANGLE_DISAGREEMENT_DEGREES: f32 = 3.0;
 
 /// One Hough-detected line's deviation from level, in degrees, or `None` if it's not close enough
 /// to horizontal/vertical to count as evidence (see `MAX_AXIS_DEVIATION_DEGREES`).
@@ -103,12 +115,14 @@ fn downscale_to_gray(pixels: &[[f32; 4]], width: u32, height: u32) -> GrayImage 
 /// own real-NEF goldens are #45's scope, not this one). Real-photo quality/threshold tuning is
 /// deliberately left as a follow-up rather than blocking this ticket on it.
 ///
-/// **Degradation contract (ADR-0101)**: the bare `Option` here has no confidence signal; #311
-/// replaces it with `AutoOutcome` (`Confident` / `LowConfidence` / `NoResult`), and a low-confidence
-/// straighten is skipped rather than applied.
-pub fn detect_level_angle(pixels: &[[f32; 4]], width: u32, height: u32) -> Option<f32> {
+/// **Degradation contract (ADR-0101)**: the result is an [`AutoOutcome`]. `NoResult` means no line
+/// qualified (or the buffer was unusable); `LowConfidence` means lines qualified but there were too
+/// few of them (`MIN_SUPPORTING_LINES`) or their angles disagree by more than
+/// `MAX_ANGLE_DISAGREEMENT_DEGREES` -- the caller skips, not applies, a low-confidence angle (a
+/// wrong rotation is worse than none). Both thresholds are untuned starting points (#273).
+pub fn detect_level_angle(pixels: &[[f32; 4]], width: u32, height: u32) -> AutoOutcome<f32> {
     if width == 0 || height == 0 || pixels.len() != (width as usize * height as usize) {
-        return None;
+        return AutoOutcome::NoResult(AutoReason::AtypicalInput);
     }
     let gray = downscale_to_gray(pixels, width, height);
     let edges = canny(&gray, 20.0, 50.0);
@@ -121,7 +135,19 @@ pub fn detect_level_angle(pixels: &[[f32; 4]], width: u32, height: u32) -> Optio
     );
 
     let mut deviations: Vec<f32> = lines.iter().filter_map(line_deviation_degrees).collect();
-    median(&mut deviations)
+    let Some(angle) = median(&mut deviations) else {
+        return AutoOutcome::NoResult(AutoReason::NoFeatures);
+    };
+    let max_disagreement = deviations
+        .iter()
+        .map(|d| (d - angle).abs())
+        .fold(0.0_f32, f32::max);
+    if deviations.len() < MIN_SUPPORTING_LINES || max_disagreement > MAX_ANGLE_DISAGREEMENT_DEGREES
+    {
+        AutoOutcome::LowConfidence(angle, AutoReason::WeakEvidence)
+    } else {
+        AutoOutcome::Confident(angle)
+    }
 }
 
 #[cfg(test)]
@@ -160,8 +186,9 @@ mod tests {
     fn detects_an_exactly_level_horizontal_line_as_already_level() {
         let size = 200;
         let pixels = line_image(size, 0.0);
-        let angle = detect_level_angle(&pixels, size, size);
-        let angle = angle.expect("a clear horizontal line should be detected");
+        let AutoOutcome::Confident(angle) = detect_level_angle(&pixels, size, size) else {
+            panic!("a clear horizontal line should be detected confidently");
+        };
         assert!(angle.abs() < 1.0, "angle = {angle}");
     }
 
@@ -170,8 +197,9 @@ mod tests {
         let size = 200;
         let tilt = 8.0;
         let pixels = line_image(size, tilt);
-        let angle = detect_level_angle(&pixels, size, size);
-        let angle = angle.expect("a clear tilted line should be detected");
+        let AutoOutcome::Confident(angle) = detect_level_angle(&pixels, size, size) else {
+            panic!("a clear tilted line should be detected confidently");
+        };
         // The correcting delta should be close to -tilt (matching
         // `straighten_delta_degrees`'s own sign convention: a line tilted +8 degrees below
         // horizontal needs a -8 degree correction).
@@ -182,15 +210,45 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_for_a_featureless_image() {
+    fn a_featureless_image_has_no_result() {
         let size = 64;
         let pixels = vec![[0.5, 0.5, 0.5, 1.0]; (size * size) as usize];
-        assert_eq!(detect_level_angle(&pixels, size, size), None);
+        assert_eq!(
+            detect_level_angle(&pixels, size, size),
+            AutoOutcome::NoResult(AutoReason::NoFeatures)
+        );
     }
 
     #[test]
-    fn returns_none_for_a_zero_sized_image() {
-        assert_eq!(detect_level_angle(&[], 0, 0), None);
+    fn a_zero_sized_image_has_no_result() {
+        assert_eq!(
+            detect_level_angle(&[], 0, 0),
+            AutoOutcome::NoResult(AutoReason::AtypicalInput)
+        );
+    }
+
+    /// Two thick lines at clearly different tilts (2 and 12 degrees): the median lands between
+    /// them and each is well over `MAX_ANGLE_DISAGREEMENT_DEGREES` from it.
+    fn two_line_image(size: u32, tilt_a: f32, tilt_b: f32) -> Vec<[f32; 4]> {
+        let (a, b) = (line_image(size, tilt_a), line_image(size, tilt_b));
+        a.iter()
+            .zip(&b)
+            .map(|(pa, pb)| if pa[0] > pb[0] { *pa } else { *pb })
+            .collect()
+    }
+
+    #[test]
+    fn lines_that_disagree_about_level_are_low_confidence() {
+        let size = 200;
+        let pixels = two_line_image(size, 2.0, 12.0);
+        assert!(
+            matches!(
+                detect_level_angle(&pixels, size, size),
+                AutoOutcome::LowConfidence(_, AutoReason::WeakEvidence)
+            ),
+            "{:?}",
+            detect_level_angle(&pixels, size, size)
+        );
     }
 
     #[test]
@@ -199,7 +257,10 @@ mod tests {
         let pixels = line_image(size, 45.0);
         // A perfect 45-degree line is equidistant from both axes and should be gated out by
         // `MAX_AXIS_DEVIATION_DEGREES` (30 degrees) -- no confident axis to snap to.
-        assert_eq!(detect_level_angle(&pixels, size, size), None);
+        assert_eq!(
+            detect_level_angle(&pixels, size, size),
+            AutoOutcome::NoResult(AutoReason::NoFeatures)
+        );
     }
 
     #[test]

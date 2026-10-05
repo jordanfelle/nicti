@@ -115,6 +115,8 @@ pub struct PeltApp {
     /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
     /// part of any edit document.
     hsl_band_selected: usize,
+    /// Hints and the low-confidence marker for Auto / Auto-level (#311, ADR-0101).
+    auto_hint: crate::develop_panel::AutoHintUi,
     /// The Heal / Remove tool's UI state and its AI-removal service (#51).
     heal_ui: HealUi,
     mask_ui: MaskUi,
@@ -404,6 +406,7 @@ impl PeltApp {
             catalog,
             develop: Some(develop),
             hsl_band_selected: 0,
+            auto_hint: Default::default(),
             heal_ui: HealUi::new(),
             mask_ui: MaskUi::new(),
             pounce,
@@ -1401,6 +1404,7 @@ impl eframe::App for PeltApp {
                             develop,
                             frame,
                             &mut self.hsl_band_selected,
+                            &mut self.auto_hint,
                             &mut self.heal_ui,
                             &mut self.mask_ui,
                             &self.pounce,

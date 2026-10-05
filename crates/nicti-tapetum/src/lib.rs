@@ -6,6 +6,7 @@
 //! concrete decode/live-suffix/geometry pipeline wired to a real `nicti_cornea::LinearFrame`
 //! (#45's third slice) -- denoise/lens/heal stay passthrough slots for their own tickets.
 
+pub mod auto;
 pub mod autolevel;
 pub mod cache;
 pub mod coat;
