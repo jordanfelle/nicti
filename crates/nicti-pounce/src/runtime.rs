@@ -401,11 +401,18 @@ impl Drop for Pounce {
 struct WakingPermit<'a> {
     _permit: crate::throttle::Permit<'a>,
     lane_state: &'a LaneState,
+    /// Set by an iteration that found no job: it never really used the capacity, so releasing it
+    /// must not wake the other workers. Otherwise every idle worker's release wakes every other
+    /// idle worker, which re-acquires, finds nothing, releases and wakes again -- a livelock that
+    /// pins most of the pool at 100% with an empty queue (#407).
+    quiet: bool,
 }
 
 impl Drop for WakingPermit<'_> {
     fn drop(&mut self) {
-        self.lane_state.notify();
+        if !self.quiet {
+            self.lane_state.notify();
+        }
     }
 }
 
@@ -417,11 +424,12 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
 
         let lane_state = inner.lane(lane);
 
-        let _permit = if lane == Lane::Cpu {
+        let mut permit = if lane == Lane::Cpu {
             match inner.cpu_throttle.try_acquire() {
                 Some(permit) => Some(WakingPermit {
                     _permit: permit,
                     lane_state,
+                    quiet: false,
                 }),
                 None => {
                     let guard = lane_state.scheduler.lock().unwrap();
@@ -448,6 +456,9 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                 }
                 None => {
                     inner.report_cancelled(cancelled_while_queued);
+                    if let Some(p) = permit.as_mut() {
+                        p.quiet = true;
+                    }
                     let _ = lane_state.condvar.wait_timeout(scheduler, POLL_INTERVAL);
                     continue;
                 }
@@ -515,6 +526,41 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
+
+    /// Total CPU ticks (utime + stime) this process's `pounce-cpu-*` threads have burned.
+    #[cfg(target_os = "linux")]
+    fn pounce_cpu_ticks() -> u64 {
+        let mut total = 0;
+        for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+            let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+            if !comm.starts_with("pounce-cpu-") {
+                continue;
+            }
+            let stat = std::fs::read_to_string(task.path().join("stat")).unwrap_or_default();
+            // Fields after the parenthesised comm; utime/stime are fields 14/15 overall.
+            if let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) {
+                let f: Vec<&str> = rest.split_whitespace().collect();
+                total += f.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+                    + f.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            }
+        }
+        total
+    }
+
+    /// Regression for #407: idle CPU workers each woke every other idle worker on every permit
+    /// release, a livelock that pinned most of the pool with an empty queue.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_cpu_pool_does_not_burn_cpu() {
+        let _pounce = Pounce::new(1 << 30, 16, 8, || {});
+        std::thread::sleep(Duration::from_millis(200));
+        let before = pounce_cpu_ticks();
+        std::thread::sleep(Duration::from_secs(1));
+        let burned = pounce_cpu_ticks() - before;
+        // 100 ticks/s per core; a healthy idle pool is a handful of ticks, the livelock was
+        // hundreds.
+        assert!(burned < 20, "idle pool burned {burned} ticks in 1s");
+    }
 
     struct StepJob {
         spec: JobSpec,
