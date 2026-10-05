@@ -1,11 +1,15 @@
 //! The neutral model image (ADR-0048): what every segmentation model is shown.
 //!
-//! It is built from the *baked* frame (linear camera RGB, post-lens, pre-heal) through
+//! It is built from the decoded `LinearFrame` (linear camera RGB, **pre-lens**, pre-heal) through
 //! `nicti_groom`'s `SpaceMap` -- as-shot white balance, one exposure scale from the image's own
 //! highlights, the sRGB curve -- so it never depends on a slider. That is the whole point: a
 //! contrast or exposure edit must not be able to change what a model selects, so a tone drag can
 //! never re-run one. It is also downscaled here (`ModelFrame`, longest side 1024) so a full 45 MP
 //! frame is read once, not once per model.
+//!
+//! The bake *key* chains from the post-lens `nicti.neutral` node, but these pixels do not: they only
+//! match the rendered (post-lens) frame while `nicti.lens` is a passthrough. Once lens correction is
+//! real, this must be fed the post-lens frame (#358, blocked by #410).
 
 use std::sync::Arc;
 
