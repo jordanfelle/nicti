@@ -401,11 +401,18 @@ impl Drop for Pounce {
 struct WakingPermit<'a> {
     _permit: crate::throttle::Permit<'a>,
     lane_state: &'a LaneState,
+    /// Set by an iteration that found no job: it never really used the capacity, so releasing it
+    /// must not wake the other workers. Otherwise every idle worker's release wakes every other
+    /// idle worker, which re-acquires, finds nothing, releases and wakes again -- a livelock that
+    /// pins most of the pool at 100% with an empty queue (#407).
+    quiet: bool,
 }
 
 impl Drop for WakingPermit<'_> {
     fn drop(&mut self) {
-        self.lane_state.notify();
+        if !self.quiet {
+            self.lane_state.notify();
+        }
     }
 }
 
@@ -417,11 +424,12 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
 
         let lane_state = inner.lane(lane);
 
-        let _permit = if lane == Lane::Cpu {
+        let mut permit = if lane == Lane::Cpu {
             match inner.cpu_throttle.try_acquire() {
                 Some(permit) => Some(WakingPermit {
                     _permit: permit,
                     lane_state,
+                    quiet: false,
                 }),
                 None => {
                     let guard = lane_state.scheduler.lock().unwrap();
@@ -448,6 +456,9 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                 }
                 None => {
                     inner.report_cancelled(cancelled_while_queued);
+                    if let Some(p) = permit.as_mut() {
+                        p.quiet = true;
+                    }
                     let _ = lane_state.condvar.wait_timeout(scheduler, POLL_INTERVAL);
                     continue;
                 }
