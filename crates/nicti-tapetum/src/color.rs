@@ -189,36 +189,6 @@ pub const XYZ_D50_TO_PROPHOTO: Mat3 = [
     [0.0000000, 0.0000000, 1.2118128],
 ];
 
-/// Linear ProPhoto RGB -> linear sRGB (via XYZ(D50), then a Bradford D50->D65 adaptation, then
-/// XYZ(D65) -> linear sRGB) -- used only for readback/golden-image comparison
-/// ([`crate::geometry::output_encode`]), never in the live suffix itself, which stays in the
-/// working space (linear ProPhoto) end to end.
-pub const PROPHOTO_TO_XYZ_D50: Mat3 = [
-    [0.7976749, 0.1351917, 0.0313534],
-    [0.2880402, 0.7118741, 0.0000857],
-    [0.0, 0.0, 0.82521],
-];
-
-/// Bradford D50 -> D65 chromatic adaptation.
-const BRADFORD_D50_TO_D65: Mat3 = [
-    [0.9555766, -0.0230393, 0.0631636],
-    [-0.0282895, 1.0099416, 0.0210077],
-    [0.0122982, -0.0204830, 1.3299098],
-];
-
-const XYZ_D65_TO_SRGB: Mat3 = [
-    [3.2404542, -1.5371385, -0.4985314],
-    [-0.969266, 1.8760108, 0.041556],
-    [0.0556434, -0.2040259, 1.0572252],
-];
-
-pub fn prophoto_to_srgb_linear_matrix() -> Mat3 {
-    mat3_mul(
-        XYZ_D65_TO_SRGB,
-        mat3_mul(BRADFORD_D50_TO_D65, PROPHOTO_TO_XYZ_D50),
-    )
-}
-
 /// The full camera-RGB -> working-space (linear ProPhoto) matrix, folding white balance (a
 /// diagonal gain matrix -- as-shot, or a manual temp/tint override, see [`wb_gains_with_params`])
 /// and the camera -> XYZ(D50) -> ProPhoto chain into one 3x3 -- linear operations compose, so this

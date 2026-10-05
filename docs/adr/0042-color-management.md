@@ -134,10 +134,10 @@ space pick (#149).
 - **The 3D LUT is only for LUT-based monitor profiles**, where colors near the monitor's gamut
   boundary carry interpolation error from clipped nodes and near-black is lifted slightly by the
   33-node shaper. Matrix/TRC profiles never touch it.
-- **Not bit-identical to before.** The default sRGB path now uses calico's primaries-derived
-  ProPhoto->sRGB matrix, which differs from `nicti_tapetum::color::prophoto_to_srgb_linear_matrix`
-  by ~3e-4, moving ~1.6% of pixels by one 8-bit code versus `geometry::output_encode`'s CPU
-  reference. Pinned by a test at 5e-4; making calico the single source is a follow-up.
+- **Single matrix source (#318).** The default sRGB path uses calico's primaries-derived
+  ProPhoto->sRGB matrix. Tapetum's former published-constant copy differed by ~3e-4 (~1.6% of
+  pixels off by one 8-bit code versus the display); #318 deleted it and `geometry::output_encode`
+  now uses calico's, so display, export and CPU readback agree. Pinned by a test at 1e-6.
 - **GPU parity tests skip without a `wgpu` adapter** (same convention as Tapetum's); they ran
   here on lavapipe, and CI runners without one silently skip them.
 - **No black-point compensation.** `moxcms` 0.9's `TransformOptions` has no BPC (the field is

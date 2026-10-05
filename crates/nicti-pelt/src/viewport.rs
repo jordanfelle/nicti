@@ -127,7 +127,7 @@ impl ViewportResources {
 
         // A target format's own `*Srgb` variant already applies the sRGB OETF on write -- the
         // shader hands it linear values in that case (double-gamma otherwise), matching
-        // `nicti_tapetum::geometry::output_encode`'s CPU reference.
+        // `nicti_tapetum::geometry::output_encode`'s CPU reference (same calico matrix, #318).
         let target_srgb = target_format.is_srgb();
         let lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nicti-pelt display LUT sampler"),
@@ -868,21 +868,32 @@ mod tests {
     }
 
     #[test]
-    fn calico_srgb_matrix_agrees_with_tapetums_cpu_reference() {
-        // Two independently derived ProPhoto -> linear sRGB matrices (calico from primaries +
-        // Bradford, tapetum from a published D65 matrix). They differ by ~3e-4, which moves ~1.6%
-        // of pixels by one 8-bit code -- so the display is *not* bit-identical to
-        // `geometry::output_encode`'s CPU reference, only within a code. This bound pins the gap
-        // so it can't silently grow; making calico the single source is a follow-up.
-        let ours = OutputSpace::Srgb.from_working_f32();
-        let theirs = nicti_tapetum::color::prophoto_to_srgb_linear_matrix();
-        for i in 0..3 {
-            for j in 0..3 {
+    fn export_and_display_matrix_is_the_cpu_references_matrix() {
+        // #318: `geometry::output_encode` (the CPU readback reference) takes its ProPhoto -> sRGB
+        // matrix from calico, the same `OutputSpace::Srgb.from_working_f32()` the display shader
+        // is fed, so the two agree to f32 rounding (they used to differ by ~3e-4, moving ~1.6% of
+        // pixels by one 8-bit code). Pinned on the encoded result (out-of-gamut channels clip to 0/1 in the OETF on both sides).
+        let inputs = [
+            [1.0, 1.0, 1.0],
+            [0.18, 0.18, 0.18],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.6, 0.3, 0.1],
+        ];
+        for px in inputs {
+            // Export's own entry point, so a file, the screen and the CPU reference are tied
+            // together here rather than by inspection.
+            let mut exported = px;
+            nicti_preen::color::to_output_linear(&mut exported, OutputSpace::Srgb);
+            let ours = exported.map(nicti_tapetum::color::srgb_oetf);
+            let theirs = nicti_tapetum::geometry::output_encode(px);
+            for c in 0..3 {
                 assert!(
-                    (ours[i][j] - theirs[i][j]).abs() < 5e-4,
-                    "[{i}][{j}] calico {} vs tapetum {}",
-                    ours[i][j],
-                    theirs[i][j]
+                    (ours[c] - theirs[c]).abs() < 1e-6,
+                    "{px:?}[{c}] export {} vs CPU reference {}",
+                    ours[c],
+                    theirs[c]
                 );
             }
         }

@@ -254,8 +254,8 @@ table.
   `GpuContext::from_device` constructor -- one real device, shared between egui's own render pass
   and every Tapetum compute dispatch. A `FrameTexture`'s display -- linear ProPhoto RGB,
   `Rgba16Float` -- into an 8-bit surface is a small dedicated fragment shader
-  (`nicti-pelt/shaders/display.wgsl`) applying the same `color::prophoto_to_srgb_linear_matrix()`/
-  sRGB-OETF pair `geometry::output_encode`'s CPU reference already uses, skipping the OETF when
+  (`nicti-pelt/shaders/display.wgsl`) applying calico's `OutputSpace::Srgb.from_working_f32()`/
+  sRGB-OETF pair (#318: the same matrix `geometry::output_encode`'s CPU reference and export use), skipping the OETF when
   the target format is itself `*Srgb` (the hardware already applies it on write in that case).
 
 - **2026-09-27 (#90)**: Status moved from Proposed to **Accepted — egui**. The planned
