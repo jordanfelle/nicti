@@ -15,9 +15,118 @@ use nicti_tapetum::stages::{
 };
 
 use crate::heal_tool::{self, HealUi};
-use crate::render::DevelopView;
+use crate::render::{AutoApplied, DevelopView};
+use nicti_tapetum::auto::AutoReason;
+use std::time::{Duration, Instant};
 
 const HSL_BAND_NAMES: [&str; 8] = ["R", "O", "Y", "G", "A", "B", "P", "M"];
+
+/// How long a transient auto-op hint stays under its button.
+const HINT_LIFETIME: Duration = Duration::from_secs(3);
+
+/// Which automatic operation a hint belongs to (it is shown under that operation's button).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoOp {
+    Tone,
+    Straighten,
+}
+
+/// The non-modal feedback for automatic develop operations (ADR-0101): a transient hint under the
+/// button that was clicked, and a marker beside Auto while a low-confidence tone is still in place.
+/// Never a modal dialog.
+#[derive(Default)]
+pub struct AutoHintUi {
+    /// (op, text, when, photo): the photo is `DevelopView::frame_key`, so a hint never follows the
+    /// user onto a different photo.
+    hint: Option<(AutoOp, &'static str, Instant, u64)>,
+    /// The exposure/tone a low-confidence Auto wrote, and the photo it was written for. The marker
+    /// shows while that photo's document still holds exactly these values, so any slider move,
+    /// reset, undo or photo switch clears it.
+    tone_marker: Option<(ExposureParams, ToneParams, u64)>,
+}
+
+/// The wording of the hint an outcome earns (`None` = silent success). Wording follows ADR-0101's
+/// examples; the exact copy is deferred to this ticket by the ADR.
+fn hint_text(op: AutoOp, result: AutoApplied) -> Option<&'static str> {
+    match (op, result) {
+        (_, AutoApplied::Applied | AutoApplied::AppliedLowConfidence(_)) => None,
+        (
+            _,
+            AutoApplied::Skipped {
+                reason: AutoReason::DecodeIncomplete,
+                ..
+            },
+        ) => Some("Photo still loading"),
+        (
+            AutoOp::Straighten,
+            AutoApplied::Skipped {
+                low_confidence: true,
+                ..
+            },
+        ) => Some("Uncertain angle, not applied"),
+        (AutoOp::Straighten, AutoApplied::Skipped { .. }) => Some("No straight lines found"),
+        (AutoOp::Straighten, AutoApplied::Unchanged) => Some("Already level"),
+        (AutoOp::Tone, AutoApplied::Skipped { .. }) => Some("Auto could not analyse this photo"),
+        (AutoOp::Tone, AutoApplied::Unchanged) => Some("Already at Auto settings"),
+    }
+}
+
+impl AutoHintUi {
+    /// Records what an auto op just did on `photo`: sets (or clears) the hint, and -- only when
+    /// Auto actually wrote something -- arms or clears the low-confidence tone marker. An
+    /// `Unchanged`/`Skipped` result leaves the document, and so the marker, as it was: a repeat
+    /// click on a still-low-confidence result must not make it look confident.
+    fn record(
+        &mut self,
+        op: AutoOp,
+        result: AutoApplied,
+        photo: u64,
+        tone_now: (ExposureParams, ToneParams),
+    ) {
+        self.hint = hint_text(op, result).map(|text| (op, text, Instant::now(), photo));
+        if op == AutoOp::Tone {
+            match result {
+                AutoApplied::AppliedLowConfidence(_) => {
+                    self.tone_marker = Some((tone_now.0, tone_now.1, photo));
+                }
+                AutoApplied::Applied => self.tone_marker = None,
+                AutoApplied::Unchanged | AutoApplied::Skipped { .. } => {}
+            }
+        }
+    }
+
+    /// The `⚠` beside Auto, while a low-confidence result is still what's in the document.
+    fn show_tone_marker(&mut self, ui: &mut egui::Ui, develop: &DevelopView) {
+        let Some(marker) = self.tone_marker else {
+            return;
+        };
+        let still_current = marker.2 == develop.frame_key()
+            && marker.0 == develop.stage_params::<ExposureParams>(EXPOSURE)
+            && marker.1 == develop.stage_params::<ToneParams>(TONE);
+        if !still_current {
+            self.tone_marker = None;
+            return;
+        }
+        ui.label(egui::RichText::new("\u{26A0}").color(egui::Color32::YELLOW))
+            .on_hover_text("Low confidence: unusual histogram. Undo or adjust to change it.");
+    }
+
+    /// The transient hint for `op`, if one is live; schedules the repaint that clears it.
+    fn show_hint(&mut self, ui: &mut egui::Ui, op: AutoOp, photo: u64) {
+        let Some((hint_op, text, since, hint_photo)) = self.hint else {
+            return;
+        };
+        let age = since.elapsed();
+        if age >= HINT_LIFETIME || hint_photo != photo {
+            self.hint = None;
+            return;
+        }
+        if hint_op == op {
+            ui.weak(text);
+        }
+        ui.ctx().request_repaint_after(HINT_LIFETIME - age);
+    }
+}
 
 /// One slider bound to a single `f32` field, with a double-click-to-reset gesture -- the repeated
 /// shape every panel section below uses.
@@ -41,11 +150,13 @@ fn slider(
 /// params (so the caller knows to re-render) -- `develop.render()` is cheap to call unconditionally
 /// though (a live-only change costs 0 bake dispatches), so callers may simply always re-render
 /// after calling this rather than checking the return value.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     develop: &mut DevelopView,
     current_frame: &FrameTexture,
     hsl_band_selected: &mut usize,
+    auto_hint: &mut AutoHintUi,
     heal: &mut HealUi,
     mask: &mut crate::mask_panel::MaskUi,
     pounce: &nicti_pounce::Pounce,
@@ -63,9 +174,13 @@ pub fn show(
             develop.show_before = !develop.show_before;
         }
         if ui.button("Auto").clicked() {
-            develop.apply_auto_tone();
+            let result = develop.apply_auto_tone();
+            let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
+            auto_hint.record(AutoOp::Tone, result, develop.frame_key(), tone_now);
         }
+        auto_hint.show_tone_marker(ui, develop);
     });
+    auto_hint.show_hint(ui, AutoOp::Tone, develop.frame_key());
 
     show_histogram(ui, develop, current_frame);
 
@@ -161,9 +276,12 @@ pub fn show(
             }
         });
         if ui.button("Auto-level").clicked() {
-            develop.apply_auto_straighten();
+            let result = develop.apply_auto_straighten();
+            let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
+            auto_hint.record(AutoOp::Straighten, result, develop.frame_key(), tone_now);
             crop = develop.stage_params(CROP);
         }
+        auto_hint.show_hint(ui, AutoOp::Straighten, develop.frame_key());
         develop.set_stage_params(CROP, &crop);
 
         ui.separator();
@@ -656,5 +774,99 @@ fn show_camera_profile_picker(ui: &mut egui::Ui, develop: &mut DevelopView) {
     }
     if let Some(err) = &develop.profile_error {
         ui.colored_label(ui.visuals().error_fg_color, err);
+    }
+}
+
+#[cfg(test)]
+mod auto_hint_tests {
+    use super::*;
+
+    fn skipped(reason: AutoReason, low_confidence: bool) -> AutoApplied {
+        AutoApplied::Skipped {
+            reason,
+            low_confidence,
+        }
+    }
+
+    #[test]
+    fn a_successful_apply_is_silent() {
+        for op in [AutoOp::Tone, AutoOp::Straighten] {
+            assert_eq!(hint_text(op, AutoApplied::Applied), None);
+            assert_eq!(
+                hint_text(
+                    op,
+                    AutoApplied::AppliedLowConfidence(AutoReason::AtypicalInput)
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn straighten_hints_distinguish_nothing_found_from_too_uncertain() {
+        let none = hint_text(AutoOp::Straighten, skipped(AutoReason::NoFeatures, false));
+        let weak = hint_text(AutoOp::Straighten, skipped(AutoReason::WeakEvidence, true));
+        assert_eq!(none, Some("No straight lines found"));
+        assert_eq!(weak, Some("Uncertain angle, not applied"));
+        assert_eq!(
+            hint_text(AutoOp::Straighten, AutoApplied::Unchanged),
+            Some("Already level")
+        );
+    }
+
+    #[test]
+    fn an_unchanged_tone_result_never_looks_like_a_failed_click() {
+        assert_eq!(
+            hint_text(AutoOp::Tone, AutoApplied::Unchanged),
+            Some("Already at Auto settings")
+        );
+    }
+
+    #[test]
+    fn an_incomplete_decode_says_the_photo_is_loading_for_either_op() {
+        for op in [AutoOp::Tone, AutoOp::Straighten] {
+            assert_eq!(
+                hint_text(op, skipped(AutoReason::DecodeIncomplete, false)),
+                Some("Photo still loading")
+            );
+        }
+    }
+
+    fn tone(stops: f32) -> (ExposureParams, ToneParams) {
+        (ExposureParams { stops }, ToneParams::default())
+    }
+
+    #[test]
+    fn a_repeat_click_on_a_low_confidence_result_keeps_the_marker() {
+        let mut ui = AutoHintUi::default();
+        let low = AutoApplied::AppliedLowConfidence(AutoReason::AtypicalInput);
+        ui.record(AutoOp::Tone, low, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some());
+        ui.record(AutoOp::Tone, AutoApplied::Unchanged, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some(), "Unchanged must not clear it");
+        let skipped = AutoApplied::Skipped {
+            reason: AutoReason::DecodeIncomplete,
+            low_confidence: false,
+        };
+        ui.record(AutoOp::Tone, skipped, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some(), "Skipped must not clear it");
+    }
+
+    #[test]
+    fn a_confident_apply_clears_the_marker_and_straighten_never_touches_it() {
+        let mut ui = AutoHintUi::default();
+        let low = AutoApplied::AppliedLowConfidence(AutoReason::AtypicalInput);
+        ui.record(AutoOp::Tone, low, 7, tone(1.0));
+        ui.record(AutoOp::Straighten, AutoApplied::Applied, 7, tone(1.0));
+        assert!(ui.tone_marker.is_some());
+        ui.record(AutoOp::Tone, AutoApplied::Applied, 7, tone(2.0));
+        assert!(ui.tone_marker.is_none());
+    }
+
+    #[test]
+    fn a_hint_remembers_which_photo_it_was_for() {
+        let mut ui = AutoHintUi::default();
+        ui.record(AutoOp::Straighten, AutoApplied::Unchanged, 7, tone(0.0));
+        assert_eq!(ui.hint.map(|h| h.3), Some(7));
     }
 }

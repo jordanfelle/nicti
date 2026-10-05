@@ -31,6 +31,11 @@ Full reasoning/history: `docs/decisions/develop.md`.
   Straighten: low-confidence is skipped + hint. Tone: always applies, low-confidence gets a marker.
   Never modal; batch = one summary. No-op/unchanged/skipped invocation → no history step, redo kept
   (general `History` invariant; via `apply_batch`, `control: None`, never coalesces). Build: #311 (signal + UI), #312 (History guard).
+  **#311 landed**: `nicti-tapetum/src/auto.rs` (`AutoOutcome`/`AutoReason`), `autolevel::detect_level_angle`
+  and `perk::estimate` return it; `DevelopView::apply_auto_tone`/`apply_auto_straighten` (`render.rs`) return
+  `AutoApplied` (Unchanged/Skipped write nothing; also the `DecodeIncomplete` guard); hints + the `⚠` Auto marker are
+  `develop_panel::AutoHintUi`. Straighten's single-line fixture yields 1 Hough detection, so `MIN_SUPPORTING_LINES` = 1 and
+  line *disagreement* (> 3°) is the live low-confidence trigger until #273 tunes both. Tone is degenerate at ≥ 50% clipped or ≥ 90% in one bin.
 - **AI auto-tone (#53)** — `docs/adr/0053-ai-auto-tone.md`: **finding is "ridge is enough," not an
   ML model.** Trained B0 (mean)/B1 (ridge)/M1 (MLP, histogram)/M2 (MLP, histogram+thumbnail) on
   5,000 real picked/rated keepers from the user's own catalog (no reference-machine deferral — the

@@ -20,6 +20,7 @@ use crate::camera_profiles::{self, ProfileEntry};
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
+use nicti_tapetum::auto::{AutoOutcome, AutoReason};
 use nicti_tapetum::coat::{self, CameraProfileParams, CropParams, HealParams};
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, output_encode};
@@ -446,18 +447,53 @@ impl DevelopView {
     /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
     /// histograms it, and writes `nicti_tapetum::perk::estimate`'s Exposure/Basic-tone output into
     /// `document` -- see `perk.rs`'s own doc comment for why this is provisional (candidate A,
-    /// pending #202). Per ADR-0101 an unchanged result must not create a history step (#312), and
-    /// a low-confidence result is applied with a marker (#311).
-    pub fn apply_auto_tone(&mut self) {
+    /// pending #202). Per ADR-0101 (#311): a result equal to the *effective* current params (an
+    /// absent entry counts as its default) writes nothing and reports [`AutoApplied::Unchanged`],
+    /// so a click never dirties the document or (once #324 wires `History`) creates a step; a
+    /// low-confidence result is still applied and reported as
+    /// [`AutoApplied::AppliedLowConfidence`] so the panel can mark the control.
+    pub fn apply_auto_tone(&mut self) -> AutoApplied {
+        if !self.frame_is_complete() {
+            return AutoApplied::Skipped {
+                reason: AutoReason::DecodeIncomplete,
+                low_confidence: false,
+            };
+        }
         let was_before = self.show_before;
         self.show_before = true;
         let default_render = self.render();
         let hist = self.histogram(&default_render);
         self.show_before = was_before;
 
-        let (exposure, tone) = nicti_tapetum::perk::estimate(&hist);
+        let outcome = nicti_tapetum::perk::estimate(&hist);
+        let (exposure, tone) = match outcome {
+            AutoOutcome::Confident(v) | AutoOutcome::LowConfidence(v, _) => v,
+            AutoOutcome::NoResult(reason) => {
+                return AutoApplied::Skipped {
+                    reason,
+                    low_confidence: false,
+                };
+            }
+        };
+        let current_exposure: coat::ExposureParams = self.stage_params(EXPOSURE);
+        let current_tone: coat::ToneParams = self.stage_params(TONE);
+        if exposure == current_exposure && tone == current_tone {
+            return AutoApplied::Unchanged;
+        }
         self.set_stage_params(EXPOSURE, &exposure);
         self.set_stage_params(TONE, &tone);
+        match outcome {
+            AutoOutcome::LowConfidence(_, reason) => AutoApplied::AppliedLowConfidence(reason),
+            _ => AutoApplied::Applied,
+        }
+    }
+
+    /// Whether the loaded frame is a complete decode: a non-empty extent and exactly three
+    /// samples per pixel. `load_real_frame` only ever receives a fully decoded `LinearFrame`, so this
+    /// is a defensive guard (ADR-0101 rule 7) -- an auto op must never analyse a partial buffer.
+    fn frame_is_complete(&self) -> bool {
+        let (w, h) = (self.frame.width as usize, self.frame.height as usize);
+        w > 0 && h > 0 && self.frame.pixels.len() == w * h * 3
     }
 
     /// Whether `document` holds any real edit at all -- what a caller (the Loupe view, #31 phase
@@ -623,11 +659,18 @@ impl DevelopView {
     /// a delta from wherever the crop already is), the detected angle here is measured against the
     /// identity-rotation render, so it's already the absolute angle that levels the image; adding
     /// it to whatever `rotation_degrees` already held would double-apply any rotation the user had
-    /// already dialed in. A no-op (leaves `rotation_degrees` untouched) if no confident line was
-    /// detected -- see `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment for when
-    /// that happens. Per ADR-0101 (#311) this will also surface a non-modal hint (distinct
-    /// wording for no-result vs. low-confidence) and skip, not apply, a low-confidence angle.
-    pub fn apply_auto_straighten(&mut self) {
+    /// already dialed in. Per ADR-0101 (#311) nothing is written (and the result says why) when no
+    /// line qualified ([`AutoApplied::Skipped`], `low_confidence: false`), when the lines were too
+    /// weak or inconsistent to trust (`low_confidence: true` -- a wrong rotation is worse than
+    /// none), or when the angle already matches the current rotation ([`AutoApplied::Unchanged`]) --
+    /// see `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment.
+    pub fn apply_auto_straighten(&mut self) -> AutoApplied {
+        if !self.frame_is_complete() {
+            return AutoApplied::Skipped {
+                reason: AutoReason::DecodeIncomplete,
+                low_confidence: false,
+            };
+        }
         let had_crop = self.document.stages.remove(CROP);
         let was_before = self.show_before;
         self.show_before = false;
@@ -646,18 +689,57 @@ impl DevelopView {
             })
             .collect();
 
-        let Some(delta) = nicti_tapetum::autolevel::detect_level_angle(
+        let delta = match nicti_tapetum::autolevel::detect_level_angle(
             &display,
             uncropped.extent.width,
             uncropped.extent.height,
-        ) else {
-            return;
+        ) {
+            AutoOutcome::Confident(delta) => delta,
+            AutoOutcome::LowConfidence(_, reason) => {
+                return AutoApplied::Skipped {
+                    reason,
+                    low_confidence: true,
+                };
+            }
+            AutoOutcome::NoResult(reason) => {
+                return AutoApplied::Skipped {
+                    reason,
+                    low_confidence: false,
+                };
+            }
         };
         let mut crop: CropParams = self.stage_params(CROP);
+        let before = crop.rotation_degrees;
         crop.set_rotation(delta);
+        if (crop.rotation_degrees - before).abs() < UNCHANGED_ROTATION_EPSILON_DEGREES {
+            return AutoApplied::Unchanged;
+        }
         self.set_stage_params(CROP, &crop);
+        AutoApplied::Applied
     }
 }
+
+/// What an automatic develop operation did to the document (ADR-0101), for the panel to turn into a
+/// hint or marker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AutoApplied {
+    /// Written to the document with no caveat.
+    Applied,
+    /// Written, but the estimate was uncertain -- the control gets a marker.
+    AppliedLowConfidence(AutoReason),
+    /// The result equals the current parameters, so nothing was written.
+    Unchanged,
+    /// Nothing written. `low_confidence` distinguishes "found something too weak to trust" from
+    /// "found nothing" -- the two get different hints.
+    Skipped {
+        reason: AutoReason,
+        low_confidence: bool,
+    },
+}
+
+/// A detected straighten angle within this many degrees of the current rotation counts as already
+/// level: below any visible change, and absorbs f32 noise between two runs on the same pixels.
+const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
 
 #[cfg(test)]
 mod tests {
@@ -1350,5 +1432,70 @@ mod tests {
         view.reset_stage(MASKS); // deleted: released
         view.prune_ai_alphas();
         assert!(!view.has_ai_alpha(&key));
+    }
+
+    /// ADR-0101: an Auto click whose result equals what's already there must not touch the
+    /// document (no dirtying, no history step once #324 wires one in).
+    #[test]
+    fn a_second_auto_tone_click_is_unchanged_and_leaves_the_document_alone() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let first = view.apply_auto_tone();
+        assert!(
+            matches!(
+                first,
+                AutoApplied::Applied | AutoApplied::AppliedLowConfidence(_)
+            ),
+            "{first:?}"
+        );
+
+        let before = view.document().clone();
+        assert_eq!(view.apply_auto_tone(), AutoApplied::Unchanged);
+        assert_eq!(view.document(), &before);
+    }
+
+    /// A uniform frame has no edges at all: auto-level must report why it did nothing, and must
+    /// not even create a crop entry.
+    #[test]
+    fn auto_straighten_on_a_featureless_frame_is_skipped_and_writes_nothing() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut flat = synthetic_linear_frame();
+        flat.pixels.fill(2000);
+        view.load_real_frame(
+            Arc::new(flat),
+            blake3::hash(b"flat"),
+            EditDocument::default(),
+        );
+        assert_eq!(
+            view.apply_auto_straighten(),
+            AutoApplied::Skipped {
+                reason: AutoReason::NoFeatures,
+                low_confidence: false,
+            }
+        );
+        assert!(!view.document().stages.contains_key(CROP));
+    }
+
+    #[test]
+    fn auto_ops_refuse_an_incomplete_frame() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut truncated = synthetic_linear_frame();
+        truncated.pixels.truncate(10);
+        view.frame = Arc::new(truncated);
+        let skipped = AutoApplied::Skipped {
+            reason: AutoReason::DecodeIncomplete,
+            low_confidence: false,
+        };
+        assert_eq!(view.apply_auto_tone(), skipped);
+        assert_eq!(view.apply_auto_straighten(), skipped);
+        assert!(!view.has_edits());
     }
 }
