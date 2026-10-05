@@ -3,6 +3,10 @@
 //! coordinate to the *input* coordinate to sample -- the inverse of "where does this input pixel
 //! end up," which is what a sampling pass actually needs.
 
+use std::sync::LazyLock;
+
+use nicti_calico::space::OutputSpace;
+
 use crate::color;
 
 /// A 2D affine transform: `(x, y) -> (a*x + b*y + tx, c*x + d*y + ty)`.
@@ -205,11 +209,17 @@ pub fn sample_bilinear(
     out
 }
 
+/// Linear ProPhoto -> linear sRGB, from `nicti-calico` (#318) -- the same matrix the display
+/// shader and export use, so a CPU readback, the screen and an exported file all agree. Built once
+/// (an f64 derivation from primaries + Bradford) rather than per pixel.
+static PROPHOTO_TO_SRGB: LazyLock<color::Mat3> =
+    LazyLock::new(|| OutputSpace::Srgb.from_working_f32());
+
 /// Linear ProPhoto RGB (the working space) -> linear sRGB -> sRGB OETF, for readback/golden-image
-/// comparison only -- the live suffix and geometry pass themselves never touch this; a real
-/// display/export color-managed path is #42's scope.
+/// comparison only -- the live suffix and geometry pass themselves never touch this. Unlike the
+/// display/export path it does not clip to [0, 1].
 pub fn output_encode(prophoto_linear: [f32; 3]) -> [f32; 3] {
-    let srgb_linear = color::mat3_apply(color::prophoto_to_srgb_linear_matrix(), prophoto_linear);
+    let srgb_linear = color::mat3_apply(*PROPHOTO_TO_SRGB, prophoto_linear);
     srgb_linear.map(color::srgb_oetf)
 }
 

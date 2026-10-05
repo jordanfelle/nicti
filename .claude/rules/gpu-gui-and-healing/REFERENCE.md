@@ -38,8 +38,8 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   between egui's render pass and every Tapetum compute dispatch, exactly ADR-0016's "one shared
   device" rule. Displaying a `FrameTexture` (linear ProPhoto RGB, `Rgba16Float`) needs its own
   small fragment shader (`nicti-pelt/shaders/display.wgsl`, `viewport.rs`'s `ViewportCallback`) —
-  the same `color::prophoto_to_srgb_linear_matrix()`/sRGB-OETF pair
-  `geometry::output_encode`'s CPU reference already uses, with the OETF skipped when the render
+  calico's `OutputSpace::Srgb.from_working_f32()` matrix + sRGB OETF (#318: the single source;
+  `geometry::output_encode`'s CPU reference and export use the same matrix), with the OETF skipped when the render
   target itself is an `*Srgb` format (hardware already applies it on write then — applying it
   twice double-gammas the image).
 - **Healing/removal** — `docs/adr/0050`: **Accepted** (2026-09-26, #97's reference-machine pass).

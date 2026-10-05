@@ -2,8 +2,8 @@
 // egui's own render-pass color target, color-managed (ADR-0042, `nicti_calico::transform::
 // DisplayTransform`). Two stages: an optional analytic soft-proof (clip in the proof space's
 // linear RGB, exact out-of-gamut flag), then the display -- mode 0: exact matrix + built-in
-// transfer function (within one 8-bit code of `nicti_tapetum::geometry::output_encode`'s CPU
-// reference for sRGB, not bit-identical); mode 2: matrix + per-channel encode table for a
+// transfer function (the sRGB matrix is calico's, shared with `nicti_tapetum::geometry::
+// output_encode`'s CPU reference and export, #318); mode 2: matrix + per-channel encode table for a
 // matrix/TRC monitor profile; mode 1: baked 3D LUT, only for a LUT-based monitor profile. An
 // optional gamut-warning tint follows. Either way the result is display-*encoded*; when the
 // target itself is an `*Srgb` format the hardware applies the sRGB OETF on write, so the shader
@@ -24,7 +24,7 @@
 // texel.
 
 struct Uniforms {
-    // Row-major 3x3 linear ProPhoto RGB -> linear sRGB matrix (color::prophoto_to_srgb_linear_matrix),
+    // Row-major 3x3 linear ProPhoto RGB -> linear sRGB matrix (nicti_calico::space::OutputSpace::Srgb.from_working_f32()),
     // laid out as three vec4 columns (matching nicti-tapetum::stages::LiveUniforms's own
     // vec4-per-column convention, to sidestep std140/WGSL's row-of-3 alignment padding).
     col0: vec4<f32>,

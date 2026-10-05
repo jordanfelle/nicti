@@ -48,8 +48,8 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
   shared device" rule. Displaying a `FrameTexture` (linear ProPhoto RGB, `Rgba16Float`) into an
   8-bit surface needed its own small fragment shader (`nicti-pelt/shaders/display.wgsl`,
   `viewport.rs`'s `ViewportCallback`), applying the same
-  `color::prophoto_to_srgb_linear_matrix()`/sRGB-OETF pair `geometry::output_encode`'s CPU
-  reference already uses — skipping the OETF when the render target itself is an `*Srgb` format,
+  calico's `OutputSpace::Srgb.from_working_f32()`/sRGB-OETF pair (#318: the same matrix
+  `geometry::output_encode`'s CPU reference and export use) — skipping the OETF when the render target itself is an `*Srgb` format,
   since the hardware already applies it on write then (applying it twice would double-gamma the
   image).
 - **Healing/removal**: `docs/adr/0050-healing-and-removal.md` — **Accepted** (2026-09-26, #97's
