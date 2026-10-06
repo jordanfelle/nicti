@@ -2708,12 +2708,19 @@ impl PeltApp {
     /// Advances the background mask pre-bake (#353) and tells the mask tool which bakes it owns,
     /// so opening one of those photos waits for the stored alpha instead of running the model
     /// again. Polls on a timer while it works: nothing else wakes an idle window.
+    /// The photo the pre-bake must leave alone: the one Develop is showing, which `MaskBakeService`
+    /// bakes itself. In Loupe and Library nothing bakes the loaded photo in the foreground (the mask
+    /// tool only runs in Develop), so there the pre-bake may take it too.
+    fn open_for_prebake(&self) -> Option<(i64, blake3::Hash)> {
+        (self.view == View::Develop)
+            .then_some(self.loupe_loaded_asset)
+            .flatten()
+    }
+
     fn poll_prebake(&mut self, ctx: &egui::Context) {
-        self.prebake.poll(
-            &self.pounce,
-            &mut self.mask_ui.service,
-            self.loupe_loaded_asset,
-        );
+        let open = self.open_for_prebake();
+        self.prebake
+            .poll(&self.pounce, &mut self.mask_ui.service, open);
         self.mask_ui
             .service
             .set_deferred_keys(self.prebake.inflight_keys());
@@ -2725,7 +2732,7 @@ impl PeltApp {
     /// Queues the photos a paste/sync touched for background mask pre-baking, nearest the grid
     /// cursor first. The photo open in Develop is skipped: `MaskBakeService` already handles it.
     fn enqueue_prebake(&mut self, touched: &[i64]) {
-        let open = self.loupe_loaded_asset.map(|(id, _)| id);
+        let open = self.open_for_prebake().map(|(id, _)| id);
         let ids: Vec<i64> = touched
             .iter()
             .copied()
