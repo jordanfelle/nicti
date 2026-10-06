@@ -88,7 +88,8 @@ Full reasoning/history: `docs/decisions/color.md`.
   `live_suffix.wgsl` bindings 3/4/5, `LiveParams.camera_profile`, tables re-uploaded only on
   fingerprint change. Selection = `coat::CameraProfileParams` on `nicti.working_space` (blake3 of
   the file → cache key; none = `{}`). `nicti-pelt` `camera_profiles.rs` discovers the user's own
-  profiles; **default is Matrix only**. Not applied yet: `ProfileToneCurve`, Look `.xmp`.
+  profiles and Look `.xmp`s (bindings 11/12); **default is Matrix only**. Not applied yet:
+  `DefaultBlackRender` Auto handling, and a Look's `ToneCurvePV2012`/Clarity/RGBTable settings.
 
 ## Package contents
 
