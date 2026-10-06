@@ -337,7 +337,11 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
             ui.data_mut(|d| d.remove_temp::<f64>(fine_id));
         }
         // ↑ / ↓ while the pointer rests on the row nudge the value (⇧: five times as much)
-        if new_value.is_none() && ui.rect_contains_pointer(row) {
+        // Not while a text field has keyboard focus: the arrows belong to it.
+        if new_value.is_none()
+            && ui.rect_contains_pointer(row)
+            && !ui.ctx().egui_wants_keyboard_input()
+        {
             let (up, down, shift) = ui.input_mut(|i| {
                 let shift = i.modifiers.shift;
                 let m = if shift {
@@ -545,6 +549,59 @@ mod tests {
             coarse.abs() > 10.0,
             "an unshifted drag follows the pointer, got {coarse}"
         );
+    }
+
+    /// ArrowUp over a slider nudges it, unless a text field has keyboard focus (then the arrow
+    /// belongs to the field).
+    #[test]
+    fn arrow_nudge_yields_to_a_focused_text_field() {
+        let nudge = |focus_text: bool| {
+            let ctx = super::super::tokens::testing::themed_ctx();
+            let mut v = 0.0_f32;
+            let mut text = String::new();
+            let mut t = 0.0;
+            let mut frame = |events: Vec<egui::Event>, v: &mut f32, text: &mut String| {
+                t += 0.02;
+                let input = egui::RawInput {
+                    time: Some(t),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    if focus_text {
+                        ui.text_edit_singleline(text).request_focus();
+                    }
+                    slider(ui, &INT, v, true);
+                });
+                out.textures_delta.clear();
+            };
+            frame(vec![], &mut v, &mut text);
+            // The slider row sits below the text field when there is one; hover well inside it.
+            let row_y = if focus_text { 60.0 } else { 36.0 };
+            frame(
+                vec![egui::Event::PointerMoved(egui::pos2(300.0, row_y))],
+                &mut v,
+                &mut text,
+            );
+            frame(
+                vec![egui::Event::Key {
+                    key: egui::Key::ArrowUp,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                &mut v,
+                &mut text,
+            );
+            v
+        };
+        assert_ne!(nudge(false), 0.0, "the arrow nudges a hovered slider");
+        assert_eq!(nudge(true), 0.0, "a focused text field keeps the arrow");
     }
 
     #[test]
