@@ -75,7 +75,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   0xFFFF for non-sRGB. exiftool `-validate` clean, except two known TIFF quirks (Adobe-Deflate
   flag; odd IFD offsets after an odd compressed strip).
 - **Edits (#57)**: read from `CatalogStore::get_master_edit`; Develop autosaves. AI Remove spots
-  are skipped at export (patches aren't persisted, #324); a missing/changed DCP profile fails that
+  are skipped at export (patches aren't persisted, #324); local adjustments (masks) are applied at the photo's own extent (#354, see `masking`); a missing/changed DCP profile fails that
   photo rather than exporting different colors. Export rotates by the file's EXIF Orientation.
 
 ## Package contents

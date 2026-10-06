@@ -97,7 +97,7 @@ test asserting it with counters (`MaskStats`):
 | Undo back to an earlier state | zero recomposes (composites are still cached) |
 
 Masks render at the frame extent **capped at 4096 px on the long edge** (~45 MB per `R32Float` field);
-the bilinear sample hides it on screen. Export should build them at full size (#354). **Until then the export pipeline (#57) applies no local adjustments at all**: its live pass is never given a mask atlas, so an exported photo silently lacks its masks. `ExportRun::start` therefore adds a warning naming every photo in the batch with an active mask (`export/jobs.rs`, tested), which the export dialog already shows.
+the bilinear sample hides it on screen. **Export builds them at the photo's own extent instead (#354)**: `ExportRenderer` owns a `MaskEngine::for_export` (capped only at the device's texture limit, every cache budget zero -- one photo at a time, and a native 45 MP field is ~180 MB), `render_live_frame` bakes the frame, prepares the atlas from it and hands that same frame to `Renderer::render_live_from` (export's renderer has a zero baked-cache budget, so the "next render finds it cached" shortcut Develop uses would bake twice). The shader samples by normalized UV, so nothing else changes. The atlas is unbound and the engine released as soon as the live pass is submitted, so ~1.5 GB (4 layers at 45 MP) is not held through the tile loop or into the next photo, and `set_masks(None)` runs for every unmasked photo because the kernel is reused. AI components read their baked alphas from the Larder on the export decode step (`stash::fetch_alpha`); export never bakes, so a component with no stored alpha is skipped (as in Develop while a bake is pending) and the report warns per photo. Clarity/Texture/Dehaze bases stay at their own 2048 px cap, as in Develop.
 
 **Brush rasterization.** The spike's kernel looped over *every dab for every pixel*. Here a stroke is a
 stored polyline (small documents; dabs are derived at `radius/4` spacing, widened rather than truncated
@@ -343,8 +343,7 @@ texture and is unaudited (#355).
   ([#350](https://github.com/jordanfelle/nicti/issues/350)); Moiré and Defringe
   ([#351](https://github.com/jordanfelle/nicti/issues/351)); global Clarity/Texture/Dehaze
   ([#352](https://github.com/jordanfelle/nicti/issues/352)); a disk tier for baked alphas
-  ([#353](https://github.com/jordanfelle/nicti/issues/353)); full-resolution refine for export
-  ([#354](https://github.com/jordanfelle/nicti/issues/354)); the remaining Dx12 audit
+  ([#353](https://github.com/jordanfelle/nicti/issues/353)); the remaining Dx12 audit
   ([#355](https://github.com/jordanfelle/nicti/issues/355)); unloading an idle session
   ([#356](https://github.com/jordanfelle/nicti/issues/356)); brush pressure/flow/auto-mask
   ([#357](https://github.com/jordanfelle/nicti/issues/357)); the post-lens neutral image once lens
@@ -353,5 +352,5 @@ texture and is unaudited (#355).
 - **Not undoable yet** — like heal, mask edits write straight into the in-memory document (#324).
 - **Known limits**: the mask overlay shows the *unrefined* AI alpha (the real render refines it); a
   uniformly hazy scene with no sky defeats the airlight estimate; the sky mask is a heuristic; a mask's
-  edge is at most 4096 px resolution until export builds its own (#354); the neutral image is built from
+  edge is at most 4096 px in Develop (export builds its own at full size, #354); the neutral image is built from
   the pre-lens frame and will need the post-lens one when lens correction is real (#358).

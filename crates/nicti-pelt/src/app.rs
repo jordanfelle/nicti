@@ -2378,6 +2378,7 @@ impl PeltApp {
                 gpu: self.gpu.clone(),
                 registry: self.export_registry.clone(),
                 software: format!("Nicti {}", self.version),
+                larder: self.larder.clone(),
             })
         };
         self.export.show_dialog(ctx, &env);

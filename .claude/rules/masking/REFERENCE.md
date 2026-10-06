@@ -46,7 +46,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **Halo gotcha**: the clarity/texture guided-filter `eps` was first too large (1.6e-2) and haloed a hard
   step by 25%; now coarse 2e-3 / fine 1e-3 (`bases.rs`). Dark-channel dehaze needs a sky/dense-haze pixel to
   anchor the airlight -- a uniformly hazy scene with none under-estimates it.
-- **Mask extent** = frame extent capped at 4096 long edge; atlas = Rgba16Float, 4 corrections/layer; composite cache 1 GiB (16 worst-case fields).
+- **Mask extent** = frame extent capped at 4096 long edge in Develop; atlas = Rgba16Float, 4 corrections/layer; composite cache 1 GiB (16 worst-case fields). **Export (#354)** uses `MaskEngine::for_export` (extent capped only at the device's texture limit, all cache budgets zero, `release()`d after each photo); clarity/dehaze bases stay at 2048 in both.
 - **Brush bounds**: dabs cap at 20k/stroke (dabs, NOT points -- `cap - points.len()` once collapsed a stroke) AND 2M tile-list entries/stroke (`raster::MAX_TILE_ENTRIES_PER_STROKE`); `compose::hash_group` hashes points as raw bytes (canonical JSON was 45 ms/frame at the point cap) with exhaustive destructuring -- a new field must be hashed or it won't compile.
 - **`MaskBakeJob` Drop** fills its slot with `CANCELLED` if Pounce drops it unrun; `MaskBakeService::poll` treats that as retryable, never a failure. `set_stage_params(MASKS, ..)` sanitizes the typed value (a NaN -> `null` would wipe the parse).
 - **Models are data**: recipe = `model_id`+`model_version`+`params.target`; `resolve_provider` returns a
@@ -82,8 +82,8 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **Real-weights test**: `crates/nicti-siamese/tests/real_models.rs` (`#[ignore]`; needs
   `NICTI_MODELS_DIR=<root>` with `birefnet/birefnet_fp32.onnx` at the exact pinned bytes +
   `NICTI_TEST_ORT_DYLIB`).
-- **Export ignores masks** (its live pass never gets an atlas): `export/jobs.rs` warns per batch naming the masked photos (tested) until #354 lands -- don't remove the warning before then.
-- **Not done**: Moire/Defringe (#351), undo (#324), full-res export masks (#354), post-lens neutral image
+- **Export applies masks (#354)**: `export/render_core.rs::render_live_frame` (`LiveSource.masks`) = `render_baked` -> `MaskEngine::prepare` -> `set_masks` -> `Renderer::render_live_from(baked)` (export's renderer has a zero baked-cache budget, so `render` after `render_baked` would bake twice). Gotchas: the `LiveSuffixKernel` is reused across photos, so `set_masks(None)` must run for every unmasked photo and after every masked one or the previous atlas leaks (regression test `local_adjustments_are_applied_without_a_warning_and_never_leak_into_the_next_photo`); AI alphas come from the Larder on the decode step (`ExportEnv.larder`, `stash::fetch_alpha`), export never bakes -- an unbaked AI component is skipped and the report warns per photo. Rendered previews (#145) still pass `masks: None` and stay marked partial (#399).
+- **Not done**: Moire/Defringe (#351), undo (#324), post-lens neutral image
   when lens is real (#358), real-photo quality (#171).
 
 ## Package contents
