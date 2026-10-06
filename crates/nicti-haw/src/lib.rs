@@ -99,6 +99,30 @@ fn ensure_committed(
     }
 }
 
+/// (Windows only.) ONNX Runtime loads a GPU provider's own dependencies (cuDNN, cuBLAS) by plain `LoadLibrary`
+/// name, which on Windows searches the application directory and `PATH` -- *not* the directory the
+/// provider DLL itself sits in. Putting the runtime's directory on `PATH` (once, before the first
+/// session, under `ensure_committed`'s lock) lets a self-contained GPU pack folder work without
+/// the CUDA toolkit being installed (#345).
+#[cfg(windows)]
+fn prepend_to_path(dir: Option<&Path>) {
+    let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) else {
+        return;
+    };
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// Elsewhere the dynamic loader's search path (`LD_LIBRARY_PATH`, rpath) is what matters, and
+/// mutating the environment of a running multi-threaded process is a data race.
+#[cfg(not(windows))]
+fn prepend_to_path(_dir: Option<&Path>) {}
+
 /// Initializes the global `ort` environment exactly once per process, from whichever caller gets
 /// there first, and validates every later call (from this crate or a different one) requests that
 /// same `dylib_path`. `dylib_path` points at the ONNX Runtime shared library itself
@@ -107,6 +131,7 @@ fn ensure_committed(
 pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), OrtInitError> {
     static COMMITTED: Mutex<Option<PathBuf>> = Mutex::new(None);
     ensure_committed(&COMMITTED, dylib_path, |path| {
+        prepend_to_path(path.parent());
         let builder =
             ort::init_from(path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
         builder.commit();
@@ -114,9 +139,128 @@ pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), OrtInitError> {
     })
 }
 
+/// Which ONNX Runtime execution provider a session runs on (#345).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionProvider {
+    Cpu,
+    /// Any DirectX 12 GPU (needs the DirectML build of ONNX Runtime plus `DirectML.dll`).
+    DirectMl,
+    /// NVIDIA GPUs only (needs the CUDA build of ONNX Runtime plus the CUDA/cuDNN runtime).
+    Cuda,
+}
+
+impl ExecutionProvider {
+    /// Parses the `NICTI_ORT_EP` override value (`cpu` / `directml` / `cuda`, case-insensitive).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Some(Self::Cpu),
+            "directml" | "dml" => Some(Self::DirectMl),
+            "cuda" => Some(Self::Cuda),
+            _ => None,
+        }
+    }
+
+    /// The provider a runtime library can offer: CUDA if the CUDA provider DLL/SO sits beside
+    /// `dylib` (a GPU build), else CPU.
+    pub fn for_runtime(dylib: &Path) -> Self {
+        let has = |name: &str| dylib.parent().is_some_and(|dir| dir.join(name).is_file());
+        if has("onnxruntime_providers_cuda.dll") || has("libonnxruntime_providers_cuda.so") {
+            Self::Cuda
+        } else {
+            Self::Cpu
+        }
+    }
+
+    /// `requested`, unless `NICTI_ORT_EP` names a different provider (benchmarking and
+    /// troubleshooting: force `cpu` to rule the GPU out).
+    pub fn resolve(requested: Self) -> Self {
+        std::env::var("NICTI_ORT_EP")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or(requested)
+    }
+}
+
+/// A session builder together with the execution provider that is *actually* active.
+pub struct ConfiguredBuilder {
+    pub builder: ort::session::builder::SessionBuilder,
+    pub active: ExecutionProvider,
+}
+
+/// Starts a session builder on `requested`, falling back to the CPU provider if the GPU provider
+/// fails to register (missing DLL, no suitable device, ...). Unlike a plain
+/// `with_execution_providers`, which silently falls back inside ONNX Runtime, the caller learns
+/// which provider is live via [`ConfiguredBuilder::active`] and the fallback is logged.
+pub fn session_builder(requested: ExecutionProvider) -> Result<ConfiguredBuilder, OrtInitError> {
+    use ort::ep::ExecutionProviderDispatch;
+    use ort::session::Session;
+
+    fn ort_err<R>(e: ort::Error<R>) -> OrtInitError {
+        OrtInitError::Ort(e.to_string())
+    }
+    let gpu: Option<ExecutionProviderDispatch> = match requested {
+        ExecutionProvider::Cpu => None,
+        ExecutionProvider::DirectMl => {
+            Some(ort::ep::DirectML::default().build().error_on_failure())
+        }
+        // The CUDA EP's defaults (power-of-two arena growth, exhaustive cuDNN algorithm search with
+        // the largest workspace) took ~12 GB of VRAM for one BiRefNet bake (#345): bound them.
+        ExecutionProvider::Cuda => Some(
+            ort::ep::CUDA::default()
+                .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
+                .with_conv_max_workspace(false)
+                .build()
+                .error_on_failure(),
+        ),
+    };
+    if let Some(ep) = gpu {
+        let attempt = Session::builder().map_err(ort_err)?;
+        // DirectML requires sequential execution and no memory-pattern optimisation.
+        let attempt = if requested == ExecutionProvider::DirectMl {
+            let attempt = attempt.with_memory_pattern(false).map_err(ort_err)?;
+            attempt.with_parallel_execution(false).map_err(ort_err)?
+        } else {
+            attempt
+        };
+        match attempt.with_execution_providers([ep]) {
+            Ok(builder) => {
+                return Ok(ConfiguredBuilder {
+                    builder,
+                    active: requested,
+                })
+            }
+            Err(e) => eprintln!(
+                "nicti-haw: {requested:?} execution provider unavailable ({e}); falling back to CPU"
+            ),
+        }
+    }
+    Ok(ConfiguredBuilder {
+        builder: Session::builder().map_err(ort_err)?,
+        active: ExecutionProvider::Cpu,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_execution_provider_names() {
+        assert_eq!(
+            ExecutionProvider::parse("CPU"),
+            Some(ExecutionProvider::Cpu)
+        );
+        assert_eq!(
+            ExecutionProvider::parse(" directml "),
+            Some(ExecutionProvider::DirectMl)
+        );
+        assert_eq!(
+            ExecutionProvider::parse("cuda"),
+            Some(ExecutionProvider::Cuda)
+        );
+        assert_eq!(ExecutionProvider::parse("tensorrt"), None);
+    }
 
     #[test]
     fn same_path_is_ok() {

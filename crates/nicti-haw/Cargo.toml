@@ -7,5 +7,5 @@ publish = false
 description = "Shared, process-wide ONNX Runtime environment init (#229): replaces the six duplicated ensure_ort_environment copies in spikes/groom, spikes/siamese, spikes/crouch, spikes/rods, spikes/litter, and spikes/rosette. Named after the haw (a cat's nictitating membrane) since it guards the one process-global ort environment every ort/load-dynamic caller shares."
 
 [dependencies]
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "directml", "cuda"] }
 thiserror = "2"

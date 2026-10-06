@@ -141,6 +141,9 @@ impl MaskUi {
 pub fn poll(ui: &egui::Ui, develop: &mut DevelopView, pounce: &Pounce, mask: &mut MaskUi) {
     if let Some(result) = mask.service.poll_install() {
         mask.status = Some(match result {
+            Ok(()) if mask.service.installing_gpu_pack() => {
+                "NVIDIA GPU pack installed. Restart Nicti to use it.".to_owned()
+            }
             Ok(()) => "AI mask model installed.".to_owned(),
             Err(e) => e,
         });
@@ -349,6 +352,24 @@ fn show_download(ui: &mut egui::Ui, mask: &mut MaskUi, develop: &DevelopView, po
             ));
             if ui.button("Download model").clicked() {
                 mask.status = mask.service.start_install(pounce).err();
+            }
+        });
+    }
+    if let Some(bytes) = mask.service.gpu_pack_offer() {
+        ui.group(|ui| {
+            ui.label(format!(
+                "Optional: faster AI masks on this NVIDIA GPU (about 6 s down to 0.2 s on an \
+                 RTX 5080). A one-time download of about {} MB:\n\
+                 - ONNX Runtime CUDA build (MIT), from github.com/microsoft/onnxruntime\n\
+                 - NVIDIA cuDNN and cuBLAS, from NVIDIA\n\
+                 - BiRefNet fp16 (MIT), from huggingface.co/onnx-community/BiRefNet-ONNX\n\
+                 Needs an RTX 20-series or newer with about 8 GB of free video memory; otherwise \
+                 masks keep running on the CPU. Takes effect after restarting Nicti. Everything \
+                 runs on this computer.",
+                megabytes(bytes)
+            ));
+            if ui.button("Download NVIDIA GPU pack").clicked() {
+                mask.status = mask.service.start_gpu_pack_install(pounce).err();
             }
         });
     }

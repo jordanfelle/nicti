@@ -14,7 +14,7 @@
 //!
 //! This is what pins the wrapper's tensor contract (input/output names, `[1,3,1024,1024]` planar
 //! ImageNet-normalized input, `[1,1,1024,1024]` logit output) to the actual model rather than to
-//! its README, and records the CPU-provider latency that ADR-0048's "<= 1 s per bake" hypothesis
+//! its README, and records the per-execution-provider latency that ADR-0048's "<= 1 s per bake" hypothesis
 //! (which assumed CUDA) is judged against.
 
 use std::path::PathBuf;
@@ -62,7 +62,6 @@ fn birefnet_segments_a_subject_with_the_documented_tensor_contract() {
     let scene = disc_scene(640, 480);
 
     let load_start = Instant::now();
-    let cold = Instant::now();
     let alpha = backend
         .bake(&BakeRequest {
             image_key: 1,
@@ -89,19 +88,31 @@ fn birefnet_segments_a_subject_with_the_documented_tensor_contract() {
         "subject not found: inside {inside}, outside {outside}"
     );
 
-    // Warm run on another photo: no reload, and this is the latency that matters interactively.
+    // Warm runs on another photo: no reload, and this is the latency that matters interactively.
+    // Protocol per docs/benchmarks.md: 1 warm-up + 5 measured runs, p50/p95. The execution provider
+    // actually in use is logged to stderr at load (`NICTI_ORT_EP=cpu|directml|cuda` forces one).
     let warm_scene = disc_scene(800, 600);
-    let warm = Instant::now();
-    backend
-        .bake(&BakeRequest {
-            image_key: 2,
-            source: &warm_scene,
-            cam_mul: [1.0; 4],
-            recipe: &recipe,
-        })
-        .unwrap();
-    println!("warm bake (CPU execution provider): {:.1?}", warm.elapsed());
-    let _ = cold;
+    let mut run = |key: u64| {
+        let start = Instant::now();
+        backend
+            .bake(&BakeRequest {
+                image_key: key,
+                source: &warm_scene,
+                cam_mul: [1.0; 4],
+                recipe: &recipe,
+            })
+            .unwrap();
+        start.elapsed()
+    };
+    let _warm_up = run(2);
+    let mut times: Vec<_> = (3..8).map(&mut run).collect();
+    times.sort();
+    println!(
+        "warm bake (NICTI_ORT_EP={}): p50 {:.0?}, p95 {:.0?}, runs {times:.0?}",
+        std::env::var("NICTI_ORT_EP").unwrap_or_else(|_| "<default>".into()),
+        times[times.len() / 2],
+        times[times.len() - 1],
+    );
 }
 
 #[test]

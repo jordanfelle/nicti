@@ -233,9 +233,9 @@ impl RemovalService {
             .clone()
             .ok_or("No place to keep models: couldn't determine a data folder.")?;
         let (job, handle) = InstallModelsJob::new(
-            store,
+            store.clone(),
             Arc::new(HttpDownloader),
-            &models::removal_artifacts(),
+            &models::removal_artifacts_for(&store),
         );
         self.install = Some(handle);
         pounce.submit(Box::new(job));
@@ -254,9 +254,9 @@ impl RemovalService {
             .clone()
             .ok_or("No place to keep models: couldn't determine a data folder.")?;
         let (job, handle) = InstallModelsJob::new_repair(
-            store,
+            store.clone(),
             Arc::new(HttpDownloader),
-            &models::removal_artifacts(),
+            &models::removal_artifacts_for(&store),
         );
         self.install = Some(handle);
         pounce.submit(Box::new(job));
@@ -288,9 +288,13 @@ impl RemovalService {
         }
         let mut lazy = LazyBackend::new(models.clone());
         if let Some(store) = self.store.clone() {
-            // The runtime is the store's own unless NICTI_ORT_DYLIB points elsewhere.
-            let ort_from_store = models.ort_dylib == store.path(&models::ORT_RUNTIME);
-            lazy = lazy.verified_by(move || models::verify_removal_install(&store, ort_from_store));
+            // The runtime is the store's own (the CPU build, or the GPU pack's CUDA build when that
+            // is installed) unless NICTI_ORT_DYLIB points elsewhere.
+            let ort_from_store =
+                store.ort_runtime_path().as_deref() == Some(models.ort_dylib.as_path());
+            let artifacts = models.artifacts();
+            lazy = lazy
+                .verified_by(move || models::verify_artifacts(&store, &artifacts, ort_from_store));
         }
         let backend: SharedBackend = Arc::new(Mutex::new(lazy));
         self.backend = Some((models, Arc::clone(&backend)));
@@ -1691,6 +1695,7 @@ mod tests {
         let f = std::path::PathBuf::from("/nonexistent/fake");
         RemovalModels {
             ort_dylib: f.clone(),
+            gpu_runtime: false,
             sam_encoder: f.clone(),
             sam_decoder: f.clone(),
             lama: f,

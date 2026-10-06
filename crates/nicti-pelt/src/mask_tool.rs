@@ -44,6 +44,8 @@ pub struct MaskBakeService {
     registry: Arc<SegmentationRegistry>,
     backend: Option<SharedBackend>,
     install: Option<InstallHandle>,
+    /// Whether the running/last install is the optional NVIDIA GPU pack (for the panel's message).
+    install_is_gpu_pack: bool,
     pending: Vec<Slot<MaskBakeOutcome>>,
     /// `(photo, bake key)` pairs with a job in flight.
     pending_keys: HashSet<(u64, blake3::Hash)>,
@@ -93,6 +95,7 @@ impl MaskBakeService {
             registry: Arc::new(segmentation_registry()),
             backend: None,
             install: None,
+            install_is_gpu_pack: false,
             pending: Vec::new(),
             pending_keys: HashSet::new(),
             failed: HashMap::new(),
@@ -166,7 +169,52 @@ impl MaskBakeService {
         self.start(pounce, true)
     }
 
+    /// Bytes of the optional NVIDIA GPU pack still to download (#345), or `None` when it isn't
+    /// offered: no NVIDIA driver, `NICTI_ORT_DYLIB` supplies the runtime, no model store, or it is
+    /// already installed.
+    pub fn gpu_pack_offer(&self) -> Option<u64> {
+        let store = self.store.as_ref()?;
+        let ort_overridden = std::env::var_os("NICTI_ORT_DYLIB").is_some_and(|v| !v.is_empty());
+        if ort_overridden || !models::nvidia_driver_present() {
+            return None;
+        }
+        let bytes = models::gpu_pack_download_bytes(store);
+        (bytes > 0).then_some(bytes)
+    }
+
+    /// Submits the explicit, user-initiated download of the NVIDIA GPU pack. Takes effect on the
+    /// next start of Nicti: ONNX Runtime's environment is process-wide and may already be
+    /// initialised on the CPU build.
+    pub fn start_gpu_pack_install(&mut self, pounce: &Pounce) -> Result<(), String> {
+        self.start_with(
+            pounce,
+            false,
+            models::gpu_pack_artifacts(),
+            "Download NVIDIA GPU pack",
+        )
+    }
+
+    /// True if the install that just finished (or is running) is the GPU pack.
+    pub fn installing_gpu_pack(&self) -> bool {
+        self.install_is_gpu_pack
+    }
+
     fn start(&mut self, pounce: &Pounce, repair: bool) -> Result<(), String> {
+        let label = if repair {
+            "Repair AI mask model"
+        } else {
+            "Download AI mask model"
+        };
+        self.start_with(pounce, repair, models::mask_artifacts(), label)
+    }
+
+    fn start_with(
+        &mut self,
+        pounce: &Pounce,
+        repair: bool,
+        artifacts: Vec<&'static models::Artifact>,
+        label: &str,
+    ) -> Result<(), String> {
         if self.install.is_some() {
             return Ok(());
         }
@@ -174,17 +222,13 @@ impl MaskBakeService {
             .store
             .clone()
             .ok_or("No place to keep models: couldn't determine a data folder.")?;
-        let artifacts = models::mask_artifacts();
+        self.install_is_gpu_pack = artifacts.iter().any(|a| a.id == models::BIREFNET_FP16.id);
         let (job, handle) = if repair {
             InstallModelsJob::new_repair(store, Arc::new(HttpDownloader), &artifacts)
         } else {
             InstallModelsJob::new(store, Arc::new(HttpDownloader), &artifacts)
         };
-        let job = job.labelled(if repair {
-            "Repair AI mask model"
-        } else {
-            "Download AI mask model"
-        });
+        let job = job.labelled(label);
         self.install = Some(handle);
         pounce.submit(Box::new(job));
         Ok(())

@@ -28,6 +28,27 @@ pub enum Payload {
     File,
     /// The download is a zip; the installed file is the single member at this path.
     ZipMember(&'static str),
+    /// The download is a zip (or wheel) of which several members are installed together into
+    /// `<store>/<dir>/` -- a directory several artifacts can share, which a native library set
+    /// (ONNX Runtime + cuDNN + cuBLAS) needs, because it resolves its dependencies from one place.
+    /// The artifact's `file_name`/`installed_*` describe the primary member only; the store checks
+    /// every member.
+    ZipMembers {
+        dir: &'static str,
+        members: &'static [Member],
+    },
+}
+
+/// One file extracted from a [`Payload::ZipMembers`] archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Member {
+    /// Path of the entry inside the archive.
+    pub zip_path: &'static str,
+    /// The installed file's name inside the artifact's directory.
+    pub file_name: &'static str,
+    pub size: u64,
+    /// SHA-256 (lowercase hex) of the installed file.
+    pub sha256: &'static str,
 }
 
 /// One pinned, downloadable model artifact.
@@ -67,6 +88,168 @@ pub const ORT_RUNTIME: Artifact = Artifact {
     installed_sha256: "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257",
     license: "MIT",
     payload: Payload::ZipMember("onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll"),
+};
+
+/// The members of the ONNX Runtime 1.28.0 Windows x64 **CUDA 13** build's zip that Nicti keeps: the
+/// runtime itself, its provider-loader, and the CUDA execution provider (the TensorRT provider and
+/// debug symbols are dropped).
+const ORT_CUDA_MEMBERS: &[Member] = &[
+    Member {
+        zip_path: "onnxruntime-win-x64-gpu_cuda13-1.28.0/lib/onnxruntime.dll",
+        file_name: "onnxruntime.dll",
+        size: 16_277_856,
+        sha256: "2462fe2d64ce063babefda3d9b1998380ffa74e99acf5d24d520ee67daa9e0f1",
+    },
+    Member {
+        zip_path: "onnxruntime-win-x64-gpu_cuda13-1.28.0/lib/onnxruntime_providers_cuda.dll",
+        file_name: "onnxruntime_providers_cuda.dll",
+        size: 267_649_848,
+        sha256: "ea191544c07fcb772d64737198004f259b7ac8a568150463c555cdb1b81ae91e",
+    },
+    Member {
+        zip_path: "onnxruntime-win-x64-gpu_cuda13-1.28.0/lib/onnxruntime_providers_shared.dll",
+        file_name: "onnxruntime_providers_shared.dll",
+        size: 21_856,
+        sha256: "c09e22fafb16675521c91db7a50a1f7e4f8922acb905ad50f8e5c66798eb153d",
+    },
+];
+
+/// cuDNN 9.27.0.42 for CUDA 13 -- the DLLs from NVIDIA's own `nvidia-cudnn-cu13` PyPI wheel (the
+/// full NVIDIA redistributable zip is 1.3 GB of headers and static libraries Nicti doesn't need).
+const CUDNN_MEMBERS: &[Member] = &[
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn64_9.dll",
+        file_name: "cudnn64_9.dll",
+        size: 270_448,
+        sha256: "0016bd73ac9192537ae5af6a3f05814316726dad1d1da44f113f0a9ef00ae34c",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_adv64_9.dll",
+        file_name: "cudnn_adv64_9.dll",
+        size: 105_226_864,
+        sha256: "041cab1d6439d2558b4a7073a42dd95058d0395463ffb0d37275af11ec0af8d7",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_cnn64_9.dll",
+        file_name: "cudnn_cnn64_9.dll",
+        size: 1_533_040,
+        sha256: "7dd1bcc6d8f00ad635f6a8a2cd076faba21626f3412e13c61a6bece3f88eacb1",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_engines_precompiled64_9.dll",
+        file_name: "cudnn_engines_precompiled64_9.dll",
+        size: 231_660_656,
+        sha256: "5d9b829228ae18594dafedf718d9612606c8ce6d199aa7151bea53e863baeefe",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_engines_runtime_compiled64_9.dll",
+        file_name: "cudnn_engines_runtime_compiled64_9.dll",
+        size: 39_266_928,
+        sha256: "8e65eeb0a4a3b7afa48ea3ca71c4b88e355199f85485b6fc0badcc97ebc552ef",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_engines_tensor_ir64_9.dll",
+        file_name: "cudnn_engines_tensor_ir64_9.dll",
+        size: 156_272,
+        sha256: "51afb44ce4b901ccdac1434f9fc9d8d707b690f39ae1e2a6ffca98c5fd9dfa96",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_ext64_9.dll",
+        file_name: "cudnn_ext64_9.dll",
+        size: 130_160,
+        sha256: "a0e0e2e8e8e4678956bbef93fdccc4730bd5edf9b23d38bff49030ebba1940a6",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_graph64_9.dll",
+        file_name: "cudnn_graph64_9.dll",
+        size: 116_132_464,
+        sha256: "ccc90435b2fd37b5ddd6a9fa0fd053ad8f46c2dc8b0a6256ef0ebea7f3efbace",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_heuristic64_9.dll",
+        file_name: "cudnn_heuristic64_9.dll",
+        size: 94_795_376,
+        sha256: "c0439ee74a3dbec8ecf56fecbc6ac2506efcce702453e36119649545d02509c3",
+    },
+    Member {
+        zip_path: "nvidia/cudnn/bin/cudnn_ops64_9.dll",
+        file_name: "cudnn_ops64_9.dll",
+        size: 37_462_128,
+        sha256: "2bd7f4122eaeccb85538c2a6f7923d7254ad77d7b7149fed0a8139f1e3cf0b07",
+    },
+];
+
+/// cuBLAS 13.8.0.4 from NVIDIA's CUDA redistributables (`redistrib_13.4.2.json`); `nvblas` is dropped.
+const CUBLAS_MEMBERS: &[Member] = &[
+    Member {
+        zip_path: "libcublas-windows-x86_64-13.8.0.4-archive/bin/x64/cublas64_13.dll",
+        file_name: "cublas64_13.dll",
+        size: 54_873_200,
+        sha256: "60bbba8868290311e9c1657b2193ddec667744eb555ff843f87acb7c039f9efa",
+    },
+    Member {
+        zip_path: "libcublas-windows-x86_64-13.8.0.4-archive/bin/x64/cublasLt64_13.dll",
+        file_name: "cublasLt64_13.dll",
+        size: 493_474_416,
+        sha256: "cad63434448e7141629e240ea093ad596a7ef6a0f67b468ba9bc1df6e1eeee33",
+    },
+];
+
+/// Where the whole NVIDIA GPU pack installs: ONNX Runtime resolves the CUDA provider's own
+/// dependencies from one directory, so the runtime, cuDNN and cuBLAS share it (#345).
+const GPU_RUNTIME_DIR: &str = "ort-cuda";
+
+/// ONNX Runtime 1.28.0, Windows x64 **CUDA 13** build (MIT), from the official Microsoft release --
+/// a superset of [`ORT_RUNTIME`]'s CPU build. Part of the optional NVIDIA GPU pack
+/// ([`gpu_pack_artifacts`]); needs cuDNN and cuBLAS beside it.
+pub const ORT_CUDA_RUNTIME: Artifact = Artifact {
+    id: "onnxruntime-cuda",
+    label: "ONNX Runtime 1.28.0 (CUDA 13)",
+    file_name: "onnxruntime.dll",
+    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-gpu_cuda13-1.28.0.zip",
+    download_size: 365_825_268,
+    download_sha256: "137f0822a4923b1d84d3e09496e0792ebbb221eb3a61a0657f71a12ab68ab1e2",
+    installed_size: 16_277_856,
+    installed_sha256: "2462fe2d64ce063babefda3d9b1998380ffa74e99acf5d24d520ee67daa9e0f1",
+    license: "MIT",
+    payload: Payload::ZipMembers {
+        dir: GPU_RUNTIME_DIR,
+        members: ORT_CUDA_MEMBERS,
+    },
+};
+
+/// NVIDIA cuDNN 9.27.0.42 (CUDA 13), the CUDA execution provider's convolution library.
+pub const CUDNN_RUNTIME: Artifact = Artifact {
+    id: "cudnn",
+    label: "NVIDIA cuDNN 9.27 (CUDA 13)",
+    file_name: "cudnn64_9.dll",
+    url: "https://files.pythonhosted.org/packages/87/6a/e55ff0ac26a5c6e2b21f41c9d04ad096b4ed6da593fba7e25845c61b0532/nvidia_cudnn_cu13-9.27.0.42-py3-none-win_amd64.whl",
+    download_size: 436_469_905,
+    download_sha256: "7d96f634adafd55c72231eb0500ca77ab109ec8ebff7b33000b76e081bc4558e",
+    installed_size: 270_448,
+    installed_sha256: "0016bd73ac9192537ae5af6a3f05814316726dad1d1da44f113f0a9ef00ae34c",
+    license: "NVIDIA cuDNN license (redistributable with an application; docs/licensing.md)",
+    payload: Payload::ZipMembers {
+        dir: GPU_RUNTIME_DIR,
+        members: CUDNN_MEMBERS,
+    },
+};
+
+/// NVIDIA cuBLAS 13.8.0.4 (CUDA 13), the CUDA execution provider's matrix-multiply library.
+pub const CUBLAS_RUNTIME: Artifact = Artifact {
+    id: "cublas",
+    label: "NVIDIA cuBLAS 13.8 (CUDA 13)",
+    file_name: "cublas64_13.dll",
+    url: "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-13.8.0.4-archive.zip",
+    download_size: 422_415_931,
+    download_sha256: "0974318e9861a61cb9091cf7de8d4c2880e9787fe311cb4bcbd08865663c5f43",
+    installed_size: 54_873_200,
+    installed_sha256: "60bbba8868290311e9c1657b2193ddec667744eb555ff843f87acb7c039f9efa",
+    license: "NVIDIA CUDA Toolkit EULA (redistributable runtime; docs/licensing.md)",
+    payload: Payload::ZipMembers {
+        dir: GPU_RUNTIME_DIR,
+        members: CUBLAS_MEMBERS,
+    },
 };
 
 /// MobileSAM image encoder, ONNX export by Acly (Apache-2.0 weights from ChaoningZhang/MobileSAM;
@@ -149,6 +332,66 @@ pub const BIREFNET: Artifact = Artifact {
     payload: Payload::File,
 };
 
+/// BiRefNet fp16 ONNX export from the same repo and revision as [`BIREFNET`] -- float32 inputs and
+/// outputs, so a drop-in swap. Part of the optional NVIDIA GPU pack ([`gpu_pack_artifacts`]): on the
+/// CUDA execution provider it is ~1.6x faster than fp32 and takes ~8 GB instead of ~13 GB of VRAM
+/// (ADR-0049's measured results). Not used on the CPU provider, where fp16 is slower.
+pub const BIREFNET_FP16: Artifact = Artifact {
+    id: "birefnet-fp16",
+    label: "BiRefNet fp16 masking model (GPU)",
+    file_name: "birefnet_fp16.onnx",
+    url: "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/534d3c82d3bb8b2f0867db6dfbc3a525b8e42f67/onnx/model_fp16.onnx",
+    download_size: 489_666_272,
+    download_sha256: "3654c741eb80bd926ada8fed1713b506ccf8d30eb1f6487e87eb9f234f33df09",
+    installed_size: 489_666_272,
+    installed_sha256: "3654c741eb80bd926ada8fed1713b506ccf8d30eb1f6487e87eb9f234f33df09",
+    license: "MIT (trained on DIS-TR per the upstream model card; a third-party ONNX conversion, see docs/licensing.md)",
+    payload: Payload::File,
+};
+
+/// The optional **NVIDIA GPU pack** (#345), in install order: the CUDA build of ONNX Runtime, the
+/// cuDNN and cuBLAS it loads, and the fp16 BiRefNet. Windows only; elsewhere `NICTI_ORT_DYLIB` must
+/// point at a GPU runtime. Additive to [`mask_artifacts`] -- the CPU path stays the fallback.
+pub fn gpu_pack_artifacts() -> Vec<&'static Artifact> {
+    #[cfg(windows)]
+    let v = vec![
+        &ORT_CUDA_RUNTIME,
+        &CUDNN_RUNTIME,
+        &CUBLAS_RUNTIME,
+        &BIREFNET_FP16,
+    ];
+    #[cfg(not(windows))]
+    let v = vec![&BIREFNET_FP16];
+    v
+}
+
+/// True when an NVIDIA display driver (which provides `nvcuda.dll`) is installed -- the precondition
+/// for offering the GPU pack. Windows only; the CUDA runtime can't work without the driver
+/// (`docs/adr/0018`), and the pack is never offered on other GPUs.
+pub fn nvidia_driver_present() -> bool {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        Path::new(&root)
+            .join("System32")
+            .join("nvcuda.dll")
+            .is_file()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Total bytes a user agrees to download for the GPU pack (skips anything already installed).
+pub fn gpu_pack_download_bytes(store: &ModelStore) -> u64 {
+    gpu_pack_artifacts()
+        .iter()
+        .filter(|a| store.status(a) != Status::Installed)
+        .map(|a| a.download_size)
+        .sum()
+}
+
 /// Everything AI subject/background masking needs, in install order (the ONNX Runtime entry exists
 /// only where Nicti ships a runtime download, as for removal).
 pub fn mask_artifacts() -> Vec<&'static Artifact> {
@@ -173,22 +416,52 @@ pub fn mask_download_bytes(store: &ModelStore) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskModels {
     pub ort_dylib: PathBuf,
+    /// The fp32 BiRefNet: always present, and what the CPU provider runs.
     pub birefnet: PathBuf,
+    /// True when `ort_dylib` is the NVIDIA GPU pack's CUDA build of the runtime.
+    pub gpu_runtime: bool,
+    /// The fp16 BiRefNet: only when the GPU pack's runtime is the one in use *and* the model is
+    /// installed (an interrupted pack download can leave the runtime without it).
+    pub birefnet_gpu: Option<PathBuf>,
 }
 
 impl MaskModels {
     /// `Some` only when BiRefNet is installed and an ONNX Runtime library is available (the store's
-    /// own copy on Windows, or `NICTI_ORT_DYLIB`, which wins where set).
+    /// own copy on Windows -- the GPU pack's CUDA build when that is installed -- or
+    /// `NICTI_ORT_DYLIB`, which wins where set).
     pub fn locate(store: &ModelStore) -> Option<Self> {
         let ort_dylib = match std::env::var_os("NICTI_ORT_DYLIB") {
             Some(p) if !p.is_empty() => PathBuf::from(p),
             _ => store.ort_runtime_path()?,
         };
+        let gpu_runtime = store.gpu_runtime_path().as_deref() == Some(ort_dylib.as_path());
+        let birefnet_gpu = gpu_runtime
+            .then(|| store.installed_path(&BIREFNET_FP16))
+            .flatten();
         let models = Self {
             ort_dylib,
             birefnet: store.installed_path(&BIREFNET)?,
+            gpu_runtime,
+            birefnet_gpu,
         };
         models.ort_dylib.is_file().then_some(models)
+    }
+
+    /// The store artifacts these paths came from, for [`verify_artifacts`] on first load (the
+    /// runtime entries are skipped there when `NICTI_ORT_DYLIB` supplied the library).
+    pub fn artifacts(&self) -> Vec<&'static Artifact> {
+        let mut v: Vec<&'static Artifact> = Vec::new();
+        if self.gpu_runtime {
+            v.extend([&ORT_CUDA_RUNTIME, &CUDNN_RUNTIME, &CUBLAS_RUNTIME]);
+        } else {
+            #[cfg(windows)]
+            v.push(&ORT_RUNTIME);
+        }
+        v.push(&BIREFNET);
+        if self.birefnet_gpu.is_some() {
+            v.push(&BIREFNET_FP16);
+        }
+        v
     }
 }
 
@@ -202,9 +475,20 @@ pub fn removal_artifacts() -> Vec<&'static Artifact> {
     v
 }
 
+/// [`removal_artifacts`] for what `store` has: the CPU ONNX Runtime is left out when the GPU pack's
+/// CUDA build (which also runs the CPU provider) is the runtime in use, so a user with only the
+/// pack isn't asked to download a runtime nothing would load.
+pub fn removal_artifacts_for(store: &ModelStore) -> Vec<&'static Artifact> {
+    let gpu = store.gpu_runtime_path().is_some();
+    removal_artifacts()
+        .into_iter()
+        .filter(|a| !(gpu && a.id == ORT_RUNTIME.id))
+        .collect()
+}
+
 /// Total bytes a user agrees to download for AI removal, for the confirmation prompt.
 pub fn removal_download_bytes(store: &ModelStore) -> u64 {
-    removal_artifacts()
+    removal_artifacts_for(store)
         .iter()
         .filter(|a| store.status(a) != Status::Installed)
         .map(|a| a.download_size)
@@ -215,6 +499,8 @@ pub fn removal_download_bytes(store: &ModelStore) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalModels {
     pub ort_dylib: PathBuf,
+    /// True when `ort_dylib` is the NVIDIA GPU pack's CUDA build of the runtime.
+    pub gpu_runtime: bool,
     pub sam_encoder: PathBuf,
     pub sam_decoder: PathBuf,
     pub lama: PathBuf,
@@ -229,13 +515,34 @@ impl RemovalModels {
             Some(p) if !p.is_empty() => PathBuf::from(p),
             _ => store.ort_runtime_path()?,
         };
+        let gpu_runtime = store.gpu_runtime_path().as_deref() == Some(ort_dylib.as_path());
         let models = Self {
             ort_dylib,
+            gpu_runtime,
             sam_encoder: store.installed_path(&MOBILE_SAM_ENCODER)?,
             sam_decoder: store.installed_path(&MOBILE_SAM_DECODER)?,
             lama: store.installed_path(&LAMA)?,
         };
         models.ort_dylib.is_file().then_some(models)
+    }
+}
+
+/// Artifacts that are the ONNX Runtime library set itself, which `NICTI_ORT_DYLIB` replaces.
+const RUNTIME_IDS: [&str; 4] = ["onnxruntime", "onnxruntime-cuda", "cudnn", "cublas"];
+
+impl RemovalModels {
+    /// The store artifacts these paths came from, for [`verify_artifacts`] on first load -- the
+    /// runtime set actually in use (the GPU pack's CUDA build serves removal too), not a fixed one.
+    pub fn artifacts(&self) -> Vec<&'static Artifact> {
+        let mut v: Vec<&'static Artifact> = Vec::new();
+        if self.gpu_runtime {
+            v.extend([&ORT_CUDA_RUNTIME, &CUDNN_RUNTIME, &CUBLAS_RUNTIME]);
+        } else {
+            #[cfg(windows)]
+            v.push(&ORT_RUNTIME);
+        }
+        v.extend([&MOBILE_SAM_ENCODER, &MOBILE_SAM_DECODER, &LAMA]);
+        v
     }
 }
 
@@ -258,7 +565,7 @@ pub fn verify_artifacts(
     ort_from_store: bool,
 ) -> Result<(), String> {
     for artifact in artifacts.iter().copied() {
-        if artifact.id == ORT_RUNTIME.id && !ort_from_store {
+        if !ort_from_store && RUNTIME_IDS.contains(&artifact.id) {
             continue;
         }
         match store.verify(artifact) {
@@ -421,18 +728,47 @@ impl ModelStore {
         &self.root
     }
 
-    /// Where `artifact`'s installed file lives (whether or not it exists yet).
-    pub fn path(&self, artifact: &Artifact) -> PathBuf {
-        self.root.join(artifact.id).join(artifact.file_name)
+    /// The directory `artifact` installs into: its own id, unless it shares one
+    /// ([`Payload::ZipMembers`]).
+    pub fn dir(&self, artifact: &Artifact) -> PathBuf {
+        match artifact.payload {
+            Payload::ZipMembers { dir, .. } => self.root.join(dir),
+            _ => self.root.join(artifact.id),
+        }
     }
 
-    /// Cheap check: the file exists at exactly the pinned size. Doesn't re-hash; call
+    /// Where `artifact`'s installed file lives (whether or not it exists yet); for a multi-member
+    /// artifact, its primary member.
+    pub fn path(&self, artifact: &Artifact) -> PathBuf {
+        self.dir(artifact).join(artifact.file_name)
+    }
+
+    /// Every file `artifact` installs: path, exact size, SHA-256.
+    fn files(&self, artifact: &Artifact) -> Vec<(PathBuf, u64, &'static str)> {
+        match artifact.payload {
+            Payload::ZipMembers { members, .. } => members
+                .iter()
+                .map(|m| (self.dir(artifact).join(m.file_name), m.size, m.sha256))
+                .collect(),
+            _ => vec![(
+                self.path(artifact),
+                artifact.installed_size,
+                artifact.installed_sha256,
+            )],
+        }
+    }
+
+    /// Cheap check: every file exists at exactly the pinned size. Doesn't re-hash; call
     /// [`Self::verify`] for that. A partial or foreign file at the right path can't pass, because
     /// install only ever renames a fully verified temp file into place.
     pub fn status(&self, artifact: &Artifact) -> Status {
-        match fs::metadata(self.path(artifact)) {
-            Ok(m) if m.is_file() && m.len() == artifact.installed_size => Status::Installed,
-            _ => Status::NotInstalled,
+        let all_present = self.files(artifact).iter().all(|(path, size, _)| {
+            fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == *size)
+        });
+        if all_present {
+            Status::Installed
+        } else {
+            Status::NotInstalled
         }
     }
 
@@ -441,11 +777,35 @@ impl ModelStore {
         (self.status(artifact) == Status::Installed).then(|| self.path(artifact))
     }
 
-    /// The ONNX Runtime library this store installed, where Nicti ships one.
+    /// The ONNX Runtime library this store installed, where Nicti ships one: the NVIDIA GPU pack's
+    /// CUDA build when that is installed (it also runs the CPU provider, so AI removal and masks
+    /// share the one process-wide runtime), else the CPU build.
     pub fn ort_runtime_path(&self) -> Option<PathBuf> {
         #[cfg(windows)]
         {
-            self.installed_path(&ORT_RUNTIME)
+            self.gpu_runtime_path()
+                .or_else(|| self.installed_path(&ORT_RUNTIME))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// The CUDA build of ONNX Runtime, only if it and the cuDNN/cuBLAS it needs are all installed
+    /// **and were already installed the first time this process asked**. ONNX Runtime's environment
+    /// is process-wide and can't be re-pointed once committed, so a pack installed mid-session must
+    /// not change which runtime masks and removal resolve (that would fail every later load with a
+    /// path mismatch) -- it takes effect on the next start, as the panel says.
+    pub fn gpu_runtime_path(&self) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            static AVAILABLE_AT_START: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let complete = [&ORT_CUDA_RUNTIME, &CUDNN_RUNTIME, &CUBLAS_RUNTIME]
+                .into_iter()
+                .all(|a| self.status(a) == Status::Installed);
+            let at_start = *AVAILABLE_AT_START.get_or_init(|| complete);
+            (complete && at_start).then(|| self.path(&ORT_CUDA_RUNTIME))
         }
         #[cfg(not(windows))]
         {
@@ -457,29 +817,37 @@ impl ModelStore {
     /// it fresh -- the way out for a same-size but corrupt file that `status` still reports as
     /// installed.
     pub fn remove(&self, artifact: &Artifact) -> io::Result<()> {
-        match fs::remove_file(self.path(artifact)) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+        for (path, _, _) in self.files(artifact) {
+            match fs::remove_file(path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
+        Ok(())
     }
 
-    /// Re-hashes the installed file against the pinned SHA-256.
+    /// Re-hashes every installed file against its pinned SHA-256.
     pub fn verify(&self, artifact: &Artifact) -> io::Result<bool> {
-        let mut file = match fs::File::open(self.path(artifact)) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e),
-        };
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
+        for (path, _, sha256) in self.files(artifact) {
+            let mut file = match fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
             }
-            hasher.update(&buf[..n]);
+            if hex(&hasher.finalize()) != sha256 {
+                return Ok(false);
+            }
         }
-        Ok(hex(&hasher.finalize()) == artifact.installed_sha256)
+        Ok(true)
     }
 
     /// Downloads, verifies and installs one artifact. Already-installed artifacts are a no-op.
@@ -494,7 +862,7 @@ impl ModelStore {
         if self.status(artifact) == Status::Installed {
             return Ok(self.path(artifact));
         }
-        let dir = self.root.join(artifact.id);
+        let dir = self.dir(artifact);
         fs::create_dir_all(&dir)?;
         let final_path = self.path(artifact);
         let download_tmp = dir.join(format!("{}.download", artifact.file_name));
@@ -578,12 +946,22 @@ impl ModelStore {
             });
         }
 
+        if let Payload::ZipMembers { members, .. } = artifact.payload {
+            return self.install_members(artifact, members, download_tmp);
+        }
         let staged = final_path.with_extension("partial");
         // Whatever happens below, don't leave the staged file behind.
         let _cleanup = RemoveOnDrop(&staged);
         match artifact.payload {
             Payload::File => fs::rename(download_tmp, &staged)?,
-            Payload::ZipMember(member) => extract_member(artifact, download_tmp, member, &staged)?,
+            Payload::ZipMember(member) => extract_member(
+                artifact,
+                download_tmp,
+                member,
+                artifact.installed_size,
+                &staged,
+            )?,
+            Payload::ZipMembers { .. } => unreachable!("handled above"),
         }
         // The extracted/renamed file must itself match the pinned installed hash and size.
         // Streamed: the installed file can be 200+ MB and must not be loaded into memory to hash.
@@ -597,6 +975,47 @@ impl ModelStore {
         }
         fs::rename(&staged, final_path)?;
         Ok(final_path.to_path_buf())
+    }
+
+    /// Extracts every member of a verified multi-member archive: each is staged next to its final
+    /// name and hash-checked, and only once all of them pass are any renamed into place, so a bad
+    /// member never leaves a half-installed set that `status` could mistake for complete.
+    fn install_members(
+        &self,
+        artifact: &Artifact,
+        members: &'static [Member],
+        archive: &Path,
+    ) -> Result<PathBuf, InstallError> {
+        let dir = self.dir(artifact);
+        // A killed earlier install can have left hundreds of MB of `.partial` files behind.
+        for member in members {
+            let _ = fs::remove_file(dir.join(format!("{}.partial", member.file_name)));
+        }
+        let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(members.len());
+        let result = (|| {
+            for member in members {
+                let final_path = dir.join(member.file_name);
+                let partial = dir.join(format!("{}.partial", member.file_name));
+                staged.push((partial.clone(), final_path));
+                extract_member(artifact, archive, member.zip_path, member.size, &partial)?;
+                let (len, hash) = hash_file(&partial)?;
+                if len != member.size || hash != member.sha256 {
+                    return Err(InstallError::HashMismatch {
+                        id: artifact.id,
+                        got: hash,
+                    });
+                }
+            }
+            for (partial, final_path) in &staged {
+                fs::rename(partial, final_path)?;
+            }
+            Ok(())
+        })();
+        for (partial, _) in &staged {
+            let _ = fs::remove_file(partial);
+        }
+        result?;
+        Ok(self.path(artifact))
     }
 }
 
@@ -613,6 +1032,7 @@ fn extract_member(
     artifact: &Artifact,
     zip_path: &Path,
     member: &'static str,
+    max_len: u64,
     dest: &Path,
 ) -> Result<(), InstallError> {
     let bad = |reason: String| InstallError::BadArchive {
@@ -625,11 +1045,8 @@ fn extract_member(
     let mut entry = archive.by_name(member).map_err(|e| bad(e.to_string()))?;
     // Bounded like the download: never write more than the pinned installed size.
     let mut out = fs::File::create(dest)?;
-    let copied = io::copy(
-        &mut (&mut entry).take(artifact.installed_size + 1),
-        &mut out,
-    )?;
-    if copied > artifact.installed_size {
+    let copied = io::copy(&mut (&mut entry).take(max_len + 1), &mut out)?;
+    if copied > max_len {
         drop(out);
         let _ = fs::remove_file(dest);
         return Err(bad("member is larger than the pinned size".to_owned()));
@@ -993,6 +1410,352 @@ mod tests {
         assert!(matches!(err, InstallError::HashMismatch { .. }), "{err}");
         assert_eq!(store.status(&a), Status::NotInstalled);
         assert!(!store.path(&a).exists());
+    }
+
+    fn zip_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(io::Cursor::new(&mut buf));
+            for (name, content) in files {
+                w.start_file(*name, SimpleFileOptions::default()).unwrap();
+                w.write_all(content).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    /// A multi-member artifact over `zip_bytes`, installing into `dir`; `members` are leaked so
+    /// they are `'static` like the real manifest's.
+    fn members_artifact(
+        id: &'static str,
+        dir: &'static str,
+        zip_bytes: &[u8],
+        members: Vec<Member>,
+    ) -> Artifact {
+        let members: &'static [Member] = Box::leak(members.into_boxed_slice());
+        Artifact {
+            id,
+            label: "test members",
+            file_name: members[0].file_name,
+            url: "https://example.invalid/m.zip",
+            download_size: zip_bytes.len() as u64,
+            download_sha256: sha(zip_bytes),
+            installed_size: members[0].size,
+            installed_sha256: members[0].sha256,
+            license: "test",
+            payload: Payload::ZipMembers { dir, members },
+        }
+    }
+
+    fn member(zip_path: &'static str, file_name: &'static str, content: &[u8]) -> Member {
+        Member {
+            zip_path,
+            file_name,
+            size: content.len() as u64,
+            sha256: sha(content),
+        }
+    }
+
+    #[test]
+    fn a_multi_member_artifact_installs_every_member_and_needs_them_all() {
+        let (a, b) = (vec![7u8; 3000], vec![9u8; 4000]);
+        let zip_bytes = zip_with_files(&[
+            ("pkg/bin/a.dll", &a),
+            ("pkg/bin/b.dll", &b),
+            ("pkg/x", b"no"),
+        ]);
+        let art = members_artifact(
+            "multi",
+            "shared-dir",
+            &zip_bytes,
+            vec![
+                member("pkg/bin/a.dll", "a.dll", &a),
+                member("pkg/bin/b.dll", "b.dll", &b),
+            ],
+        );
+        let store = temp_store("multi");
+        let path = store
+            .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
+            .unwrap();
+        assert_eq!(path, store.dir(&art).join("a.dll"));
+        assert_eq!(fs::read(store.dir(&art).join("a.dll")).unwrap(), a);
+        assert_eq!(fs::read(store.dir(&art).join("b.dll")).unwrap(), b);
+        assert_eq!(store.dir(&art), store.root().join("shared-dir"));
+        // Only the two members remain: no archive, no partials, nothing from outside the list.
+        assert_eq!(fs::read_dir(store.dir(&art)).unwrap().count(), 2);
+        assert_eq!(store.status(&art), Status::Installed);
+        assert!(store.verify(&art).unwrap());
+
+        // Losing or corrupting any one member makes the whole artifact not-installed / unverified.
+        let mut bad = b.clone();
+        bad[0] ^= 1;
+        fs::write(store.dir(&art).join("b.dll"), &bad).unwrap();
+        assert_eq!(store.status(&art), Status::Installed, "same size");
+        assert!(!store.verify(&art).unwrap());
+        fs::remove_file(store.dir(&art).join("b.dll")).unwrap();
+        assert_eq!(store.status(&art), Status::NotInstalled);
+    }
+
+    #[test]
+    fn a_bad_member_installs_none_of_the_members() {
+        let (a, b) = (vec![7u8; 3000], vec![9u8; 4000]);
+        let zip_bytes = zip_with_files(&[("pkg/a.dll", &a), ("pkg/b.dll", &b)]);
+        let mut wrong = member("pkg/b.dll", "b.dll", &b);
+        wrong.sha256 = sha(b"not b");
+        let art = members_artifact(
+            "multi-bad",
+            "multi-bad",
+            &zip_bytes,
+            vec![member("pkg/a.dll", "a.dll", &a), wrong],
+        );
+        let store = temp_store("multi-bad");
+        let err = store
+            .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
+            .unwrap_err();
+        assert!(matches!(err, InstallError::HashMismatch { .. }), "{err}");
+        assert_eq!(store.status(&art), Status::NotInstalled);
+        assert_eq!(
+            fs::read_dir(store.dir(&art)).unwrap().count(),
+            0,
+            "the good member must not be left behind beside a rejected one"
+        );
+    }
+
+    #[test]
+    fn a_missing_archive_member_is_a_bad_archive_and_installs_nothing() {
+        let a = vec![7u8; 100];
+        let zip_bytes = zip_with_files(&[("pkg/a.dll", &a)]);
+        let art = members_artifact(
+            "multi-missing",
+            "multi-missing",
+            &zip_bytes,
+            vec![
+                member("pkg/a.dll", "a.dll", &a),
+                member("pkg/gone.dll", "gone.dll", b"x"),
+            ],
+        );
+        let store = temp_store("multi-missing");
+        let err = store
+            .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
+            .unwrap_err();
+        assert!(matches!(err, InstallError::BadArchive { .. }), "{err}");
+        assert_eq!(fs::read_dir(store.dir(&art)).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn artifacts_can_share_one_directory() {
+        let (a, b) = (vec![1u8; 500], vec![2u8; 600]);
+        let (za, zb) = (
+            zip_with_files(&[("a.dll", &a)]),
+            zip_with_files(&[("b.dll", &b)]),
+        );
+        let first = members_artifact("first", "pack", &za, vec![member("a.dll", "a.dll", &a)]);
+        let second = members_artifact("second", "pack", &zb, vec![member("b.dll", "b.dll", &b)]);
+        let store = temp_store("shared");
+        store
+            .install(&first, &Fake::new(za), &mut |_| {}, &no_cancel())
+            .unwrap();
+        store
+            .install(&second, &Fake::new(zb), &mut |_| {}, &no_cancel())
+            .unwrap();
+        assert_eq!(store.dir(&first), store.dir(&second));
+        assert_eq!(fs::read_dir(store.dir(&first)).unwrap().count(), 2);
+        // Removing one artifact leaves the other.
+        store.remove(&first).unwrap();
+        assert_eq!(store.status(&first), Status::NotInstalled);
+        assert_eq!(store.status(&second), Status::Installed);
+    }
+
+    #[test]
+    fn the_gpu_pack_manifest_is_well_formed() {
+        let runtime = [&ORT_CUDA_RUNTIME, &CUDNN_RUNTIME, &CUBLAS_RUNTIME];
+        let mut names = Vec::new();
+        for a in runtime {
+            assert_eq!(a.download_sha256.len(), 64, "{}", a.id);
+            assert!(a.download_sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(a.url.starts_with("https://"), "{}", a.id);
+            let Payload::ZipMembers { dir, members } = a.payload else {
+                panic!("{} must be a multi-member artifact", a.id);
+            };
+            assert_eq!(
+                dir, GPU_RUNTIME_DIR,
+                "{}: the pack shares one directory",
+                a.id
+            );
+            assert!(!members.is_empty());
+            for m in members {
+                assert_eq!(m.sha256.len(), 64, "{}", m.file_name);
+                assert!(m.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+                assert!(m.size > 0 && !m.zip_path.is_empty());
+                assert!(m.zip_path.ends_with(m.file_name), "{}", m.file_name);
+                names.push(m.file_name);
+            }
+            // The artifact's own file_name/installed_* describe one of its members exactly.
+            let primary = members.iter().find(|m| m.file_name == a.file_name).unwrap();
+            assert_eq!(
+                (primary.size, primary.sha256),
+                (a.installed_size, a.installed_sha256)
+            );
+            assert!(RUNTIME_IDS.contains(&a.id), "{} must be a runtime id", a.id);
+        }
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            total,
+            "no two pack files may share a name: {names:?}"
+        );
+        // The loader the runtime is started from, and the provider it needs, are in the pack.
+        assert!(names.contains(&"onnxruntime.dll"));
+        assert!(names.contains(&"onnxruntime_providers_cuda.dll"));
+        assert!(names.contains(&"cudnn64_9.dll"));
+        assert!(names.contains(&"cublasLt64_13.dll"));
+    }
+
+    #[test]
+    fn birefnet_fp16_is_the_same_revision_as_fp32_and_a_plain_file() {
+        let revision = "/resolve/534d3c82d3bb8b2f0867db6dfbc3a525b8e42f67/onnx/";
+        assert!(BIREFNET.url.contains(revision));
+        assert!(BIREFNET_FP16.url.contains(revision));
+        assert!(BIREFNET_FP16.url.ends_with("model_fp16.onnx"));
+        assert_eq!(BIREFNET_FP16.payload, Payload::File);
+        assert_eq!(
+            BIREFNET_FP16.download_sha256,
+            BIREFNET_FP16.installed_sha256
+        );
+        assert_ne!(BIREFNET_FP16.id, BIREFNET.id);
+        assert_ne!(BIREFNET_FP16.file_name, BIREFNET.file_name);
+    }
+
+    #[test]
+    fn removal_verifies_the_runtime_it_actually_loads() {
+        let cpu = RemovalModels {
+            ort_dylib: PathBuf::from("onnxruntime.dll"),
+            gpu_runtime: false,
+            sam_encoder: PathBuf::new(),
+            sam_decoder: PathBuf::new(),
+            lama: PathBuf::new(),
+        };
+        let ids: Vec<_> = cpu.artifacts().iter().map(|a| a.id).collect();
+        assert!(ids.contains(&LAMA.id) && !ids.contains(&ORT_CUDA_RUNTIME.id));
+        let gpu = RemovalModels {
+            gpu_runtime: true,
+            ..cpu
+        };
+        let ids: Vec<_> = gpu.artifacts().iter().map(|a| a.id).collect();
+        for want in [
+            ORT_CUDA_RUNTIME.id,
+            CUDNN_RUNTIME.id,
+            CUBLAS_RUNTIME.id,
+            LAMA.id,
+        ] {
+            assert!(ids.contains(&want), "{want} must be verified: {ids:?}");
+        }
+        assert!(!ids.contains(&ORT_RUNTIME.id));
+    }
+
+    #[test]
+    fn an_oversized_archive_member_is_rejected_by_its_pinned_size() {
+        let real = vec![5u8; 2000];
+        let zip_bytes = zip_with_files(&[("pkg/a.dll", &real)]);
+        // The manifest pins 100 bytes; the archive's member is 2000.
+        let mut pinned = member("pkg/a.dll", "a.dll", &real);
+        pinned.size = 100;
+        let art = members_artifact("multi-big", "multi-big", &zip_bytes, vec![pinned]);
+        let store = temp_store("multi-big");
+        let err = store
+            .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
+            .unwrap_err();
+        assert!(matches!(err, InstallError::BadArchive { .. }), "{err}");
+        assert_eq!(fs::read_dir(store.dir(&art)).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_stale_partial_from_a_killed_install_is_cleaned_up() {
+        let a = vec![1u8; 300];
+        let zip_bytes = zip_with_files(&[("a.dll", &a)]);
+        let art = members_artifact(
+            "multi-stale",
+            "multi-stale",
+            &zip_bytes,
+            vec![member("a.dll", "a.dll", &a)],
+        );
+        let store = temp_store("multi-stale");
+        fs::create_dir_all(store.dir(&art)).unwrap();
+        fs::write(store.dir(&art).join("a.dll.partial"), vec![0u8; 999]).unwrap();
+        store
+            .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
+            .unwrap();
+        assert_eq!(fs::read_dir(store.dir(&art)).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn the_gpu_pack_is_additive_and_never_part_of_the_default_downloads() {
+        let default_ids: Vec<_> = mask_artifacts()
+            .iter()
+            .chain(removal_artifacts().iter())
+            .map(|a| a.id)
+            .collect();
+        for a in gpu_pack_artifacts() {
+            assert!(!default_ids.contains(&a.id), "{} must be opt-in", a.id);
+        }
+        let store = temp_store("gpu-size");
+        assert!(gpu_pack_download_bytes(&store) >= BIREFNET_FP16.download_size);
+    }
+
+    #[test]
+    fn the_gpu_runtime_needs_all_three_pieces_and_is_ignored_off_windows() {
+        let store = temp_store("gpu-runtime");
+        assert_eq!(store.gpu_runtime_path(), None);
+        // Nothing installed: masks fall back to whatever the CPU path offers.
+        assert_eq!(store.ort_runtime_path(), None);
+    }
+
+    #[test]
+    fn mask_models_name_the_artifacts_they_were_built_from() {
+        let cpu = MaskModels {
+            ort_dylib: PathBuf::from("onnxruntime.dll"),
+            birefnet: PathBuf::from("birefnet_fp32.onnx"),
+            gpu_runtime: false,
+            birefnet_gpu: None,
+        };
+        let ids: Vec<_> = cpu.artifacts().iter().map(|a| a.id).collect();
+        assert!(ids.contains(&BIREFNET.id));
+        assert!(!ids.contains(&BIREFNET_FP16.id));
+        assert!(!ids.contains(&ORT_CUDA_RUNTIME.id));
+
+        // The CUDA runtime in use but the fp16 model missing (an interrupted pack download): the
+        // runtime that is loaded is still the one verified, never the CPU build's.
+        let incomplete = MaskModels {
+            gpu_runtime: true,
+            ..cpu.clone()
+        };
+        let ids: Vec<_> = incomplete.artifacts().iter().map(|a| a.id).collect();
+        assert!(ids.contains(&CUDNN_RUNTIME.id) && ids.contains(&ORT_CUDA_RUNTIME.id));
+        assert!(!ids.contains(&ORT_RUNTIME.id) && !ids.contains(&BIREFNET_FP16.id));
+
+        let gpu = MaskModels {
+            gpu_runtime: true,
+            birefnet_gpu: Some(PathBuf::from("birefnet_fp16.onnx")),
+            ..cpu
+        };
+        let ids: Vec<_> = gpu.artifacts().iter().map(|a| a.id).collect();
+        for want in [
+            ORT_CUDA_RUNTIME.id,
+            CUDNN_RUNTIME.id,
+            CUBLAS_RUNTIME.id,
+            BIREFNET.id,
+            BIREFNET_FP16.id,
+        ] {
+            assert!(ids.contains(&want), "{want} missing from {ids:?}");
+        }
+        assert!(
+            !ids.contains(&ORT_RUNTIME.id),
+            "the CPU runtime isn't used with the GPU one"
+        );
     }
 
     #[test]

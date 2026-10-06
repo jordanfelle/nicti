@@ -86,9 +86,9 @@ impl ChunkedJob for MaskBakeJob {
             priority: Priority::Foreground,
             kind: JobKind::Bake,
             lane: Lane::Gpu,
-            // The default ONNX Runtime build is the CPU execution provider, so no VRAM is claimed;
-            // a GPU EP (a follow-up) would declare the session's real footprint here.
-            vram_bytes: 0,
+            // 0 on the CPU provider (it uses no VRAM, and nothing is loaded before the first bake);
+            // the GPU provider's measured footprint once BiRefNet is running on it (#345).
+            vram_bytes: crate::birefnet::declared_vram_bytes(),
             image_index: None,
         }
     }
