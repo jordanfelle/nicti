@@ -24,8 +24,9 @@ use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
 use crate::coat::{
-    self, CropParams, ExposureParams, HslParams, NoiseReductionParams, PresenceParams,
-    SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CropParams, EffectsParams, ExposureParams, HslParams, NoiseReductionParams,
+    PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
+    WbParams,
 };
 use crate::color;
 use crate::detail::{self, MAX_BLUR_RADIUS};
@@ -53,6 +54,10 @@ pub const HSL: &str = "nicti.hsl";
 pub const SHARPEN: &str = "nicti.sharpen";
 pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
 pub const CROP: &str = "nicti.crop";
+/// Post-crop vignette and grain (#380). A Geometry node: it runs inside the crop's own sample pass,
+/// so editing it re-runs only that pass (never the live suffix) and is evaluated in crop-normalized
+/// coordinates.
+pub const EFFECTS: &str = "nicti.effects";
 /// Local corrections (#49): every mask + its adjustments, one stage so a whole set pastes/syncs as a
 /// unit and the graph stays fixed-shape. Live: its cost is uniforms, not bakes.
 pub const MASKS: &str = "nicti.masks";
@@ -188,6 +193,13 @@ pub fn presence_stage() -> BasicStage {
         id: PRESENCE,
         kind: StageKind::Live,
         default_params: || coat::default_value::<PresenceParams>(),
+    }
+}
+pub fn effects_stage() -> BasicStage {
+    BasicStage {
+        id: EFFECTS,
+        kind: StageKind::Geometry,
+        default_params: || coat::default_value::<EffectsParams>(),
     }
 }
 pub fn hsl_stage() -> BasicStage {
@@ -1317,11 +1329,45 @@ struct PresentUniforms {
     ty: f32,
     out_width: u32,
     out_height: u32,
+    // #380 effects -- field order mirrors `present_sample.wgsl`'s `Uniforms`.
+    n_a: f32,
+    n_b: f32,
+    n_c: f32,
+    n_d: f32,
+    n_tx: f32,
+    n_ty: f32,
+    crop_w: f32,
+    crop_h: f32,
+    v_amount: f32,
+    v_mid: f32,
+    v_feather: f32,
+    v_round: f32,
+    v_highlights: f32,
+    v_style: u32,
+    g_amount: f32,
+    g_size: f32,
+    g_rough: f32,
+    g_seed: u32,
+    flags: u32,
+    pad: u32,
+}
+
+/// What the geometry pass needs to apply the post-crop effects (#380): the params plus the crop it
+/// is relative to. Set once per render -- it does not change per export tile, which is exactly what
+/// keeps a tile's pattern identical to the whole frame's.
+#[derive(Debug, Clone, Copy)]
+struct EffectsState {
+    params: EffectsParams,
+    /// Source coordinate -> crop-normalized `(u, v)` (`effects::crop_norm`).
+    norm: Affine2D,
+    crop_w: f32,
+    crop_h: f32,
 }
 
 pub struct CropKernel {
     pipeline: wgpu::ComputePipeline,
     transform: std::sync::Mutex<Affine2D>,
+    effects: std::sync::Mutex<Option<EffectsState>>,
     uniform_buf: wgpu::Buffer,
 }
 
@@ -1341,8 +1387,34 @@ impl CropKernel {
         Self {
             pipeline,
             transform: std::sync::Mutex::new(Affine2D::IDENTITY),
+            effects: std::sync::Mutex::new(None),
             uniform_buf,
         }
+    }
+
+    /// Records this render's post-crop effects (#380): `crop_transform` is the same output ->
+    /// source transform [`Self::set_transform`] gets for an untiled render (a tiled one calls
+    /// `set_transform` per tile but this once), and `crop_w`/`crop_h` the crop rect's size. A noop
+    /// `params`, or a degenerate crop, clears the effects so the pass runs the exact pre-#380 path.
+    pub fn set_effects(
+        &self,
+        params: &EffectsParams,
+        crop_transform: Affine2D,
+        crop_w: f32,
+        crop_h: f32,
+    ) {
+        let params = params.sanitized();
+        let state = if params.is_noop() {
+            None
+        } else {
+            crate::effects::crop_norm(crop_transform, crop_w, crop_h).map(|norm| EffectsState {
+                params,
+                norm,
+                crop_w,
+                crop_h,
+            })
+        };
+        *self.effects.lock().unwrap() = state;
     }
 
     /// Records this render's crop transform -- the actual uniform-buffer write is deferred to
@@ -1361,7 +1433,8 @@ impl GeometryExec for CropKernel {
         output: &FrameTexture,
     ) {
         let transform = *self.transform.lock().unwrap();
-        let u = PresentUniforms {
+        let fx = *self.effects.lock().unwrap();
+        let mut u = PresentUniforms {
             a: transform.a,
             b: transform.b,
             c: transform.c,
@@ -1370,7 +1443,34 @@ impl GeometryExec for CropKernel {
             ty: transform.ty,
             out_width: output.extent.width,
             out_height: output.extent.height,
+            ..Zeroable::zeroed()
         };
+        if let Some(fx) = fx {
+            let e = fx.params;
+            u.n_a = fx.norm.a;
+            u.n_b = fx.norm.b;
+            u.n_c = fx.norm.c;
+            u.n_d = fx.norm.d;
+            u.n_tx = fx.norm.tx;
+            u.n_ty = fx.norm.ty;
+            u.crop_w = fx.crop_w;
+            u.crop_h = fx.crop_h;
+            u.v_amount = e.vignette_amount;
+            u.v_mid = e.vignette_midpoint;
+            u.v_feather = e.vignette_feather;
+            u.v_round = e.vignette_roundness;
+            u.v_highlights = e.vignette_highlights;
+            u.v_style = match e.vignette_style {
+                VignetteStyle::HighlightPriority => 0,
+                VignetteStyle::ColorPriority => 1,
+                VignetteStyle::PaintOverlay => 2,
+            };
+            u.g_amount = e.grain_amount;
+            u.g_size = e.grain_size;
+            u.g_rough = e.grain_roughness;
+            u.g_seed = e.grain_seed;
+            u.flags = u32::from(e.vignette_active()) | (u32::from(e.grain_active()) << 1);
+        }
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
@@ -2085,6 +2185,131 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #380: the geometry pass's vignette + grain match `effects::apply_effects` for every style,
+    /// through a real crop rect and straighten rotation (so the crop-normalized coordinates are
+    /// exercised, not just an identity transform).
+    #[test]
+    fn present_sample_effects_match_the_cpu_reference() {
+        use crate::coat::{EffectsParams, VignetteStyle};
+        use crate::geometry::{affine_for_crop, sample_bilinear, CropRect};
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 64,
+            height: 48,
+        };
+        let input_data: Vec<[f32; 4]> = (0..extent.width * extent.height)
+            .map(|i| {
+                let (x, y) = ((i % extent.width) as f32, (i / extent.width) as f32);
+                [0.05 + x / 80.0, 0.1 + y / 90.0, 0.6 - x / 200.0, 1.0]
+            })
+            .collect();
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let rect = CropRect {
+            x: 8.0,
+            y: 6.0,
+            width: 40.0,
+            height: 30.0,
+        };
+        let transform = affine_for_crop(rect, 6.0);
+        let norm = crate::effects::crop_norm(transform, rect.width, rect.height).unwrap();
+        let out_extent = crate::frame::Extent {
+            width: 40,
+            height: 30,
+        };
+        for (style, highlights) in [
+            (VignetteStyle::HighlightPriority, 0.6),
+            (VignetteStyle::ColorPriority, 0.0),
+            (VignetteStyle::PaintOverlay, 0.0),
+        ] {
+            let effects = EffectsParams {
+                vignette_amount: -0.7,
+                vignette_midpoint: 0.35,
+                vignette_feather: 0.6,
+                vignette_roundness: 0.4,
+                vignette_highlights: highlights,
+                vignette_style: style,
+                grain_amount: 0.8,
+                grain_size: 0.5,
+                grain_roughness: 0.7,
+                grain_seed: 4242,
+            };
+            let kernel = CropKernel::new(&gpu);
+            kernel.set_transform(transform);
+            kernel.set_effects(&effects, transform, rect.width, rect.height);
+            let output = FrameTexture::new(&gpu, out_extent);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            let actual = crate::test_util::read_frame(&gpu, &output);
+
+            let mut worst = 0.0f32;
+            let mut changed = 0usize;
+            for oy in 0..out_extent.height {
+                for ox in 0..out_extent.width {
+                    let base = sample_bilinear(
+                        &input_data,
+                        (extent.width, extent.height),
+                        &transform,
+                        (ox, oy),
+                    );
+                    let s = transform.apply((ox as f32 + 0.5, oy as f32 + 0.5));
+                    let want = crate::effects::apply_effects(
+                        [base[0], base[1], base[2]],
+                        norm.apply(s),
+                        (rect.width, rect.height),
+                        &effects,
+                    );
+                    let got = actual[(oy * out_extent.width + ox) as usize];
+                    for c in 0..3 {
+                        worst = worst.max((got[c] - want[c]).abs());
+                    }
+                    if (want[0] - base[0]).abs() > 1e-3 {
+                        changed += 1;
+                    }
+                }
+            }
+            assert!(worst < 0.01, "{style:?}: GPU vs CPU differ by {worst}");
+            assert!(
+                changed > 600,
+                "{style:?}: the effects must actually change pixels"
+            );
+        }
+    }
+
+    /// #380: with the effects off the pass is exactly the pre-#380 sample.
+    #[test]
+    fn present_sample_with_noop_effects_is_the_plain_sample() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 8,
+            height: 8,
+        };
+        let data: Vec<[f32; 4]> = (0..64).map(|i| [i as f32 * 0.01, 0.2, 0.3, 1.0]).collect();
+        let input = crate::test_util::upload_frame(&gpu, extent, &data);
+        let run = |with_noop_effects: bool| {
+            let kernel = CropKernel::new(&gpu);
+            kernel.set_transform(Affine2D::crop(1.0, 1.0));
+            if with_noop_effects {
+                kernel.set_effects(
+                    &EffectsParams::default(),
+                    Affine2D::crop(1.0, 1.0),
+                    6.0,
+                    6.0,
+                );
+            }
+            let output = FrameTexture::new(&gpu, extent);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(&gpu, &output)
+        };
+        assert_eq!(run(false), run(true));
     }
 
     /// Same shape as `present_sample_gpu_matches_cpu_reference`, but with a real straighten

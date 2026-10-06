@@ -16,10 +16,12 @@ use nicti_tapetum::mask::compose as mask_compose;
 use nicti_tapetum::mask::engine::{AiAlpha, MaskEngine, MaskInputs};
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
-use nicti_tapetum::spine::{self, build_graph, build_registry, RenderInputs, LIVE_IDS};
+use nicti_tapetum::spine::{
+    self, build_graph, build_registry, RenderInputs, GEOMETRY_IDS, LIVE_IDS,
+};
 use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
-    DEMOSAIC, DENOISE, HEAL, LENS, MASKS, NEUTRAL,
+    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, DECODE, DEMOSAIC,
+    DENOISE, HEAL, LENS, MASKS, NEUTRAL,
 };
 use nicti_tapetum::StageRegistry;
 
@@ -145,7 +147,7 @@ pub(crate) fn render_live_frame(
         live: &ctx.live_kernel,
         live_nodes: &LIVE_IDS,
         geometry: &ctx.crop_kernel,
-        geometry_nodes: &[CROP],
+        geometry_nodes: &GEOMETRY_IDS,
         extent,
     };
     // Local corrections only when the caller asked for them (`masks`); the global Presence's

@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::stages::{
-    CROP, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE,
-    VIBRANCE, WB, WORKING_SPACE,
+    CROP, EFFECTS, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE,
+    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 
 /// One row of the checklist: a stage and the label the user sees.
@@ -78,6 +78,11 @@ pub const GROUPS: &[StageGroup] = &[
     StageGroup {
         id: NOISE_REDUCTION,
         label: "Noise reduction",
+        default_on: true,
+    },
+    StageGroup {
+        id: EFFECTS,
+        label: "Effects (vignette, grain)",
         default_on: true,
     },
     StageGroup {

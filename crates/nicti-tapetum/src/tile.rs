@@ -674,6 +674,104 @@ mod tests {
         }
     }
 
+    /// #380: the post-crop vignette and grain are functions of crop-normalized position, so a tiled
+    /// render (each tile with its own offset transform) matches the whole-frame render. The effects
+    /// are bound once for the photo, exactly as the export job does.
+    #[test]
+    fn tiled_render_with_effects_matches_a_whole_frame_render() {
+        use crate::coat::EffectsParams;
+        use crate::geometry::{affine_for_crop, CropRect};
+        let Some(gpu) = test_gpu() else { return };
+        let src_extent = Extent {
+            width: 48,
+            height: 40,
+        };
+        let source = gradient_source(&gpu, src_extent);
+        let rect = CropRect {
+            x: 4.0,
+            y: 3.0,
+            width: 36.0,
+            height: 28.0,
+        };
+        let base = affine_for_crop(rect, 5.0);
+        let out = Extent {
+            width: 36,
+            height: 28,
+        };
+        let effects = EffectsParams {
+            vignette_amount: -0.8,
+            vignette_midpoint: 0.3,
+            grain_amount: 1.0,
+            grain_seed: 7,
+            ..EffectsParams::default()
+        };
+
+        let whole_kernel = CropKernel::new(&gpu);
+        whole_kernel.set_transform(base);
+        whole_kernel.set_effects(&effects, base, rect.width, rect.height);
+        let whole_output = FrameTexture::new(&gpu, out);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        GeometryExec::encode(&whole_kernel, &gpu, &mut encoder, &source, &whole_output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let whole = read_frame(&gpu, &whole_output);
+
+        let tiles = TilePlanner::plan(
+            out,
+            Rect {
+                x: 0,
+                y: 0,
+                width: out.width,
+                height: out.height,
+            },
+            1,
+            TileBudget {
+                max_dim: 10,
+                max_staging_bytes: u64::MAX,
+                target_chunk_ms: 8.0,
+            },
+        );
+        assert!(tiles.len() > 4, "the test must exercise many tiles");
+        let tile_kernel = CropKernel::new(&gpu);
+        tile_kernel.set_effects(&effects, base, rect.width, rect.height);
+        let mut renderer = TiledRender::new(
+            std::sync::Arc::clone(&gpu),
+            &source,
+            &tile_kernel,
+            base,
+            tiles,
+        );
+        let mut sink = MemorySink::new(out);
+        while renderer.step(&mut sink) != TileStep::Done {}
+
+        let mut worst = 0.0f32;
+        for (a, b) in whole.iter().zip(sink.pixels.iter()) {
+            for c in 0..3 {
+                worst = worst.max((a[c] - b[c]).abs());
+            }
+        }
+        // Not bit-exact: a tile's offset transform rounds its source coordinate differently in the
+        // last place, which moves grain by far less than this.
+        assert!(worst < 2e-3, "tiled vs whole effects differ by {worst}");
+        // And the effects really are on (not a vacuous equality of two untouched renders).
+        let plain_kernel = CropKernel::new(&gpu);
+        plain_kernel.set_transform(base);
+        let plain_output = FrameTexture::new(&gpu, out);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        GeometryExec::encode(&plain_kernel, &gpu, &mut encoder, &source, &plain_output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let plain = read_frame(&gpu, &plain_output);
+        let moved = whole
+            .iter()
+            .zip(&plain)
+            .filter(|(a, b)| (a[0] - b[0]).abs() > 1e-3)
+            .count();
+        assert!(moved > 300, "only {moved} pixels changed");
+    }
+
     // No "halo=0 produces visible seams" regression test exists here, unlike
     // `spikes/rods`'s AI-tiling seam tests -- and deliberately so, not an oversight. Checked by
     // actually writing one and finding it never fails: `CropKernel::encode`'s `input` is always

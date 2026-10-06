@@ -19,6 +19,7 @@ use serde::Serialize;
 mod basic;
 mod crop;
 mod detail;
+mod effects;
 mod filters;
 mod heal;
 mod hsl;
@@ -302,6 +303,7 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
         basic::apply(&mut tx);
         hsl::apply(&mut tx);
         detail::apply(&mut tx);
+        effects::apply(&mut tx);
         crop::apply(&mut tx);
         heal::apply(&mut tx);
         masks::apply(&mut tx);
@@ -364,10 +366,14 @@ mod tests {
     #[test]
     fn a_user_set_zero_on_a_key_with_a_nonzero_default_stays_visible_but_the_default_is_noise() {
         let t = translate(
-            "s = { ColorGradeBlending = 0, GrainSize = 25, GrainFrequency = 10 }",
+            // (The grain keys used to be this test's example; #380 translates them.)
+            "s = { ColorGradeBlending = 0, PerspectiveScale = 100, UprightFocalLength35mm = 50 }",
             &Context::default(),
         )
         .unwrap();
-        assert_eq!(t.untranslated, vec!["ColorGradeBlending", "GrainFrequency"]);
+        assert_eq!(
+            t.untranslated,
+            vec!["ColorGradeBlending", "UprightFocalLength35mm"]
+        );
     }
 }

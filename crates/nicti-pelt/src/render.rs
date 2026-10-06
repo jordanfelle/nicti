@@ -32,7 +32,7 @@ use nicti_tapetum::mask::compose as mask_compose;
 use nicti_tapetum::mask::engine::{AiAlpha, MaskEngine, MaskInputs};
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
-use nicti_tapetum::spine::{self, build_graph, build_registry, LIVE_IDS};
+use nicti_tapetum::spine::{self, build_graph, build_registry, GEOMETRY_IDS, LIVE_IDS};
 use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
     DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, MASKS, NEUTRAL, TONE, WORKING_SPACE,
@@ -373,6 +373,7 @@ impl DevelopView {
             1.0,
         );
         self.crop_kernel.set_transform(inputs.crop_transform);
+        inputs.bind_effects(&self.crop_kernel);
         self.live_kernel.set_params(&self.gpu, &inputs.live);
 
         let decode_exec = DecodeExec {
@@ -398,7 +399,7 @@ impl DevelopView {
             live: &self.live_kernel,
             live_nodes: &LIVE_IDS,
             geometry: &self.crop_kernel,
-            geometry_nodes: &[CROP],
+            geometry_nodes: &GEOMETRY_IDS,
             extent: self.extent,
         };
 
@@ -1163,6 +1164,84 @@ mod tests {
         view.show_before = true;
         view.render();
         assert_eq!(view.graph.cache_key(DECODE).unwrap(), key_two);
+    }
+
+    // --- Global presence and effects (#380) through the real DevelopView ------------------------
+
+    /// A global clarity/dehaze with no mask at all is rendered (the preview bakes first and builds
+    /// the bases), and removing it returns the exact original pixels.
+    #[test]
+    fn a_global_presence_edit_changes_the_preview_with_no_masks() {
+        use nicti_tapetum::coat::PresenceParams;
+        use nicti_tapetum::frame::read_frame;
+        use nicti_tapetum::stages::PRESENCE;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(
+            Arc::new(synthetic_linear_frame()),
+            blake3::hash(b"presence"),
+            EditDocument::default(),
+        );
+        let base = read_frame(&gpu, &view.render());
+
+        view.set_stage_params(
+            PRESENCE,
+            &PresenceParams {
+                clarity: 0.9,
+                dehaze: 0.6,
+                ..Default::default()
+            },
+        );
+        let edited = read_frame(&gpu, &view.render());
+        let moved = base
+            .iter()
+            .zip(&edited)
+            .filter(|(a, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 1e-3)
+            .count();
+        assert!(moved > base.len() / 10, "only {moved} pixels changed");
+
+        view.reset_stage(PRESENCE);
+        assert_eq!(read_frame(&gpu, &view.render()), base);
+    }
+
+    /// An Effects edit re-runs only the geometry pass (ADR-0044: never a bake, never the live
+    /// suffix), darkens the corners and leaves the centre alone.
+    #[test]
+    fn an_effects_edit_only_reruns_the_geometry_pass() {
+        use nicti_tapetum::coat::EffectsParams;
+        use nicti_tapetum::frame::read_frame;
+        use nicti_tapetum::stages::EFFECTS;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(
+            Arc::new(synthetic_linear_frame()),
+            blake3::hash(b"effects"),
+            EditDocument::default(),
+        );
+        let base = read_frame(&gpu, &view.render());
+        let (w, h) = (view.extent.width as usize, view.extent.height as usize);
+
+        view.set_stage_params(
+            EFFECTS,
+            &EffectsParams {
+                vignette_amount: -1.0,
+                ..Default::default()
+            },
+        );
+        let edited = read_frame(&gpu, &view.render());
+        let stats = view.renderer.last_stats();
+        assert_eq!(stats.live_dispatches, 0, "{stats:?}");
+        assert_eq!(stats.geometry_dispatches, 1, "{stats:?}");
+        let (corner, centre) = (w * h - 1, (h / 2) * w + w / 2);
+        assert!(edited[corner][0] < base[corner][0] * 0.5);
+        assert_eq!(edited[centre], base[centre]);
+
+        view.reset_stage(EFFECTS);
+        assert_eq!(read_frame(&gpu, &view.render()), base);
     }
 
     // --- Local corrections (#49) through the real DevelopView -----------------------------------
