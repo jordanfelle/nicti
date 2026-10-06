@@ -699,6 +699,13 @@ entries (`cargo deny check licenses` passes):
 
 No ML model, font, or other bundled data asset is introduced by this ticket.
 
+## Update (2026-10-06, [#353](https://github.com/jordanfelle/nicti/issues/353)'s baked-alpha disk tier)
+
+`nicti-tapetum` now depends on `flate2` (`AiAlpha::encode`/`decode`, deflate over the 8-bit alpha plane).
+It is already in the tree via `nicti-calico` (MIT OR Apache-2.0), so there is no new crate and no
+`deny.toml` change. `zstd` and `lz4_flex`, reviewed above for ADR-0044's disk tier, were **not**
+adopted for it (ADR-0353); their rows stay as the record of what was checked.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23

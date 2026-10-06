@@ -47,6 +47,7 @@ pub struct MaskBakeJob {
     recipe: MaskRecipe,
     bake_key: blake3::Hash,
     label: String,
+    priority: Priority,
     done: bool,
     slot: Slot<MaskBakeOutcome>,
 }
@@ -72,18 +73,27 @@ impl MaskBakeJob {
             label: format!("Select {target}"),
             recipe,
             bake_key,
+            priority: Priority::Foreground,
             done: false,
             slot: Arc::clone(&slot),
         };
         (job, slot)
+    }
+
+    /// Runs at `priority` instead of the default `Foreground`. A pre-bake of a photo the user is
+    /// not looking at (#353) is `Background`, so it never delays a mask they are waiting on.
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
     }
 }
 
 impl ChunkedJob for MaskBakeJob {
     fn spec(&self) -> JobSpec {
         JobSpec {
-            // Foreground: the user just asked for this mask and is looking at it.
-            priority: Priority::Foreground,
+            // Foreground unless built `with_priority`: the user just asked for this mask and is
+            // looking at it.
+            priority: self.priority,
             kind: JobKind::Bake,
             lane: Lane::Gpu,
             // 0 on the CPU provider (it uses no VRAM, and nothing is loaded before the first bake);
@@ -115,7 +125,8 @@ impl ChunkedJob for MaskBakeJob {
                 })
                 .map_err(|e| e.to_string())
                 .and_then(|a| {
-                    AiAlpha::new(a.width, a.height, a.alpha)
+                    // 8-bit quantised, so this is exactly what the disk tier returns (#353).
+                    AiAlpha::quantized(a.width, a.height, a.alpha)
                         .map(Arc::new)
                         .ok_or_else(|| "the model returned an empty alpha".to_owned())
                 }),
@@ -229,6 +240,24 @@ mod tests {
         assert_eq!(spec.priority, Priority::Foreground);
         assert_eq!(spec.vram_bytes, 0);
         assert_eq!(job.label(), "Select subject");
+    }
+
+    #[test]
+    fn with_priority_overrides_only_the_priority() {
+        let (job, _, _) = job_with(Fake { ok: true, calls: 0 });
+        let spec = job.with_priority(Priority::Background).spec();
+        assert_eq!(spec.priority, Priority::Background);
+        assert_eq!(spec.lane, Lane::Gpu);
+        assert_eq!(spec.kind, JobKind::Bake);
+    }
+
+    #[test]
+    fn a_baked_alpha_is_already_quantised_to_what_the_disk_tier_stores() {
+        let (mut job, slot, _) = job_with(Fake { ok: true, calls: 0 });
+        job.step().unwrap();
+        let alpha = slot.lock().unwrap().take().unwrap().result.unwrap();
+        let reloaded = AiAlpha::decode(&alpha.encode()).unwrap();
+        assert_eq!(alpha.content_hash, reloaded.content_hash);
     }
 
     #[test]

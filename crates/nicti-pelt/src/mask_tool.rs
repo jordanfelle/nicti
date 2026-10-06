@@ -13,6 +13,10 @@
 //!   agree to, and only [`MaskBakeService::start_install`] -- wired to a button -- fetches anything.
 //! - **A failed bake is remembered**, not retried every frame; the panel offers Retry.
 //! - **A result for a photo the user has since left is dropped**, never applied to the wrong one.
+//! - **Disk tier (#353, ADR-0353).** With a Larder attached, a missing alpha is first looked up in
+//!   the [Stash](crate::stash) (a Foreground `AlphaFetchJob`); only a miss falls through to the
+//!   bake, and every finished bake is stored by a Background `AlphaStoreJob` -- also one that
+//!   finishes after the user has left the photo, since the work is still valid.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -29,6 +33,8 @@ use nicti_stalk::SegmentationRegistry;
 use nicti_tapetum::mask::engine::AiAlpha;
 
 use crate::render::DevelopView;
+use crate::stash::{AlphaFetchJob, AlphaStoreJob, FetchOutcome};
+use crate::t2::SharedLarder;
 
 /// A bake that finished for the photo currently open.
 pub struct MaskEvent {
@@ -51,6 +57,25 @@ pub struct MaskBakeService {
     pending_keys: HashSet<(u64, blake3::Hash)>,
     /// Bakes that failed, by `(photo, bake key)`, so a broken model isn't re-run every frame.
     failed: HashMap<(u64, blake3::Hash), String>,
+    /// The disk tier's Larder (#353); `None` = RAM only, exactly as before.
+    larder: Option<SharedLarder>,
+    /// Catalog id of the photo in Develop, which files its alphas in the Larder. Set by the app
+    /// each frame; `None` (no catalog photo, e.g. a synthetic frame) disables the disk tier.
+    open_asset: Option<i64>,
+    /// Disk lookups in flight.
+    fetching: Vec<Slot<FetchOutcome>>,
+    /// `(photo, bake key)` pairs whose disk lookup has run and missed: don't ask again, bake. Cleared
+    /// when the bake lands or on a hit, so an alpha pruned from RAM (its mask deleted, then undone)
+    /// is looked up on disk again rather than re-baked.
+    fetched: HashSet<(u64, blake3::Hash)>,
+    /// The catalog id each in-flight bake was requested under, to file its alpha by.
+    bake_asset: HashMap<(u64, blake3::Hash), i64>,
+    /// Finished bakes waiting for a store job; flushed in `request_missing`, which has the Pounce
+    /// handle `poll` doesn't.
+    to_store: Vec<(i64, blake3::Hash, Arc<AiAlpha>)>,
+    /// Bake keys the background pre-bake (#353) has in flight: wait for them to land on disk
+    /// instead of running the same model a second time.
+    deferred: HashSet<blake3::Hash>,
     /// Test seam: substitute the backend so the whole request -> job -> alpha path runs without
     /// ~1 GB of weights.
     #[cfg(test)]
@@ -99,9 +124,41 @@ impl MaskBakeService {
             pending: Vec::new(),
             pending_keys: HashSet::new(),
             failed: HashMap::new(),
+            larder: None,
+            open_asset: None,
+            fetching: Vec::new(),
+            fetched: HashSet::new(),
+            bake_asset: HashMap::new(),
+            to_store: Vec::new(),
+            deferred: HashSet::new(),
             #[cfg(test)]
             backend_override: None,
         }
+    }
+
+    /// Attaches (or detaches) the disk tier.
+    pub fn set_larder(&mut self, larder: Option<SharedLarder>) {
+        self.larder = larder;
+    }
+
+    /// The bake keys the pre-bake is working on right now (call every frame). A request for one is
+    /// neither fetched nor baked here -- it shows as pending until the pre-bake has stored it, and
+    /// then the ordinary disk lookup finds it.
+    pub fn set_deferred_keys(&mut self, keys: &HashSet<blake3::Hash>) {
+        if &self.deferred != keys {
+            self.deferred = keys.clone();
+        }
+    }
+
+    /// Test seam for modules that drive this service (the pre-bake): substitute the model backend.
+    #[cfg(test)]
+    pub(crate) fn set_backend_for_test(&mut self, backend: SharedBackend) {
+        self.backend_override = Some(backend);
+    }
+
+    /// Tells the service which catalog photo is open in Develop (call every frame, cheap).
+    pub fn set_open_asset(&mut self, asset_id: Option<i64>) {
+        self.open_asset = asset_id;
     }
 
     /// True when the model `model_id` names still has something to download.
@@ -269,7 +326,7 @@ impl MaskBakeService {
     }
 
     /// The shared backend, created (with nothing loaded) on first use.
-    fn shared_backend(&mut self) -> SharedBackend {
+    pub(crate) fn shared_backend(&mut self) -> SharedBackend {
         #[cfg(test)]
         if let Some(b) = &self.backend_override {
             return Arc::clone(b);
@@ -296,12 +353,29 @@ impl MaskBakeService {
     /// flight, ones that already failed on this photo, and ones waiting on a download the user has
     /// not agreed to. Returns how many jobs it submitted.
     pub fn request_missing(&mut self, pounce: &Pounce, develop: &DevelopView) -> usize {
+        self.flush_stores(pounce);
         let image_key = develop.frame_key();
         let mut submitted = 0;
         for request in develop.mask_bake_requests() {
             let id = (image_key, request.key);
-            if self.pending_keys.contains(&id) || self.failed.contains_key(&id) {
+            if self.pending_keys.contains(&id)
+                || self.failed.contains_key(&id)
+                || self.deferred.contains(&request.key)
+            {
                 continue;
+            }
+            // Disk first, even for a model that isn't installed: a stored alpha needs no model.
+            if let (Some(larder), Some(asset_id)) = (&self.larder, self.open_asset) {
+                if !self.fetched.contains(&id) {
+                    let (job, slot) =
+                        AlphaFetchJob::new(Arc::clone(larder), asset_id, image_key, request.key);
+                    self.fetched.insert(id);
+                    self.pending_keys.insert(id);
+                    self.fetching.push(slot);
+                    pounce.submit(Box::new(job));
+                    submitted += 1;
+                    continue;
+                }
             }
             if self.model_missing(&request.recipe.model_id) {
                 continue; // waits for an explicit download
@@ -318,6 +392,9 @@ impl MaskBakeService {
                 request.key,
             );
             self.pending_keys.insert(id);
+            if let Some(asset_id) = self.open_asset {
+                self.bake_asset.insert(id, asset_id);
+            }
             self.pending.push(slot);
             pounce.submit(Box::new(job));
             submitted += 1;
@@ -325,11 +402,57 @@ impl MaskBakeService {
         submitted
     }
 
+    /// Submits a store job for every bake that finished since the last call.
+    fn flush_stores(&mut self, pounce: &Pounce) {
+        let Some(larder) = &self.larder else {
+            self.to_store.clear();
+            return;
+        };
+        for (asset_id, bake_key, alpha) in self.to_store.drain(..) {
+            pounce.submit(Box::new(AlphaStoreJob::new(
+                Arc::clone(larder),
+                asset_id,
+                bake_key,
+                alpha,
+            )));
+        }
+    }
+
     /// Collects finished bakes. A success for the open photo is stored in `develop` (and returned);
     /// a failure is remembered and returned; a result for a photo the user has left is dropped.
     pub fn poll(&mut self, develop: &mut DevelopView) -> Vec<MaskEvent> {
         let open = develop.frame_key();
         let mut events = Vec::new();
+        let mut fetched_back = Vec::new();
+        self.fetching
+            .retain(|slot| match slot.lock().unwrap().take() {
+                Some(outcome) => {
+                    fetched_back.push(outcome);
+                    false
+                }
+                None => true,
+            });
+        for outcome in fetched_back {
+            let id = (outcome.image_key, outcome.bake_key);
+            self.pending_keys.remove(&id);
+            // A hit, or a result for a photo the user has left, is done with: forget the lookup so
+            // a later request (an undo, coming back) asks the disk again. A miss for the open photo
+            // stays recorded, so the next `request_missing` bakes instead of asking again.
+            let hit = outcome.alpha.is_some();
+            if hit || outcome.image_key != open {
+                self.fetched.remove(&id);
+            }
+            if outcome.image_key != open {
+                continue;
+            }
+            if let Some(alpha) = outcome.alpha {
+                develop.set_ai_alpha(outcome.bake_key, Arc::clone(&alpha));
+                events.push(MaskEvent {
+                    bake_key: outcome.bake_key,
+                    result: Ok(alpha),
+                });
+            }
+        }
         let mut finished = Vec::new();
         self.pending
             .retain(|slot| match slot.lock().unwrap().take() {
@@ -340,8 +463,15 @@ impl MaskBakeService {
                 None => true,
             });
         for outcome in finished {
-            self.pending_keys
-                .remove(&(outcome.image_key, outcome.bake_key));
+            let id = (outcome.image_key, outcome.bake_key);
+            self.pending_keys.remove(&id);
+            self.fetched.remove(&id);
+            // File a successful bake on disk, whichever photo is open now: it is still valid work.
+            let asset = self.bake_asset.remove(&id);
+            if let (Some(asset_id), Ok(alpha)) = (asset, &outcome.result) {
+                self.to_store
+                    .push((asset_id, outcome.bake_key, Arc::clone(alpha)));
+            }
             if outcome.image_key != open {
                 continue;
             }
@@ -393,11 +523,11 @@ impl MaskBakeService {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.fetching.len()
     }
 
     pub fn is_pending(&self, image_key: u64, bake_key: &blake3::Hash) -> bool {
-        self.pending_keys.contains(&(image_key, *bake_key))
+        self.pending_keys.contains(&(image_key, *bake_key)) || self.deferred.contains(bake_key)
     }
 }
 
@@ -516,6 +646,238 @@ mod tests {
             "nothing left to bake"
         );
         assert_eq!(svc.request_missing(&p, &develop), 0);
+    }
+
+    #[test]
+    fn the_pre_bakes_pixel_free_keys_match_what_the_open_photo_computes() {
+        // The pre-bake (#353) names a photo's bakes from its document and identity alone. They
+        // must be the keys Develop looks for once that photo is open, or the stored alphas would
+        // never be found.
+        let Some(mut develop) = develop() else { return };
+        let identity = blake3::hash(b"photo");
+        let sky = recipe_for(SegmentTarget::Sky);
+        set_masks(&mut develop, vec![ai(sky, false)]);
+        develop.set_stage_params(
+            nicti_tapetum::stages::EXPOSURE,
+            &nicti_tapetum::coat::ExposureParams { stops: 1.25 },
+        );
+        let _ = develop.render(); // applies the whole document to the graph
+        let doc = develop.document().clone();
+        assert_eq!(
+            develop.neutral_key(),
+            nicti_tapetum::spine::neutral_key(&doc, identity)
+        );
+        let params: MaskParams = nicti_tapetum::coat::parse(&doc.stages[MASKS].params);
+        let expected = nicti_tapetum::mask::compose::bake_requests(
+            &params,
+            nicti_tapetum::spine::neutral_key(&doc, identity),
+        );
+        assert_eq!(develop.mask_bake_requests(), expected);
+    }
+
+    // --- #353: the disk tier ------------------------------------------------------------
+
+    fn larder() -> (tempfile::TempDir, SharedLarder) {
+        use nicti_lair::larder::{Larder, LarderConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let l = Larder::open(dir.path(), LarderConfig::default()).unwrap();
+        (dir, Arc::new(Mutex::new(l)))
+    }
+
+    /// One frame of the app's loop: collect, then request (which also flushes stores).
+    fn frame(svc: &mut MaskBakeService, p: &Pounce, develop: &mut DevelopView) -> Vec<MaskEvent> {
+        drain(p);
+        let events = svc.poll(develop);
+        svc.request_missing(p, develop);
+        events
+    }
+
+    fn stored(l: &SharedLarder, asset: i64, key: &blake3::Hash) -> bool {
+        l.lock()
+            .unwrap()
+            .contains_keyed(crate::stash::keyed(asset, key.as_bytes()))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_baked_alpha_is_stored_and_a_fresh_session_loads_it_without_running_the_model() {
+        let (Some(mut first), Some(mut second)) = (develop(), develop()) else {
+            return;
+        };
+        let (_dir, l) = larder();
+        let p = pounce();
+        let sky = recipe_for(SegmentTarget::Sky);
+        set_masks(&mut first, vec![ai(sky.clone(), false)]);
+        let key = first.mask_bake_requests()[0].key;
+
+        let (mut svc, calls) = service(false);
+        svc.set_larder(Some(Arc::clone(&l)));
+        svc.set_open_asset(Some(5));
+        assert_eq!(
+            svc.request_missing(&p, &first),
+            1,
+            "the disk is asked first"
+        );
+        assert!(svc.is_pending(first.frame_key(), &key));
+        assert!(
+            frame(&mut svc, &p, &mut first).is_empty(),
+            "a miss is no event"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "...and has not baked yet");
+        let events = frame(&mut svc, &p, &mut first); // the bake lands; its store is queued
+        assert!(events[0].result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drain(&p); // the store job
+        assert!(stored(&l, 5, &key));
+        let baked = events[0].result.as_ref().unwrap().content_hash;
+
+        // Another run of the app: nothing in RAM, a model that must not be called.
+        set_masks(&mut second, vec![ai(sky, false)]);
+        let (mut svc2, calls2) = service(false);
+        svc2.set_larder(Some(Arc::clone(&l)));
+        svc2.set_open_asset(Some(5));
+        assert_eq!(svc2.request_missing(&p, &second), 1);
+        let events = frame(&mut svc2, &p, &mut second);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].result.as_ref().unwrap().content_hash, baked);
+        assert!(second.has_ai_alpha(&key));
+        assert_eq!(calls2.load(Ordering::SeqCst), 0, "no model run");
+        assert!(second.mask_bake_requests().is_empty());
+        assert_eq!(svc2.request_missing(&p, &second), 0);
+    }
+
+    #[test]
+    fn a_stored_alpha_loads_even_when_its_model_is_not_installed() {
+        let Some(mut develop) = develop() else { return };
+        let (_dir, l) = larder();
+        let p = pounce();
+        set_masks(
+            &mut develop,
+            vec![ai(recipe_for(SegmentTarget::Subject), false)],
+        );
+        let key = develop.mask_bake_requests()[0].key;
+        let a = AiAlpha::quantized(2, 2, vec![1.0, 1.0, 0.0, 0.0]).unwrap();
+        l.lock()
+            .unwrap()
+            .put_keyed(crate::stash::keyed(5, key.as_bytes()), &a.encode())
+            .unwrap();
+        let (mut svc, calls) = service(false);
+        assert!(svc.model_missing(&recipe_for(SegmentTarget::Subject).model_id));
+        svc.set_larder(Some(l));
+        svc.set_open_asset(Some(5));
+        assert_eq!(svc.request_missing(&p, &develop), 1);
+        assert_eq!(frame(&mut svc, &p, &mut develop).len(), 1);
+        assert!(develop.has_ai_alpha(&key));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            svc.download_needed(&develop).is_none(),
+            "nothing waits on a model"
+        );
+    }
+
+    #[test]
+    fn a_disk_miss_for_a_missing_model_still_waits_for_the_download() {
+        let Some(mut develop) = develop() else { return };
+        let (_dir, l) = larder();
+        let p = pounce();
+        set_masks(
+            &mut develop,
+            vec![ai(recipe_for(SegmentTarget::Subject), false)],
+        );
+        let (mut svc, calls) = service(false);
+        svc.set_larder(Some(l));
+        svc.set_open_asset(Some(5));
+        assert_eq!(svc.request_missing(&p, &develop), 1, "the lookup");
+        assert!(frame(&mut svc, &p, &mut develop).is_empty());
+        for _ in 0..3 {
+            assert_eq!(
+                svc.request_missing(&p, &develop),
+                0,
+                "waits, no repeat lookup"
+            );
+        }
+        assert!(svc.download_needed(&develop).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_alpha_pruned_from_ram_comes_back_from_disk_instead_of_re_baking() {
+        let Some(mut develop) = develop() else { return };
+        let (_dir, l) = larder();
+        let p = pounce();
+        let masks = vec![ai(recipe_for(SegmentTarget::Sky), false)];
+        set_masks(&mut develop, masks.clone());
+        let key = develop.mask_bake_requests()[0].key;
+        let (mut svc, calls) = service(false);
+        svc.set_larder(Some(Arc::clone(&l)));
+        svc.set_open_asset(Some(5));
+        svc.request_missing(&p, &develop);
+        frame(&mut svc, &p, &mut develop); // miss
+        frame(&mut svc, &p, &mut develop); // bake lands, store queued
+        drain(&p);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // The user deletes the mask (the alpha is pruned), then undoes it.
+        set_masks(&mut develop, Vec::new());
+        develop.prune_ai_alphas();
+        assert!(!develop.has_ai_alpha(&key));
+        set_masks(&mut develop, masks);
+        assert_eq!(svc.request_missing(&p, &develop), 1, "asks the disk again");
+        assert_eq!(frame(&mut svc, &p, &mut develop).len(), 1);
+        assert!(develop.has_ai_alpha(&key));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no second bake");
+    }
+
+    #[test]
+    fn a_bake_that_lands_after_the_user_left_is_still_stored() {
+        let Some(mut develop) = develop() else { return };
+        let (_dir, l) = larder();
+        let p = pounce();
+        set_masks(
+            &mut develop,
+            vec![ai(recipe_for(SegmentTarget::Sky), false)],
+        );
+        let key = develop.mask_bake_requests()[0].key;
+        let (mut svc, _) = service(false);
+        svc.set_larder(Some(Arc::clone(&l)));
+        svc.set_open_asset(Some(5));
+        svc.request_missing(&p, &develop);
+        frame(&mut svc, &p, &mut develop); // the lookup misses; the bake is submitted
+                                           // The user moves to another photo before the bake lands.
+        develop.load_real_frame(
+            develop.frame_arc(),
+            blake3::hash(b"another photo"),
+            nicti_pawprint::EditDocument::default(),
+        );
+        svc.set_open_asset(Some(6));
+        assert!(
+            frame(&mut svc, &p, &mut develop).is_empty(),
+            "dropped from the view"
+        );
+        drain(&p);
+        assert!(
+            stored(&l, 5, &key),
+            "filed under the photo it was baked for"
+        );
+    }
+
+    #[test]
+    fn without_an_open_catalog_photo_the_disk_tier_stays_out_of_the_way() {
+        let Some(mut develop) = develop() else { return };
+        let (_dir, l) = larder();
+        let p = pounce();
+        set_masks(
+            &mut develop,
+            vec![ai(recipe_for(SegmentTarget::Sky), false)],
+        );
+        let (mut svc, calls) = service(false);
+        svc.set_larder(Some(Arc::clone(&l)));
+        // No `set_open_asset`: a synthetic frame has no catalog id to file under.
+        assert_eq!(svc.request_missing(&p, &develop), 1);
+        assert_eq!(frame(&mut svc, &p, &mut develop).len(), 1);
+        drain(&p);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(l.lock().unwrap().stats().unwrap().entry_count, 0);
     }
 
     #[test]

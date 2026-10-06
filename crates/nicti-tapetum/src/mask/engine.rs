@@ -93,6 +93,78 @@ impl AiAlpha {
             content_hash,
         })
     }
+
+    /// Like [`AiAlpha::new`], but rounds every value to a multiple of 1/255 first. This is what
+    /// every baked alpha is built with (#353): the disk tier stores 8 bits per pixel, so the
+    /// in-memory alpha must already *be* what a reload returns -- same `content_hash`, so the
+    /// stamped "ready" state, the refined-alpha cache and rendered-preview hashes do not change
+    /// across a reload. 8 bits is below what a sigmoid mask can show on screen.
+    pub fn quantized(width: usize, height: usize, mut alpha: Vec<f32>) -> Option<Self> {
+        for v in &mut alpha {
+            // Non-finite -> 0 here too, so `quantize_unit` never sees one.
+            *v = f32::from(quantize_unit(*v)) / 255.0;
+        }
+        Self::new(width, height, alpha)
+    }
+
+    /// Serialised form for the disk tier: `NAL1`, width and height as little-endian `u32`, then
+    /// the 8-bit plane deflated (a mask is mostly 0 and 1, so it shrinks by a large factor).
+    /// Exact for an alpha built with [`AiAlpha::quantized`].
+    pub fn encode(&self) -> Vec<u8> {
+        use std::io::Write;
+        let plane: Vec<u8> = self.alpha.iter().map(|v| quantize_unit(*v)).collect();
+        let mut out = Vec::with_capacity(12 + plane.len() / 8);
+        out.extend_from_slice(ALPHA_MAGIC);
+        out.extend_from_slice(&(self.width as u32).to_le_bytes());
+        out.extend_from_slice(&(self.height as u32).to_le_bytes());
+        let mut z = flate2::write::ZlibEncoder::new(out, flate2::Compression::fast());
+        // Writing into a `Vec` cannot fail.
+        z.write_all(&plane).expect("write to Vec");
+        z.finish().expect("finish into Vec")
+    }
+
+    /// Inverse of [`AiAlpha::encode`]. `None` for anything that is not a well-formed payload
+    /// (wrong magic, a zero or oversized extent, a plane of the wrong length): the caller treats
+    /// that as a miss and re-bakes. The extent is capped so a corrupt header cannot ask for a
+    /// huge allocation.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        use std::io::Read;
+        let rest = bytes.strip_prefix(ALPHA_MAGIC.as_slice())?;
+        let (w, rest) = rest.split_first_chunk::<4>()?;
+        let (h, rest) = rest.split_first_chunk::<4>()?;
+        let (width, height) = (
+            u32::from_le_bytes(*w) as usize,
+            u32::from_le_bytes(*h) as usize,
+        );
+        if width == 0 || height == 0 || width > ALPHA_MAX_EDGE || height > ALPHA_MAX_EDGE {
+            return None;
+        }
+        let len = width.checked_mul(height)?;
+        let mut plane = Vec::with_capacity(len);
+        // One byte past the expected length, so trailing data is caught rather than ignored.
+        flate2::read::ZlibDecoder::new(rest)
+            .take(len as u64 + 1)
+            .read_to_end(&mut plane)
+            .ok()?;
+        if plane.len() != len {
+            return None;
+        }
+        let alpha = plane.iter().map(|b| f32::from(*b) / 255.0).collect();
+        Self::new(width, height, alpha)
+    }
+}
+
+const ALPHA_MAGIC: &[u8; 4] = b"NAL1";
+/// A stored alpha is at most a model output (1024 px today); anything past this is corrupt.
+const ALPHA_MAX_EDGE: usize = 16_384;
+
+/// `v` in 0..=1 as 0..=255, rounded; NaN/inf and out-of-range collapse as in [`AiAlpha::new`].
+fn quantize_unit(v: f32) -> u8 {
+    if v.is_finite() {
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        0
+    }
 }
 
 /// Counters of the expensive things the engine did, cumulative. Tests diff them around a call.
@@ -1705,5 +1777,87 @@ mod tests {
                 other => other.clone(),
             }
         }
+    }
+
+    // --- #353: the disk-tier alpha codec -------------------------------------------------
+
+    fn blob_alpha(w: usize, h: usize) -> Vec<f32> {
+        // A filled disc with a soft edge: mostly exact 0 and 1, like a real subject mask.
+        let (cx, cy, r) = (w as f32 / 2.0, h as f32 / 2.0, w as f32 / 4.0);
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                (1.0 - (d - r) / 4.0).clamp(0.0, 1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_quantized_alpha_round_trips_through_encode_decode_exactly() {
+        let a = AiAlpha::quantized(64, 48, blob_alpha(64, 48)).unwrap();
+        let b = AiAlpha::decode(&a.encode()).unwrap();
+        assert_eq!((b.width, b.height), (64, 48));
+        assert_eq!(a.alpha, b.alpha);
+        assert_eq!(
+            a.content_hash, b.content_hash,
+            "a reload must not change the hash"
+        );
+    }
+
+    #[test]
+    fn quantizing_is_idempotent_and_clamps_untrusted_values() {
+        let raw = vec![0.0, 1.0, 0.5, -3.0, 7.0, f32::NAN, f32::INFINITY, 0.3333];
+        let once = AiAlpha::quantized(4, 2, raw).unwrap();
+        assert!(once.alpha.iter().all(|v| (0.0..=1.0).contains(v)));
+        let twice = AiAlpha::quantized(4, 2, once.alpha.clone()).unwrap();
+        assert_eq!(once.alpha, twice.alpha);
+        assert_eq!(once.content_hash, twice.content_hash);
+        assert_eq!(once.alpha[3], 0.0);
+        assert_eq!(once.alpha[4], 1.0);
+        assert_eq!(once.alpha[5], 0.0);
+    }
+
+    #[test]
+    fn a_model_sized_mostly_binary_alpha_compresses_far_below_its_raw_size() {
+        let a = AiAlpha::quantized(1024, 1024, blob_alpha(1024, 1024)).unwrap();
+        let bytes = a.encode();
+        assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
+        assert!(AiAlpha::decode(&bytes).is_some());
+    }
+
+    #[test]
+    fn decode_rejects_anything_that_is_not_a_well_formed_payload() {
+        let good = AiAlpha::quantized(8, 8, blob_alpha(8, 8)).unwrap().encode();
+        assert!(AiAlpha::decode(&good).is_some());
+        assert!(AiAlpha::decode(&[]).is_none());
+        assert!(AiAlpha::decode(b"NAL").is_none());
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'X';
+        assert!(AiAlpha::decode(&bad_magic).is_none());
+        assert!(
+            AiAlpha::decode(&good[..good.len() - 3]).is_none(),
+            "truncated stream"
+        );
+        // Header claims a bigger extent than the plane holds.
+        let mut wrong_extent = good.clone();
+        wrong_extent[4..8].copy_from_slice(&9u32.to_le_bytes());
+        assert!(AiAlpha::decode(&wrong_extent).is_none());
+        // Zero and absurd extents never allocate.
+        for (w, h) in [(0u32, 8u32), (8, 0), (u32::MAX, u32::MAX), (100_000, 1)] {
+            let mut hdr = good.clone();
+            hdr[4..8].copy_from_slice(&w.to_le_bytes());
+            hdr[8..12].copy_from_slice(&h.to_le_bytes());
+            assert!(AiAlpha::decode(&hdr).is_none(), "{w}x{h}");
+        }
+        // Trailing data after a complete plane is corruption, not something to ignore.
+        let mut z = Vec::from(&good[..12]);
+        {
+            use std::io::Write;
+            let mut enc = flate2::write::ZlibEncoder::new(&mut z, flate2::Compression::fast());
+            enc.write_all(&[0u8; 65]).unwrap();
+            enc.finish().unwrap();
+        }
+        assert!(AiAlpha::decode(&z).is_none());
     }
 }

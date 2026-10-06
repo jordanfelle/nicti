@@ -32,6 +32,8 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   codec (zstd/lz4) stayed with #190, which needs real baked output to choose against.
 - **Disk compression**: zstd/lz4 both round-trip; synthetic-gradient ratios (~3688×/~247×) are
   **not** a real-photo promise — see follow-up #190.
+  Baked **mask alpha** (the other half of the disk row) is done (#353, ADR-0353): Larder keyed entries, 8-bit +
+  zlib, no zstd/lz4 — see `masking`. Baked frame planes (#190) are still open.
 - **Masks (#49)**: `nicti-tapetum/src/mask/` -- the `nicti.masks` Live stage (in the fused live dispatch, tail),
   the keying-only `nicti.neutral` Baked node (upstream `nicti.lens`, **pre-heal**, not in the baked chain), the
   guided-filter refine (`mask/guided.rs`, CPU reference + GPU kernels) and `Renderer::render_baked` (bakes +

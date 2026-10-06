@@ -16,7 +16,7 @@ Full reasoning/history: `docs/decisions/develop.md`.
 - **Presets, copy/paste, sync (#52)** — `docs/adr/0052-presets-copy-paste-sync.md`: **Accepted**.
   Per-stage + absolute: a checked stage replaces the target's entry, a checked stage the source
   lacks is *removed*, unchecked untouched; crop/heal/masks/camera-profile start unchecked. AI masks re-bake lazily
-  when a photo opens (batch pre-bake → #353). No-op targets: no write, no undo entry. Undo is
+  when a photo opens, unless the background pre-bake (#353, `prebake.rs`) has already filed them on disk. No-op targets: no write, no undo entry. Undo is
   session-local and skips photos edited since. Presets = `<catalog>.develop-presets.json`, no
   built-ins, dup/empty name refused; an unusable file is copied to `<file>.bad` on first save. **Gotcha:** after a batch touching the loaded photo call
   `DevelopView::replace_document`, or the per-frame autosave writes the stale doc back.

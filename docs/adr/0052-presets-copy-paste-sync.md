@@ -80,3 +80,10 @@ saved (`DevelopView::replace_document`), so the per-frame autosave cannot write 
   (1,000 photos is one batch and one undo, covered in `knead::batch` tests; it isn't timed). If a future catalog or
   document size makes that visible, move `run_batch` onto a Pounce job; its plan/write split already
   fits one.
+
+## Context update (#353)
+
+The two deferrals above are resolved by ADR-0353: baked AI alphas now have a disk tier (Larder keyed
+entries), and a paste/sync/preset queues the touched photos for a background pre-bake
+(`nicti-pelt/src/prebake.rs`), so a synced AI mask is usually a disk read when the photo is opened
+rather than a model run. The decision text above is kept as written.

@@ -30,9 +30,11 @@ mod lrc_import;
 mod mask_edit;
 mod mask_panel;
 mod mask_tool;
+mod prebake;
 mod preview_color;
 mod preview_settings;
 mod render;
+mod stash;
 mod t0_fetch;
 mod t2;
 #[cfg(test)]

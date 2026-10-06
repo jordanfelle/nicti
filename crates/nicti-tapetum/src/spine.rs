@@ -176,6 +176,26 @@ pub fn stamp_source_identity(doc: &mut EditDocument, identity: blake3::Hash) {
     );
 }
 
+/// Cache key of the neutral render AI masks infer on (the keying-only `NEUTRAL` node) for a photo
+/// with identity `identity` and edit document `doc` -- what `ai_bake_key` chains from.
+///
+/// Needs no pixels and no GPU, so a caller that is *not* looking at the photo (the background
+/// pre-bake, #353) can name the bakes its masks need. It is the same key `DevelopView::neutral_key`
+/// reports once that photo is loaded and `doc` applied (a test in `nicti-pelt` pins this): `NEUTRAL`
+/// sits upstream of heal, the masks and every live stage, so only the identity and the baked
+/// prefix's own entries reach it.
+pub fn neutral_key(doc: &EditDocument, identity: blake3::Hash) -> blake3::Hash {
+    let mut graph = build_graph();
+    let mut doc = doc.clone();
+    stamp_source_identity(&mut doc, identity);
+    graph
+        .apply_document(&doc, &build_registry())
+        .expect("build_registry covers every id build_graph adds");
+    graph
+        .cache_key(NEUTRAL)
+        .expect("build_graph always adds NEUTRAL")
+}
+
 /// One stage's typed params out of a document (`T::default()` when the document has no entry).
 pub fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id: &str) -> T {
     match doc.stages.get(id) {
@@ -269,6 +289,43 @@ pub fn resolve_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn id(n: u8) -> blake3::Hash {
+        blake3::hash(&[n])
+    }
+
+    #[test]
+    fn the_neutral_key_follows_the_photo_and_not_the_edits_downstream_of_it() {
+        let plain = neutral_key(&EditDocument::default(), id(1));
+        assert_eq!(
+            plain,
+            neutral_key(&EditDocument::default(), id(1)),
+            "stable"
+        );
+        assert_ne!(
+            plain,
+            neutral_key(&EditDocument::default(), id(2)),
+            "per photo"
+        );
+
+        // A slider, a heal spot and the masks themselves are all downstream of NEUTRAL: none of
+        // them may re-key an AI bake.
+        let mut edited = EditDocument::default();
+        for (stage, params) in [
+            (EXPOSURE, serde_json::json!({ "stops": 1.5 })),
+            (HEAL, serde_json::json!({ "spots": [] })),
+            (MASKS, serde_json::json!({ "corrections": [] })),
+        ] {
+            edited.stages.insert(
+                stage.to_string(),
+                nicti_pawprint::StageEntry {
+                    schema_version: 1,
+                    params,
+                },
+            );
+        }
+        assert_eq!(plain, neutral_key(&edited, id(1)));
+    }
 
     #[test]
     fn the_registry_covers_every_graph_node() {
