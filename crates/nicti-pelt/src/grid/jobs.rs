@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use nicti_calico::source_transform::SourceTransforms;
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_lair::{CatalogStore, Filter, PreviewTier, Sort};
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
@@ -125,6 +126,8 @@ pub struct ThumbBatchJob {
     first_index: usize,
     label: String,
     out: ThumbSlot,
+    /// Source -> monitor conversion applied to every decoded thumbnail (#319).
+    color: Arc<SourceTransforms>,
 }
 
 impl ThumbBatchJob {
@@ -132,6 +135,7 @@ impl ThumbBatchJob {
         store: Arc<dyn CatalogStore + Send + Sync>,
         ids: Vec<i64>,
         first_index: usize,
+        color: Arc<SourceTransforms>,
     ) -> (Self, ThumbSlot) {
         let out: ThumbSlot = Arc::new(Mutex::new(ThumbOutput::default()));
         let label = format!("Thumbnails: {} from #{}", ids.len(), first_index);
@@ -142,6 +146,7 @@ impl ThumbBatchJob {
             first_index,
             label,
             out: out.clone(),
+            color,
         };
         (job, out)
     }
@@ -197,9 +202,8 @@ impl ChunkedJob for ThumbBatchJob {
                             .map_err(|e| ThumbError::Transient(e.to_string())),
                     };
                     let outcome = match preview {
-                        Ok(Some(preview)) => {
-                            make_thumbnail(&preview.bytes).map_err(ThumbError::Permanent)
-                        }
+                        Ok(Some(preview)) => make_thumbnail(&preview.bytes, &self.color)
+                            .map_err(ThumbError::Permanent),
                         Ok(None) => Err(ThumbError::Permanent("no stored preview".to_string())),
                         Err(e) => Err(e),
                     };
@@ -266,15 +270,20 @@ impl Drop for ThumbBatchJob {
     }
 }
 
-/// JPEG-decodes `bytes` and downsizes to [`THUMB_LONG_EDGE`] (never upscales).
-pub fn make_thumbnail(bytes: &[u8]) -> Result<ThumbImage, String> {
-    let decoded = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
-    let small = if decoded.width().max(decoded.height()) > THUMB_LONG_EDGE {
-        decoded.thumbnail(THUMB_LONG_EDGE, THUMB_LONG_EDGE)
+/// JPEG-decodes `bytes`, downsizes to [`THUMB_LONG_EDGE`] (never upscales), then converts the
+/// pixels from the JPEG's own color space to the display (#319). Converting after the downsize
+/// keeps it to ~64k pixels rather than the full T0.
+pub fn make_thumbnail(bytes: &[u8], color: &SourceTransforms) -> Result<ThumbImage, String> {
+    let decoded = crate::preview_color::decode(bytes)?;
+    let small = if decoded.image.width().max(decoded.image.height()) > THUMB_LONG_EDGE {
+        crate::preview_color::DecodedJpeg {
+            image: decoded.image.thumbnail(THUMB_LONG_EDGE, THUMB_LONG_EDGE),
+            icc: decoded.icc,
+        }
     } else {
         decoded
     };
-    let rgba = small.to_rgba8();
+    let rgba = crate::preview_color::to_display_rgba(small, color);
     let size = [rgba.width() as usize, rgba.height() as usize];
     Ok(ThumbImage {
         image: egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
@@ -301,7 +310,14 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::jpeg;
     use super::*;
+    use nicti_calico::icc::profile_bytes;
+    use nicti_calico::space::OutputSpace;
+    use nicti_calico::transform::DisplayProfile;
     use nicti_lair::{NewAsset, Preview, SqliteCatalog};
+
+    fn srgb() -> SourceTransforms {
+        SourceTransforms::new(&DisplayProfile::Space(OutputSpace::Srgb))
+    }
 
     fn new_asset(name: &str) -> NewAsset {
         NewAsset {
@@ -351,18 +367,18 @@ mod tests {
 
     #[test]
     fn thumbnails_are_downsized_to_the_long_edge_and_never_upscaled() {
-        let big = make_thumbnail(&jpeg(640, 424, [10, 20, 30])).unwrap();
+        let big = make_thumbnail(&jpeg(640, 424, [10, 20, 30]), &srgb()).unwrap();
         // 424 * 256/640 = 169.6, which `image` rounds to 170.
         assert_eq!(big.image.size, [256, 170]);
-        let small = make_thumbnail(&jpeg(100, 60, [10, 20, 30])).unwrap();
+        let small = make_thumbnail(&jpeg(100, 60, [10, 20, 30]), &srgb()).unwrap();
         assert_eq!(small.image.size, [100, 60]);
-        assert!(make_thumbnail(b"not a jpeg").is_err());
+        assert!(make_thumbnail(b"not a jpeg", &srgb()).is_err());
     }
 
     #[test]
     fn a_batch_reports_every_id_including_ones_with_no_preview() {
         let (store, ids) = seeded(20, |i| i % 5 != 0);
-        let (mut job, out) = ThumbBatchJob::new(store, ids.clone(), 100);
+        let (mut job, out) = ThumbBatchJob::new(store, ids.clone(), 100, Arc::new(srgb()));
         let steps = run_to_done(&mut job);
         // 20 images at 8 per step: chunked so a cancel can land between them.
         assert_eq!(steps, 3);
@@ -383,7 +399,7 @@ mod tests {
     #[test]
     fn partial_results_are_visible_before_the_job_finishes() {
         let (store, ids) = seeded(20, |_| true);
-        let (mut job, out) = ThumbBatchJob::new(store, ids, 0);
+        let (mut job, out) = ThumbBatchJob::new(store, ids, 0, Arc::new(srgb()));
         assert_eq!(job.step().unwrap(), Step::Yield);
         let out = out.lock().unwrap();
         assert_eq!(out.ready.len(), IMAGES_PER_STEP);
@@ -393,7 +409,7 @@ mod tests {
     #[test]
     fn dropping_a_job_mid_batch_marks_its_slot_done() {
         let (store, ids) = seeded(20, |_| true);
-        let (mut job, out) = ThumbBatchJob::new(store, ids, 0);
+        let (mut job, out) = ThumbBatchJob::new(store, ids, 0, Arc::new(srgb()));
         job.step().unwrap();
         drop(job);
         assert!(out.lock().unwrap().done);
@@ -402,7 +418,7 @@ mod tests {
     #[test]
     fn spec_carries_a_midpoint_index_and_the_thumbnail_kind() {
         let (store, ids) = seeded(10, |_| true);
-        let (job, _out) = ThumbBatchJob::new(store, ids, 640);
+        let (job, _out) = ThumbBatchJob::new(store, ids, 640, Arc::new(srgb()));
         let spec = job.spec();
         assert_eq!(spec.kind, JobKind::Thumbnail);
         assert_eq!(spec.lane, Lane::Cpu);
@@ -420,5 +436,32 @@ mod tests {
         assert_eq!(job.step().unwrap(), Step::Done);
         let resolved = slot.lock().unwrap().take().expect("slot must resolve");
         assert_eq!(resolved.unwrap(), ids);
+    }
+
+    #[test]
+    fn an_untagged_thumbnail_on_an_srgb_display_keeps_its_pixels() {
+        let thumb = make_thumbnail(&jpeg(100, 60, [200, 40, 40]), &srgb()).unwrap();
+        let plain = image::load_from_memory(&jpeg(100, 60, [200, 40, 40]))
+            .unwrap()
+            .to_rgba8();
+        let p = thumb.image.pixels[0];
+        let q = plain.get_pixel(0, 0);
+        assert_eq!([p.r(), p.g(), p.b()], [q[0], q[1], q[2]]);
+    }
+
+    #[test]
+    fn a_display_p3_thumbnail_is_converted_for_the_display() {
+        let p3 = profile_bytes(OutputSpace::DisplayP3).unwrap();
+        let tagged =
+            crate::preview_color::testutil::tagged_jpeg(640, 424, [200, 120, 60], Some(&p3));
+        let thumb = make_thumbnail(&tagged, &srgb()).unwrap();
+        // Downsized to the thumbnail edge, and not the same numbers the unmanaged path produced.
+        assert_eq!(thumb.image.size[0], THUMB_LONG_EDGE as usize);
+        let unmanaged = make_thumbnail(
+            &crate::preview_color::testutil::tagged_jpeg(640, 424, [200, 120, 60], None),
+            &srgb(),
+        )
+        .unwrap();
+        assert_ne!(thumb.image.pixels[0], unmanaged.image.pixels[0]);
     }
 }

@@ -185,6 +185,8 @@ pub struct PeltApp {
     /// lands (nothing clears it eagerly; it's simply not looked at once `current_frame` starts
     /// returning `Some`, and gets replaced the next time a *different* asset needs it).
     loupe_preview: Option<(i64, bool, egui::TextureHandle)>,
+    /// `ColorManagement::generation` the preview surfaces were last converted for (#319).
+    preview_color_generation: u64,
     /// The T2 preview cache (#301), shared with every `LoupeSession`. `None` if it couldn't be
     /// opened (read-only location, another instance holding its lock) -- the loupe then falls back
     /// to T0 alone, exactly as before.
@@ -437,6 +439,7 @@ impl PeltApp {
             loupe_zoomed: false,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
+            preview_color_generation: 0,
             larder: larder.clone(),
             cache_settings: CacheSettingsUi::default(),
             preview_settings,
@@ -621,6 +624,23 @@ impl PeltApp {
         if self.view != View::Library {
             grid.pause(&self.pounce);
         }
+    }
+
+    /// Re-converts every JPEG-sourced surface when the monitor profile changes (#319): the grid's
+    /// thumbnails, the survey/compare tiles and the loupe's T0/T2/rendered fallback were all
+    /// converted for the previous display.
+    fn sync_preview_color(&mut self) {
+        let generation = self.color.generation();
+        if generation == self.preview_color_generation {
+            return;
+        }
+        self.preview_color_generation = generation;
+        let color = self.color.source_transforms();
+        if let Some(grid) = self.grid.as_mut() {
+            grid.set_color(color.clone(), generation, &self.pounce);
+        }
+        self.tile_previews.set_color(color, generation);
+        self.loupe_preview = None;
     }
 
     fn job_active(&self, kinds: &[JobKind]) -> bool {
@@ -1184,6 +1204,7 @@ impl eframe::App for PeltApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.color.handle_shortcuts(ui.ctx());
         self.color.sync(frame);
+        self.sync_preview_color();
         self.poll_backup();
         self.poll_move();
         self.poll_recovery();
@@ -1489,10 +1510,15 @@ impl PeltApp {
         };
         if self.grid.is_none() {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-            self.grid = Some(GridSession::new(
-                dyn_store,
-                PLACEHOLDER_GRID_TEXTURE_BUDGET_BYTES,
-            ));
+            let mut grid = GridSession::new(dyn_store, PLACEHOLDER_GRID_TEXTURE_BUDGET_BYTES);
+            // Born after the display profile was resolved: start on the current conversion, not
+            // the sRGB default `sync_preview_color` already moved past.
+            grid.set_color(
+                self.color.source_transforms(),
+                self.color.generation(),
+                &self.pounce,
+            );
+            self.grid = Some(grid);
         }
 
         self.show_folder_panel(ui, &store);
@@ -2661,6 +2687,7 @@ impl PeltApp {
         store: &dyn CatalogStore,
         asset_id: i64,
     ) {
+        let color = self.color.source_transforms();
         if self.loupe_preview.as_ref().map(|(id, _, _)| *id) != Some(asset_id) {
             self.loupe_preview = None;
         }
@@ -2723,7 +2750,12 @@ impl PeltApp {
                                 .is_some_and(|cur| hash == cur || eyeshine::same_file(&hash, cur));
                             let texture = usable
                                 .then(|| {
-                                    preview_texture(ui.ctx(), format!("loupe-r-{asset_id}"), &bytes)
+                                    preview_texture(
+                                        ui.ctx(),
+                                        format!("loupe-r-{asset_id}"),
+                                        &bytes,
+                                        &color,
+                                    )
                                 })
                                 .flatten();
                             match texture {
@@ -2741,7 +2773,7 @@ impl PeltApp {
         let has_t2 = matches!(&self.loupe_preview, Some((_, true, _)));
         if !has_t2 && self.loupe_t2_undecodable != Some(asset_id) {
             if let Some(bytes) = self.loupe.as_mut().and_then(|l| l.current_t2(store)) {
-                match preview_texture(ui.ctx(), format!("loupe-t2-{asset_id}"), &bytes) {
+                match preview_texture(ui.ctx(), format!("loupe-t2-{asset_id}"), &bytes, &color) {
                     Some(texture) => self.loupe_preview = Some((asset_id, true, texture)),
                     None => self.loupe_t2_undecodable = Some(asset_id),
                 }
@@ -2758,7 +2790,9 @@ impl PeltApp {
                 // Never downgrade: T2 may have been installed while the sidecar read ran.
                 let texture = bytes
                     .filter(|_| self.loupe_preview.is_none())
-                    .and_then(|b| preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &b));
+                    .and_then(|b| {
+                        preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &b, &color)
+                    });
                 match texture {
                     _ if self.loupe_preview.is_some() => {}
                     Some(texture) => self.loupe_preview = Some((asset_id, false, texture)),
@@ -2777,9 +2811,12 @@ impl PeltApp {
             // Catalog only on the UI thread; an archived folder's sidecar is read on a worker.
             match store.get_preview(asset_id, nicti_lair::PreviewTier::T0) {
                 Ok(Some(preview)) => {
-                    if let Some(texture) =
-                        preview_texture(ui.ctx(), format!("loupe-t0-{asset_id}"), &preview.bytes)
-                    {
+                    if let Some(texture) = preview_texture(
+                        ui.ctx(),
+                        format!("loupe-t0-{asset_id}"),
+                        &preview.bytes,
+                        &color,
+                    ) {
                         self.loupe_preview = Some((asset_id, false, texture));
                     }
                 }

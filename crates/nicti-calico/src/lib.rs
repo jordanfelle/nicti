@@ -8,6 +8,8 @@
 //!   proof stage with an exact out-of-gamut flag; exact matrix display, or a baked 3D LUT for a
 //!   non-built-in monitor profile).
 //! - [`display_profile`]: the active monitor's ICC profile, degrading to sRGB.
+//! - [`source_transform`]: [`source_transform::SourceTransforms`], JPEG-sourced 8-bit RGBA (grid
+//!   thumbnails, T0/T2 previews) from its embedded ICC profile (else sRGB) to the display (#319).
 //!
 //! `ColorProfile` still settles identity and versioning only, via `Module`; DCP parsing
 //! (color-matrix, HueSatMap 3D LUT, tone curve) is #38's research, promoted here by the second
@@ -20,6 +22,7 @@ pub mod huesatmap;
 pub mod icc;
 mod math;
 pub mod profile;
+pub mod source_transform;
 pub mod space;
 pub mod transform;
 
