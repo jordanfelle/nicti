@@ -16,10 +16,12 @@ use nicti_tapetum::mask::compose as mask_compose;
 use nicti_tapetum::mask::engine::{AiAlpha, MaskEngine, MaskInputs};
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
-use nicti_tapetum::spine::{self, build_graph, build_registry, RenderInputs, LIVE_IDS};
+use nicti_tapetum::spine::{
+    self, build_graph, build_registry, RenderInputs, GEOMETRY_IDS, LIVE_IDS,
+};
 use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
-    DEMOSAIC, DENOISE, HEAL, LENS, MASKS, NEUTRAL,
+    CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, DECODE, DEMOSAIC,
+    DENOISE, HEAL, LENS, MASKS, NEUTRAL,
 };
 use nicti_tapetum::StageRegistry;
 
@@ -33,8 +35,8 @@ pub(crate) struct ExportRenderer {
     pub(crate) registry: StageRegistry,
     pub(crate) renderer: Renderer,
     /// Builds local-adjustment masks at the frame's own extent, uncached (#354). Created on the
-    /// first masked photo: it compiles its own pipelines, which an unmasked batch (or the preview
-    /// job sharing this type) should not pay for.
+    /// first photo that needs it (a mask, or a global clarity/texture/dehaze, #380): it compiles its
+    /// own pipelines, which a batch with neither should not pay for.
     pub(crate) mask_engine: Option<MaskEngine>,
 }
 
@@ -145,12 +147,20 @@ pub(crate) fn render_live_frame(
         live: &ctx.live_kernel,
         live_nodes: &LIVE_IDS,
         geometry: &ctx.crop_kernel,
-        geometry_nodes: &[CROP],
+        geometry_nodes: &GEOMETRY_IDS,
         extent,
     };
-    let mask_params: MaskParams = spine::resolve(&doc, MASKS);
-    let live = match masks {
-        Some(alphas) if mask_params.active().next().is_some() => {
+    // Local corrections only when the caller asked for them (`masks`); the global Presence's
+    // clarity/texture/dehaze (#380) always needs the baked frame and bases, masks or not -- a
+    // rendered preview (`masks: None`) still shows them, with an empty mask set.
+    let doc_masks: MaskParams = spine::resolve(&doc, MASKS);
+    let no_masks = MaskParams::default();
+    let no_alphas = HashMap::new();
+    let wants_locals = masks.is_some() && doc_masks.active().next().is_some();
+    let mask_params = if wants_locals { &doc_masks } else { &no_masks };
+    let alphas = masks.unwrap_or(&no_alphas);
+    let live = {
+        if wants_locals || inputs.live.presence.needs_bases() {
             // The engine needs the *baked* frame (AI refines and range masks follow it). This
             // renderer's baked cache has a zero budget, so hand the frame straight to the live
             // pass rather than rely on the cache (Develop's way) -- else it would bake twice.
@@ -179,18 +189,18 @@ pub(crate) fn render_live_frame(
             let mask_frame = engine.prepare(
                 gpu,
                 &MaskInputs {
-                    params: &mask_params,
+                    params: mask_params,
                     ai_alphas: alphas,
                     neutral_key,
                     guide: &baked,
                     guide_key,
                     range_matrix,
+                    presence: inputs.live.presence,
                 },
             );
             ctx.live_kernel.set_masks(gpu, mask_frame.as_ref());
             ctx.renderer.render_live_from(&req, baked)
-        }
-        _ => {
+        } else {
             // This kernel is reused across photos: never leave the previous photo's atlas bound.
             ctx.live_kernel.set_masks(gpu, None);
             ctx.renderer.render_live(&req)

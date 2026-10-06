@@ -88,6 +88,160 @@ pub struct VibranceParams {
     pub amount: f32,
 }
 
+/// The Basic panel's Presence group beyond Vibrance (#380): global Texture, Clarity, Dehaze and
+/// Saturation, each PV2012 range -100.0..=100.0 (normalized to -1.0..=1.0 here). 0.0 on every
+/// field is a no-op. They share the per-mask adjustments' kernels and are *summed with* any local
+/// delta (`LocalAdjust`'s same-named fields), so a global +0.3 and a local +0.2 act as +0.5 there.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresenceParams {
+    pub texture: f32,
+    pub clarity: f32,
+    pub dehaze: f32,
+    pub saturation: f32,
+}
+
+impl PresenceParams {
+    pub fn is_noop(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Clamped to -1..1 with non-finite values scrubbed to 0: documents are untrusted, and an
+    /// unbounded saturation would overflow the `Rgba16Float` target to Inf.
+    pub fn sanitized(&self) -> Self {
+        let unit = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            texture: unit(self.texture),
+            clarity: unit(self.clarity),
+            dehaze: unit(self.dehaze),
+            saturation: unit(self.saturation),
+        }
+    }
+
+    /// Whether the clarity/texture band bases (`mask::bases`) are needed to render this.
+    pub fn needs_bands(&self) -> bool {
+        self.clarity != 0.0 || self.texture != 0.0
+    }
+
+    /// Whether the dehaze transmission/airlight base is needed to render this.
+    pub fn needs_haze(&self) -> bool {
+        self.dehaze != 0.0
+    }
+
+    /// Whether any spatial base is needed -- i.e. whether a render must bake first and build bases
+    /// even with no active local correction.
+    pub fn needs_bases(&self) -> bool {
+        self.needs_bands() || self.needs_haze()
+    }
+}
+
+/// How the post-crop vignette darkens (LRC's `PostCropVignetteStyle` 1/2/3, #380).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VignetteStyle {
+    /// Multiplies the exposure toward the corners, holding highlights back by `vignette_highlights`.
+    #[default]
+    HighlightPriority,
+    /// Multiplies the exposure, then re-saturates so colours stay vivid in the darkened corners.
+    ColorPriority,
+    /// Blends toward black (negative amount) or white (positive), like painting over the corners.
+    PaintOverlay,
+}
+
+/// The Effects panel (#380): a post-crop vignette and film grain. Both are defined in
+/// *crop-normalized* coordinates (the crop rect is 0..1 on each axis), so a vignette follows the
+/// crop and a render at any resolution -- a preview, a full-size export, one tile of it -- puts the
+/// same pattern in the same place. Amount 0 on both is a no-op.
+///
+/// Ranges are LRC's PV2012 ones normalized: amounts -100..100 -> -1..1 (grain 0..100 -> 0..1),
+/// midpoint/feather/roundness/size/roughness as 0..100 -> 0..1 (roundness -100..100 -> -1..1).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EffectsParams {
+    /// Negative darkens, positive lightens.
+    pub vignette_amount: f32,
+    /// Where the falloff starts: higher confines it to the edges. LRC default 0.5.
+    pub vignette_midpoint: f32,
+    /// Softness of the falloff. LRC default 0.5.
+    pub vignette_feather: f32,
+    /// -1 squarer .. 0 oval following the crop .. +1 a circle.
+    pub vignette_roundness: f32,
+    /// Highlight Priority only: how much brighter pixels resist the darkening, 0..1.
+    pub vignette_highlights: f32,
+    pub vignette_style: VignetteStyle,
+    /// 0 = none.
+    pub grain_amount: f32,
+    /// Grain cell size: 0 fine .. 1 coarse. LRC default 0.25.
+    pub grain_size: f32,
+    /// 0 smooth .. 1 rough (a second, finer octave). LRC default 0.5.
+    pub grain_roughness: f32,
+    /// Seeds the pattern (LRC's `GrainSeed`), so the same photo always gets the same grain.
+    pub grain_seed: u32,
+}
+
+impl Default for EffectsParams {
+    fn default() -> Self {
+        Self {
+            vignette_amount: 0.0,
+            vignette_midpoint: 0.5,
+            vignette_feather: 0.5,
+            vignette_roundness: 0.0,
+            vignette_highlights: 0.0,
+            vignette_style: VignetteStyle::default(),
+            grain_amount: 0.0,
+            grain_size: 0.25,
+            grain_roughness: 0.5,
+            grain_seed: 0,
+        }
+    }
+}
+
+impl EffectsParams {
+    pub fn vignette_active(&self) -> bool {
+        self.vignette_amount != 0.0
+    }
+
+    pub fn grain_active(&self) -> bool {
+        self.grain_amount != 0.0
+    }
+
+    /// Whether either effect changes a pixel -- the geometry pass skips all of it when not.
+    pub fn is_noop(&self) -> bool {
+        !self.vignette_active() && !self.grain_active()
+    }
+
+    /// The params clamped to their documented ranges, NaN scrubbed to the default (documents are
+    /// untrusted, and the shader divides/pows by some of these).
+    pub fn sanitized(&self) -> Self {
+        let d = Self::default();
+        let unit = |v: f32, lo: f32, hi: f32, fallback: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
+        };
+        Self {
+            vignette_amount: unit(self.vignette_amount, -1.0, 1.0, 0.0),
+            vignette_midpoint: unit(self.vignette_midpoint, 0.0, 1.0, d.vignette_midpoint),
+            vignette_feather: unit(self.vignette_feather, 0.0, 1.0, d.vignette_feather),
+            vignette_roundness: unit(self.vignette_roundness, -1.0, 1.0, 0.0),
+            vignette_highlights: unit(self.vignette_highlights, 0.0, 1.0, 0.0),
+            vignette_style: self.vignette_style,
+            grain_amount: unit(self.grain_amount, 0.0, 1.0, 0.0),
+            grain_size: unit(self.grain_size, 0.0, 1.0, d.grain_size),
+            grain_roughness: unit(self.grain_roughness, 0.0, 1.0, d.grain_roughness),
+            grain_seed: self.grain_seed,
+        }
+    }
+}
+
 /// Tone Curve panel, parametric mode only (LRC's alternate freeform point-curve mode is not
 /// modeled -- a documented v1 simplification). Each field is one of the four region sliders
 /// (PV2012 `ToneCurvePV2012` range -100.0..=100.0, normalized to -1.0..=1.0 here), moving the
@@ -407,6 +561,78 @@ mod tests {
     fn parse_ignores_unrecognized_fields() {
         let parsed: VibranceParams = parse(&serde_json::json!({"amount": 0.4, "future_field": 1}));
         assert_eq!(parsed, VibranceParams { amount: 0.4 });
+    }
+
+    #[test]
+    fn effects_params_default_is_noop_and_round_trips_through_parse() {
+        let e = EffectsParams::default();
+        assert!(e.is_noop() && !e.vignette_active() && !e.grain_active());
+        let value = serde_json::to_value(e).unwrap();
+        assert_eq!(parse::<EffectsParams>(&value), e);
+        // An older document with no entry, or a newer one with extra fields, parses to the default.
+        assert_eq!(parse::<EffectsParams>(&serde_json::json!({})), e);
+        let styled: EffectsParams = parse(&serde_json::json!({
+            "vignette_amount": -0.4, "vignette_style": "paint_overlay", "future": 1
+        }));
+        assert_eq!(styled.vignette_style, VignetteStyle::PaintOverlay);
+        assert!(styled.vignette_active() && !styled.is_noop());
+    }
+
+    #[test]
+    fn effects_params_sanitize_clamps_and_scrubs_non_finite_values() {
+        let hostile = EffectsParams {
+            vignette_amount: f32::NAN,
+            vignette_midpoint: 7.0,
+            vignette_feather: -3.0,
+            vignette_roundness: f32::INFINITY,
+            grain_amount: 9.0,
+            grain_size: f32::NAN,
+            ..EffectsParams::default()
+        }
+        .sanitized();
+        assert_eq!(hostile.vignette_amount, 0.0);
+        assert_eq!(hostile.vignette_midpoint, 1.0);
+        assert_eq!(hostile.vignette_feather, 0.0);
+        assert_eq!(hostile.vignette_roundness, 0.0);
+        assert_eq!(hostile.grain_amount, 1.0);
+        assert_eq!(hostile.grain_size, EffectsParams::default().grain_size);
+    }
+
+    #[test]
+    fn presence_params_default_is_noop_and_needs_no_bases() {
+        let p = PresenceParams::default();
+        assert!(p.is_noop() && !p.needs_bases());
+        // Saturation is per-pixel: it never needs a spatial base.
+        let sat = PresenceParams {
+            saturation: 0.5,
+            ..Default::default()
+        };
+        assert!(!sat.is_noop() && !sat.needs_bases());
+        let clarity = PresenceParams {
+            clarity: 0.1,
+            ..Default::default()
+        };
+        assert!(clarity.needs_bands() && !clarity.needs_haze());
+        let dehaze = PresenceParams {
+            dehaze: -0.1,
+            ..Default::default()
+        };
+        assert!(dehaze.needs_haze() && !dehaze.needs_bands());
+    }
+
+    #[test]
+    fn presence_params_sanitize_clamps_and_scrubs() {
+        let p = PresenceParams {
+            texture: f32::NAN,
+            clarity: 1e30,
+            dehaze: -5.0,
+            saturation: f32::INFINITY,
+        }
+        .sanitized();
+        assert_eq!(
+            (p.texture, p.clarity, p.dehaze, p.saturation),
+            (0.0, 1.0, -1.0, 0.0)
+        );
     }
 
     #[test]

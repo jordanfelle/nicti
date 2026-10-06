@@ -22,7 +22,8 @@ struct World {
     lrcat: PathBuf,
 }
 
-const DEV_A: &str = "s = { Exposure2012 = 0.5, Contrast2012 = 20, Clarity2012 = 10 }";
+const DEV_A: &str =
+    "s = { Exposure2012 = 0.5, Contrast2012 = 20, ToneCurvePV2012 = { 0, 0, 64, 70, 255, 255, } }";
 
 fn world() -> World {
     let dir = tempfile::tempdir().unwrap();
@@ -167,7 +168,7 @@ fn imports_metadata_keywords_collections_variants_and_provenance() {
     assert_eq!(report.roots[0].missing_examples, vec!["2026/gone.NEF"]);
     assert_eq!(report.virtual_copies, 1);
     assert_eq!(report.develop_parse_failures, 1);
-    assert_eq!(report.untranslated.get("Clarity2012"), Some(&1));
+    assert_eq!(report.untranslated.get("ToneCurvePV2012"), Some(&1));
 
     let a = asset_id(&store, &w.root, "2026/Event/a.NEF");
     let b = asset_id(&store, &w.root, "2026/Event/b.NEF");
@@ -201,7 +202,7 @@ fn imports_metadata_keywords_collections_variants_and_provenance() {
     assert_eq!(doc.stages["nicti.exposure"].params["stops"], 0.5);
     let prov = store.lrc_provenance("G1").unwrap().unwrap();
     assert_eq!(prov.develop_text.as_deref(), Some(DEV_A));
-    assert_eq!(prov.untranslated, vec!["Clarity2012".to_string()]);
+    assert_eq!(prov.untranslated, vec!["ToneCurvePV2012".to_string()]);
     assert_eq!(prov.iptc_caption.as_deref(), Some("a caption"));
 
     // Virtual copy: an extra variant with its own edit; the master's markers untouched by it.

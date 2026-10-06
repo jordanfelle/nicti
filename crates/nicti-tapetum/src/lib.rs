@@ -12,6 +12,7 @@ pub mod cache;
 pub mod coat;
 pub mod color;
 pub mod detail;
+pub mod effects;
 pub mod frame;
 pub mod geometry;
 pub mod gpu;

@@ -81,3 +81,12 @@ a radial's `MaskInverted=true` means the effect is applied outside; AI mask rast
 uncropped frame; `fileWidth`/`fileHeight` are `REAL`. Measured on the 380,228-image backup: 0 parse
 failures, 13 s to translate everything. See ADR-0062 for the full list of what is not translated.
 
+
+## #380: Presence and Effects are now translated
+
+`Texture`/`Clarity2012`/`Dehaze`/`Saturation` map (-100..100 -> -1..1) onto `nicti.presence`;
+`PostCropVignette*` and `Grain*` (gated by `EnableEffects`) onto `nicti.effects` (ADR-0380). A slider
+whose *amount* is zero is ignored: LRC writes a random `GrainSeed` and the shape sliders at their
+defaults into every image, so taking them would import every untouched photo as edited.
+`OverrideLookVignette` (a vignette baked into a Look profile) is not modelled and stays in the
+untranslated list when real. ADR-0062's "Not translated" list is updated accordingly.

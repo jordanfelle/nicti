@@ -19,8 +19,8 @@ use nicti_tapetum::gpu::{GpuContext, GpuPreference};
 use nicti_tapetum::graph::RenderGraph;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
 use nicti_tapetum::stages::{
-    CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, CROP,
-    DECODE, DEMOSAIC, DENOISE, HEAL, LENS,
+    CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, DECODE,
+    DEMOSAIC, DENOISE, HEAL, LENS,
 };
 
 /// One real render of a NEF: decodes it, runs it through the full graph at full resolution and
@@ -37,7 +37,7 @@ pub struct RealRender {
     pub graph: RenderGraph,
 }
 
-pub use nicti_tapetum::spine::{build_graph, LIVE_IDS};
+pub use nicti_tapetum::spine::{build_graph, GEOMETRY_IDS, LIVE_IDS};
 
 impl RealRender {
     /// Decodes `nef_path` via the real LibRaw-backed decoder and prepares every kernel this
@@ -109,7 +109,7 @@ impl RealRender {
             live: &self.live_kernel,
             live_nodes: &LIVE_IDS,
             geometry: &self.crop_kernel,
-            geometry_nodes: &[CROP],
+            geometry_nodes: &GEOMETRY_IDS,
             extent: self.extent,
         };
         renderer

@@ -5,13 +5,15 @@
 //! (once #31 lands persistence) will read too.
 
 use nicti_tapetum::coat::{
-    CropParams, ExposureParams, HslBand, HslParams, NoiseReductionParams, SharpenParams,
-    ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    CropParams, EffectsParams, ExposureParams, HslBand, HslParams, NoiseReductionParams,
+    PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
+    WbParams,
 };
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    CROP, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    CROP, EFFECTS, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE,
+    TONE_CURVE, VIBRANCE, WB,
 };
 
 use crate::heal_tool::{self, HealUi};
@@ -221,9 +223,16 @@ pub fn show(
         slider(ui, "Blacks", &mut tone.blacks, -1.0..=1.0, 0.0);
         develop.set_stage_params(TONE, &tone);
 
+        // Presence (#380): Texture/Clarity/Dehaze/Saturation are one stage; Vibrance stays its own.
+        let mut presence: PresenceParams = develop.stage_params(PRESENCE);
+        slider(ui, "Texture", &mut presence.texture, -1.0..=1.0, 0.0);
+        slider(ui, "Clarity", &mut presence.clarity, -1.0..=1.0, 0.0);
+        slider(ui, "Dehaze", &mut presence.dehaze, -1.0..=1.0, 0.0);
         let mut vibrance: VibranceParams = develop.stage_params(VIBRANCE);
         slider(ui, "Vibrance", &mut vibrance.amount, -1.0..=1.0, 0.0);
         develop.set_stage_params(VIBRANCE, &vibrance);
+        slider(ui, "Saturation", &mut presence.saturation, -1.0..=1.0, 0.0);
+        develop.set_stage_params(PRESENCE, &presence);
     });
 
     ui.collapsing("Tone Curve", |ui| {
@@ -320,6 +329,60 @@ pub fn show(
         develop.set_stage_params(NOISE_REDUCTION, &nr);
     });
 
+    ui.collapsing("Effects", |ui| {
+        let mut fx: EffectsParams = develop.stage_params(EFFECTS);
+        ui.label("Post-crop vignette");
+        ui.horizontal(|ui| {
+            ui.label("Style");
+            egui::ComboBox::from_id_salt("vignette_style")
+                .selected_text(match fx.vignette_style {
+                    VignetteStyle::HighlightPriority => "Highlight priority",
+                    VignetteStyle::ColorPriority => "Color priority",
+                    VignetteStyle::PaintOverlay => "Paint overlay",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut fx.vignette_style,
+                        VignetteStyle::HighlightPriority,
+                        "Highlight priority",
+                    );
+                    ui.selectable_value(
+                        &mut fx.vignette_style,
+                        VignetteStyle::ColorPriority,
+                        "Color priority",
+                    );
+                    ui.selectable_value(
+                        &mut fx.vignette_style,
+                        VignetteStyle::PaintOverlay,
+                        "Paint overlay",
+                    );
+                });
+        });
+        slider(ui, "Amount", &mut fx.vignette_amount, -1.0..=1.0, 0.0);
+        slider(ui, "Midpoint", &mut fx.vignette_midpoint, 0.0..=1.0, 0.5);
+        slider(ui, "Roundness", &mut fx.vignette_roundness, -1.0..=1.0, 0.0);
+        slider(ui, "Feather", &mut fx.vignette_feather, 0.0..=1.0, 0.5);
+        slider(
+            ui,
+            "Highlights",
+            &mut fx.vignette_highlights,
+            0.0..=1.0,
+            0.0,
+        );
+        ui.separator();
+        ui.label("Grain");
+        slider(ui, "Grain Amount", &mut fx.grain_amount, 0.0..=1.0, 0.0);
+        slider(ui, "Grain Size", &mut fx.grain_size, 0.0..=1.0, 0.25);
+        slider(
+            ui,
+            "Grain Roughness",
+            &mut fx.grain_roughness,
+            0.0..=1.0,
+            0.5,
+        );
+        develop.set_stage_params(EFFECTS, &fx);
+    });
+
     if heal.heal_active() {
         heal_tool::show_panel(ui, develop, heal, pounce);
     }
@@ -336,10 +399,12 @@ pub fn show(
             TONE,
             TONE_CURVE,
             VIBRANCE,
+            PRESENCE,
             HSL,
             SHARPEN,
             NOISE_REDUCTION,
             CROP,
+            EFFECTS,
             MASKS,
         ] {
             develop.reset_stage(id);

@@ -794,6 +794,9 @@ impl RenderJob {
         drop(frame);
 
         let rect = inputs.crop_rect;
+        // Once for the whole photo (not per tile): the effects are crop-relative, so every tile
+        // samples the same continuous pattern.
+        inputs.bind_effects(&ctx.crop_kernel);
         let out_w = (rect.width.round() as u32).max(1);
         let out_h = (rect.height.round() as u32).max(1);
         let sink = match AccumSink::try_new(out_w, out_h) {
@@ -1508,6 +1511,97 @@ mod tests {
         // The unmasked photo that follows in the same batch (same kernels, same atlas slot) is
         // untouched: a stale atlas from the previous photo would brighten it too.
         assert_eq!(got_b, base_b, "the previous photo's masks leaked");
+    }
+
+    /// #380: a *global* clarity/dehaze needs the baked frame and its bases even though the photo
+    /// has no mask -- and must not leak into the next photo of the batch (same kernel, same slot).
+    #[test]
+    fn a_global_dehaze_is_applied_with_no_mask_and_never_leaks_into_the_next_photo() {
+        let (Some(base), Some(fx)) = (fixture(&["a.NEF", "b.NEF"]), fixture(&["a.NEF", "b.NEF"]))
+        else {
+            return;
+        };
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            nicti_tapetum::stages::PRESENCE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "dehaze": 1.0, "clarity": 0.8 }),
+            },
+        );
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let base_report = wait(&ExportRun::start(base.env(), &base.ids, base.spec()).unwrap());
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(base_report.exported.len(), 2, "{base_report:?}");
+        assert_eq!(report.exported.len(), 2, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+        let base_a = png(&base.out.path().join("01_a.png"));
+        let base_b = png(&base.out.path().join("02_b.png"));
+        assert_ne!(
+            png(&fx.out.path().join("01_a.png")),
+            base_a,
+            "the global dehaze/clarity must change the photo"
+        );
+        assert_eq!(
+            png(&fx.out.path().join("02_b.png")),
+            base_b,
+            "the previous photo's bases leaked"
+        );
+    }
+
+    /// #380: the post-crop vignette is applied across the exported tiles (it is computed in
+    /// crop-normalized coordinates), darkening the corners and leaving the centre alone, and does
+    /// not leak into the next photo.
+    #[test]
+    fn a_post_crop_vignette_darkens_the_exported_corners_and_never_leaks() {
+        let (Some(base), Some(fx)) = (fixture(&["a.NEF", "b.NEF"]), fixture(&["a.NEF", "b.NEF"]))
+        else {
+            return;
+        };
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            nicti_tapetum::stages::EFFECTS.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "vignette_amount": -1.0 }),
+            },
+        );
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let base_report = wait(&ExportRun::start(base.env(), &base.ids, base.spec()).unwrap());
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(base_report.exported.len(), 2, "{base_report:?}");
+        assert_eq!(report.exported.len(), 2, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+
+        let (base_a, base_b) = (
+            png(&base.out.path().join("01_a.png")),
+            png(&base.out.path().join("02_b.png")),
+        );
+        let (got_a, got_b) = (
+            png(&fx.out.path().join("01_a.png")),
+            png(&fx.out.path().join("02_b.png")),
+        );
+        let (w, h) = (base_a.width(), base_a.height());
+        let mean = |img: &image::RgbImage, x0: u32, x1: u32, y0: u32, y1: u32| {
+            let (mut sum, mut n) = (0.0, 0.0);
+            for (x, y, px) in img.enumerate_pixels() {
+                if (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                    sum += f64::from(px[0]) + f64::from(px[1]) + f64::from(px[2]);
+                    n += 3.0;
+                }
+            }
+            sum / n
+        };
+        let corner = |img: &image::RgbImage| mean(img, 0, w / 8, 0, h / 8);
+        let centre = |img: &image::RgbImage| mean(img, 3 * w / 8, 5 * w / 8, 3 * h / 8, 5 * h / 8);
+        assert!(
+            corner(&got_a) < corner(&base_a) - 2.0,
+            "corner {} vs {}",
+            corner(&got_a),
+            corner(&base_a)
+        );
+        assert!((centre(&got_a) - centre(&base_a)).abs() < 1.0);
+        assert_eq!(got_b, base_b, "the previous photo's effects leaked");
     }
 
     #[test]

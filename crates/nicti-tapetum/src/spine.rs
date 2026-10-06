@@ -16,16 +16,17 @@ use nicti_cornea::LinearFrame;
 use nicti_pawprint::EditDocument;
 
 use crate::coat::{
-    self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
-    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CameraProfileParams, CropParams, EffectsParams, ExposureParams, HealParams, HslParams,
+    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, WbParams,
 };
 use crate::color;
 use crate::frame::Extent;
 use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
-    self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, MASKS, NEUTRAL,
-    NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS,
+    NEUTRAL, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -33,13 +34,14 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 10] = [
+pub const LIVE_IDS: [&str; 11] = [
     WB,
     WORKING_SPACE,
     EXPOSURE,
     TONE,
     TONE_CURVE,
     VIBRANCE,
+    PRESENCE,
     HSL,
     SHARPEN,
     NOISE_REDUCTION,
@@ -47,7 +49,10 @@ pub const LIVE_IDS: [&str; 10] = [
     MASKS,
 ];
 
-/// The full graph: baked prefix -> live suffix -> crop.
+/// The geometry nodes, one fused sample pass: the crop and the post-crop effects (#380).
+pub const GEOMETRY_IDS: [&str; 2] = [CROP, EFFECTS];
+
+/// The full graph: baked prefix -> live suffix -> crop -> effects.
 pub fn build_graph() -> RenderGraph {
     let mut graph = RenderGraph::new();
     let mut prev: Option<&str> = None;
@@ -93,6 +98,14 @@ pub fn build_graph() -> RenderGraph {
         })
         .expect("static graph ids are unique");
     graph
+        .add_node(StageNode {
+            id: EFFECTS.to_string(),
+            kind: StageKind::Geometry,
+            upstream: vec![CROP.to_string()],
+            own_hash: blake3::hash(EFFECTS.as_bytes()),
+        })
+        .expect("static graph ids are unique");
+    graph
 }
 
 macro_rules! render_stage_factory {
@@ -113,10 +126,12 @@ render_stage_factory!(exposure_factory, stages::exposure_stage);
 render_stage_factory!(tone_factory, stages::tone_stage);
 render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
 render_stage_factory!(vibrance_factory, stages::vibrance_stage);
+render_stage_factory!(presence_factory, stages::presence_stage);
 render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(sharpen_factory, stages::sharpen_stage);
 render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
 render_stage_factory!(crop_factory, stages::crop_stage);
+render_stage_factory!(effects_factory, stages::effects_stage);
 render_stage_factory!(neutral_factory, stages::neutral_stage);
 render_stage_factory!(masks_factory, stages::masks_stage);
 
@@ -125,7 +140,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 17] = [
+    let entries: [StageFactoryEntry; 19] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -137,10 +152,12 @@ pub fn build_registry() -> StageRegistry {
         (TONE, tone_factory),
         (TONE_CURVE, tone_curve_factory),
         (VIBRANCE, vibrance_factory),
+        (PRESENCE, presence_factory),
         (HSL, hsl_factory),
         (SHARPEN, sharpen_factory),
         (NOISE_REDUCTION, noise_reduction_factory),
         (CROP, crop_factory),
+        (EFFECTS, effects_factory),
         (NEUTRAL, neutral_factory),
         (MASKS, masks_factory),
     ];
@@ -215,8 +232,25 @@ pub struct RenderInputs {
     /// Rotation composed with the crop offset; for `CropKernel::set_transform` and, at export,
     /// `TiledRender::new`'s base transform.
     pub crop_transform: Affine2D,
+    /// Post-crop vignette and grain (#380), sanitized.
+    pub effects: EffectsParams,
 }
 
+impl RenderInputs {
+    /// Binds the post-crop effects to the geometry pass. `crop_transform` here is the *untiled,
+    /// unscaled* crop transform on purpose: the effects are evaluated in crop-normalized
+    /// coordinates, so a screen-size preview or one export tile (whose own output -> source
+    /// transform is scaled or offset) sees the same pattern as the whole frame. Call it every
+    /// render -- the kernel is reused across photos and a noop `effects` clears the previous one.
+    pub fn bind_effects(&self, crop: &crate::stages::CropKernel) {
+        crop.set_effects(
+            &self.effects,
+            self.crop_transform,
+            self.crop_rect.width,
+            self.crop_rect.height,
+        );
+    }
+}
 /// Resolves `doc` into kernel inputs for `frame` at `extent` -- the "document -> params" half of a
 /// render, previously inlined in `DevelopView::render`.
 ///
@@ -263,6 +297,7 @@ pub fn resolve_inputs(
     let tone: ToneParams = resolve(doc, TONE);
     let tone_curve: ToneCurveParams = resolve(doc, TONE_CURVE);
     let vibrance: VibranceParams = resolve(doc, VIBRANCE);
+    let presence: PresenceParams = resolve::<PresenceParams>(doc, PRESENCE).sanitized();
     let hsl: HslParams = resolve(doc, HSL);
     let sharpen: SharpenParams = resolve(doc, SHARPEN);
     let noise_reduction: NoiseReductionParams = resolve(doc, NOISE_REDUCTION);
@@ -275,6 +310,7 @@ pub fn resolve_inputs(
             tone,
             tone_curve,
             vibrance,
+            presence,
             hsl,
             sharpen,
             noise_reduction,
@@ -283,6 +319,7 @@ pub fn resolve_inputs(
         heal: resolve(doc, HEAL),
         crop_rect,
         crop_transform,
+        effects: resolve::<EffectsParams>(doc, EFFECTS).sanitized(),
     }
 }
 
@@ -315,6 +352,14 @@ mod tests {
             (EXPOSURE, serde_json::json!({ "stops": 1.5 })),
             (HEAL, serde_json::json!({ "spots": [] })),
             (MASKS, serde_json::json!({ "corrections": [] })),
+            (
+                PRESENCE,
+                serde_json::json!({ "clarity": 0.5, "dehaze": 0.4 }),
+            ),
+            (
+                EFFECTS,
+                serde_json::json!({ "vignette_amount": -0.5, "grain_amount": 0.5 }),
+            ),
         ] {
             edited.stages.insert(
                 stage.to_string(),

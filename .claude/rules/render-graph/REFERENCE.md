@@ -39,6 +39,16 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   guided-filter refine (`mask/guided.rs`, CPU reference + GPU kernels) and `Renderer::render_baked` (bakes +
   submits the chain so the mask engine can read the baked frame; the following `render` finds it cached).
   See the `masking` topic.
+- **Presence + Effects (#380, `docs/adr/0380`)**: `nicti.presence` (global texture/clarity/dehaze/saturation) is a Live
+  stage whose values are **added to the local deltas** in `live_suffix.wgsl` (same kernels as masks); with no mask,
+  `MaskEngine::prepare(.., presence)` still builds the bands/haze bases and returns a zero-correction `MaskFrame`
+  (1x1 atlas) -- every renderer (Develop, export, rendered previews) bakes + prepares when masks are active OR
+  `PresenceParams::needs_bases`. `nicti.effects` (post-crop vignette + grain) is a second **Geometry** node
+  (`spine::GEOMETRY_IDS = [CROP, EFFECTS]`, one fused pass) evaluated in `present_sample.wgsl` in **crop-normalized**
+  coordinates (`effects::crop_norm` = inverse crop transform / crop size, passed once per photo via
+  `RenderInputs::bind_effects` with the UNTILED, UNSCALED transform) so previews/exports/tiles match; CPU reference =
+  `effects.rs`, PCG hash pinned by reference vectors. Editing it re-runs only the geometry pass. Gotcha: bind it
+  every render (the `CropKernel` is reused across photos; a noop clears the last one).
 - **Real RTX 5080 numbers** (GPU-timestamp only): live-suffix 0.375ms p50/0.392ms p95 (screen res),
   1.767ms p50/3.924ms p95 (full res, matches ADR-0016's own comparable figure within a few
   percent). Present/sample (crop): ≤1.611ms p95 even at full res.

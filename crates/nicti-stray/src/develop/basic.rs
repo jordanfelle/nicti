@@ -1,10 +1,12 @@
 //! Basic panel, white balance, parametric tone curve (the keys `nicti-tapetum`'s `coat.rs` has a
-//! stage for). Anything else on those panels (Clarity/Texture/Dehaze/global Saturation, point
-//! curves, the curve split points when non-default) has no nicti global stage yet and stays
-//! untranslated -- see the follow-up issues filed with #62.
+//! stage for), including the Presence group (Texture/Clarity/Dehaze/Saturation, #380). Anything
+//! else on those panels (point curves, the curve split points when non-default) has no nicti
+//! global stage yet and stays untranslated -- see the follow-up issues filed with #62.
 
-use nicti_tapetum::coat::{ExposureParams, ToneCurveParams, ToneParams, VibranceParams, WbParams};
-use nicti_tapetum::stages::{EXPOSURE, TONE, TONE_CURVE, VIBRANCE, WB};
+use nicti_tapetum::coat::{
+    ExposureParams, PresenceParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+};
+use nicti_tapetum::stages::{EXPOSURE, PRESENCE, TONE, TONE_CURVE, VIBRANCE, WB};
 
 use super::Tx;
 
@@ -35,6 +37,16 @@ pub(super) fn apply(tx: &mut Tx) {
         amount: unit(tx.num("Vibrance").unwrap_or(0.0)),
     };
     tx.put(VIBRANCE, vibrance);
+
+    // LRC's global Presence sliders share the -100..100 scale; the per-mask `Local*` equivalents
+    // are already -1..1 (see `masks::adjust_for`), so a global value stacks with a local one.
+    let presence = PresenceParams {
+        texture: unit(tx.num("Texture").unwrap_or(0.0)),
+        clarity: unit(tx.num("Clarity2012").unwrap_or(0.0)),
+        dehaze: unit(tx.num("Dehaze").unwrap_or(0.0)),
+        saturation: unit(tx.num("Saturation").unwrap_or(0.0)),
+    };
+    tx.put(PRESENCE, presence);
 
     white_balance(tx);
     tone_curve(tx);
@@ -99,7 +111,8 @@ mod tests {
     fn basic_sliders_map_with_the_right_scale() {
         let t = tr(
             "s = { Exposure2012 = 0.75, Contrast2012 = 25, Highlights2012 = -50, \
-                    Shadows2012 = 100, Whites2012 = -10, Blacks2012 = 5, Vibrance = 40 }",
+                    Shadows2012 = 100, Whites2012 = -10, Blacks2012 = 5, Vibrance = 40, \
+                    Texture = 30, Clarity2012 = -20, Dehaze = 50, Saturation = -10 }",
         );
         let stages = &t.document.stages;
         assert_eq!(stages[EXPOSURE].params["stops"], 0.75);
@@ -110,6 +123,11 @@ mod tests {
             &stages[VIBRANCE].params["amount"],
             0.4
         ));
+        let presence = &stages[PRESENCE].params;
+        assert!(crate::develop::close(&presence["texture"], 0.3));
+        assert!(crate::develop::close(&presence["clarity"], -0.2));
+        assert!(crate::develop::close(&presence["dehaze"], 0.5));
+        assert!(crate::develop::close(&presence["saturation"], -0.1));
         assert!(t.untranslated.is_empty());
     }
 
@@ -149,9 +167,7 @@ mod tests {
             r#"s = { Clarity2012 = 12, Texture = 0, Dehaze = 5, Saturation = 0,
                     ToneCurvePV2012 = { 0, 0, 64, 70, 255, 255, }, Exposure2012 = 1 }"#,
         );
-        assert_eq!(
-            t.untranslated,
-            vec!["Clarity2012", "Dehaze", "ToneCurvePV2012"]
-        );
+        // Clarity/Dehaze are mapped now (#380); only the point curve has no nicti stage yet.
+        assert_eq!(t.untranslated, vec!["ToneCurvePV2012"]);
     }
 }

@@ -66,7 +66,10 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   numeric columns by stored value); `LocalExposure2012` is stops/4; a radial's `MaskInverted=true`
   = effect outside; AI mask space = uncropped frame; legacy PV2003 keys (`Contrast`, `Shadows`,
   `Exposure` …) sit beside PV2012 ones in every image. Not translated: brushes, People masks, rotated
-  crops/geometric masks, retouch, Clarity/Texture/Dehaze, point curves (all in provenance).
+  crops/geometric masks, retouch, point curves, colour grading (all in provenance). **#380** translates the global
+  `Texture`/`Clarity2012`/`Dehaze`/`Saturation` (-100..100 -> `nicti.presence`) and the Effects panel (`PostCropVignette*`,
+  `Grain*`, gated by `EnableEffects`) -> `nicti.effects`; **a slider whose amount is 0 is ignored** (LRC writes a random
+  `GrainSeed` + default sliders into every image, taking them would mark every photo edited); `OverrideLookVignette` stays untranslated.
 
 ## Package contents
 
