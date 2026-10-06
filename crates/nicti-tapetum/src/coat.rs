@@ -106,6 +106,24 @@ impl PresenceParams {
         *self == Self::default()
     }
 
+    /// Clamped to -1..1 with non-finite values scrubbed to 0: documents are untrusted, and an
+    /// unbounded saturation would overflow the `Rgba16Float` target to Inf.
+    pub fn sanitized(&self) -> Self {
+        let unit = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            texture: unit(self.texture),
+            clarity: unit(self.clarity),
+            dehaze: unit(self.dehaze),
+            saturation: unit(self.saturation),
+        }
+    }
+
     /// Whether the clarity/texture band bases (`mask::bases`) are needed to render this.
     pub fn needs_bands(&self) -> bool {
         self.clarity != 0.0 || self.texture != 0.0
@@ -600,6 +618,21 @@ mod tests {
             ..Default::default()
         };
         assert!(dehaze.needs_haze() && !dehaze.needs_bands());
+    }
+
+    #[test]
+    fn presence_params_sanitize_clamps_and_scrubs() {
+        let p = PresenceParams {
+            texture: f32::NAN,
+            clarity: 1e30,
+            dehaze: -5.0,
+            saturation: f32::INFINITY,
+        }
+        .sanitized();
+        assert_eq!(
+            (p.texture, p.clarity, p.dehaze, p.saturation),
+            (0.0, 1.0, -1.0, 0.0)
+        );
     }
 
     #[test]

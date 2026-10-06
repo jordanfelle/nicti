@@ -2218,19 +2218,23 @@ mod tests {
             width: 40,
             height: 30,
         };
-        for (style, highlights) in [
-            (VignetteStyle::HighlightPriority, 0.6),
-            (VignetteStyle::ColorPriority, 0.0),
-            (VignetteStyle::PaintOverlay, 0.0),
+        // (style, highlights, roundness, vignette on, grain on): both bits together, each alone,
+        // and the squarish superellipse branch (negative roundness).
+        for (style, highlights, roundness, vignette, grain) in [
+            (VignetteStyle::HighlightPriority, 0.6, 0.4, true, true),
+            (VignetteStyle::ColorPriority, 0.0, -0.6, true, true),
+            (VignetteStyle::PaintOverlay, 0.0, 0.0, true, true),
+            (VignetteStyle::HighlightPriority, 0.0, 0.0, false, true),
+            (VignetteStyle::ColorPriority, 0.0, -1.0, true, false),
         ] {
             let effects = EffectsParams {
-                vignette_amount: -0.7,
+                vignette_amount: if vignette { -0.7 } else { 0.0 },
                 vignette_midpoint: 0.35,
                 vignette_feather: 0.6,
-                vignette_roundness: 0.4,
+                vignette_roundness: roundness,
                 vignette_highlights: highlights,
                 vignette_style: style,
-                grain_amount: 0.8,
+                grain_amount: if grain { 0.8 } else { 0.0 },
                 grain_size: 0.5,
                 grain_roughness: 0.7,
                 grain_seed: 4242,
@@ -2278,6 +2282,68 @@ mod tests {
                 "{style:?}: the effects must actually change pixels"
             );
         }
+    }
+
+    /// #380: a screen-size preview (output -> source transform scaled, as `eyeshine::screen_geometry`
+    /// does) with the *unscaled* crop bound for the effects matches a full-size render's vignette,
+    /// because the effects read the source position, not the output pixel.
+    #[test]
+    fn a_scaled_preview_shows_the_same_vignette_as_the_full_size_render() {
+        use crate::coat::EffectsParams;
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 40,
+            height: 30,
+        };
+        let flat: Vec<[f32; 4]> = vec![[0.5, 0.4, 0.3, 1.0]; 40 * 30];
+        let input = crate::test_util::upload_frame(&gpu, extent, &flat);
+        let effects = EffectsParams {
+            vignette_amount: -0.9,
+            vignette_midpoint: 0.2,
+            ..EffectsParams::default()
+        };
+        let render = |out: crate::frame::Extent, transform: Affine2D| {
+            let kernel = CropKernel::new(&gpu);
+            kernel.set_transform(transform);
+            // Always the unscaled crop (the whole 40x30 frame, identity).
+            kernel.set_effects(&effects, Affine2D::IDENTITY, 40.0, 30.0);
+            let output = FrameTexture::new(&gpu, out);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(&gpu, &output)
+        };
+        let full = render(extent, Affine2D::IDENTITY);
+        let half = render(
+            crate::frame::Extent {
+                width: 20,
+                height: 15,
+            },
+            Affine2D {
+                a: 2.0,
+                d: 2.0,
+                ..Affine2D::IDENTITY
+            },
+        );
+        let mut worst = 0.0f32;
+        for y in 0..15usize {
+            for x in 0..20usize {
+                let avg: f32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .iter()
+                    .map(|(dx, dy)| full[(2 * y + dy) * 40 + 2 * x + dx][0])
+                    .sum::<f32>()
+                    / 4.0;
+                worst = worst.max((half[y * 20 + x][0] - avg).abs());
+            }
+        }
+        assert!(
+            worst < 0.02,
+            "preview vs full-size vignette differ by {worst}"
+        );
+        // Not vacuous: the corner really is vignetted.
+        assert!(half[0][0] < 0.5 * 0.6);
     }
 
     /// #380: with the effects off the pass is exactly the pre-#380 sample.

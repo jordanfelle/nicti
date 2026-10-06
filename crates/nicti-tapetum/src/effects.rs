@@ -351,17 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn grain_is_the_same_at_any_resolution_for_the_same_crop_position() {
-        // The pattern is a function of crop-normalized position, so it does not care how many
-        // pixels the render has.
+    fn a_larger_grain_size_is_smoother() {
         let e = EffectsParams {
             grain_amount: 1.0,
             ..EffectsParams::default()
         };
-        let a = grain_noise((0.4, 0.6), (6000.0, 4000.0), &e);
-        let b = grain_noise((0.4, 0.6), (6000.0, 4000.0), &e);
-        assert_eq!(a, b);
-        // A larger cell size is smoother: neighbouring points differ less.
+        // Neighbouring points differ less at a coarser cell size.
         let step = |size: f32| {
             let e = EffectsParams {
                 grain_size: size,

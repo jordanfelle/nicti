@@ -89,6 +89,9 @@ every image, so taking them would make every untouched photo import as edited. `
 - `present_sample.wgsl` is still unaudited on the real RTX 5080 under Dx12 (#355); the new code adds
   integer hashing there, so the reference-machine pass for #355 should include it
   (`NICTI_WGPU_BACKEND=vulkan|dx12`).
+- Grain cells are fixed per crop (300..1500 across the long edge), so a screen-size preview samples
+  them at ~1 px and looks noisier than the export's ~5 px cells. The pattern is the same, the look
+  at preview scale is not; a preview-scale grain filter is a follow-up.
 - Not done: Look-profile vignettes (`OverrideLookVignette`), LRC-pixel comparison of the effects, the
   Develop canvas not resizing to the crop (#272: the effects follow the crop region the preview
   samples, so they cover the crop-sized area of an oversized canvas, not the whole canvas).

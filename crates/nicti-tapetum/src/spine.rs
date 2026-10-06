@@ -297,7 +297,7 @@ pub fn resolve_inputs(
     let tone: ToneParams = resolve(doc, TONE);
     let tone_curve: ToneCurveParams = resolve(doc, TONE_CURVE);
     let vibrance: VibranceParams = resolve(doc, VIBRANCE);
-    let presence: PresenceParams = resolve(doc, PRESENCE);
+    let presence: PresenceParams = resolve::<PresenceParams>(doc, PRESENCE).sanitized();
     let hsl: HslParams = resolve(doc, HSL);
     let sharpen: SharpenParams = resolve(doc, SHARPEN);
     let noise_reduction: NoiseReductionParams = resolve(doc, NOISE_REDUCTION);
@@ -352,6 +352,14 @@ mod tests {
             (EXPOSURE, serde_json::json!({ "stops": 1.5 })),
             (HEAL, serde_json::json!({ "spots": [] })),
             (MASKS, serde_json::json!({ "corrections": [] })),
+            (
+                PRESENCE,
+                serde_json::json!({ "clarity": 0.5, "dehaze": 0.4 }),
+            ),
+            (
+                EFFECTS,
+                serde_json::json!({ "vignette_amount": -0.5, "grain_amount": 0.5 }),
+            ),
         ] {
             edited.stages.insert(
                 stage.to_string(),

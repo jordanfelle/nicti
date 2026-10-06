@@ -35,8 +35,8 @@ pub(crate) struct ExportRenderer {
     pub(crate) registry: StageRegistry,
     pub(crate) renderer: Renderer,
     /// Builds local-adjustment masks at the frame's own extent, uncached (#354). Created on the
-    /// first masked photo: it compiles its own pipelines, which an unmasked batch (or the preview
-    /// job sharing this type) should not pay for.
+    /// first photo that needs it (a mask, or a global clarity/texture/dehaze, #380): it compiles its
+    /// own pipelines, which a batch with neither should not pay for.
     pub(crate) mask_engine: Option<MaskEngine>,
 }
 

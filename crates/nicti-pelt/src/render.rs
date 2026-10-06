@@ -339,6 +339,9 @@ impl DevelopView {
                 // Removing the entry (rather than only ignoring it below) also gives the crop node
                 // its default hash, so the cached cropped composite can't be served back.
                 d.stages.remove(CROP);
+                // The vignette/grain are relative to the crop: over the whole frame they would
+                // only get in the way of seeing the spots being healed.
+                d.stages.remove(nicti_tapetum::stages::EFFECTS);
             }
             d
         };
