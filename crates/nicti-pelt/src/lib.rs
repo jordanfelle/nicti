@@ -22,6 +22,7 @@ mod export;
 mod eyeshine;
 mod filter_bar;
 mod folder_panel;
+mod fur;
 mod grid;
 mod heal_tool;
 mod knead;

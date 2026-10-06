@@ -264,6 +264,8 @@ const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 impl PeltApp {
     pub fn new(cc: &eframe::CreationContext<'_>, version: String) -> Self {
+        crate::fur::install_fonts(&cc.egui_ctx);
+        crate::fur::apply(&cc.egui_ctx);
         let render_state = cc
             .wgpu_render_state
             .as_ref()

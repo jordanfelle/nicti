@@ -16,6 +16,7 @@ use nicti_tapetum::stages::{
     TONE_CURVE, VIBRANCE, WB,
 };
 
+use crate::fur::{self, SliderSpec, Track};
 use crate::heal_tool::{self, HealUi};
 use crate::render::{AutoApplied, DevelopView};
 use nicti_tapetum::auto::AutoReason;
@@ -109,8 +110,9 @@ impl AutoHintUi {
             self.tone_marker = None;
             return;
         }
-        ui.label(egui::RichText::new("\u{26A0}").color(egui::Color32::YELLOW))
-            .on_hover_text("Low confidence: unusual histogram. Undo or adjust to change it.");
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        fur::paint_icon(ui.painter(), rect, fur::Icon::Info, egui::Color32::YELLOW);
+        resp.on_hover_text("Low confidence: unusual histogram. Undo or adjust to change it.");
     }
 
     /// The transient hint for `op`, if one is live; schedules the repaint that clears it.
@@ -130,22 +132,73 @@ impl AutoHintUi {
     }
 }
 
-/// One slider bound to a single `f32` field, with a double-click-to-reset gesture -- the repeated
-/// shape every panel section below uses.
-fn slider(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    default: f32,
-) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let response = ui.add(egui::Slider::new(value, range));
-        if response.double_clicked() {
-            *value = default;
-        }
-    });
+// Slider specs, one per control. `id` is unique across the panel (it salts the widget id), and the
+// defaults match what `Reset all` / a double-click restores.
+const TEMP: SliderSpec = SliderSpec::new("basic.temp", "Temp", 2000.0, 50000.0, 5500.0)
+    .step(50.0, 0)
+    .track(Track::Temp);
+const TINT: SliderSpec = SliderSpec::new("basic.tint", "Tint", -150.0, 150.0, 0.0)
+    .step(1.0, 0)
+    .track(Track::Tint)
+    .signed();
+const EXPOSURE_STOPS: SliderSpec = SliderSpec::new("basic.exposure", "Exposure", -5.0, 5.0, 0.0)
+    .track(Track::Centered)
+    .signed();
+const CONTRAST: SliderSpec = SliderSpec::bipolar("basic.contrast", "Contrast");
+const HIGHLIGHTS: SliderSpec = SliderSpec::bipolar("basic.highlights", "Highlights");
+const SHADOWS: SliderSpec = SliderSpec::bipolar("basic.shadows", "Shadows");
+const WHITES: SliderSpec = SliderSpec::bipolar("basic.whites", "Whites");
+const BLACKS: SliderSpec = SliderSpec::bipolar("basic.blacks", "Blacks");
+const TEXTURE: SliderSpec = SliderSpec::bipolar("basic.texture", "Texture");
+const CLARITY: SliderSpec = SliderSpec::bipolar("basic.clarity", "Clarity");
+const DEHAZE: SliderSpec = SliderSpec::bipolar("basic.dehaze", "Dehaze");
+const VIBRANCE_AMOUNT: SliderSpec = SliderSpec::bipolar("basic.vibrance", "Vibrance");
+const SATURATION: SliderSpec = SliderSpec::bipolar("basic.saturation", "Saturation");
+
+const CURVE_SHADOWS: SliderSpec = SliderSpec::bipolar("curve.shadows", "Shadows");
+const CURVE_DARKS: SliderSpec = SliderSpec::bipolar("curve.darks", "Darks");
+const CURVE_LIGHTS: SliderSpec = SliderSpec::bipolar("curve.lights", "Lights");
+const CURVE_HIGHLIGHTS: SliderSpec = SliderSpec::bipolar("curve.highlights", "Highlights");
+
+const ROTATION: SliderSpec = SliderSpec::new(
+    "crop.rotation",
+    "Rotation",
+    -MAX_STRAIGHTEN_DEGREES,
+    MAX_STRAIGHTEN_DEGREES,
+    0.0,
+)
+.step(0.1, 1)
+.track(Track::Centered)
+.signed()
+.unit("\u{b0}");
+
+const SHARPEN_AMOUNT: SliderSpec =
+    SliderSpec::new("sharpen.amount", "Sharpen Amount", 0.0, 1.5, 0.0);
+const SHARPEN_RADIUS: SliderSpec =
+    SliderSpec::new("sharpen.radius", "Sharpen Radius", 0.5, 3.0, 1.0);
+const SHARPEN_DETAIL: SliderSpec =
+    SliderSpec::new("sharpen.detail", "Sharpen Detail", 0.0, 1.0, 0.5);
+const NR_LUMINANCE: SliderSpec = SliderSpec::new("nr.luminance", "NR Luminance", 0.0, 1.0, 0.0);
+const NR_COLOR: SliderSpec = SliderSpec::new("nr.color", "NR Color", 0.0, 1.0, 0.0);
+const NR_DETAIL: SliderSpec = SliderSpec::new("nr.detail", "NR Detail", 0.0, 1.0, 0.0);
+
+const VIGNETTE_AMOUNT: SliderSpec = SliderSpec::bipolar("fx.vignette_amount", "Amount");
+const VIGNETTE_MIDPOINT: SliderSpec =
+    SliderSpec::new("fx.vignette_midpoint", "Midpoint", 0.0, 1.0, 0.5);
+const VIGNETTE_ROUNDNESS: SliderSpec = SliderSpec::bipolar("fx.vignette_roundness", "Roundness");
+const VIGNETTE_FEATHER: SliderSpec =
+    SliderSpec::new("fx.vignette_feather", "Feather", 0.0, 1.0, 0.5);
+const VIGNETTE_HIGHLIGHTS: SliderSpec =
+    SliderSpec::new("fx.vignette_highlights", "Highlights", 0.0, 1.0, 0.0);
+const GRAIN_AMOUNT: SliderSpec = SliderSpec::new("fx.grain_amount", "Grain Amount", 0.0, 1.0, 0.0);
+const GRAIN_SIZE: SliderSpec = SliderSpec::new("fx.grain_size", "Grain Size", 0.0, 1.0, 0.25);
+const GRAIN_ROUGHNESS: SliderSpec =
+    SliderSpec::new("fx.grain_roughness", "Grain Roughness", 0.0, 1.0, 0.5);
+
+/// One slider row bound to a single `f32` field -- the repeated shape every panel section below
+/// uses. Reset (double-click) and the value display come from the spec.
+fn slider(ui: &mut egui::Ui, spec: &SliderSpec, value: &mut f32) -> fur::SliderOut {
+    fur::slider(ui, spec, value, true)
 }
 
 /// Renders the Develop panel's controls and returns `true` if any edit changed this render's
@@ -186,14 +239,14 @@ pub fn show(
 
     show_histogram(ui, develop, current_frame);
 
-    ui.separator();
-    ui.collapsing("Basic", |ui| {
+    fur::divider(ui);
+    fur::section(ui, "basic", "Basic", false, |ui| {
         show_camera_profile_picker(ui, develop);
 
         let mut wb: WbParams = develop.stage_params(WB);
         let mut temp = wb.temp_k.unwrap_or(5500.0);
         ui.horizontal(|ui| {
-            ui.label("Temp");
+            ui.label("White balance");
             let use_as_shot = wb.temp_k.is_none();
             let mut manual = !use_as_shot;
             ui.checkbox(&mut manual, "Manual");
@@ -201,89 +254,74 @@ pub fn show(
                 wb.temp_k = if manual { Some(temp) } else { None };
             }
         });
-        if wb.temp_k.is_some()
-            && ui
-                .add(egui::Slider::new(&mut temp, 2000.0..=50000.0))
-                .changed()
-        {
+        if wb.temp_k.is_some() && slider(ui, &TEMP, &mut temp).changed {
             wb.temp_k = Some(temp);
         }
-        slider(ui, "Tint", &mut wb.tint, -150.0..=150.0, 0.0);
+        slider(ui, &TINT, &mut wb.tint);
         develop.set_stage_params(WB, &wb);
 
         let mut exposure: ExposureParams = develop.stage_params(EXPOSURE);
-        slider(ui, "Exposure", &mut exposure.stops, -5.0..=5.0, 0.0);
+        slider(ui, &EXPOSURE_STOPS, &mut exposure.stops);
         develop.set_stage_params(EXPOSURE, &exposure);
 
         let mut tone: ToneParams = develop.stage_params(TONE);
-        slider(ui, "Contrast", &mut tone.contrast, -1.0..=1.0, 0.0);
-        slider(ui, "Highlights", &mut tone.highlights, -1.0..=1.0, 0.0);
-        slider(ui, "Shadows", &mut tone.shadows, -1.0..=1.0, 0.0);
-        slider(ui, "Whites", &mut tone.whites, -1.0..=1.0, 0.0);
-        slider(ui, "Blacks", &mut tone.blacks, -1.0..=1.0, 0.0);
+        slider(ui, &CONTRAST, &mut tone.contrast);
+        slider(ui, &HIGHLIGHTS, &mut tone.highlights);
+        slider(ui, &SHADOWS, &mut tone.shadows);
+        slider(ui, &WHITES, &mut tone.whites);
+        slider(ui, &BLACKS, &mut tone.blacks);
         develop.set_stage_params(TONE, &tone);
 
         // Presence (#380): Texture/Clarity/Dehaze/Saturation are one stage; Vibrance stays its own.
         let mut presence: PresenceParams = develop.stage_params(PRESENCE);
-        slider(ui, "Texture", &mut presence.texture, -1.0..=1.0, 0.0);
-        slider(ui, "Clarity", &mut presence.clarity, -1.0..=1.0, 0.0);
-        slider(ui, "Dehaze", &mut presence.dehaze, -1.0..=1.0, 0.0);
+        slider(ui, &TEXTURE, &mut presence.texture);
+        slider(ui, &CLARITY, &mut presence.clarity);
+        slider(ui, &DEHAZE, &mut presence.dehaze);
         let mut vibrance: VibranceParams = develop.stage_params(VIBRANCE);
-        slider(ui, "Vibrance", &mut vibrance.amount, -1.0..=1.0, 0.0);
+        slider(ui, &VIBRANCE_AMOUNT, &mut vibrance.amount);
         develop.set_stage_params(VIBRANCE, &vibrance);
-        slider(ui, "Saturation", &mut presence.saturation, -1.0..=1.0, 0.0);
+        slider(ui, &SATURATION, &mut presence.saturation);
         develop.set_stage_params(PRESENCE, &presence);
     });
 
-    ui.collapsing("Tone Curve", |ui| {
+    fur::section(ui, "tone_curve", "Tone Curve", false, |ui| {
         let mut curve: ToneCurveParams = develop.stage_params(TONE_CURVE);
         draw_curve_preview(ui, &curve);
-        slider(ui, "Shadows", &mut curve.shadows, -1.0..=1.0, 0.0);
-        slider(ui, "Darks", &mut curve.darks, -1.0..=1.0, 0.0);
-        slider(ui, "Lights", &mut curve.lights, -1.0..=1.0, 0.0);
-        slider(ui, "Highlights", &mut curve.highlights, -1.0..=1.0, 0.0);
+        slider(ui, &CURVE_SHADOWS, &mut curve.shadows);
+        slider(ui, &CURVE_DARKS, &mut curve.darks);
+        slider(ui, &CURVE_LIGHTS, &mut curve.lights);
+        slider(ui, &CURVE_HIGHLIGHTS, &mut curve.highlights);
         develop.set_stage_params(TONE_CURVE, &curve);
     });
 
-    ui.collapsing("HSL", |ui| {
-        ui.horizontal(|ui| {
-            for (i, name) in HSL_BAND_NAMES.iter().enumerate() {
-                if ui
-                    .selectable_label(*hsl_band_selected == i, *name)
-                    .clicked()
-                {
-                    *hsl_band_selected = i;
-                }
-            }
-        });
+    fur::section(ui, "hsl", "HSL", false, |ui| {
+        if let Some(i) = fur::segmented(ui, &HSL_BAND_NAMES, Some(*hsl_band_selected), 8) {
+            *hsl_band_selected = i;
+        }
+        let band_no = *hsl_band_selected as u8;
         let mut hsl: HslParams = develop.stage_params(HSL);
         let band: &mut HslBand = &mut hsl.bands[*hsl_band_selected];
-        slider(ui, "Hue", &mut band.hue, -1.0..=1.0, 0.0);
-        slider(ui, "Saturation", &mut band.saturation, -1.0..=1.0, 0.0);
-        slider(ui, "Luminance", &mut band.luminance, -1.0..=1.0, 0.0);
+        let hue = SliderSpec::bipolar("hsl.hue", "Hue").track(Track::Hue { band: band_no });
+        let sat =
+            SliderSpec::bipolar("hsl.saturation", "Saturation").track(Track::Sat { band: band_no });
+        let lum =
+            SliderSpec::bipolar("hsl.luminance", "Luminance").track(Track::Lum { band: band_no });
+        slider(ui, &hue, &mut band.hue);
+        slider(ui, &sat, &mut band.saturation);
+        slider(ui, &lum, &mut band.luminance);
         develop.set_stage_params(HSL, &hsl);
     });
 
-    ui.collapsing("Crop & Straighten", |ui| {
+    fur::section(ui, "crop", "Crop & Straighten", false, |ui| {
         let mut crop: CropParams = develop.stage_params(CROP);
         ui.label(
             "Hold Ctrl and drag along something in the photo that should be level, or use the \
              rotate handle / freeform drag on the overlay.",
         );
-        ui.horizontal(|ui| {
-            ui.label("Rotation");
-            let mut rotation = crop.rotation_degrees;
-            let response = ui.add(egui::Slider::new(
-                &mut rotation,
-                -MAX_STRAIGHTEN_DEGREES..=MAX_STRAIGHTEN_DEGREES,
-            ));
-            if response.double_clicked() {
-                rotation = 0.0;
-            }
-            if response.changed() || response.double_clicked() {
-                crop.set_rotation(rotation);
-            }
-        });
+        let mut rotation = crop.rotation_degrees;
+        if slider(ui, &ROTATION, &mut rotation).changed {
+            crop.set_rotation(rotation);
+        }
         if ui.button("Auto-level").clicked() {
             let result = develop.apply_auto_straighten();
             let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
@@ -315,21 +353,21 @@ pub fn show(
         }
     });
 
-    ui.collapsing("Detail", |ui| {
+    fur::section(ui, "detail", "Detail", false, |ui| {
         let mut sharpen: SharpenParams = develop.stage_params(SHARPEN);
-        slider(ui, "Sharpen Amount", &mut sharpen.amount, 0.0..=1.5, 0.0);
-        slider(ui, "Sharpen Radius", &mut sharpen.radius_px, 0.5..=3.0, 1.0);
-        slider(ui, "Sharpen Detail", &mut sharpen.detail, 0.0..=1.0, 0.5);
+        slider(ui, &SHARPEN_AMOUNT, &mut sharpen.amount);
+        slider(ui, &SHARPEN_RADIUS, &mut sharpen.radius_px);
+        slider(ui, &SHARPEN_DETAIL, &mut sharpen.detail);
         develop.set_stage_params(SHARPEN, &sharpen);
 
         let mut nr: NoiseReductionParams = develop.stage_params(NOISE_REDUCTION);
-        slider(ui, "NR Luminance", &mut nr.luminance, 0.0..=1.0, 0.0);
-        slider(ui, "NR Color", &mut nr.color, 0.0..=1.0, 0.0);
-        slider(ui, "NR Detail", &mut nr.detail, 0.0..=1.0, 0.0);
+        slider(ui, &NR_LUMINANCE, &mut nr.luminance);
+        slider(ui, &NR_COLOR, &mut nr.color);
+        slider(ui, &NR_DETAIL, &mut nr.detail);
         develop.set_stage_params(NOISE_REDUCTION, &nr);
     });
 
-    ui.collapsing("Effects", |ui| {
+    fur::section(ui, "effects", "Effects", false, |ui| {
         let mut fx: EffectsParams = develop.stage_params(EFFECTS);
         ui.label("Post-crop vignette");
         ui.horizontal(|ui| {
@@ -358,28 +396,16 @@ pub fn show(
                     );
                 });
         });
-        slider(ui, "Amount", &mut fx.vignette_amount, -1.0..=1.0, 0.0);
-        slider(ui, "Midpoint", &mut fx.vignette_midpoint, 0.0..=1.0, 0.5);
-        slider(ui, "Roundness", &mut fx.vignette_roundness, -1.0..=1.0, 0.0);
-        slider(ui, "Feather", &mut fx.vignette_feather, 0.0..=1.0, 0.5);
-        slider(
-            ui,
-            "Highlights",
-            &mut fx.vignette_highlights,
-            0.0..=1.0,
-            0.0,
-        );
-        ui.separator();
+        slider(ui, &VIGNETTE_AMOUNT, &mut fx.vignette_amount);
+        slider(ui, &VIGNETTE_MIDPOINT, &mut fx.vignette_midpoint);
+        slider(ui, &VIGNETTE_ROUNDNESS, &mut fx.vignette_roundness);
+        slider(ui, &VIGNETTE_FEATHER, &mut fx.vignette_feather);
+        slider(ui, &VIGNETTE_HIGHLIGHTS, &mut fx.vignette_highlights);
+        fur::divider(ui);
         ui.label("Grain");
-        slider(ui, "Grain Amount", &mut fx.grain_amount, 0.0..=1.0, 0.0);
-        slider(ui, "Grain Size", &mut fx.grain_size, 0.0..=1.0, 0.25);
-        slider(
-            ui,
-            "Grain Roughness",
-            &mut fx.grain_roughness,
-            0.0..=1.0,
-            0.5,
-        );
+        slider(ui, &GRAIN_AMOUNT, &mut fx.grain_amount);
+        slider(ui, &GRAIN_SIZE, &mut fx.grain_size);
+        slider(ui, &GRAIN_ROUGHNESS, &mut fx.grain_roughness);
         develop.set_stage_params(EFFECTS, &fx);
     });
 

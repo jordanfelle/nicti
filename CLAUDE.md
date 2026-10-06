@@ -227,6 +227,7 @@ terse index: crate/spike → purpose → owning topic.
   **#52 (presets/copy/paste/sync, landed)**: `knead/` — see [`develop`](.claude/rules/develop/REFERENCE.md).
   **#145 (rendered previews, landed)**: `eyeshine.rs` (render job + display rule), `preview_settings.rs`, `export/render_core.rs` — see [`preview-tiers`](.claude/rules/preview-tiers/REFERENCE.md).
   **#354 (export masks, landed)**: `export/render_core.rs` `render_live_frame` + `nicti-tapetum`'s `MaskEngine::for_export`/`Renderer::render_live_from`; baked AI alphas via `ExportEnv.larder` — see `masking`.
+  **#425 (LightCraft look, landed)**: `fur/` -- app-wide theme + Inter fonts (`tokens.rs`, applied in `PeltApp::new`), the Lightroom-style `SliderSpec`/`slider` row (`slider.rs`; Develop panel only so far, mask/heal/export still stock `egui::Slider`), section/segmented/icon-button chrome (`widgets.rs`) and code-drawn `Icon`s (`icons.rs`); ported from LightCraft, provenance in `docs/licensing.md`.
   **#319 (managed previews, landed)**: `preview_color.rs` + `nicti_calico::source_transform` convert JPEG thumbnails/T0/T2 to the monitor profile — see [`color`](.claude/rules/color/REFERENCE.md).
 - **`spikes/pawprint`** (#21/ADR-0021) → [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`spikes/glint`** (#16/ADR-0016) → [`gpu-gui-and-healing`](.claude/rules/gpu-gui-and-healing/REFERENCE.md)
