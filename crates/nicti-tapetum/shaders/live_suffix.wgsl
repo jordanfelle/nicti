@@ -428,13 +428,6 @@ fn dcp_srgb_eotf(c: f32) -> f32 {
     return pow((v + 0.055) / 1.055, 2.4);
 }
 
-// One HueSatMap/LookTable (DNG SDK RefBaselineHueSatMap): hue and saturation come from the
-// *unencoded* linear RGB; only the value coordinate goes through the table's encoding (sRGB when
-// `srgb_value`), for both the lookup and the returned scale, then decoded back. Trilinear
-// filtering treats texel i's center as (i+0.5)/N, so coordinates are remapped (hue tiles: i/N;
-// sat/value span edge to edge: i/(N-1)). The hardware lerps the hue shift linearly rather than
-// along the shortest arc -- an accepted approximation (the CPU reference in nicti-calico differs
-// only across the 0/360 seam).
 fn profile_tone_eval(x: f32) -> f32 {
     let n = i32(textureDimensions(profile_tone_lut).x);
     let uu = sqrt(clamp(x, 0.0, 1.0)) * f32(n - 1);
@@ -445,30 +438,30 @@ fn profile_tone_eval(x: f32) -> f32 {
     return a * (1.0 - t) + b * t;
 }
 
-// Hue-preserving RGB tone (nicti_calico::tonecurve::ToneCurveLut::apply_rgb): the extreme
-// channels go through the curve, the middle one is interpolated between them.
+// Hue-preserving RGB tone (nicti_calico::tonecurve::ToneCurveLut::apply_rgb): the largest and
+// smallest channels go through the curve, the others are interpolated between them. Written with
+// no dynamic vector indexing: FXC (Windows DX12) rejects `v[i] = x` with a runtime `i`.
 fn profile_tone(rgb_in: vec3<f32>) -> vec3<f32> {
     let c = clamp(rgb_in, vec3<f32>(0.0), vec3<f32>(1.0));
-    var hi = 0;
-    var lo = 0;
-    for (var i = 1; i < 3; i = i + 1) {
-        if (c[i] > c[hi]) { hi = i; }
-        if (c[i] < c[lo]) { lo = i; }
-    }
-    if (hi == lo) {
+    let mx = max(c.x, max(c.y, c.z));
+    let mn = min(c.x, min(c.y, c.z));
+    if (mx == mn) {
         return vec3<f32>(profile_tone_eval(c.x));
     }
-    let mid = 3 - hi - lo;
-    let yh = profile_tone_eval(c[hi]);
-    let yl = profile_tone_eval(c[lo]);
-    let t = (c[mid] - c[lo]) / (c[hi] - c[lo]);
-    var out = vec3<f32>(0.0);
-    out[hi] = yh;
-    out[lo] = yl;
-    out[mid] = yl + (yh - yl) * t;
-    return out;
+    let yh = profile_tone_eval(mx);
+    let yl = profile_tone_eval(mn);
+    // The max channel gets t = 1 (yh), the min channel t = 0 (yl), ties included.
+    let t = (c - vec3<f32>(mn)) / (mx - mn);
+    return vec3<f32>(yl) + (yh - yl) * t;
 }
 
+// One HueSatMap/LookTable (DNG SDK RefBaselineHueSatMap): hue and saturation come from the
+// *unencoded* linear RGB; only the value coordinate goes through the table's encoding (sRGB when
+// `srgb_value`), for both the lookup and the returned scale, then decoded back. Trilinear
+// filtering treats texel i's center as (i+0.5)/N, so coordinates are remapped (hue tiles: i/N;
+// sat/value span edge to edge: i/(N-1)). The hardware lerps the hue shift linearly rather than
+// along the shortest arc -- an accepted approximation (the CPU reference in nicti-calico differs
+// only across the 0/360 seam).
 fn dcp_apply_table(rgb: vec3<f32>, tex: texture_3d<f32>, srgb_value: bool) -> vec3<f32> {
     let hsv = dcp_rgb_to_hsv(rgb);
     var v_enc = max(hsv.z, 0.0);
