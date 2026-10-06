@@ -31,6 +31,7 @@ use super::params::{LocalCorrection, MaskParams, MaskSource};
 use super::raster;
 use super::Field;
 use crate::cache::Tier;
+use crate::coat::PresenceParams;
 use crate::color::Mat3;
 use crate::frame::{Extent, FrameTexture};
 use crate::gpu::GpuContext;
@@ -210,6 +211,9 @@ pub struct MaskInputs<'a> {
     /// Camera -> working space, for range masks. Pass the *as-shot* matrix, not the live one, so a
     /// white-balance drag doesn't rebuild every range mask.
     pub range_matrix: Mat3,
+    /// The document's global Presence (#380): its clarity/texture/dehaze need the same cached bases
+    /// as a local correction does, even when no correction is active.
+    pub presence: PresenceParams,
 }
 
 /// A finished dehaze base: the refined transmission and the airlight it was built against.
@@ -332,11 +336,13 @@ impl MaskEngine {
     }
 
     /// Builds (or reuses) everything the live shader needs for `inputs`. `None` when no correction
-    /// is active -- the caller should then `set_masks(None)`, which costs the shader nothing.
+    /// is active *and* the global Presence needs no spatial base -- the caller should then
+    /// `set_masks(None)`, which costs the shader nothing. With no correction but a global
+    /// clarity/texture/dehaze, the frame carries an empty (1x1, zero-count) atlas plus the bases.
     pub fn prepare(&mut self, gpu: &GpuContext, inputs: &MaskInputs) -> Option<MaskFrame> {
         let params = inputs.params.sanitized();
         let active: Vec<&LocalCorrection> = params.active().collect();
-        if active.is_empty() {
+        if active.is_empty() && !inputs.presence.needs_bases() {
             return None;
         }
         let mask = mask_extent_capped(
@@ -352,9 +358,11 @@ impl MaskEngine {
             .iter()
             .map(|correction| self.composite_key(correction, &cx))
             .collect();
+        // No correction (a global-only render): a 1x1 placeholder, not a mask-sized empty array.
+        let atlas_extent = if active.is_empty() { (1, 1) } else { mask };
         let mut atlas_key = blake3::Hasher::new();
-        atlas_key.update(&mask.0.to_le_bytes());
-        atlas_key.update(&mask.1.to_le_bytes());
+        atlas_key.update(&atlas_extent.0.to_le_bytes());
+        atlas_key.update(&atlas_extent.1.to_le_bytes());
         for key in &keys {
             atlas_key.update(key.as_bytes());
         }
@@ -369,7 +377,7 @@ impl MaskEngine {
                     .map(|(correction, key)| self.composite(gpu, correction, &cx, *key))
                     .collect();
                 self.stats.packs += 1;
-                let atlas = Atlas::new(gpu, mask.0, mask.1, composites.len());
+                let atlas = Atlas::new(gpu, atlas_extent.0, atlas_extent.1, composites.len());
                 submit(gpu, |enc| {
                     for (layer, chunk) in composites.chunks(CHANNELS).enumerate() {
                         let slot = |i: usize| chunk.get(i).map(|t| t.as_ref());
@@ -390,10 +398,12 @@ impl MaskEngine {
         };
         // The spatial bases are built only when some active correction uses them, and depend only
         // on the guide frame -- never on a slider, an Amount or a mask edit.
-        let needs_bands = active
-            .iter()
-            .any(|c| c.adjust.clarity != 0.0 || c.adjust.texture != 0.0);
-        let needs_haze = active.iter().any(|c| c.adjust.dehaze != 0.0);
+        let needs_bands = inputs.presence.needs_bands()
+            || active
+                .iter()
+                .any(|c| c.adjust.clarity != 0.0 || c.adjust.texture != 0.0);
+        let needs_haze =
+            inputs.presence.needs_haze() || active.iter().any(|c| c.adjust.dehaze != 0.0);
         let mut bases = Bases::default();
         if needs_bands {
             bases.bands = Some(self.bands(gpu, &cx));
@@ -917,6 +927,14 @@ mod tests {
         }
 
         fn prepare(&mut self, corrections: Vec<LocalCorrection>) -> Option<MaskFrame> {
+            self.prepare_with_presence(corrections, PresenceParams::default())
+        }
+
+        fn prepare_with_presence(
+            &mut self,
+            corrections: Vec<LocalCorrection>,
+            presence: PresenceParams,
+        ) -> Option<MaskFrame> {
             let params = MaskParams { corrections };
             let inputs = MaskInputs {
                 params: &params,
@@ -925,6 +943,7 @@ mod tests {
                 guide: &self.guide,
                 guide_key: self.guide_key,
                 range_matrix: crate::color::mat3_identity(),
+                presence,
             };
             self.engine.prepare(&self.gpu, &inputs)
         }
@@ -1687,6 +1706,7 @@ mod tests {
                                 guide: &input,
                                 guide_key,
                                 range_matrix: crate::color::mat3_identity(),
+                                presence: PresenceParams::default(),
                             },
                         )
                         .expect("active corrections");
@@ -1731,6 +1751,7 @@ mod tests {
                             guide: &input,
                             guide_key,
                             range_matrix: crate::color::mat3_identity(),
+                            presence: PresenceParams::default(),
                         },
                     );
                 }),
@@ -1773,6 +1794,7 @@ mod tests {
                             guide: &input,
                             guide_key,
                             range_matrix: crate::color::mat3_identity(),
+                            presence: PresenceParams::default(),
                         },
                     );
                 }),
@@ -1815,6 +1837,7 @@ mod tests {
                             guide: &input,
                             guide_key,
                             range_matrix: crate::color::mat3_identity(),
+                            presence: PresenceParams::default(),
                         },
                     );
                 }),
@@ -1844,6 +1867,7 @@ mod tests {
                             guide: &input,
                             guide_key: blake3::hash(&n.to_le_bytes()),
                             range_matrix: crate::color::mat3_identity(),
+                            presence: PresenceParams::default(),
                         },
                     );
                 }),

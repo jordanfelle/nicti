@@ -17,7 +17,8 @@ use nicti_pawprint::EditDocument;
 
 use crate::coat::{
     self, CameraProfileParams, CropParams, ExposureParams, HealParams, HslParams,
-    NoiseReductionParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, WbParams,
 };
 use crate::color;
 use crate::frame::Extent;
@@ -25,7 +26,7 @@ use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
     self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EXPOSURE, HEAL, HSL, LENS, MASKS, NEUTRAL,
-    NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -33,13 +34,14 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 10] = [
+pub const LIVE_IDS: [&str; 11] = [
     WB,
     WORKING_SPACE,
     EXPOSURE,
     TONE,
     TONE_CURVE,
     VIBRANCE,
+    PRESENCE,
     HSL,
     SHARPEN,
     NOISE_REDUCTION,
@@ -113,6 +115,7 @@ render_stage_factory!(exposure_factory, stages::exposure_stage);
 render_stage_factory!(tone_factory, stages::tone_stage);
 render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
 render_stage_factory!(vibrance_factory, stages::vibrance_stage);
+render_stage_factory!(presence_factory, stages::presence_stage);
 render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(sharpen_factory, stages::sharpen_stage);
 render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
@@ -125,7 +128,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 17] = [
+    let entries: [StageFactoryEntry; 18] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -137,6 +140,7 @@ pub fn build_registry() -> StageRegistry {
         (TONE, tone_factory),
         (TONE_CURVE, tone_curve_factory),
         (VIBRANCE, vibrance_factory),
+        (PRESENCE, presence_factory),
         (HSL, hsl_factory),
         (SHARPEN, sharpen_factory),
         (NOISE_REDUCTION, noise_reduction_factory),
@@ -263,6 +267,7 @@ pub fn resolve_inputs(
     let tone: ToneParams = resolve(doc, TONE);
     let tone_curve: ToneCurveParams = resolve(doc, TONE_CURVE);
     let vibrance: VibranceParams = resolve(doc, VIBRANCE);
+    let presence: PresenceParams = resolve(doc, PRESENCE);
     let hsl: HslParams = resolve(doc, HSL);
     let sharpen: SharpenParams = resolve(doc, SHARPEN);
     let noise_reduction: NoiseReductionParams = resolve(doc, NOISE_REDUCTION);
@@ -275,6 +280,7 @@ pub fn resolve_inputs(
             tone,
             tone_curve,
             vibrance,
+            presence,
             hsl,
             sharpen,
             noise_reduction,

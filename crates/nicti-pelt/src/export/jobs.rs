@@ -1510,6 +1510,42 @@ mod tests {
         assert_eq!(got_b, base_b, "the previous photo's masks leaked");
     }
 
+    /// #380: a *global* clarity/dehaze needs the baked frame and its bases even though the photo
+    /// has no mask -- and must not leak into the next photo of the batch (same kernel, same slot).
+    #[test]
+    fn a_global_dehaze_is_applied_with_no_mask_and_never_leaks_into_the_next_photo() {
+        let (Some(base), Some(fx)) = (fixture(&["a.NEF", "b.NEF"]), fixture(&["a.NEF", "b.NEF"]))
+        else {
+            return;
+        };
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            nicti_tapetum::stages::PRESENCE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "dehaze": 1.0, "clarity": 0.8 }),
+            },
+        );
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let base_report = wait(&ExportRun::start(base.env(), &base.ids, base.spec()).unwrap());
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(base_report.exported.len(), 2, "{base_report:?}");
+        assert_eq!(report.exported.len(), 2, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+        let base_a = png(&base.out.path().join("01_a.png"));
+        let base_b = png(&base.out.path().join("02_b.png"));
+        assert_ne!(
+            png(&fx.out.path().join("01_a.png")),
+            base_a,
+            "the global dehaze/clarity must change the photo"
+        );
+        assert_eq!(
+            png(&fx.out.path().join("02_b.png")),
+            base_b,
+            "the previous photo's bases leaked"
+        );
+    }
+
     #[test]
     fn a_stored_ai_mask_is_applied_and_one_never_baked_is_left_out_with_a_warning() {
         use nicti_tapetum::coat::MaskRecipe;

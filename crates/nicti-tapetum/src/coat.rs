@@ -88,6 +88,41 @@ pub struct VibranceParams {
     pub amount: f32,
 }
 
+/// The Basic panel's Presence group beyond Vibrance (#380): global Texture, Clarity, Dehaze and
+/// Saturation, each PV2012 range -100.0..=100.0 (normalized to -1.0..=1.0 here). 0.0 on every
+/// field is a no-op. They share the per-mask adjustments' kernels and are *summed with* any local
+/// delta (`LocalAdjust`'s same-named fields), so a global +0.3 and a local +0.2 act as +0.5 there.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresenceParams {
+    pub texture: f32,
+    pub clarity: f32,
+    pub dehaze: f32,
+    pub saturation: f32,
+}
+
+impl PresenceParams {
+    pub fn is_noop(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether the clarity/texture band bases (`mask::bases`) are needed to render this.
+    pub fn needs_bands(&self) -> bool {
+        self.clarity != 0.0 || self.texture != 0.0
+    }
+
+    /// Whether the dehaze transmission/airlight base is needed to render this.
+    pub fn needs_haze(&self) -> bool {
+        self.dehaze != 0.0
+    }
+
+    /// Whether any spatial base is needed -- i.e. whether a render must bake first and build bases
+    /// even with no active local correction.
+    pub fn needs_bases(&self) -> bool {
+        self.needs_bands() || self.needs_haze()
+    }
+}
+
 /// Tone Curve panel, parametric mode only (LRC's alternate freeform point-curve mode is not
 /// modeled -- a documented v1 simplification). Each field is one of the four region sliders
 /// (PV2012 `ToneCurvePV2012` range -100.0..=100.0, normalized to -1.0..=1.0 here), moving the
@@ -407,6 +442,28 @@ mod tests {
     fn parse_ignores_unrecognized_fields() {
         let parsed: VibranceParams = parse(&serde_json::json!({"amount": 0.4, "future_field": 1}));
         assert_eq!(parsed, VibranceParams { amount: 0.4 });
+    }
+
+    #[test]
+    fn presence_params_default_is_noop_and_needs_no_bases() {
+        let p = PresenceParams::default();
+        assert!(p.is_noop() && !p.needs_bases());
+        // Saturation is per-pixel: it never needs a spatial base.
+        let sat = PresenceParams {
+            saturation: 0.5,
+            ..Default::default()
+        };
+        assert!(!sat.is_noop() && !sat.needs_bases());
+        let clarity = PresenceParams {
+            clarity: 0.1,
+            ..Default::default()
+        };
+        assert!(clarity.needs_bands() && !clarity.needs_haze());
+        let dehaze = PresenceParams {
+            dehaze: -0.1,
+            ..Default::default()
+        };
+        assert!(dehaze.needs_haze() && !dehaze.needs_bands());
     }
 
     #[test]

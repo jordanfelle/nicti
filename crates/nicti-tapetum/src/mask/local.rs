@@ -19,7 +19,7 @@
 //! reduction are per-pixel deltas into `detail_combine`.
 
 use super::params::{LocalCorrection, MaskParams, TintColor};
-use crate::coat::{HslParams, ToneParams};
+use crate::coat::{HslParams, PresenceParams, ToneParams};
 use crate::color::{self, Mat3};
 
 /// `temp` of +1 scales red by `2^TEMP_STOPS` and blue by `2^-TEMP_STOPS` (warmer).
@@ -297,6 +297,8 @@ pub struct PixelParams<'a> {
     pub tone: ToneParams,
     pub lut: &'a [f32; 256],
     pub vibrance: f32,
+    /// Global Presence (#380): summed with the local clarity/texture/dehaze/saturation deltas.
+    pub presence: PresenceParams,
     pub hsl: &'a HslParams,
 }
 
@@ -327,21 +329,27 @@ pub fn live_pixel(
     if let Some(sp) = spatial {
         // The airlight goes through the same matrix and exposure as the pixels it is subtracted from.
         let a = color::mat3_apply(p.matrix, sp.airlight_cam).map(|c| c * exposure);
-        rgb = apply_dehaze(rgb, sp.transmission, a, s.dehaze);
+        rgb = apply_dehaze(rgb, sp.transmission, a, s.dehaze + p.presence.dehaze);
     }
     let gains = temp_tint_gains(s.temp, s.tint);
     rgb = std::array::from_fn(|i| rgb[i] * gains[i]);
     rgb = color::apply_tone(rgb, &effective_tone(&p.tone, s));
     rgb = color::apply_tone_curve(rgb, p.lut);
     if let Some(sp) = spatial {
-        rgb = apply_bands(rgb, sp, s.clarity, s.texture);
+        rgb = apply_bands(
+            rgb,
+            sp,
+            s.clarity + p.presence.clarity,
+            s.texture + p.presence.texture,
+        );
     }
     rgb = color::apply_vibrance(rgb, p.vibrance);
     rgb = color::apply_hsl(rgb, p.hsl);
     // Each is skipped when its stacked delta is exactly zero (mirroring the shader), so a mask that
     // selects nothing leaves the pixel bit-identical.
-    if s.saturation != 0.0 {
-        rgb = saturate(rgb, s.saturation);
+    let saturation = s.saturation + p.presence.saturation;
+    if saturation != 0.0 {
+        rgb = saturate(rgb, saturation);
     }
     if s.hue != 0.0 {
         rgb = rotate_hue(rgb, s.hue * HUE_DEGREES);
@@ -382,6 +390,7 @@ mod tests {
             tone: ToneParams::default(),
             lut,
             vibrance: 0.0,
+            presence: PresenceParams::default(),
             hsl,
         }
     }
@@ -720,6 +729,7 @@ mod gpu_tests {
         exposure: f32,
         tone: ToneParams,
         vibrance: f32,
+        presence: PresenceParams,
     }
 
     /// Renders `setup` through the real `LiveSuffixKernel` and returns GPU pixels.
@@ -743,6 +753,7 @@ mod gpu_tests {
                 vibrance: VibranceParams {
                     amount: setup.vibrance,
                 },
+                presence: setup.presence,
                 hsl: HslParams::default(),
                 sharpen: SharpenParams::default(),
                 noise_reduction: NoiseReductionParams::default(),
@@ -803,6 +814,7 @@ mod gpu_tests {
             tone: setup.tone,
             lut: &lut,
             vibrance: setup.vibrance,
+            presence: setup.presence,
             hsl: &hsl,
         };
         let uniforms = pack_active(&MaskParams {
@@ -833,6 +845,7 @@ mod gpu_tests {
                 blacks: -0.05,
             },
             vibrance: 0.1,
+            presence: PresenceParams::default(),
         }
     }
 
@@ -1062,6 +1075,41 @@ mod spatial_tests {
         sharpen: SharpenParams,
         noise_reduction: NoiseReductionParams,
     ) -> (Vec<[f32; 4]>, Option<MaskFrame>) {
+        render_full(
+            gpu,
+            frame,
+            corrections,
+            sharpen,
+            noise_reduction,
+            PresenceParams::default(),
+        )
+    }
+
+    /// As [`render`], with explicit *global* Presence values (#380).
+    fn render_presence(
+        gpu: &Arc<GpuContext>,
+        frame: &[[f32; 4]],
+        corrections: Vec<LocalCorrection>,
+        presence: PresenceParams,
+    ) -> (Vec<[f32; 4]>, Option<MaskFrame>) {
+        render_full(
+            gpu,
+            frame,
+            corrections,
+            SharpenParams::default(),
+            NoiseReductionParams::default(),
+            presence,
+        )
+    }
+
+    fn render_full(
+        gpu: &Arc<GpuContext>,
+        frame: &[[f32; 4]],
+        corrections: Vec<LocalCorrection>,
+        sharpen: SharpenParams,
+        noise_reduction: NoiseReductionParams,
+        presence: PresenceParams,
+    ) -> (Vec<[f32; 4]>, Option<MaskFrame>) {
         let extent = Extent {
             width: W as u32,
             height: H as u32,
@@ -1077,6 +1125,7 @@ mod spatial_tests {
                 tone: ToneParams::default(),
                 tone_curve: ToneCurveParams::default(),
                 vibrance: VibranceParams::default(),
+                presence,
                 hsl: HslParams::default(),
                 sharpen,
                 noise_reduction,
@@ -1100,6 +1149,7 @@ mod spatial_tests {
                 guide: &input,
                 guide_key: blake3::hash(b"g"),
                 range_matrix: color::mat3_identity(),
+                presence,
             },
         );
         kernel.set_masks(gpu, mask_frame.as_ref());
@@ -1391,14 +1441,11 @@ mod spatial_tests {
         );
     }
 
-    /// The application step on the GPU must equal the CPU twin given the same bases: this pins the
-    /// shader's band/dehaze maths (indexing, sampling, order in the pipeline) independently of the
-    /// outcome tests above.
-    #[test]
-    fn the_gpu_spatial_application_matches_the_cpu_twin() {
-        let Some(gpu) = shared_test_gpu() else { return };
+    /// A hazy scene with a speckled texture: every spatial base (bands, transmission, airlight) has
+    /// something to chew on.
+    fn hazy_textured_scene() -> Vec<[f32; 4]> {
         let a = [0.8f32, 0.82, 0.88];
-        let scene: Vec<[f32; 4]> = blob_scene()
+        blob_scene()
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -1411,7 +1458,16 @@ mod spatial_tests {
                     1.0,
                 ]
             })
-            .collect();
+            .collect()
+    }
+
+    /// The application step on the GPU must equal the CPU twin given the same bases: this pins the
+    /// shader's band/dehaze maths (indexing, sampling, order in the pipeline) independently of the
+    /// outcome tests above.
+    #[test]
+    fn the_gpu_spatial_application_matches_the_cpu_twin() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = hazy_textured_scene();
         let adjust = LocalAdjust {
             clarity: 0.7,
             texture: 0.5,
@@ -1434,6 +1490,7 @@ mod spatial_tests {
             tone: ToneParams::default(),
             lut: &lut,
             vibrance: 0.0,
+            presence: PresenceParams::default(),
             hsl: &hsl,
         };
         let uniforms = pack_active(&MaskParams {
@@ -1458,6 +1515,139 @@ mod spatial_tests {
             worst < 0.05,
             "GPU vs CPU spatial application differ by {worst}"
         );
+    }
+
+    /// #380: a global clarity/texture/dehaze/saturation with *no mask at all* still gets its bases
+    /// built and matches the CPU twin.
+    #[test]
+    fn global_presence_without_any_mask_matches_the_cpu_twin() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = hazy_textured_scene();
+        let presence = PresenceParams {
+            texture: 0.5,
+            clarity: 0.7,
+            dehaze: 0.6,
+            saturation: 0.3,
+        };
+        let (got, frame) = render_presence(&gpu, &scene, vec![], presence);
+        let frame = frame.expect("a global spatial adjustment builds the bases with no mask");
+        assert!(frame.uniforms.is_empty());
+        assert!(frame.bases.bands.is_some() && frame.bases.haze.is_some());
+
+        let g = guided::guide_from_frame(&scene, W, H, W, H);
+        let (fine, mid) = bases::bands_cpu(&g);
+        let airlight = frame.bases.airlight;
+        let trans = bases::transmission_cpu(&scene, W, H, airlight, &g);
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        let p = PixelParams {
+            matrix: color::mat3_identity(),
+            exposure_mult: 1.0,
+            tone: ToneParams::default(),
+            lut: &lut,
+            vibrance: 0.0,
+            presence,
+            hsl: &hsl,
+        };
+        let mut worst = 0.0f32;
+        for (i, px) in scene.iter().enumerate() {
+            let sp = SpatialPixel {
+                d_tex: fine.data[i],
+                d_clar: mid.data[i],
+                g: g.data[i],
+                transmission: trans.data[i],
+                airlight_cam: airlight,
+            };
+            let want = live_pixel([px[0], px[1], px[2]], &p, &LocalSums::default(), Some(&sp));
+            for c in 0..3 {
+                worst = worst.max((got[i][c] - want[c]).abs());
+            }
+        }
+        assert!(
+            worst < 0.05,
+            "global presence: GPU vs CPU differ by {worst}"
+        );
+    }
+
+    /// #380: global and local deltas are *summed*, so +0.3 global with +0.4 local equals +0.7 local.
+    #[test]
+    fn a_global_presence_delta_sums_with_a_local_one() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = hazy_textured_scene();
+        let local = |clarity: f32, texture: f32, dehaze: f32, saturation: f32| {
+            vec![everywhere(LocalAdjust {
+                clarity,
+                texture,
+                dehaze,
+                saturation,
+                ..LocalAdjust::default()
+            })]
+        };
+        let (summed, _) = render_presence(
+            &gpu,
+            &scene,
+            local(0.4, 0.2, 0.3, 0.1),
+            PresenceParams {
+                clarity: 0.3,
+                texture: 0.2,
+                dehaze: 0.3,
+                saturation: 0.2,
+            },
+        );
+        let (local_only, _) = render_presence(
+            &gpu,
+            &scene,
+            local(0.7, 0.4, 0.6, 0.3),
+            PresenceParams::default(),
+        );
+        let worst = summed
+            .iter()
+            .zip(&local_only)
+            .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 2e-3,
+            "global + local must equal the summed local: {worst}"
+        );
+    }
+
+    /// #380: a global saturation is per-pixel, so it builds no bases and no mask frame at all.
+    #[test]
+    fn global_saturation_alone_needs_no_mask_frame() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let scene = blob_scene();
+        let presence = PresenceParams {
+            saturation: -0.6,
+            ..Default::default()
+        };
+        let (got, frame) = render_presence(&gpu, &scene, vec![], presence);
+        assert!(frame.is_none());
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        let p = PixelParams {
+            matrix: color::mat3_identity(),
+            exposure_mult: 1.0,
+            tone: ToneParams::default(),
+            lut: &lut,
+            vibrance: 0.0,
+            presence,
+            hsl: &hsl,
+        };
+        for (g, px) in got.iter().zip(&scene) {
+            let want = live_pixel([px[0], px[1], px[2]], &p, &LocalSums::default(), None);
+            assert!(
+                (0..3).all(|c| (g[c] - want[c]).abs() < 0.02),
+                "{g:?} vs {want:?}"
+            );
+        }
+        // And it really desaturates (not a vacuous pass).
+        let (base, _) = render(&gpu, &scene, vec![]);
+        let chroma = |px: &[[f32; 4]]| -> f32 {
+            px.iter()
+                .map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]))
+                .sum::<f32>()
+        };
+        assert!(chroma(&got) < chroma(&base) * 0.6);
     }
 
     #[test]
@@ -1662,6 +1852,7 @@ mod spatial_tests {
             tone: ToneParams::default(),
             lut: &lut,
             vibrance: 0.0,
+            presence: PresenceParams::default(),
             hsl: &hsl,
         };
         let mut worst = 0.0f32;

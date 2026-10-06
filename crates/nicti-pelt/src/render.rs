@@ -402,45 +402,47 @@ impl DevelopView {
             extent: self.extent,
         };
 
-        // Local corrections (#49). The engine needs the *baked* frame (AI refines and range masks
+        // Local corrections (#49) and global Presence (#380). The engine needs the *baked* frame (AI refines and range masks
         // follow it), which only exists once the baked chain has run and been submitted -- so bake
         // first, prepare the masks from it, bind them, and let the render below find every baked
         // stage already cached. With no active correction none of this costs anything.
         let mask_params: MaskParams = spine::resolve(doc, MASKS);
-        let mask_frame = if mask_params.active().next().is_some() {
-            let baked = self
-                .renderer
-                .render_baked(&req)
-                .expect("the synthetic frame's own graph/extent are always internally consistent");
-            let neutral_key = self
-                .graph
-                .cache_key(NEUTRAL)
-                .expect("build_graph always adds NEUTRAL");
-            let guide_key = self
-                .graph
-                .cache_key(HEAL)
-                .expect("build_graph always adds HEAL");
-            // Range masks measure the frame as shot: the as-shot matrix (no user white balance),
-            // so a white-balance drag doesn't rebuild every range mask.
-            let range_matrix = nicti_tapetum::color::camera_to_working_space_matrix(
-                self.frame.cam_mul,
-                &self.frame.cam_xyz,
-                &nicti_tapetum::coat::WbParams::default(),
-            );
-            self.mask_engine.prepare(
-                &self.gpu,
-                &MaskInputs {
-                    params: &mask_params,
-                    ai_alphas: &self.ai_alphas,
-                    neutral_key,
-                    guide: &baked,
-                    guide_key,
-                    range_matrix,
-                },
-            )
-        } else {
-            None
-        };
+        // A global clarity/texture/dehaze (#380) needs the same baked frame and bases with no mask.
+        let mask_frame =
+            if mask_params.active().next().is_some() || inputs.live.presence.needs_bases() {
+                let baked = self.renderer.render_baked(&req).expect(
+                    "the synthetic frame's own graph/extent are always internally consistent",
+                );
+                let neutral_key = self
+                    .graph
+                    .cache_key(NEUTRAL)
+                    .expect("build_graph always adds NEUTRAL");
+                let guide_key = self
+                    .graph
+                    .cache_key(HEAL)
+                    .expect("build_graph always adds HEAL");
+                // Range masks measure the frame as shot: the as-shot matrix (no user white balance),
+                // so a white-balance drag doesn't rebuild every range mask.
+                let range_matrix = nicti_tapetum::color::camera_to_working_space_matrix(
+                    self.frame.cam_mul,
+                    &self.frame.cam_xyz,
+                    &nicti_tapetum::coat::WbParams::default(),
+                );
+                self.mask_engine.prepare(
+                    &self.gpu,
+                    &MaskInputs {
+                        params: &mask_params,
+                        ai_alphas: &self.ai_alphas,
+                        neutral_key,
+                        guide: &baked,
+                        guide_key,
+                        range_matrix,
+                        presence: inputs.live.presence,
+                    },
+                )
+            } else {
+                None
+            };
         self.live_kernel.set_masks(&self.gpu, mask_frame.as_ref());
 
         self.renderer

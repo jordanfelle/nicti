@@ -34,6 +34,9 @@ struct Uniforms {
     // #321: x = Look .xmp table enabled, y = Look table uses sRGB value encoding, z = profile tone
     // curve enabled, w unused.
     profile2: vec4<f32>,
+    // #380 global Presence: x = texture, y = clarity, z = dehaze, w = saturation. Each is summed
+    // with the stacked local delta of the same name (a global +0.3 and a local +0.2 act as +0.5).
+    presence: vec4<f32>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -497,11 +500,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     locals.saturation = 0.0; locals.hue = 0.0; locals.tint_mult = vec3<f32>(0.0);
     locals.noise = 0.0; locals.sharpness = 0.0; locals.clarity = 0.0; locals.texture_amt = 0.0;
     locals.dehaze = 0.0;
-    var uv = vec2<f32>(0.0);
+    // The bases (and so `uv`) are also needed for a global clarity/texture/dehaze with no mask at
+    // all: the header's bands/haze flags say whether the caller bound them.
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
     if (has_locals) {
-        uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
         locals = accumulate_locals(uv);
     }
+    let dehaze_total = locals.dehaze + u.presence.z;
+    let clarity_total = locals.clarity + u.presence.y;
+    let texture_total = locals.texture_amt + u.presence.x;
+    let saturation_total = locals.saturation + u.presence.w;
 
     // DCP camera profile (ADR-0038 order): HueSatMap -> baseline exposure -> LookTable.
     if (u.profile0.x > 0.5) {
@@ -526,7 +534,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // Local dehaze: scene-linear, before white balance / tone. The airlight goes through the same
     // matrix and exposure as the pixels it is subtracted from.
-    if (has_locals && mu.header.z > 0.5 && locals.dehaze != 0.0) {
+    if (mu.header.z > 0.5 && dehaze_total != 0.0) {
         // The transmission lives at the bases extent (<= 2048 px long edge) but the live pass runs
         // at the frame extent, and the guided refine makes `t` change sharply at edges, so a
         // nearest-texel load would step by one bases texel. R32Float isn't filterable: 4 taps by
@@ -544,7 +552,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let t01 = textureLoad(haze_tex, vec2<i32>(h0.x, h1.y), 0).r;
         let t11 = textureLoad(haze_tex, h1, 0).r;
         let t = mix(mix(t00, t10, hr.x), mix(t01, t11, hr.x), hr.y);
-        rgb = apply_dehaze(rgb, t, (m * mu.airlight.xyz) * exposure, locals.dehaze);
+        rgb = apply_dehaze(rgb, t, (m * mu.airlight.xyz) * exposure, dehaze_total);
     }
     var contrast = u.tone0.y;
     var highlights = u.tone0.z;
@@ -566,18 +574,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     rgb = apply_tone(rgb, contrast, highlights, shadows, whites, blacks);
     rgb = apply_tone_curve(rgb);
-    if (has_locals && mu.header.y > 0.5 && (locals.clarity != 0.0 || locals.texture_amt != 0.0)) {
+    if (mu.header.y > 0.5 && (clarity_total != 0.0 || texture_total != 0.0)) {
         let bands = textureSampleLevel(bases_tex, mask_sampler, uv, 0.0);
-        rgb = apply_bands(rgb, bands, locals.clarity, locals.texture_amt);
+        rgb = apply_bands(rgb, bands, clarity_total, texture_total);
     }
     rgb = apply_vibrance(rgb, u.tone1.z);
     rgb = apply_hsl(rgb);
+    // Skipped when the stacked delta is exactly zero, so a mask that selects nothing (or has no
+    // such adjustment) leaves the pixel bit-identical, not merely close.
+    if (saturation_total != 0.0) {
+        rgb = saturate_chroma(rgb, saturation_total);
+    }
     if (has_locals) {
-        // Each is skipped when its stacked delta is exactly zero, so a mask that selects nothing
-        // (or has no such adjustment) leaves the pixel bit-identical, not merely close.
-        if (locals.saturation != 0.0) {
-            rgb = saturate_chroma(rgb, locals.saturation);
-        }
         if (locals.hue != 0.0) {
             rgb = rotate_hue(rgb, locals.hue * HUE_DEGREES);
         }

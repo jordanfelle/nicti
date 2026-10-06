@@ -24,8 +24,8 @@ use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
 use crate::coat::{
-    self, CropParams, ExposureParams, HslParams, NoiseReductionParams, SharpenParams,
-    ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CropParams, ExposureParams, HslParams, NoiseReductionParams, PresenceParams,
+    SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use crate::color;
 use crate::detail::{self, MAX_BLUR_RADIUS};
@@ -47,6 +47,8 @@ pub const WORKING_SPACE: &str = "nicti.working_space";
 pub const TONE: &str = "nicti.tone";
 pub const TONE_CURVE: &str = "nicti.tone_curve";
 pub const VIBRANCE: &str = "nicti.vibrance";
+/// Global Texture/Clarity/Dehaze/Saturation (#380); summed with the per-mask deltas in the shader.
+pub const PRESENCE: &str = "nicti.presence";
 pub const HSL: &str = "nicti.hsl";
 pub const SHARPEN: &str = "nicti.sharpen";
 pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
@@ -179,6 +181,13 @@ pub fn vibrance_stage() -> BasicStage {
         id: VIBRANCE,
         kind: StageKind::Live,
         default_params: || coat::default_value::<VibranceParams>(),
+    }
+}
+pub fn presence_stage() -> BasicStage {
+    BasicStage {
+        id: PRESENCE,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<PresenceParams>(),
     }
 }
 pub fn hsl_stage() -> BasicStage {
@@ -462,6 +471,8 @@ struct LiveUniforms {
     profile1: [f32; 4],
     /// #321: Look `.xmp` table enabled, its sRGB value encoding, profile tone curve enabled, unused.
     profile2: [f32; 4],
+    /// #380: global Presence -- texture, clarity, dehaze, saturation.
+    presence: [f32; 4],
 }
 
 #[repr(C)]
@@ -493,6 +504,10 @@ pub struct LiveParams {
     pub tone: ToneParams,
     pub tone_curve: ToneCurveParams,
     pub vibrance: VibranceParams,
+    /// Global Texture/Clarity/Dehaze/Saturation (#380). When [`PresenceParams::needs_bases`], the
+    /// caller must also bind a `MaskFrame` carrying the matching spatial bases (`MaskEngine::prepare`
+    /// with this value) or the spatial part is skipped.
+    pub presence: PresenceParams,
     pub hsl: HslParams,
     pub sharpen: SharpenParams,
     pub noise_reduction: NoiseReductionParams,
@@ -516,6 +531,7 @@ impl Default for LiveParams {
             tone: ToneParams::default(),
             tone_curve: ToneCurveParams::default(),
             vibrance: VibranceParams::default(),
+            presence: PresenceParams::default(),
             hsl: HslParams::default(),
             sharpen: SharpenParams::default(),
             noise_reduction: NoiseReductionParams::default(),
@@ -901,6 +917,12 @@ impl LiveSuffixKernel {
             profile0: [0.0; 4],
             profile1: [1.0, 0.0, 0.0, 0.0],
             profile2: [0.0; 4],
+            presence: [
+                params.presence.texture,
+                params.presence.clarity,
+                params.presence.dehaze,
+                params.presence.saturation,
+            ],
         };
         let mut u = u;
         {
@@ -1426,6 +1448,7 @@ mod tests {
             TONE,
             TONE_CURVE,
             VIBRANCE,
+            PRESENCE,
             HSL,
             SHARPEN,
             NOISE_REDUCTION,
@@ -1452,6 +1475,7 @@ mod tests {
         assert_eq!(tone_stage().kind(), StageKind::Live);
         assert_eq!(tone_curve_stage().kind(), StageKind::Live);
         assert_eq!(vibrance_stage().kind(), StageKind::Live);
+        assert_eq!(presence_stage().kind(), StageKind::Live);
         assert_eq!(hsl_stage().kind(), StageKind::Live);
         assert_eq!(sharpen_stage().kind(), StageKind::Live);
         assert_eq!(noise_reduction_stage().kind(), StageKind::Live);
@@ -2232,6 +2256,7 @@ mod tests {
                 tone,
                 tone_curve,
                 vibrance,
+                presence: PresenceParams::default(),
                 hsl,
                 sharpen,
                 noise_reduction,

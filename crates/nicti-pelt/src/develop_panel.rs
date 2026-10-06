@@ -5,13 +5,14 @@
 //! (once #31 lands persistence) will read too.
 
 use nicti_tapetum::coat::{
-    CropParams, ExposureParams, HslBand, HslParams, NoiseReductionParams, SharpenParams,
-    ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    CropParams, ExposureParams, HslBand, HslParams, NoiseReductionParams, PresenceParams,
+    SharpenParams, ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    CROP, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    CROP, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE,
+    VIBRANCE, WB,
 };
 
 use crate::heal_tool::{self, HealUi};
@@ -221,9 +222,16 @@ pub fn show(
         slider(ui, "Blacks", &mut tone.blacks, -1.0..=1.0, 0.0);
         develop.set_stage_params(TONE, &tone);
 
+        // Presence (#380): Texture/Clarity/Dehaze/Saturation are one stage; Vibrance stays its own.
+        let mut presence: PresenceParams = develop.stage_params(PRESENCE);
+        slider(ui, "Texture", &mut presence.texture, -1.0..=1.0, 0.0);
+        slider(ui, "Clarity", &mut presence.clarity, -1.0..=1.0, 0.0);
+        slider(ui, "Dehaze", &mut presence.dehaze, -1.0..=1.0, 0.0);
         let mut vibrance: VibranceParams = develop.stage_params(VIBRANCE);
         slider(ui, "Vibrance", &mut vibrance.amount, -1.0..=1.0, 0.0);
         develop.set_stage_params(VIBRANCE, &vibrance);
+        slider(ui, "Saturation", &mut presence.saturation, -1.0..=1.0, 0.0);
+        develop.set_stage_params(PRESENCE, &presence);
     });
 
     ui.collapsing("Tone Curve", |ui| {
@@ -336,6 +344,7 @@ pub fn show(
             TONE,
             TONE_CURVE,
             VIBRANCE,
+            PRESENCE,
             HSL,
             SHARPEN,
             NOISE_REDUCTION,
