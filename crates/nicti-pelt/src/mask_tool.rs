@@ -354,6 +354,11 @@ impl MaskBakeService {
     /// not agreed to. Returns how many jobs it submitted.
     pub fn request_missing(&mut self, pounce: &Pounce, develop: &DevelopView) -> usize {
         self.flush_stores(pounce);
+        // "Before" renders the default document, so its neutral key is not the one the pre-bake and
+        // the stored alphas use; asking now would fetch and bake under a key nothing else wants.
+        if develop.show_before {
+            return 0;
+        }
         let image_key = develop.frame_key();
         let mut submitted = 0;
         for request in develop.mask_bake_requests() {
@@ -422,6 +427,9 @@ impl MaskBakeService {
     /// a failure is remembered and returned; a result for a photo the user has left is dropped.
     pub fn poll(&mut self, develop: &mut DevelopView) -> Vec<MaskEvent> {
         let open = develop.frame_key();
+        // A recorded miss only means "bake instead" for the photo it was made on; coming back later
+        // must look again, since the pre-bake may have stored it meanwhile.
+        self.fetched.retain(|(photo, _)| *photo == open);
         let mut events = Vec::new();
         let mut fetched_back = Vec::new();
         self.fetching

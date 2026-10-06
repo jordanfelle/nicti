@@ -63,15 +63,20 @@ photo can carry several AI masks (subject, sky, ...), each with its own bake key
    without pixels, via `spine::neutral_key` (a test pins it to `DevelopView::neutral_key`) and drops
    the ones already on disk; `DecodeJob` (CPU) decodes the RAW and submits one `MaskBakeJob` per
    recipe at **Background** priority (`MaskBakeJob::with_priority`; `new` stays Foreground), so a
-   mask the user is waiting on always goes first and a slider drag pauses them (`IS_EDITING`);
+   queued foreground mask is taken ahead of them and a slider drag pauses them (`IS_EDITING`); a
+   bake already running finishes first (one GPU worker, one non-interruptible chunk). A Background
+   bake declares 0 VRAM: Pounce drops a Background job whose declaration exceeds the lane's whole
+   budget, which the GPU pack's 8 GiB would do against today's 512 MiB placeholder;
    an `AlphaStoreJob` per alpha, with a finished flag, so the photo's keys stay "in flight" until
    its alphas are actually on disk.
 7. **No download, no duplicate work.** A recipe whose model is not installed is skipped: the
    pre-bake never downloads one (ADR-0218). While a photo's bakes are in flight their keys are
    announced to `MaskBakeService` (`set_deferred_keys`), which neither fetches nor bakes them
    (they show as pending) and finds them on disk afterwards; a queued photo the user opens first
-   is simply not pre-baked. Cancelling any of its jobs from the activity panel stops the whole
-   pre-bake (a corrupt file only skips its own photo).
+   is simply not pre-baked, and one the user opens mid-chain is handed back to the foreground
+   (the pre-bake abandons it so nothing waits behind Background work). Cancelling a decode or a
+   bake from the activity panel stops the whole pre-bake; cancelling a plan or a store only
+   skips that step (a corrupt file likewise only skips its own photo).
 
 ## Consequences / limits
 
@@ -82,6 +87,10 @@ photo can carry several AI masks (subject, sky, ...), each with its own bake key
 - The pre-bake plans a photo against its document at the time it is reached, so a photo edited
   while queued is planned against the new document, and one edited mid-chain stores the alphas for
   the old keys (harmless: unused keys age out).
+- Two catalog assets with the same fingerprint share bake keys; the one keyed row belongs to the
+  asset that stored it, so `purge_asset` of that asset drops it for both (a re-bake, nothing worse).
+- While Develop's "show before" is held the mask tool neither fetches nor bakes (that render keys
+  the neutral frame from the default document).
 - A bake that finishes for a photo the user has just left is stored by a Background job; if the
   user returns before that job runs, the lookup can miss and bake again. Narrow, and only costs the
   work the old behaviour always did.

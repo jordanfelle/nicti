@@ -140,7 +140,9 @@ impl AiAlpha {
             return None;
         }
         let len = width.checked_mul(height)?;
-        let mut plane = Vec::with_capacity(len);
+        // Deflate cannot beat ~1032:1, so a header claiming more than the data could hold must not
+        // reserve it up front (a checksum-valid entry from another build is still untrusted).
+        let mut plane = Vec::with_capacity(len.min(rest.len().saturating_mul(1100)));
         // One byte past the expected length, so trailing data is caught rather than ignored.
         flate2::read::ZlibDecoder::new(rest)
             .take(len as u64 + 1)
@@ -155,8 +157,9 @@ impl AiAlpha {
 }
 
 const ALPHA_MAGIC: &[u8; 4] = b"NAL1";
-/// A stored alpha is at most a model output (1024 px today); anything past this is corrupt.
-const ALPHA_MAX_EDGE: usize = 16_384;
+/// A stored alpha is at most a model output (1024 px today) and the mask extent is capped at 4096
+/// (`MAX_MASK_LONG_EDGE`); anything past this is corrupt.
+const ALPHA_MAX_EDGE: usize = 4096;
 
 /// `v` in 0..=1 as 0..=255, rounded; NaN/inf and out-of-range collapse as in [`AiAlpha::new`].
 fn quantize_unit(v: f32) -> u8 {
@@ -1844,7 +1847,13 @@ mod tests {
         wrong_extent[4..8].copy_from_slice(&9u32.to_le_bytes());
         assert!(AiAlpha::decode(&wrong_extent).is_none());
         // Zero and absurd extents never allocate.
-        for (w, h) in [(0u32, 8u32), (8, 0), (u32::MAX, u32::MAX), (100_000, 1)] {
+        for (w, h) in [
+            (0u32, 8u32),
+            (8, 0),
+            (u32::MAX, u32::MAX),
+            (100_000, 1),
+            (4097, 1),
+        ] {
             let mut hdr = good.clone();
             hdr[4..8].copy_from_slice(&w.to_le_bytes());
             hdr[8..12].copy_from_slice(&h.to_le_bytes());

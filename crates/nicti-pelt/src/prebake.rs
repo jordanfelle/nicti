@@ -301,6 +301,8 @@ pub struct PrebakeService {
     /// Bake keys of the photo in flight (set once its plan is accepted, until its alphas are on
     /// disk). `MaskBakeService` waits on these instead of baking the same thing.
     inflight: HashSet<blake3::Hash>,
+    /// Identity of the photo in flight, to notice the user opening it mid-chain.
+    inflight_identity: Option<blake3::Hash>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -313,6 +315,7 @@ impl PrebakeService {
             queued: HashSet::new(),
             stage: None,
             inflight: HashSet::new(),
+            inflight_identity: None,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -354,10 +357,17 @@ impl PrebakeService {
     fn cancel_all(&mut self) {
         self.queue.clear();
         self.queued.clear();
+        self.abandon_current();
+    }
+
+    /// Gives up on the photo in flight (not the queue): its undecoded work is skipped and its
+    /// alphas, if they land, are not stored.
+    fn abandon_current(&mut self) {
         self.stage = None;
         self.inflight.clear();
+        self.inflight_identity = None;
         self.cancelled.store(true, Ordering::SeqCst);
-        // A fresh flag for whatever is enqueued next; the old one stays raised for in-flight jobs.
+        // A fresh flag for whatever starts next; the old one stays raised for in-flight jobs.
         self.cancelled = Arc::new(AtomicBool::new(false));
     }
 
@@ -370,6 +380,11 @@ impl PrebakeService {
         open: Option<(i64, blake3::Hash)>,
     ) {
         let Some(env) = self.env.clone() else { return };
+        // The user opened the photo being pre-baked: its own foreground flow must not sit waiting
+        // behind Background work, so step aside and let it bake (the next photo carries on).
+        if open.is_some_and(|(_, identity)| Some(identity) == self.inflight_identity) {
+            self.abandon_current();
+        }
         // A finished step can start the next one at once, so a photo with nothing to bake does not
         // cost a frame; bounded by the queue so a long run of them can't spin forever.
         for _ in 0..=self.queue.len() {
@@ -384,7 +399,10 @@ impl PrebakeService {
                     self.stage = Some(stage);
                     return;
                 }
-                None => self.inflight.clear(),
+                None => {
+                    self.inflight.clear();
+                    self.inflight_identity = None;
+                }
             }
         }
     }
@@ -437,6 +455,7 @@ impl PrebakeService {
                     return None;
                 }
                 self.inflight = plan.requests.iter().map(|r| r.key).collect();
+                self.inflight_identity = Some(plan.identity);
                 let result: Slot<DecodeOutcome> = Arc::new(Mutex::new(None));
                 pounce.submit(Box::new(DecodeJob {
                     env: env.clone(),
@@ -853,6 +872,31 @@ mod tests {
         f.run(None);
         f.masks.set_deferred_keys(f.svc.inflight_keys());
         assert!(!f.masks.is_pending(0, &key), "released once it is on disk");
+    }
+
+    #[test]
+    fn opening_the_photo_in_flight_hands_it_back_to_the_foreground() {
+        let mut f = fx();
+        let doc = ai_doc(SegmentTarget::Sky);
+        let a = f.add("a.NEF", Some(doc.clone()));
+        let b = f.add("b.NEF", Some(doc.clone()));
+        f.svc.enqueue([a, b]);
+        let start = std::time::Instant::now();
+        while f.svc.inflight_keys().is_empty() {
+            f.svc.poll(&f.pounce, &mut f.masks, None);
+            assert!(start.elapsed() < Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let identity = asset_cache_key(&f.store.get_asset(a).unwrap().unwrap());
+        // The user opens `a` while its chain is running.
+        f.svc.poll(&f.pounce, &mut f.masks, Some((a, identity)));
+        assert!(
+            !f.svc.inflight_keys().contains(&key_of(&f, a, &doc)),
+            "released, so the foreground bakes it itself"
+        );
+        // The queue carries on with the next photo.
+        f.run(Some((a, identity)));
+        assert!(f.stored(b, &key_of(&f, b, &doc)));
     }
 
     #[test]

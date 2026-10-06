@@ -70,7 +70,9 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   baked in the background, nearest the grid cursor first, ONE photo at a time (plan -> decode -> Background
   `MaskBakeJob`s -> store). Keys come from `spine::neutral_key` (pixel-free; pinned to `DevelopView::neutral_key`
   by a test). Never downloads a model; its in-flight keys are `set_deferred_keys`'d so the foreground waits instead
-  of baking twice; cancelling any of its jobs from the activity panel stops the whole run.
+  of baking twice (opening the photo mid-chain abandons it to the foreground); cancelling a decode or bake from the
+  activity panel stops the whole run. Background `MaskBakeJob`s declare 0 VRAM (Pounce drops a Background job whose
+  declaration exceeds the lane's total budget -- the GPU pack's 8 GiB vs the 512 MiB placeholder would kill every one).
 - **Sky** = interim flood-filled heuristic (`nicti-siamese/src/sky.rs`), beta (#347).
 - **Real-hardware numbers (RTX 5080, 45 MP)**: 16 stacked masks +1.4 ms (Vulkan)/+1.9 ms (Dx12) over the
   no-mask live pass; 2.5/3.2 ms p95 in total with spatial adjustments -- inside the 4 ms rule, so no
