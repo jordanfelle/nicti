@@ -105,28 +105,61 @@ pub fn wait_until<S>(
     }
 }
 
-/// A primary-button click at `pos`: press and release on separate frames, as a real mouse does
-/// (egui only reports `clicked()` once it has seen the press settle on the widget).
+/// One frame on a deterministic clock. kittest only sets `predicted_dt`, so egui would otherwise
+/// read the wall clock for `time` -- and its double-click window (0.3 s) would then depend on how
+/// fast the test machine steps. The pointer helpers below all go through this.
+pub fn tick<S>(harness: &mut Harness<'_, S>) {
+    // Continue from whatever time egui has reached; it panics if time moves backwards.
+    let now = harness.ctx.input(|i| i.time);
+    harness.input_mut().time = Some(now + FRAME_DT);
+    harness.step();
+}
+
+/// Lets `secs` of fake time pass (frames at 60 Hz), e.g. for a double-click window to lapse.
+pub fn pass_time<S>(harness: &mut Harness<'_, S>, secs: f64) {
+    for _ in 0..(secs / FRAME_DT).ceil() as usize {
+        tick(harness);
+    }
+}
+
+const FRAME_DT: f64 = 1.0 / 60.0;
+
+fn button_event(pos: Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers,
+    }
+}
+
+/// A primary-button click at `pos`: press and release on separate frames, as a real mouse does.
 pub fn click_at<S>(harness: &mut Harness<'_, S>, pos: Pos2) {
     click_at_with(harness, pos, egui::Modifiers::NONE);
 }
 
 /// [`click_at`] with modifier keys held (Ctrl/Shift multi-select).
 pub fn click_at_with<S>(harness: &mut Harness<'_, S>, pos: Pos2, modifiers: egui::Modifiers) {
-    use egui::{Event, PointerButton};
-    let button = |pressed| Event::PointerButton {
-        pos,
-        button: PointerButton::Primary,
-        pressed,
-        modifiers,
-    };
-    harness.event(Event::ModifiersChanged(modifiers));
-    harness.event(Event::PointerMoved(pos));
-    harness.step();
-    harness.event(button(true));
-    harness.step();
-    harness.event(button(false));
-    harness.run_steps(2);
-    harness.event(Event::ModifiersChanged(egui::Modifiers::NONE));
-    harness.step();
+    harness.event(egui::Event::ModifiersChanged(modifiers));
+    harness.event(egui::Event::PointerMoved(pos));
+    tick(harness);
+    for pressed in [true, false] {
+        harness.event(button_event(pos, pressed, modifiers));
+        tick(harness);
+    }
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    pass_time(harness, 2.0 * FRAME_DT);
+}
+
+/// A primary-button double-click at `pos`: two press/release pairs a frame apart, well inside
+/// egui's double-click window. Call [`pass_time`] first if a click just happened at the same spot,
+/// or this one reads as a triple-click.
+pub fn double_click_at<S>(harness: &mut Harness<'_, S>, pos: Pos2) {
+    harness.event(egui::Event::PointerMoved(pos));
+    tick(harness);
+    for pressed in [true, false, true, false] {
+        harness.event(button_event(pos, pressed, egui::Modifiers::NONE));
+        tick(harness);
+    }
+    pass_time(harness, 2.0 * FRAME_DT);
 }

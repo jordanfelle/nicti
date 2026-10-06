@@ -6,7 +6,7 @@ use nicti_pounce::Pounce;
 use nicti_tapetum::coat::ExposureParams;
 use nicti_tapetum::stages::EXPOSURE;
 
-use super::{click_at, harness};
+use super::{click_at, double_click_at, harness, pass_time};
 use crate::develop_panel::{self, AutoHintUi};
 use crate::heal_tool::HealUi;
 use crate::mask_panel::MaskUi;
@@ -58,16 +58,7 @@ fn open_basic(h: &mut egui_kittest::Harness<'_, Panel>) {
 
 #[test]
 fn without_an_engine_the_auto_buttons_are_disabled() {
-    let h = panel_harness();
-    for label in ["Auto", "Auto-level"] {
-        // Auto-level lives inside the (closed) Crop section, so only Auto is always on screen.
-        if let Some(button) = h.query_by_label(label) {
-            assert!(
-                button.accesskit_node().is_disabled(),
-                "{label} needs the GPU engine"
-            );
-        }
-    }
+    let mut h = panel_harness();
     assert!(
         h.get_by_label("Auto").accesskit_node().is_disabled(),
         "Auto tone renders and histograms, so it needs the engine"
@@ -77,6 +68,11 @@ fn without_an_engine_the_auto_buttons_are_disabled() {
         .get_by_label("Showing: After")
         .accesskit_node()
         .is_disabled());
+
+    // Auto-level lives in the Crop section, closed by default.
+    h.get_by_label("Crop & Straighten").click();
+    h.run_steps(3);
+    assert!(h.get_by_label("Auto-level").accesskit_node().is_disabled());
 }
 
 #[test]
@@ -113,9 +109,18 @@ fn double_clicking_a_slider_resets_it() {
         .doc
         .set_stage_params(EXPOSURE, &ExposureParams { stops: 2.0 });
     h.run_steps(2);
-    let centre = h.get_by_label("Exposure").rect().center();
-    click_at(&mut h, centre);
-    click_at(&mut h, centre);
+    // Off-centre on purpose: a single click on the track jumps the value to that point (+3 here),
+    // and only the double-click reset lands on the default 0, so this can't pass by coincidence.
+    let rect = h.get_by_label("Exposure").rect();
+    let at = egui::pos2(rect.right() - 20.0, rect.center().y);
+    click_at(&mut h, at);
+    assert!(
+        exposure(&h) > 3.0,
+        "a single click moves the thumb to the click"
+    );
+    // Let the double-click window lapse, or this click and the next two would read as a triple.
+    pass_time(&mut h, 0.5);
+    double_click_at(&mut h, at);
     assert_eq!(exposure(&h), 0.0, "double-click restores the default");
 }
 

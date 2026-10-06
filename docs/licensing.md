@@ -736,8 +736,8 @@ feature (no `wgpu`, so no adapter is ever needed). It is test-only, never linked
 - **`egui_kittest`** 0.36.2, **`kittest`** 0.4.0, **`accesskit_consumer`** 0.35.0 — MIT OR Apache-2.0.[^kt1]
 - **`dify`** 0.8.0 (the snapshot image diff), **`open`** 5.4.4 and its `is-docker`/`is-wsl` — MIT.
   `open` only launches a viewer for a failed-snapshot diff; no test here calls that path.
-- **`colored`** 2.2.0 (a `dify` dependency) — **MPL-2.0**, already on the allowlist for
-  `lrcat-extractor`'s tree. File-level copyleft only, and it is dev-only here, so nothing of it is
+- **`colored`** 2.2.0 (a `dify` dependency) — **MPL-2.0**, already on the allowlist (`deny.toml` records
+  it for `avif-parse`). File-level copyleft only, and it is dev-only here, so nothing of it is
   redistributed in a release.
 - **`getopts`** 0.2.24, **`toml`** 1.1.6, **`serde_spanned`** 1.1.1 — MIT OR Apache-2.0.
 
