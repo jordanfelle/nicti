@@ -219,3 +219,13 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   `DevelopView` gained `uncropped_preview`, `set_removal`/`prune_removals`, `frame_arc`/`frame_key`.
 - ~~**`spikes/groom`**~~ (#50/ADR-0050) — deleted in #51; see `docs/research/groom-healing-removal.md`
   for the LaMa/MI-GAN licensing findings it produced.
+- **Headless UI harness (#426)** -- `crates/nicti-pelt/src/swat/`: `egui_kittest` (AccessKit queries, input
+  injection) with a ported LightCraft CPU rasteriser (`softpaint.rs`) as its `TestRenderer`, so view tests and
+  PNG snapshots run with no wgpu adapter (verified with `VK_ICD_FILENAMES=/nonexistent
+  NICTI_WGPU_BACKEND=vulkan`, where the existing GPU tests skip and `swat` still runs). Paint callbacks (the
+  wgpu viewport) are not drawn, so anything needing render pixels stays a `test_gpu::shared()` test. To be
+  findable a custom-painted widget needs `response.widget_info(..)` (grid cells have it). `DevelopView` is split
+  into `DevelopDoc` (GPU-free) + `DevelopEngine`; UI that only edits params takes `&mut DevelopDoc`.
+  **Gotcha**: kittest runs one frame inside `build`, before any context setup, and fonts/styles apply a frame
+  later -- `swat::harness` therefore installs the theme on a discarded first frame (the app's panels panic on
+  the missing `semibold` family otherwise).

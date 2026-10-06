@@ -216,6 +216,17 @@ pub fn show(
                     let id = session.ids()[index];
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::splat(CELL), Sense::click());
+                    // Cells are custom-painted, so without this they have no accessibility node: a
+                    // screen reader (and the headless UI harness, `swat/`) couldn't find them.
+                    // Only evaluated while AccessKit is on.
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::SelectableLabel,
+                            true,
+                            session.is_selected(index),
+                            format!("Photo {id}"),
+                        )
+                    });
                     let marks = Marks {
                         cursor: cursor == Some(index),
                         selected: session.is_selected(index),

@@ -44,3 +44,7 @@ tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # PNG decode for export round-trip assertions.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Headless UI harness (#426, `swat/`): AccessKit queries + input injection without a GPU. `snapshot`
+# (dify/image/open/tempfile) only for the golden-image diff; rendering is our own CPU softpaint
+# (`swat/softpaint.rs`), so no `wgpu` feature and no adapter is ever needed.
+egui_kittest = { version = "0.36", default-features = false, features = ["snapshot"] }

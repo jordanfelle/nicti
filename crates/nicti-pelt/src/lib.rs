@@ -36,6 +36,8 @@ mod preview_color;
 mod preview_settings;
 mod render;
 mod stash;
+#[cfg(test)]
+mod swat;
 mod t0_fetch;
 mod t2;
 #[cfg(test)]
