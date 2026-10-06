@@ -7,9 +7,11 @@
 //! work.
 
 use nicti_calico::display_profile;
+use nicti_calico::source_transform::SourceTransforms;
 use nicti_calico::space::OutputSpace;
 use nicti_calico::transform::{DisplayKind, DisplayProfile, DisplayTransform};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::sync::Arc;
 
 use crate::viewport::ViewportResources;
 
@@ -19,6 +21,12 @@ pub struct ColorManagement {
     /// may bake a LUT (6-90 ms), so it is cached and only rebuilt when the monitor profile
     /// changes -- toggling proofing or the gamut warning just swaps the cheap proof half.
     display_kind: Option<DisplayKind>,
+    /// JPEG-sourced pixels (grid thumbnails, T0/T2 previews) -> `display` (#319). Rebuilt with the
+    /// profile; shared with the worker threads that decode thumbnails.
+    source: Arc<SourceTransforms>,
+    /// Bumped whenever `display` changes, so anything cached through `source` (thumbnail textures,
+    /// the loupe/tile preview textures) can tell it was converted for a stale monitor.
+    generation: u64,
     /// Why the display profile fell back to sRGB, if it did -- shown in the menu.
     display_note: Option<String>,
     /// Last-seen monitor of the window, to detect a move to another monitor.
@@ -43,6 +51,10 @@ impl ColorManagement {
         Self {
             display: DisplayProfile::Space(OutputSpace::Srgb),
             display_kind: None,
+            source: Arc::new(SourceTransforms::new(&DisplayProfile::Space(
+                OutputSpace::Srgb,
+            ))),
+            generation: 0,
             display_note: None,
             monitor: None,
             soft_proof: false,
@@ -51,6 +63,16 @@ impl ColorManagement {
             dirty: true,
             error: None,
         }
+    }
+
+    /// The source -> display converter for JPEG-sourced pixels, valid for [`Self::generation`].
+    pub fn source_transforms(&self) -> Arc<SourceTransforms> {
+        self.source.clone()
+    }
+
+    /// Changes whenever the display profile does (monitor move, "Re-read display profile").
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The transform for the current settings. Pure (no GPU), so it is unit-tested directly.
@@ -143,6 +165,8 @@ impl ColorManagement {
         if monitor != self.monitor || (self.monitor.is_none() && self.dirty) {
             let (profile, note) = display_profile::resolve(hwnd);
             self.display = profile;
+            self.source = Arc::new(SourceTransforms::new(&self.display));
+            self.generation += 1;
             self.display_kind = None;
             self.display_note = note;
             self.monitor = monitor;

@@ -118,9 +118,19 @@ The Intent dropdown was also a no-op (Perceptual and Relative colorimetric are b
 matrix profiles), so it was removed.
 
 Known limits, all recorded in ADR-0042: no black-point compensation (`moxcms` 0.9 doesn't
-implement it), the T0/T2 previews and grid thumbnails are not color-managed, a non-built-in
+implement it), a non-built-in
 LUT-based monitor profile carries interpolation error near its gamut boundary, Windows code is type-checked
 but not run, and a real wide-gamut monitor check is still outstanding.
+
+## JPEG-sourced previews (#319, ADR-0042 amendment)
+
+The T0/T2 previews and grid thumbnails now convert from the JPEG's embedded ICC (else sRGB) to the
+monitor profile with `nicti_calico::source_transform::SourceTransforms` (CPU, `moxcms` 8-bit,
+cached per source profile, identity fast path when source and display are the same space). Done on
+the Pounce worker for thumbnails (after the 256 px downsize, ~0.05 ms) and at texture upload for
+the loupe/tiles (~11-13 ms for a 3840 px T2). `ColorManagement::generation` invalidates all of it
+on a monitor change. `t2.rs` now keeps the source's RGB ICC profile through its re-encode. Not
+proofed; real P3-monitor check still outstanding. See ADR-0042's "JPEG-sourced previews".
 
 ## DCP camera profiles in production (#42, ADR-0038 amendment)
 

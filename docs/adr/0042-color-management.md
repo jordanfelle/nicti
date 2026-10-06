@@ -129,6 +129,41 @@ one or both, so those profiles render close to, but not exactly, Adobe's look) a
 spike), per-photo persistence of the choice (edits are not yet catalog-persisted), and the working
 space pick (#149).
 
+## JPEG-sourced previews (#319)
+
+The grid thumbnails, the loupe's T0/T2/rendered-tier fallback and the survey/compare tiles are
+display-referred 8-bit JPEGs that never enter the render graph, so `DisplayTransform` (linear
+ProPhoto -> display) can't take them. On a wide-gamut monitor they disagreed with the managed
+rendered frame.
+
+- **`nicti_calico::source_transform::SourceTransforms`** converts 8-bit RGBA from a source profile
+  to the display profile on the CPU (`moxcms` 8-bit transform, relative colorimetric, same options
+  as the display probe). The source is the JPEG's embedded ICC profile; no profile, an unparseable
+  one, a panicking parse or a non-RGB one means sRGB. One transform is built per distinct source
+  profile and cached (bounded). Source and display being the same space (judged with the same
+  `equivalent_space` probe the display path uses) is a no-op, so the common case -- untagged
+  JPEGs on an sRGB monitor -- costs nothing and is byte-identical to before.
+- **Soft-proofing is not applied** to previews: they show the photo, proofing stays on the
+  rendered frame.
+- **Where it runs.** Thumbnails convert on the Pounce worker *after* the 256 px downsize
+  (`grid/jobs.rs::make_thumbnail`); the loupe and tiles convert in `cull/previews.rs::
+  preview_texture` on the UI thread, once per photo (the texture is cached).
+- **Invalidation.** `ColorManagement` bumps a `generation` whenever the display profile is
+  re-resolved and rebuilds its `SourceTransforms`. `PeltApp::sync_preview_color` hands both to
+  `GridSession::set_color` (drops thumbnail textures and decoded-but-unuploaded results, cancels
+  in-flight batches; snapshot, failure sets and edited flags are kept), `TilePreviews::set_color`
+  and the loupe's cached texture.
+- **T2 keeps the source profile.** `t2.rs::resize_and_encode` used to drop the embedded ICC when
+  it re-encoded, so a Display P3 original would have been read back as sRGB. It now carries an RGB
+  profile over to the T2 JPEG. T2s stored before #319 have no profile and are treated as sRGB
+  (the pre-#319 behaviour); they refresh when their cache entry is regenerated.
+- **Measured** (release, `cargo test -p nicti-calico --release -- --ignored --nocapture
+  convert_cost`): converting a 256x170 thumbnail costs ~0.05 ms (ADR-0029's per-thumbnail decode is
+  ~2-3 ms, so the 1M-asset grid budget is unaffected; untagged-on-sRGB is free); a 3840x2560 T2
+  costs ~11-13 ms when it does convert, on top of its JPEG decode, still under one 16 ms frame.
+- **Not verified here:** the issue's "done when" -- a Display P3 JPEG looking the same in the grid,
+  the loupe fallback and the rendered frame on a real P3 monitor -- needs physical testing.
+
 ## Consequences
 
 - **The 3D LUT is only for LUT-based monitor profiles**, where colors near the monitor's gamut
@@ -145,9 +180,9 @@ space pick (#149).
 - **LUT mode clamps in working space** before the shaper, whereas the exact path clamps after the
   matrix in display space. Tapetum's output is display-referred in [0, 1] in practice; values
   outside it would clip differently between the two paths.
-- **Unmanaged surfaces.** The T0/T2 embedded-JPEG previews and grid thumbnails go straight to
-  egui's sRGB textures and ignore both the monitor profile and any embedded JPEG profile. The
-  Develop and Loupe *rendered* frames are managed.
+- **Preview surfaces are managed too (#319, see "JPEG-sourced previews" below).** The T0/T2
+  embedded-JPEG previews and grid thumbnails used to go straight to egui's sRGB textures; they now
+  convert from the JPEG's embedded ICC profile (else sRGB) to the monitor profile on the CPU.
 - **Profile-derived caching.** The monitor-dependent half of the transform (probe + possible
   bake, 6-90 ms) is cached and rebuilt only when the resolved profile changes; toggling proofing
   or the gamut warning only swaps the proof half.

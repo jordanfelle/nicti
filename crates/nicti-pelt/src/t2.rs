@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageDecoder, ImageReader};
+use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageReader};
 use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 use nicti_lair::larder::{Larder, LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
@@ -116,6 +116,14 @@ fn resize_and_encode(jpeg: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     // A portrait phone JPEG carries its rotation as an EXIF tag, not in the pixels.
     let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    // Keep the source's color space (#319): the T2 is shown through the display conversion, which
+    // needs to know it was Display P3 / Adobe RGB rather than assume sRGB. Only an RGB profile
+    // describes the RGB we re-encode (a gray/CMYK one would mislabel it).
+    let icc = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .filter(|p| p.get(16..20) == Some(b"RGB ".as_slice()));
     let mut decoded = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     decoded.apply_orientation(orientation);
     let (w, h) = (decoded.width(), decoded.height());
@@ -131,9 +139,12 @@ fn resize_and_encode(jpeg: &[u8]) -> Result<Vec<u8>, String> {
     };
     let rgb = resized.to_rgb8();
     let mut out = Vec::new();
-    JpegEncoder::new_with_quality(&mut out, T2_JPEG_QUALITY)
-        .encode_image(&rgb)
-        .map_err(|e| e.to_string())?;
+    let mut encoder = JpegEncoder::new_with_quality(&mut out, T2_JPEG_QUALITY);
+    if let Some(icc) = icc {
+        // An encoder that can't carry it just loses the tag, as before #319.
+        let _ = encoder.set_icc_profile(icc);
+    }
+    encoder.encode_image(&rgb).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
@@ -429,6 +440,44 @@ mod tests {
     fn a_small_source_is_never_upscaled() {
         let out = resize_and_encode(&jpeg_of(640, 480)).unwrap();
         assert_eq!(dims(&out), (640, 480));
+    }
+
+    fn icc_of(jpeg: &[u8]) -> Option<Vec<u8>> {
+        ImageReader::new(Cursor::new(jpeg))
+            .with_guessed_format()
+            .unwrap()
+            .into_decoder()
+            .unwrap()
+            .icc_profile()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_source_icc_profile_survives_the_re_encode() {
+        let p3 =
+            nicti_calico::icc::profile_bytes(nicti_calico::space::OutputSpace::DisplayP3).unwrap();
+        let src =
+            crate::preview_color::testutil::tagged_jpeg(5000, 3000, [200, 120, 60], Some(&p3));
+        let out = resize_and_encode(&src).unwrap();
+        assert_eq!(dims(&out), (T2_LONG_EDGE, 2304));
+        assert_eq!(icc_of(&out).as_deref(), Some(p3.as_slice()));
+    }
+
+    #[test]
+    fn an_untagged_source_stays_untagged() {
+        let out = resize_and_encode(&jpeg_of(640, 480)).unwrap();
+        assert!(icc_of(&out).is_none());
+    }
+
+    #[test]
+    fn a_non_rgb_profile_is_not_carried_onto_the_rgb_output() {
+        // A real header whose data color space (bytes 16..20) says gray, not RGB.
+        let mut gray =
+            nicti_calico::icc::profile_bytes(nicti_calico::space::OutputSpace::Srgb).unwrap();
+        gray[16..20].copy_from_slice(b"GRAY");
+        let src = crate::preview_color::testutil::tagged_jpeg(64, 64, [9, 9, 9], Some(&gray));
+        let out = resize_and_encode(&src).unwrap();
+        assert!(icc_of(&out).is_none());
     }
 
     #[test]

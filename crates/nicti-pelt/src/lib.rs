@@ -30,6 +30,7 @@ mod lrc_import;
 mod mask_edit;
 mod mask_panel;
 mod mask_tool;
+mod preview_color;
 mod preview_settings;
 mod render;
 mod t0_fetch;

@@ -11,9 +11,13 @@
 //! upgrades are throttled and only requested for the two compare tiles, never for a whole survey.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::TextureHandle;
+use nicti_calico::source_transform::SourceTransforms;
+use nicti_calico::space::OutputSpace;
+use nicti_calico::transform::DisplayProfile;
 use nicti_lair::larder::{LarderKey, LarderTier};
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_lair::CatalogStore;
@@ -61,6 +65,10 @@ pub struct TilePreviews {
     /// Sidecar reads in flight on a worker (an archived folder's T0).
     sidecar_fetch: HashMap<i64, crate::t0_fetch::FetchSlot>,
     next_check: HashMap<i64, Instant>,
+    /// JPEG -> monitor conversion for new textures (#319) and the display generation it was built
+    /// for; see [`Self::set_color`].
+    color: Arc<SourceTransforms>,
+    color_generation: u64,
 }
 
 /// How long a photo with no thumbnail anywhere is left alone before looking again.
@@ -77,7 +85,26 @@ impl TilePreviews {
             no_t0: std::collections::HashMap::new(),
             sidecar_fetch: HashMap::new(),
             next_check: HashMap::new(),
+            color: Arc::new(SourceTransforms::new(&DisplayProfile::Space(
+                OutputSpace::Srgb,
+            ))),
+            color_generation: 0,
         }
+    }
+
+    /// Switches to a new display color conversion (#319). A no-op while `generation` matches the
+    /// last one given; otherwise every texture (converted for the old monitor) is dropped and
+    /// re-decoded on its next `get`. Queued T2 jobs, give-ups and misses are about the *files*,
+    /// not the pixels, so they stay.
+    pub fn set_color(&mut self, color: Arc<SourceTransforms>, generation: u64) {
+        if generation == self.color_generation {
+            return;
+        }
+        self.color = color;
+        self.color_generation = generation;
+        self.tiles.clear();
+        self.order.clear();
+        self.next_check.clear();
     }
 
     /// Folds finished T2 jobs in. Call once per frame while a survey/compare is showing.
@@ -154,7 +181,7 @@ impl TilePreviews {
                 let has_t2 = self.tiles.get(&id).is_some_and(|t| t.is_t2);
                 let texture = bytes
                     .filter(|_| !has_t2 && !self.tiles.contains_key(&id))
-                    .and_then(|b| preview_texture(ctx, format!("tile-t0-{id}"), &b));
+                    .and_then(|b| preview_texture(ctx, format!("tile-t0-{id}"), &b, &self.color));
                 match texture {
                     _ if has_t2 || self.tiles.contains_key(&id) => {}
                     Some(texture) => self.insert(
@@ -183,7 +210,7 @@ impl TilePreviews {
             match store.get_preview(id, nicti_lair::PreviewTier::T0) {
                 Ok(Some(preview)) => {
                     if let Some(texture) =
-                        preview_texture(ctx, format!("tile-t0-{id}"), &preview.bytes)
+                        preview_texture(ctx, format!("tile-t0-{id}"), &preview.bytes, &self.color)
                     {
                         self.insert(
                             id,
@@ -246,7 +273,8 @@ impl TilePreviews {
         drop(guard);
 
         match stored {
-            Some(bytes) => match preview_texture(ctx, format!("tile-t2-{id}"), &bytes) {
+            Some(bytes) => match preview_texture(ctx, format!("tile-t2-{id}"), &bytes, &self.color)
+            {
                 Some(texture) => self.insert(
                     id,
                     Tile {
@@ -300,13 +328,16 @@ impl TilePreviews {
     }
 }
 
-/// JPEG-decodes `bytes` into an egui texture, `None` if they aren't a decodable image.
+/// JPEG-decodes `bytes`, converts the pixels from the JPEG's embedded color space (else sRGB) to
+/// the display `color` was built for (#319), and uploads an egui texture. `None` if they aren't a
+/// decodable image.
 pub fn preview_texture(
     ctx: &egui::Context,
     name: String,
     bytes: &[u8],
+    color: &SourceTransforms,
 ) -> Option<egui::TextureHandle> {
-    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let rgba = crate::preview_color::decode_to_display(bytes, color).ok()?;
     let (w, h) = rgba.dimensions();
     let color_image =
         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
@@ -464,6 +495,34 @@ mod tests {
         assert_eq!(previews.len(), MAX_TILES);
         assert!(!previews.tiles.contains_key(&ids[0]), "the oldest went");
         assert!(previews.tiles.contains_key(ids.last().unwrap()));
+    }
+
+    #[test]
+    fn a_new_display_generation_re_decodes_tiles_for_the_new_monitor() {
+        let (store, ids) = seeded(1, true);
+        let ctx = egui::Context::default();
+        let pounce = pounce();
+        let mut previews = TilePreviews::new(None);
+        let first = previews
+            .get(&ctx, &*store, &pounce, ids[0], Want::Small)
+            .map(|t| t.id());
+        let p3 = Arc::new(SourceTransforms::new(&DisplayProfile::Space(
+            OutputSpace::DisplayP3,
+        )));
+
+        previews.set_color(p3.clone(), 0);
+        assert_eq!(previews.len(), 1, "same generation keeps the tile");
+
+        previews.set_color(p3, 1);
+        assert_eq!(previews.len(), 0);
+        let again = previews
+            .get(&ctx, &*store, &pounce, ids[0], Want::Small)
+            .map(|t| t.id());
+        assert!(again.is_some());
+        assert_ne!(
+            again, first,
+            "a fresh texture, converted for the new display"
+        );
     }
 
     #[test]

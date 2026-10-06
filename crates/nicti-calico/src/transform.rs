@@ -310,7 +310,7 @@ fn bake_lut(display_profile: &ColorProfile) -> Result<Lut3d, CmsError> {
 
 /// The built-in space `profile` is indistinguishable from (max encoded difference < 0.004 over a
 /// probe grid of working-space colors), if any.
-fn equivalent_space(profile: &ColorProfile) -> Option<OutputSpace> {
+pub(crate) fn equivalent_space(profile: &ColorProfile) -> Option<OutputSpace> {
     let levels = [0.05f32, 0.3, 0.6, 0.85];
     let mut probe = Vec::new();
     for &r in &levels {

@@ -21,6 +21,9 @@ use nicti_tapetum::cache::Tier;
 use super::jobs::{SnapshotJob, SnapshotResult, ThumbBatchJob, ThumbError, ThumbImage, ThumbSlot};
 use super::layout::{batch_indices, batches_for};
 use super::selection::Selection;
+use nicti_calico::source_transform::SourceTransforms;
+use nicti_calico::space::OutputSpace;
+use nicti_calico::transform::DisplayProfile;
 
 /// How long a cell whose thumbnail hit a *transient* catalog error waits before being asked for
 /// again -- long enough that a persistent error can't turn `request_visible` (called every frame)
@@ -98,6 +101,10 @@ pub struct GridSession {
     /// The multi-selection (#32). Empty means "just the cursor" -- see [`Selection`].
     selection: Selection,
     last_window: Option<Range<usize>>,
+    /// JPEG -> monitor conversion for new thumbnails (#319) and the display generation it was
+    /// built for; see [`Self::set_color`].
+    color: Arc<SourceTransforms>,
+    color_generation: u64,
 }
 
 /// The texture cache key for an asset. Keyed by id alone: a re-ingest can change an asset's
@@ -133,7 +140,31 @@ impl GridSession {
             cursor_id: None,
             selection: Selection::default(),
             last_window: None,
+            color: Arc::new(SourceTransforms::new(&DisplayProfile::Space(
+                OutputSpace::Srgb,
+            ))),
+            color_generation: 0,
         }
+    }
+
+    /// Switches thumbnails to a new display color conversion (#319). A no-op while `generation`
+    /// matches the last one given; otherwise drops every texture and decoded-but-unuploaded
+    /// thumbnail (all converted for the old monitor) and cancels in-flight batches, so
+    /// `request_visible` re-decodes what's on screen. Unlike [`Self::refresh`] the snapshot, the
+    /// failure sets and the edited flags are left alone: only the pixels were wrong.
+    pub fn set_color(&mut self, color: Arc<SourceTransforms>, generation: u64, pounce: &Pounce) {
+        if generation == self.color_generation {
+            return;
+        }
+        self.color = color;
+        self.color_generation = generation;
+        self.textures = Tier::new(self.textures.stats().budget_bytes, |t: &TextureHandle| {
+            let [w, h] = t.size();
+            (w * h * 4) as u64
+        });
+        self.pending_uploads.clear();
+        self.pending_ids.clear();
+        self.cancel_batches(pounce);
     }
 
     pub fn ids(&self) -> &[i64] {
@@ -542,7 +573,8 @@ impl GridSession {
             if missing.is_empty() {
                 continue;
             }
-            let (job, slot) = ThumbBatchJob::new(self.store.clone(), missing, first_index);
+            let (job, slot) =
+                ThumbBatchJob::new(self.store.clone(), missing, first_index, self.color.clone());
             let job_id = pounce.submit(Box::new(job));
             self.inflight.insert(batch, InflightBatch { job_id, slot });
         }
@@ -990,6 +1022,45 @@ mod tests {
     }
 
     #[test]
+    fn a_new_display_generation_drops_textures_and_cancels_batches_but_keeps_the_snapshot() {
+        let (mut session, ids, ctx, pounce) = loaded_session(10, 1 << 20, |i| i == 0);
+        session.request_visible(0..10, &pounce);
+        wait_for(&mut session, &ctx, &pounce, |s| s.inflight_batches() == 0);
+        wait_for(&mut session, &ctx, &pounce, |s| {
+            s.pending_uploads.is_empty()
+        });
+        assert!(session.texture(ids[5]).is_some());
+
+        let p3 = Arc::new(SourceTransforms::new(&DisplayProfile::Space(
+            OutputSpace::DisplayP3,
+        )));
+        // Same generation: nothing happens.
+        session.set_color(p3.clone(), 0, &pounce);
+        assert!(session.texture(ids[5]).is_some());
+
+        session.set_color(p3, 1, &pounce);
+        assert!(
+            session.texture(ids[5]).is_none(),
+            "converted for the old monitor"
+        );
+        assert_eq!(session.inflight_batches(), 0);
+        assert_eq!(session.len(), 10, "the snapshot is not re-read");
+        assert!(!session.is_loading());
+        assert!(
+            session.has_failed(ids[0]),
+            "a missing preview is still missing"
+        );
+
+        // Visible cells are decoded again, now through the new conversion.
+        session.request_visible(0..10, &pounce);
+        wait_for(&mut session, &ctx, &pounce, |s| s.inflight_batches() == 0);
+        wait_for(&mut session, &ctx, &pounce, |s| {
+            s.pending_uploads.is_empty()
+        });
+        assert!(session.texture(ids[5]).is_some());
+    }
+
+    #[test]
     fn refresh_cancels_batches_that_were_decoding_the_old_previews() {
         let (mut session, _store, _ids, _ctx, pounce) = loaded_with_store(2000);
         session.request_visible(0..64, &pounce);
@@ -1003,7 +1074,8 @@ mod tests {
     fn a_permanent_thumbnail_error_is_never_retried_but_a_transient_one_backs_off() {
         let (mut session, _store, ids, _ctx, pounce) = loaded_with_store(5);
         // Two hand-made batch results, delivered through a real job's id so `inflight` is valid.
-        let (job, slot) = ThumbBatchJob::new(session.store.clone(), Vec::new(), 0);
+        let (job, slot) =
+            ThumbBatchJob::new(session.store.clone(), Vec::new(), 0, session.color.clone());
         let job_id = pounce.submit(Box::new(job));
         {
             let mut out = slot.lock().unwrap();
