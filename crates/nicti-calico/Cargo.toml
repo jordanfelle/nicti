@@ -12,7 +12,7 @@ moxcms = "0.9.1"
 serde_json = "1"
 thiserror = "2"
 byteorder = "1"
-roxmltree = "0.20"
+roxmltree = "0.21"
 flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
