@@ -192,6 +192,44 @@ mod tests {
         assert_eq!(closed_runs, 0, "a closed section skips the body");
     }
 
+    /// A click on the header toggles the section, and the state persists to the next frame.
+    #[test]
+    fn clicking_the_header_toggles_and_persists() {
+        let ctx = themed_ctx();
+        let mut bodies = Vec::new();
+        let mut t = 0.0;
+        let mut frame = |events: Vec<egui::Event>| {
+            t += 0.02;
+            let input = egui::RawInput {
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut shown = false;
+            let mut out = ctx.run_ui(input, |ui| {
+                section(ui, "s", "Section", false, |_| shown = true);
+            });
+            out.textures_delta.clear();
+            bodies.push(shown);
+        };
+        let at = egui::pos2(60.0, 20.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at)]);
+        frame(vec![click(true)]);
+        frame(vec![click(false)]);
+        frame(vec![]);
+        assert_eq!(
+            bodies,
+            [false, false, true, true],
+            "opened by the click, then stays open"
+        );
+    }
+
     #[test]
     fn segmented_and_icon_button_draw() {
         let mut out = None;

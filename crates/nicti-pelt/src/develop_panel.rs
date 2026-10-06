@@ -135,7 +135,7 @@ impl AutoHintUi {
 // Slider specs, one per control. `id` is unique across the panel (it salts the widget id), and the
 // defaults match what `Reset all` / a double-click restores.
 const TEMP: SliderSpec = SliderSpec::new("basic.temp", "Temp", 2000.0, 50000.0, 5500.0)
-    .step(50.0, 0)
+    .step(1.0, 0)
     .track(Track::Temp);
 const TINT: SliderSpec = SliderSpec::new("basic.tint", "Tint", -150.0, 150.0, 0.0)
     .step(1.0, 0)
@@ -167,7 +167,7 @@ const ROTATION: SliderSpec = SliderSpec::new(
     MAX_STRAIGHTEN_DEGREES,
     0.0,
 )
-.step(0.1, 1)
+.step(0.01, 2)
 .track(Track::Centered)
 .signed()
 .unit("\u{b0}");

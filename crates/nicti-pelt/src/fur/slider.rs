@@ -468,6 +468,85 @@ mod tests {
         );
     }
 
+    /// Drives `slider()` through a real press, many small moves and a release, with or without
+    /// shift held, and returns the final value. Moves are 1 point per frame.
+    fn drag(spec: &SliderSpec, start: f32, shift: bool, frames: usize) -> f32 {
+        let ctx = super::super::tokens::testing::themed_ctx();
+        let mods = egui::Modifiers {
+            shift,
+            ..Default::default()
+        };
+        let (x0, y) = (300.0, 36.0);
+        let mut v = start;
+        let mut t = 0.0;
+        let mut run = |events: Vec<egui::Event>, v: &mut f32| {
+            t += 0.02;
+            let input = egui::RawInput {
+                time: Some(t),
+                // Without a screen rect egui assumes a huge one and the track gets ~10k points wide.
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                slider(ui, spec, v, true);
+            });
+            out.textures_delta.clear();
+        };
+        let at = |x: f32| egui::pos2(x, y);
+        run(
+            vec![
+                egui::Event::ModifiersChanged(mods),
+                egui::Event::PointerMoved(at(x0)),
+            ],
+            &mut v,
+        );
+        run(
+            vec![egui::Event::PointerButton {
+                pos: at(x0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: mods,
+            }],
+            &mut v,
+        );
+        for i in 1..=frames {
+            run(vec![egui::Event::PointerMoved(at(x0 + i as f32))], &mut v);
+        }
+        run(
+            vec![egui::Event::PointerButton {
+                pos: at(x0 + frames as f32),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: mods,
+            }],
+            &mut v,
+        );
+        v
+    }
+
+    /// Through the real widget: 60 one-point moves with shift held cover 60/738 of the track at a
+    /// tenth speed (~2.4 steps on Tint's integer range). Rounding per frame would stay at the
+    /// start; an un-accumulated absolute mapping would jump by ~24 steps.
+    #[test]
+    fn shift_drag_through_the_widget_accumulates_fine_movement() {
+        let fine = drag(&INT, 0.0, true, 60);
+        assert!(
+            (1.0..=4.0).contains(&fine),
+            "fine drag moved by a few steps, got {fine}"
+        );
+        let coarse = drag(&INT, 0.0, false, 60);
+        // Absolute mapping: the thumb lands under the pointer (x=360 of a ~738pt track), far from
+        // the starting 0 and from the few steps a fine drag moves.
+        assert!(
+            coarse.abs() > 10.0,
+            "an unshifted drag follows the pointer, got {coarse}"
+        );
+    }
+
     #[test]
     fn snap_clamps_and_rounds_to_step() {
         assert_eq!(snap(&TEMP, 6523.0), 6500.0);
