@@ -109,7 +109,11 @@ terse index: crate/spike → purpose → owning topic.
   the display/proof transform, Windows monitor-profile lookup; see [`color`](.claude/rules/color/REFERENCE.md).
   Also the DCP camera-profile machinery (`dcp.rs`/`cct.rs`/`huesatmap.rs`/`profile.rs`, promoted from
   `spikes/calico`) and the `ColorProfile` extension point. `nicti-pelt`'s `camera_profiles.rs`
-  discovers/loads the user's Adobe `.dcp` files for the Develop panel
+  discovers/loads the user's Adobe `.dcp` files and Look `.xmp` profiles for the Develop panel.
+  Profile tone curve (#321) → `nicti-calico/src/tonecurve.rs` (`ToneCurveLut`, `ProfileSolution.tone_lut`)
+  + `profile_tone` in `nicti-tapetum/shaders/live_suffix.wgsl`; Look `.xmp` decode →
+  `nicti-calico/src/xmp_profile.rs`, selected via `DevelopView::select_look`, stored in
+  `CameraProfileParams.look`
 - **`crates/nicti-iris`/`nicti-stalk`**
   — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
   `LensCorrection` (#39), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):

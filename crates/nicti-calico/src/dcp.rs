@@ -35,9 +35,9 @@ pub enum DcpError {
 /// Every tag [`DcpProfile::parse`] reads. `read_ifd` decodes only these: a hostile file can list
 /// tens of thousands of entries, and decoding each unknown one would copy its value bytes for
 /// nothing.
-const KNOWN_TAGS: [u16; 17] = [
+const KNOWN_TAGS: [u16; 18] = [
     50708, 50721, 50722, 50778, 50779, 50936, 50937, 50938, 50939, 50940, 50964, 50965, 50981,
-    50982, 51107, 51108, 51109,
+    50982, 51107, 51108, 51109, 51110,
 ];
 
 /// Largest axis / total cell count accepted for a HueSatMap or LookTable. Real tables are at most
@@ -65,6 +65,24 @@ const TAG_PROFILE_TONE_CURVE: u16 = 50940;
 const TAG_BASELINE_EXPOSURE_OFFSET: u16 = 51109;
 const TAG_PROFILE_HUE_SAT_MAP_ENCODING: u16 = 51107;
 const TAG_PROFILE_LOOK_TABLE_ENCODING: u16 = 51108;
+const TAG_DEFAULT_BLACK_RENDER: u16 = 51110;
+
+/// `DefaultBlackRender` (DNG 1.4, tag 51110): whether the renderer applies its default black
+/// level handling (`Auto`, the spec default when the tag is absent) or leaves the black point
+/// untouched (`None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlackRender {
+    #[default]
+    Auto,
+    None,
+}
+
+fn black_render(tags: &HashMap<u16, TagValue>) -> BlackRender {
+    match tags.get(&TAG_DEFAULT_BLACK_RENDER) {
+        Some(TagValue::Longs(v)) if v.first() == Some(&1) => BlackRender::None,
+        _ => BlackRender::Auto,
+    }
+}
 
 /// `ProfileHueSatMapEncoding`/`ProfileLookTableEncoding` (DNG 1.4+, spec section 6.3.7): which
 /// representation a HueSatMap/LookTable's HSV coordinates are defined in. A missing tag means
@@ -357,6 +375,8 @@ pub struct DcpProfile {
     pub hue_sat_map_encoding: TableEncoding,
     /// `ProfileLookTableEncoding`; defaults to `Linear` when absent, per spec.
     pub look_table_encoding: TableEncoding,
+    /// `DefaultBlackRender`; defaults to `Auto` when absent, per spec.
+    pub default_black_render: BlackRender,
 }
 
 impl DcpProfile {
@@ -518,6 +538,7 @@ impl DcpProfile {
             baseline_exposure_offset,
             hue_sat_map_encoding: table_encoding(&tags, TAG_PROFILE_HUE_SAT_MAP_ENCODING),
             look_table_encoding: table_encoding(&tags, TAG_PROFILE_LOOK_TABLE_ENCODING),
+            default_black_render: black_render(&tags),
         })
     }
 }
@@ -920,5 +941,51 @@ mod tests {
             .tone_curve_points
             .as_ref()
             .is_some_and(|p| p.len() == 127));
+        // Real profiles carry the tag; whichever value, it must parse to a defined variant and
+        // the curve must bake to a monotone table.
+        assert!(matches!(
+            land.default_black_render,
+            BlackRender::Auto | BlackRender::None
+        ));
+        let lut = crate::tonecurve::ToneCurveLut::from_points_or_default(
+            land.tone_curve_points.as_deref(),
+        );
+        assert!(lut.samples().windows(2).all(|w| w[1] >= w[0] - 1e-6));
+    }
+
+    fn with_black_render(value: Option<u32>) -> BlackRender {
+        let mut bytes = testing::synthetic_dcp_bytes("TEST CAM", "t", None, None, false);
+        if let Some(v) = value {
+            // Re-assemble with the extra tag by parsing nothing: rebuild from a minimal entry set.
+            let entries = vec![
+                (TAG_UNIQUE_CAMERA_MODEL, 2u16, 9u32, b"TEST CAM\0".to_vec()),
+                (TAG_PROFILE_NAME, 2, 2, b"t\0".to_vec()),
+                (
+                    TAG_CALIBRATION_ILLUMINANT1,
+                    3,
+                    1,
+                    17u16.to_le_bytes().to_vec(),
+                ),
+                (
+                    TAG_COLOR_MATRIX1,
+                    10,
+                    9,
+                    [1i32, 0, 0, 0, 1, 0, 0, 0, 1]
+                        .iter()
+                        .flat_map(|n| [n.to_le_bytes(), 1i32.to_le_bytes()].concat())
+                        .collect(),
+                ),
+                (TAG_DEFAULT_BLACK_RENDER, 4, 1, v.to_le_bytes().to_vec()),
+            ];
+            bytes = testing::assemble(entries, false);
+        }
+        DcpProfile::parse(&bytes).unwrap().default_black_render
+    }
+
+    #[test]
+    fn default_black_render_parses_with_auto_as_the_default() {
+        assert_eq!(with_black_render(None), BlackRender::Auto);
+        assert_eq!(with_black_render(Some(0)), BlackRender::Auto);
+        assert_eq!(with_black_render(Some(1)), BlackRender::None);
     }
 }

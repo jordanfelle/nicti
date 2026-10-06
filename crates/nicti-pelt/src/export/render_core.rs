@@ -61,6 +61,7 @@ pub(crate) fn render_live_frame(
     identity: blake3::Hash,
     frame: &LinearFrame,
     profile: Option<&DcpProfile>,
+    look: Option<&nicti_calico::xmp_profile::LookProfile>,
 ) -> Result<LiveRender, String> {
     // The photo's identity goes into the render document, not `set_own_hash` -- see
     // `spine::stamp_source_identity` for why the latter is silently undone.
@@ -74,7 +75,7 @@ pub(crate) fn render_live_frame(
         height: frame.height,
     };
     // Always full resolution: pixel_scale 1.0.
-    let inputs = spine::resolve_inputs(&doc, frame, extent, profile, 1.0);
+    let inputs = spine::resolve_inputs(&doc, frame, extent, profile, look, 1.0);
     ctx.live_kernel.set_params(gpu, &inputs.live);
 
     let decode_exec = DecodeExec {

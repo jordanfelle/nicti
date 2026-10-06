@@ -646,11 +646,10 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "clap",
- "flate2",
  "half",
  "image",
+ "nicti-calico",
  "pollster",
- "roxmltree 0.20.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -3648,8 +3647,10 @@ name = "nicti-calico"
 version = "0.0.0"
 dependencies = [
  "byteorder",
+ "flate2",
  "moxcms 0.9.1",
  "nicti-claw",
+ "roxmltree 0.20.0",
  "serde_json",
  "thiserror 2.0.21",
  "windows 0.62.2",

@@ -460,6 +460,8 @@ struct LiveUniforms {
     profile0: [f32; 4],
     /// Baseline-exposure multiplier (`2^BaselineExposureOffset`, `1.0` with no profile), yzw unused.
     profile1: [f32; 4],
+    /// #321: Look `.xmp` table enabled, its sRGB value encoding, profile tone curve enabled, unused.
+    profile2: [f32; 4],
 }
 
 #[repr(C)]
@@ -633,6 +635,10 @@ struct ProfileTables {
     look_view: wgpu::TextureView,
     hue_sat_fp: Option<u64>,
     look_fp: Option<u64>,
+    look_profile_view: wgpu::TextureView,
+    look_profile_fp: Option<u64>,
+    tone_view: wgpu::TextureView,
+    tone_fp: Option<u64>,
 }
 
 /// A 3D table texture: width = saturation, height = hue, depth = value (the DNG SDK's on-disk
@@ -703,6 +709,41 @@ fn dummy_table(gpu: &GpuContext) -> wgpu::TextureView {
     )
 }
 
+/// The profile tone curve as an N x 1 `R32Float` texture (read with `textureLoad`, so no
+/// filtering support is needed). The dummy is a 2 x 1 identity-free ramp that is never read.
+fn upload_tone_lut(gpu: &GpuContext, samples: &[f32]) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: samples.len() as u32,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("profile tone lut"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        bytemuck::cast_slice(samples),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(samples.len() as u32 * 4),
+            rows_per_image: Some(1),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn dummy_tone_lut(gpu: &GpuContext) -> wgpu::TextureView {
+    upload_tone_lut(gpu, &[0.0, 1.0])
+}
+
 fn make_uniform_buffer(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
     gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -755,6 +796,10 @@ impl LiveSuffixKernel {
                 look_view: dummy_table(gpu),
                 hue_sat_fp: None,
                 look_fp: None,
+                look_profile_view: dummy_table(gpu),
+                look_profile_fp: None,
+                tone_view: dummy_tone_lut(gpu),
+                tone_fp: None,
             }),
             profile_sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("dcp table sampler"),
@@ -855,6 +900,7 @@ impl LiveSuffixKernel {
             hsl_bands: pack_hsl(&params.hsl),
             profile0: [0.0; 4],
             profile1: [1.0, 0.0, 0.0, 0.0],
+            profile2: [0.0; 4],
         };
         let mut u = u;
         {
@@ -877,7 +923,32 @@ impl LiveSuffixKernel {
                 tables.look_view = look.map_or_else(|| dummy_table(gpu), |m| upload_table(gpu, m));
                 tables.look_fp = look_fp;
             }
+            let look_profile = params
+                .camera_profile
+                .as_ref()
+                .and_then(|p| p.look_profile.as_ref());
+            let lp_fp = look_profile.map(fingerprint);
+            if lp_fp != tables.look_profile_fp {
+                tables.look_profile_view =
+                    look_profile.map_or_else(|| dummy_table(gpu), |m| upload_table(gpu, m));
+                tables.look_profile_fp = lp_fp;
+            }
+            let tone = params.camera_profile.as_ref().map(|p| &p.tone_lut);
+            let tone_fp = tone.map(|t| t.fingerprint());
+            if tone_fp != tables.tone_fp {
+                tables.tone_view = tone.map_or_else(
+                    || dummy_tone_lut(gpu),
+                    |t| upload_tone_lut(gpu, t.samples()),
+                );
+                tables.tone_fp = tone_fp;
+            }
             if let Some(p) = &params.camera_profile {
+                u.profile2 = [
+                    f32::from(look_profile.is_some()),
+                    srgb(p.look_profile_encoding),
+                    1.0,
+                    0.0,
+                ];
                 u.profile0 = [
                     f32::from(hsm.is_some()),
                     f32::from(look.is_some()),
@@ -974,6 +1045,14 @@ impl LiveSuffixKernel {
                 wgpu::BindGroupEntry {
                     binding: 10,
                     resource: wgpu::BindingResource::TextureView(haze_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&tables.look_profile_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&tables.tone_view),
                 },
             ],
         });
@@ -1594,32 +1673,34 @@ mod tests {
 
     /// A synthetic camera profile with smooth, non-trivial HueSatMap and sRGB-encoded LookTable
     /// plus a baseline exposure offset, so every profile stage visibly changes the output.
+    fn smooth_table(hue_div: usize, sat_div: usize, val_div: usize, amp: f32) -> HueSatMap {
+        let mut data = Vec::new();
+        for v in 0..val_div {
+            for h in 0..hue_div {
+                for sa in 0..sat_div {
+                    let ang = h as f32 / hue_div as f32 * std::f32::consts::TAU;
+                    data.push([
+                        amp * ang.sin(),
+                        0.85 + 0.1 * sa as f32 / sat_div as f32,
+                        1.0 + 0.15 * (v as f32 / val_div as f32) * ang.cos().abs(),
+                    ]);
+                }
+            }
+        }
+        HueSatMap {
+            hue_divisions: hue_div,
+            sat_divisions: sat_div,
+            val_divisions: val_div,
+            data,
+        }
+    }
+
     fn synthetic_profile() -> nicti_calico::dcp::DcpProfile {
         use nicti_calico::dcp::{DcpProfile, TableEncoding};
         let d50 = [0.9642, 1.0, 0.8249];
         let fm = [[d50[0], 0.0, 0.0], [0.0, d50[1], 0.0], [0.0, 0.0, d50[2]]];
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let smooth = |hue_div: usize, sat_div: usize, val_div: usize, amp: f32| {
-            let mut data = Vec::new();
-            for v in 0..val_div {
-                for h in 0..hue_div {
-                    for sa in 0..sat_div {
-                        let ang = h as f32 / hue_div as f32 * std::f32::consts::TAU;
-                        data.push([
-                            amp * ang.sin(),
-                            0.85 + 0.1 * sa as f32 / sat_div as f32,
-                            1.0 + 0.15 * (v as f32 / val_div as f32) * ang.cos().abs(),
-                        ]);
-                    }
-                }
-            }
-            HueSatMap {
-                hue_divisions: hue_div,
-                sat_divisions: sat_div,
-                val_divisions: val_div,
-                data,
-            }
-        };
+        let smooth = smooth_table;
         DcpProfile {
             name: "synthetic".into(),
             unique_camera_model: "TEST".into(),
@@ -1632,10 +1713,17 @@ mod tests {
             hue_sat_map1: Some(smooth(12, 4, 3, 12.0)),
             hue_sat_map2: Some(smooth(12, 4, 3, 6.0)),
             look_table: Some(smooth(9, 3, 4, 8.0)),
-            tone_curve_points: None,
+            tone_curve_points: Some(vec![
+                (0.0, 0.0),
+                (0.12, 0.07),
+                (0.5, 0.6),
+                (0.85, 0.93),
+                (1.0, 1.0),
+            ]),
             baseline_exposure_offset: -0.3,
             hue_sat_map_encoding: TableEncoding::Linear,
             look_table_encoding: TableEncoding::Srgb,
+            default_black_render: nicti_calico::dcp::BlackRender::Auto,
         }
     }
 
@@ -1661,7 +1749,13 @@ mod tests {
         let output = FrameTexture::new(&gpu, extent);
 
         let gains = [1.8f64, 1.0, 1.3];
-        let solution = Arc::new(synthetic_profile().solve(gains));
+        let look = nicti_calico::xmp_profile::LookProfile {
+            name: "synthetic look".into(),
+            look_table: smooth_table(6, 3, 3, 5.0),
+            encoding: TableEncoding::Srgb,
+            unsupported_settings: vec![],
+        };
+        let solution = Arc::new(synthetic_profile().solve(gains).with_look(&look));
         let params = LiveParams {
             working_space_matrix: solution.camera_to_working,
             camera_profile: Some(solution.clone()),
@@ -1681,6 +1775,10 @@ mod tests {
         let mut stripped = (*solution).clone();
         stripped.hue_sat_map = None;
         stripped.look_table = None;
+        stripped.look_profile = None;
+        stripped.tone_lut = Arc::new(nicti_calico::tonecurve::ToneCurveLut::from_curve(
+            &nicti_calico::tonecurve::ToneCurve::identity(),
+        ));
         stripped.baseline_exposure_multiplier = 1.0;
         let mut biggest_effect = 0.0f32;
 
@@ -1688,8 +1786,8 @@ mod tests {
         let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
         let hsl = HslParams::default();
         for (i, px) in input_data.iter().enumerate() {
-            let mut rgb = solution.apply_cpu([px[0], px[1], px[2]]);
-            let plain = stripped.apply_cpu([px[0], px[1], px[2]]);
+            let mut rgb = solution.apply_cpu_toned([px[0], px[1], px[2]]);
+            let plain = stripped.apply_cpu_toned([px[0], px[1], px[2]]);
             for c in 0..3 {
                 biggest_effect = biggest_effect.max((rgb[c] - plain[c]).abs());
             }
@@ -1709,6 +1807,82 @@ mod tests {
         assert!(
             biggest_effect > 0.02,
             "the profile barely changed the output ({biggest_effect}); the test is vacuous"
+        );
+    }
+
+    /// The profile tone's edge cases against the CPU twin (#321): a profile with no curve (the ACR
+    /// default), channels above 1 and exact ties for the max/min channel.
+    #[test]
+    fn profile_tone_edge_inputs_with_the_default_curve_match_the_cpu_reference() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 3,
+            height: 2,
+        };
+        let input_data = vec![
+            [1.8, 0.9, 0.2, 1.0],     // clips above 1 after the matrix
+            [0.4, 0.4, 0.1, 1.0],     // tied maxima
+            [0.1, 0.4, 0.1, 1.0],     // tied minima
+            [0.3, 0.3, 0.3, 1.0],     // neutral
+            [0.0, 0.0, 0.0, 1.0],     // black
+            [0.02, 0.01, 0.015, 1.0], // deep shadow, where the sqrt-space table matters
+        ];
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let output = FrameTexture::new(&gpu, extent);
+        let mut profile = synthetic_profile();
+        profile.tone_curve_points = None;
+        profile.hue_sat_map1 = None;
+        profile.hue_sat_map2 = None;
+        profile.look_table = None;
+        profile.baseline_exposure_offset = 0.0;
+        let solution = Arc::new(profile.solve([1.0; 3]));
+        let params = LiveParams {
+            working_space_matrix: solution.camera_to_working,
+            camera_profile: Some(solution.clone()),
+            ..Default::default()
+        };
+        let kernel = LiveSuffixKernel::new(&gpu);
+        kernel.set_params(&gpu, &params);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(&gpu, &mut encoder, &input, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let actual = crate::test_util::read_frame(&gpu, &output);
+
+        let tone = ToneParams::default();
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        let untoned = {
+            let mut s = (*solution).clone();
+            s.tone_lut = Arc::new(nicti_calico::tonecurve::ToneCurveLut::from_curve(
+                &nicti_calico::tonecurve::ToneCurve::identity(),
+            ));
+            s
+        };
+        let mut biggest_tone_effect = 0.0f32;
+        for (i, px) in input_data.iter().enumerate() {
+            let mut rgb = solution.apply_cpu_toned([px[0], px[1], px[2]]);
+            let plain = untoned.apply_cpu_toned([px[0], px[1], px[2]]);
+            for c in 0..3 {
+                biggest_tone_effect = biggest_tone_effect.max((rgb[c] - plain[c]).abs());
+            }
+            rgb = color::apply_tone(rgb, &tone);
+            rgb = color::apply_tone_curve(rgb, &lut);
+            rgb = color::apply_vibrance(rgb, 0.0);
+            rgb = color::apply_hsl(rgb, &hsl);
+            for c in 0..3 {
+                assert!(
+                    (actual[i][c] - rgb[c]).abs() < 0.015,
+                    "pixel {i} channel {c}: gpu={} cpu={} (input {px:?})",
+                    actual[i][c],
+                    rgb[c]
+                );
+            }
+        }
+        assert!(
+            biggest_tone_effect > 0.02,
+            "the default curve barely changed the output ({biggest_tone_effect})"
         );
     }
 

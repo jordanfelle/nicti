@@ -772,8 +772,51 @@ fn show_camera_profile_picker(ui: &mut egui::Ui, develop: &mut DevelopView) {
     if let Some(pick) = pick {
         develop.select_camera_profile(pick.map(|i| &choices[i]));
     }
+    show_look_picker(ui, develop, &current);
     if let Some(err) = &develop.profile_error {
         ui.colored_label(ui.visuals().error_fg_color, err);
+    }
+}
+
+/// The Adobe Raw "Look" `.xmp` picker (#321), layered on the selected camera profile -- disabled
+/// without one, since a Look has no base to sit on.
+fn show_look_picker(
+    ui: &mut egui::Ui,
+    develop: &mut DevelopView,
+    current: &nicti_tapetum::coat::CameraProfileParams,
+) {
+    // Shown even with no installed Looks when the document records one, so it can be seen and
+    // cleared.
+    if develop.look_choices().is_empty() && current.look.is_none() {
+        return;
+    }
+    let looks = develop.look_choices().to_vec();
+    let has_profile = current.content_hash.is_some();
+    let chosen = current.look.as_ref();
+    let mut pick: Option<Option<usize>> = None;
+    ui.add_enabled_ui(has_profile, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Look");
+            egui::ComboBox::from_id_salt("camera_look")
+                .selected_text(chosen.map_or("None", |l| l.name.as_str()))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(chosen.is_none(), "None").clicked() {
+                        pick = Some(None);
+                    }
+                    for (i, entry) in looks.iter().enumerate() {
+                        let selected =
+                            chosen.is_some_and(|l| l.path == entry.path.display().to_string());
+                        if ui.selectable_label(selected, &entry.name).clicked() {
+                            pick = Some(Some(i));
+                        }
+                    }
+                });
+        })
+        .response
+        .on_disabled_hover_text("Pick a camera profile first; a Look layers on top of it.");
+    });
+    if let Some(pick) = pick {
+        develop.select_look(pick.map(|i| &looks[i]));
     }
 }
 

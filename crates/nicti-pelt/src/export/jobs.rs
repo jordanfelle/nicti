@@ -361,6 +361,7 @@ struct Ready {
     frame: Arc<LinearFrame>,
     exif: SourceExif,
     profile: Option<Arc<DcpProfile>>,
+    look: Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
 }
 
 struct Rendered {
@@ -610,13 +611,14 @@ impl ChunkedJob for DecodeJob {
             ticket.cancelled();
         } else {
             match decode_one(&shared, ticket.item()) {
-                Ok((frame, exif, profile)) => shared.with_state(|st| {
+                Ok((frame, exif, profile, look)) => shared.with_state(|st| {
                     st.decoding -= 1;
                     st.ready.push_back(Ready {
                         ticket,
                         frame,
                         exif,
                         profile,
+                        look,
                     });
                 }),
                 Err(why) => {
@@ -644,7 +646,15 @@ impl Drop for DecodeJob {
 fn decode_one(
     shared: &Shared,
     item: &Item,
-) -> Result<(Arc<LinearFrame>, SourceExif, Option<Arc<DcpProfile>>), String> {
+) -> Result<
+    (
+        Arc<LinearFrame>,
+        SourceExif,
+        Option<Arc<DcpProfile>>,
+        Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
+    ),
+    String,
+> {
     let frame = shared
         .decoder
         .decode_linear(&item.source_path)
@@ -654,7 +664,10 @@ fn decode_one(
     // different profile than the user edited with would be worse than failing this photo.
     let profile = camera_profiles::load_for_document(&item.edit, &frame.make, &frame.model)
         .map_err(|e| format!("camera profile: {e}"))?;
-    Ok((Arc::new(frame), exif, profile))
+    // Same for the Look `.xmp` layered on it.
+    let look = camera_profiles::load_look_for_document(&item.edit)
+        .map_err(|e| format!("camera profile: {e}"))?;
+    Ok((Arc::new(frame), exif, profile, look))
 }
 
 // --- stage 2: render ---------------------------------------------------------------------------
@@ -704,6 +717,7 @@ impl RenderJob {
             frame,
             exif,
             profile,
+            look,
         } = ready;
         let shared = self.shared.clone();
         let item = ticket.item();
@@ -721,6 +735,7 @@ impl RenderJob {
             item.identity,
             &frame,
             profile.as_deref(),
+            look.as_deref(),
         ) {
             Ok(r) => r,
             Err(why) => {
@@ -1307,6 +1322,7 @@ mod tests {
                     name: Some("Gone".into()),
                     path: Some("/definitely/not/here.dcp".into()),
                     content_hash: Some("00".repeat(32)),
+                    look: None,
                 })
                 .unwrap(),
             },
