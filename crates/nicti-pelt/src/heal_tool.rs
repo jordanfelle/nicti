@@ -256,7 +256,7 @@ impl RemovalService {
         let (job, handle) = InstallModelsJob::new_repair(
             store.clone(),
             Arc::new(HttpDownloader),
-            &models::removal_artifacts_for(&store),
+            &models::removal_repair_artifacts(&store),
         );
         self.install = Some(handle);
         pounce.submit(Box::new(job));

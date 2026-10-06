@@ -109,7 +109,16 @@ impl MaskBakeService {
         let Some(provider) = self.registry.get(model_id) else {
             return false; // an unknown model is a resolve error at bake time, not a download
         };
-        let artifacts = provider.artifacts();
+        // With the GPU pack's runtime in use, the CPU runtime isn't part of what's needed.
+        let gpu_runtime = self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.gpu_runtime_path().is_some());
+        let artifacts: Vec<_> = provider
+            .artifacts()
+            .into_iter()
+            .filter(|a| !(gpu_runtime && a.id == models::ORT_RUNTIME.id))
+            .collect();
         if artifacts.is_empty() {
             return false;
         }
@@ -205,7 +214,16 @@ impl MaskBakeService {
         } else {
             "Download AI mask model"
         };
-        self.start_with(pounce, repair, models::mask_artifacts(), label)
+        let store = self
+            .store
+            .as_ref()
+            .ok_or("No place to keep models: couldn't determine a data folder.")?;
+        let artifacts = if repair {
+            models::mask_repair_artifacts(store)
+        } else {
+            models::mask_artifacts_for(store)
+        };
+        self.start_with(pounce, repair, artifacts, label)
     }
 
     fn start_with(

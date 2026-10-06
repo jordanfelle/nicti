@@ -402,10 +402,37 @@ pub fn mask_artifacts() -> Vec<&'static Artifact> {
     v
 }
 
+/// [`mask_artifacts`] for what `store` has: the CPU ONNX Runtime is left out when the GPU pack's
+/// CUDA build is the runtime in use, so a user with the pack isn't asked to download one nothing
+/// would load (the same rule as [`removal_artifacts_for`]).
+pub fn mask_artifacts_for(store: &ModelStore) -> Vec<&'static Artifact> {
+    let gpu = store.gpu_runtime_path().is_some();
+    mask_artifacts()
+        .into_iter()
+        .filter(|a| !(gpu && a.id == ORT_RUNTIME.id))
+        .collect()
+}
+
+/// What a Repair must re-check for AI masks: exactly the set the load path verifies
+/// ([`MaskModels::artifacts`] -- including the GPU pack's files when that is the runtime in use),
+/// else the default set when the masks aren't fully installed yet.
+pub fn mask_repair_artifacts(store: &ModelStore) -> Vec<&'static Artifact> {
+    MaskModels::locate(store)
+        .map(|m| m.artifacts())
+        .unwrap_or_else(|| mask_artifacts_for(store))
+}
+
+/// [`mask_repair_artifacts`] for AI removal ([`RemovalModels::artifacts`]).
+pub fn removal_repair_artifacts(store: &ModelStore) -> Vec<&'static Artifact> {
+    RemovalModels::locate(store)
+        .map(|m| m.artifacts())
+        .unwrap_or_else(|| removal_artifacts_for(store))
+}
+
 /// Total bytes a user agrees to download for AI masks, for the confirmation prompt (skips anything
 /// already installed, e.g. a runtime AI removal already fetched).
 pub fn mask_download_bytes(store: &ModelStore) -> u64 {
-    mask_artifacts()
+    mask_artifacts_for(store)
         .iter()
         .filter(|a| store.status(a) != Status::Installed)
         .map(|a| a.download_size)
@@ -1690,6 +1717,20 @@ mod tests {
             .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap();
         assert_eq!(fs::read_dir(store.dir(&art)).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn without_the_pack_the_for_store_lists_are_the_default_lists() {
+        let store = temp_store("for-store");
+        let ids = |v: Vec<&'static Artifact>| v.iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(mask_artifacts_for(&store)), ids(mask_artifacts()));
+        assert_eq!(ids(removal_artifacts_for(&store)), ids(removal_artifacts()));
+        // Nothing installed: a repair re-checks the default sets (locate() is None).
+        assert_eq!(ids(mask_repair_artifacts(&store)), ids(mask_artifacts()));
+        assert_eq!(
+            ids(removal_repair_artifacts(&store)),
+            ids(removal_artifacts())
+        );
     }
 
     #[test]
