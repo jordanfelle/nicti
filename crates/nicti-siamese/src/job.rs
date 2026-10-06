@@ -47,6 +47,7 @@ pub struct MaskBakeJob {
     recipe: MaskRecipe,
     bake_key: blake3::Hash,
     label: String,
+    priority: Priority,
     done: bool,
     slot: Slot<MaskBakeOutcome>,
 }
@@ -72,23 +73,45 @@ impl MaskBakeJob {
             label: format!("Select {target}"),
             recipe,
             bake_key,
+            priority: Priority::Foreground,
             done: false,
             slot: Arc::clone(&slot),
         };
         (job, slot)
+    }
+
+    /// Runs at `priority` instead of the default `Foreground`. A pre-bake of a photo the user is
+    /// not looking at (#353) is `Background`, so it never delays a mask they are waiting on.
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+}
+
+/// What a bake declares to Pounce's admission control. Foreground is never refused on VRAM, so it
+/// may declare the model's real footprint (informational). A **Background** job is refused -- and
+/// dropped unrun -- when its declaration exceeds the lane's whole budget (a 512 MiB placeholder
+/// today, against ~8 GiB for the GPU pack), which would silently kill every pre-bake (#353). The
+/// GPU lane's one serial worker already keeps a Background bake from overlapping the foreground
+/// one, so it declares 0.
+fn vram_for_priority(priority: Priority, declared: u64) -> u64 {
+    match priority {
+        Priority::Foreground => declared,
+        Priority::Background => 0,
     }
 }
 
 impl ChunkedJob for MaskBakeJob {
     fn spec(&self) -> JobSpec {
         JobSpec {
-            // Foreground: the user just asked for this mask and is looking at it.
-            priority: Priority::Foreground,
+            // Foreground unless built `with_priority`: the user just asked for this mask and is
+            // looking at it.
+            priority: self.priority,
             kind: JobKind::Bake,
             lane: Lane::Gpu,
             // 0 on the CPU provider (it uses no VRAM, and nothing is loaded before the first bake);
             // the GPU provider's measured footprint once BiRefNet is running on it (#345).
-            vram_bytes: crate::birefnet::declared_vram_bytes(),
+            vram_bytes: vram_for_priority(self.priority, crate::birefnet::declared_vram_bytes()),
             image_index: None,
         }
     }
@@ -115,7 +138,8 @@ impl ChunkedJob for MaskBakeJob {
                 })
                 .map_err(|e| e.to_string())
                 .and_then(|a| {
-                    AiAlpha::new(a.width, a.height, a.alpha)
+                    // 8-bit quantised, so this is exactly what the disk tier returns (#353).
+                    AiAlpha::quantized(a.width, a.height, a.alpha)
                         .map(Arc::new)
                         .ok_or_else(|| "the model returned an empty alpha".to_owned())
                 }),
@@ -229,6 +253,31 @@ mod tests {
         assert_eq!(spec.priority, Priority::Foreground);
         assert_eq!(spec.vram_bytes, 0);
         assert_eq!(job.label(), "Select subject");
+    }
+
+    #[test]
+    fn a_background_bake_declares_no_vram_so_a_small_budget_cannot_drop_it() {
+        let gpu_pack = 8 * 1024 * 1024 * 1024;
+        assert_eq!(vram_for_priority(Priority::Foreground, gpu_pack), gpu_pack);
+        assert_eq!(vram_for_priority(Priority::Background, gpu_pack), 0);
+    }
+
+    #[test]
+    fn with_priority_overrides_only_the_priority() {
+        let (job, _, _) = job_with(Fake { ok: true, calls: 0 });
+        let spec = job.with_priority(Priority::Background).spec();
+        assert_eq!(spec.priority, Priority::Background);
+        assert_eq!(spec.lane, Lane::Gpu);
+        assert_eq!(spec.kind, JobKind::Bake);
+    }
+
+    #[test]
+    fn a_baked_alpha_is_already_quantised_to_what_the_disk_tier_stores() {
+        let (mut job, slot, _) = job_with(Fake { ok: true, calls: 0 });
+        job.step().unwrap();
+        let alpha = slot.lock().unwrap().take().unwrap().result.unwrap();
+        let reloaded = AiAlpha::decode(&alpha.encode()).unwrap();
+        assert_eq!(alpha.content_hash, reloaded.content_hash);
     }
 
     #[test]

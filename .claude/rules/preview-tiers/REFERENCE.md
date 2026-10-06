@@ -54,6 +54,11 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   Loupe fallback swaps the render in, never downgrades; grid only flags edited photos (`ThumbImage.edited`,
   `cull::badges::paint_stale`); survey/compare unchanged (ADR-0032). Gotcha: `Larder::get` with a *different* hash
   deletes the entry -- use `get_latest`/`stored_hash` when comparing hashes.
+- **Keyed entries (#353, `docs/adr/0353`)**: a second Larder index table `keyed_entry (kind, key)` for content-addressed
+  blobs that are many-per-photo -- today `LarderKind::AiAlpha` (baked AI mask alphas, key = bake key). Same pack
+  file/cap/LRU (one shared `seq`)/compaction/`purge_all`; `put_keyed`/`get_keyed`/`contains_keyed`/`forget_keyed`/
+  `purge_kind`; `purge_asset` drops an asset's keyed rows too. Existing Larders need no migration (`IF NOT EXISTS`).
+  See `masking`.
 
 ## Package contents
 

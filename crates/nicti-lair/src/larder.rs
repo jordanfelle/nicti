@@ -47,6 +47,31 @@ impl LarderTier {
     }
 }
 
+/// What a content-addressed (keyed) payload is (#353). The kind is part of the key so other
+/// derived blobs can share the store later without colliding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LarderKind {
+    /// A baked AI mask alpha, keyed by `ai_bake_key` (ADR-0044's disk tier for mask alpha).
+    AiAlpha,
+}
+
+impl LarderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LarderKind::AiAlpha => "alpha",
+        }
+    }
+}
+
+/// A keyed payload's identity. `key` is the content address (for an alpha, the 32 bytes of the
+/// bake key); `asset_id` only scopes `purge_asset`, it is not part of the key.
+#[derive(Debug, Clone, Copy)]
+pub struct LarderKeyed<'a> {
+    pub kind: LarderKind,
+    pub asset_id: i64,
+    pub key: &'a [u8],
+}
+
 /// One cached payload's identity: ADR-0029's `(asset_id, tier, render_hash)` cache key. A stored
 /// entry whose `render_hash` differs from the one asked for is stale and treated as a miss.
 /// `render_hash` is ADR-0021's blake3 edit-document hash, or a fixed sentinel (e.g. `"embedded"`)
@@ -107,6 +132,10 @@ pub struct Larder {
     /// Held for the life of the `Larder`: the in-memory counters assume a single owner.
     _lock: File,
 }
+
+/// Live payload bytes across both index tables (the `(asset, tier)` entries and the keyed ones).
+const LIVE_BYTES_SQL: &str = "SELECT COALESCE((SELECT SUM(len) FROM entry), 0)
+     + COALESCE((SELECT SUM(len) FROM keyed_entry), 0)";
 
 fn io_err(e: io::Error) -> CatalogError {
     CatalogError::Io(e.to_string())
@@ -201,7 +230,19 @@ impl Larder {
                  seq         INTEGER NOT NULL,
                  PRIMARY KEY (asset_id, tier)
              );
-             CREATE INDEX IF NOT EXISTS idx_entry_seq ON entry(seq);",
+             CREATE INDEX IF NOT EXISTS idx_entry_seq ON entry(seq);
+             CREATE TABLE IF NOT EXISTS keyed_entry (
+                 key      BLOB NOT NULL,
+                 kind     TEXT NOT NULL,
+                 asset_id INTEGER NOT NULL,
+                 offset   INTEGER NOT NULL,
+                 len      INTEGER NOT NULL,
+                 checksum BLOB NOT NULL,
+                 seq      INTEGER NOT NULL,
+                 PRIMARY KEY (kind, key)
+             );
+             CREATE INDEX IF NOT EXISTS idx_keyed_seq ON keyed_entry(seq);
+             CREATE INDEX IF NOT EXISTS idx_keyed_asset ON keyed_entry(asset_id);",
         )?;
         let meta = |key: &str| -> Result<Option<i64>, rusqlite::Error> {
             conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
@@ -228,8 +269,11 @@ impl Larder {
             "DELETE FROM entry WHERE offset < 0 OR len < 0 OR offset + len > ?1",
             [file_len as i64],
         )?;
-        let live_bytes: i64 =
-            conn.query_row("SELECT COALESCE(SUM(len), 0) FROM entry", [], |r| r.get(0))?;
+        conn.execute(
+            "DELETE FROM keyed_entry WHERE offset < 0 OR len < 0 OR offset + len > ?1",
+            [file_len as i64],
+        )?;
+        let live_bytes: i64 = conn.query_row(LIVE_BYTES_SQL, [], |r| r.get(0))?;
 
         let mut larder = Self {
             dir: dir.to_path_buf(),
@@ -249,9 +293,11 @@ impl Larder {
     }
 
     pub fn stats(&self) -> Result<LarderStats, CatalogError> {
-        let entry_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))?;
+        let entry_count: i64 = self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM entry) + (SELECT COUNT(*) FROM keyed_entry)",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(LarderStats {
             entry_count: entry_count as u64,
             live_bytes: self.live_bytes,
@@ -273,11 +319,27 @@ impl Larder {
     /// cap — evicting everything for something that would itself be evicted next is worse than a
     /// miss.
     pub fn put(&mut self, key: LarderKey<'_>, bytes: &[u8]) -> Result<bool, CatalogError> {
+        self.put_tx(bytes, |l| l.put_in_tx(key, bytes))
+    }
+
+    /// Stores `bytes` under a content-addressed key (#353), replacing any previous entry for the
+    /// same `(kind, key)`. Unlike [`Larder::put`] there can be many per asset, and no stale case:
+    /// the key already names the content. Shares the pack file, the byte cap and the
+    /// recency order with the `(asset, tier)` entries. Same `false`-when-over-the-cap contract.
+    pub fn put_keyed(&mut self, key: LarderKeyed<'_>, bytes: &[u8]) -> Result<bool, CatalogError> {
+        self.put_tx(bytes, |l| l.put_keyed_in_tx(key, bytes))
+    }
+
+    fn put_tx(
+        &mut self,
+        bytes: &[u8],
+        body: impl FnOnce(&mut Self) -> Result<(), CatalogError>,
+    ) -> Result<bool, CatalogError> {
         if bytes.len() as u64 > self.cfg.cap_bytes {
             return Ok(false);
         }
         self.conn.execute_batch("BEGIN")?;
-        let stored = self.put_in_tx(key, bytes);
+        let stored = body(self);
         match stored {
             Ok(()) => {
                 if let Err(e) = self.conn.execute_batch("COMMIT") {
@@ -300,11 +362,11 @@ impl Larder {
         Ok(true)
     }
 
-    fn put_in_tx(&mut self, key: LarderKey<'_>, bytes: &[u8]) -> Result<(), CatalogError> {
+    /// Appends `bytes` to the pack and takes the next recency `seq`; the caller inserts the index
+    /// row. Evicts first so the payload fits under the cap.
+    fn append_payload(&mut self, bytes: &[u8]) -> Result<(u64, i64), CatalogError> {
         let len = bytes.len() as u64;
-        self.remove_entry(key.asset_id, key.tier.as_str())?;
         self.evict_to_fit(len)?;
-
         let offset = self.file_len;
         if let Err(e) = write_all_at(&self.pack, bytes, offset) {
             // Drop any torn tail so the next write can't leave a gap or overlap.
@@ -313,6 +375,34 @@ impl Larder {
         }
         self.file_len += len;
         let seq = self.bump_seq()?;
+        Ok((offset, seq))
+    }
+
+    fn put_keyed_in_tx(&mut self, key: LarderKeyed<'_>, bytes: &[u8]) -> Result<(), CatalogError> {
+        self.remove_keyed(key.kind.as_str(), key.key)?;
+        let (offset, seq) = self.append_payload(bytes)?;
+        let len = bytes.len() as u64;
+        self.conn.execute(
+            "INSERT INTO keyed_entry (key, kind, asset_id, offset, len, checksum, seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                key.key,
+                key.kind.as_str(),
+                key.asset_id,
+                offset as i64,
+                len as i64,
+                blake3::hash(bytes).as_bytes().as_slice(),
+                seq,
+            ],
+        )?;
+        self.live_bytes += len;
+        Ok(())
+    }
+
+    fn put_in_tx(&mut self, key: LarderKey<'_>, bytes: &[u8]) -> Result<(), CatalogError> {
+        let len = bytes.len() as u64;
+        self.remove_entry(key.asset_id, key.tier.as_str())?;
+        let (offset, seq) = self.append_payload(bytes)?;
         self.conn.execute(
             "INSERT INTO entry (asset_id, tier, render_hash, offset, len, checksum, seq)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -334,9 +424,7 @@ impl Larder {
     fn resync_counters(&mut self) {
         if let Ok(live) = self
             .conn
-            .query_row("SELECT COALESCE(SUM(len), 0) FROM entry", [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(LIVE_BYTES_SQL, [], |r| r.get::<_, i64>(0))
         {
             self.live_bytes = live as u64;
         }
@@ -458,11 +546,71 @@ impl Larder {
         Ok(stored.as_deref() == Some(key.render_hash))
     }
 
+    /// Returns the payload stored under a content-addressed key and marks it most-recently-used.
+    /// An unreadable or checksum-failing entry is dropped and reported as a miss.
+    pub fn get_keyed(&mut self, key: LarderKeyed<'_>) -> Result<Option<Vec<u8>>, CatalogError> {
+        let row: Option<(i64, i64, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT offset, len, checksum FROM keyed_entry WHERE kind = ?1 AND key = ?2",
+                params![key.kind.as_str(), key.key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((offset, len, checksum)) = row else {
+            return Ok(None);
+        };
+        let mut buf = vec![0u8; len as usize];
+        let intact = read_exact_at(&self.pack, &mut buf, offset as u64).is_ok()
+            && blake3::hash(&buf).as_bytes().as_slice() == checksum.as_slice();
+        if !intact {
+            self.remove_keyed(key.kind.as_str(), key.key)?;
+            return Ok(None);
+        }
+        let seq = self.bump_seq()?;
+        self.conn.execute(
+            "UPDATE keyed_entry SET seq = ?3 WHERE kind = ?1 AND key = ?2",
+            params![key.kind.as_str(), key.key, seq],
+        )?;
+        Ok(Some(buf))
+    }
+
+    /// Drops the entry under `key`, if any. For a caller that read a payload which passed the
+    /// checksum but that it cannot interpret (written by another build): left in place it would
+    /// also make [`Larder::contains_keyed`] true forever and keep a replacement from being stored.
+    pub fn forget_keyed(&mut self, key: LarderKeyed<'_>) -> Result<(), CatalogError> {
+        self.remove_keyed(key.kind.as_str(), key.key)
+    }
+
+    /// Whether a payload is indexed under `key` -- index-only, no read, no recency bump.
+    pub fn contains_keyed(&self, key: LarderKeyed<'_>) -> Result<bool, CatalogError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM keyed_entry WHERE kind = ?1 AND key = ?2",
+                params![key.kind.as_str(), key.key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     /// Manual purge: drops every cached payload for one asset (e.g. after its source file was
-    /// replaced). Returns the live bytes freed. Disk space is reclaimed by the next compaction
-    /// (automatic past the dead-byte threshold, or call [`Larder::compact`] after a batch).
+    /// replaced), keyed ones included. Returns the live bytes freed. Disk space is reclaimed by
+    /// the next compaction (automatic past the dead-byte threshold, or call [`Larder::compact`]
+    /// after a batch).
     pub fn purge_asset(&mut self, asset_id: i64) -> Result<u64, CatalogError> {
-        self.purge_where("asset_id = ?1", asset_id.into(), false)
+        let keyed = self.purge_keyed_where("asset_id = ?1", asset_id.into())?;
+        Ok(keyed + self.purge_where("asset_id = ?1", asset_id.into(), false)?)
+    }
+
+    /// Manual purge: drops every keyed payload of one kind. Returns the live bytes freed.
+    pub fn purge_kind(&mut self, kind: LarderKind) -> Result<u64, CatalogError> {
+        let freed = self.purge_keyed_where("kind = ?1", kind.as_str().to_string().into())?;
+        if freed > 0 {
+            let _ = self.compact();
+        }
+        Ok(freed)
     }
 
     /// Manual purge: drops every payload of one tier. Returns the live bytes freed.
@@ -479,6 +627,7 @@ impl Larder {
         let new_pack = open_pack(&pack_path(&self.dir, new_gen)).map_err(io_err)?;
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM entry", [])?;
+        tx.execute("DELETE FROM keyed_entry", [])?;
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('generation', ?1)",
             [new_gen],
@@ -517,13 +666,29 @@ impl Larder {
                 stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             mapped.collect::<Result<_, _>>()?
         };
+        let keyed_rows: Vec<(Vec<u8>, String, i64, i64)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT key, kind, offset, len FROM keyed_entry ORDER BY offset")?;
+            let mapped =
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            mapped.collect::<Result<_, _>>()?
+        };
         let mut moved = Vec::with_capacity(rows.len());
+        let mut moved_keyed = Vec::with_capacity(keyed_rows.len());
         let mut new_len = 0u64;
         for (asset_id, tier, offset, len) in rows {
             let mut buf = vec![0u8; len as usize];
             read_exact_at(&self.pack, &mut buf, offset as u64).map_err(io_err)?;
             write_all_at(&new_pack, &buf, new_len).map_err(io_err)?;
             moved.push((asset_id, tier, new_len as i64));
+            new_len += len as u64;
+        }
+        for (key, kind, offset, len) in keyed_rows {
+            let mut buf = vec![0u8; len as usize];
+            read_exact_at(&self.pack, &mut buf, offset as u64).map_err(io_err)?;
+            write_all_at(&new_pack, &buf, new_len).map_err(io_err)?;
+            moved_keyed.push((key, kind, new_len as i64));
             new_len += len as u64;
         }
         new_pack.sync_all().map_err(io_err)?;
@@ -533,6 +698,12 @@ impl Larder {
             tx.execute(
                 "UPDATE entry SET offset = ?3 WHERE asset_id = ?1 AND tier = ?2",
                 params![asset_id, tier, new_offset],
+            )?;
+        }
+        for (key, kind, new_offset) in &moved_keyed {
+            tx.execute(
+                "UPDATE keyed_entry SET offset = ?3 WHERE key = ?1 AND kind = ?2",
+                params![key, kind, new_offset],
             )?;
         }
         tx.execute(
@@ -607,6 +778,44 @@ impl Larder {
         Ok(freed as u64)
     }
 
+    /// Like [`Larder::purge_where`] but for `keyed_entry`; never compacts (the callers decide).
+    fn purge_keyed_where(
+        &mut self,
+        predicate: &str,
+        arg: rusqlite::types::Value,
+    ) -> Result<u64, CatalogError> {
+        let freed: i64 = self.conn.query_row(
+            &format!("SELECT COALESCE(SUM(len), 0) FROM keyed_entry WHERE {predicate}"),
+            params![arg],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            &format!("DELETE FROM keyed_entry WHERE {predicate}"),
+            params![arg],
+        )?;
+        self.live_bytes = self.live_bytes.saturating_sub(freed as u64);
+        Ok(freed as u64)
+    }
+
+    fn remove_keyed(&mut self, kind: &str, key: &[u8]) -> Result<(), CatalogError> {
+        let len: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT len FROM keyed_entry WHERE kind = ?1 AND key = ?2",
+                params![kind, key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(len) = len {
+            self.conn.execute(
+                "DELETE FROM keyed_entry WHERE kind = ?1 AND key = ?2",
+                params![kind, key],
+            )?;
+            self.live_bytes = self.live_bytes.saturating_sub(len as u64);
+        }
+        Ok(())
+    }
+
     fn remove_entry(&mut self, asset_id: i64, tier: &str) -> Result<(), CatalogError> {
         let len: Option<i64> = self
             .conn
@@ -629,18 +838,32 @@ impl Larder {
     /// Evicts least-recently-used entries until `incoming` more bytes would fit under the cap.
     fn evict_to_fit(&mut self, incoming: u64) -> Result<(), CatalogError> {
         while self.live_bytes + incoming > self.cfg.cap_bytes {
-            let victim: Option<(i64, String)> = self
+            // Oldest `seq` across both index tables; `seq` is one shared counter, so it orders
+            // them against each other.
+            let tiered: Option<(i64, i64, String)> = self
                 .conn
                 .query_row(
-                    "SELECT asset_id, tier FROM entry ORDER BY seq LIMIT 1",
+                    "SELECT seq, asset_id, tier FROM entry ORDER BY seq LIMIT 1",
                     [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            let Some((asset_id, tier)) = victim else {
-                break;
-            };
-            self.remove_entry(asset_id, &tier)?;
+            let keyed: Option<(i64, Vec<u8>, String)> = self
+                .conn
+                .query_row(
+                    "SELECT seq, key, kind FROM keyed_entry ORDER BY seq LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            match (tiered, keyed) {
+                (None, None) => break,
+                (Some((_, asset_id, tier)), None) => self.remove_entry(asset_id, &tier)?,
+                (Some((a, asset_id, tier)), Some((b, ..))) if a <= b => {
+                    self.remove_entry(asset_id, &tier)?
+                }
+                (_, Some((_, key, kind))) => self.remove_keyed(&kind, &key)?,
+            }
         }
         Ok(())
     }
@@ -1110,5 +1333,160 @@ mod tests {
         let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
         assert!(!pack_path(dir.path(), 7).exists());
         assert!(l.get(key(1)).unwrap().is_some());
+    }
+
+    fn kkey<'a>(asset_id: i64, key: &'a [u8]) -> LarderKeyed<'a> {
+        LarderKeyed {
+            kind: LarderKind::AiAlpha,
+            asset_id,
+            key,
+        }
+    }
+
+    #[test]
+    fn keyed_put_get_round_trips_and_many_keys_share_one_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        assert!(l.put_keyed(kkey(1, b"a"), b"alpha-a").unwrap());
+        assert!(l.put_keyed(kkey(1, b"b"), b"alpha-b").unwrap());
+        assert!(
+            l.put(key(1), b"t2").unwrap(),
+            "the (asset, tier) entry coexists"
+        );
+        assert_eq!(
+            l.get_keyed(kkey(1, b"a")).unwrap().as_deref(),
+            Some(&b"alpha-a"[..])
+        );
+        assert_eq!(
+            l.get_keyed(kkey(1, b"b")).unwrap().as_deref(),
+            Some(&b"alpha-b"[..])
+        );
+        assert_eq!(l.get_keyed(kkey(1, b"c")).unwrap(), None);
+        assert!(l.contains_keyed(kkey(1, b"a")).unwrap());
+        assert!(!l.contains_keyed(kkey(1, b"c")).unwrap());
+        assert_eq!(l.get(key(1)).unwrap().as_deref(), Some(&b"t2"[..]));
+        let stats = l.stats().unwrap();
+        assert_eq!(stats.entry_count, 3);
+        assert_eq!(stats.live_bytes, (7 + 7 + 2) as u64);
+    }
+
+    #[test]
+    fn re_putting_a_keyed_entry_replaces_it_without_leaking_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[1; 10]).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[2; 4]).unwrap();
+        assert_eq!(l.get_keyed(kkey(1, b"a")).unwrap(), Some(vec![2; 4]));
+        let stats = l.stats().unwrap();
+        assert_eq!((stats.entry_count, stats.live_bytes), (1, 4));
+    }
+
+    #[test]
+    fn eviction_orders_keyed_and_tiered_entries_against_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(30)).unwrap();
+        l.put(key(1), &[1; 10]).unwrap(); // oldest
+        l.put_keyed(kkey(2, b"k"), &[2; 10]).unwrap();
+        l.put(key(3), &[3; 10]).unwrap();
+        // Touch the oldest tiered entry so the keyed one becomes the LRU victim.
+        assert!(l.get(key(1)).unwrap().is_some());
+        l.put(key(4), &[4; 10]).unwrap();
+        assert!(
+            l.get_keyed(kkey(2, b"k")).unwrap().is_none(),
+            "keyed was the LRU entry"
+        );
+        assert!(l.get(key(1)).unwrap().is_some());
+        assert!(l.get(key(3)).unwrap().is_some());
+        // And the other way round: a keyed put evicts the oldest tiered entry.
+        l.put_keyed(kkey(5, b"n"), &[5; 10]).unwrap();
+        assert!(l.get(key(4)).unwrap().is_none(), "4 was the LRU entry");
+        assert!(l.stats().unwrap().live_bytes <= 30);
+    }
+
+    #[test]
+    fn a_keyed_payload_larger_than_the_cap_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(8)).unwrap();
+        assert!(!l.put_keyed(kkey(1, b"a"), &[0; 9]).unwrap());
+        assert_eq!(l.stats().unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn compaction_keeps_keyed_entries_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[1; 50]).unwrap();
+        l.put(key(2), &[2; 50]).unwrap();
+        l.put_keyed(kkey(3, b"b"), &[3; 50]).unwrap();
+        l.purge_asset(2).unwrap(); // leaves a dead hole in the middle
+        l.compact().unwrap();
+        assert_eq!(l.stats().unwrap().file_bytes, 100);
+        assert_eq!(l.get_keyed(kkey(1, b"a")).unwrap(), Some(vec![1; 50]));
+        assert_eq!(l.get_keyed(kkey(3, b"b")).unwrap(), Some(vec![3; 50]));
+    }
+
+    #[test]
+    fn purge_asset_drops_keyed_rows_and_purge_kind_only_keyed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[1; 10]).unwrap();
+        l.put_keyed(kkey(2, b"b"), &[2; 10]).unwrap();
+        l.put(key(1), &[9; 5]).unwrap();
+        assert_eq!(l.purge_asset(1).unwrap(), 15);
+        assert!(!l.contains_keyed(kkey(1, b"a")).unwrap());
+        assert!(l.get(key(1)).unwrap().is_none());
+        assert!(l.contains_keyed(kkey(2, b"b")).unwrap());
+        l.put(key(3), &[3; 5]).unwrap();
+        assert_eq!(l.purge_kind(LarderKind::AiAlpha).unwrap(), 10);
+        assert!(
+            l.get(key(3)).unwrap().is_some(),
+            "tiered entries survive purge_kind"
+        );
+        assert_eq!(l.stats().unwrap().live_bytes, 5);
+    }
+
+    #[test]
+    fn forget_keyed_drops_one_entry_and_frees_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[1; 10]).unwrap();
+        l.put_keyed(kkey(1, b"b"), &[2; 6]).unwrap();
+        l.forget_keyed(kkey(1, b"a")).unwrap();
+        l.forget_keyed(kkey(1, b"never-stored")).unwrap(); // a no-op, not an error
+        assert!(!l.contains_keyed(kkey(1, b"a")).unwrap());
+        assert!(l.contains_keyed(kkey(1, b"b")).unwrap());
+        assert_eq!(l.stats().unwrap().live_bytes, 6);
+    }
+
+    #[test]
+    fn purge_all_clears_keyed_entries_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[1; 10]).unwrap();
+        assert_eq!(l.purge_all().unwrap(), 10);
+        assert!(!l.contains_keyed(kkey(1, b"a")).unwrap());
+        assert_eq!(l.stats().unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn a_corrupt_keyed_payload_is_a_miss_and_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[7; 10]).unwrap();
+        write_all_at(&l.pack, &[0xFF; 10], 0).unwrap();
+        assert_eq!(l.get_keyed(kkey(1, b"a")).unwrap(), None);
+        assert!(!l.contains_keyed(kkey(1, b"a")).unwrap());
+        assert_eq!(l.stats().unwrap().live_bytes, 0);
+    }
+
+    #[test]
+    fn keyed_entries_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        l.put_keyed(kkey(1, b"a"), &[4; 12]).unwrap();
+        drop(l);
+        let mut l = Larder::open(dir.path(), cfg(1000)).unwrap();
+        assert_eq!(l.get_keyed(kkey(1, b"a")).unwrap(), Some(vec![4; 12]));
+        assert_eq!(l.stats().unwrap().live_bytes, 12);
     }
 }

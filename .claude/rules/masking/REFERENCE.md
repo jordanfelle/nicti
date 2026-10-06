@@ -7,8 +7,11 @@ paths:
   - "crates/nicti-tapetum/shaders/guide*.wgsl"
   - "crates/nicti-tapetum/shaders/dehaze_*.wgsl"
   - "crates/nicti-pelt/src/mask_*.rs"
+  - "crates/nicti-pelt/src/stash.rs"
+  - "crates/nicti-pelt/src/prebake.rs"
   - "docs/adr/0048-masking.md"
   - "docs/adr/0049-masking-build.md"
+  - "docs/adr/0353-baked-alpha-disk-tier.md"
 ---
 
 # Masking — Quick Reference
@@ -57,6 +60,19 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   DIS-TR"; the *conversion* matches upstream on outputs (#348, `bench/birefnet-verify`, mask IoU >= 0.997).
 - **GPU pack (#345)**: optional, Windows+NVIDIA, ~1.7 GB (ORT CUDA 13 + cuDNN 9.27 + cuBLAS 13.8 + fp16 BiRefNet) -> `nicti_stalk::models::gpu_pack_artifacts`, installed into `<store>/ort-cuda/` (`Payload::ZipMembers`, shared dir, all-or-nothing). **CUDA fp16 = 0.17-0.21 s warm bake, ~8 GB VRAM; DirectML = 6 s (no faster than CPU), fp32 CUDA = 0.27 s but ~13 GB.** EP chosen in `nicti-haw::session_builder` (CUDA only if `onnxruntime_providers_cuda.dll` sits beside the runtime; `NICTI_ORT_EP=cpu|cuda|directml` overrides); a failed register/load/run falls back to CPU fp32 (`birefnet.rs::open_session`). `ensure_ort_environment` prepends the runtime dir to `PATH` (cuDNN/cuBLAS load by bare name -- not found beside the DLL otherwise, -- before that fix a clean-`PATH` session registered CUDA fine and only failed at the first run). Pack takes effect after restart: the runtime is pinned per process on first resolve (`gpu_runtime_path`), and CUDA is only requested when fp16 is installed too. `MaskBakeJob` declares 8 GiB via `birefnet::declared_vram_bytes()` (informational: Foreground never reserves). Run-time mid-bake CPU retry is not exercised end to end.
 - **CPU-viable model (#349)**: nothing is both interactive and BiRefNet-grade -- fp16 BiRefNet is *slower* on CPU (9.9 vs 8.0 s), BiRefNet-lite 4.9 s (near-identical masks, 1.6x), IS-Net 0.56 s (right subject, soft/leaky edges). GPU EP (#345) is the path; lite/IS-Net are optional extra providers (not registered; need pin+licence row+#171 pass). `docs/research/cpu-subject-model.md`, `bench/subject-model-bench`.
+- **Disk tier for baked alphas (#353, `docs/adr/0353`)**: alphas persist in the Larder as *keyed* entries
+  (`LarderKind::AiAlpha`, key = the 32-byte bake key), 8-bit quantised at bake time (`AiAlpha::quantized`, so a
+  reload has the same `content_hash`) + zlib (`AiAlpha::encode`/`decode`, magic `NAL1`). `MaskBakeService` fetches
+  before baking (`stash.rs` `AlphaFetchJob`, Foreground, even with the model missing) and stores after
+  (`AlphaStoreJob`, Background, also for a bake that lands after the user left). Gotcha: an intact-but-undecodable
+  payload is `forget_keyed`'d or `contains_keyed` blocks the replacement store.
+- **Pre-bake (#353, `prebake.rs`)**: after a paste/sync/preset (not undo), touched photos minus the open one are
+  baked in the background, nearest the grid cursor first, ONE photo at a time (plan -> decode -> Background
+  `MaskBakeJob`s -> store). Keys come from `spine::neutral_key` (pixel-free; pinned to `DevelopView::neutral_key`
+  by a test). Never downloads a model; its in-flight keys are `set_deferred_keys`'d so the foreground waits instead
+  of baking twice (opening the photo mid-chain abandons it to the foreground); cancelling a decode or bake from the
+  activity panel stops the whole run. Background `MaskBakeJob`s declare 0 VRAM (Pounce drops a Background job whose
+  declaration exceeds the lane's total budget -- the GPU pack's 8 GiB vs the 512 MiB placeholder would kill every one).
 - **Sky** = interim flood-filled heuristic (`nicti-siamese/src/sky.rs`), beta (#347).
 - **Real-hardware numbers (RTX 5080, 45 MP)**: 16 stacked masks +1.4 ms (Vulkan)/+1.9 ms (Dx12) over the
   no-mask live pass; 2.5/3.2 ms p95 in total with spatial adjustments -- inside the 4 ms rule, so no
@@ -79,4 +95,5 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **`crates/nicti-stalk`** -- the provider traits + `resolve_provider`; `models.rs`'s `BIREFNET`, `mask_artifacts`,
   `MaskModels`, `verify_artifacts`.
 - **`crates/nicti-pelt`** -- `mask_panel.rs`, `mask_edit.rs`, `mask_tool.rs`; `render.rs`'s mask API
-  (`mask_bake_requests`, `set_ai_alpha`, `prune_ai_alphas`, `neutral_key`).
+  (`mask_bake_requests`, `set_ai_alpha`, `prune_ai_alphas`, `neutral_key`); `stash.rs` (#353: `AlphaFetchJob`/
+  `AlphaStoreJob`), `prebake.rs` (#353: `PrebakeService`, `nearest_first`).

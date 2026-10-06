@@ -47,6 +47,7 @@ use crate::knead::Clipboard;
 use crate::loupe::{asset_cache_key, LoupeSession};
 use crate::lrc_import::{self, LrcImportUi};
 use crate::mask_panel::MaskUi;
+use crate::prebake::{self, PrebakeService};
 use crate::preview_settings::{self, PreviewSettings, Surface};
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
@@ -197,6 +198,8 @@ pub struct PeltApp {
     preview_settings: PreviewSettings,
     /// Queues/dedupes the background renders of edited photos' screen previews (#145).
     eyeshine: EyeshineService,
+    /// Bakes the AI masks of photos a sync/paste touched, in the background (#353).
+    prebake: PrebakeService,
     /// The loupe fallback's installed *rendered* preview: `(asset, render hash)`. Lets the fallback
     /// swap in a newer render without ever downgrading to a camera preview.
     loupe_rendered: Option<(i64, String)>,
@@ -390,6 +393,15 @@ impl PeltApp {
         // signal that an update exists, just a background nicety.
         update.spawn_check(&version, false);
 
+        let prebake = PrebakeService::new(match (&catalog, &larder) {
+            (CatalogOpenState::Open(store), Some(larder)) => Some(prebake::Env {
+                decoder: Arc::new(LibRawDecoder),
+                store: store.clone(),
+                larder: larder.clone(),
+                submitter: pounce.submitter(),
+            }),
+            _ => None,
+        });
         let preview_settings = preview_settings::load(&catalog_path);
         let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
             eyeshine::Env::new(
@@ -410,7 +422,12 @@ impl PeltApp {
             hsl_band_selected: 0,
             auto_hint: Default::default(),
             heal_ui: HealUi::new(),
-            mask_ui: MaskUi::new(),
+            mask_ui: {
+                // The disk tier for baked AI alphas (#353).
+                let mut mask_ui = MaskUi::new();
+                mask_ui.service.set_larder(larder.clone());
+                mask_ui
+            },
             pounce,
             telemetry,
             bottleneck: None,
@@ -444,6 +461,7 @@ impl PeltApp {
             cache_settings: CacheSettingsUi::default(),
             preview_settings,
             eyeshine,
+            prebake,
             loupe_rendered: None,
             loupe_badge: Badge::None,
             loupe_render_undecodable: None,
@@ -1210,6 +1228,7 @@ impl eframe::App for PeltApp {
         self.poll_recovery();
         self.poll_cull();
         self.poll_eyeshine(ui.ctx());
+        self.poll_prebake(ui.ctx());
         self.export.poll();
         if self.export.is_running() {
             // Progress text; nothing else repaints an otherwise idle window.
@@ -1399,6 +1418,10 @@ impl eframe::App for PeltApp {
                 && (self.heal_ui.heal_active() || self.heal_ui.mask_active());
             if self.view == View::Develop {
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
+                // Files this photo's baked alphas in the disk tier (#353).
+                self.mask_ui
+                    .service
+                    .set_open_asset(self.loupe_loaded_asset.map(|(id, _)| id));
                 crate::mask_panel::poll(ui, d, &self.pounce, &mut self.mask_ui);
             }
         }
@@ -2280,6 +2303,8 @@ impl PeltApp {
             );
             return;
         }
+        // Only a paste/sync/preset has new masks worth baking ahead; an undo just restores old ones.
+        let prebake_new_masks = matches!(command, KneadCommand::Run { .. });
         let touched: Vec<i64> = match command {
             KneadCommand::Run { clip, ids, label } => {
                 match run_batch(store.as_ref(), &clip, &ids, &label) {
@@ -2304,6 +2329,9 @@ impl PeltApp {
             }
         };
         self.refresh_loaded_develop(store.as_ref(), &touched);
+        if prebake_new_masks {
+            self.enqueue_prebake(&touched);
+        }
         // #145: paste / sync / preset / undo rewrote these photos' edits without going through
         // Develop's save, so their grid dots and cached render state must be re-read too.
         for id in &touched {
@@ -2675,6 +2703,46 @@ impl PeltApp {
         if self.eyeshine.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+    }
+
+    /// Advances the background mask pre-bake (#353) and tells the mask tool which bakes it owns,
+    /// so opening one of those photos waits for the stored alpha instead of running the model
+    /// again. Polls on a timer while it works: nothing else wakes an idle window.
+    /// The photo the pre-bake must leave alone: the one Develop is showing, which `MaskBakeService`
+    /// bakes itself. In Loupe and Library nothing bakes the loaded photo in the foreground (the mask
+    /// tool only runs in Develop), so there the pre-bake may take it too.
+    fn open_for_prebake(&self) -> Option<(i64, blake3::Hash)> {
+        (self.view == View::Develop)
+            .then_some(self.loupe_loaded_asset)
+            .flatten()
+    }
+
+    fn poll_prebake(&mut self, ctx: &egui::Context) {
+        let open = self.open_for_prebake();
+        self.prebake
+            .poll(&self.pounce, &mut self.mask_ui.service, open);
+        self.mask_ui
+            .service
+            .set_deferred_keys(self.prebake.inflight_keys());
+        if self.prebake.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// Queues the photos a paste/sync touched for background mask pre-baking, nearest the grid
+    /// cursor first. The photo open in Develop is skipped: `MaskBakeService` already handles it.
+    fn enqueue_prebake(&mut self, touched: &[i64]) {
+        let open = self.open_for_prebake().map(|(id, _)| id);
+        let ids: Vec<i64> = touched
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != open)
+            .collect();
+        let ordered = match self.grid.as_ref() {
+            Some(grid) => prebake::nearest_first(grid.ids(), grid.cursor(), &ids),
+            None => ids,
+        };
+        self.prebake.enqueue(ordered);
     }
 
     /// The instant fallback while a real decode is still in flight: shows the asset's T2 preview
