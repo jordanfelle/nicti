@@ -1447,8 +1447,8 @@ impl eframe::App for PeltApp {
                     if let Some(develop) = self.develop.as_mut() {
                         crate::develop_panel::show(
                             ui,
-                            develop,
-                            frame,
+                            &mut develop.doc,
+                            Some((&mut develop.engine, frame)),
                             &mut self.hsl_band_selected,
                             &mut self.auto_hint,
                             &mut self.heal_ui,
@@ -2557,7 +2557,7 @@ impl PeltApp {
                     // itself failed.
                     self.save_develop_edits_to(store.as_ref(), false);
                     let develop_has_unsaved_edits =
-                        self.develop.as_ref().is_some_and(DevelopView::is_dirty);
+                        self.develop.as_ref().is_some_and(|d| d.is_dirty());
                     if develop_has_unsaved_edits {
                         let why = self
                             .edit_save_failed

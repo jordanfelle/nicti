@@ -726,6 +726,35 @@ process: data files get a row here in the same PR):
   travel with it (kept beside the files as `OFL-Inter.txt`). Inter is not renamed or modified.
   `OFL-1.1` is already on `deny.toml`'s allowlist (for egui's bundled fonts), so no policy change.
 
+## Update (2026-10-06, [#426](https://github.com/jordanfelle/nicti/issues/426)'s headless UI harness)
+
+One new **dev-dependency** of `crates/nicti-pelt`: `egui_kittest` 0.36 with only its `snapshot`
+feature (no `wgpu`, so no adapter is ever needed). It is test-only, never linked into the shipped
+`nicti` binary. Eleven crates enter the lock file with it, all clearing `deny.toml`'s allowlist
+(`cargo deny check licenses` passes):
+
+- **`egui_kittest`** 0.36.2, **`kittest`** 0.4.0, **`accesskit_consumer`** 0.35.0 — MIT OR Apache-2.0.[^kt1]
+- **`dify`** 0.8.0 (the snapshot image diff), **`open`** 5.4.4 and its `is-docker`/`is-wsl` — MIT.
+  `open` only launches a viewer for a failed-snapshot diff; no test here calls that path.
+- **`colored`** 2.2.0 (a `dify` dependency) — **MPL-2.0**, already on the allowlist (`deny.toml` records
+  it for `avif-parse`). File-level copyleft only, and it is dev-only here, so nothing of it is
+  redistributed in a release.
+- **`getopts`** 0.2.24, **`toml`** 1.1.6, **`serde_spanned`** 1.1.1 — MIT OR Apache-2.0.
+
+`cargo deny check advisories` reports one yanked crate (`yoke-derive` 0.8.3, via `purr`'s
+`candle-core`); it fails identically on `main` before this change and is unrelated.
+
+- **Ported source** — `crates/nicti-pelt/src/swat/softpaint.rs` is adapted from
+  `storytold/lightcraft` at commit `265248c` (`crates/ui-egui/src/softpaint.rs`), `MIT OR
+  Apache-2.0`, "Copyright (c) 2026 ArtCraft Team and the LightCraft contributors" (same grant as
+  the #425 `fur/` port above;[^fur1] the copyright line is kept in the file header). Trimmed to what
+  the harness uses: the `TextureSource`/`Layered` indirection and the wasm paths are gone.
+  LightCraft's widget registry, control-protocol input layer and `headless.rs` were audited and
+  **not** adopted: `egui_kittest`'s AccessKit queries and input injection cover them.
+
+No ML model, font, or other bundled data asset is introduced by this ticket. The golden PNGs under
+`crates/nicti-pelt/tests/snapshots/` are rendered by the harness from this repo's own UI.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23
@@ -788,3 +817,4 @@ process: data files get a row here in the same PR):
 [^tr2]: `urlencoding` `license = "MIT"` — https://crates.io/api/v1/crates/urlencoding — verified 2026-09-29 against the downloaded 2.1.3 `Cargo.toml`
 [^fur1]: LightCraft `LICENSE-MIT` and `LICENSE-APACHE` at https://github.com/storytold/lightcraft (commit 265248c), read directly; per-file ported-from provenance is recorded in each `crates/nicti-pelt/src/fur/*.rs` header — verified 2026-10-06
 [^fur2]: rsms/inter v4.1 release archive (https://github.com/rsms/inter/releases/tag/v4.1, `Inter-4.1.zip` SHA-256 `9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e`): `extras/ttf/Inter-Regular.ttf` SHA-256 `40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82`, `extras/ttf/Inter-SemiBold.ttf` SHA-256 `78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3`, licence text from the archive's own `LICENSE.txt` (SIL OFL 1.1, Copyright (c) 2016 The Inter Project Authors) — verified 2026-10-06
+[^kt1]: `egui_kittest`, `kittest`, `accesskit_consumer` `license = "MIT OR Apache-2.0"` and `dify`, `open`, `is-docker`, `is-wsl` `license = "MIT"`, `colored` `license = "MPL-2.0"`, read from the downloaded `Cargo.toml`s of egui_kittest 0.36.2 / kittest 0.4.0 / accesskit_consumer 0.35.0 / dify 0.8.0 / open 5.4.4 / colored 2.2.0 — verified 2026-10-06

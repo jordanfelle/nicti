@@ -90,3 +90,13 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
   removal measures ~3-4 s and **misses ADR-0050's <2 s target** (which assumed CUDA); quality was
   verified on synthetic scenes only, never real photos. Deferred: GPU execution provider,
   real-photo evaluation, undo/persistence (Develop-wide), LRC `RetouchInfo` import (#62).
+- **Headless UI harness (#426)** -- `crates/nicti-pelt/src/swat/`: `egui_kittest` (AccessKit queries, input
+  injection) with a ported LightCraft CPU rasteriser (`softpaint.rs`) as its `TestRenderer`, so view tests and
+  PNG snapshots run with no wgpu adapter (verified with `VK_ICD_FILENAMES=/nonexistent
+  NICTI_WGPU_BACKEND=vulkan`, where the existing GPU tests skip and `swat` still runs). Paint callbacks (the
+  wgpu viewport) are not drawn, so anything needing render pixels stays a `test_gpu::shared()` test. To be
+  findable a custom-painted widget needs `response.widget_info(..)` (grid cells have it). `DevelopView` is split
+  into `DevelopDoc` (GPU-free) + `DevelopEngine`; UI that only edits params takes `&mut DevelopDoc`.
+  **Gotcha**: kittest runs one frame inside `build`, before any context setup, and fonts/styles apply a frame
+  later -- `swat::harness` therefore installs the theme on a discarded first frame (the app's panels panic on
+  the missing `semibold` family otherwise).

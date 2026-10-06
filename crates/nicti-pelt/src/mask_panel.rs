@@ -25,7 +25,7 @@ use crate::mask_edit::{
     BrushSettings, NewMask, Thumb, MAX_BRUSH_RADIUS, MIN_BRUSH_RADIUS,
 };
 use crate::mask_tool::MaskBakeService;
-use crate::render::DevelopView;
+use crate::render::DevelopDoc;
 
 /// Screen pixels within which a press grabs a gradient handle.
 const HANDLE_GRAB_PX: f32 = 12.0;
@@ -105,7 +105,7 @@ impl MaskUi {
     }
 
     /// The photo thumbnail for colour sampling, rebuilt only when the photo changes.
-    fn thumb_for(&mut self, develop: &DevelopView) -> Arc<Thumb> {
+    fn thumb_for(&mut self, develop: &DevelopDoc) -> Arc<Thumb> {
         let key = develop.frame_key();
         if let Some((k, t)) = &self.thumb {
             if *k == key {
@@ -138,7 +138,7 @@ impl MaskUi {
 
 /// Runs once per frame while the Develop view is open: collects finished bakes and the model
 /// download, submits bakes the current masks are waiting on, and releases alphas no mask refers to.
-pub fn poll(ui: &egui::Ui, develop: &mut DevelopView, pounce: &Pounce, mask: &mut MaskUi) {
+pub fn poll(ui: &egui::Ui, develop: &mut DevelopDoc, pounce: &Pounce, mask: &mut MaskUi) {
     if let Some(result) = mask.service.poll_install() {
         mask.status = Some(match result {
             Ok(()) if mask.service.installing_gpu_pack() => {
@@ -181,7 +181,7 @@ pub(crate) enum AiState {
 
 pub(crate) fn ai_state(
     mask: &MaskUi,
-    develop: &DevelopView,
+    develop: &DevelopDoc,
     source: &MaskSource,
 ) -> Option<AiState> {
     let recipe = source.recipe()?;
@@ -310,7 +310,7 @@ fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
     changed
 }
 
-fn show_download(ui: &mut egui::Ui, mask: &mut MaskUi, develop: &DevelopView, pounce: &Pounce) {
+fn show_download(ui: &mut egui::Ui, mask: &mut MaskUi, develop: &DevelopDoc, pounce: &Pounce) {
     if let Some((done, total)) = mask.service.install_progress() {
         let fraction = if total == 0 {
             0.0
@@ -384,12 +384,7 @@ const LIMIT_MESSAGE: &str = "A photo can have at most 16 local corrections.";
 
 /// The Masks controls: creation, the correction list, the selected correction's components and
 /// adjustments, and the AI-model download.
-pub fn show_panel(
-    ui: &mut egui::Ui,
-    develop: &mut DevelopView,
-    mask: &mut MaskUi,
-    pounce: &Pounce,
-) {
+pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, mask: &mut MaskUi, pounce: &Pounce) {
     ui.separator();
     ui.heading("Masks");
     ui.label(
@@ -491,7 +486,7 @@ pub fn show_panel(
 
 fn show_selected(
     ui: &mut egui::Ui,
-    develop: &DevelopView,
+    develop: &DevelopDoc,
     mask: &mut MaskUi,
     params: &mut MaskParams,
     sel: usize,
@@ -782,7 +777,7 @@ pub fn handle_viewport(
     ui: &mut egui::Ui,
     response: &egui::Response,
     rect: egui::Rect,
-    develop: &mut DevelopView,
+    develop: &mut DevelopDoc,
     mask: &mut MaskUi,
 ) {
     let source = develop.source_extent();
@@ -971,7 +966,7 @@ fn draw_overlay(
     ui: &mut egui::Ui,
     response: &egui::Response,
     rect: egui::Rect,
-    develop: &DevelopView,
+    develop: &DevelopDoc,
     mask: &mut MaskUi,
     params: &MaskParams,
 ) {
@@ -1082,6 +1077,7 @@ fn draw_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::DevelopView;
     use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2, Rect};
     use nicti_tapetum::mask::params::Stroke;
 

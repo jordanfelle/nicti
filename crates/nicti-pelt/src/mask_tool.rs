@@ -32,7 +32,7 @@ use nicti_stalk::models::{self, HttpDownloader, ModelStore, Status};
 use nicti_stalk::SegmentationRegistry;
 use nicti_tapetum::mask::engine::AiAlpha;
 
-use crate::render::DevelopView;
+use crate::render::DevelopDoc;
 use crate::stash::{AlphaFetchJob, AlphaStoreJob, FetchOutcome};
 use crate::t2::SharedLarder;
 
@@ -195,7 +195,7 @@ impl MaskBakeService {
 
     /// Bytes the user would download to satisfy the masks that are waiting on a model, or `None`
     /// when nothing waits on one. Drives the panel's "Download model (970 MB)" prompt.
-    pub fn download_needed(&self, develop: &DevelopView) -> Option<u64> {
+    pub fn download_needed(&self, develop: &DevelopDoc) -> Option<u64> {
         let waiting = develop
             .mask_bake_requests()
             .iter()
@@ -352,7 +352,7 @@ impl MaskBakeService {
     /// Submits a job for every AI recipe the current masks need but don't have, skipping ones in
     /// flight, ones that already failed on this photo, and ones waiting on a download the user has
     /// not agreed to. Returns how many jobs it submitted.
-    pub fn request_missing(&mut self, pounce: &Pounce, develop: &DevelopView) -> usize {
+    pub fn request_missing(&mut self, pounce: &Pounce, develop: &DevelopDoc) -> usize {
         self.flush_stores(pounce);
         // "Before" renders the default document, so its neutral key is not the one the pre-bake and
         // the stored alphas use; asking now would fetch and bake under a key nothing else wants.
@@ -425,7 +425,7 @@ impl MaskBakeService {
 
     /// Collects finished bakes. A success for the open photo is stored in `develop` (and returned);
     /// a failure is remembered and returned; a result for a photo the user has left is dropped.
-    pub fn poll(&mut self, develop: &mut DevelopView) -> Vec<MaskEvent> {
+    pub fn poll(&mut self, develop: &mut DevelopDoc) -> Vec<MaskEvent> {
         let open = develop.frame_key();
         // A recorded miss only means "bake instead" for the photo it was made on; coming back later
         // must look again, since the pre-bake may have stored it meanwhile.
@@ -542,6 +542,7 @@ impl MaskBakeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::DevelopView;
     use nicti_pounce::JobState;
     use nicti_siamese::backend::{BakeRequest, MaskBackend};
     use nicti_siamese::providers::recipe_for;

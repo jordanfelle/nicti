@@ -1,6 +1,6 @@
 //! The Develop view's right-side edit panel (#46): Basic tone, Tone Curve, HSL, Detail
 //! (Sharpen/Noise Reduction), a live histogram, an Auto button, and the before/after toggle. Pure
-//! UI glue over `render::DevelopView`'s `stage_params`/`set_stage_params`/`reset_stage` -- every
+//! UI glue over `render::DevelopDoc`'s `stage_params`/`set_stage_params`/`reset_stage` -- every
 //! slider here reads/writes one `coat.rs` params struct, the same shape a catalog-backed edit
 //! (once #31 lands persistence) will read too.
 
@@ -18,7 +18,7 @@ use nicti_tapetum::stages::{
 
 use crate::fur::{self, SliderSpec, Track};
 use crate::heal_tool::{self, HealUi};
-use crate::render::{AutoApplied, DevelopView};
+use crate::render::{AutoApplied, DevelopDoc, DevelopEngine};
 use nicti_tapetum::auto::AutoReason;
 use std::time::{Duration, Instant};
 
@@ -99,7 +99,7 @@ impl AutoHintUi {
     }
 
     /// The `⚠` beside Auto, while a low-confidence result is still what's in the document.
-    fn show_tone_marker(&mut self, ui: &mut egui::Ui, develop: &DevelopView) {
+    fn show_tone_marker(&mut self, ui: &mut egui::Ui, develop: &DevelopDoc) {
         let Some(marker) = self.tone_marker else {
             return;
         };
@@ -205,17 +205,22 @@ fn slider(ui: &mut egui::Ui, spec: &SliderSpec, value: &mut f32) -> fur::SliderO
 /// params (so the caller knows to re-render) -- `develop.render()` is cheap to call unconditionally
 /// though (a live-only change costs 0 bake dispatches), so callers may simply always re-render
 /// after calling this rather than checking the return value.
+///
+/// `gpu` is the engine plus the frame it just rendered: the histogram and the Auto buttons need
+/// them. `None` (the headless UI harness, #426) draws an empty histogram and disables the Auto
+/// buttons; every other control only touches `develop`.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    develop: &mut DevelopView,
-    current_frame: &FrameTexture,
+    develop: &mut DevelopDoc,
+    gpu: Option<(&mut DevelopEngine, &FrameTexture)>,
     hsl_band_selected: &mut usize,
     auto_hint: &mut AutoHintUi,
     heal: &mut HealUi,
     mask: &mut crate::mask_panel::MaskUi,
     pounce: &nicti_pounce::Pounce,
 ) {
+    let mut gpu = gpu;
     ui.heading("Develop");
     heal_tool::tool_switch(ui, heal);
 
@@ -228,8 +233,9 @@ pub fn show(
         if ui.button(before_label).clicked() || ui.input(|i| i.key_pressed(egui::Key::Backslash)) {
             develop.show_before = !develop.show_before;
         }
-        if ui.button("Auto").clicked() {
-            let result = develop.apply_auto_tone();
+        let auto_tone = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto"));
+        if let (true, Some((engine, _))) = (auto_tone.clicked(), gpu.as_mut()) {
+            let result = engine.apply_auto_tone(develop);
             let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
             auto_hint.record(AutoOp::Tone, result, develop.frame_key(), tone_now);
         }
@@ -237,7 +243,7 @@ pub fn show(
     });
     auto_hint.show_hint(ui, AutoOp::Tone, develop.frame_key());
 
-    show_histogram(ui, develop, current_frame);
+    show_histogram(ui, gpu.as_ref().map(|(engine, frame)| (&**engine, *frame)));
 
     fur::divider(ui);
     fur::section(ui, "basic", "Basic", false, |ui| {
@@ -322,8 +328,9 @@ pub fn show(
         if slider(ui, &ROTATION, &mut rotation).changed {
             crop.set_rotation(rotation);
         }
-        if ui.button("Auto-level").clicked() {
-            let result = develop.apply_auto_straighten();
+        let auto_level = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto-level"));
+        if let (true, Some((engine, _))) = (auto_level.clicked(), gpu.as_mut()) {
+            let result = engine.apply_auto_straighten(develop);
             let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
             auto_hint.record(AutoOp::Straighten, result, develop.frame_key(), tone_now);
             crop = develop.stage_params(CROP);
@@ -512,7 +519,7 @@ pub fn handle_viewport_gesture(
     ui: &mut egui::Ui,
     response: &egui::Response,
     rect: egui::Rect,
-    develop: &mut DevelopView,
+    develop: &mut DevelopDoc,
 ) {
     let source = develop.source_extent();
     let crop: CropParams = develop.stage_params(CROP);
@@ -761,8 +768,10 @@ fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), cr
     );
 }
 
-fn show_histogram(ui: &mut egui::Ui, develop: &DevelopView, frame: &FrameTexture) {
-    let hist = develop.histogram(frame);
+fn show_histogram(ui: &mut egui::Ui, gpu: Option<(&DevelopEngine, &FrameTexture)>) {
+    let hist = gpu
+        .map(|(engine, frame)| engine.histogram(frame))
+        .unwrap_or_else(|| nicti_tapetum::histogram::from_display_pixels(&[]));
     let (rect, _response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 80.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -833,7 +842,7 @@ fn draw_curve_preview(ui: &mut egui::Ui, curve: &ToneCurveParams) {
 
 /// The DCP camera-profile picker (#42): lists the installed Adobe profiles for this frame's
 /// camera, plus "Matrix only" (the plain LibRaw color matrix). Hidden when none are installed.
-fn show_camera_profile_picker(ui: &mut egui::Ui, develop: &mut DevelopView) {
+fn show_camera_profile_picker(ui: &mut egui::Ui, develop: &mut DevelopDoc) {
     let choices = develop.profile_choices().to_vec();
     if choices.is_empty() {
         return;
@@ -873,7 +882,7 @@ fn show_camera_profile_picker(ui: &mut egui::Ui, develop: &mut DevelopView) {
 /// without one, since a Look has no base to sit on.
 fn show_look_picker(
     ui: &mut egui::Ui,
-    develop: &mut DevelopView,
+    develop: &mut DevelopDoc,
     current: &nicti_tapetum::coat::CameraProfileParams,
 ) {
     // Shown even with no installed Looks when the document records one, so it can be seen and

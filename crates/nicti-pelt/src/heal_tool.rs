@@ -32,7 +32,7 @@ use nicti_tapetum::heal::{spot_key, RemovalPatch, MAX_RADIUS, MAX_SPOTS};
 use nicti_tapetum::stages::HEAL;
 
 use crate::develop_panel::{image_to_screen, screen_to_image};
-use crate::render::DevelopView;
+use crate::render::DevelopDoc;
 
 /// Which on-image tool owns the Develop viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,7 +305,7 @@ impl RemovalService {
     pub fn submit(
         &mut self,
         pounce: &Pounce,
-        develop: &DevelopView,
+        develop: &DevelopDoc,
         spot: &Spot,
         prompt: Prompt,
     ) -> Result<(), String> {
@@ -327,7 +327,7 @@ impl RemovalService {
         &mut self,
         pounce: &Pounce,
         backend: SharedBackend,
-        develop: &DevelopView,
+        develop: &DevelopDoc,
         spot: &Spot,
         prompt: Prompt,
     ) -> Result<(), String> {
@@ -450,7 +450,7 @@ impl HealUi {
 }
 
 /// Removes the spot at `index` and prunes patches that no longer belong to any spot.
-fn delete_spot(develop: &mut DevelopView, params: &mut HealParams, index: usize) {
+fn delete_spot(develop: &mut DevelopDoc, params: &mut HealParams, index: usize) {
     if index < params.spots.len() {
         params.spots.remove(index);
         develop.set_stage_params(HEAL, params);
@@ -460,7 +460,7 @@ fn delete_spot(develop: &mut DevelopView, params: &mut HealParams, index: usize)
 
 /// Applies finished removals to the view and handles failures. Call once per frame while the
 /// Develop view is up.
-pub fn poll(ui: &egui::Ui, develop: &mut DevelopView, heal: &mut HealUi) {
+pub fn poll(ui: &egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi) {
     if let Some(result) = heal.service.poll_install() {
         heal.status = Some(match result {
             Ok(()) => {
@@ -518,7 +518,7 @@ pub fn handle_viewport(
     ui: &mut egui::Ui,
     response: &egui::Response,
     rect: egui::Rect,
-    develop: &mut DevelopView,
+    develop: &mut DevelopDoc,
     heal: &mut HealUi,
     pounce: &Pounce,
 ) {
@@ -663,7 +663,7 @@ pub fn handle_viewport(
 
 /// Places a new spot of the current kind at `p`.
 fn place_spot(
-    develop: &mut DevelopView,
+    develop: &mut DevelopDoc,
     heal: &mut HealUi,
     pounce: &Pounce,
     params: &mut HealParams,
@@ -827,12 +827,7 @@ fn kind_label(kind: SpotKind) -> &'static str {
 }
 
 /// The Heal / Remove controls: spot kind and size, the spot list, and the AI-model download.
-pub fn show_panel(
-    ui: &mut egui::Ui,
-    develop: &mut DevelopView,
-    heal: &mut HealUi,
-    pounce: &Pounce,
-) {
+pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi, pounce: &Pounce) {
     ui.separator();
     ui.heading("Heal / Remove");
     ui.label("Click the photo to place a spot. [ and ] resize; Delete removes the selected spot.");
@@ -990,6 +985,7 @@ fn show_models(ui: &mut egui::Ui, heal: &mut HealUi, pounce: &Pounce) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::DevelopView;
     use nicti_groom::remove::{RemovalBackend, RemovalRequest};
     use nicti_groom::RemovalError;
     use nicti_pounce::JobState;

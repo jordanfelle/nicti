@@ -26,7 +26,7 @@ use nicti_tapetum::mask::params::{
 use nicti_tapetum::mask::raster;
 use nicti_tapetum::mask::Field;
 
-use crate::render::DevelopView;
+use crate::render::DevelopDoc;
 
 /// What a "New mask" button creates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,7 +533,7 @@ pub fn preview_field(
     c: &LocalCorrection,
     w: usize,
     h: usize,
-    develop: &DevelopView,
+    develop: &DevelopDoc,
     thumb: Option<&Thumb>,
 ) -> Field {
     let neutral = develop.neutral_key();
@@ -575,7 +575,7 @@ pub fn preview_field(
 /// alpha it depends on.
 pub fn preview_key(
     c: &LocalCorrection,
-    develop: &DevelopView,
+    develop: &DevelopDoc,
     frame_key: u64,
     have_thumb: bool,
 ) -> blake3::Hash {
