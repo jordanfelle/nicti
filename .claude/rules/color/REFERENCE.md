@@ -31,7 +31,7 @@ Full reasoning/history: `docs/decisions/color.md`.
   one (ADR-0018) — falls back to LibRaw's built-in camera matrix when none is installed. Adobe
   Raw "Look" `.xmp` profiles (e.g. Adobe Vivid) resolved in #150: `crs:LookTable` is an MD5
   fingerprint, the payload is `crs:Table_<id>` in the DNG SDK's `dng_big_table` wire format
-  (base85 + zlib); `xmp_profile.rs` decodes it and self-checks by recomputing that same
+  (base85 + zlib); `nicti-calico/src/xmp_profile.rs` (promoted from the spike by #321) decodes it and self-checks by recomputing that same
   fingerprint. Verified against all six real Adobe Raw profiles.
 - **Working-space candidates**: linear ProPhoto (ACR's own), Rec.2020, ACEScg — picked by lowest
   measured ΔE00 against LRC exports, not decided yet.
@@ -83,7 +83,7 @@ Full reasoning/history: `docs/decisions/color.md`.
 - **DCP camera profiles in the live suffix (#42)** — `nicti-calico` `dcp.rs`/`cct.rs`/
   `huesatmap.rs` promoted from `spikes/calico`; `profile.rs` `DcpProfile::solve(wb_gains)` →
   `ProfileSolution` (folded matrix, blended HueSatMap, LookTable, baseline exposure) with an
-  `apply_cpu` reference. **Real Adobe files start `IIRC` (magic 0x4352) and use LookTable tags
+  `apply_cpu` reference. #321 adds `tone_lut` (profile `ProfileToneCurve` or ACR default, 1024 entries in sqrt space, hue-preserving RGB tone via `apply_cpu_toned`), `black_render` (parsed, Auto not applied), and `with_look` for a Look `.xmp` layered after the LookTable. **Real Adobe files start `IIRC` (magic 0x4352) and use LookTable tags
   50981/50982** — the spike had both wrong. Matched to a frame via `UniqueCameraModel`. Tapetum:
   `live_suffix.wgsl` bindings 3/4/5, `LiveParams.camera_profile`, tables re-uploaded only on
   fingerprint change. Selection = `coat::CameraProfileParams` on `nicti.working_space` (blake3 of
@@ -92,7 +92,7 @@ Full reasoning/history: `docs/decisions/color.md`.
 
 ## Package contents
 
-- **`spikes/calico`** (#38/ADR-0038's color-pipeline research; DCP parser/CCT/HueSatMap promoted to `crates/nicti-calico` by #42, this spike stays for its `xmp_profile.rs`, tone curve, ΔE tooling and CLI) — a from-scratch DNG-spec Camera
+- **`spikes/calico`** (#38/ADR-0038's color-pipeline research; DCP parser/CCT/HueSatMap promoted to `crates/nicti-calico` by #42, `xmp_profile.rs`/`tonecurve.rs` promoted by #321 and the spike's copy is now a shim; the spike stays for its ΔE tooling and CLI until #149's run is done) — a from-scratch DNG-spec Camera
   Profile (`.dcp`) tag reader over a hand-rolled TIFF/IFD parser, DNG-spec CCT-based
   dual-illuminant matrix interpolation, three working-space candidates (ProPhoto/Rec.2020/ACEScg),
   a HueSatMap/LookTable trilinear HSV implementation with hue-wrap-aware interpolation, a

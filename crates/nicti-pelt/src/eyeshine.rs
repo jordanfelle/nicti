@@ -47,7 +47,8 @@ use nicti_tapetum::stages::{HEAL, MASKS};
 
 /// Bump whenever the render pipeline's output changes for the same document, so every cached
 /// rendered preview reads as stale and is regenerated.
-pub const EYESHINE_VERSION: u32 = 1;
+/// v2 (#321): a selected DCP now applies its tone curve (or the ACR default).
+pub const EYESHINE_VERSION: u32 = 2;
 
 /// Suffix on a render hash when the document holds adjustments the preview render cannot show yet:
 /// local masks (#354) and AI removal patches (#324).
@@ -462,6 +463,7 @@ struct Decoded {
     frame: Arc<LinearFrame>,
     exif: SourceExif,
     profile: Option<Arc<DcpProfile>>,
+    look: Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
 }
 
 /// `Err` is a *final* outcome (nothing further to run); `Ok` is the decoded photo.
@@ -491,10 +493,13 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
     // profile than the user edited with would show the wrong colours.
     let profile = camera_profiles::load_for_document(&task.req.edit, &frame.make, &frame.model)
         .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
+    let look = camera_profiles::load_look_for_document(&task.req.edit)
+        .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
     Ok(Decoded {
         frame: Arc::new(frame),
         exif,
         profile,
+        look,
     })
 }
 
@@ -537,6 +542,7 @@ impl RenderJob {
             frame,
             exif,
             profile,
+            look,
         } = decoded;
         let mut ctx = task
             .env
@@ -552,6 +558,7 @@ impl RenderJob {
             task.req.identity,
             &frame,
             profile.as_deref(),
+            look.as_deref(),
         ) {
             Ok(r) => r,
             Err(why) => {

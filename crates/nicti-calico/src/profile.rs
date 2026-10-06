@@ -132,8 +132,15 @@ pub struct ProfileSolution {
     pub hue_sat_encoding: TableEncoding,
     pub look_table: Option<HueSatMap>,
     pub look_encoding: TableEncoding,
+    /// An Adobe Raw "Look" `.xmp` profile's LookTable, layered after the DCP's own (#321).
+    pub look_profile: Option<HueSatMap>,
+    pub look_profile_encoding: TableEncoding,
     /// `2^BaselineExposureOffset`.
     pub baseline_exposure_multiplier: f32,
+    /// The profile's own `ProfileToneCurve` (or the ACR default when it has none), baked.
+    pub tone_lut: std::sync::Arc<crate::tonecurve::ToneCurveLut>,
+    /// `DefaultBlackRender`; parsed and carried, see ADR-0042.
+    pub black_render: crate::dcp::BlackRender,
 }
 
 impl DcpProfile {
@@ -203,12 +210,25 @@ impl DcpProfile {
             hue_sat_encoding: self.hue_sat_map_encoding,
             look_table: self.look_table.clone(),
             look_encoding: self.look_table_encoding,
+            look_profile: None,
+            look_profile_encoding: TableEncoding::Linear,
             baseline_exposure_multiplier: 2f64.powf(self.baseline_exposure_offset) as f32,
+            tone_lut: std::sync::Arc::new(crate::tonecurve::ToneCurveLut::from_points_or_default(
+                self.tone_curve_points.as_deref(),
+            )),
+            black_render: self.default_black_render,
         }
     }
 }
 
 impl ProfileSolution {
+    /// Layers an Adobe Raw "Look" profile's table after the DCP's own LookTable.
+    pub fn with_look(mut self, look: &crate::xmp_profile::LookProfile) -> Self {
+        self.look_profile = Some(look.look_table.clone());
+        self.look_profile_encoding = look.encoding;
+        self
+    }
+
     /// CPU reference for the shader's profile stages: camera RGB -> linear ProPhoto -> HueSatMap
     /// -> baseline exposure -> LookTable. The GPU parity test measures against this.
     pub fn apply_cpu(&self, camera_rgb: [f32; 3]) -> [f32; 3] {
@@ -222,7 +242,16 @@ impl ProfileSolution {
         if let Some(look) = &self.look_table {
             rgb = apply_hue_sat(rgb, look, self.look_encoding);
         }
+        if let Some(look) = &self.look_profile {
+            rgb = apply_hue_sat(rgb, look, self.look_profile_encoding);
+        }
         rgb.map(|c| c as f32)
+    }
+
+    /// [`Self::apply_cpu`] followed by the profile's hue-preserving tone curve: the full CPU
+    /// reference for the shader's profile block.
+    pub fn apply_cpu_toned(&self, camera_rgb: [f32; 3]) -> [f32; 3] {
+        self.tone_lut.apply_rgb(self.apply_cpu(camera_rgb))
     }
 }
 
@@ -322,6 +351,7 @@ mod tests {
             baseline_exposure_offset: 0.0,
             hue_sat_map_encoding: TableEncoding::Linear,
             look_table_encoding: TableEncoding::Linear,
+            default_black_render: crate::dcp::BlackRender::Auto,
         }
     }
 

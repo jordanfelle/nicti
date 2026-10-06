@@ -118,16 +118,36 @@ so `Z 6` doesn't claim the Z 6II's `Z 6 2 ...` files; LibRaw's `Z 6_2` and multi
 them in the Develop panel's Basic section. **Default is "Matrix only"** -- silently changing every
 photo's look on load is a decision for the reference-machine ΔE pass (#149), not this PR.
 
-**Hostile `.dcp` files** are bounded: only the 17 tags the parser reads are decoded, total decoded
+**Hostile `.dcp` files** are bounded: only the 18 tags the parser reads are decoded, total decoded
 bytes are budgeted against the file size (entries may legally overlap, so an unbudgeted parse
 multiplied memory ~1 GB per MB), table axes are capped at 256 (3D texture limits are 2048 on common
 adapters), a singular ColorMatrix is refused at parse time, and the CCT solver degrades rather than
 panics on a matrix pair that is singular only when blended.
 
-**Not done here:** `ProfileToneCurve`, `DefaultBlackRender` (most Adobe "Camera *" profiles carry
-one or both, so those profiles render close to, but not exactly, Adobe's look) and the Look `.xmp` profiles (`xmp_profile.rs` stays in the
-spike), per-photo persistence of the choice (edits are not yet catalog-persisted), and the working
-space pick (#149).
+**Update (#321):** `ProfileToneCurve` is applied (and `DefaultBlackRender` parsed), and Adobe Raw
+"Look" `.xmp` profiles are supported. After the LookTable the shader layers the Look's table, then
+the profile's tone curve. The curve is the profile's own, or Adobe's default ACR curve
+(`ToneCurve::acr_default`, an approximation from public sources) when the profile has none;
+"Matrix only" stays curve-free. It is baked to a 1024-entry table indexed in sqrt space (a
+linear table of that size under-samples the shadows, where the curve bends hardest) and applied
+as a hue-preserving RGB tone (max and min channels through the curve, the middle one
+interpolated), after Adobe's reference renderer, not per channel as the spike did. The Look is
+chosen in a second picker, recorded in `CameraProfileParams.look` (path + blake3, skipped when
+absent so existing document hashes don't change), re-verified on reload, and fails an export
+whose file changed. `xmp_profile.rs` and `tonecurve.rs` are promoted into `nicti-calico`.
+`DefaultBlackRender` is carried on `ProfileSolution.black_render` but its `Auto` black handling
+is not applied yet (exact renderer behavior unpinned); #149's DeltaE run will show whether it
+matters.
+
+The tone stage clamps its input to [0, 1] (as the spike did), so after a profile is selected
+Highlights/Whites can no longer recover scene values above 1.0 that were present after exposure;
+Exposure still can, since it runs before the curve. The ACR fallback's control points are 8-bit
+values from public sources applied to linear data, so its shadow/midtone lift is an approximation
+to verify visually against Adobe Standard (#149).
+
+**Not done here:** per-photo persistence of the base DCP choice beyond the document stage, the
+working space pick and the default profile per camera (#149), and the Look's `ToneCurvePV2012` /
+Clarity / RGBTable settings (reported via `LookProfile::unsupported_settings`).
 
 ## JPEG-sourced previews (#319)
 

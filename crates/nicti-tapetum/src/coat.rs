@@ -44,6 +44,21 @@ pub struct CameraProfileParams {
     /// blake3 hex of the `.dcp` file's bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    /// An Adobe Raw "Look" `.xmp` profile layered on the DCP (#321). Skipped when absent so the
+    /// params (and therefore every existing document's stage hash) are unchanged without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<LookRef>,
+}
+
+/// Identity of a selected Look `.xmp` profile: like the DCP's, the hash is what invalidates cached
+/// output and what a reload is verified against.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LookRef {
+    pub name: String,
+    pub path: String,
+    /// blake3 hex of the `.xmp` file's bytes.
+    pub content_hash: String,
 }
 
 /// Basic-panel exposure, in stops. PV2012 range -5.0..=5.0. 0.0 is a no-op.

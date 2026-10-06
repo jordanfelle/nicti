@@ -31,6 +31,9 @@ struct Uniforms {
     profile0: vec4<f32>,
     // x = baseline-exposure multiplier (2^BaselineExposureOffset; 1.0 with no profile).
     profile1: vec4<f32>,
+    // #321: x = Look .xmp table enabled, y = Look table uses sRGB value encoding, z = profile tone
+    // curve enabled, w unused.
+    profile2: vec4<f32>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -41,6 +44,11 @@ struct Uniforms {
 @group(0) @binding(3) var hue_sat_map: texture_3d<f32>;
 @group(0) @binding(4) var look_table: texture_3d<f32>;
 @group(0) @binding(5) var profile_sampler: sampler;
+// #321: the Adobe Raw "Look" .xmp profile's table, and the profile tone curve baked to
+// TONE_LUT_LEN samples in sqrt space (see nicti_calico::tonecurve::ToneCurveLut). 1x1 dummies are
+// bound when absent.
+@group(0) @binding(11) var look_profile_table: texture_3d<f32>;
+@group(0) @binding(12) var profile_tone_lut: texture_2d<f32>;
 
 // Local corrections (#49, mask/local.rs is the CPU twin). `mask_atlas` packs four correction
 // composites per layer, one per channel, at the mask extent (sampled bilinearly). Each correction
@@ -427,6 +435,40 @@ fn dcp_srgb_eotf(c: f32) -> f32 {
 // sat/value span edge to edge: i/(N-1)). The hardware lerps the hue shift linearly rather than
 // along the shortest arc -- an accepted approximation (the CPU reference in nicti-calico differs
 // only across the 0/360 seam).
+fn profile_tone_eval(x: f32) -> f32 {
+    let n = i32(textureDimensions(profile_tone_lut).x);
+    let uu = sqrt(clamp(x, 0.0, 1.0)) * f32(n - 1);
+    let i = min(i32(floor(uu)), n - 2);
+    let t = uu - f32(i);
+    let a = textureLoad(profile_tone_lut, vec2<i32>(i, 0), 0).x;
+    let b = textureLoad(profile_tone_lut, vec2<i32>(i + 1, 0), 0).x;
+    return a * (1.0 - t) + b * t;
+}
+
+// Hue-preserving RGB tone (nicti_calico::tonecurve::ToneCurveLut::apply_rgb): the extreme
+// channels go through the curve, the middle one is interpolated between them.
+fn profile_tone(rgb_in: vec3<f32>) -> vec3<f32> {
+    let c = clamp(rgb_in, vec3<f32>(0.0), vec3<f32>(1.0));
+    var hi = 0;
+    var lo = 0;
+    for (var i = 1; i < 3; i = i + 1) {
+        if (c[i] > c[hi]) { hi = i; }
+        if (c[i] < c[lo]) { lo = i; }
+    }
+    if (hi == lo) {
+        return vec3<f32>(profile_tone_eval(c.x));
+    }
+    let mid = 3 - hi - lo;
+    let yh = profile_tone_eval(c[hi]);
+    let yl = profile_tone_eval(c[lo]);
+    let t = (c[mid] - c[lo]) / (c[hi] - c[lo]);
+    var out = vec3<f32>(0.0);
+    out[hi] = yh;
+    out[lo] = yl;
+    out[mid] = yl + (yh - yl) * t;
+    return out;
+}
+
 fn dcp_apply_table(rgb: vec3<f32>, tex: texture_3d<f32>, srgb_value: bool) -> vec3<f32> {
     let hsv = dcp_rgb_to_hsv(rgb);
     var v_enc = max(hsv.z, 0.0);
@@ -482,6 +524,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = rgb * exposure;
     if (u.profile0.y > 0.5) {
         rgb = dcp_apply_table(rgb, look_table, u.profile0.w > 0.5);
+    }
+    if (u.profile2.x > 0.5) {
+        rgb = dcp_apply_table(rgb, look_profile_table, u.profile2.y > 0.5);
+    }
+    if (u.profile2.z > 0.5) {
+        rgb = profile_tone(rgb);
     }
     // Local dehaze: scene-linear, before white balance / tone. The airlight goes through the same
     // matrix and exposure as the pixels it is subtracted from.

@@ -24,7 +24,9 @@ mod math;
 pub mod profile;
 pub mod source_transform;
 pub mod space;
+pub mod tonecurve;
 pub mod transform;
+pub mod xmp_profile;
 
 use nicti_claw::{Module, Registry};
 use serde_json::Value;

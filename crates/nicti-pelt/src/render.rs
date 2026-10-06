@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::camera_profiles::{self, ProfileEntry};
+use crate::camera_profiles::{self, LookEntry, ProfileEntry};
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::{EditDocument, StageEntry};
@@ -130,6 +130,11 @@ pub struct DevelopView {
     /// The parsed profile the document's `CameraProfileParams` refers to. Kept out of the
     /// document itself (it is large and not JSON); the document holds only its identity.
     active_profile: Option<Arc<DcpProfile>>,
+    /// Look `.xmp` profiles installed (#321); camera-independent, discovered once.
+    look_choices: Vec<LookEntry>,
+    looks_discovered: bool,
+    /// The parsed Look the document's `CameraProfileParams.look` refers to.
+    active_look: Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
     /// The last profile load failure, for the picker to show.
     pub profile_error: Option<String>,
 }
@@ -181,6 +186,9 @@ impl DevelopView {
             profile_choices: Vec::new(),
             profiles_for: None,
             active_profile: None,
+            look_choices: Vec::new(),
+            looks_discovered: false,
+            active_look: None,
             profile_error: None,
         }
     }
@@ -201,7 +209,9 @@ impl DevelopView {
     pub fn select_camera_profile(&mut self, entry: Option<&ProfileEntry>) {
         self.profile_error = None;
         let Some(entry) = entry else {
+            // A Look layers on a DCP, so clearing the profile clears it too.
             self.active_profile = None;
+            self.active_look = None;
             self.reset_stage(WORKING_SPACE);
             return;
         };
@@ -214,11 +224,61 @@ impl DevelopView {
                         name: Some(loaded.profile.name.clone()),
                         path: Some(loaded.path.display().to_string()),
                         content_hash: Some(loaded.content_hash),
+                        // Switching the base DCP keeps the chosen Look.
+                        look: self.camera_profile().look,
                     },
                 );
                 self.active_profile = Some(loaded.profile);
             }
             Err(e) => self.profile_error = Some(e),
+        }
+    }
+
+    /// The Look `.xmp` profiles installed (#321).
+    pub fn look_choices(&self) -> &[LookEntry] {
+        &self.look_choices
+    }
+
+    /// Selects a Look `.xmp` on top of the current camera profile (`None` clears it). A no-op
+    /// without a selected DCP: a Look has no base to layer on. On failure the previous selection
+    /// is untouched and [`Self::profile_error`] says why.
+    pub fn select_look(&mut self, entry: Option<&LookEntry>) {
+        self.profile_error = None;
+        let mut params = self.camera_profile();
+        if params.content_hash.is_none() {
+            return;
+        }
+        match entry {
+            None => {
+                params.look = None;
+                self.active_look = None;
+            }
+            Some(entry) => match camera_profiles::load_look(&entry.path) {
+                Ok(loaded) => {
+                    params.look = Some(nicti_tapetum::coat::LookRef {
+                        name: loaded.look.name.clone(),
+                        path: loaded.path.display().to_string(),
+                        content_hash: loaded.content_hash,
+                    });
+                    self.active_look = Some(loaded.look);
+                }
+                Err(e) => {
+                    self.profile_error = Some(e);
+                    return;
+                }
+            },
+        }
+        self.set_stage_params(WORKING_SPACE, &params);
+    }
+
+    /// Reloads the document's Look, leaving `active_look` off and recording the reason on failure.
+    fn reload_active_look(&mut self) {
+        self.active_look = None;
+        match camera_profiles::load_look_for_document(&self.document) {
+            Ok(look) => self.active_look = look,
+            Err(e) => {
+                self.profile_error.get_or_insert(e);
+            }
         }
     }
 
@@ -309,6 +369,7 @@ impl DevelopView {
             &self.frame,
             self.extent,
             self.active_profile.as_deref(),
+            self.active_look.as_deref(),
             1.0,
         );
         self.crop_kernel.set_transform(inputs.crop_transform);
@@ -543,6 +604,7 @@ impl DevelopView {
             Ok(profile) => self.active_profile = profile,
             Err(e) => self.profile_error = Some(e),
         }
+        self.reload_active_look();
     }
 
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
@@ -583,6 +645,11 @@ impl DevelopView {
         ) {
             Ok(profile) => self.active_profile = profile,
             Err(e) => self.profile_error = Some(e),
+        }
+        self.reload_active_look();
+        if !self.looks_discovered {
+            self.look_choices = camera_profiles::discover_looks();
+            self.looks_discovered = true;
         }
         let needles = camera_profiles::camera_needles(&self.frame.make, &self.frame.model);
         if self.profiles_for.as_ref() != Some(&needles) {
@@ -847,6 +914,7 @@ mod tests {
                     name: Some("Gone".into()),
                     path: Some("/definitely/not/here.dcp".into()),
                     content_hash: Some("00".repeat(32)),
+                    look: None,
                 })
                 .unwrap(),
             },
@@ -854,6 +922,93 @@ mod tests {
         view.load_real_frame(view.frame_arc(), blake3::hash(b"x"), doc);
         assert!(view.profile_error.is_some());
         assert!(!view.is_dirty(), "loading never marks the view dirty");
+    }
+
+    /// A Look `.xmp` (#321) layers on the selected DCP: selecting one records its identity, changes
+    /// the render, survives a document reload, and a file changed on disk is reported rather than
+    /// silently rendering other colours. Without a DCP the selection is a no-op.
+    #[test]
+    fn selecting_a_look_layers_on_the_profile_and_survives_a_reload() {
+        use nicti_tapetum::frame::read_frame;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let dir = tempfile::tempdir().unwrap();
+        let dcp_path = dir.path().join("Base.dcp");
+        std::fs::write(
+            &dcp_path,
+            nicti_calico::dcp::testing::synthetic_dcp_bytes(
+                "NICTI SYNTHETIC",
+                "Base",
+                Some(1.2),
+                None,
+                true,
+            ),
+        )
+        .unwrap();
+        let base = ProfileEntry {
+            name: "Base".into(),
+            path: dcp_path,
+        };
+        let look_path = dir.path().join("Vivid.xmp");
+        std::fs::write(
+            &look_path,
+            nicti_calico::xmp_profile::testing::synthetic_valid_xmp("Vivid"),
+        )
+        .unwrap();
+        let look = LookEntry {
+            name: "Vivid".into(),
+            path: look_path.clone(),
+        };
+
+        view.select_look(Some(&look));
+        assert!(
+            view.camera_profile().look.is_none(),
+            "a Look needs a DCP to layer on"
+        );
+
+        view.select_camera_profile(Some(&base));
+        let pixels = |view: &mut DevelopView| {
+            let frame = view.render();
+            read_frame(&gpu, &frame)
+        };
+        let without = pixels(&mut view);
+        view.select_look(Some(&look));
+        assert!(view.profile_error.is_none(), "{:?}", view.profile_error);
+        let chosen = view.camera_profile().look.expect("look recorded");
+        assert_eq!(chosen.name, "Vivid");
+        assert_eq!(chosen.content_hash.len(), 64);
+        assert_ne!(
+            without,
+            pixels(&mut view),
+            "the look should change the render"
+        );
+
+        // Switching the base DCP keeps the look.
+        view.select_camera_profile(Some(&base));
+        assert!(view.camera_profile().look.is_some());
+
+        // Reloading the stored document restores the look.
+        let doc = view.document().clone();
+        view.replace_document(doc);
+        assert!(view.profile_error.is_none(), "{:?}", view.profile_error);
+        assert!(view.active_look.is_some());
+
+        // A look changed on disk is reported, not silently re-rendered.
+        std::fs::write(
+            &look_path,
+            nicti_calico::xmp_profile::testing::synthetic_valid_xmp("Vivid")
+                .replace("Vivid", "Vivid2"),
+        )
+        .unwrap();
+        let doc = view.document().clone();
+        view.replace_document(doc);
+        assert!(view.profile_error.is_some());
+        assert!(view.active_look.is_none());
+
+        view.select_look(None);
+        assert!(view.camera_profile().look.is_none());
     }
 
     /// Selecting a camera profile must (a) record its identity in the edit document, (b) change

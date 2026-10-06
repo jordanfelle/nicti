@@ -228,6 +228,136 @@ pub fn load_for_document(
     Ok(Some(loaded.profile))
 }
 
+// --- Adobe Raw "Look" .xmp profiles (#321) ----------------------------------------------------
+
+/// Largest Look `.xmp` read (real ones are ~100 KB; the decoder also caps the decompressed size).
+const MAX_LOOK_BYTES: u64 = 16 * 1024 * 1024;
+
+/// One discoverable Look `.xmp` (not camera-specific, unlike a DCP).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookEntry {
+    /// File stem, e.g. `Adobe Vivid`.
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// A loaded Look plus the identity the edit document records.
+pub struct LoadedLook {
+    pub look: Arc<nicti_calico::xmp_profile::LookProfile>,
+    pub path: PathBuf,
+    /// blake3 hex of the file's bytes.
+    pub content_hash: String,
+}
+
+/// Roots searched for Look profiles: `NICTI_LOOK_XMP_DIR` if set, else Adobe's Windows
+/// `CameraRaw/Settings/Adobe/Profiles` locations.
+fn look_roots() -> Vec<PathBuf> {
+    if let Some(dir) = std::env::var_os("NICTI_LOOK_XMP_DIR") {
+        return vec![PathBuf::from(dir)];
+    }
+    let mut roots = Vec::new();
+    for var in ["PROGRAMDATA", "APPDATA"] {
+        if let Some(base) = std::env::var_os(var) {
+            roots.push(Path::new(&base).join("Adobe/CameraRaw/Settings/Adobe/Profiles"));
+        }
+    }
+    roots
+}
+
+/// Look profiles under the default roots, sorted by name.
+pub fn discover_looks() -> Vec<LookEntry> {
+    discover_looks_in(&look_roots())
+}
+
+pub fn discover_looks_in(roots: &[PathBuf]) -> Vec<LookEntry> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<LookEntry>, visited: &mut usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            *visited += 1;
+            if *visited > MAX_FILES_VISITED {
+                return;
+            }
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                walk(&path, depth + 1, out, visited);
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+            {
+                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                    out.push(LookEntry {
+                        name: name.to_string(),
+                        path,
+                    });
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for root in roots {
+        let mut visited = 0usize;
+        walk(root, 0, &mut found, &mut visited);
+    }
+    // Only the same file (e.g. one root listed twice) collapses: two distinct Looks may share a
+    // name, and the picker identifies the selection by path.
+    found.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    found.dedup_by(|a, b| a.path == b.path);
+    found
+}
+
+/// Reads, size-checks, parses and hashes a Look `.xmp`.
+pub fn load_look(path: &Path) -> Result<LoadedLook, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if len > MAX_LOOK_BYTES {
+        return Err(format!(
+            "{}: {len} bytes is too large for a look profile",
+            path.display()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| format!("{}: not UTF-8 text: {e}", path.display()))?;
+    let look =
+        nicti_calico::xmp_profile::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(LoadedLook {
+        look: Arc::new(look),
+        path: path.to_path_buf(),
+        content_hash: blake3::hash(&bytes).to_hex().to_string(),
+    })
+}
+
+/// Reloads the Look `.xmp` an edit document refers to (`CameraProfileParams.look`), verifying the
+/// file still hashes to what the document recorded. Same contract as [`load_for_document`]:
+/// `Ok(None)` for no look, `Err` when it is missing or changed (export fails the photo).
+pub fn load_look_for_document(
+    doc: &nicti_pawprint::EditDocument,
+) -> Result<Option<Arc<nicti_calico::xmp_profile::LookProfile>>, String> {
+    let chosen: nicti_tapetum::coat::CameraProfileParams =
+        match doc.stages.get(nicti_tapetum::stages::WORKING_SPACE) {
+            Some(entry) => nicti_tapetum::coat::parse(&entry.params),
+            None => return Ok(None),
+        };
+    let Some(look_ref) = chosen.look else {
+        return Ok(None);
+    };
+    let loaded = load_look(Path::new(&look_ref.path))?;
+    if loaded.content_hash != look_ref.content_hash {
+        return Err(format!(
+            "look profile {} has changed on disk since this photo was edited",
+            look_ref.path
+        ));
+    }
+    Ok(Some(loaded.look))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +478,27 @@ mod tests {
         }
         // The same file must be rejected for a different camera.
         assert!(load(&found[0].path, Some(&["NIKON Z 7".to_string()])).is_err());
+    }
+
+    #[test]
+    fn looks_are_discovered_by_xmp_extension_and_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("Adobe Raw");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("Adobe Vivid.xmp"), "x").unwrap();
+        std::fs::write(sub.join("Adobe Color.xmp"), "x").unwrap();
+        std::fs::write(sub.join("readme.txt"), "x").unwrap();
+        let found = discover_looks_in(&[dir.path().to_path_buf()]);
+        let names: Vec<_> = found.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Adobe Color", "Adobe Vivid"]);
+    }
+
+    #[test]
+    fn a_missing_or_garbage_look_fails_to_load_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_look(&dir.path().join("nope.xmp")).is_err());
+        let bad = dir.path().join("bad.xmp");
+        std::fs::write(&bad, "<not-xmp/>").unwrap();
+        assert!(load_look(&bad).is_err());
     }
 }

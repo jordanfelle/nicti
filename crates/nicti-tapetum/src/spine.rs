@@ -200,7 +200,8 @@ pub struct RenderInputs {
 /// Resolves `doc` into kernel inputs for `frame` at `extent` -- the "document -> params" half of a
 /// render, previously inlined in `DevelopView::render`.
 ///
-/// `profile` is the DCP camera profile the caller has loaded and verified; it is only used when the
+/// `look` is the Look `.xmp` the document's `CameraProfileParams.look` names, loaded and
+/// verified by the caller. `profile` is the DCP camera profile the caller has loaded and verified; it is only used when the
 /// document's `WORKING_SPACE` entry actually selects one (`content_hash` set), so an empty document
 /// (the before view) always gets the plain LibRaw matrix. `pixel_scale` is render long edge over
 /// source long edge (`1.0` for a native-extent render).
@@ -209,6 +210,7 @@ pub fn resolve_inputs(
     frame: &LinearFrame,
     extent: Extent,
     profile: Option<&DcpProfile>,
+    look: Option<&nicti_calico::xmp_profile::LookProfile>,
     pixel_scale: f32,
 ) -> RenderInputs {
     let wb: WbParams = resolve(doc, WB);
@@ -223,7 +225,12 @@ pub fn resolve_inputs(
     let solution: Option<Arc<ProfileSolution>> = match (&chosen.content_hash, profile) {
         (Some(_), Some(profile)) => {
             let gains = color::wb_gains_with_params(frame.cam_mul, &frame.cam_xyz, &wb);
-            Some(Arc::new(profile.solve(gains.map(f64::from))))
+            let solved = profile.solve(gains.map(f64::from));
+            // A Look only layers on a selected DCP, and only if the document names one.
+            Some(Arc::new(match (&chosen.look, look) {
+                (Some(_), Some(look)) => solved.with_look(look),
+                _ => solved,
+            }))
         }
         _ => None,
     };

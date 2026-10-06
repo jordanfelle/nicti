@@ -312,7 +312,7 @@ profile file already present on the *user's own machine* (installed there by the
 licensed Adobe Camera Raw/Lightroom Classic install) — reading a file the user already has a legal
 copy of, at runtime, on their own system, is not a redistribution act at all, so ADR-0018's
 "never bundle" concern doesn't reach it; nothing Adobe's is ever copied into this repo, a build
-artifact, or distributed to any other user. `spikes/calico`'s `dcp.rs`/`xmp_profile.rs` parsers
+artifact, or distributed to any other user. `nicti-calico`'s `dcp.rs`/`xmp_profile.rs` parsers (`xmp_profile.rs` promoted from `spikes/calico` by #321, adding `roxmltree` and `flate2` to the crate)
 are tested exclusively against synthetic fixtures built byte-for-byte in test code for exactly
 this reason — no real Adobe profile file exists anywhere in this repo or its test data. New
 dependencies: `roxmltree` v0.20 (MIT/Apache-2.0, XMP/RDF-XML parsing) and `base64` v0.22 (MIT/
