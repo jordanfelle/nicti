@@ -78,7 +78,7 @@ Full reasoning/history: `docs/decisions/color.md`.
   (`grid/jobs.rs::make_thumbnail`, ~0.05 ms); loupe/tiles at upload (`cull/previews.rs::
   preview_texture`, ~12 ms at 3840 px). `ColorManagement::generation` -> `PeltApp::sync_preview_color`
   -> `GridSession::set_color`/`TilePreviews::set_color`/loupe texture. `t2.rs` keeps the RGB ICC
-  through its re-encode (old T2s = sRGB). Real P3-monitor check outstanding. Shared decode:
+  through its re-encode (`render_hash` `v2` regenerates pre-#319 T2s). Real P3-monitor check outstanding. Shared decode:
   `nicti-pelt/src/preview_color.rs`.
 - **DCP camera profiles in the live suffix (#42)** — `nicti-calico` `dcp.rs`/`cct.rs`/
   `huesatmap.rs` promoted from `spikes/calico`; `profile.rs` `DcpProfile::solve(wb_gains)` →

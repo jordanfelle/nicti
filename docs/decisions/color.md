@@ -129,7 +129,7 @@ monitor profile with `nicti_calico::source_transform::SourceTransforms` (CPU, `m
 cached per source profile, identity fast path when source and display are the same space). Done on
 the Pounce worker for thumbnails (after the 256 px downsize, ~0.05 ms) and at texture upload for
 the loupe/tiles (~11-13 ms for a 3840 px T2). `ColorManagement::generation` invalidates all of it
-on a monitor change. `t2.rs` now keeps the source's RGB ICC profile through its re-encode. Not
+on a monitor change. `t2.rs` now keeps the source's RGB ICC profile through its re-encode (`render_hash` `v2` regenerates pre-#319 T2s). Not
 proofed; real P3-monitor check still outstanding. See ADR-0042's "JPEG-sourced previews".
 
 ## DCP camera profiles in production (#42, ADR-0038 amendment)

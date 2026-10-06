@@ -57,8 +57,12 @@ const MAX_EMBEDDED_JPEG_BYTES: u64 = 256 * 1024 * 1024;
 /// the file's content changes the identity, so the old T2 reads as stale (a miss) instead of being
 /// served for the new revision. No edit-document hash is involved -- T2 here is the *camera's*
 /// preview, not a render of the user's edits.
+///
+/// `v2` (#319): T2s stored before `resize_and_encode` kept the source ICC profile are untagged JPEGs
+/// of Display P3 / Adobe RGB pixels; the version makes them read as stale (a miss, regenerated
+/// with their profile) instead of being shown as sRGB forever.
 pub fn render_hash(identity: &blake3::Hash) -> String {
-    format!("embedded:{}", identity.to_hex())
+    format!("embedded:v2:{}", identity.to_hex())
 }
 
 /// Where a session's Larder lives: a sibling of the catalog file, so it moves with it and never

@@ -14,7 +14,9 @@ use crate::space::OutputSpace;
 use crate::transform::{equivalent_space, DisplayProfile};
 use moxcms::Transform8BitExecutor;
 use moxcms::{ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformOptions};
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::sync::{Arc, Mutex};
 
 /// Distinct source profiles kept built. Cameras and editors emit a handful (sRGB, Adobe RGB,
@@ -38,8 +40,11 @@ enum Entry {
 pub struct SourceTransforms {
     display: Arc<ColorProfile>,
     display_space: Option<OutputSpace>,
-    /// `None` key = untagged (treated as sRGB).
-    cache: Mutex<HashMap<Option<Vec<u8>>, Entry>>,
+    /// Keyed by (length, keyed hash) of the embedded ICC bytes rather than the bytes themselves:
+    /// a JPEG can carry a profile of many MB and the cache must stay small whatever the library
+    /// holds. `None` key = untagged (treated as sRGB).
+    cache: Mutex<HashMap<Option<(usize, u64)>, Entry>>,
+    hasher: RandomState,
 }
 
 impl SourceTransforms {
@@ -52,6 +57,7 @@ impl SourceTransforms {
             display,
             display_space,
             cache: Mutex::new(HashMap::new()),
+            hasher: RandomState::new(),
         }
     }
 
@@ -74,7 +80,7 @@ impl SourceTransforms {
     }
 
     fn entry_for(&self, icc: Option<&[u8]>) -> Entry {
-        let key = icc.map(<[u8]>::to_vec);
+        let key = icc.map(|b| (b.len(), self.hasher.hash_one(b)));
         if let Some(e) = self.cache.lock().unwrap().get(&key) {
             return e.clone();
         }
@@ -115,7 +121,12 @@ impl SourceTransforms {
     fn build_from(&self, src: &ColorProfile) -> Option<Entry> {
         // Same space on both sides (judged the way `DisplayTransform::build` judges a monitor
         // profile): converting would only add rounding.
-        if let (Some(s), Some(d)) = (equivalent_space(src), self.display_space) {
+        // The probe runs `moxcms` transforms too: a profile that parses but panics there must
+        // degrade like one that fails to parse.
+        let src_space = std::panic::catch_unwind(|| equivalent_space(src))
+            .ok()
+            .flatten();
+        if let (Some(s), Some(d)) = (src_space, self.display_space) {
             if s == d {
                 return Some(Entry::Identity);
             }

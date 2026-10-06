@@ -1051,9 +1051,40 @@ mod tests {
             "a missing preview is still missing"
         );
 
-        // Visible cells are decoded again, now through the new conversion.
+        // Visible cells are decoded again, now through the new conversion: the seeded previews
+        // are untagged sRGB, which a Display P3 monitor shows with different numbers.
+        let unconverted = {
+            let (job, slot) = ThumbBatchJob::new(
+                session.store.clone(),
+                vec![ids[5]],
+                5,
+                Arc::new(SourceTransforms::new(&DisplayProfile::Space(
+                    OutputSpace::Srgb,
+                ))),
+            );
+            let mut job = job;
+            nicti_pounce::ChunkedJob::step(&mut job).unwrap();
+            let (_, thumb) = slot.lock().unwrap().ready.remove(0);
+            thumb.unwrap().image.pixels[0]
+        };
         session.request_visible(0..10, &pounce);
-        wait_for(&mut session, &ctx, &pounce, |s| s.inflight_batches() == 0);
+        // Finish decoding without uploading, so the decoded pixels can still be inspected.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while session.inflight_batches() > 0 {
+            session.poll_batches();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let converted = session
+            .pending_uploads
+            .iter()
+            .find(|(id, _)| *id == ids[5])
+            .map(|(_, t)| t.image.pixels[0])
+            .expect("re-decoded cell is waiting to upload");
+        assert_ne!(
+            converted, unconverted,
+            "decoded through the new display conversion"
+        );
         wait_for(&mut session, &ctx, &pounce, |s| {
             s.pending_uploads.is_empty()
         });

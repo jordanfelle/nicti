@@ -157,6 +157,17 @@ impl ColorManagement {
         });
     }
 
+    /// Takes a freshly resolved display profile. Only a genuinely different one rebuilds the
+    /// preview conversion and bumps [`Self::generation`]: off Windows every toggle re-resolves, and
+    /// two identical monitors share one profile -- neither should purge every thumbnail.
+    fn adopt_profile(&mut self, profile: DisplayProfile) {
+        if !same_profile(&self.display, &profile) {
+            self.source = Arc::new(SourceTransforms::new(&profile));
+            self.generation += 1;
+        }
+        self.display = profile;
+    }
+
     /// Call once per frame: follows the window across monitors, and re-pushes the transform to
     /// the GPU when anything changed.
     pub fn sync(&mut self, frame: &eframe::Frame) {
@@ -164,9 +175,7 @@ impl ColorManagement {
         let monitor = display_profile::current_monitor(hwnd);
         if monitor != self.monitor || (self.monitor.is_none() && self.dirty) {
             let (profile, note) = display_profile::resolve(hwnd);
-            self.display = profile;
-            self.source = Arc::new(SourceTransforms::new(&self.display));
-            self.generation += 1;
+            self.adopt_profile(profile);
             self.display_kind = None;
             self.display_note = note;
             self.monitor = monitor;
@@ -200,6 +209,18 @@ impl ColorManagement {
     }
 }
 
+/// Whether two display profiles convert identically: the same built-in space, or the same ICC
+/// bytes. A profile that can't be serialized to compare counts as different (re-convert).
+fn same_profile(a: &DisplayProfile, b: &DisplayProfile) -> bool {
+    match (a, b) {
+        (DisplayProfile::Space(x), DisplayProfile::Space(y)) => x == y,
+        (DisplayProfile::Icc(x), DisplayProfile::Icc(y)) => {
+            Arc::ptr_eq(x, y) || matches!((x.encode(), y.encode()), (Ok(p), Ok(q)) if p == q)
+        }
+        _ => false,
+    }
+}
+
 /// The native window handle as an integer (Windows HWND), or `None` if unavailable.
 fn native_window_handle(frame: &eframe::Frame) -> Option<isize> {
     match frame.window_handle().ok()?.as_raw() {
@@ -212,6 +233,29 @@ fn native_window_handle(frame: &eframe::Frame) -> Option<isize> {
 mod tests {
     use super::*;
     use nicti_calico::transform::DisplayKind;
+
+    #[test]
+    fn re_resolving_the_same_profile_keeps_the_preview_generation() {
+        let mut cm = ColorManagement::new();
+        let p3 = nicti_calico::icc::profile_bytes(OutputSpace::DisplayP3).unwrap();
+        let icc = || nicti_calico::display_profile::from_icc_bytes(&p3).unwrap();
+        cm.adopt_profile(DisplayProfile::Space(OutputSpace::Srgb));
+        assert_eq!(cm.generation(), 0, "still the sRGB default");
+        let source = cm.source_transforms();
+
+        cm.adopt_profile(icc());
+        assert_eq!(cm.generation(), 1);
+        cm.adopt_profile(icc());
+        assert_eq!(
+            cm.generation(),
+            1,
+            "identical bytes from a second monitor/toggle"
+        );
+
+        cm.adopt_profile(DisplayProfile::Space(OutputSpace::AdobeRgb));
+        assert_eq!(cm.generation(), 2);
+        assert!(!Arc::ptr_eq(&source, &cm.source_transforms()));
+    }
 
     #[test]
     fn default_is_a_direct_srgb_transform() {

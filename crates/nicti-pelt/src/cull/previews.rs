@@ -513,16 +513,17 @@ mod tests {
         previews.set_color(p3.clone(), 0);
         assert_eq!(previews.len(), 1, "same generation keeps the tile");
 
-        previews.set_color(p3, 1);
+        previews.set_color(p3.clone(), 1);
         assert_eq!(previews.len(), 0);
+        assert!(
+            Arc::ptr_eq(&previews.color, &p3),
+            "new tiles use the new conversion"
+        );
         let again = previews
             .get(&ctx, &*store, &pounce, ids[0], Want::Small)
             .map(|t| t.id());
         assert!(again.is_some());
-        assert_ne!(
-            again, first,
-            "a fresh texture, converted for the new display"
-        );
+        assert_ne!(again, first, "a fresh texture, not the cached one");
     }
 
     #[test]

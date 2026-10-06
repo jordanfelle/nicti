@@ -149,14 +149,16 @@ rendered frame.
   (`grid/jobs.rs::make_thumbnail`); the loupe and tiles convert in `cull/previews.rs::
   preview_texture` on the UI thread, once per photo (the texture is cached).
 - **Invalidation.** `ColorManagement` bumps a `generation` whenever the display profile is
-  re-resolved and rebuilds its `SourceTransforms`. `PeltApp::sync_preview_color` hands both to
+  re-resolved *to a different profile* and rebuilds its `SourceTransforms` (off Windows every menu
+  toggle re-resolves, so an unchanged profile must not purge anything). `PeltApp::sync_preview_color` hands both to
   `GridSession::set_color` (drops thumbnail textures and decoded-but-unuploaded results, cancels
   in-flight batches; snapshot, failure sets and edited flags are kept), `TilePreviews::set_color`
   and the loupe's cached texture.
 - **T2 keeps the source profile.** `t2.rs::resize_and_encode` used to drop the embedded ICC when
   it re-encoded, so a Display P3 original would have been read back as sRGB. It now carries an RGB
-  profile over to the T2 JPEG. T2s stored before #319 have no profile and are treated as sRGB
-  (the pre-#319 behaviour); they refresh when their cache entry is regenerated.
+  profile over to the T2 JPEG, and `t2::render_hash` gained a `v2` segment so T2s stored
+  before #319 (untagged JPEGs of P3/Adobe RGB pixels) read as stale and are regenerated with
+  their profile rather than shown as sRGB forever.
 - **Measured** (release, `cargo test -p nicti-calico --release -- --ignored --nocapture
   convert_cost`): converting a 256x170 thumbnail costs ~0.05 ms (ADR-0029's per-thumbnail decode is
   ~2-3 ms, so the 1M-asset grid budget is unaffected; untagged-on-sRGB is free); a 3840x2560 T2
