@@ -235,7 +235,7 @@ impl Renderer {
     /// live/geometry passes are each either a cache hit (their composite key matches the stored
     /// one from the previous render) or exactly one dispatch.
     pub fn render(&mut self, req: &RenderRequest<'_>) -> Result<Arc<FrameTexture>, RenderError> {
-        self.render_through(req, true)
+        self.render_through(req, true, None)
     }
 
     /// Like [`Self::render`] but stops after the fused live suffix, returning its output without
@@ -246,13 +246,26 @@ impl Renderer {
         &mut self,
         req: &RenderRequest<'_>,
     ) -> Result<Arc<FrameTexture>, RenderError> {
-        self.render_through(req, false)
+        self.render_through(req, false, None)
+    }
+
+    /// [`Self::render_live`] over a baked frame the caller already holds (from
+    /// [`Self::render_baked`]), so the baked chain is not run a second time. Export (#354) needs
+    /// this: its renderer has a zero baked-cache budget, so the "following render finds it cached"
+    /// assumption [`Self::render_baked`] documents does not hold there.
+    pub fn render_live_from(
+        &mut self,
+        req: &RenderRequest<'_>,
+        baked: Arc<FrameTexture>,
+    ) -> Result<Arc<FrameTexture>, RenderError> {
+        self.render_through(req, false, Some(baked))
     }
 
     fn render_through(
         &mut self,
         req: &RenderRequest<'_>,
         with_geometry: bool,
+        pre_baked: Option<Arc<FrameTexture>>,
     ) -> Result<Arc<FrameTexture>, RenderError> {
         let mut stats = RenderStats::default();
         let mut encoder = self
@@ -261,7 +274,17 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("nicti-tapetum frame"),
             });
-        let (baked_output, baked_output_key) = self.run_baked(req, &mut encoder, &mut stats)?;
+        let (baked_output, baked_output_key) = match pre_baked {
+            Some(baked) => {
+                let last = req
+                    .baked_chain
+                    .last()
+                    .map(|(id, _)| *id)
+                    .ok_or(RenderError::EmptyBakedChain)?;
+                (baked, req.graph.cache_key(last)?)
+            }
+            None => self.run_baked(req, &mut encoder, &mut stats)?,
+        };
 
         let live_key = composite_key(req.graph, req.live_nodes, baked_output_key, req.extent)?;
         let live_output = if self.live_key == Some(live_key) {
@@ -477,6 +500,49 @@ mod tests {
         renderer.render(&req).unwrap();
         assert_eq!(renderer.last_stats().live_dispatches, 0);
         assert_eq!(renderer.last_stats().geometry_dispatches, 1);
+    }
+
+    #[test]
+    fn render_live_from_reuses_a_held_baked_frame_even_with_no_baked_cache() {
+        // Export's renderer has a zero baked-cache budget, so "the next render finds the baked
+        // frame cached" (what `render_baked` documents) is false there (#354).
+        let Some(gpu) = test_gpu() else { return };
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 0);
+        let g = hero_graph(&[]);
+        let chain = baked_chain(&g, &baked_exec);
+        let req = RenderRequest {
+            graph: &g,
+            baked_chain: &chain,
+            live: &live_exec,
+            live_nodes: &[],
+            geometry: &geom_exec,
+            geometry_nodes: &[],
+            extent: extent(),
+        };
+
+        let baked = renderer.render_baked(&req).unwrap();
+        let chain_len = baked_exec.0.load(Ordering::SeqCst);
+        assert_eq!(chain_len as usize, chain.len());
+
+        renderer.render_live_from(&req, baked).unwrap();
+        assert_eq!(
+            baked_exec.0.load(Ordering::SeqCst),
+            chain_len,
+            "the held frame is used: no baked stage runs again"
+        );
+        let stats = renderer.last_stats();
+        assert_eq!((stats.bake_dispatches, stats.live_dispatches), (0, 1));
+        assert_eq!(geom_exec.0.load(Ordering::SeqCst), 0);
+
+        // The contrast that motivates it: plain `render_live` re-bakes at a zero budget.
+        let mut renderer = Renderer::new(test_gpu().unwrap(), 0);
+        renderer.render_baked(&req).unwrap();
+        let before = baked_exec.0.load(Ordering::SeqCst);
+        renderer.render_live(&req).unwrap();
+        assert!(baked_exec.0.load(Ordering::SeqCst) > before);
     }
 
     #[test]

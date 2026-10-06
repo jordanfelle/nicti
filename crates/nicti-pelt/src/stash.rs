@@ -86,22 +86,34 @@ impl AlphaFetchJob {
     }
 
     fn run(&self) -> Option<Arc<AiAlpha>> {
-        let key = keyed(self.asset_id, self.bake_key.as_bytes());
-        let bytes = {
-            let mut larder = lock_larder_within(&self.larder, LOCK_WAIT)?;
-            larder.get_keyed(key).ok().flatten()?
-        };
-        // Decoded outside the lock.
-        let Some(alpha) = AiAlpha::decode(&bytes) else {
-            // Intact but unreadable (another build's format): forget it, or it would also make the
-            // re-bake's store skip as "already there".
-            if let Some(mut larder) = lock_larder_within(&self.larder, LOCK_WAIT) {
-                let _ = larder.forget_keyed(key);
-            }
-            return None;
-        };
-        Some(Arc::new(alpha))
+        fetch_alpha(&self.larder, self.asset_id, &self.bake_key, LOCK_WAIT)
     }
+}
+
+/// Loads one stored alpha from the Larder, `None` on any miss (absent, unreadable, busy past
+/// `wait`). Shared by [`AlphaFetchJob`] and export (#354), which reads baked alphas on its decode
+/// step and never bakes.
+pub(crate) fn fetch_alpha(
+    larder: &SharedLarder,
+    asset_id: i64,
+    bake_key: &blake3::Hash,
+    wait: Duration,
+) -> Option<Arc<AiAlpha>> {
+    let key = keyed(asset_id, bake_key.as_bytes());
+    let bytes = {
+        let mut guard = lock_larder_within(larder, wait)?;
+        guard.get_keyed(key).ok().flatten()?
+    };
+    // Decoded outside the lock.
+    let Some(alpha) = AiAlpha::decode(&bytes) else {
+        // Intact but unreadable (another build's format): forget it, or it would also make the
+        // re-bake's store skip as "already there".
+        if let Some(mut guard) = lock_larder_within(larder, wait) {
+            let _ = guard.forget_keyed(key);
+        }
+        return None;
+    };
+    Some(Arc::new(alpha))
 }
 
 impl ChunkedJob for AlphaFetchJob {

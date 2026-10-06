@@ -51,11 +51,16 @@ const HAZE_BUDGET: u64 = 64 << 20;
 
 /// The mask extent for a frame of `width x height`.
 pub fn mask_extent(width: u32, height: u32) -> (u32, u32) {
+    mask_extent_capped(width, height, MAX_MASK_LONG_EDGE)
+}
+
+/// [`mask_extent`] with an explicit long-edge cap (export builds at the frame's own extent, #354).
+pub fn mask_extent_capped(width: u32, height: u32, max_long_edge: u32) -> (u32, u32) {
     let long = width.max(height);
-    if long <= MAX_MASK_LONG_EDGE {
+    if long <= max_long_edge {
         return (width.max(1), height.max(1));
     }
-    let scale = MAX_MASK_LONG_EDGE as f32 / long as f32;
+    let scale = max_long_edge as f32 / long as f32;
     (
         ((width as f32 * scale).round() as u32).max(1),
         ((height as f32 * scale).round() as u32).max(1),
@@ -238,6 +243,9 @@ pub struct MaskEngine {
     brushes: Tier<BrushState>,
     atlas: Option<(blake3::Hash, Arc<Atlas>)>,
     stats: MaskStats,
+    /// Long-edge cap for the mask extent: [`MAX_MASK_LONG_EDGE`] for Develop, the device's texture
+    /// limit for export (#354).
+    max_long_edge: u32,
 }
 
 fn field_size(t: &Arc<FieldTexture>) -> u64 {
@@ -282,7 +290,35 @@ impl MaskEngine {
             brushes: Tier::new(BRUSH_BUDGET, |s: &BrushState| s.tex.byte_size()),
             atlas: None,
             stats: MaskStats::default(),
+            max_long_edge: MAX_MASK_LONG_EDGE,
         }
+    }
+
+    /// An engine for export (#354): masks at the frame's own extent (capped only at
+    /// `max_long_edge`, the device's texture limit), with no cache budgets. One photo is rendered
+    /// at a time and every key includes the guide and extent, so nothing is reusable across photos,
+    /// while a native 45 MP field is ~180 MB: caching them would only pin VRAM.
+    pub fn for_export(gpu: &GpuContext, max_long_edge: u32) -> Self {
+        let mut engine = Self::new(gpu);
+        engine.max_long_edge = max_long_edge.max(1);
+        engine.drop_caches();
+        engine
+    }
+
+    /// Drops every cache and the packed atlas (export calls this between photos to free VRAM).
+    pub fn release(&mut self) {
+        self.drop_caches();
+        self.atlas = None;
+    }
+
+    fn drop_caches(&mut self) {
+        // A zero budget refuses every `put`, so a cache is simply never populated.
+        self.band_cache = Tier::new(0, |f: &Arc<FrameTexture>| f.byte_size());
+        self.haze_cache = Tier::new(0, |h: &HazeState| h.transmission.byte_size());
+        self.composites = Tier::new(0, field_size);
+        self.refined = Tier::new(0, field_size);
+        self.guides = Tier::new(0, field_size);
+        self.brushes = Tier::new(0, |s: &BrushState| s.tex.byte_size());
     }
 
     pub fn stats(&self) -> MaskStats {
@@ -303,7 +339,11 @@ impl MaskEngine {
         if active.is_empty() {
             return None;
         }
-        let mask = mask_extent(inputs.guide.extent.width, inputs.guide.extent.height);
+        let mask = mask_extent_capped(
+            inputs.guide.extent.width,
+            inputs.guide.extent.height,
+            self.max_long_edge,
+        );
         let cx = Cx { mask, inputs };
 
         // Keys first, textures only if the atlas has to be rebuilt: a slider drag changes neither,
@@ -970,6 +1010,62 @@ mod tests {
         assert_eq!(mask_extent(8280, 5520), (4096, 2731));
         assert_eq!(mask_extent(5520, 8280), (2731, 4096));
         assert_eq!(mask_extent(1, 1), (1, 1));
+    }
+
+    #[test]
+    fn an_export_engine_caps_only_at_its_own_limit() {
+        assert_eq!(mask_extent_capped(8280, 5520, 16384), (8280, 5520));
+        assert_eq!(
+            mask_extent_capped(8280, 5520, 4096),
+            mask_extent(8280, 5520)
+        );
+        assert_eq!(mask_extent_capped(5520, 8280, 4140), (2760, 4140));
+    }
+
+    #[test]
+    fn an_export_engine_builds_the_same_masks_at_the_frames_extent_and_holds_nothing() {
+        let Some(mut rig) = Rig::new() else { return };
+        let brush = MaskSource::Brush {
+            strokes: vec![Stroke {
+                points: vec![[0.2, 0.3], [0.5, 0.5], [0.8, 0.6]],
+                radius: 0.08,
+                feather: 0.04,
+                ..Stroke::default()
+            }],
+        };
+        let corrections = || {
+            vec![
+                correction("a", radial(0.4), 1.0),
+                correction("b", brush.clone(), -0.5),
+            ]
+        };
+        let reference = rig.prepare(corrections()).unwrap();
+        let reference: Vec<Vec<f32>> = (0..2).map(|c| rig.atlas_channel(&reference, c)).collect();
+
+        // Uncapped (the guide is far under the limit): identical to Develop's engine, and the
+        // zero-budget caches still compose correctly within one prepare.
+        rig.engine = MaskEngine::for_export(&rig.gpu, 4096);
+        let frame = rig.prepare(corrections()).unwrap();
+        assert_eq!(
+            (frame.atlas.width, frame.atlas.height),
+            (W as u32, H as u32)
+        );
+        for (c, want) in reference.iter().enumerate() {
+            close(&rig.atlas_channel(&frame, c), want, 1e-3);
+        }
+        assert_eq!(rig.engine.stats().packs, 1);
+        // Nothing is kept for the next photo, and `release` drops the packed atlas too.
+        assert_eq!(rig.engine.composites.stats().used_bytes, 0);
+        assert_eq!(rig.engine.brushes.stats().used_bytes, 0);
+        rig.engine.release();
+        assert!(rig.engine.atlas.is_none());
+        rig.prepare(corrections()).unwrap();
+        assert_eq!(rig.engine.stats().packs, 2, "repacked after release");
+
+        // The cap is the device's limit, not 4096: a tighter one scales the extent down.
+        rig.engine = MaskEngine::for_export(&rig.gpu, 48);
+        let frame = rig.prepare(corrections()).unwrap();
+        assert_eq!((frame.atlas.width, frame.atlas.height), (48, 32));
     }
 
     #[test]

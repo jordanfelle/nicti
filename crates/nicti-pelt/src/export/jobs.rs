@@ -24,10 +24,11 @@
 //! inside Pounce's scheduler lock, so submitting from there could deadlock. Only `step()` paths
 //! and [`ExportRun::poll`] call `advance`, which releases the state lock before submitting.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::{LinearFrame, RawDecoder};
@@ -48,14 +49,19 @@ use nicti_preen::{export_frame, ExportContext, ExporterRegistry, WorkingFrame};
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::Affine2D;
 use nicti_tapetum::gpu::GpuContext;
+use nicti_tapetum::mask::compose as mask_compose;
+use nicti_tapetum::mask::engine::AiAlpha;
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::spine;
+use nicti_tapetum::stages::MASKS;
 use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
-use super::render_core::{render_live_frame, ExportRenderer, LiveRender};
+use super::render_core::{render_live_frame, ExportRenderer, LiveRender, LiveSource};
 use super::sink::AccumSink;
 use crate::camera_profiles;
 use crate::loupe::asset_cache_key;
+use crate::stash::fetch_alpha;
+use crate::t2::SharedLarder;
 
 /// Decoded (or decoding) photos allowed ahead of the renderer.
 pub const DECODE_AHEAD: usize = 1;
@@ -79,6 +85,9 @@ pub struct ExportEnv {
     pub registry: Arc<ExporterRegistry>,
     /// Written to EXIF `Software` / XMP `CreatorTool`, e.g. `Nicti 0.3.1`.
     pub software: String,
+    /// Where baked AI-mask alphas live (#353). Export reads them to apply AI masks (#354) and
+    /// never bakes: `None` (no catalog cache) leaves AI components out, with a warning.
+    pub larder: Option<SharedLarder>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -229,30 +238,6 @@ impl ExportRun {
         let plan_items: Vec<PlanItem> = prepared.iter().map(|p| p.plan_item.clone()).collect();
         let plan = plan_batch(&plan_items, &spec, exporter.extension(), &FsProbe)?;
         warnings.extend(plan.warnings);
-        // Local adjustments (#49) aren't rendered by the export path yet (#354): its live pass never
-        // gets a mask atlas. Say so rather than hand back an image that silently lacks them.
-        let with_masks: Vec<String> = prepared
-            .iter()
-            .filter(|p| {
-                spine::resolve::<MaskParams>(&p.edit, nicti_tapetum::stages::MASKS)
-                    .active()
-                    .next()
-                    .is_some()
-            })
-            .map(|p| {
-                p.source_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            })
-            .collect();
-        if !with_masks.is_empty() {
-            warnings.push(format!(
-                "{} photo(s) have local adjustments (masks), which are not applied to exports yet (#354): {}.",
-                with_masks.len(),
-                with_masks.join(", ")
-            ));
-        }
 
         let total = prepared.len() + failed_up_front.len();
         let items: Vec<Item> = prepared
@@ -279,6 +264,7 @@ impl ExportRun {
             gpu: env.gpu,
             registry: env.registry,
             software: env.software,
+            larder: env.larder,
             spec,
             watermark,
             items,
@@ -362,6 +348,9 @@ struct Ready {
     exif: SourceExif,
     profile: Option<Arc<DcpProfile>>,
     look: Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
+    /// Baked AI-mask alphas this photo's edit uses, by bake key (#354). A component whose alpha
+    /// was never baked is simply absent and the engine skips it.
+    ai_alphas: HashMap<blake3::Hash, Arc<AiAlpha>>,
 }
 
 struct Rendered {
@@ -387,6 +376,7 @@ struct Shared {
     gpu: Arc<GpuContext>,
     registry: Arc<ExporterRegistry>,
     software: String,
+    larder: Option<SharedLarder>,
     spec: ExportSpec,
     watermark: Option<Arc<WatermarkSource>>,
     items: Vec<Item>,
@@ -611,7 +601,7 @@ impl ChunkedJob for DecodeJob {
             ticket.cancelled();
         } else {
             match decode_one(&shared, ticket.item()) {
-                Ok((frame, exif, profile, look)) => shared.with_state(|st| {
+                Ok((frame, exif, profile, look, ai_alphas)) => shared.with_state(|st| {
                     st.decoding -= 1;
                     st.ready.push_back(Ready {
                         ticket,
@@ -619,6 +609,7 @@ impl ChunkedJob for DecodeJob {
                         exif,
                         profile,
                         look,
+                        ai_alphas,
                     });
                 }),
                 Err(why) => {
@@ -652,6 +643,7 @@ fn decode_one(
         SourceExif,
         Option<Arc<DcpProfile>>,
         Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
+        HashMap<blake3::Hash, Arc<AiAlpha>>,
     ),
     String,
 > {
@@ -667,7 +659,58 @@ fn decode_one(
     // Same for the Look `.xmp` layered on it.
     let look = camera_profiles::load_look_for_document(&item.edit)
         .map_err(|e| format!("camera profile: {e}"))?;
-    Ok((Arc::new(frame), exif, profile, look))
+    let ai_alphas = stored_ai_alphas(shared, item);
+    Ok((Arc::new(frame), exif, profile, look, ai_alphas))
+}
+
+/// How long export waits for the Larder in total, per photo, across all its alphas. Off the UI
+/// thread, and a miss would drop a mask from the file, so this waits longer than an interactive
+/// fetch does; a shared budget (not one per alpha) bounds a photo with many AI corrections when the
+/// Larder is held by something long like a compaction.
+const ALPHA_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// The baked AI-mask alphas `item`'s edit uses, read from the Larder (#354). Export never bakes: an
+/// alpha that isn't stored is left out (the engine skips that component, as Develop does while a
+/// bake is pending) and the report says so, so the file is never silently missing a mask.
+fn stored_ai_alphas(shared: &Shared, item: &Item) -> HashMap<blake3::Hash, Arc<AiAlpha>> {
+    let params: MaskParams = spine::resolve(&item.edit, MASKS);
+    // Only corrections that change pixels: `bake_requests` also covers enabled-but-inert ones (a
+    // fresh Select Subject with no slider moved), which export neither needs nor should wait on.
+    let active = MaskParams {
+        corrections: params.active().cloned().collect(),
+    };
+    let neutral_key = spine::neutral_key(&item.edit, item.identity);
+    let wanted = mask_compose::bake_requests(&active, neutral_key);
+    let mut found = HashMap::new();
+    let mut missing = 0usize;
+    let deadline = Instant::now() + ALPHA_LOCK_WAIT;
+    for request in &wanted {
+        if shared.is_cancelled() {
+            break;
+        }
+        // What is left of the photo's budget (zero still makes one non-waiting attempt).
+        let left = deadline.saturating_duration_since(Instant::now());
+        let alpha = shared
+            .larder
+            .as_ref()
+            .and_then(|l| fetch_alpha(l, item.asset_id, &request.key, left));
+        match alpha {
+            Some(a) => {
+                found.insert(request.key, a);
+            }
+            None => missing += 1,
+        }
+    }
+    if missing > 0 && !shared.is_cancelled() {
+        shared.with_state(|st| {
+            st.report.warnings.push(format!(
+                "{}: {missing} AI mask(s) couldn't be loaded and were left out (not computed \
+                 yet, or the cache was busy); open the photo in Develop (or sync it) first.",
+                item.name
+            ));
+        });
+    }
+    found
 }
 
 // --- stage 2: render ---------------------------------------------------------------------------
@@ -718,6 +761,7 @@ impl RenderJob {
             exif,
             profile,
             look,
+            ai_alphas,
         } = ready;
         let shared = self.shared.clone();
         let item = ticket.item();
@@ -731,11 +775,14 @@ impl RenderJob {
         let LiveRender { live, inputs } = match render_live_frame(
             &mut ctx,
             &shared.gpu,
-            &item.edit,
-            item.identity,
-            &frame,
-            profile.as_deref(),
-            look.as_deref(),
+            LiveSource {
+                edit: &item.edit,
+                identity: item.identity,
+                frame: &frame,
+                profile: profile.as_deref(),
+                look: look.as_deref(),
+                masks: Some(&ai_alphas),
+            },
         ) {
             Ok(r) => r,
             Err(why) => {
@@ -1061,6 +1108,7 @@ mod tests {
         _root: tempfile::TempDir,
         out: tempfile::TempDir,
         pounce: Pounce,
+        larder: Option<SharedLarder>,
     }
 
     fn fixture(names: &[&str]) -> Option<Fixture> {
@@ -1103,6 +1151,7 @@ mod tests {
             _root: root,
             out: tempfile::tempdir().unwrap(),
             pounce: Pounce::new(u64::MAX, 2, 2, || {}),
+            larder: None,
         })
     }
 
@@ -1115,6 +1164,7 @@ mod tests {
                 gpu: self.gpu.clone(),
                 registry: Arc::new(builtin_registry()),
                 software: "Nicti test".into(),
+                larder: self.larder.clone(),
             }
         }
 
@@ -1363,49 +1413,192 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_photo_with_active_masks_exports_with_a_warning_that_they_are_not_applied() {
-        use nicti_tapetum::mask::params::{
-            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
-        };
-        let Some(fx) = fixture(&["a.NEF", "b.NEF"]) else {
-            return;
-        };
+    /// A +1 EV correction through `source`, as the master edit of one photo.
+    fn masked_edit(source: nicti_tapetum::mask::params::MaskSource) -> EditDocument {
+        masked_edit_by(source, 1.0)
+    }
+
+    fn masked_edit_by(
+        source: nicti_tapetum::mask::params::MaskSource,
+        exposure: f32,
+    ) -> EditDocument {
+        use nicti_tapetum::mask::params::{LocalAdjust, LocalCorrection, MaskComponent, MaskGroup};
         let mut doc = EditDocument::default();
         let masks = MaskParams {
             corrections: vec![LocalCorrection {
                 mask: MaskGroup {
                     components: vec![MaskComponent {
-                        source: MaskSource::LinearGradient {
-                            p0: [0.0, 0.5],
-                            p1: [1.0, 0.5],
-                        },
+                        source,
                         ..MaskComponent::default()
                     }],
                 },
                 adjust: LocalAdjust {
-                    exposure: 1.0,
+                    exposure,
                     ..LocalAdjust::default()
                 },
                 ..LocalCorrection::default()
             }],
         };
         doc.stages.insert(
-            nicti_tapetum::stages::MASKS.to_string(),
+            MASKS.to_string(),
             StageEntry {
                 schema_version: 1,
                 params: serde_json::to_value(&masks).unwrap(),
             },
         );
-        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        doc
+    }
+
+    fn gradient_edit() -> EditDocument {
+        masked_edit(nicti_tapetum::mask::params::MaskSource::LinearGradient {
+            p0: [0.0, 0.5],
+            p1: [1.0, 0.5],
+        })
+    }
+
+    /// Mean brightness (0..=255) of the columns `x0..x1`.
+    fn mean_luma(img: &image::RgbImage, x0: u32, x1: u32) -> f64 {
+        let (mut sum, mut n) = (0.0, 0.0);
+        for (x, _, px) in img.enumerate_pixels() {
+            if (x0..x1).contains(&x) {
+                sum += f64::from(px[0]) + f64::from(px[1]) + f64::from(px[2]);
+                n += 3.0;
+            }
+        }
+        sum / n
+    }
+
+    /// How much brighter `masked` is than `base` over the left and the right quarter.
+    fn side_gains(base: &image::RgbImage, masked: &image::RgbImage) -> (f64, f64) {
+        let w = base.width();
+        (
+            mean_luma(masked, 0, w / 4) - mean_luma(base, 0, w / 4),
+            mean_luma(masked, w - w / 4, w) - mean_luma(base, w - w / 4, w),
+        )
+    }
+
+    #[test]
+    fn local_adjustments_are_applied_without_a_warning_and_never_leak_into_the_next_photo() {
+        let (Some(base), Some(fx)) = (fixture(&["a.NEF", "b.NEF"]), fixture(&["a.NEF", "b.NEF"]))
+        else {
+            return;
+        };
+        fx.store
+            .put_master_edit(fx.ids[0], &gradient_edit())
+            .unwrap();
+        let base_report = wait(&ExportRun::start(base.env(), &base.ids, base.spec()).unwrap());
         let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
-        assert_eq!(report.exported.len(), 2, "both still export: {report:?}");
+        assert_eq!(base_report.exported.len(), 2, "{base_report:?}");
+        assert_eq!(report.exported.len(), 2, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+
+        let (base_a, base_b) = (
+            png(&base.out.path().join("01_a.png")),
+            png(&base.out.path().join("02_b.png")),
+        );
+        let (got_a, got_b) = (
+            png(&fx.out.path().join("01_a.png")),
+            png(&fx.out.path().join("02_b.png")),
+        );
+        let (left, right) = side_gains(&base_a, &got_a);
+        assert!(
+            left.max(right) > 2.0 && (left - right).abs() > 2.0,
+            "the gradient brightens one side more than the other: left {left}, right {right}"
+        );
+        // The unmasked photo that follows in the same batch (same kernels, same atlas slot) is
+        // untouched: a stale atlas from the previous photo would brighten it too.
+        assert_eq!(got_b, base_b, "the previous photo's masks leaked");
+    }
+
+    #[test]
+    fn a_stored_ai_mask_is_applied_and_one_never_baked_is_left_out_with_a_warning() {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::compose::ai_bake_key;
+        use nicti_tapetum::mask::engine::AiAlpha;
+        use nicti_tapetum::mask::params::MaskSource;
+
+        let (Some(base), Some(mut fx)) = (fixture(&["a.NEF"]), fixture(&["a.NEF"])) else {
+            return;
+        };
+        let source = MaskSource::Ai(MaskRecipe {
+            model_id: "test.model".into(),
+            model_version: "1".into(),
+            params: serde_json::json!({ "target": "subject" }),
+            seed: None,
+        });
+        let doc = masked_edit(source.clone());
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let base_report = wait(&ExportRun::start(base.env(), &base.ids, base.spec()).unwrap());
+        assert_eq!(base_report.exported.len(), 1);
+        let base_a = png(&base.out.path().join("01_a.png"));
+
+        // Never baked (and no Larder at all): left out, named, and the pixels are the unmasked
+        // ones -- a missing model must never select everything.
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(report.exported.len(), 1, "{report:?}");
         assert_eq!(report.warnings.len(), 1, "{report:?}");
         assert!(report.warnings[0].contains("a.NEF"), "{report:?}");
+        assert!(report.warnings[0].contains("AI mask"), "{report:?}");
+        assert_eq!(png(&fx.out.path().join("01_a.png")), base_a);
+
+        // Baked and stored: applied, no warning. Left half unselected, right half selected.
+        let dir = tempfile::tempdir().unwrap();
+        let larder: SharedLarder = Arc::new(Mutex::new(
+            nicti_lair::larder::Larder::open(
+                dir.path(),
+                nicti_lair::larder::LarderConfig::default(),
+            )
+            .unwrap(),
+        ));
+        let identity = blake3::hash(b"fp-a.NEF");
+        let key = ai_bake_key(&source, spine::neutral_key(&doc, identity)).unwrap();
+        let alpha = AiAlpha::quantized(
+            8,
+            8,
+            (0..64).map(|i| if i % 8 < 4 { 0.0 } else { 1.0 }).collect(),
+        )
+        .unwrap();
+        larder
+            .lock()
+            .unwrap()
+            .put_keyed(
+                crate::stash::keyed(fx.ids[0], key.as_bytes()),
+                &alpha.encode(),
+            )
+            .unwrap();
+        fx.larder = Some(larder);
+        fx.out = tempfile::tempdir().unwrap();
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(report.exported.len(), 1, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+        let (left, right) = side_gains(&base_a, &png(&fx.out.path().join("01_a.png")));
         assert!(
-            !report.warnings[0].contains("b.NEF"),
-            "only the masked photo"
+            right > 2.0 && right > left + 2.0,
+            "the selected half is brightened, the other is not: left {left}, right {right}"
         );
+    }
+
+    #[test]
+    fn an_enabled_but_inert_ai_mask_needs_no_alpha_and_raises_no_warning() {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::params::MaskSource;
+        let Some(fx) = fixture(&["a.NEF"]) else {
+            return;
+        };
+        // A fresh "Select Subject": enabled, but no slider moved, so it changes no pixel.
+        let doc = masked_edit_by(
+            MaskSource::Ai(MaskRecipe {
+                model_id: "test.model".into(),
+                model_version: "1".into(),
+                params: serde_json::json!({ "target": "subject" }),
+                seed: None,
+            }),
+            0.0,
+        );
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(report.exported.len(), 1, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
     }
 
     #[test]

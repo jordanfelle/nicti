@@ -35,7 +35,7 @@ use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
 use crate::camera_profiles;
-use crate::export::render_core::{render_live_frame, ExportRenderer, LiveRender};
+use crate::export::render_core::{render_live_frame, ExportRenderer, LiveRender, LiveSource};
 use crate::export::sink::AccumSink;
 use crate::loupe::asset_cache_key;
 use crate::t2::{lock_larder_within, try_lock_larder, SharedLarder, T2Outcome};
@@ -554,11 +554,15 @@ impl RenderJob {
         let LiveRender { live, inputs } = match render_live_frame(
             &mut ctx,
             &task.env.gpu,
-            &task.req.edit,
-            task.req.identity,
-            &frame,
-            profile.as_deref(),
-            look.as_deref(),
+            LiveSource {
+                edit: &task.req.edit,
+                identity: task.req.identity,
+                frame: &frame,
+                profile: profile.as_deref(),
+                look: look.as_deref(),
+                // Previews leave local adjustments out and are marked partial (`is_partial`).
+                masks: None,
+            },
         ) {
             Ok(r) => r,
             Err(why) => {
