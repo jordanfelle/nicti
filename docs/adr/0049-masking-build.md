@@ -230,16 +230,69 @@ ONNX Runtime 1.28.0):
 
 | | cold (load + SHA-256 verify + first run) | warm |
 |---|---|---|
-| Windows, CPU execution provider | 15.3 s | **9.2 s** |
+| Windows, CPU execution provider (#49, one run) | 15.3 s | **9.2 s** |
+| Windows, CPU execution provider (#345 harness, p50 of 5) | 11.4 s | **≈ 6 s** |
 | Linux sandbox, CPU execution provider | 30.4 s | 18.3 s |
+
+**GPU execution providers (#345)** — RTX 5080, release build, `session.run` for the pinned model on a
+1024² input unless noted; idle desktop baseline 2.7–3.2 GB VRAM and ~5 % GPU, so every figure is a
+delta over that. Warm = 1 warm-up + 5 measured runs.
+
+| Execution provider (ONNX Runtime) | model | warm p50 | cold | peak VRAM |
+|---|---|---|---|---|
+| DirectML (NuGet ORT 1.24.4 + DirectML 1.15.4) | fp32 | **6.1 s** (a *bake*: 6 s) | 12.3 s | ~10 GB, GPU at 100 % |
+| CUDA 13, default options (ORT 1.28.0 GPU build) | fp32 | 0.24 s (bake 0.28 s) | 11.9 s | ~12.7 GB |
+| CUDA 13, heuristic cuDNN search + as-requested arena | fp32 | bake 0.31 s | 4.7 s | ~12.7 GB |
+| CUDA 13, same options, same input | fp32 | 0.27 s (p95 0.44 s) | 0.73 s first run | ~12.8 GB |
+| CUDA 13, same options, same input | **fp16** | **0.17 s** (p95 0.20 s) | 0.85–1.4 s first run | **~7.9 GB** |
+| CUDA 13, shipped path (store install, clean `PATH`, pinned cuBLAS 13.8) | fp16 | bake **0.21 s** (p95 0.22 s) | 5.9 s (incl. hashing ~1.9 GB) | 8 GiB declared |
+
+- **DirectML is out.** It registered and kept the GPU at 100 % but is no faster than the CPU provider
+  for this graph — BiRefNet's attention and deformable-convolution ops don't map well to DirectML.
+  (Microsoft also stopped publishing the DirectML ORT package at 1.24.4 and has DirectML in
+  maintenance; it was never going to track the 1.28.0 runtime AI removal already pins.)
+- **CUDA meets the ≤ 1 s target by ~4–5×**, and **fp16 is the right model for it**: 1.6× faster, 38 %
+  less VRAM, same output (mean logit −7.6340 vs −7.6296 on the probe input). The fp32 model peaks at
+  ~13 GB, which would not fit beside the renderer on a 16 GB card.
+- The CUDA EP's defaults (exhaustive cuDNN algorithm search, power-of-two arena growth) cost ~7 s of
+  first-run time and a lot of memory; `nicti-haw::session_builder` sets heuristic search, an
+  as-requested arena and no max workspace. VRAM stayed ~12.7 GB for fp32 either way — it is the
+  activations of a 1024² fp32 swin backbone, not allocator slack.
+- **Footprint is declared, not enforced:** `MaskBakeJob::spec().vram_bytes` is 8 GiB once the session is
+  on a GPU provider (`birefnet::GPU_VRAM_BYTES`), 0 on CPU. Pounce never reserves for a Foreground
+  job (`queue.rs::take_next`), so today this is bookkeeping; if bakes ever become Background jobs the
+  512 MiB placeholder budget in `nicti-pelt` must grow first.
+- **Safety nets:** the GPU provider is only requested when the runtime directory holds
+  `onnxruntime_providers_cuda.dll` (`ExecutionProvider::for_runtime`); a provider that fails to
+  register, a model that fails to load on it, or a GPU `run` that errors (cuDNN missing, out of VRAM
+  beside the renderer, a driver reset) all fall back to the CPU provider on the fp32 model, and the
+  declared footprint drops to 0. **Verified:** registration failure (cuDNN absent) → CPU, bake
+  succeeds. **Not exercised end to end:** the mid-run retry in `BiRefNetSegmenter::segment` — the
+  incomplete-cuDNN reproduction failed at registration instead, so that branch is unit-uncovered.
+- **Selection rules (from the adversarial review):** the pack's runtime is pinned **per process** — the
+  first time anything resolves it (`ModelStore::gpu_runtime_path`), because ONNX Runtime's environment
+  can't be re-pointed, so a pack installed mid-session changes nothing until restart (otherwise every
+  later mask and removal load would fail with a path mismatch). Masks *and* removal verify the runtime
+  set actually loaded (`MaskModels::artifacts`/`RemovalModels::artifacts`, keyed on `gpu_runtime`, not
+  on the fp16 file), and the CUDA provider is requested only when the fp16 model is installed too (an
+  interrupted pack download leaves the runtime without it; fp32 on CUDA would need ~13 GB, declared as
+  such if a caller supplies its own GPU runtime). AI removal stays on the CPU provider inside the CUDA
+  build until #322; with only the pack installed it is not asked to download the CPU runtime.
+- **Known gaps:** the pack is offered to any machine with an NVIDIA driver (`nvcuda.dll`); there is no
+  probe for GPU generation (CUDA 13 needs Turing or newer) or free VRAM — the panel says so, and the
+  CPU fallback covers a card that can't run it, after a wasted download. `remove()` of a multi-member
+  artifact can stop partway if a DLL is locked by a live session.
+- **Measured on a live desktop** (Lightroom Classic, Parsec, Nicti itself and ~40 other GPU clients
+  were running, ~5 % idle load), so absolute times carry some noise; the ranking is not close.
 
 - The tensor contract is **verified against the real weights**: it loads, the names resolve from the
   graph, the output is 1024×1024 in 0…1, and a bright synthetic subject on a dark background gets alpha
   1.000 inside and 0.000 in a corner.
 - **ADR-0048's "≤ 1 s per bake" hypothesis assumed CUDA and is not met on the CPU provider — by ~9×.**
   That ADR said a CPU-provider bake is "reported, not gated"; it is reported here. A bake is a background
-  job with a *Selecting…* indicator, so it is usable, but ~9 s per Select Subject is poor. A GPU execution
-  provider (#345) and a CPU-viable model (#349) are filed; the download prompt does not hide it.
+  job with a *Selecting…* indicator, so it is usable, but ~9 s per Select Subject is poor. **#345 closes
+  the gap on NVIDIA GPUs** with the optional GPU pack below (a CPU-viable model, #349, is still open for
+  everyone else).
 - **Quality on real photos — fursuiters in particular — was not evaluated**; only a synthetic scene.
   That remains #171's job.
 
@@ -261,7 +314,8 @@ texture and is unaudited (#355).
 - **Draw the overlay in the display shader**: needs an atlas binding through the colour-managed display
   pipeline, whose uniform layout has already had one size-mismatch bug. A CPU preview needs none of it.
 - **fp16 BiRefNet** (490 MB): ONNX Runtime's CPU provider has thin fp16 kernel coverage and falls back
-  through casts. Worth measuring on a GPU provider (#349).
+  through casts, so it stays out of the default download. **Measured on CUDA in #345 and adopted there**
+  (see the table above): it ships in the optional NVIDIA GPU pack, used only when the CUDA provider is live.
 - **Refining the AI alpha on the CPU**: needs a full-frame readback of the baked frame.
 
 ## Consequences
@@ -269,7 +323,19 @@ texture and is unaudited (#355).
 - **#49 ships**: masks and local adjustments in Develop. `spikes/siamese` is deleted (its compose,
   geometry, refine and WGSL superseded by `nicti-tapetum::mask`; its segmentation scaffolding by
   `nicti-siamese`); `nicti-groom`'s cross-crate `ort` test no longer uses it as a caller.
-- **Follow-ups**, each filed: a GPU execution provider for masks ([#345](https://github.com/jordanfelle/nicti/issues/345));
+- **The optional NVIDIA GPU pack (#345)**: `nicti_stalk::models::gpu_pack_artifacts()` — ONNX Runtime 1.28.0
+  CUDA 13 build (366 MB download), cuDNN 9.27 (436 MB, NVIDIA's own PyPI wheel; NVIDIA's full redist zip
+  is 1.3 GB), cuBLAS 13.8 (422 MB, NVIDIA CUDA redistributables) and the fp16 BiRefNet (490 MB) — about
+  **1.7 GB to download, 1.9 GB on disk**, installed into `<store>/ort-cuda/` (one directory: ONNX Runtime
+  resolves the provider's dependencies from it) and `birefnet-fp16/`. Windows + an NVIDIA driver only;
+  offered by a button in the Masks panel, never automatic (ADR-0218); takes effect after a restart
+  because ONNX Runtime's environment is process-wide. Needs `Payload::ZipMembers` (several members of one
+  archive, a directory shared between artifacts, installed all-or-nothing). `ensure_ort_environment`
+  prepends the runtime's directory to `PATH`, because ONNX Runtime loads cuDNN/cuBLAS by bare name
+  (found by measurement: with a clean `PATH` cuDNN was not found beside the DLL, and the session still
+  reported the CUDA provider until the first run failed). **Licences:** ORT MIT; cuDNN/cuBLAS are
+  redistributable under NVIDIA's terms (`docs/licensing.md`) and are an on-demand download, never bundled.
+- **Follow-ups**, each filed: ~~a GPU execution provider for masks ([#345](https://github.com/jordanfelle/nicti/issues/345))~~ (done);
   a model picker ([#346](https://github.com/jordanfelle/nicti/issues/346)); a provenance-clean sky model
   ([#347](https://github.com/jordanfelle/nicti/issues/347)); verifying the BiRefNet conversion
   ([#348](https://github.com/jordanfelle/nicti/issues/348)); a CPU-viable subject model

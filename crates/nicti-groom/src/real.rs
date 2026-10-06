@@ -94,6 +94,7 @@ mod tests {
     fn fake_models() -> RemovalModels {
         RemovalModels {
             ort_dylib: PathBuf::from("/nonexistent/libonnxruntime.so"),
+            gpu_runtime: false,
             sam_encoder: PathBuf::from("/nonexistent/enc.onnx"),
             sam_decoder: PathBuf::from("/nonexistent/dec.onnx"),
             lama: PathBuf::from("/nonexistent/lama.onnx"),
@@ -133,6 +134,7 @@ mod tests {
     fn missing_models_fail_cleanly_and_stay_unloaded_so_a_later_install_can_succeed() {
         let mut backend = LazyBackend::new(RemovalModels {
             ort_dylib: PathBuf::from("/nonexistent/libonnxruntime.so"),
+            gpu_runtime: false,
             sam_encoder: PathBuf::from("/nonexistent/enc.onnx"),
             sam_decoder: PathBuf::from("/nonexistent/dec.onnx"),
             lama: PathBuf::from("/nonexistent/lama.onnx"),

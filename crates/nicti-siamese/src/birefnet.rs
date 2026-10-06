@@ -15,6 +15,9 @@
 //! and runs on the caller's worker thread, because hashing and building a ~1 GB session takes
 //! seconds. `ort`/`load-dynamic` keeps the runtime out of the binary until here.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use nicti_claw::Module;
 use nicti_stalk::models::{mask_artifacts, verify_artifacts, MaskModels, BIREFNET};
 use nicti_stalk::{
@@ -117,12 +120,20 @@ impl SegmentationProvider for BiRefNetProvider {
     }
 
     fn load(&self, ctx: &LoadContext) -> Result<Box<dyn Segmenter>, SegmentError> {
-        let (dylib, model, ort_from_store) = match ctx.ort_dylib {
+        let (dylib, fp32, fp16, artifacts, ort_from_store, gpu_allowed) = match ctx.ort_dylib {
             Some(dylib) => {
                 let model = ctx.store.installed_path(&BIREFNET).ok_or_else(|| {
                     SegmentError::NotInstalled(format!("{} is not downloaded", BIREFNET.label))
                 })?;
-                (dylib.to_path_buf(), model, false)
+                // A caller-supplied runtime (dev/tests) may use a GPU provider with the fp32 model.
+                (
+                    dylib.to_path_buf(),
+                    model,
+                    None,
+                    mask_artifacts(),
+                    false,
+                    true,
+                )
             }
             None => {
                 let models = MaskModels::locate(ctx.store).ok_or_else(|| {
@@ -132,47 +143,125 @@ impl SegmentationProvider for BiRefNetProvider {
                     ))
                 })?;
                 let from_store = std::env::var_os("NICTI_ORT_DYLIB").is_none_or(|v| v.is_empty());
-                (models.ort_dylib, models.birefnet, from_store)
+                let artifacts = models.artifacts();
+                // The store's GPU pack is only *used* once its fp16 model is there too: an
+                // interrupted pack download leaves the CUDA runtime installed without it, and fp32
+                // on CUDA needs ~13 GB of VRAM.
+                let gpu_allowed = models.birefnet_gpu.is_some();
+                (
+                    models.ort_dylib,
+                    models.birefnet,
+                    models.birefnet_gpu,
+                    artifacts,
+                    from_store,
+                    gpu_allowed,
+                )
             }
         };
-        verify_artifacts(ctx.store, &mask_artifacts(), ort_from_store)
-            .map_err(SegmentError::Verify)?;
+        verify_artifacts(ctx.store, &artifacts, ort_from_store).map_err(SegmentError::Verify)?;
         nicti_haw::ensure_ort_environment(&dylib).map_err(|e| SegmentError::Load(e.to_string()))?;
-        let session = Session::builder()
-            .map_err(|e| SegmentError::Load(e.to_string()))?
-            .commit_from_file(&model)
-            .map_err(|e| SegmentError::Load(e.to_string()))?;
-        let input_name = session
-            .inputs()
-            .first()
-            .map(|i| i.name().to_owned())
-            .ok_or_else(|| SegmentError::Load("the model declares no input".into()))?;
-        let output_name = session
-            .outputs()
-            .first()
-            .map(|o| o.name().to_owned())
-            .ok_or_else(|| SegmentError::Load("the model declares no output".into()))?;
+        // A CUDA build of the runtime asks for the CUDA provider (`NICTI_ORT_EP` overrides); the CPU
+        // build -- or a GPU provider that can't start -- runs on the CPU.
+        let preferred = if gpu_allowed {
+            nicti_haw::ExecutionProvider::for_runtime(&dylib)
+        } else {
+            nicti_haw::ExecutionProvider::Cpu
+        };
+        let requested = nicti_haw::ExecutionProvider::resolve(preferred);
+        let (session, active, fp16_used) = open_session(requested, &fp32, fp16.as_deref())?;
+        eprintln!("nicti-siamese: BiRefNet session on the {active:?} execution provider");
+        DECLARED_VRAM.store(vram_for(active, fp16_used), Ordering::Relaxed);
+        let (input_name, output_name) = io_names(&session)?;
         Ok(Box::new(BiRefNetSegmenter {
             session,
             input_name,
             output_name,
+            active,
+            fp32,
         }))
     }
+}
+
+/// Peak VRAM one BiRefNet bake takes on the CUDA provider with the fp16 model, measured on the RTX
+/// 5080 reference machine (#345, ADR-0049): ~7.7 GiB over the idle baseline, declared as 8 GiB.
+/// The fp32 model peaks at ~12.5 GiB ([`GPU_FP32_VRAM_BYTES`]), which is why the GPU pack ships fp16.
+pub const GPU_VRAM_BYTES: u64 = 8 << 30;
+
+/// Peak VRAM of the fp32 model on the CUDA provider (measured ~12.5 GiB), declared as 13 GiB -- only
+/// reached when a caller supplies its own GPU runtime and the fp32 file (dev/tests, `NICTI_ORT_DYLIB`).
+pub const GPU_FP32_VRAM_BYTES: u64 = 13 << 30;
+
+static DECLARED_VRAM: AtomicU64 = AtomicU64::new(0);
+
+/// What a bake claims from Pounce's VRAM budget: [`GPU_VRAM_BYTES`] once BiRefNet is running on a
+/// GPU provider, else 0 (the CPU provider uses no VRAM, and nothing is loaded before the first
+/// bake). Lock-free because `MaskBakeJob::spec` runs on the UI thread while a bake may hold the
+/// backend; process-wide because ONNX Runtime's environment is.
+pub fn declared_vram_bytes() -> u64 {
+    DECLARED_VRAM.load(Ordering::Relaxed)
+}
+
+fn vram_for(active: nicti_haw::ExecutionProvider, fp16: bool) -> u64 {
+    match (active, fp16) {
+        (nicti_haw::ExecutionProvider::Cpu, _) => 0,
+        (_, true) => GPU_VRAM_BYTES,
+        (_, false) => GPU_FP32_VRAM_BYTES,
+    }
+}
+
+/// Builds the session on `requested`: the fp16 model on the CUDA provider (about 8 GB of VRAM,
+/// versus ~13 GB for fp32), else the fp32 model. If the GPU provider can't register, or the model
+/// won't load on it, falls back to the CPU provider on the fp32 model.
+fn open_session(
+    requested: nicti_haw::ExecutionProvider,
+    fp32: &Path,
+    fp16: Option<&Path>,
+) -> Result<(Session, nicti_haw::ExecutionProvider, bool), SegmentError> {
+    use nicti_haw::ExecutionProvider::Cpu;
+    let nicti_haw::ConfiguredBuilder {
+        builder: mut session_builder,
+        active,
+    } = nicti_haw::session_builder(requested).map_err(|e| SegmentError::Load(e.to_string()))?;
+    let (model, fp16_used) = match (active, fp16) {
+        (Cpu, _) | (_, None) => (fp32, false),
+        (_, Some(fp16)) => (fp16, true),
+    };
+    match session_builder.commit_from_file(model) {
+        Ok(session) => Ok((session, active, fp16_used)),
+        Err(e) if active != Cpu => {
+            eprintln!("nicti-siamese: BiRefNet failed to load on {active:?} ({e}); using the CPU");
+            open_session(Cpu, fp32, None)
+        }
+        Err(e) => Err(SegmentError::Load(e.to_string())),
+    }
+}
+
+fn io_names(session: &Session) -> Result<(String, String), SegmentError> {
+    let input = session
+        .inputs()
+        .first()
+        .map(|i| i.name().to_owned())
+        .ok_or_else(|| SegmentError::Load("the model declares no input".into()))?;
+    let output = session
+        .outputs()
+        .first()
+        .map(|o| o.name().to_owned())
+        .ok_or_else(|| SegmentError::Load("the model declares no output".into()))?;
+    Ok((input, output))
 }
 
 struct BiRefNetSegmenter {
     session: Session,
     input_name: String,
     output_name: String,
+    /// The provider the session is really running on.
+    active: nicti_haw::ExecutionProvider,
+    /// The fp32 model, which a failed GPU run falls back to on the CPU.
+    fp32: PathBuf,
 }
 
-impl Segmenter for BiRefNetSegmenter {
-    fn segment(&mut self, image: &ModelImage, params: &Value) -> Result<AlphaMap, SegmentError> {
-        match SegmentTarget::from_params(params)? {
-            SegmentTarget::Subject => {}
-            other => return Err(SegmentError::UnsupportedTarget(other.as_str().to_owned())),
-        }
-        let input = preprocess(image)?;
+impl BiRefNetSegmenter {
+    fn infer(&mut self, input: Vec<f32>) -> Result<AlphaMap, SegmentError> {
         let tensor = Tensor::from_array(([1usize, 3, MODEL_SIZE, MODEL_SIZE], input))
             .map_err(|e| SegmentError::Inference(e.to_string()))?;
         let outputs = self
@@ -186,9 +275,48 @@ impl Segmenter for BiRefNetSegmenter {
     }
 }
 
+impl Segmenter for BiRefNetSegmenter {
+    fn segment(&mut self, image: &ModelImage, params: &Value) -> Result<AlphaMap, SegmentError> {
+        match SegmentTarget::from_params(params)? {
+            SegmentTarget::Subject => {}
+            other => return Err(SegmentError::UnsupportedTarget(other.as_str().to_owned())),
+        }
+        let input = preprocess(image)?;
+        match self.infer(input.clone()) {
+            Err(SegmentError::Inference(e)) if self.active != nicti_haw::ExecutionProvider::Cpu => {
+                // The GPU provider registered but can't run (cuDNN missing from the pack, out of
+                // VRAM beside the renderer, a driver reset): finish this bake -- and every later
+                // one -- on the CPU rather than failing the mask.
+                eprintln!(
+                    "nicti-siamese: BiRefNet run failed on {:?} ({e}); using the CPU",
+                    self.active
+                );
+                let (session, active, fp16_used) =
+                    open_session(nicti_haw::ExecutionProvider::Cpu, &self.fp32, None)?;
+                (self.input_name, self.output_name) = io_names(&session)?;
+                self.session = session;
+                self.active = active;
+                DECLARED_VRAM.store(vram_for(active, fp16_used), Ordering::Relaxed);
+                self.infer(input)
+            }
+            other => other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_gpu_provider_claims_vram() {
+        use nicti_haw::ExecutionProvider::{Cpu, Cuda};
+        assert_eq!(vram_for(Cpu, false), 0);
+        assert_eq!(vram_for(Cpu, true), 0, "the CPU provider never claims VRAM");
+        assert_eq!(vram_for(Cuda, true), GPU_VRAM_BYTES);
+        // fp32 on a GPU (a caller-supplied runtime) takes far more than the fp16 the pack ships.
+        assert_eq!(vram_for(Cuda, false), GPU_FP32_VRAM_BYTES);
+    }
 
     fn view(w: usize, h: usize, rgb: &[f32]) -> ModelImage<'_> {
         ModelImage {

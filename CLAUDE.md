@@ -88,7 +88,7 @@ terse index: crate/spike → purpose → owning topic.
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
 - **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
   and benchmarking section above
-- **`crates/nicti-haw`** (#229) — shared, process-wide `ort`/`load-dynamic` environment init,
+- **`crates/nicti-haw`** (#229; #345 adds `session_builder`/`ExecutionProvider`: GPU-provider selection with a logged CPU fallback, `NICTI_ORT_EP`) — shared, process-wide `ort`/`load-dynamic` environment init,
   replacing the six duplicated crate-local copies in `groom` (now `nicti-groom`)/`siamese`/`crouch`/`rods`/
   `litter`/`rosette`; see its own doc comment for the cross-crate path-mismatch rationale.
 - **`crates/nicti-pounce`** (#55, landed) — Pounce: the production job scheduler, promoted from
@@ -115,7 +115,7 @@ terse index: crate/spike → purpose → owning topic.
   `LensCorrection` (#39), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):
   the on-demand, checksummed AI-model store + pinned manifest (ADR-0218), and (#49) the backend-
   agnostic `SegmentationProvider`/`Segmenter`/`SegmentationRegistry` layer that makes AI mask models
-  pluggable, plus the pinned BiRefNet artifact
+  pluggable, plus the pinned BiRefNet artifact and (#345) the optional NVIDIA GPU pack (`models::gpu_pack_artifacts`, multi-file `Payload::ZipMembers`)
 - **`crates/nicti-preen`** (#57, landed) — the export engine: `Exporter` (JPEG/PNG/TIFF) plus settings/
   presets, filename tokens, batch planning, collision-safe writes, linear-light resize, orientation,
   output color, watermark and EXIF/XMP/ICC metadata; `export_frame` is the entry point. GPU-free and
