@@ -38,7 +38,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **Engine costs** (tested with `MaskStats`): slider drag = uniform-only (0 recomposes; keys first, atlas reused, composites untouched even if evicted); a geometry edit
   recomposes that correction only; painting = one GPU pass/frame (prefix `[..n-1]` cached); an AI alpha
   recomposes only its corrections; a new guide rebuilds AI/range masks, not gradients/brushes.
-- **Local adjustments stack additively** (`global + Σ weight·amount·delta`) in `live_suffix.wgsl`; the
+- **Local adjustments stack additively** (`global + Σ weight·amount·delta`; since #380 the global clarity/texture/dehaze/saturation is `nicti.presence`, summed in the same shader step and building the same bases with no mask -- see `render-graph`) in `live_suffix.wgsl`; the
   dehaze/clarity/texture/sat/hue/tint steps are skipped at exactly-zero delta and the rest are identities at
   zero, so an empty mask is bit-identical for in-range globals. Local temp/tint are per-channel
   gains (NOT a camera WB solve). CPU twin: `mask/local.rs::live_pixel`. Spatial ones (clarity/texture/

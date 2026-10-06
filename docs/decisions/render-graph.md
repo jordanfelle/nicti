@@ -171,3 +171,19 @@ never stamped), which `apply_document` then reapplies identically every frame (n
 invalidation). Regression tests: `render.rs::two_photos_of_the_same_size_never_share_cached_pixels`
 and `export/jobs.rs::exports_every_photo_with_planned_names_and_distinct_pixels`, both confirmed to
 fail when the stamp is removed.
+
+## #380: global Presence and post-crop Effects
+
+Full decision: `docs/adr/0380-global-presence-and-effects.md`. Two new stages. `nicti.presence`
+(global Texture/Clarity/Dehaze/Saturation) is a Live stage summed with the per-mask deltas in
+`live_suffix.wgsl`, reusing the mask kernels; with no mask `MaskEngine::prepare` still builds the
+clarity/texture/dehaze bases (a zero-correction `MaskFrame` over a 1x1 atlas) and every renderer --
+Develop, export, rendered previews -- bakes first whenever masks are active or
+`PresenceParams::needs_bases`. `nicti.effects` (post-crop vignette + film grain) is a second Geometry
+node (`spine::GEOMETRY_IDS`), evaluated inside `present_sample.wgsl` in crop-normalized coordinates
+(`effects::crop_norm`: inverse crop transform over the crop size, bound once per photo with the
+untiled, unscaled transform by `RenderInputs::bind_effects`), so a preview, a full-size export and
+every export tile show the same pattern and an Effects edit re-runs only the geometry pass (pinned by
+`render.rs::an_effects_edit_only_reruns_the_geometry_pass`). The formulas are this repo's
+approximation of LRC's Effects panel (no LRC to compare against); the PCG hash is pinned by reference
+vectors so the WGSL copy cannot drift silently. `present_sample` is still unaudited on Dx12 (#355).

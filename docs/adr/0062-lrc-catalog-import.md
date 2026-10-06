@@ -88,8 +88,8 @@ is untranslatable (a partial selection would be wrong); geometric masks and crop
 originals or with a straighten angle (LRC's sign/orientation convention is unpinned), and radials with a non-zero `Angle` or `Roundness`;
 a radial's `Feather` is applied as nicti's outward feather (not verified against LRC renders); a
 skipped correction also leaves `MaskGroupBasedCorrections` in the untranslated list; retouch
-areas; global Clarity/Texture/Dehaze/Saturation, point curves, colour grading, calibration, lens,
-transform/Upright, grain/vignette, `CameraProfile` (a name with no resolvable `.dcp` has no render
+areas; point curves, colour grading, calibration, lens,
+transform/Upright, `CameraProfile` (a name with no resolvable `.dcp` has no render
 effect, so no stage is written), `FilterList` (counted per `Title`: Denoise / removal / Super
 Resolution), PV2003/2010 images. Non-RAW originals (JPEG/TIFF/PSD/video) are not Scruff candidates, so they match nothing and are
 reported as missing. A subset import (`only_roots`) creates only the keywords and collections that
@@ -108,7 +108,7 @@ now applied to every numeric column).
 
 ## Consequences
 
-- Follow-ups filed under #11: global Clarity/Texture/Dehaze/Saturation/grain/vignette (#46); point
+- Follow-ups filed under #11: ~~global Clarity/Texture/Dehaze/Saturation/grain/vignette (#46)~~ (done in #380, ADR-0380); point
   curves, colour grading, calibration and `.dcp` resolution (#42); lens (#39); transform (#47);
   AI removal (#51); Super Resolution (#174); brush masks and retouch areas (units + source offset);
   crop/geometric masks on rotated originals and `CropAngle`; smart collections; IPTC fields; a

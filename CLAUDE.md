@@ -22,8 +22,8 @@ file under the line-count gate. Each topic has:
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143, 0072, 0145), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
-`lrc-migration` (0061, 0062, 0156, 0158), `masking` (0048, 0049, 0353), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
-`xmp-interop` (0059), `render-graph` (0044, 0047), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
+`lrc-migration` (0061, 0062, 0156, 0158, 0380), `masking` (0048, 0049, 0353), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
+`xmp-interop` (0059), `render-graph` (0044, 0047, 0380), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
@@ -151,7 +151,7 @@ terse index: crate/spike → purpose → owning topic.
   (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`, and renamed from
   `nicti-render` to `nicti-tapetum` once the whole #45 stack merged, matching the naming-convention
   section above. `spine.rs` (#57) is the shared graph/registry/`resolve_inputs` Develop, export and
-  `bench/knead` all use (#49 adds its keying-only `nicti.neutral` node and the `nicti.masks` live stage).
+  `bench/knead` all use (#49 adds its keying-only `nicti.neutral` node and the `nicti.masks` live stage). **#380**: global Texture/Clarity/Dehaze/Saturation = `nicti.presence` (`coat::PresenceParams`, summed with local deltas in `live_suffix.wgsl`; bases via `MaskEngine::prepare`'s `presence` input) and post-crop vignette/grain = `nicti.effects` (`coat::EffectsParams`, `effects.rs` CPU reference, `present_sample.wgsl`, `RenderInputs::bind_effects`); LRC mapping in `nicti-stray`'s `develop/basic.rs` + `develop/effects.rs`; UI in `nicti-pelt`'s `develop_panel.rs` (Basic + Effects).
   **`mask/`** (#49): the `nicti.masks` stage -- `params.rs` (data model), `raster.rs`/`compose.rs`
   (CPU references, fold, AI bake key), `kernels.rs`/`guided.rs`/`bases.rs` (GPU kernels), `local.rs` (per-mask
   adjustments' uniforms + CPU twin), `engine.rs` (`MaskEngine`, the caches) → [`masking`](.claude/rules/masking/REFERENCE.md).
