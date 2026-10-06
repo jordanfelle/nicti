@@ -816,17 +816,33 @@ mod tests {
             "cells already decoded and awaiting upload were queued for decoding a second time"
         );
 
+        let front: Vec<i64> = session
+            .pending_uploads
+            .iter()
+            .take(MAX_UPLOADS_PER_FRAME)
+            .map(|(id, _)| *id)
+            .collect();
         session.upload(&ctx);
         assert_eq!(
             session.pending_uploads.len(),
             decoded - MAX_UPLOADS_PER_FRAME
+        );
+        assert!(
+            front.iter().all(|&id| session.texture(id).is_some()),
+            "the uploads must come from the front of the queue"
         );
         assert_eq!(
             session.pending_ids.len(),
             decoded - MAX_UPLOADS_PER_FRAME,
             "uploaded ids must leave the pending set"
         );
-        assert!(session.texture(ids[0]).is_some());
+        // Batches complete in pool order, not id order, so which cells were uploaded first is
+        // nondeterministic; only the count is guaranteed.
+        let textured = ids
+            .iter()
+            .filter(|&&id| session.texture(id).is_some())
+            .count();
+        assert_eq!(textured, MAX_UPLOADS_PER_FRAME);
     }
 
     #[test]
