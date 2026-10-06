@@ -76,12 +76,12 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
     }
 }
 
-/// Owns the long-lived kernels and `Renderer` a real develop view needs -- built once
-/// (`DecodeKernel`/`LiveSuffixKernel`/`CropKernel` compile a pipeline apiece; rebuilding one per
-/// render measured ~1000x too slow in this repo's own prior research, see
-/// `nicti_tapetum::gpu::make_compute_pipeline`'s own doc comment) and reused across every render.
-pub struct DevelopView {
-    gpu: Arc<GpuContext>,
+/// The GPU-free half of the Develop view: the loaded frame, the user's edit document, the render
+/// graph/registry (pure data, hashing only), and everything the Develop panel reads or writes
+/// (stage params, camera/look profiles, finished AI removals and alphas). Constructible and fully
+/// usable with no wgpu adapter, which is what lets the Develop panel run under the headless UI
+/// harness (#426); [`DevelopEngine`] is the half that actually owns GPU resources.
+pub struct DevelopDoc {
     /// `Arc`, not owned -- #31 phase 3's `load_real_frame` swaps this on every loupe cursor move,
     /// and a real decoded photo's pixel buffer is large enough (hundreds of MB at full res) that
     /// cloning it on every swap would be a real cost, not just style.
@@ -94,17 +94,12 @@ pub struct DevelopView {
     document: EditDocument,
     /// The document as last loaded from / saved to the catalog: what `is_dirty` compares against.
     saved: EditDocument,
-    decode_kernel: DecodeKernel,
-    live_kernel: LiveSuffixKernel,
-    crop_kernel: CropKernel,
-    heal_kernel: HealKernel,
     /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
     /// photo changes: a patch is pixels inpainted from *this* frame and means nothing on another.
     removals: RemovalSet,
-    /// Local-adjustment masks (#49): the engine that builds the atlas the live shader reads, and the
-    /// finished AI alphas by bake key. Alphas are pixels computed from *this* photo's neutral
-    /// render, so they are cleared whenever the photo changes (their keys chain from it anyway).
-    mask_engine: MaskEngine,
+    /// Finished AI mask alphas by bake key (#49). Alphas are pixels computed from *this* photo's
+    /// neutral render, so they are cleared whenever the photo changes (their keys chain from it
+    /// anyway).
     ai_alphas: std::collections::HashMap<blake3::Hash, Arc<AiAlpha>>,
     /// Identity of the loaded photo (`loupe::asset_cache_key`), stamped into every render's
     /// document (`spine::stamp_source_identity`) so Tapetum's baked cache can't serve one photo's
@@ -117,7 +112,6 @@ pub struct DevelopView {
     /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
     /// inverse crop transform in the way.
     pub uncropped_preview: bool,
-    renderer: Renderer,
     /// When true, `render()` renders with every stage at its default instead of `document`'s own
     /// values -- the before/after toggle.
     pub show_before: bool,
@@ -139,6 +133,81 @@ pub struct DevelopView {
     pub profile_error: Option<String>,
 }
 
+/// The GPU half of the Develop view: the long-lived kernels, mask engine and `Renderer`, built once
+/// (`DecodeKernel`/`LiveSuffixKernel`/`CropKernel` compile a pipeline apiece; rebuilding one per
+/// render measured ~1000x too slow in this repo's own prior research, see
+/// `nicti_tapetum::gpu::make_compute_pipeline`'s own doc comment) and reused across every render.
+/// Every method takes the [`DevelopDoc`] it renders or analyses.
+pub struct DevelopEngine {
+    gpu: Arc<GpuContext>,
+    decode_kernel: DecodeKernel,
+    live_kernel: LiveSuffixKernel,
+    crop_kernel: CropKernel,
+    heal_kernel: HealKernel,
+    /// Local-adjustment masks (#49): the engine that builds the atlas the live shader reads.
+    mask_engine: MaskEngine,
+    renderer: Renderer,
+}
+
+/// The app-facing Develop view: a [`DevelopDoc`] plus the [`DevelopEngine`] that renders it.
+/// Derefs to the doc, so data accessors (`stage_params`, `set_stage_params`, ...) read as before;
+/// the GPU operations (`render`, `histogram`, `apply_auto_*`) live here, splitting the borrow.
+pub struct DevelopView {
+    pub doc: DevelopDoc,
+    pub engine: DevelopEngine,
+}
+
+impl std::ops::Deref for DevelopView {
+    type Target = DevelopDoc;
+    fn deref(&self) -> &DevelopDoc {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for DevelopView {
+    fn deref_mut(&mut self) -> &mut DevelopDoc {
+        &mut self.doc
+    }
+}
+
+impl DevelopView {
+    pub fn new(gpu: Arc<GpuContext>) -> Self {
+        Self {
+            doc: DevelopDoc::new(),
+            engine: DevelopEngine::new(gpu),
+        }
+    }
+
+    /// See [`DevelopDoc::load_real_frame`]. Forwarded (rather than reached through `Deref`) so a
+    /// call like `view.load_real_frame(view.frame_arc(), ..)` keeps its two-phase borrow.
+    pub fn load_real_frame(
+        &mut self,
+        frame: Arc<LinearFrame>,
+        identity: blake3::Hash,
+        doc: EditDocument,
+    ) {
+        self.doc.load_real_frame(frame, identity, doc);
+    }
+
+    /// Renders the current frame at its native extent, returning the final (post-crop) texture.
+    /// See [`DevelopEngine::render`].
+    pub fn render(&mut self) -> Arc<FrameTexture> {
+        self.engine.render(&mut self.doc)
+    }
+
+    /// One-click Auto tone (#46). See [`DevelopEngine::apply_auto_tone`].
+    #[cfg(test)]
+    pub fn apply_auto_tone(&mut self) -> AutoApplied {
+        self.engine.apply_auto_tone(&mut self.doc)
+    }
+
+    /// Auto-level (#47). See [`DevelopEngine::apply_auto_straighten`].
+    #[cfg(test)]
+    pub fn apply_auto_straighten(&mut self) -> AutoApplied {
+        self.engine.apply_auto_straighten(&mut self.doc)
+    }
+}
+
 fn has_null(v: &serde_json::Value) -> bool {
     match v {
         serde_json::Value::Null => true,
@@ -148,40 +217,25 @@ fn has_null(v: &serde_json::Value) -> bool {
     }
 }
 
-impl DevelopView {
-    pub fn new(gpu: Arc<GpuContext>) -> Self {
+impl DevelopDoc {
+    pub fn new() -> Self {
         let frame = Arc::new(synthetic_linear_frame());
         let extent = Extent {
             width: frame.width,
             height: frame.height,
         };
-        let decode_kernel = DecodeKernel::new(&gpu);
-        let live_kernel = LiveSuffixKernel::new(&gpu);
-        let crop_kernel = CropKernel::new(&gpu);
-        crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
-        let heal_kernel = HealKernel::new(&gpu);
-        let mask_engine = MaskEngine::new(&gpu);
-        let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
-
         Self {
-            gpu,
             frame,
             extent,
             graph: build_graph(),
             registry: build_registry(),
             document: EditDocument::default(),
             saved: EditDocument::default(),
-            decode_kernel,
-            live_kernel,
-            crop_kernel,
-            heal_kernel,
             removals: RemovalSet::new(),
-            mask_engine,
             ai_alphas: std::collections::HashMap::new(),
             identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
-            renderer,
             show_before: false,
             profile_choices: Vec::new(),
             profiles_for: None,
@@ -323,137 +377,6 @@ impl DevelopView {
         self.document.stages.remove(stage_id);
     }
 
-    /// Renders the current frame at its native extent, returning the final (post-crop) texture.
-    /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
-    /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
-    /// gives a document with no entry for a stage, just applied to the whole document at once.
-    pub fn render(&mut self) -> Arc<FrameTexture> {
-        let mut doc = if self.show_before {
-            EditDocument::default()
-        } else {
-            // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
-            // changing) rebakes the heal stage through the normal cache-key path.
-            let mut d = self.document.clone();
-            heal::stamp_removal_state(&mut d, &self.removals);
-            if self.uncropped_preview {
-                // Removing the entry (rather than only ignoring it below) also gives the crop node
-                // its default hash, so the cached cropped composite can't be served back.
-                d.stages.remove(CROP);
-                // The vignette/grain are relative to the crop: over the whole frame they would
-                // only get in the way of seeing the spots being healed.
-                d.stages.remove(nicti_tapetum::stages::EFFECTS);
-            }
-            d
-        };
-        spine::stamp_source_identity(&mut doc, self.identity);
-        self.graph
-            .apply_document(&doc, &self.registry)
-            .expect("build_registry covers every id build_graph adds");
-        if !self.show_before {
-            // The masks entry is stamped with which AI alphas are ready, so one arriving (or being
-            // replaced) recomposes only the corrections that use it. The stamp needs the neutral
-            // render's key, which is known once the photo's identity is applied above -- hence the
-            // second, nearly free `apply_document` (only the masks node's hash changes).
-            let neutral_key = self.neutral_key();
-            let ready: std::collections::HashMap<blake3::Hash, blake3::Hash> = self
-                .ai_alphas
-                .iter()
-                .map(|(k, a)| (*k, a.content_hash))
-                .collect();
-            mask_compose::stamp_ai_alpha_state(&mut doc, neutral_key, &ready);
-            self.graph
-                .apply_document(&doc, &self.registry)
-                .expect("build_registry covers every id build_graph adds");
-        }
-        let doc = &doc;
-
-        let inputs = spine::resolve_inputs(
-            doc,
-            &self.frame,
-            self.extent,
-            self.active_profile.as_deref(),
-            self.active_look.as_deref(),
-            1.0,
-        );
-        self.crop_kernel.set_transform(inputs.crop_transform);
-        inputs.bind_effects(&self.crop_kernel);
-        self.live_kernel.set_params(&self.gpu, &inputs.live);
-
-        let decode_exec = DecodeExec {
-            kernel: &self.decode_kernel,
-            frame: &self.frame,
-        };
-        let heal_exec = HealExec {
-            kernel: &self.heal_kernel,
-            params: &inputs.heal,
-            removals: &self.removals,
-        };
-        let passthrough = PassthroughExec;
-        let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
-            (DECODE, &decode_exec),
-            (DEMOSAIC, &passthrough),
-            (DENOISE, &passthrough),
-            (LENS, &passthrough),
-            (HEAL, &heal_exec),
-        ];
-        let req = RenderRequest {
-            graph: &self.graph,
-            baked_chain: &baked_chain,
-            live: &self.live_kernel,
-            live_nodes: &LIVE_IDS,
-            geometry: &self.crop_kernel,
-            geometry_nodes: &GEOMETRY_IDS,
-            extent: self.extent,
-        };
-
-        // Local corrections (#49) and global Presence (#380). The engine needs the *baked* frame (AI refines and range masks
-        // follow it), which only exists once the baked chain has run and been submitted -- so bake
-        // first, prepare the masks from it, bind them, and let the render below find every baked
-        // stage already cached. With no active correction none of this costs anything.
-        let mask_params: MaskParams = spine::resolve(doc, MASKS);
-        // A global clarity/texture/dehaze (#380) needs the same baked frame and bases with no mask.
-        let mask_frame =
-            if mask_params.active().next().is_some() || inputs.live.presence.needs_bases() {
-                let baked = self.renderer.render_baked(&req).expect(
-                    "the synthetic frame's own graph/extent are always internally consistent",
-                );
-                let neutral_key = self
-                    .graph
-                    .cache_key(NEUTRAL)
-                    .expect("build_graph always adds NEUTRAL");
-                let guide_key = self
-                    .graph
-                    .cache_key(HEAL)
-                    .expect("build_graph always adds HEAL");
-                // Range masks measure the frame as shot: the as-shot matrix (no user white balance),
-                // so a white-balance drag doesn't rebuild every range mask.
-                let range_matrix = nicti_tapetum::color::camera_to_working_space_matrix(
-                    self.frame.cam_mul,
-                    &self.frame.cam_xyz,
-                    &nicti_tapetum::coat::WbParams::default(),
-                );
-                self.mask_engine.prepare(
-                    &self.gpu,
-                    &MaskInputs {
-                        params: &mask_params,
-                        ai_alphas: &self.ai_alphas,
-                        neutral_key,
-                        guide: &baked,
-                        guide_key,
-                        range_matrix,
-                        presence: inputs.live.presence,
-                    },
-                )
-            } else {
-                None
-            };
-        self.live_kernel.set_masks(&self.gpu, mask_frame.as_ref());
-
-        self.renderer
-            .render(&req)
-            .expect("the synthetic frame's own graph/extent are always internally consistent")
-    }
-
     /// Cache key of the neutral render AI masks infer on (see `build_graph`'s `NEUTRAL` node):
     /// what a bake key chains from, so a finished alpha is only ever reused for the same photo.
     pub fn neutral_key(&self) -> blake3::Hash {
@@ -494,65 +417,6 @@ impl DevelopView {
         let params: MaskParams = self.stage_params(MASKS);
         let keep = mask_compose::referenced_bake_keys(&params, self.neutral_key());
         self.ai_alphas.retain(|k, _| keep.contains(k));
-    }
-
-    /// A live histogram of `frame`'s display-encoded pixels -- a CPU readback, cheap at this
-    /// view's small synthetic extent (see this module's own doc comment for why a full-res photo
-    /// would need a different, throttled/GPU approach instead).
-    pub fn histogram(&self, frame: &FrameTexture) -> Histogram {
-        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, frame);
-        let display: Vec<[f32; 4]> = pixels
-            .iter()
-            .map(|p| {
-                let encoded = output_encode([p[0], p[1], p[2]]);
-                [encoded[0], encoded[1], encoded[2], p[3]]
-            })
-            .collect();
-        histogram::from_display_pixels(&display)
-    }
-
-    /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
-    /// histograms it, and writes `nicti_tapetum::perk::estimate`'s Exposure/Basic-tone output into
-    /// `document` -- see `perk.rs`'s own doc comment for why this is provisional (candidate A,
-    /// pending #202). Per ADR-0101 (#311): a result equal to the *effective* current params (an
-    /// absent entry counts as its default) writes nothing and reports [`AutoApplied::Unchanged`],
-    /// so a click never dirties the document or (once #324 wires `History`) creates a step; a
-    /// low-confidence result is still applied and reported as
-    /// [`AutoApplied::AppliedLowConfidence`] so the panel can mark the control.
-    pub fn apply_auto_tone(&mut self) -> AutoApplied {
-        if !self.frame_is_complete() {
-            return AutoApplied::Skipped {
-                reason: AutoReason::DecodeIncomplete,
-                low_confidence: false,
-            };
-        }
-        let was_before = self.show_before;
-        self.show_before = true;
-        let default_render = self.render();
-        let hist = self.histogram(&default_render);
-        self.show_before = was_before;
-
-        let outcome = nicti_tapetum::perk::estimate(&hist);
-        let (exposure, tone) = match outcome {
-            AutoOutcome::Confident(v) | AutoOutcome::LowConfidence(v, _) => v,
-            AutoOutcome::NoResult(reason) => {
-                return AutoApplied::Skipped {
-                    reason,
-                    low_confidence: false,
-                };
-            }
-        };
-        let current_exposure: coat::ExposureParams = self.stage_params(EXPOSURE);
-        let current_tone: coat::ToneParams = self.stage_params(TONE);
-        if exposure == current_exposure && tone == current_tone {
-            return AutoApplied::Unchanged;
-        }
-        self.set_stage_params(EXPOSURE, &exposure);
-        self.set_stage_params(TONE, &tone);
-        match outcome {
-            AutoOutcome::LowConfidence(_, reason) => AutoApplied::AppliedLowConfidence(reason),
-            _ => AutoApplied::Applied,
-        }
     }
 
     /// Whether the loaded frame is a complete decode: a non-empty extent and exactly three
@@ -723,12 +587,223 @@ impl DevelopView {
         crop.set_rotation(crop.rotation_degrees + delta);
         self.set_stage_params(CROP, &crop);
     }
+}
+
+impl DevelopEngine {
+    pub fn new(gpu: Arc<GpuContext>) -> Self {
+        let decode_kernel = DecodeKernel::new(&gpu);
+        let live_kernel = LiveSuffixKernel::new(&gpu);
+        let crop_kernel = CropKernel::new(&gpu);
+        crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
+        let heal_kernel = HealKernel::new(&gpu);
+        let mask_engine = MaskEngine::new(&gpu);
+        let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
+        Self {
+            gpu,
+            decode_kernel,
+            live_kernel,
+            crop_kernel,
+            heal_kernel,
+            mask_engine,
+            renderer,
+        }
+    }
+
+    /// Renders the current frame at its native extent, returning the final (post-crop) texture.
+    /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
+    /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
+    /// gives a document with no entry for a stage, just applied to the whole document at once.
+    pub fn render(&mut self, dv: &mut DevelopDoc) -> Arc<FrameTexture> {
+        let mut doc = if dv.show_before {
+            EditDocument::default()
+        } else {
+            // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
+            // changing) rebakes the heal stage through the normal cache-key path.
+            let mut d = dv.document.clone();
+            heal::stamp_removal_state(&mut d, &dv.removals);
+            if dv.uncropped_preview {
+                // Removing the entry (rather than only ignoring it below) also gives the crop node
+                // its default hash, so the cached cropped composite can't be served back.
+                d.stages.remove(CROP);
+                // The vignette/grain are relative to the crop: over the whole frame they would
+                // only get in the way of seeing the spots being healed.
+                d.stages.remove(nicti_tapetum::stages::EFFECTS);
+            }
+            d
+        };
+        spine::stamp_source_identity(&mut doc, dv.identity);
+        dv.graph
+            .apply_document(&doc, &dv.registry)
+            .expect("build_registry covers every id build_graph adds");
+        if !dv.show_before {
+            // The masks entry is stamped with which AI alphas are ready, so one arriving (or being
+            // replaced) recomposes only the corrections that use it. The stamp needs the neutral
+            // render's key, which is known once the photo's identity is applied above -- hence the
+            // second, nearly free `apply_document` (only the masks node's hash changes).
+            let neutral_key = dv.neutral_key();
+            let ready: std::collections::HashMap<blake3::Hash, blake3::Hash> = dv
+                .ai_alphas
+                .iter()
+                .map(|(k, a)| (*k, a.content_hash))
+                .collect();
+            mask_compose::stamp_ai_alpha_state(&mut doc, neutral_key, &ready);
+            dv.graph
+                .apply_document(&doc, &dv.registry)
+                .expect("build_registry covers every id build_graph adds");
+        }
+        let doc = &doc;
+
+        let inputs = spine::resolve_inputs(
+            doc,
+            &dv.frame,
+            dv.extent,
+            dv.active_profile.as_deref(),
+            dv.active_look.as_deref(),
+            1.0,
+        );
+        self.crop_kernel.set_transform(inputs.crop_transform);
+        inputs.bind_effects(&self.crop_kernel);
+        self.live_kernel.set_params(&self.gpu, &inputs.live);
+
+        let decode_exec = DecodeExec {
+            kernel: &self.decode_kernel,
+            frame: &dv.frame,
+        };
+        let heal_exec = HealExec {
+            kernel: &self.heal_kernel,
+            params: &inputs.heal,
+            removals: &dv.removals,
+        };
+        let passthrough = PassthroughExec;
+        let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
+            (DECODE, &decode_exec),
+            (DEMOSAIC, &passthrough),
+            (DENOISE, &passthrough),
+            (LENS, &passthrough),
+            (HEAL, &heal_exec),
+        ];
+        let req = RenderRequest {
+            graph: &dv.graph,
+            baked_chain: &baked_chain,
+            live: &self.live_kernel,
+            live_nodes: &LIVE_IDS,
+            geometry: &self.crop_kernel,
+            geometry_nodes: &GEOMETRY_IDS,
+            extent: dv.extent,
+        };
+
+        // Local corrections (#49) and global Presence (#380). The engine needs the *baked* frame (AI refines and range masks
+        // follow it), which only exists once the baked chain has run and been submitted -- so bake
+        // first, prepare the masks from it, bind them, and let the render below find every baked
+        // stage already cached. With no active correction none of this costs anything.
+        let mask_params: MaskParams = spine::resolve(doc, MASKS);
+        // A global clarity/texture/dehaze (#380) needs the same baked frame and bases with no mask.
+        let mask_frame =
+            if mask_params.active().next().is_some() || inputs.live.presence.needs_bases() {
+                let baked = self.renderer.render_baked(&req).expect(
+                    "the synthetic frame's own graph/extent are always internally consistent",
+                );
+                let neutral_key = dv
+                    .graph
+                    .cache_key(NEUTRAL)
+                    .expect("build_graph always adds NEUTRAL");
+                let guide_key = dv
+                    .graph
+                    .cache_key(HEAL)
+                    .expect("build_graph always adds HEAL");
+                // Range masks measure the frame as shot: the as-shot matrix (no user white balance),
+                // so a white-balance drag doesn't rebuild every range mask.
+                let range_matrix = nicti_tapetum::color::camera_to_working_space_matrix(
+                    dv.frame.cam_mul,
+                    &dv.frame.cam_xyz,
+                    &nicti_tapetum::coat::WbParams::default(),
+                );
+                self.mask_engine.prepare(
+                    &self.gpu,
+                    &MaskInputs {
+                        params: &mask_params,
+                        ai_alphas: &dv.ai_alphas,
+                        neutral_key,
+                        guide: &baked,
+                        guide_key,
+                        range_matrix,
+                        presence: inputs.live.presence,
+                    },
+                )
+            } else {
+                None
+            };
+        self.live_kernel.set_masks(&self.gpu, mask_frame.as_ref());
+
+        self.renderer
+            .render(&req)
+            .expect("the synthetic frame's own graph/extent are always internally consistent")
+    }
+
+    /// A live histogram of `frame`'s display-encoded pixels -- a CPU readback, cheap at this
+    /// view's small synthetic extent (see this module's own doc comment for why a full-res photo
+    /// would need a different, throttled/GPU approach instead).
+    pub fn histogram(&self, frame: &FrameTexture) -> Histogram {
+        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, frame);
+        let display: Vec<[f32; 4]> = pixels
+            .iter()
+            .map(|p| {
+                let encoded = output_encode([p[0], p[1], p[2]]);
+                [encoded[0], encoded[1], encoded[2], p[3]]
+            })
+            .collect();
+        histogram::from_display_pixels(&display)
+    }
+
+    /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
+    /// histograms it, and writes `nicti_tapetum::perk::estimate`'s Exposure/Basic-tone output into
+    /// `document` -- see `perk.rs`'s own doc comment for why this is provisional (candidate A,
+    /// pending #202). Per ADR-0101 (#311): a result equal to the *effective* current params (an
+    /// absent entry counts as its default) writes nothing and reports [`AutoApplied::Unchanged`],
+    /// so a click never dirties the document or (once #324 wires `History`) creates a step; a
+    /// low-confidence result is still applied and reported as
+    /// [`AutoApplied::AppliedLowConfidence`] so the panel can mark the control.
+    pub fn apply_auto_tone(&mut self, dv: &mut DevelopDoc) -> AutoApplied {
+        if !dv.frame_is_complete() {
+            return AutoApplied::Skipped {
+                reason: AutoReason::DecodeIncomplete,
+                low_confidence: false,
+            };
+        }
+        let was_before = dv.show_before;
+        dv.show_before = true;
+        let default_render = self.render(dv);
+        let hist = self.histogram(&default_render);
+        dv.show_before = was_before;
+
+        let outcome = nicti_tapetum::perk::estimate(&hist);
+        let (exposure, tone) = match outcome {
+            AutoOutcome::Confident(v) | AutoOutcome::LowConfidence(v, _) => v,
+            AutoOutcome::NoResult(reason) => {
+                return AutoApplied::Skipped {
+                    reason,
+                    low_confidence: false,
+                };
+            }
+        };
+        let current_exposure: coat::ExposureParams = dv.stage_params(EXPOSURE);
+        let current_tone: coat::ToneParams = dv.stage_params(TONE);
+        if exposure == current_exposure && tone == current_tone {
+            return AutoApplied::Unchanged;
+        }
+        dv.set_stage_params(EXPOSURE, &exposure);
+        dv.set_stage_params(TONE, &tone);
+        match outcome {
+            AutoOutcome::LowConfidence(_, reason) => AutoApplied::AppliedLowConfidence(reason),
+            _ => AutoApplied::Applied,
+        }
+    }
 
     /// Auto-level (#47): renders the image with crop/straighten reset to identity (so detection
     /// isn't biased by any rotation already applied), runs Canny+Hough on that render, and -- if a
     /// confident near-horizontal/near-vertical line was found -- **sets** the crop's
     /// `rotation_degrees` (clamped) to the detected correction. Unlike
-    /// [`Self::straighten_from_drag`] (which is inherently relative -- a drag only ever describes
+    /// [`DevelopDoc::straighten_from_drag`] (which is inherently relative -- a drag only ever describes
     /// a delta from wherever the crop already is), the detected angle here is measured against the
     /// identity-rotation render, so it's already the absolute angle that levels the image; adding
     /// it to whatever `rotation_degrees` already held would double-apply any rotation the user had
@@ -737,20 +812,20 @@ impl DevelopView {
     /// weak or inconsistent to trust (`low_confidence: true` -- a wrong rotation is worse than
     /// none), or when the angle already matches the current rotation ([`AutoApplied::Unchanged`]) --
     /// see `nicti_tapetum::autolevel::detect_level_angle`'s own doc comment.
-    pub fn apply_auto_straighten(&mut self) -> AutoApplied {
-        if !self.frame_is_complete() {
+    pub fn apply_auto_straighten(&mut self, dv: &mut DevelopDoc) -> AutoApplied {
+        if !dv.frame_is_complete() {
             return AutoApplied::Skipped {
                 reason: AutoReason::DecodeIncomplete,
                 low_confidence: false,
             };
         }
-        let had_crop = self.document.stages.remove(CROP);
-        let was_before = self.show_before;
-        self.show_before = false;
-        let uncropped = self.render();
-        self.show_before = was_before;
+        let had_crop = dv.document.stages.remove(CROP);
+        let was_before = dv.show_before;
+        dv.show_before = false;
+        let uncropped = self.render(dv);
+        dv.show_before = was_before;
         if let Some(entry) = had_crop {
-            self.document.stages.insert(CROP.to_string(), entry);
+            dv.document.stages.insert(CROP.to_string(), entry);
         }
 
         let pixels = nicti_tapetum::frame::read_frame(&self.gpu, &uncropped);
@@ -781,13 +856,13 @@ impl DevelopView {
                 };
             }
         };
-        let mut crop: CropParams = self.stage_params(CROP);
+        let mut crop: CropParams = dv.stage_params(CROP);
         let before = crop.rotation_degrees;
         crop.set_rotation(delta);
         if (crop.rotation_degrees - before).abs() < UNCHANGED_ROTATION_EPSILON_DEGREES {
             return AutoApplied::Unchanged;
         }
-        self.set_stage_params(CROP, &crop);
+        dv.set_stage_params(CROP, &crop);
         AutoApplied::Applied
     }
 }
@@ -1236,7 +1311,7 @@ mod tests {
             },
         );
         let edited = read_frame(&gpu, &view.render());
-        let stats = view.renderer.last_stats();
+        let stats = view.engine.renderer.last_stats();
         assert_eq!(stats.live_dispatches, 0, "{stats:?}");
         assert_eq!(stats.geometry_dispatches, 1, "{stats:?}");
         let (corner, centre) = (w * h - 1, (h / 2) * w + w / 2);
