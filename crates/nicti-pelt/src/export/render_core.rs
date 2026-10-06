@@ -32,8 +32,10 @@ pub(crate) struct ExportRenderer {
     pub(crate) graph: RenderGraph,
     pub(crate) registry: StageRegistry,
     pub(crate) renderer: Renderer,
-    /// Builds local-adjustment masks at the frame's own extent, uncached (#354).
-    pub(crate) mask_engine: MaskEngine,
+    /// Builds local-adjustment masks at the frame's own extent, uncached (#354). Created on the
+    /// first masked photo: it compiles its own pipelines, which an unmasked batch (or the preview
+    /// job sharing this type) should not pay for.
+    pub(crate) mask_engine: Option<MaskEngine>,
 }
 
 impl ExportRenderer {
@@ -48,8 +50,7 @@ impl ExportRenderer {
             // A zero baked-cache budget: consecutive photos never share baked output, and a full
             // frame texture is ~350 MB of VRAM not worth keeping.
             renderer: Renderer::new(Arc::clone(gpu), 0),
-            // Native resolution: only the device's texture limit caps the mask extent.
-            mask_engine: MaskEngine::for_export(gpu, gpu.limits.max_texture_dimension_2d),
+            mask_engine: None,
         }
     }
 }
@@ -171,7 +172,11 @@ pub(crate) fn render_live_frame(
                 &frame.cam_xyz,
                 &nicti_tapetum::coat::WbParams::default(),
             );
-            let mask_frame = ctx.mask_engine.prepare(
+            // Native resolution: only the device's texture limit caps the mask extent.
+            let engine = ctx.mask_engine.get_or_insert_with(|| {
+                MaskEngine::for_export(gpu, gpu.limits.max_texture_dimension_2d)
+            });
+            let mask_frame = engine.prepare(
                 gpu,
                 &MaskInputs {
                     params: &mask_params,
@@ -191,10 +196,12 @@ pub(crate) fn render_live_frame(
             ctx.renderer.render_live(&req)
         }
     };
-    // The live pass is submitted: unbind the atlas and free the engine's textures (up to ~1.5 GB
-    // at 45 MP) now rather than hold them through the tile loop, the next photo, or idle.
+    // The live pass is submitted: unbind the atlas and free the engine's textures (several GB
+    // at 45 MP with many corrections) now rather than hold them through the tile loop, the next photo, or idle.
     ctx.live_kernel.set_masks(gpu, None);
-    ctx.mask_engine.release();
+    if let Some(engine) = ctx.mask_engine.as_mut() {
+        engine.release();
+    }
     let live = live.map_err(|e| format!("render failed: {e:?}"))?;
     Ok(LiveRender { live, inputs })
 }

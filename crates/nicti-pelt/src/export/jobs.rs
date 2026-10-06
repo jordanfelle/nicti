@@ -672,11 +672,19 @@ const ALPHA_LOCK_WAIT: Duration = Duration::from_secs(30);
 /// bake is pending) and the report says so, so the file is never silently missing a mask.
 fn stored_ai_alphas(shared: &Shared, item: &Item) -> HashMap<blake3::Hash, Arc<AiAlpha>> {
     let params: MaskParams = spine::resolve(&item.edit, MASKS);
+    // Only corrections that change pixels: `bake_requests` also covers enabled-but-inert ones (a
+    // fresh Select Subject with no slider moved), which export neither needs nor should wait on.
+    let active = MaskParams {
+        corrections: params.active().cloned().collect(),
+    };
     let neutral_key = spine::neutral_key(&item.edit, item.identity);
-    let wanted = mask_compose::bake_requests(&params, neutral_key);
+    let wanted = mask_compose::bake_requests(&active, neutral_key);
     let mut found = HashMap::new();
     let mut missing = 0usize;
     for request in &wanted {
+        if shared.is_cancelled() {
+            break;
+        }
         let alpha = shared
             .larder
             .as_ref()
@@ -691,8 +699,8 @@ fn stored_ai_alphas(shared: &Shared, item: &Item) -> HashMap<blake3::Hash, Arc<A
     if missing > 0 {
         shared.with_state(|st| {
             st.report.warnings.push(format!(
-                "{}: {missing} AI mask(s) haven't been computed yet and were left out; open the \
-                 photo in Develop (or sync it) first.",
+                "{}: {missing} AI mask(s) couldn't be loaded and were left out (not computed \
+                 yet, or the cache was busy); open the photo in Develop (or sync it) first.",
                 item.name
             ));
         });
@@ -1402,6 +1410,13 @@ mod tests {
 
     /// A +1 EV correction through `source`, as the master edit of one photo.
     fn masked_edit(source: nicti_tapetum::mask::params::MaskSource) -> EditDocument {
+        masked_edit_by(source, 1.0)
+    }
+
+    fn masked_edit_by(
+        source: nicti_tapetum::mask::params::MaskSource,
+        exposure: f32,
+    ) -> EditDocument {
         use nicti_tapetum::mask::params::{LocalAdjust, LocalCorrection, MaskComponent, MaskGroup};
         let mut doc = EditDocument::default();
         let masks = MaskParams {
@@ -1413,7 +1428,7 @@ mod tests {
                     }],
                 },
                 adjust: LocalAdjust {
-                    exposure: 1.0,
+                    exposure,
                     ..LocalAdjust::default()
                 },
                 ..LocalCorrection::default()
@@ -1556,6 +1571,29 @@ mod tests {
             right > 2.0 && right > left + 2.0,
             "the selected half is brightened, the other is not: left {left}, right {right}"
         );
+    }
+
+    #[test]
+    fn an_enabled_but_inert_ai_mask_needs_no_alpha_and_raises_no_warning() {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::params::MaskSource;
+        let Some(fx) = fixture(&["a.NEF"]) else {
+            return;
+        };
+        // A fresh "Select Subject": enabled, but no slider moved, so it changes no pixel.
+        let doc = masked_edit_by(
+            MaskSource::Ai(MaskRecipe {
+                model_id: "test.model".into(),
+                model_version: "1".into(),
+                params: serde_json::json!({ "target": "subject" }),
+                seed: None,
+            }),
+            0.0,
+        );
+        fx.store.put_master_edit(fx.ids[0], &doc).unwrap();
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(report.exported.len(), 1, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
     }
 
     #[test]
