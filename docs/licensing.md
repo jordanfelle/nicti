@@ -706,6 +706,26 @@ It is already in the tree via `nicti-calico` (MIT OR Apache-2.0), so there is no
 `deny.toml` change. `zstd` and `lz4_flex`, reviewed above for ADR-0044's disk tier, were **not**
 adopted for it (ADR-0353); their rows stay as the record of what was checked.
 
+## Update (2026-10-06, [#425](https://github.com/jordanfelle/nicti/issues/425)'s LightCraft theme/slider/icon port)
+
+No new crate enters the dependency graph (`cargo deny check licenses` is unaffected). Two kinds of
+non-crate material are added to `crates/nicti-pelt`, which `cargo-deny` cannot see (ADR-0018's
+process: data files get a row here in the same PR):
+
+- **Ported source** — `src/fur/{tokens,slider,widgets,icons}.rs` are adapted from
+  `storytold/lightcraft` at commit `265248c` (`crates/ui-egui/src/{theme,widgets,icons}.rs`), which
+  is `MIT OR Apache-2.0`, "Copyright (c) 2026 ArtCraft Team and the LightCraft contributors".[^fur1]
+  Both grants permit relicensing into an AGPL-3.0-or-later work, and the copyright line is kept in
+  each ported file's header. LightCraft's own `NOTICE` excludes only the ArtCraft *brand* assets,
+  none of which are used. The palette values were measured by LightCraft from a reference app's
+  theme and are re-validated on real photos per #424's provenance rules; the ported icons are, per
+  LightCraft's `assets/ATTRIBUTION.md`, original work drawn in code.
+- **Font** — Inter Regular and SemiBold (`crates/nicti-pelt/assets/fonts/Inter-{Regular,SemiBold}.ttf`,
+  embedded with `include_bytes!`), SIL Open Font License 1.1.[^fur2] OFL permits bundling and
+  embedding in software, forbids selling the font on its own, and requires the licence text to
+  travel with it (kept beside the files as `OFL-Inter.txt`). Inter is not renamed or modified.
+  `OFL-1.1` is already on `deny.toml`'s allowlist (for egui's bundled fonts), so no policy change.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23
@@ -766,3 +786,5 @@ adopted for it (ADR-0353); their rows stay as the record of what was checked.
 [^rel4]: `rsign2` `license = "MIT"` — https://crates.io/api/v1/crates/rsign2 — verified 2026-09-27
 [^tr1]: `trash` `license = "MIT"` — https://crates.io/api/v1/crates/trash — verified 2026-09-29 against the downloaded 5.2.9 `Cargo.toml`
 [^tr2]: `urlencoding` `license = "MIT"` — https://crates.io/api/v1/crates/urlencoding — verified 2026-09-29 against the downloaded 2.1.3 `Cargo.toml`
+[^fur1]: LightCraft `LICENSE-MIT` and `LICENSE-APACHE` at https://github.com/storytold/lightcraft (commit 265248c), read directly; per-file ported-from provenance is recorded in each `crates/nicti-pelt/src/fur/*.rs` header — verified 2026-10-06
+[^fur2]: rsms/inter v4.1 release archive (https://github.com/rsms/inter/releases/tag/v4.1, `Inter-4.1.zip` SHA-256 `9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e`): `extras/ttf/Inter-Regular.ttf` SHA-256 `40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82`, `extras/ttf/Inter-SemiBold.ttf` SHA-256 `78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3`, licence text from the archive's own `LICENSE.txt` (SIL OFL 1.1, Copyright (c) 2016 The Inter Project Authors) — verified 2026-10-06
