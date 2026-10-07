@@ -105,7 +105,9 @@ impl LrcImportUi {
             catalog_path: PathBuf::from(self.path.trim()),
             remaps: remaps_of(rows),
             only_roots,
-            profile_resolver: None,
+            profile_resolver: Some(nicti_stray::ResolverHandle::new(
+                crate::camera_profiles::LrcProfileResolver::default(),
+            )),
         })
     }
 

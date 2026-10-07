@@ -358,6 +358,95 @@ pub fn load_look_for_document(
     Ok(Some(loaded.look))
 }
 
+// --- LRC import: camera-profile name -> installed profile (#381) -------------------------------
+
+/// Resolves the `CameraProfile` name LRC stored for a photo to the user's own installed `.dcp` or
+/// Adobe Raw Look, for `nicti-stray`'s import job.
+///
+/// - A **DCP** wins when the name matches an installed profile for that camera
+///   (`Camera Landscape`, `Adobe Standard` ...), compared case-insensitively.
+/// - Otherwise a **Look** (`Adobe Vivid`, `Adobe Color` ...) matched by file name, layered on that
+///   camera's `Adobe Standard` DCP -- a Look needs a DCP underneath it
+///   (`spine::resolve_inputs`), and `Adobe Standard` is the base Adobe's own Raw profiles use.
+/// - Anything else, or a file that no longer loads, is `None`: the import reports the name as
+///   missing rather than substituting a different profile.
+///
+/// Discovery reads the disk, so each lookup is cheap but not free; the import job caches per
+/// (camera, name).
+#[derive(Debug, Clone)]
+pub struct LrcProfileResolver {
+    dcp_roots: Vec<PathBuf>,
+    look_roots: Vec<PathBuf>,
+}
+
+impl Default for LrcProfileResolver {
+    /// The same roots the Develop panel's pickers search (`NICTI_DCP_DIR`/`NICTI_LOOK_XMP_DIR`
+    /// override Adobe's Windows locations).
+    fn default() -> Self {
+        Self {
+            dcp_roots: roots(),
+            look_roots: look_roots(),
+        }
+    }
+}
+
+impl LrcProfileResolver {
+    /// A resolver over explicit roots (tests).
+    pub fn with_roots(dcp_roots: Vec<PathBuf>, look_roots: Vec<PathBuf>) -> Self {
+        Self {
+            dcp_roots,
+            look_roots,
+        }
+    }
+
+    fn dcp(
+        &self,
+        make: &str,
+        model: &str,
+        name: &str,
+    ) -> Option<nicti_tapetum::coat::CameraProfileParams> {
+        let needles = camera_needles(make, model);
+        let entry = discover_in(&self.dcp_roots, make, model)
+            .into_iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))?;
+        let loaded = load(&entry.path, Some(&needles)).ok()?;
+        Some(nicti_tapetum::coat::CameraProfileParams {
+            name: Some(loaded.profile.name.clone()),
+            path: Some(loaded.path.display().to_string()),
+            content_hash: Some(loaded.content_hash),
+            look: None,
+        })
+    }
+}
+
+impl nicti_stray::ProfileResolver for LrcProfileResolver {
+    fn resolve(
+        &self,
+        make: &str,
+        model: &str,
+        name: &str,
+    ) -> Option<nicti_tapetum::coat::CameraProfileParams> {
+        // No camera, no `.dcp` (they are matched by model), and so no Look either.
+        if camera_needles(make, model).is_empty() {
+            return None;
+        }
+        if let Some(found) = self.dcp(make, model, name) {
+            return Some(found);
+        }
+        let entry = discover_looks_in(&self.look_roots)
+            .into_iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))?;
+        let mut base = self.dcp(make, model, "Adobe Standard")?;
+        let look = load_look(&entry.path).ok()?;
+        base.look = Some(nicti_tapetum::coat::LookRef {
+            name: entry.name,
+            path: look.path.display().to_string(),
+            content_hash: look.content_hash,
+        });
+        Some(base)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +589,126 @@ mod tests {
         let bad = dir.path().join("bad.xmp");
         std::fs::write(&bad, "<not-xmp/>").unwrap();
         assert!(load_look(&bad).is_err());
+    }
+
+    mod lrc_resolver {
+        use super::*;
+        use nicti_calico::dcp::testing::synthetic_dcp_bytes;
+        use nicti_calico::xmp_profile::testing::synthetic_valid_xmp;
+        use nicti_stray::ProfileResolver;
+
+        struct Fixture {
+            _dir: tempfile::TempDir,
+            resolver: LrcProfileResolver,
+        }
+
+        /// A Z 8 with `Adobe Standard` + `Camera Landscape` DCPs, an unrelated Z 7 DCP, and two
+        /// Looks (one valid, one garbage) in separate trees.
+        fn fixture(with_standard: bool) -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
+            let dcps = dir.path().join("CameraProfiles");
+            let looks = dir.path().join("Profiles");
+            std::fs::create_dir_all(dcps.join("Camera/Nikon Z 8")).unwrap();
+            std::fs::create_dir_all(dcps.join("Adobe Standard")).unwrap();
+            std::fs::create_dir_all(&looks).unwrap();
+            let write = |rel: &str, name: &str, model: &str| {
+                std::fs::write(
+                    dcps.join(rel),
+                    synthetic_dcp_bytes(model, name, None, None, true),
+                )
+                .unwrap();
+            };
+            if with_standard {
+                write(
+                    "Adobe Standard/NIKON Z 8 Adobe Standard.dcp",
+                    "Adobe Standard",
+                    "NIKON Z 8",
+                );
+            }
+            write(
+                "Camera/Nikon Z 8/NIKON Z 8 Camera Landscape.dcp",
+                "Camera Landscape",
+                "NIKON Z 8",
+            );
+            write(
+                "Adobe Standard/NIKON Z 7 Adobe Standard.dcp",
+                "Adobe Standard",
+                "NIKON Z 7",
+            );
+            std::fs::write(
+                looks.join("Adobe Vivid.xmp"),
+                synthetic_valid_xmp("Adobe Vivid"),
+            )
+            .unwrap();
+            std::fs::write(looks.join("Adobe Broken.xmp"), "<not-xmp/>").unwrap();
+            Fixture {
+                resolver: LrcProfileResolver::with_roots(vec![dcps], vec![looks]),
+                _dir: dir,
+            }
+        }
+
+        #[test]
+        fn a_named_dcp_resolves_case_insensitively_with_its_identity() {
+            let f = fixture(true);
+            let p = f
+                .resolver
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "camera LANDSCAPE")
+                .expect("installed");
+            assert_eq!(p.name.as_deref(), Some("Camera Landscape"));
+            assert!(p.path.as_deref().unwrap().ends_with("Camera Landscape.dcp"));
+            assert_eq!(p.content_hash.as_deref().map(str::len), Some(64));
+            assert!(p.look.is_none());
+        }
+
+        #[test]
+        fn a_look_resolves_on_top_of_the_cameras_adobe_standard() {
+            let f = fixture(true);
+            let p = f
+                .resolver
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "Adobe Vivid")
+                .expect("installed");
+            assert_eq!(p.name.as_deref(), Some("Adobe Standard"));
+            let look = p.look.expect("look layered");
+            assert_eq!(look.name, "Adobe Vivid");
+            assert_eq!(look.content_hash.len(), 64);
+        }
+
+        #[test]
+        fn nothing_is_guessed_when_a_piece_is_missing() {
+            let f = fixture(true);
+            let r = &f.resolver;
+            // Unknown name, a Look that does not parse, a camera with no such DCP, no camera at all.
+            assert!(r
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "Camera Portrait")
+                .is_none());
+            assert!(r
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "Adobe Broken")
+                .is_none());
+            assert!(r
+                .resolve("NIKON CORPORATION", "NIKON Z 7", "Camera Landscape")
+                .is_none());
+            assert!(r.resolve("", "", "Camera Landscape").is_none());
+            // A Look without that camera's Adobe Standard underneath has nothing to layer on.
+            let no_base = fixture(false);
+            assert!(no_base
+                .resolver
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "Adobe Vivid")
+                .is_none());
+        }
+
+        #[test]
+        fn a_short_model_does_not_pick_up_a_longer_models_profile() {
+            let f = fixture(true);
+            // "Z 8" must not match "Z 80..." and the Z 7's file is never offered for a Z 8.
+            assert!(f
+                .resolver
+                .resolve("NIKON CORPORATION", "NIKON Z 7", "Adobe Standard")
+                .is_some());
+            let z8 = f
+                .resolver
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "Adobe Standard")
+                .unwrap();
+            assert!(z8.path.unwrap().contains("Z 8"));
+        }
     }
 }
