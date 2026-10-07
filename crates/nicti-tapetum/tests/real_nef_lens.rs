@@ -65,4 +65,10 @@ fn real_nefs_decode_to_sane_models() {
         with_profile += 1;
     }
     eprintln!("{with_profile}/{seen} NEFs carried a usable Nikon lens profile");
+    // A fixture directory that never reaches the decode/model path would pass vacuously.
+    assert!(seen > 0, "NICTI_TEST_REAL_NEF_DIR holds no .nef files");
+    assert!(
+        with_profile > 0,
+        "none of the {seen} NEFs yielded a usable Nikon lens profile"
+    );
 }
