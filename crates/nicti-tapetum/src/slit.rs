@@ -65,9 +65,13 @@ fn ca_key(frame: &LinearFrame, center: Option<[f64; 2]>) -> u64 {
     for c in center.unwrap_or([f64::NAN; 2]) {
         h.update(&c.to_bits().to_le_bytes());
     }
-    let stride = (frame.pixels.len() / 4096).max(1);
-    for v in frame.pixels.iter().step_by(stride) {
-        h.update(&v.to_le_bytes());
+    // Whole RGB pixels, not raw indices: a stride that is a multiple of 3 would sample one colour
+    // channel only and let two frames differing in the others share a key.
+    let stride = (frame.pixels.len() / 3 / 1366).max(1);
+    for px in frame.pixels.as_chunks::<3>().0.iter().step_by(stride) {
+        for v in px {
+            h.update(&v.to_le_bytes());
+        }
     }
     u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
 }

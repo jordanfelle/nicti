@@ -67,9 +67,16 @@ Changes from LightCraft (`nicti-iris/src/lateral_ca.rs`):
 - **A goodness-of-fit gate.** LightCraft accepts any 12 matches. On pure white noise (and on frames
   with clipped highlights) matches still appear, scattered, and the fit returned a confident
   `alpha` of ~1e-3: about a pixel of red/blue fringe at the corners on an image with no CA. Lateral
-  CA makes the displacement proportional to radius, so the radial-scale model must explain at least
-  half of the displacement's weighted energy (`MIN_R_SQUARED`) or the plane reads as no estimate.
-  Tests cover noise at three levels and clipped highlights.
+  CA makes the displacement proportional to radius, so over the matches the outlier trim kept the slope must
+  be **significant** (`t >= 5`, about a 1e-6 false-positive rate however many matches there are) and
+  explain a minimum share of the displacement energy (`R^2 >= 0.03`, because with thousands of matches a
+  trivial correlation is "significant"), or the plane reads as no estimate. Measured: real CA on a clean
+  grid R^2 0.94; pure noise <= 0.024; real CA with a third of the frame cluttered 0.08. (A first version
+  used `R^2 >= 0.5` over *all* matches; review showed it threw away a correct fit whenever junk matches
+  were present.) Tests cover noise at three levels, clipped highlights, and small real CA surviving
+  clutter and noise. **Limitation:** junk matches pull the least-squares slope toward zero, so on a
+  cluttered frame the correction is partial (about 0.0009 for a planted 0.0015), in the right direction;
+  at small image sizes (CA below a pixel) the gate declines to estimate, which is the safe failure.
 - **The estimate is memoised** (8 entries, keyed by a content fingerprint of the frame and the
   centre): it is a pure function of the frame, and `LensExec` runs on every baked-cache miss of the
   lens node, on the render path.

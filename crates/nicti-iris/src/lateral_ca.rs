@@ -18,8 +18,8 @@
 //!   near `3 / r` and silently discards (biasing toward zero) everything larger.
 //! - Takes the optical centre (a DNG profile's, when there is one) instead of assuming the middle.
 //! - Normalises `u16` linear camera RGB by black/white level itself.
-//! - No hidden global cache: the caller runs it once per decode and the result is a pure function
-//!   of the pixels, so the baked-frame cache key already covers it.
+//! - No hidden global cache in this module: it is a pure function of its arguments. (The lens stage
+//!   memoises the result per frame in `nicti-tapetum`'s `slit.rs`, where the frame identity lives.)
 //!
 //! The thresholds below are LightCraft's hand-tuned values, **not** validated on real photos yet;
 //! `NICTI_TEST_REAL_NEF_DIR` drives `real_nef_estimates_are_small_and_stable` in the Tapetum lens
@@ -44,8 +44,10 @@ const MAX_SSD_PER_SAMPLE: f32 = 0.3;
 /// Fewer matches than this and the plane is reported as `0` (no estimate).
 const MIN_MATCHES: usize = 12;
 const MIN_MATCHES_AFTER_TRIM: usize = 8;
-/// Share of the displacement's (weighted) energy the radial-scale model must explain.
-const MIN_R_SQUARED: f64 = 0.5;
+/// Smallest share of the displacement's (weighted) energy the radial-scale model must explain.
+const MIN_R_SQUARED: f64 = 0.03;
+/// Significance floor for the fitted slope (t >= 5); see `fit`.
+const MIN_T_SQUARED: f64 = 25.0;
 /// Outlier trim: drop residuals beyond `TRIM_MADS` × the median residual (floored).
 const TRIM_MADS: f64 = 2.5;
 const TRIM_FLOOR: f64 = 0.05;
@@ -133,6 +135,7 @@ fn fit(obs: &[(f64, f64, f64)]) -> f64 {
     };
     let all: Vec<&(f64, f64, f64)> = obs.iter().collect();
     let mut alpha = solve(&all);
+    let mut kept = all;
     for _ in 0..2 {
         let mut res: Vec<f64> = obs.iter().map(|(r, d, _)| (d - alpha * r).abs()).collect();
         res.sort_by(f64::total_cmp);
@@ -145,18 +148,32 @@ fn fit(obs: &[(f64, f64, f64)]) -> f64 {
             break;
         }
         alpha = solve(&keep);
+        kept = keep;
     }
-    // Goodness of fit: lateral CA makes the displacement *proportional to the radius*, so the
-    // model has to explain most of the displacement's own energy. Noise, clipped highlights and
-    // texture produce matches too, but scattered ones that no radial scale explains; without this
-    // gate they yielded a confident alpha of ~1e-3 (about a pixel of fringe at the corners) on
-    // frames that have no CA at all.
+    // Is there a radial-scale relationship at all? Lateral CA makes the displacement proportional
+    // to the radius. Noise, clipped highlights and texture produce matches too, but scattered ones
+    // no radial scale explains; without a gate they yielded a confident alpha of ~1e-3 (about a
+    // pixel of fringe at the corners) on frames with no CA. Over the matches the trim *kept* (the
+    // junk it discarded must not veto a correct fit), require both:
+    //  - **significance**: for a slope through the origin, t^2 = R^2 (n - 1) / (1 - R^2) is about
+    //    chi-square(1) under "no relationship", so t >= 5 is a ~1e-6 false-positive rate however
+    //    many matches there are (pure noise has R^2 ~ 1/n, a real fit 0.9+);
+    //  - **effect size**: R^2 >= MIN_R_SQUARED, because with thousands of matches even a trivial
+    //    correlation is "significant".
+    // Measured: real CA on a clean grid R^2 0.94, noise <= 0.024 (n ~ 250-300), real CA with a
+    // third of the frame cluttered 0.08 (n ~ 3800, where the fit is biased low but in the right
+    // direction, which still beats none).
     let (mut ss_total, mut ss_resid) = (0.0, 0.0);
-    for (r, d, wt) in obs {
+    for (r, d, wt) in &kept {
         ss_total += wt * d * d;
         ss_resid += wt * (d - alpha * r).powi(2);
     }
-    if ss_total <= 0.0 || 1.0 - ss_resid / ss_total < MIN_R_SQUARED {
+    if ss_total <= 0.0 {
+        return 0.0;
+    }
+    let r2 = 1.0 - ss_resid / ss_total;
+    let t_squared = r2 * (kept.len() as f64 - 1.0) / (1.0 - r2).max(1e-12);
+    if r2 < MIN_R_SQUARED || t_squared < MIN_T_SQUARED {
         return 0.0;
     }
     alpha
@@ -342,6 +359,58 @@ mod tests {
         let [r, b] = estimate(&img, None);
         assert!((r - 0.004).abs() < 0.001, "red {r}");
         assert!((b + 0.003).abs() < 0.001, "blue {b}");
+    }
+
+    /// Small, real CA must survive an ordinary photo's clutter and noise: the gate exists to reject
+    /// scatter, not to throw away a correct fit because some matches are junk.
+    fn degraded_ca_grid(
+        w: usize,
+        h: usize,
+        ar: f64,
+        ab: f64,
+        clutter: bool,
+        noise: f64,
+    ) -> Vec<u16> {
+        let mut px = ca_grid(w, h, ar, ab, [0.5, 0.5]);
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let i = (y * w + x) * 3 + c;
+                    let mut v = px[i] as f64 / 65535.0;
+                    if clutter && x < w / 3 {
+                        // Foliage-like texture, uncorrelated between channels.
+                        v = 0.3 + 0.25 * ((x as f64 * 0.9 + c as f64 * 2.1).sin() * next());
+                    }
+                    v += noise * (next() - 0.5);
+                    px[i] = (v.clamp(0.0, 1.0) * 65535.0) as u16;
+                }
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn small_real_ca_survives_clutter_and_moderate_noise() {
+        // A 2400x1600 frame: alpha 0.0015 is ~2 px of fringe at the corners, the size of CA a user
+        // would actually want removed (at 1200 px, 0.001 is a 0.35 px fringe, below the matcher's own
+        // scatter, and declining to estimate there is the right call). Junk matches pull the
+        // least-squares slope toward zero, so the bar is the right sign and a useful share of the
+        // magnitude (a partial correction in the right direction beats none), not exactness.
+        for (clutter, noise) in [(true, 0.0), (false, 0.1), (true, 0.1)] {
+            let px = degraded_ca_grid(2400, 1600, 0.0015, -0.0015, clutter, noise);
+            let [r, b] = estimate(&frame(2400, 1600, &px), None);
+            assert!(
+                (0.0006..0.0022).contains(&r) && (-0.0022..-0.0006).contains(&b),
+                "clutter {clutter} noise {noise}: alpha ({r}, {b}) for a planted (0.0015, -0.0015)"
+            );
+        }
     }
 
     /// Independent white noise per channel: there is no CA to find, so any confident non-zero
