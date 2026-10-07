@@ -20,10 +20,13 @@ use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 
 use crate::{CatalogError, CatalogStore, NewAsset, Preview};
 
-/// v1 targets Nikon NEF only (ADR-0015's language-and-stack topic) -- NRW is Nikon's
-/// compact-body variant of the same format. Widening this list is a future-camera-support
-/// concern, not this ticket's.
-const RAW_EXTENSIONS: &[&str] = &["nef", "nrw"];
+/// v1 targets Nikon NEF (ADR-0015's language-and-stack topic) -- NRW is Nikon's compact-body
+/// variant of the same format. DNG joined in #428: it is the one format whose files carry their
+/// own lens profile (`OpcodeList3`), so without it the embedded-profile lens path could never run.
+/// The T0 preview walker (`nicti_cornea::embedded`) already reads DNG SubIFD previews, and XMP
+/// sync only ever writes `.xmp` sidecars, never into the RAW itself. Widening this list further is
+/// a future-camera-support concern.
+const RAW_EXTENSIONS: &[&str] = &["nef", "nrw", "dng"];
 
 const PARTIAL_HASH_WINDOW: u64 = 64 * 1024;
 
@@ -532,9 +535,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.NEF"), b"x").unwrap();
         std::fs::write(dir.path().join("b.nrw"), b"x").unwrap();
+        std::fs::write(dir.path().join("d.DNG"), b"x").unwrap();
         std::fs::write(dir.path().join("c.jpg"), b"x").unwrap();
         let found: Vec<_> = candidate_files(dir.path()).collect();
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 3);
     }
 
     #[test]
