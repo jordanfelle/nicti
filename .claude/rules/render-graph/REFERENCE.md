@@ -223,11 +223,12 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   shared sign-convention math (clockwise-positive, y-down; locked in by a GPU/CPU parity test with
   a real 12-degree rotation, not just the pre-#47 translation-only case). `CropParams` (x/y/width/
   height/rotation, `Default` = full-frame no-op) is a real cached `StageEntry`, wired through
-  `stages::crop_stage`'s `default_params`. The interactive Develop preview's own canvas doesn't
-  resize to the crop rect (deliberate, matches real editor UX); the already-landed (#45 PR4)
-  `tile::TiledRender`/`MemorySink` full-res export path already supports an arbitrary output
-  extent, so the crop rect *is* honored end-to-end at export time. Two follow-ups filed: #272
-  (live-preview canvas resize) and #273 (real-photo Canny/Hough threshold tuning,
+  `stages::crop_stage`'s `default_params`. **#272**: `RenderRequest::geometry_extent` sizes only the geometry pass (baked/live stay on `extent`;
+  part of the geometry cache key), so the idle Develop preview is the crop rect (`DevelopDoc::display_extent`),
+  letterboxed by `viewport::fit_rect`; the Crop tool (`Tool::Crop`, key R, Esc/Enter commit), Heal and Masks set
+  `uncropped_preview` and show the whole frame. `DevelopDoc::display_to_source_norm` maps a click on the cropped
+  canvas back to the source (eyedropper). The full-res `tile::TiledRender`/`MemorySink` export path already honored
+  the crop (#45 PR4). Follow-up #273 (real-photo Canny/Hough threshold tuning,
   `needs-physical-testing`). Failure/low-confidence behavior of auto-level: ADR-0101 (see the
   `develop` topic) — a low-confidence angle is skipped with a hint, not applied.
 

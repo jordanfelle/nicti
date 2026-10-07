@@ -3248,6 +3248,7 @@ mod tests {
             geometry: &crop_kernel,
             geometry_nodes: &[CROP],
             extent,
+            geometry_extent: extent,
         };
         let output = renderer.render(&req).unwrap();
         assert_eq!(renderer.last_stats().bake_dispatches, 5);

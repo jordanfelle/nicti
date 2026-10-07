@@ -147,8 +147,10 @@ primitives confirmed present by reading its actual source before committing to i
 `opencv-rust`, matching the ticket's own stated preference. The crop rectangle is a real, typed,
 cached `CropParams` `StageEntry` (`coat.rs`), with an interactive overlay (resize handles, a
 freeform-rotate handle, pan, and the Ctrl-drag gesture) in `nicti-pelt`; the live preview's own
-canvas doesn't resize to the crop rect (deliberate, matches real editor UX -- see the ADR's own
-"Crop rectangle scope" section), while the already-existing `tile::TiledRender`/`MemorySink`
+canvas did not resize to the crop rect at first (see the ADR's own "Crop rectangle scope" section) --
+**#272 later did this**: `RenderRequest::geometry_extent` sizes only the geometry pass, the idle
+Develop view shows the cropped canvas (letterboxed by `viewport::fit_rect`), and the Crop tool (R)
+shows the whole image with the overlay, while the already-existing `tile::TiledRender`/`MemorySink`
 full-res export path (landed in #45 PR4) already supports an arbitrary decoupled output extent, so
 crop *does* actually resize the framing at export time.
 

@@ -386,6 +386,19 @@ pub fn fit_scale(rect_size: (f32, f32), tex_size: (f32, f32)) -> [f32; 2] {
     ]
 }
 
+/// The largest rect of `tex_size`'s aspect ratio that fits inside `area`, centred in it (#272). A
+/// degenerate texture or area returns `area` unchanged.
+pub fn fit_rect(area: egui::Rect, tex_size: (f32, f32)) -> egui::Rect {
+    if tex_size.0 <= 0.0 || tex_size.1 <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
+        return area;
+    }
+    let scale = (area.width() / tex_size.0).min(area.height() / tex_size.1);
+    egui::Rect::from_center_size(
+        area.center(),
+        egui::vec2(tex_size.0 * scale, tex_size.1 * scale),
+    )
+}
+
 /// The `view_scale` for "100%": exactly one texture texel maps to one screen pixel on each axis.
 pub fn one_to_one_scale(rect_size_px: (f32, f32), tex_size_px: (f32, f32)) -> [f32; 2] {
     [
@@ -468,6 +481,27 @@ impl CallbackTrait for ViewportCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_rect_letterboxes_at_the_texture_aspect_ratio() {
+        let area = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 200.0));
+        // A square texture in a wide area: pillarboxed, centred.
+        let r = fit_rect(area, (50.0, 50.0));
+        assert_eq!((r.width(), r.height()), (200.0, 200.0));
+        assert_eq!(r.center(), area.center());
+        // A tall texture in a wide area: height-limited.
+        let r = fit_rect(area, (100.0, 400.0));
+        assert_eq!((r.width(), r.height()), (50.0, 200.0));
+        // A tall area: width-limited.
+        let tall = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 300.0));
+        let r = fit_rect(tall, (200.0, 100.0));
+        assert_eq!((r.width(), r.height()), (100.0, 50.0));
+        // Same aspect: the area itself.
+        assert_eq!(fit_rect(area, (200.0, 100.0)), area);
+        // Degenerate input leaves the area alone.
+        assert_eq!(fit_rect(area, (0.0, 10.0)), area);
+    }
+
     use nicti_calico::transform::DisplayProfile;
     use nicti_tapetum::frame::Extent;
     use nicti_tapetum::gpu::GpuContext;
