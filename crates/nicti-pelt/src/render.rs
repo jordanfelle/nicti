@@ -75,6 +75,7 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
         cblack: [0, 0, 0, 0],
         pixels,
         dng_opcode_list3: None,
+        nikon_lens_info: None,
     }
 }
 
@@ -551,6 +552,12 @@ impl DevelopDoc {
     /// section only offers the "use embedded profile" switch then.
     pub fn has_embedded_lens_profile(&self) -> bool {
         nicti_tapetum::slit::has_embedded_profile(&self.frame)
+    }
+
+    /// Whether the loaded photo is a Z-series NEF carrying Nikon's own correction data (#410): the
+    /// Lens Corrections section only offers the opt-in "Nikon lens profile" switch then.
+    pub fn has_nikon_lens_profile(&self) -> bool {
+        nicti_tapetum::slit::has_nikon_profile(&self.frame)
     }
 
     /// Cache key for the loaded photo (see the `frame_key` field).

@@ -34,6 +34,7 @@ use nicti_claw::Module;
 use nicti_cornea::LinearFrame;
 use nicti_iris::dng::DngEmbedded;
 use nicti_iris::lateral_ca::{self, RgbU16};
+use nicti_iris::nikon::NikonEmbedded;
 use nicti_iris::{LensCorrection, LensModel, LensSource};
 
 use crate::coat::{self, LensParams};
@@ -224,15 +225,7 @@ impl LensPlan {
     /// handled by the profile, estimates lateral CA from the pixels. CPU work -- the exec only runs
     /// it on a baked-cache miss.
     pub fn resolve(params: &LensParams, frame: &LinearFrame, extent: Extent) -> Self {
-        let model = if params.embedded_profile {
-            DngEmbedded.model(&LensSource {
-                make: &frame.make,
-                model: &frame.model,
-                dng_opcode_list3: frame.dng_opcode_list3.as_deref(),
-            })
-        } else {
-            None
-        };
+        let model = embedded_lens_model(params, frame);
         let profile_corrects_ca = model
             .as_ref()
             .and_then(|m| m.warp.as_ref())
@@ -356,16 +349,41 @@ impl LensKernel {
     }
 }
 
+fn lens_source(frame: &LinearFrame) -> LensSource<'_> {
+    LensSource {
+        make: &frame.make,
+        model: &frame.model,
+        dng_opcode_list3: frame.dng_opcode_list3.as_deref(),
+        nikon_lens_info: frame.nikon_lens_info.as_deref(),
+    }
+}
+
+/// The file's own lens model under `params`: the DNG `OpcodeList3` when `embedded_profile` is on
+/// (unchanged, default), else Nikon's 0xC7D5 data when `nikon_profile` is opted into (#410). The
+/// providers never both apply -- a file is a DNG or a NEF.
+pub fn embedded_lens_model(params: &LensParams, frame: &LinearFrame) -> Option<LensModel> {
+    let source = lens_source(frame);
+    params
+        .embedded_profile
+        .then(|| DngEmbedded.model(&source))
+        .flatten()
+        .or_else(|| {
+            params
+                .nikon_profile
+                .then(|| NikonEmbedded.model(&source))
+                .flatten()
+        })
+}
+
 /// Whether `frame` carries a usable embedded lens profile (a DNG whose `OpcodeList3` has a
 /// warp or vignette), so a UI can offer the switch only where it does something.
 pub fn has_embedded_profile(frame: &LinearFrame) -> bool {
-    DngEmbedded
-        .model(&LensSource {
-            make: &frame.make,
-            model: &frame.model,
-            dng_opcode_list3: frame.dng_opcode_list3.as_deref(),
-        })
-        .is_some()
+    DngEmbedded.model(&lens_source(frame)).is_some()
+}
+
+/// Whether `frame` carries usable Nikon correction data (a Z-series NEF), for the opt-in switch.
+pub fn has_nikon_profile(frame: &LinearFrame) -> bool {
+    NikonEmbedded.model(&lens_source(frame)).is_some()
 }
 
 /// One render's lens pass: the persistent kernel, the document's params and the source frame.
@@ -784,6 +802,7 @@ mod tests {
             cblack: [0; 4],
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: None,
+            nikon_lens_info: None,
         };
         let kernel = LensKernel::new(&gpu);
         let params = LensParams::default();
@@ -818,10 +837,12 @@ mod tests {
             // A pixel pattern unique to this test, so no other test can prime its memo entry.
             pixels: (0..w * h * 3).map(|i| (i * 7919 % 60001) as u16).collect(),
             dng_opcode_list3: None,
+            nikon_lens_info: None,
         };
         let params = LensParams {
             remove_ca: true,
             embedded_profile: true,
+            ..Default::default()
         };
         let e = ext(w as u32, h as u32);
         let before = CA_RUNS.load(Ordering::SeqCst);
@@ -836,6 +857,54 @@ mod tests {
         other.pixels[1] = 12345;
         let _ = LensPlan::resolve(&params, &other, e);
         assert_eq!(CA_RUNS.load(Ordering::SeqCst) - before, 2);
+    }
+
+    #[test]
+    fn a_nikon_nef_profile_is_opt_in_and_never_touches_the_default_render() {
+        let e = ext(64, 48);
+        let blob = nicti_iris::nikon::write_blob(
+            Some((1, &[0.0, 0.0, 0.02, 0.0])),
+            Some((1, &[0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.2, 0.0])),
+        );
+        let frame = nicti_cornea::LinearFrame {
+            make: "NIKON CORPORATION".into(),
+            model: "NIKON Z 8".into(),
+            width: e.width,
+            height: e.height,
+            black: 0,
+            maximum: 65535,
+            cam_mul: [1.0; 4],
+            pre_mul: [1.0; 4],
+            cam_xyz: [0.0; 12],
+            cblack: [0; 4],
+            pixels: vec![0; (e.width * e.height * 3) as usize],
+            dng_opcode_list3: None,
+            nikon_lens_info: Some(blob),
+        };
+        assert!(has_nikon_profile(&frame) && !has_embedded_profile(&frame));
+        // Default params: a NEF renders exactly as before (the lens stage's cache key is unchanged).
+        let default = LensPlan::resolve(&LensParams::default(), &frame, e);
+        assert!(default.is_identity());
+        let on = LensPlan::resolve(
+            &LensParams {
+                nikon_profile: true,
+                ..Default::default()
+            },
+            &frame,
+            e,
+        );
+        assert!(on.warp.is_some() && on.vignette.is_some());
+        // The DNG switch off does not disable the Nikon one: they are independent sources.
+        let only_nikon = LensPlan::resolve(
+            &LensParams {
+                embedded_profile: false,
+                nikon_profile: true,
+                ..Default::default()
+            },
+            &frame,
+            e,
+        );
+        assert_eq!(on, only_nikon);
     }
 
     #[test]
@@ -855,6 +924,7 @@ mod tests {
             cblack: [0; 4],
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: Some(blob),
+            nikon_lens_info: None,
         };
         let on = LensPlan::resolve(&LensParams::default(), &frame, e);
         assert!(on.warp.is_some() && on.vignette.is_some());
@@ -863,6 +933,7 @@ mod tests {
             &LensParams {
                 remove_ca: true,
                 embedded_profile: true,
+                ..Default::default()
             },
             &frame,
             e,
@@ -872,6 +943,7 @@ mod tests {
             &LensParams {
                 remove_ca: false,
                 embedded_profile: false,
+                ..Default::default()
             },
             &frame,
             e,

@@ -4,14 +4,16 @@
 //! `LensCorrection` settles identity/versioning via `Module` and now has one method,
 //! [`LensCorrection::model`], returning a [`LensModel`]: plain data (per-plane warp, radial
 //! vignette, optical centre) that a GPU kernel can upload without knowing where it came from.
-//! The first provider is [`dng::DngEmbedded`] (OpcodeList3 from a DNG). A lensfun- or NEF-backed
-//! provider is #410's scope and plugs in behind the same trait.
+//! The first provider is [`dng::DngEmbedded`] (OpcodeList3 from a DNG). [`nikon::NikonEmbedded`] (#410) reads
+//! Nikon's own coefficients out of a Z-series NEF; a lensfun-backed provider plugs in behind the
+//! same trait.
 //!
 //! [`lateral_ca`] holds the automatic lateral-chromatic-aberration estimator, the no-profile
 //! fallback.
 
 pub mod dng;
 pub mod lateral_ca;
+pub mod nikon;
 
 use nicti_claw::{Module, Registry};
 
@@ -95,6 +97,8 @@ pub struct LensSource<'a> {
     pub model: &'a str,
     /// The raw DNG `OpcodeList3` blob, when the file is a DNG that carries one.
     pub dng_opcode_list3: Option<&'a [u8]>,
+    /// The raw Nikon 0xC7D5 lens-correction blob (#410), when the file is a Z-series NEF that has one.
+    pub nikon_lens_info: Option<&'a [u8]>,
 }
 
 /// A lens-correction data provider.

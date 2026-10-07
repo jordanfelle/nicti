@@ -155,6 +155,7 @@ mod tests {
             cblack: [0, 0, 0, 0],
             pixels: vec![0; 2 * 2 * 3],
             dng_opcode_list3: None,
+            nikon_lens_info: None,
         }
     }
 

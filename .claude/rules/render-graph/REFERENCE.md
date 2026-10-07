@@ -68,7 +68,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 - **Lens correction**: confirmed in the baked prefix, before ADR-0038's color pipeline (#191) — CA
   correction is calibrated in camera-native RGB channel space, which no longer exists once
   cam→XYZ mixes channels, so it must precede that matrix. **Real since #428 (`docs/adr/0428`)** —
-  see the next bullet; the correction-data source for NEF (lensfun/embedded) is still #410.
+  see the next bullets; the NEF correction-data source is Nikon's embedded blob (#410, opt-in), lensfun deferred.
 - **Point curves, Color Grading, Point Color (#432, `docs/adr/0432`)**: three Live stages fused in `live_suffix.wgsl`: `nicti.point_curve` (after
   the parametric curve; `PointCurveParams` = `Vec` points per RGB/R/G/B, empty = identity = `{}`; Fritsch-Carlson via `nicti_calico::tonecurve::ToneCurve`,
   composed `channel(master(x))` into a 256x3 `R32Float` texture at binding 13, re-uploaded on hash change, flag in `LiveUniforms.point_curve`),
@@ -93,6 +93,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   warp is *corrected→source* (inverse); `round` differs between WGSL (half-even) and Rust, so shared
   radii use `floor(x + 0.5)`; AI masks/removal still infer from the *uncorrected* decode (#358).
   Constants are LightCraft's, untuned on real photos.
+- **NEF lens source (#410, `docs/adr/0410`)**: Nikon Z bodies embed their own correction data in TIFF tag `0xC7D5` of a SubIFD (unencrypted `Nikon\0` blob, entry 0x05 distortion / 0x06 vignette). `nicti_cornea::embedded::Walker::find_nikon_lens_info` reads it -> `LinearFrame.nikon_lens_info` -> `nicti_iris::nikon` (`parse`, `NikonEmbedded`, polynomial refit onto the existing `Warp`/`Vignette` via `fit_even`). **Opt-in and unverified**: `LensParams::nikon_profile` defaults off (omitted from the JSON, `IMPL_VERSION` stays 0) because the polynomial semantics follow ART's reading and are unchecked on a real Z8 (parity vs Adobe DNG Converter is the follow-up, which also flips the default and bumps `IMPL_VERSION`). Lateral-CA block 0x07 not decoded; lensfun deferred. Real-file test: `nicti-tapetum/tests/real_nef_lens.rs` (`NICTI_TEST_REAL_NEF_DIR`).
 - **Full-res tiling** (#45 PR4, landed): `nicti_tapetum::tile::TilePlanner::plan` partitions an ROI
   into non-overlapping core tiles (each padded by a chain-wide halo, clamped to the source
   extent), bounded by both a max-dimension and a max-staging-bytes budget; `calibrate_core_size`

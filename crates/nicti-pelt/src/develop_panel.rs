@@ -502,6 +502,12 @@ pub fn show(
         if develop.has_embedded_lens_profile() {
             ui.checkbox(&mut lens.embedded_profile, "Use embedded lens profile");
         }
+        if develop.has_nikon_lens_profile() {
+            ui.checkbox(
+                &mut lens.nikon_profile,
+                "Use Nikon lens profile (unverified)",
+            );
+        }
         develop.set_stage_params(LENS, &lens);
         fur::divider(ui);
         ui.label("Defringe");

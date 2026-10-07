@@ -547,6 +547,12 @@ pub struct LensParams {
     /// files without a profile.
     #[serde(skip_serializing_if = "is_true")]
     pub embedded_profile: bool,
+    /// Apply Nikon's own correction data from a Z-series NEF (TIFF tag 0xC7D5, #410/ADR-0410).
+    /// **Off by default** until the coefficient semantics are checked against real files (the parity
+    /// follow-up); a no-op for files without that data. Off serialises to nothing, so existing
+    /// documents keep their lens hash.
+    #[serde(skip_serializing_if = "is_false")]
+    pub nikon_profile: bool,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -562,6 +568,7 @@ impl Default for LensParams {
         Self {
             remove_ca: false,
             embedded_profile: true,
+            nikon_profile: false,
         }
     }
 }
@@ -570,7 +577,7 @@ impl LensParams {
     /// True when the stage can do nothing *for any file*: used only to pick the cheap texture copy
     /// when the frame has no profile either (see `slit::LensExec`).
     pub fn is_noop(&self) -> bool {
-        !self.remove_ca && !self.embedded_profile
+        !self.remove_ca && !self.embedded_profile && !self.nikon_profile
     }
 }
 
@@ -1040,14 +1047,21 @@ mod tests {
             LensParams {
                 remove_ca: true,
                 embedded_profile: true,
+                ..Default::default()
             },
             LensParams {
                 remove_ca: false,
                 embedded_profile: false,
+                ..Default::default()
             },
             LensParams {
                 remove_ca: true,
                 embedded_profile: false,
+                ..Default::default()
+            },
+            LensParams {
+                nikon_profile: true,
+                ..Default::default()
             },
         ] {
             let v = serde_json::to_value(p).unwrap();
