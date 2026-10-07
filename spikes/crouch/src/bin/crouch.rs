@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crouch::gpu_contend::{BackgroundLoad, BusyKernel, GpuContext};
 use crouch::ort_contend::{tiles_for_frame, BackgroundOrtLoad, ExecutionProviderKind, TileLoad};
-use crouch::sim::{simulate_hero_bake_chunked, ChunkedBakeCost};
+use crouch::sim::{simulate_hero_bake_chunked, simulate_hero_bake_two_lane, ChunkedBakeCost};
 use nicti_prowl::perf::{write_report, HardwareIdentity, Protocol, RunReport, Stats};
 
 /// #205's own decision rule (ADR-0054's "well under ~16ms" same-API contention budget): a chunk
@@ -122,7 +122,20 @@ enum Command {
         foreground_interval_ms: u64,
         #[arg(long, default_value_t = 0)]
         foreground_cost_ms: u64,
+        /// `one`: ADR-0054's original model, every stage on one worker timeline. `two`: #206's
+        /// model of #55's real runtime, decode on its own CPU lane concurrent with the GPU lane.
+        #[arg(long, value_enum, default_value_t = Lanes::One)]
+        lanes: Lanes,
+        /// Parallel decode slots on the CPU lane (`--lanes two` only).
+        #[arg(long, default_value_t = 1)]
+        cpu_decode_threads: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Lanes {
+    One,
+    Two,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -195,6 +208,8 @@ fn main() -> anyhow::Result<()> {
             mask_bake_ms,
             foreground_interval_ms,
             foreground_cost_ms,
+            lanes,
+            cpu_decode_threads,
         } => run_sim(
             n_images,
             cursor_start,
@@ -205,6 +220,8 @@ fn main() -> anyhow::Result<()> {
             mask_bake_ms,
             foreground_interval_ms,
             foreground_cost_ms,
+            lanes,
+            cpu_decode_threads,
         ),
     }
 }
@@ -425,7 +442,12 @@ fn run_sim(
     mask_bake_ms: u64,
     foreground_interval_ms: u64,
     foreground_cost_ms: u64,
+    lanes: Lanes,
+    cpu_decode_threads: usize,
 ) -> anyhow::Result<()> {
+    if matches!(lanes, Lanes::Two) && cpu_decode_threads == 0 {
+        anyhow::bail!("--cpu-decode-threads must be at least 1, or no decode ever finishes");
+    }
     if foreground_interval_ms != 0 && foreground_cost_ms >= foreground_interval_ms {
         anyhow::bail!(
             "--foreground-cost-ms ({foreground_cost_ms}) must be strictly less than \
@@ -439,21 +461,42 @@ fn run_sim(
         denoise_chunk: Duration::from_millis(denoise_chunk_ms),
         mask_bake: Duration::from_millis(mask_bake_ms),
     };
-    let result = simulate_hero_bake_chunked(
-        n_images,
-        cursor_start,
-        Duration::from_millis(walk_pace_ms),
-        cost,
-        Duration::from_millis(foreground_interval_ms),
-        Duration::from_millis(foreground_cost_ms),
-    );
+    let walk_pace = Duration::from_millis(walk_pace_ms);
+    let foreground_interval = Duration::from_millis(foreground_interval_ms);
+    let foreground_cost = Duration::from_millis(foreground_cost_ms);
+    let (result, bound_label, bound) = match lanes {
+        Lanes::One => (
+            simulate_hero_bake_chunked(
+                n_images,
+                cursor_start,
+                walk_pace,
+                cost,
+                foreground_interval,
+                foreground_cost,
+            ),
+            "worst_case_atomic_unit",
+            cost.worst_case_atomic_unit(),
+        ),
+        Lanes::Two => (
+            simulate_hero_bake_two_lane(
+                n_images,
+                cursor_start,
+                walk_pace,
+                cost,
+                cpu_decode_threads,
+                foreground_interval,
+                foreground_cost,
+            ),
+            "worst_case_gpu_atomic_unit",
+            cost.worst_case_gpu_atomic_unit(),
+        ),
+    };
     println!(
         "first_image_ready={:?} total_wall_time={:?} stale_at_arrival={}/{}",
         result.first_image_ready, result.total_wall_time, result.stale_at_arrival, n_images
     );
     println!(
-        "worst_case_atomic_unit={:?} foreground_worst_latency={:?} (over {} serviced requests)",
-        cost.worst_case_atomic_unit(),
+        "{bound_label}={bound:?} foreground_worst_latency={:?} (over {} serviced requests)",
         result.foreground_worst_latency(),
         result.foreground_latencies.len()
     );
