@@ -1813,7 +1813,16 @@ impl PeltApp {
             JobKind::Baseline,
         ]);
         let move_running = self.job_active(&[JobKind::Move]);
-        let blocked = (moving && !self.verify_ui.running())
+        // Blocked by anything other than our own verify/baseline job, decided from the live job
+        // list (not `verify_ui.running()`, which lags a frame behind `poll`).
+        let other_busy = self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+        ]);
+        let blocked = other_busy
             .then_some("An import, sync, move, delete or export is running; wait for it.");
         // Re-read on a busy edge or the cache's own cadence -- never per frame.
         // Nothing else repaints an idle window, so wake up when the cache goes stale.
@@ -2045,9 +2054,16 @@ impl PeltApp {
         let Some(path) = self.checked_import_path(true) else {
             return;
         };
-        if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
+        if self.job_active(&[
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
+        ]) {
             self.last_move_summary = Some(
-                "A folder move or delete is running; import/sync waits until it finishes.".into(),
+                "A folder move, delete or verify is running; import/sync waits until it finishes."
+                    .into(),
             );
             return;
         }

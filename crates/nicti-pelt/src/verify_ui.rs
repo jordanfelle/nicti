@@ -123,7 +123,10 @@ pub fn summarize_verify(r: &VerifyReport) -> String {
     if let Some(e) = &r.error {
         return format!("Verify failed: {e}");
     }
-    let mut s = if r.cancelled {
+    let mut s = if r.cancelled && r.checked == 0 && r.unchecked.is_empty() {
+        // Cut short before the file list was even read: nothing was looked at.
+        "Verify cancelled before any file was checked".to_string()
+    } else if r.cancelled {
         format!(
             "Verify cancelled: {} checked, {} not checked",
             r.checked,
@@ -144,7 +147,7 @@ pub fn summarize_verify(r: &VerifyReport) -> String {
     if r.unhashed > 0 {
         s += &format!(", {} have no checksum yet", r.unhashed);
     }
-    if r.is_clean() && r.unhashed == 0 {
+    if r.is_clean() && r.unhashed == 0 && !r.cancelled {
         s += " -- all good";
     }
     s.push('.');
@@ -318,6 +321,22 @@ mod tests {
             summarize_verify(&cancelled),
             "Verify cancelled: 1 checked, 2 not checked."
         );
+        let early = VerifyReport {
+            cancelled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            summarize_verify(&early),
+            "Verify cancelled before any file was checked."
+        );
+        let clean_but_cut = VerifyReport {
+            checked: 3,
+            matched: 3,
+            cancelled: true,
+            unchecked: vec!["z".into()],
+            ..Default::default()
+        };
+        assert!(!summarize_verify(&clean_but_cut).contains("all good"));
         let gone = VerifyReport {
             root_unreachable: true,
             ..Default::default()

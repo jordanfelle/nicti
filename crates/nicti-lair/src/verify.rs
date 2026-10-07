@@ -465,12 +465,15 @@ fn stat_matches(file: &File, size: u64, mtime: i64) -> bool {
     let Ok(meta) = file.metadata() else {
         return false;
     };
-    let on_disk = meta
+    // An unreadable mtime never matches (it must not equal a stored 0).
+    let Some(on_disk) = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    else {
+        return false;
+    };
     meta.len() == size && on_disk == mtime
 }
 
