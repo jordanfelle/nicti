@@ -300,6 +300,18 @@ impl LensKernel {
     }
 }
 
+/// Whether `frame` carries a usable embedded lens profile (a DNG whose `OpcodeList3` has a
+/// warp or vignette), so a UI can offer the switch only where it does something.
+pub fn has_embedded_profile(frame: &LinearFrame) -> bool {
+    DngEmbedded
+        .model(&LensSource {
+            make: &frame.make,
+            model: &frame.model,
+            dng_opcode_list3: frame.dng_opcode_list3.as_deref(),
+        })
+        .is_some()
+}
+
 /// One render's lens pass: the persistent kernel, the document's params and the source frame.
 pub struct LensExec<'a> {
     pub kernel: &'a LensKernel,

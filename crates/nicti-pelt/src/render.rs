@@ -547,6 +547,12 @@ impl DevelopDoc {
         Arc::clone(&self.frame)
     }
 
+    /// Whether the loaded photo is a DNG carrying its own lens profile (#428): the Lens Corrections
+    /// section only offers the "use embedded profile" switch then.
+    pub fn has_embedded_lens_profile(&self) -> bool {
+        nicti_tapetum::slit::has_embedded_profile(&self.frame)
+    }
+
     /// Cache key for the loaded photo (see the `frame_key` field).
     pub fn frame_key(&self) -> u64 {
         self.frame_key

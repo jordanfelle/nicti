@@ -3,8 +3,8 @@
 
 use egui_kittest::kittest::{NodeT, Queryable};
 use nicti_pounce::Pounce;
-use nicti_tapetum::coat::ExposureParams;
-use nicti_tapetum::stages::EXPOSURE;
+use nicti_tapetum::coat::{DefringeParams, ExposureParams, LensParams};
+use nicti_tapetum::stages::{DEFRINGE, EXPOSURE, LENS};
 
 use super::{click_at, double_click_at, harness, pass_time};
 use crate::develop_panel::{self, AutoHintUi};
@@ -135,6 +135,78 @@ fn the_before_after_toggle_flips_the_document_flag() {
         h.query_by_label("Showing: Before").is_some(),
         "the button relabels itself"
     );
+}
+
+fn open_lens(h: &mut egui_kittest::Harness<'_, Panel>) {
+    h.get_by_label("Lens Corrections").click();
+    h.run_steps(3);
+}
+
+#[test]
+fn the_lens_toggle_writes_remove_ca_and_a_photo_without_a_profile_has_no_profile_switch() {
+    let mut h = panel_harness();
+    open_lens(&mut h);
+    assert!(!h.state().doc.stage_params::<LensParams>(LENS).remove_ca);
+    h.get_by_label("Remove chromatic aberration").click();
+    h.run_steps(2);
+    let lens = h.state().doc.stage_params::<LensParams>(LENS);
+    assert!(lens.remove_ca);
+    assert!(
+        lens.embedded_profile,
+        "the profile switch stays at its default"
+    );
+    // The synthetic frame carries no DNG opcodes, so offering the switch would be a dead control.
+    assert!(
+        h.query_by_label("Use embedded lens profile").is_none(),
+        "no embedded profile, no switch"
+    );
+}
+
+#[test]
+fn the_defringe_slider_edits_the_document_and_reset_all_clears_the_lens_stages() {
+    let mut h = panel_harness();
+    open_lens(&mut h);
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<DefringeParams>(DEFRINGE)
+        .is_noop());
+    // Purple Amount spans 0..=1: a click 60 % of the way along lands near 0.6.
+    let rect = h.get_by_label("Purple Amount").rect();
+    let track = (rect.left() + 8.0)..(rect.right() - 8.0);
+    let x = track.start + 0.6 * (track.end - track.start);
+    click_at(&mut h, egui::pos2(x, rect.center().y));
+    let amount = h
+        .state()
+        .doc
+        .stage_params::<DefringeParams>(DEFRINGE)
+        .purple_amount;
+    assert!(
+        (amount - 0.6).abs() < 0.1,
+        "expected about 0.6, got {amount}"
+    );
+    // The green channel and both hue windows are untouched.
+    let d = h.state().doc.stage_params::<DefringeParams>(DEFRINGE);
+    assert_eq!(d.green_amount, 0.0);
+    assert_eq!((d.purple_hue_lo, d.purple_hue_hi), (0.3, 0.7));
+
+    h.state_mut().doc.set_stage_params(
+        LENS,
+        &LensParams {
+            remove_ca: true,
+            embedded_profile: true,
+        },
+    );
+    h.run_steps(2);
+    h.get_by_label("Reset all").click();
+    h.run_steps(2);
+    // Reset removes the entries; the sections re-read their (default) values on the next frame.
+    assert!(!h.state().doc.stage_params::<LensParams>(LENS).remove_ca);
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<DefringeParams>(DEFRINGE)
+        .is_noop());
 }
 
 #[test]

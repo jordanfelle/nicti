@@ -100,7 +100,9 @@ mod tests {
 
     #[test]
     fn one_channel_leaves_the_other_at_its_defaults() {
-        let t = tr("s = { DefringeGreenAmount = 10, DefringePurpleHueLo = 5, DefringePurpleHueHi = 95 }");
+        let t = tr(
+            "s = { DefringeGreenAmount = 10, DefringePurpleHueLo = 5, DefringePurpleHueHi = 95 }",
+        );
         let p = &t.document.stages[DEFRINGE].params;
         assert!(close(&p["green_amount"], 0.5));
         assert_eq!(p["purple_amount"], 0.0);
@@ -131,8 +133,10 @@ mod tests {
 
     #[test]
     fn out_of_range_values_are_clamped_not_rejected() {
-        let t = tr("s = { DefringePurpleAmount = 500, DefringePurpleHueLo = -40, \
-                    DefringePurpleHueHi = 900 }");
+        let t = tr(
+            "s = { DefringePurpleAmount = 500, DefringePurpleHueLo = -40, \
+                    DefringePurpleHueHi = 900 }",
+        );
         let p = &t.document.stages[DEFRINGE].params;
         assert!(close(&p["purple_amount"], 1.0));
         assert!(close(&p["purple_hue_lo"], 0.0));
