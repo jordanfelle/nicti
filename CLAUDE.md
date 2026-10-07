@@ -23,7 +23,7 @@ Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143, 0072, 0145), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042, 0381),
 `lrc-migration` (0061, 0062, 0156, 0158, 0380, 0381, 0432), `masking` (0048, 0049, 0353), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
-`xmp-interop` (0059), `render-graph` (0044, 0047, 0380, 0381, 0428, 0432), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
+`xmp-interop` (0059), `render-graph` (0044, 0047, 0380, 0381, 0410, 0428, 0432), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
@@ -116,7 +116,7 @@ terse index: crate/spike → purpose → owning topic.
   `CameraProfileParams.look`
 - **`crates/nicti-iris`/`nicti-stalk`**
   — extension-point crates (supertrait + `Registry` alias; `nicti-stalk` has no execution methods yet):
-  `LensCorrection` (`nicti-iris`, #428: `model()` -> plain-data `LensModel`; `dng::DngEmbedded`, `lateral_ca::estimate`, the shared
+  `LensCorrection` (`nicti-iris`, #428: `model()` -> plain-data `LensModel`; `dng::DngEmbedded`, #410 `nikon::NikonEmbedded` (opt-in `LensParams::nikon_profile`), `lateral_ca::estimate`, the shared
   warp/vignette math), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):
   the on-demand, checksummed AI-model store + pinned manifest (ADR-0218), and (#49) the backend-
   agnostic `SegmentationProvider`/`Segmenter`/`SegmentationRegistry` layer that makes AI mask models

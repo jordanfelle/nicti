@@ -22,8 +22,8 @@
 //!   memoises the result per frame in `nicti-tapetum`'s `slit.rs`, where the frame identity lives.)
 //!
 //! The thresholds below are LightCraft's hand-tuned values, **not** validated on real photos yet;
-//! `NICTI_TEST_REAL_NEF_DIR` drives `real_nef_estimates_are_small_and_stable` in the Tapetum lens
-//! tests for that.
+//! A real-NEF check of the estimator is still to be written (the Nikon lens-data test
+//! `nicti-tapetum/tests/real_nef_lens.rs` is gated on the same `NICTI_TEST_REAL_NEF_DIR`).
 
 /// Edge candidates per grid cell, and the grid is `CELLS`×`CELLS` over the frame.
 const CELLS: usize = 24;

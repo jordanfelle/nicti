@@ -98,6 +98,10 @@ pub struct LinearFrame {
     /// for every NEF and for DNGs without opcodes. Parsed by `nicti_iris::dng`, applied by the
     /// Tapetum lens stage (#428); LibRaw itself applies none of it.
     pub dng_opcode_list3: Option<Vec<u8>>,
+    /// Nikon's raw lens-correction blob (TIFF tag 0xC7D5 in a SubIFD) when the file is a Z-series
+    /// NEF that carries one, `None` otherwise. Located by `embedded::Walker::find_nikon_lens_info`,
+    /// decoded by `nicti_iris::nikon`, applied by the Tapetum lens stage when the user opts in (#410).
+    pub nikon_lens_info: Option<Vec<u8>>,
 }
 
 /// The production `RawDecoder`: LibRaw (vendored `yogthos/LibRaw#nikon-he-decoder`, see
@@ -160,6 +164,10 @@ impl RawDecoder for LibRawDecoder {
 
         let linear = handle.linear_metadata();
         let dng_opcode_list3 = handle.dng_opcode_list3();
+        // A missing or unreadable profile is a normal outcome, never a decode failure.
+        let nikon_lens_info = embedded::Walker::new(embedded::SliceSource::new(&data))
+            .ok()
+            .and_then(|mut w| w.find_nikon_lens_info().ok().flatten());
         let image = handle
             .linear_image()
             .map_err(|source| DecodeError::Decode {
@@ -197,6 +205,7 @@ impl RawDecoder for LibRawDecoder {
             cblack: linear.cblack,
             pixels,
             dng_opcode_list3,
+            nikon_lens_info,
         })
     }
 }

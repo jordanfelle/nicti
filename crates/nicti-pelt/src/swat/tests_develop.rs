@@ -200,6 +200,7 @@ fn the_defringe_slider_edits_the_document_and_reset_all_clears_the_lens_stages()
         &LensParams {
             remove_ca: true,
             embedded_profile: true,
+            ..Default::default()
         },
     );
     h.run_steps(2);

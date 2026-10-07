@@ -90,6 +90,12 @@ pub const TAG_JPEG_IF_LENGTH: u16 = 0x0202;
 pub const TAG_EXIF_IFD: u16 = 0x8769;
 pub const TAG_MAKER_NOTE: u16 = 0x927C;
 pub const TAG_NIKON_PREVIEW_IFD: u16 = 0x0011;
+/// Nikon "NEFInfo" (#410): the Z-series lens-correction blob, in a SubIFD of IFD0.
+pub const TAG_NIKON_LENS_INFO: u16 = 0xC7D5;
+/// `"Nikon\0"` + 2 version + 2 reserved + the 8-byte inner TIFF header.
+pub(crate) const NIKON_BLOB_HEADER_LEN: usize = 18;
+/// Real blobs are 448-976 bytes; anything past this is corrupt, not a bigger profile.
+const MAX_NIKON_LENS_INFO_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewSource {
@@ -368,6 +374,44 @@ impl<S: ByteSource> Walker<S> {
         }
 
         Ok(out)
+    }
+
+    /// Reads the raw bytes of Nikon's lens-correction blob (#410): TIFF tag 0xC7D5 in one of
+    /// IFD0's SubIFDs (SubIFD1 on the Z6/Z7 and later bodies). Returns `None` when the file has no
+    /// such tag or its payload doesn't start with `"Nikon\0"`; parsing the blob itself is
+    /// `nikon_lens::parse`'s job, so this stays a locate-and-read step. A SubIFD that fails to read
+    /// is skipped rather than failing the whole lookup -- a missing profile is a normal outcome.
+    pub fn find_nikon_lens_info(&mut self) -> Result<Option<Vec<u8>>, IfdError> {
+        let ifd0_off = self.ifd0_offset();
+        let (ifd0, _) = self.read_ifd(0, ifd0_off)?;
+        let Some(sub_entry) = Self::find_entry(&ifd0, TAG_SUB_IFDS) else {
+            return Ok(None);
+        };
+        let offsets = self.read_offset_array(&sub_entry)?;
+        for off in offsets {
+            let Ok((entries, _)) = self.read_ifd(0, off) else {
+                continue;
+            };
+            let Some(e) = Self::find_entry(&entries, TAG_NIKON_LENS_INFO) else {
+                continue;
+            };
+            let len = e.value_len();
+            if len < NIKON_BLOB_HEADER_LEN as u64 || len > MAX_NIKON_LENS_INFO_BYTES {
+                continue;
+            }
+            // A blob this size never fits inline (>4 bytes), so the field is always an offset.
+            let start = e.as_offset(self.bo) as u64;
+            if !self.in_bounds(start) {
+                continue;
+            }
+            let Ok(bytes) = self.source.read_at(start, len as usize) else {
+                continue;
+            };
+            if bytes.len() as u64 == len && bytes.starts_with(b"Nikon\0") {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
     }
 
     fn read_offset_array(&mut self, entry: &IfdEntry) -> Result<Vec<u32>, IfdError> {
@@ -670,6 +714,65 @@ mod tests {
         assert_eq!(j.new_subfile_type, Some(1));
         assert_eq!(j.declared_width, Some(1024));
         assert_eq!(j.file_offset, jpeg_off as u64);
+    }
+
+    /// IFD0 -> SubIFDs [preview, lens-info] with the blob appended as external data, like a Z body.
+    fn nef_with_lens_blob(blob: &[u8]) -> Vec<u8> {
+        const TY_UNDEFINED: u16 = 7;
+        let mut b = FileBuilder::new();
+        let blob_off = b.append_bytes(blob);
+        let (sub0, _) = b.append_ifd(&[(TAG_NEW_SUBFILE_TYPE, TY_LONG, 1, 1)], 0);
+        let (sub1, _) = b.append_ifd(
+            &[(
+                TAG_NIKON_LENS_INFO,
+                TY_UNDEFINED,
+                blob.len() as u32,
+                blob_off,
+            )],
+            0,
+        );
+        let arr = b.append_bytes(&[sub0.to_le_bytes(), sub1.to_le_bytes()].concat());
+        let (ifd0, _) = b.append_ifd(&[(TAG_SUB_IFDS, TY_LONG, 2, arr)], 0);
+        b.finish(ifd0)
+    }
+
+    /// Bytes shaped enough like a Nikon lens blob for the locate step (which only checks the
+    /// `Nikon\0` prefix and the size bounds); decoding them is `nicti_iris::nikon`'s tested job.
+    fn fake_lens_blob() -> Vec<u8> {
+        let mut blob = b"Nikon\0\x02\x00\x00\x00MM\x00\x2a\x00\x00\x00\x08".to_vec();
+        blob.resize(448, 0x5A);
+        blob
+    }
+
+    #[test]
+    fn finds_nikon_lens_info_in_second_subifd() {
+        let blob = fake_lens_blob();
+        let data = nef_with_lens_blob(&blob);
+        let found = walk(&data).find_nikon_lens_info().expect("walk");
+        assert_eq!(found.as_deref(), Some(blob.as_slice()));
+    }
+
+    #[test]
+    fn nikon_lens_info_absent_or_foreign_is_none() {
+        // No SubIFDs at all.
+        let mut b = FileBuilder::new();
+        let (ifd0, _) = b.append_ifd(&[(TAG_IMAGE_WIDTH, TY_SHORT, 1, 8)], 0);
+        let data = b.finish(ifd0);
+        assert_eq!(walk(&data).find_nikon_lens_info().expect("walk"), None);
+
+        // Tag present but the payload isn't a Nikon blob.
+        let data = nef_with_lens_blob(&[0xAB; 64]);
+        assert_eq!(walk(&data).find_nikon_lens_info().expect("walk"), None);
+    }
+
+    #[test]
+    fn nikon_lens_info_truncated_file_is_none_not_panic() {
+        let data = nef_with_lens_blob(&fake_lens_blob());
+        // Chop the file inside the blob: the read comes back short and is skipped.
+        let cut = &data[..20.min(data.len())];
+        if let Ok(mut w) = Walker::new(SliceSource::new(cut)) {
+            let _ = w.find_nikon_lens_info();
+        }
     }
 
     #[test]
