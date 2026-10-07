@@ -4,10 +4,12 @@
 use egui_kittest::kittest::{NodeT, Queryable};
 use nicti_pounce::Pounce;
 use nicti_tapetum::coat::{
-    ColorGradeParams, DefringeParams, ExposureParams, LensParams, PointColorParams,
-    PointColorSample, PointCurveParams,
+    CalibrationParams, ColorGradeParams, DefringeParams, ExposureParams, LensParams,
+    PointColorParams, PointColorSample, PointCurveParams,
 };
-use nicti_tapetum::stages::{COLOR_GRADE, DEFRINGE, EXPOSURE, LENS, POINT_COLOR, POINT_CURVE};
+use nicti_tapetum::stages::{
+    CALIBRATION, COLOR_GRADE, DEFRINGE, EXPOSURE, LENS, POINT_COLOR, POINT_CURVE,
+};
 
 use super::{click_at, double_click_at, harness, pass_time};
 use crate::develop_panel::{self, AutoHintUi};
@@ -209,6 +211,40 @@ fn the_defringe_slider_edits_the_document_and_reset_all_clears_the_lens_stages()
         .state()
         .doc
         .stage_params::<DefringeParams>(DEFRINGE)
+        .is_noop());
+}
+
+/// #381: the Calibration section's sliders write `nicti.calibration` (bipolar: the middle of the
+/// track is 0, a click 75 % along lands near +0.5), and Reset all clears them.
+#[test]
+fn the_calibration_sliders_edit_the_document_and_reset_all_clears_them() {
+    let mut h = panel_harness();
+    open_section(&mut h, "Calibration");
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<CalibrationParams>(CALIBRATION)
+        .is_noop());
+    let rect = h.get_by_label("Shadows Tint").rect();
+    let track = (rect.left() + 8.0)..(rect.right() - 8.0);
+    let x = track.start + 0.75 * (track.end - track.start);
+    click_at(&mut h, egui::pos2(x, rect.center().y));
+    let c = h.state().doc.stage_params::<CalibrationParams>(CALIBRATION);
+    assert!(
+        (c.shadow_tint - 0.5).abs() < 0.15,
+        "expected about +0.5, got {}",
+        c.shadow_tint
+    );
+    // The other sliders are untouched and the stage is a real, non-default entry now.
+    assert_eq!((c.red_hue, c.blue_sat), (0.0, 0.0));
+    assert!(!c.is_noop());
+
+    h.get_by_label("Reset all").click();
+    h.run_steps(2);
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<CalibrationParams>(CALIBRATION)
         .is_noop());
 }
 

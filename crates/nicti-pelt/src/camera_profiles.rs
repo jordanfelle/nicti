@@ -392,6 +392,7 @@ impl Default for LrcProfileResolver {
 
 impl LrcProfileResolver {
     /// A resolver over explicit roots (tests).
+    #[cfg(test)]
     pub fn with_roots(dcp_roots: Vec<PathBuf>, look_roots: Vec<PathBuf>) -> Self {
         Self {
             dcp_roots,
