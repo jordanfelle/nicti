@@ -235,12 +235,16 @@ pub fn show(
                     {
                         *set_archive = Some((drive.path.clone(), flag));
                     }
-                    if ui
-                        .small_button("Import here\u{2026}")
-                        .on_hover_text(
-                            "Put this drive's path in the Folder field, then add the folder to import.",
-                        )
-                        .clicked()
+                    // Not for the `/` catch-all "drive": seeding it would make one stray Import
+                    // click scan the whole filesystem.
+                    if drive.path != "/"
+                        && ui
+                            .small_button("Import here\u{2026}")
+                            .on_hover_text(
+                                "Put this drive's path in the (empty) Folder field, then \
+                                 append the folder to import.",
+                            )
+                            .clicked()
                     {
                         out.import_from = Some(drive.path.clone());
                     }
@@ -296,6 +300,7 @@ fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool, selected: bool) -> bo
         "\u{1F4C1}"
     };
     let text = format!("{icon} {label}");
+    let mut label_clicked = false;
     let response = if moving {
         ui.selectable_label(selected, text)
     } else {
@@ -303,12 +308,14 @@ fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool, selected: bool) -> bo
         // to also sense clicks (a press-release without movement is a click, not a drag).
         let r = ui
             .dnd_drag_source(id, root.id, |ui| {
-                let _ = ui.selectable_label(selected, text);
+                // Mouse clicks land on the widened drag widget below; the label still gets
+                // keyboard activation (Tab + Enter/Space), so honour that too.
+                label_clicked = ui.selectable_label(selected, text).clicked();
             })
             .response;
         r.interact(egui::Sense::click())
     };
-    let clicked = response.clicked();
+    let clicked = response.clicked() || label_clicked;
     response.on_hover_text(&root.path);
     clicked
 }

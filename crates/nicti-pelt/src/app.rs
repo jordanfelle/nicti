@@ -1827,8 +1827,14 @@ impl PeltApp {
             self.grid_root = sel;
         }
         if let Some(drive) = out.import_from {
-            self.import_path_input = drive;
-            self.import_status = None;
+            // Never clobber what the user already typed.
+            if self.import_path_input.trim().is_empty() {
+                self.import_path_input = drive;
+                self.import_status = None;
+            } else {
+                self.import_status =
+                    Some("The Folder field already has a path -- clear it first.".to_string());
+            }
         }
         if let Some(r) = out.drop {
             self.submit_move_to(store, r.root_id, r.dest_parent);
