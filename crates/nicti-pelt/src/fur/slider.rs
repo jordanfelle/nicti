@@ -145,7 +145,7 @@ fn fine_accumulate(acc: f64, dx: f32, span: f64, track_width: f32) -> f64 {
     acc + f64::from(dx) * span / f64::from(track_width.max(1.0)) * 0.1
 }
 
-fn hex(s: &str) -> Color32 {
+pub(super) fn hex(s: &str) -> Color32 {
     let v = u32::from_str_radix(s.trim_start_matches('#'), 16).unwrap_or(0x80_80_80);
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }

@@ -41,6 +41,18 @@ struct Uniforms {
     // (green hue lo, green hue hi, unused, unused). Amounts 0..1 (LRC 0..20), hues 0..1.
     defringe0: vec4<f32>,
     defringe1: vec4<f32>,
+    // #432 point curves: x = enabled (point_curve_lut is only read when 1), yzw unused.
+    point_curve: vec4<f32>,
+    // #432 OkLab ops (oklab.rs is the CPU twin). ok_flags: x = any active, y = grading, z = point
+    // colour. ok_to / ok_from: ProPhoto <-> LMS matrix rows. grade_k: (split, width). grade_w:
+    // shadows / midtones / highlights / global offsets (dL, da, db). points: three vec4s per slot,
+    // see stages.rs::pack_oklab.
+    ok_flags: vec4<f32>,
+    ok_to: array<vec4<f32>, 3>,
+    ok_from: array<vec4<f32>, 3>,
+    grade_k: vec4<f32>,
+    grade_w: array<vec4<f32>, 4>,
+    points: array<vec4<f32>, 24>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -56,6 +68,9 @@ struct Uniforms {
 // bound when absent.
 @group(0) @binding(11) var look_profile_table: texture_3d<f32>;
 @group(0) @binding(12) var profile_tone_lut: texture_2d<f32>;
+// #432: the point-curve LUTs, 256 x 3 R32Float (rows R, G, B; master already composed in), read
+// with textureLoad. A never-read dummy is bound when the curves are the identity.
+@group(0) @binding(13) var point_curve_lut: texture_2d<f32>;
 
 // Local corrections (#49, mask/local.rs is the CPU twin). `mask_atlas` packs four correction
 // composites per layer, one per channel, at the mask extent (sampled bilinearly). Each correction
@@ -247,6 +262,113 @@ fn apply_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
     );
     let clamped = max(looked_up, vec3<f32>(0.0));
     return clamped * clamped * clamped;
+}
+
+fn point_curve_at(row: i32, index: i32) -> f32 {
+    return textureLoad(point_curve_lut, vec2<i32>(clamp(index, 0, 255), row), 0).x;
+}
+
+// Mirrors color.rs::apply_point_curve exactly: per channel, cube-root perceptual space, linear
+// interpolation between adjacent LUT entries.
+fn apply_point_curve(rgb: vec3<f32>) -> vec3<f32> {
+    let perceptual = clamp(pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / 3.0)), vec3<f32>(0.0), vec3<f32>(1.0));
+    let pos = perceptual * 255.0;
+    let i0 = vec3<i32>(floor(pos));
+    let frac = pos - vec3<f32>(i0);
+    let looked_up = vec3<f32>(
+        mix(point_curve_at(0, i0.x), point_curve_at(0, i0.x + 1), frac.x),
+        mix(point_curve_at(1, i0.y), point_curve_at(1, i0.y + 1), frac.y),
+        mix(point_curve_at(2, i0.z), point_curve_at(2, i0.z + 1), frac.z),
+    );
+    let clamped = max(looked_up, vec3<f32>(0.0));
+    return clamped * clamped * clamped;
+}
+
+fn ok_rows(m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(m0.xyz, v), dot(m1.xyz, v), dot(m2.xyz, v));
+}
+
+fn ok_smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
+    if (hi <= lo) {
+        return select(1.0, 0.0, x < lo);
+    }
+    let t = clamp((x - lo) / (hi - lo), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn ok_wrap_pi(a: f32) -> f32 {
+    let tau = 6.283185307179586;
+    let r = (a + 3.141592653589793);
+    return (r - tau * floor(r / tau)) - 3.141592653589793;
+}
+
+fn ok_soft(half_width: f32, d: f32) -> f32 {
+    return 1.0 - ok_smoothstep(0.5 * half_width, half_width, abs(d));
+}
+
+// Mirrors oklab.rs::OkLabOps::apply: ProPhoto -> OkLab, Color Grading, Point Color, back.
+fn apply_oklab_ops(rgb: vec3<f32>) -> vec3<f32> {
+    let lms = pow(max(ok_rows(u.ok_to[0], u.ok_to[1], u.ok_to[2], rgb), vec3<f32>(0.0)), vec3<f32>(1.0 / 3.0));
+    // Ottosson's M2 (LMS' -> Lab).
+    var lab = vec3<f32>(
+        0.2104542553 * lms.x + 0.7936177850 * lms.y - 0.0040720468 * lms.z,
+        1.9779984951 * lms.x - 2.4285922050 * lms.y + 0.4505937099 * lms.z,
+        0.0259040371 * lms.x + 0.7827717662 * lms.y - 0.8086757660 * lms.z,
+    );
+    if (u.ok_flags.y > 0.5) {
+        let split = u.grade_k.x;
+        let width = u.grade_k.y;
+        let ws = 1.0 - ok_smoothstep(split - width, split + 0.25 * width, lab.x);
+        let wh = ok_smoothstep(split - 0.25 * width, split + width, lab.x);
+        let wm = max(1.0 - ws - wh, 0.0);
+        lab = lab
+            + ws * u.grade_w[0].xyz
+            + wm * u.grade_w[1].xyz
+            + wh * u.grade_w[2].xyz
+            + u.grade_w[3].xyz;
+    }
+    if (u.ok_flags.z > 0.5) {
+        let l0 = lab.x;
+        let c0 = length(lab.yz);
+        var h0 = 0.0;
+        if (c0 > 1e-6) {
+            h0 = atan2(lab.z, lab.y);
+        }
+        var l = l0;
+        var c = c0;
+        var h = h0;
+        for (var i = 0; i < 8; i = i + 1) {
+            let p0 = u.points[i * 3];
+            if (p0.w < 0.5) {
+                continue;
+            }
+            let p1 = u.points[i * 3 + 1];
+            let p2 = u.points[i * 3 + 2];
+            let dh = ok_wrap_pi(h0 - p0.z);
+            var hue_w = 1.0;
+            if (p1.w > 0.5) {
+                hue_w = ok_soft(p1.x, dh) * ok_smoothstep(0.005, 0.025, c0);
+            }
+            let w = hue_w * ok_soft(p1.y, c0 - p0.y) * ok_soft(p1.z, l0 - p0.x);
+            if (w <= 0.0) {
+                continue;
+            }
+            h = h + w * (p2.w * dh + p2.x);
+            c = c + w * p2.w * (c0 - p0.y);
+            c = c * (1.0 + w * p2.y);
+            l = l + w * (p2.w * (l0 - p0.x) + p2.z);
+        }
+        c = max(c, 0.0);
+        lab = vec3<f32>(l, c * cos(h), c * sin(h));
+    }
+    // Ottosson's M2 inverse (Lab -> LMS'), then cube.
+    let lp = vec3<f32>(
+        lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z,
+        lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z,
+        lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z,
+    );
+    let back = ok_rows(u.ok_from[0], u.ok_from[1], u.ok_from[2], lp * lp * lp);
+    return max(back, vec3<f32>(0.0));
 }
 
 fn hsl_band(index: i32) -> vec3<f32> {
@@ -655,12 +777,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     rgb = apply_tone(rgb, contrast, highlights, shadows, whites, blacks);
     rgb = apply_tone_curve(rgb);
+    if (u.point_curve.x > 0.5) {
+        rgb = apply_point_curve(rgb);
+    }
     if (mu.header.y > 0.5 && (clarity_total != 0.0 || texture_total != 0.0)) {
         let bands = textureSampleLevel(bases_tex, mask_sampler, uv, 0.0);
         rgb = apply_bands(rgb, bands, clarity_total, texture_total);
     }
     rgb = apply_vibrance(rgb, u.tone1.z);
     rgb = apply_hsl(rgb);
+    if (u.ok_flags.x > 0.5) {
+        rgb = apply_oklab_ops(rgb);
+    }
     // Skipped when the stacked delta is exactly zero, so a mask that selects nothing (or has no
     // such adjustment) leaves the pixel bit-identical, not merely close.
     if (saturation_total != 0.0) {

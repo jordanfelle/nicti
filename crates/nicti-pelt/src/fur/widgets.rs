@@ -9,6 +9,7 @@
 use egui::{pos2, vec2, Align2, CornerRadius, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 
 use super::icons::{paint, Icon};
+use super::slider::{hex, BAND_COLORS};
 use super::tokens::Tokens;
 
 /// A collapsible section: a header row (chevron + title) and `body` while open. The open state
@@ -170,6 +171,34 @@ pub fn icon_button(
     } else {
         resp.on_hover_text(tooltip)
     }
+}
+
+/// The colour mixer's band picker: one dot per band in the band's own colour (Red, Orange, Yellow,
+/// Green, Aqua, Blue, Purple, Magenta), the selected one ringed. Returns the clicked index. Each
+/// dot reports its band name to screen readers (and the headless harness).
+pub fn band_dots(ui: &mut Ui, names: &[&str; 8], active: usize) -> Option<usize> {
+    let t = Tokens::get(ui.ctx());
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (i, name) in names.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, true, i == active, *name)
+            });
+            let p = ui.painter();
+            p.circle_filled(r.center(), 8.0, hex(BAND_COLORS[i]));
+            if i == active {
+                p.circle_stroke(r.center(), 10.0, Stroke::new(1.5, t.text));
+            } else if resp.hovered() {
+                p.circle_stroke(r.center(), 10.0, Stroke::new(1.0, t.text_dim));
+            }
+            if resp.clicked() {
+                clicked = Some(i);
+            }
+        }
+    });
+    clicked
 }
 
 #[cfg(test)]

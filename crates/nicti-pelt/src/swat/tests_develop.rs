@@ -3,8 +3,11 @@
 
 use egui_kittest::kittest::{NodeT, Queryable};
 use nicti_pounce::Pounce;
-use nicti_tapetum::coat::{DefringeParams, ExposureParams, LensParams};
-use nicti_tapetum::stages::{DEFRINGE, EXPOSURE, LENS};
+use nicti_tapetum::coat::{
+    ColorGradeParams, DefringeParams, ExposureParams, LensParams, PointColorParams,
+    PointColorSample, PointCurveParams,
+};
+use nicti_tapetum::stages::{COLOR_GRADE, DEFRINGE, EXPOSURE, LENS, POINT_COLOR, POINT_CURVE};
 
 use super::{click_at, double_click_at, harness, pass_time};
 use crate::develop_panel::{self, AutoHintUi};
@@ -214,4 +217,193 @@ fn develop_panel_snapshot() {
     let mut h = panel_harness();
     open_basic(&mut h);
     h.snapshot("develop_panel");
+}
+
+fn open_section(h: &mut egui_kittest::Harness<'_, Panel>, title: &str) {
+    h.get_by_label(title).click();
+    h.run_steps(3);
+}
+
+/// A point inside a widget's rect at fractions `(fx, fy_up)` of its width and height (y up, as
+/// the curve graph is drawn).
+fn at_fraction(rect: egui::Rect, fx: f32, fy_up: f32) -> egui::Pos2 {
+    egui::pos2(
+        rect.left() + fx * rect.width(),
+        rect.bottom() - fy_up * rect.height(),
+    )
+}
+
+#[test]
+fn clicking_the_rgb_curve_adds_a_point_and_double_clicking_it_removes_it() {
+    let mut h = panel_harness();
+    open_section(&mut h, "Tone Curve");
+    h.get_by_label("RGB").click();
+    h.run_steps(3);
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<PointCurveParams>(POINT_CURVE)
+        .is_noop());
+
+    let rect = h.get_by_label("RGB curve").rect();
+    click_at(&mut h, at_fraction(rect, 0.5, 0.75));
+    let master = h
+        .state()
+        .doc
+        .stage_params::<PointCurveParams>(POINT_CURVE)
+        .master;
+    assert_eq!(master.len(), 3, "endpoints plus the new point: {master:?}");
+    assert!(
+        (master[1][0] - 0.5).abs() < 0.03 && (master[1][1] - 0.75).abs() < 0.03,
+        "the point lands where clicked: {:?}",
+        master[1]
+    );
+
+    pass_time(&mut h, 0.5);
+    double_click_at(&mut h, at_fraction(rect, 0.5, 0.75));
+    let master = h
+        .state()
+        .doc
+        .stage_params::<PointCurveParams>(POINT_CURVE)
+        .master;
+    // Back to just the endpoints is the identity, which is stored as nothing at all.
+    assert!(master.is_empty(), "double-click removed it: {master:?}");
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<PointCurveParams>(POINT_CURVE)
+        .is_noop());
+}
+
+#[test]
+fn point_curves_are_edited_per_channel() {
+    let mut h = panel_harness();
+    open_section(&mut h, "Tone Curve");
+    h.get_by_label("Blue").click();
+    h.run_steps(3);
+    let rect = h.get_by_label("Blue curve").rect();
+    click_at(&mut h, at_fraction(rect, 0.3, 0.6));
+    let c = h.state().doc.stage_params::<PointCurveParams>(POINT_CURVE);
+    assert_eq!(c.blue.len(), 3);
+    assert!(c.master.is_empty() && c.red.is_empty() && c.green.is_empty());
+}
+
+#[test]
+fn clicking_a_band_dot_selects_that_hsl_band() {
+    let mut h = panel_harness();
+    open_section(&mut h, "HSL");
+    assert_eq!(h.state().hsl_band, 0);
+    h.get_by_label("Blue").click();
+    h.run_steps(3);
+    assert_eq!(h.state().hsl_band, 5);
+}
+
+#[test]
+fn the_grading_wheel_sets_hue_and_saturation_and_double_click_resets_them() {
+    let mut h = panel_harness();
+    open_section(&mut h, "Color Grading");
+    // Midtones is the default wheel.
+    let rect = h.get_by_label("Midtones wheel").rect();
+    // Halfway out along +x is hue 0 (red) at saturation 0.5 (the wheel's radius is 56).
+    let at = egui::pos2(rect.center().x + 28.0, rect.center().y);
+    click_at(&mut h, at);
+    let g = h.state().doc.stage_params::<ColorGradeParams>(COLOR_GRADE);
+    assert!(
+        (g.midtones.sat - 0.5).abs() < 0.08,
+        "saturation {}",
+        g.midtones.sat
+    );
+    assert!(
+        g.midtones.hue < 8.0 || g.midtones.hue > 352.0,
+        "hue {}",
+        g.midtones.hue
+    );
+    assert_eq!(g.shadows.sat, 0.0, "only the selected wheel changed");
+
+    pass_time(&mut h, 0.5);
+    double_click_at(&mut h, at);
+    let g = h.state().doc.stage_params::<ColorGradeParams>(COLOR_GRADE);
+    assert_eq!((g.midtones.hue, g.midtones.sat), (0.0, 0.0));
+}
+
+#[test]
+fn point_color_samples_are_edited_and_deleted_from_the_panel() {
+    let mut h = panel_harness();
+    let mut pc = PointColorParams {
+        count: 1,
+        ..Default::default()
+    };
+    pc.samples[0] = PointColorSample {
+        lum: 0.6,
+        chroma: 0.12,
+        hue: 40.0,
+        ..Default::default()
+    };
+    h.state_mut().doc.set_stage_params(POINT_COLOR, &pc);
+    open_section(&mut h, "Point Color");
+    assert!(h.query_by_label("Point color sample 1").is_some());
+
+    // Hue Shift spans -1..=1: 80 % of the way along is about +0.6.
+    let rect = h.get_by_label("Hue Shift").rect();
+    let track = (rect.left() + 8.0)..(rect.right() - 8.0);
+    let x = track.start + 0.8 * (track.end - track.start);
+    click_at(&mut h, egui::pos2(x, rect.center().y));
+    let s = h.state().doc.stage_params::<PointColorParams>(POINT_COLOR);
+    assert!(
+        (s.samples[0].hue_shift - 0.6).abs() < 0.12,
+        "hue shift {}",
+        s.samples[0].hue_shift
+    );
+    assert_eq!(
+        s.samples[0].hue, 40.0,
+        "the sampled colour itself is untouched"
+    );
+
+    h.get_by_label("Delete sample").click();
+    h.run_steps(3);
+    let s = h.state().doc.stage_params::<PointColorParams>(POINT_COLOR);
+    assert_eq!(s.count, 0);
+    assert!(h.query_by_label("Point color sample 1").is_none());
+}
+
+#[test]
+fn the_eyedropper_arms_the_point_color_tool_and_reset_all_clears_the_new_stages() {
+    let mut h = panel_harness();
+    open_section(&mut h, "Point Color");
+    assert!(!h.state().heal.point_color_active());
+    h.get_by_label("Pick a colour from the photo").click();
+    h.run_steps(3);
+    assert!(h.state().heal.point_color_active());
+
+    h.state_mut().doc.set_stage_params(
+        COLOR_GRADE,
+        &ColorGradeParams {
+            global: nicti_tapetum::coat::GradeWheel {
+                hue: 10.0,
+                sat: 0.4,
+                lum: 0.0,
+            },
+            ..Default::default()
+        },
+    );
+    h.state_mut().doc.set_stage_params(
+        POINT_CURVE,
+        &PointCurveParams {
+            red: vec![[0.0, 0.1], [1.0, 0.9]],
+            ..Default::default()
+        },
+    );
+    h.run_steps(2);
+    h.get_by_label("Reset all").click();
+    h.run_steps(2);
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<ColorGradeParams>(COLOR_GRADE)
+        .is_noop());
+    assert!(h
+        .state()
+        .doc
+        .stage_params::<PointCurveParams>(POINT_CURVE)
+        .is_noop());
 }

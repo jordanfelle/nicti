@@ -16,18 +16,19 @@ use nicti_cornea::LinearFrame;
 use nicti_pawprint::EditDocument;
 
 use crate::coat::{
-    self, CameraProfileParams, CropParams, DefringeParams, EffectsParams, ExposureParams,
-    HealParams, HslParams, LensParams, NoiseReductionParams, PresenceParams, SharpenParams,
-    ToneCurveParams, ToneParams, VibranceParams, WbParams,
+    self, CameraProfileParams, ColorGradeParams, CropParams, DefringeParams, EffectsParams,
+    ExposureParams, HealParams, HslParams, LensParams, NoiseReductionParams, PointColorParams,
+    PointCurveParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams,
+    WbParams,
 };
 use crate::color;
 use crate::frame::Extent;
 use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
-    self, LiveParams, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE, HEAL, HSL,
-    LENS, MASKS, NEUTRAL, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
-    WORKING_SPACE,
+    self, LiveParams, COLOR_GRADE, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE,
+    HEAL, HSL, LENS, MASKS, NEUTRAL, NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN,
+    TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -35,7 +36,7 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 12] = [
+pub const LIVE_IDS: [&str; 15] = [
     WB,
     WORKING_SPACE,
     // Purple/green fringe desaturation (#428): same dispatch, right after the camera->working matrix.
@@ -43,9 +44,14 @@ pub const LIVE_IDS: [&str; 12] = [
     EXPOSURE,
     TONE,
     TONE_CURVE,
+    // Freeform RGB/R/G/B point curves (#432), right after the parametric curve.
+    POINT_CURVE,
     VIBRANCE,
     PRESENCE,
     HSL,
+    // Color Grading then Point Color (#432), both OkLab, right after HSL.
+    COLOR_GRADE,
+    POINT_COLOR,
     SHARPEN,
     NOISE_REDUCTION,
     // Local corrections (#49): applied inside the same fused live dispatch as everything above.
@@ -128,10 +134,13 @@ render_stage_factory!(working_space_factory, stages::working_space_stage);
 render_stage_factory!(exposure_factory, stages::exposure_stage);
 render_stage_factory!(tone_factory, stages::tone_stage);
 render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
+render_stage_factory!(point_curve_factory, stages::point_curve_stage);
 render_stage_factory!(vibrance_factory, stages::vibrance_stage);
 render_stage_factory!(presence_factory, stages::presence_stage);
 render_stage_factory!(defringe_factory, stages::defringe_stage);
 render_stage_factory!(hsl_factory, stages::hsl_stage);
+render_stage_factory!(color_grade_factory, stages::color_grade_stage);
+render_stage_factory!(point_color_factory, stages::point_color_stage);
 render_stage_factory!(sharpen_factory, stages::sharpen_stage);
 render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
 render_stage_factory!(crop_factory, stages::crop_stage);
@@ -144,7 +153,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 20] = [
+    let entries: [StageFactoryEntry; 23] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -155,10 +164,13 @@ pub fn build_registry() -> StageRegistry {
         (EXPOSURE, exposure_factory),
         (TONE, tone_factory),
         (TONE_CURVE, tone_curve_factory),
+        (POINT_CURVE, point_curve_factory),
         (VIBRANCE, vibrance_factory),
         (PRESENCE, presence_factory),
         (DEFRINGE, defringe_factory),
         (HSL, hsl_factory),
+        (COLOR_GRADE, color_grade_factory),
+        (POINT_COLOR, point_color_factory),
         (SHARPEN, sharpen_factory),
         (NOISE_REDUCTION, noise_reduction_factory),
         (CROP, crop_factory),
@@ -303,9 +315,12 @@ pub fn resolve_inputs(
     let exposure: ExposureParams = resolve(doc, EXPOSURE);
     let tone: ToneParams = resolve(doc, TONE);
     let tone_curve: ToneCurveParams = resolve(doc, TONE_CURVE);
+    let point_curve: PointCurveParams = resolve::<PointCurveParams>(doc, POINT_CURVE).sanitized();
     let vibrance: VibranceParams = resolve(doc, VIBRANCE);
     let presence: PresenceParams = resolve::<PresenceParams>(doc, PRESENCE).sanitized();
     let hsl: HslParams = resolve(doc, HSL);
+    let color_grade: ColorGradeParams = resolve::<ColorGradeParams>(doc, COLOR_GRADE).sanitized();
+    let point_color: PointColorParams = resolve::<PointColorParams>(doc, POINT_COLOR).sanitized();
     let sharpen: SharpenParams = resolve(doc, SHARPEN);
     let noise_reduction: NoiseReductionParams = resolve(doc, NOISE_REDUCTION);
 
@@ -316,6 +331,9 @@ pub fn resolve_inputs(
             exposure,
             tone,
             tone_curve,
+            point_curve,
+            color_grade,
+            point_color,
             vibrance,
             presence,
             defringe: resolve::<DefringeParams>(doc, DEFRINGE).sanitized(),

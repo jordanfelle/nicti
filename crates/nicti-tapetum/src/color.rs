@@ -19,7 +19,9 @@
 //! is available -- #42's still-Proposed scope). Good enough for a manual WB slider to move the
 //! image in the expected direction; not claimed to match Adobe's own temp/tint numbers exactly.
 
-use crate::coat::{DefringeParams, HslParams, ToneCurveParams, ToneParams, WbParams};
+use crate::coat::{
+    DefringeParams, HslParams, PointCurveParams, ToneCurveParams, ToneParams, WbParams,
+};
 
 pub type Mat3 = [[f32; 3]; 3];
 
@@ -54,7 +56,7 @@ fn mat3_diag(d: [f32; 3]) -> Mat3 {
 /// Cramer's-rule 3x3 inverse. Panics on a singular matrix -- `cam_xyz` (the only matrix this
 /// module inverts) is always invertible in practice: LibRaw derives it from a real sensor's
 /// spectral-sensitivity calibration, never a degenerate/rank-deficient one.
-fn mat3_invert(m: &Mat3) -> Mat3 {
+pub(crate) fn mat3_invert(m: &Mat3) -> Mat3 {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
@@ -430,6 +432,52 @@ pub fn apply_tone_curve(rgb: [f32; 3], lut: &[f32; 256]) -> [f32; 3] {
         let i0 = (pos.floor() as usize).min(254);
         let frac = pos - i0 as f32;
         let looked_up = lut[i0] * (1.0 - frac) + lut[i0 + 1] * frac;
+        looked_up.max(0.0).powi(3)
+    })
+}
+
+/// Per-channel point-curve LUTs (#432): rows are R, G, B, each 256 entries over the cube-root
+/// perceptual axis, with the master curve already composed in (`channel(master(x))`). `None` when
+/// every curve is the identity, so the shader can skip the stage and leave pixels bit-identical.
+/// Built from [`PointCurveParams::sanitized`] points with the same Fritsch-Carlson monotone spline
+/// the DCP profile curve uses (`nicti_calico::tonecurve::ToneCurve`).
+pub fn build_point_curve_luts(params: &PointCurveParams) -> Option<[[f32; 256]; 3]> {
+    use nicti_calico::tonecurve::ToneCurve;
+    let s = params.sanitized();
+    if s.master.is_empty() && s.red.is_empty() && s.green.is_empty() && s.blue.is_empty() {
+        return None;
+    }
+    let curve = |pts: &[[f32; 2]]| -> Option<ToneCurve> {
+        (!pts.is_empty()).then(|| {
+            let pts: Vec<(f64, f64)> = pts
+                .iter()
+                .map(|p| (f64::from(p[0]), f64::from(p[1])))
+                .collect();
+            ToneCurve::new(&pts)
+        })
+    };
+    let master = curve(&s.master);
+    let channels = [curve(&s.red), curve(&s.green), curve(&s.blue)];
+    Some(std::array::from_fn(|c| {
+        std::array::from_fn(|i| {
+            let x = f64::from(i as f32 / 255.0);
+            let m = master.as_ref().map_or(x, |m| m.eval(x));
+            let y = channels[c].as_ref().map_or(m, |ch| ch.eval(m));
+            y.clamp(0.0, 1.0) as f32
+        })
+    }))
+}
+
+/// Applies [`build_point_curve_luts`]'s tables per channel in the cube-root perceptual space,
+/// mirroring [`apply_tone_curve`] (linear interpolation between adjacent entries). CPU twin of
+/// `live_suffix.wgsl`'s `apply_point_curve`.
+pub fn apply_point_curve(rgb: [f32; 3], luts: &[[f32; 256]; 3]) -> [f32; 3] {
+    std::array::from_fn(|c| {
+        let perceptual = rgb[c].max(0.0).cbrt().clamp(0.0, 1.0);
+        let pos = perceptual * 255.0;
+        let i0 = (pos.floor() as usize).min(254);
+        let frac = pos - i0 as f32;
+        let looked_up = luts[c][i0] * (1.0 - frac) + luts[c][i0 + 1] * frac;
         looked_up.max(0.0).powi(3)
     })
 }

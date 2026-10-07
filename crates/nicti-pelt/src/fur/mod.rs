@@ -7,11 +7,15 @@
 #![allow(dead_code)]
 
 mod icons;
+mod iris_wheel;
 mod slider;
 mod tokens;
+mod whisker_curve;
 mod widgets;
 
 pub use icons::{paint as paint_icon, Icon};
+pub use iris_wheel::show as iris_wheel;
 pub use slider::{slider, SliderOut, SliderSpec, Track};
 pub use tokens::{apply, install_fonts};
-pub use widgets::{divider, section, segmented};
+pub use whisker_curve::show as whisker_curve;
+pub use widgets::{band_dots, divider, icon_button, section, segmented};

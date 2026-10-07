@@ -496,6 +496,12 @@ impl Thumb {
     /// Lab of the photo at normalized `(nx, ny)`, averaged over a 3x3 window (a click on a noisy
     /// pixel shouldn't pick up the noise).
     pub fn sample_lab(&self, nx: f32, ny: f32) -> [f32; 3] {
+        raster::working_lab(self.sample_working(nx, ny))
+    }
+
+    /// The photo at normalized `(nx, ny)` as linear working-space (ProPhoto) RGB, averaged over a
+    /// 3x3 window, as shot (no edits applied).
+    pub fn sample_working(&self, nx: f32, ny: f32) -> [f32; 3] {
         let cx = (nx * self.width as f32).floor() as i64;
         let cy = (ny * self.height as f32).floor() as i64;
         let mut acc = [0.0f32; 3];
@@ -512,7 +518,7 @@ impl Thumb {
             }
         }
         let cam = [acc[0] / n, acc[1] / n, acc[2] / n];
-        raster::working_lab(color::mat3_apply(self.matrix, cam))
+        color::mat3_apply(self.matrix, cam)
     }
 }
 

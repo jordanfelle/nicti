@@ -20,6 +20,7 @@ pub mod graph;
 pub mod heal;
 pub mod histogram;
 pub mod mask;
+pub mod oklab;
 pub mod perk;
 pub mod prefetch;
 pub mod renderer;

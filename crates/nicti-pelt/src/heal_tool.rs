@@ -41,6 +41,8 @@ pub enum Tool {
     Heal,
     /// Local-adjustment masks (#49).
     Mask,
+    /// The Point Color eyedropper (#432): the next click on the photo adds a sample.
+    PointColor,
 }
 
 const MIN_RADIUS: f32 = 4.0;
@@ -447,6 +449,11 @@ impl HealUi {
     pub fn mask_active(&self) -> bool {
         self.tool == Tool::Mask
     }
+
+    /// True while the Point Color eyedropper owns the viewport (#432).
+    pub fn point_color_active(&self) -> bool {
+        self.tool == Tool::PointColor
+    }
 }
 
 /// Removes the spot at `index` and prunes patches that no longer belong to any spot.
@@ -810,11 +817,12 @@ fn draw_overlay(
 
 /// The Crop | Heal tool switch, shown at the top of the Develop panel.
 pub fn tool_switch(ui: &mut egui::Ui, heal: &mut HealUi) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Tool");
         ui.selectable_value(&mut heal.tool, Tool::Crop, "Crop");
         ui.selectable_value(&mut heal.tool, Tool::Heal, "Heal / Remove");
         ui.selectable_value(&mut heal.tool, Tool::Mask, "Masks");
+        ui.selectable_value(&mut heal.tool, Tool::PointColor, "Pick Color");
     });
 }
 

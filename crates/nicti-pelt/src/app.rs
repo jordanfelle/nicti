@@ -1477,7 +1477,10 @@ impl eframe::App for PeltApp {
                     // Only the heal and mask tools need clicks. Sensing them makes egui report
                     // `drag_started` after the pointer has crossed its drag threshold, which would
                     // offset the crop tool's handle hit tests and lag every crop/rotate/pan drag.
-                    let sense = if self.heal_ui.heal_active() || self.heal_ui.mask_active() {
+                    let sense = if self.heal_ui.heal_active()
+                        || self.heal_ui.mask_active()
+                        || self.heal_ui.point_color_active()
+                    {
                         egui::Sense::click_and_drag()
                     } else {
                         egui::Sense::drag()
@@ -1504,6 +1507,14 @@ impl eframe::App for PeltApp {
                                 rect,
                                 develop,
                                 &mut self.mask_ui,
+                            );
+                        } else if self.heal_ui.point_color_active() {
+                            crate::catseye::handle_viewport(
+                                ui,
+                                &response,
+                                rect,
+                                develop,
+                                &mut self.heal_ui,
                             );
                         } else {
                             crate::develop_panel::handle_viewport_gesture(

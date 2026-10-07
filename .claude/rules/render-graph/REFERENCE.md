@@ -69,6 +69,15 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   correction is calibrated in camera-native RGB channel space, which no longer exists once
   cam→XYZ mixes channels, so it must precede that matrix. **Real since #428 (`docs/adr/0428`)** —
   see the next bullet; the correction-data source for NEF (lensfun/embedded) is still #410.
+- **Point curves, Color Grading, Point Color (#432, `docs/adr/0432`)**: three Live stages fused in `live_suffix.wgsl`: `nicti.point_curve` (after
+  the parametric curve; `PointCurveParams` = `Vec` points per RGB/R/G/B, empty = identity = `{}`; Fritsch-Carlson via `nicti_calico::tonecurve::ToneCurve`,
+  composed `channel(master(x))` into a 256x3 `R32Float` texture at binding 13, re-uploaded on hash change, flag in `LiveUniforms.point_curve`),
+  then after HSL `nicti.color_grade` + `nicti.point_color` (OkLab/OkLCh on ProPhoto through one precomputed 3x3, `oklab.rs` `OkLabOps` =
+  CPU reference, `apply_oklab_ops` = WGSL twin, uniforms packed by `stages::write_oklab`). Every stage skips itself when a no-op so an unedited photo is
+  bit-identical (tests compare against an untouched run). Gotchas: a wheel's *painted* HSV hue is what becomes the OkLab direction
+  (`oklab::wheel_direction`); an out-of-gamut ProPhoto pixel clamps negative LMS to 0 before the cube root (the round-trip test needs in-gamut
+  pixels); `LiveParams` gained fields, so any explicit initializer (tests in `mask/local.rs`, `stages.rs`) needs them. Constants are
+  LightCraft's, untuned; LRC parity is a reference-machine follow-up.
 - **Lens stage + Defringe (#428)**: `nicti.lens` is its own baked resample pass (`slit.rs`,
   `shaders/slit.wgsl`; crop can't host it, it runs post-matrix in ProPhoto): per-plane inverse DNG
   `WarpRectilinear`, red/blue auto-CA scale about the optical centre, `FixVignetteRadial` gain at
