@@ -258,7 +258,7 @@ pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
         let col = [m[0][i], m[1][i], m[2][i]];
         let xyz = mat3_apply(to_xyz, col);
         let sum = xyz[0] + xyz[1] + xyz[2];
-        if !(sum.abs() > 1e-9) {
+        if !sum.is_finite() || sum.abs() <= 1e-9 {
             return m;
         }
         let (x, y) = (xyz[0] / sum, xyz[1] / sum);
@@ -273,7 +273,7 @@ pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
         }
         let nx = D50_XY[0] + vx * scale;
         let ny = D50_XY[1] + vy * scale;
-        if !(ny > 1e-4) {
+        if !ny.is_finite() || ny <= 1e-4 {
             return m;
         }
         // Keep the primary's own luminance (Y), rebuild X and Z from the moved chromaticity.
@@ -287,7 +287,8 @@ pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
         [cols[0][1], cols[1][1], cols[2][1]],
         [cols[0][2], cols[1][2], cols[2][2]],
     ];
-    if !(mat3_det(&c).abs() > 1e-9) {
+    let det = mat3_det(&c);
+    if !det.is_finite() || det.abs() <= 1e-9 {
         return m;
     }
     let k = mat3_apply(mat3_invert(&c), white);
