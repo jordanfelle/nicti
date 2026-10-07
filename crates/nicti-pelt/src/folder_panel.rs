@@ -22,6 +22,22 @@ pub struct DropRequest {
     pub dest_parent: PathBuf,
 }
 
+/// What the user clicked this frame (#368). A click on a folder filters the Library grid to it; a
+/// click on the drive's "Import here" button seeds the Folder field with the drive path.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PanelOutput {
+    pub drop: Option<DropRequest>,
+    /// `Some(Some(id))` = filter to that root, `Some(None)` = clear the filter (clicked the
+    /// already-selected root again).
+    pub select_root: Option<Option<i64>>,
+    pub import_from: Option<String>,
+}
+
+/// The root filter a click on `clicked` produces: toggles off when it is already `selected`.
+pub fn toggle_root(selected: Option<i64>, clicked: i64) -> Option<i64> {
+    (selected != Some(clicked)).then_some(clicked)
+}
+
 /// One drive node and the registered roots that live on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DriveNode {
@@ -182,8 +198,10 @@ fn folder_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-/// Draws the tree. Returns the drop the user made this frame, if any (only drives accept drops). `moving` disables dropping
-/// (a scan or another move is running -- same guard as the text-field path).
+/// Draws the tree. Reports the drop the user made this frame, if any (only drives accept drops),
+/// and any folder/drive click (#368). `moving` disables dropping (a scan or another move is
+/// running -- same guard as the text-field path); `selected_root` is the grid's current filter.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     tree: &[DriveNode],
@@ -192,8 +210,9 @@ pub fn show(
     moving: bool,
     archive: &ArchiveDrives,
     set_archive: &mut Option<(String, bool)>,
-) -> Option<DropRequest> {
-    let mut request = None;
+    selected_root: Option<i64>,
+) -> PanelOutput {
+    let mut out = PanelOutput::default();
     if tree.is_empty() {
         ui.weak("No folders yet -- import one.");
     }
@@ -216,8 +235,23 @@ pub fn show(
                     {
                         *set_archive = Some((drive.path.clone(), flag));
                     }
+                    // Not for the `/` catch-all "drive": seeding it would make one stray Import
+                    // click scan the whole filesystem.
+                    if drive.path != "/"
+                        && ui
+                            .small_button("Import here\u{2026}")
+                            .on_hover_text(
+                                "Put this drive's path in the (empty) Folder field, then \
+                                 append the folder to import.",
+                            )
+                            .clicked()
+                    {
+                        out.import_from = Some(drive.path.clone());
+                    }
                     for root in &drive.roots {
-                        show_root(ui, root, moving);
+                        if show_root(ui, root, moving, selected_root == Some(root.id)) {
+                            out.select_root = Some(toggle_root(selected_root, root.id));
+                        }
                     }
                 });
         });
@@ -225,7 +259,7 @@ pub fn show(
             if let Some(dragged) = find_root(tree, *root_id) {
                 let dest = PathBuf::from(&drive.path);
                 if !is_noop_or_cyclic(Path::new(&dragged.path), &dest) {
-                    request = Some(DropRequest {
+                    out.drop = Some(DropRequest {
                         root_id: *root_id,
                         dest_parent: dest,
                     });
@@ -247,16 +281,17 @@ pub fn show(
         ui.separator();
         ui.label(status);
     }
-    request
+    out
 }
 
 fn find_root(tree: &[DriveNode], id: i64) -> Option<&Root> {
     tree.iter().flat_map(|d| &d.roots).find(|r| r.id == id)
 }
 
-/// One draggable folder row. Deliberately not a drop target: `Carry` refuses any destination
-/// inside another registered root (overlapping roots), so "move into this folder" can only fail.
-fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool) {
+/// One folder row: click selects it as the grid filter (returns true), drag starts a move.
+/// Deliberately not a drop target: `Carry` refuses any destination inside another registered
+/// root (overlapping roots), so "move into this folder" can only fail.
+fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool, selected: bool) -> bool {
     let id = egui::Id::new(("folder_panel_root", root.id));
     let label = folder_name(&root.path);
     let icon = if root.archived {
@@ -264,15 +299,27 @@ fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool) {
     } else {
         "\u{1F4C1}"
     };
+    let text = format!("{icon} {label}");
+    let mut label_clicked = false;
     let response = if moving {
-        ui.label(format!("{icon} {label}"))
+        ui.selectable_label(selected, text)
     } else {
-        ui.dnd_drag_source(id, root.id, |ui| {
-            ui.label(format!("{icon} {label}"));
-        })
-        .response
+        // The drag source only senses drags and would swallow the press, so widen its response
+        // to also sense clicks (a press-release without movement is a click, not a drag).
+        let r = ui
+            .dnd_drag_source(id, root.id, |ui| {
+                // Mouse clicks land on the widened drag widget below; the label still gets
+                // keyboard activation (Tab + Enter/Space), so honour that too.
+                label_clicked = ui.selectable_label(selected, text).clicked();
+            })
+            .response;
+        // `Response::interact` is undefined on `dnd_drag_source`'s unioned response, so
+        // register the click sense on the drag widget's id and rect directly (senses merge).
+        ui.interact(r.rect, id, egui::Sense::click())
     };
+    let clicked = response.clicked() || label_clicked;
     response.on_hover_text(&root.path);
+    clicked
 }
 
 #[cfg(test)]
@@ -355,6 +402,57 @@ mod tests {
         assert!(attention_lines(std::slice::from_ref(&m), true).is_empty());
         let lines = attention_lines(&[m], false);
         assert_eq!(lines, ["/a -> /b (source cleanup pending)"]);
+    }
+
+    #[test]
+    fn clicking_a_root_toggles_the_filter() {
+        assert_eq!(toggle_root(None, 3), Some(3));
+        assert_eq!(toggle_root(Some(2), 3), Some(3), "switches roots");
+        assert_eq!(toggle_root(Some(3), 3), None, "second click clears");
+    }
+
+    /// Draws the real panel under the headless harness and returns what the last click produced.
+    fn click_in_panel(label: &str, selected: Option<i64>) -> PanelOutput {
+        use egui_kittest::kittest::Queryable;
+        let tree = build_tree(&[root(7, "/mnt/d/2026")], &[]);
+        let state = (PanelOutput::default(), tree);
+        // A plain kittest harness, not `swat::harness`: the panel uses only egui's default fonts,
+        // and installing the app theme here perturbs `library_grid_snapshot`'s pixels when the
+        // suite runs in parallel.
+        let mut h = egui_kittest::Harness::new_ui_state(
+            move |ui, (out, tree): &mut (PanelOutput, Vec<DriveNode>)| {
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                let got = show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    selected,
+                );
+                if got != PanelOutput::default() {
+                    *out = got;
+                }
+            },
+            state,
+        );
+        h.get_by_label(label).click();
+        h.run();
+        h.state().0.clone()
+    }
+
+    #[test]
+    fn clicking_a_folder_row_selects_it_and_a_drive_button_seeds_import() {
+        let out = click_in_panel("\u{1F4C1} 2026", None);
+        assert_eq!(out.select_root, Some(Some(7)));
+        let out = click_in_panel("\u{1F4C1} 2026", Some(7));
+        assert_eq!(out.select_root, Some(None), "second click clears");
+        let out = click_in_panel("Import here\u{2026}", None);
+        assert_eq!(out.import_from.as_deref(), Some("/mnt/d"));
+        assert_eq!(out.select_root, None);
     }
 
     #[test]

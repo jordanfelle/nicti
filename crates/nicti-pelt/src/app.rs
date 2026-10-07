@@ -1797,14 +1797,15 @@ impl PeltApp {
         });
         let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
         let attention = folder_panel::attention_lines(&self.folder_cache.open_moves, move_running);
-        let mut request = None;
+        let mut out = folder_panel::PanelOutput::default();
         let mut set_archive = None;
+        let selected_root = self.grid_root;
         egui::Panel::left("folder_panel")
             .resizable(true)
             .show(ui, |ui| {
                 ui.heading("Folders");
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    request = folder_panel::show(
+                    out = folder_panel::show(
                         ui,
                         &tree,
                         &attention,
@@ -1812,6 +1813,7 @@ impl PeltApp {
                         moving,
                         &self.archive_drives,
                         &mut set_archive,
+                        selected_root,
                     );
                 });
             });
@@ -1821,7 +1823,20 @@ impl PeltApp {
                     Some(format!("Couldn't save the archive-drive setting: {e}"));
             }
         }
-        if let Some(r) = request {
+        if let Some(sel) = out.select_root {
+            self.grid_root = sel;
+        }
+        if let Some(drive) = out.import_from {
+            // Never clobber what the user already typed.
+            if self.import_path_input.trim().is_empty() {
+                self.import_path_input = drive;
+                self.import_status = None;
+            } else {
+                self.import_status =
+                    Some("The Folder field already has a path -- clear it first.".to_string());
+            }
+        }
+        if let Some(r) = out.drop {
             self.submit_move_to(store, r.root_id, r.dest_parent);
         }
     }
