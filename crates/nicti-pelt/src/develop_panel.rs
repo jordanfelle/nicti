@@ -559,6 +559,7 @@ pub fn show(
 
     fur::section(ui, "calibration", "Calibration", false, |ui| {
         let mut c: CalibrationParams = develop.stage_params(CALIBRATION);
+        let before = c;
         slider(ui, &CAL_SHADOW_TINT, &mut c.shadow_tint);
         fur::divider(ui);
         slider(ui, &CAL_RED_HUE, &mut c.red_hue);
@@ -567,7 +568,10 @@ pub fn show(
         slider(ui, &CAL_GREEN_SAT, &mut c.green_sat);
         slider(ui, &CAL_BLUE_HUE, &mut c.blue_hue);
         slider(ui, &CAL_BLUE_SAT, &mut c.blue_sat);
-        develop.set_stage_params(CALIBRATION, &c);
+        // Write only on a real change: merely opening the section must not mark the photo edited.
+        if c != before {
+            develop.set_stage_params(CALIBRATION, &c);
+        }
     });
 
     if heal.heal_active() {

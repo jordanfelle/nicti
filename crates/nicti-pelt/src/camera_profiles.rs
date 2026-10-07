@@ -85,6 +85,15 @@ pub fn discover(make: &str, model: &str) -> Vec<ProfileEntry> {
 /// Profiles for the camera under `roots`. Sorted, `Adobe Standard` first (the conventional
 /// default), the rest alphabetical.
 pub fn discover_in(roots: &[PathBuf], make: &str, model: &str) -> Vec<ProfileEntry> {
+    let mut found = discover_all_in(roots, make, model);
+    // The same profile installed under both PROGRAMDATA and APPDATA would list twice.
+    found.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    found
+}
+
+/// Like [`discover_in`] but keeps every installed copy of a same-named profile (only the very same
+/// file collapses), in the same order -- the LRC import tries each until one loads.
+fn discover_all_in(roots: &[PathBuf], make: &str, model: &str) -> Vec<ProfileEntry> {
     let needles = camera_needles(make, model);
     if needles.is_empty() {
         return Vec::new();
@@ -99,8 +108,7 @@ pub fn discover_in(roots: &[PathBuf], make: &str, model: &str) -> Vec<ProfileEnt
         let rank = |e: &ProfileEntry| u8::from(e.name != "Adobe Standard");
         rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
     });
-    // The same profile installed under both PROGRAMDATA and APPDATA would list twice.
-    found.dedup_by(|a, b| a.path == b.path || a.name.eq_ignore_ascii_case(&b.name));
+    found.dedup_by(|a, b| a.path == b.path);
     found
 }
 
@@ -407,16 +415,20 @@ impl LrcProfileResolver {
         name: &str,
     ) -> Option<nicti_tapetum::coat::CameraProfileParams> {
         let needles = camera_needles(make, model);
-        let entry = discover_in(&self.dcp_roots, make, model)
+        // The same profile name can be installed twice (per-user and system folders); an
+        // unreadable first copy must not hide a valid second one.
+        discover_all_in(&self.dcp_roots, make, model)
             .into_iter()
-            .find(|e| e.name.eq_ignore_ascii_case(name))?;
-        let loaded = load(&entry.path, Some(&needles)).ok()?;
-        Some(nicti_tapetum::coat::CameraProfileParams {
-            name: Some(loaded.profile.name.clone()),
-            path: Some(loaded.path.display().to_string()),
-            content_hash: Some(loaded.content_hash),
-            look: None,
-        })
+            .filter(|e| e.name.eq_ignore_ascii_case(name))
+            .find_map(|entry| {
+                let loaded = load(&entry.path, Some(&needles)).ok()?;
+                Some(nicti_tapetum::coat::CameraProfileParams {
+                    name: Some(loaded.profile.name.clone()),
+                    path: Some(loaded.path.display().to_string()),
+                    content_hash: Some(loaded.content_hash),
+                    look: None,
+                })
+            })
     }
 }
 
@@ -434,11 +446,11 @@ impl nicti_stray::ProfileResolver for LrcProfileResolver {
         if let Some(found) = self.dcp(make, model, name) {
             return Some(found);
         }
-        let entry = discover_looks_in(&self.look_roots)
+        let (entry, look) = discover_looks_in(&self.look_roots)
             .into_iter()
-            .find(|e| e.name.eq_ignore_ascii_case(name))?;
+            .filter(|e| e.name.eq_ignore_ascii_case(name))
+            .find_map(|e| load_look(&e.path).ok().map(|l| (e, l)))?;
         let mut base = self.dcp(make, model, "Adobe Standard")?;
-        let look = load_look(&entry.path).ok()?;
         base.look = Some(nicti_tapetum::coat::LookRef {
             name: entry.name,
             path: look.path.display().to_string(),
@@ -653,6 +665,47 @@ mod tests {
                 resolver: LrcProfileResolver::with_roots(vec![dcps], vec![looks]),
                 _dir: dir,
             }
+        }
+
+        /// CodeRabbit: the same profile installed twice, the first copy unreadable, must still resolve.
+        #[test]
+        fn an_unreadable_first_copy_does_not_hide_a_valid_second_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let (bad_root, good_root) = (dir.path().join("a"), dir.path().join("b"));
+            for root in [&bad_root, &good_root] {
+                std::fs::create_dir_all(root).unwrap();
+            }
+            let file = "NIKON Z 8 Camera Landscape.dcp";
+            std::fs::write(bad_root.join(file), b"not a dcp").unwrap();
+            std::fs::write(
+                good_root.join(file),
+                synthetic_dcp_bytes("NIKON Z 8", "Camera Landscape", None, None, true),
+            )
+            .unwrap();
+            // Same-named Look twice too: a garbage one in the first root, a valid one in the second.
+            let (bad_look, good_look) = (dir.path().join("la"), dir.path().join("lb"));
+            for root in [&bad_look, &good_look] {
+                std::fs::create_dir_all(root).unwrap();
+            }
+            std::fs::write(bad_look.join("Adobe Vivid.xmp"), "<not-xmp/>").unwrap();
+            std::fs::write(
+                good_look.join("Adobe Vivid.xmp"),
+                synthetic_valid_xmp("Adobe Vivid"),
+            )
+            .unwrap();
+            std::fs::write(
+                good_root.join("NIKON Z 8 Adobe Standard.dcp"),
+                synthetic_dcp_bytes("NIKON Z 8", "Adobe Standard", None, None, true),
+            )
+            .unwrap();
+            let r = LrcProfileResolver::with_roots(
+                vec![bad_root, good_root],
+                vec![bad_look, good_look],
+            );
+            let dcp = r.resolve("NIKON CORPORATION", "NIKON Z 8", "Camera Landscape");
+            assert_eq!(dcp.unwrap().name.as_deref(), Some("Camera Landscape"));
+            let look = r.resolve("NIKON CORPORATION", "NIKON Z 8", "Adobe Vivid");
+            assert!(look.unwrap().look.is_some());
         }
 
         #[test]
