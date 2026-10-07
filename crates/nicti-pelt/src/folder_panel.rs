@@ -313,7 +313,9 @@ fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool, selected: bool) -> bo
                 label_clicked = ui.selectable_label(selected, text).clicked();
             })
             .response;
-        r.interact(egui::Sense::click())
+        // `Response::interact` is undefined on `dnd_drag_source`'s unioned response, so
+        // register the click sense on the drag widget's id and rect directly (senses merge).
+        ui.interact(r.rect, id, egui::Sense::click())
     };
     let clicked = response.clicked() || label_clicked;
     response.on_hover_text(&root.path);
