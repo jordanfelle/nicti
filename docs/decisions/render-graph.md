@@ -287,3 +287,12 @@ no luminance is not an edit even if LRC kept a stray hue. **Not translated, stil
 `PointColors` (its string format needs its own research), calibration and `CameraProfile` (#381), and the
 legacy Split Toning panel on pre-grading process versions.
 
+## #381: Calibration stage and a Look's tone curve (ADR-0381)
+
+Full decision: `docs/adr/0381-calibration-and-lrc-profile-resolution.md`. `nicti.calibration` is a live
+stage after `nicti.working_space`; its primaries are folded into the camera->working matrix on the CPU
+(`color::calibrate_matrix`: each column moved in xy about D50, columns re-scaled to sum to the original
+white so neutrals stay neutral), Shadows Tint is a shadow-weighted green gain in the live shader. A
+Look profile's own `ToneCurvePV2012` is composed ahead of the user's master point curve in
+`build_point_curve_luts` (same display-referred domain), not into the scene-linear profile tone LUT.
+All constants untuned vs LRC.

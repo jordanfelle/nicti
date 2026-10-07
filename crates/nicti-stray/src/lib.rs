@@ -18,12 +18,14 @@ pub mod open;
 pub mod paths;
 pub mod read;
 pub mod report;
+pub mod resolver;
 
 #[cfg(test)]
 pub(crate) mod test_fixture;
 
 pub use job::{ImportConfig, LrcImportJob};
 pub use report::LrcImportReport;
+pub use resolver::{ProfileResolver, ResolverHandle};
 
 /// Everything that can stop an import. A single image's develop text failing to parse is *not* one
 /// of these -- it is counted in the report and the image is imported without a translated edit.

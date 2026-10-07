@@ -24,9 +24,10 @@ use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
 use crate::coat::{
-    self, ColorGradeParams, CropParams, DefringeParams, EffectsParams, ExposureParams, HslParams,
-    NoiseReductionParams, PointColorParams, PointCurveParams, PresenceParams, SharpenParams,
-    ToneCurveParams, ToneParams, VibranceParams, VignetteStyle, WbParams,
+    self, CalibrationParams, ColorGradeParams, CropParams, DefringeParams, EffectsParams,
+    ExposureParams, HslParams, NoiseReductionParams, PointColorParams, PointCurveParams,
+    PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
+    WbParams,
 };
 use crate::color;
 use crate::detail::{self, MAX_BLUR_RADIUS};
@@ -55,6 +56,9 @@ pub const PRESENCE: &str = "nicti.presence";
 /// Purple/green fringe desaturation (#428): fused into the live dispatch, right after the
 /// camera->working matrix, so a slider drag is a uniform write and never rebakes anything.
 pub const DEFRINGE: &str = "nicti.defringe";
+/// Camera Calibration panel (#381): primaries folded into the camera->working matrix on the CPU,
+/// shadows tint a uniform applied right after that matrix.
+pub const CALIBRATION: &str = "nicti.calibration";
 pub const HSL: &str = "nicti.hsl";
 /// Color Grading wheels (#432), OkLab, after HSL.
 pub const COLOR_GRADE: &str = "nicti.color_grade";
@@ -219,6 +223,13 @@ pub fn point_color_stage() -> BasicStage {
         id: POINT_COLOR,
         kind: StageKind::Live,
         default_params: || coat::default_value::<PointColorParams>(),
+    }
+}
+pub fn calibration_stage() -> BasicStage {
+    BasicStage {
+        id: CALIBRATION,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<CalibrationParams>(),
     }
 }
 pub fn defringe_stage() -> BasicStage {
@@ -520,7 +531,7 @@ struct LiveUniforms {
     presence: [f32; 4],
     /// #428: purple amount, purple hue lo, purple hue hi, green amount.
     defringe0: [f32; 4],
-    /// #428: green hue lo, green hue hi, unused, unused.
+    /// #428: green hue lo, green hue hi; #381: shadows tint (z), unused (w).
     defringe1: [f32; 4],
     /// #432: x = point curves enabled (the LUT texture at binding 13 is only read when 1), yzw unused.
     point_curve: [f32; 4],
@@ -606,6 +617,9 @@ pub struct LiveParams {
     pub tone_curve: ToneCurveParams,
     /// Freeform point curves (#432); [`PointCurveParams::sanitized`] by the caller or here.
     pub point_curve: PointCurveParams,
+    /// The selected Look profile's own tone curve (#381), composed ahead of `point_curve`'s master
+    /// curve. Empty = none.
+    pub look_curve: Vec<[f32; 2]>,
     /// Color Grading wheels (#432), OkLab, after HSL.
     pub color_grade: ColorGradeParams,
     /// Point Color samples (#432), OkLCh, after Color Grading.
@@ -617,6 +631,9 @@ pub struct LiveParams {
     pub presence: PresenceParams,
     /// Purple/green fringe desaturation (#428), applied right after the camera->working matrix.
     pub defringe: DefringeParams,
+    /// Calibration (#381): the primaries are already folded into `working_space_matrix` by the
+    /// caller (`spine::resolve_inputs`); only the shadows tint is read here.
+    pub calibration: CalibrationParams,
     pub hsl: HslParams,
     pub sharpen: SharpenParams,
     pub noise_reduction: NoiseReductionParams,
@@ -640,11 +657,13 @@ impl Default for LiveParams {
             tone: ToneParams::default(),
             tone_curve: ToneCurveParams::default(),
             point_curve: PointCurveParams::default(),
+            look_curve: Vec::new(),
             color_grade: ColorGradeParams::default(),
             point_color: PointColorParams::default(),
             vibrance: VibranceParams::default(),
             presence: PresenceParams::default(),
             defringe: DefringeParams::default(),
+            calibration: CalibrationParams::default(),
             hsl: HslParams::default(),
             sharpen: SharpenParams::default(),
             noise_reduction: NoiseReductionParams::default(),
@@ -1092,7 +1111,7 @@ impl LiveSuffixKernel {
             defringe1: [
                 params.defringe.green_hue_lo,
                 params.defringe.green_hue_hi,
-                0.0,
+                params.calibration.sanitized().shadow_tint,
                 0.0,
             ],
             point_curve: [0.0; 4],
@@ -1109,7 +1128,7 @@ impl LiveSuffixKernel {
             write_oklab(&mut u, &ops);
         }
         {
-            let luts = color::build_point_curve_luts(&params.point_curve);
+            let luts = color::build_point_curve_luts(&params.point_curve, &params.look_curve);
             let fp = luts.as_ref().map(|l| {
                 let hash = blake3::hash(bytemuck::cast_slice(l.as_slice()));
                 u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"))
@@ -2071,6 +2090,7 @@ mod tests {
             look_table: smooth_table(6, 3, 3, 5.0),
             encoding: TableEncoding::Srgb,
             unsupported_settings: vec![],
+            tone_curve: vec![],
         };
         let solution = Arc::new(synthetic_profile().solve(gains).with_look(&look));
         let params = LiveParams {
@@ -2283,7 +2303,7 @@ mod tests {
             green: vec![],
             blue: vec![[0.0, 0.0], [0.3, 0.2], [0.7, 0.8], [1.0, 1.0]],
         };
-        let luts = color::build_point_curve_luts(&curves).expect("non-identity");
+        let luts = color::build_point_curve_luts(&curves, &[]).expect("non-identity");
         let baseline = run(PointCurveParams::default());
         let actual = run(curves);
         let identity = run(PointCurveParams {
@@ -2589,6 +2609,78 @@ mod tests {
             }
         }
         (on, off)
+    }
+
+    /// #381: the live pass's shadows tint (shader) matches `color::shadow_tint_pixel` (CPU twin)
+    /// across shadow-to-highlight pixels, and a zero tint renders bit-identically to an untouched run.
+    #[test]
+    fn shadow_tint_in_the_live_pass_matches_the_cpu_twin_and_zero_is_a_noop() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 16,
+            height: 4,
+        };
+        let (w, h) = (extent.width as usize, extent.height as usize);
+        let data: Vec<[f32; 4]> = (0..w * h)
+            .map(|i| {
+                let v = 0.002 * 1.45f32.powi((i % w) as i32);
+                [v, v * 1.1, v * 0.9, 1.0]
+            })
+            .collect();
+        let input = crate::test_util::upload_frame(&gpu, extent, &data);
+        let quantised = crate::test_util::read_frame(&gpu, &input);
+        let kernel = LiveSuffixKernel::new(&gpu);
+        let run = |calibration: CalibrationParams| {
+            kernel.set_params(
+                &gpu,
+                &LiveParams {
+                    calibration,
+                    ..Default::default()
+                },
+            );
+            let output = FrameTexture::new(&gpu, extent);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(&gpu, &output)
+        };
+        let untouched = run(CalibrationParams::default());
+        let tinted = run(CalibrationParams {
+            shadow_tint: 0.8,
+            ..Default::default()
+        });
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let tail = |rgb: [f32; 3]| {
+            let rgb = color::apply_tone(rgb, &ToneParams::default());
+            let rgb = color::apply_tone_curve(rgb, &lut);
+            let rgb = color::apply_vibrance(rgb, 0.0);
+            color::apply_hsl(rgb, &HslParams::default())
+        };
+        let mut moved = false;
+        for (i, p) in quantised.iter().enumerate() {
+            let expected = tail(color::shadow_tint_pixel([p[0], p[1], p[2]], 0.8));
+            for c in 0..3 {
+                assert!(
+                    (tinted[i][c] - expected[c]).abs() < 0.01,
+                    "pixel {i} channel {c}: gpu={} cpu={}",
+                    tinted[i][c],
+                    expected[c]
+                );
+            }
+            moved |= (tinted[i][1] - untouched[i][1]).abs() > 1e-3;
+        }
+        assert!(moved, "the tint changed nothing on dark pixels");
+        // And the untouched run equals the plain default-params render exactly.
+        kernel.set_params(&gpu, &LiveParams::default());
+        let output = FrameTexture::new(&gpu, extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(&gpu, &mut encoder, &input, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        assert_eq!(crate::test_util::read_frame(&gpu, &output), untouched);
     }
 
     fn chroma_of(p: [f32; 4]) -> f32 {
@@ -3125,11 +3217,13 @@ mod tests {
                 tone,
                 tone_curve,
                 point_curve: PointCurveParams::default(),
+                look_curve: Vec::new(),
                 color_grade: Default::default(),
                 point_color: Default::default(),
                 vibrance,
                 presence: PresenceParams::default(),
                 defringe: DefringeParams::default(),
+                calibration: CalibrationParams::default(),
                 hsl,
                 sharpen,
                 noise_reduction,

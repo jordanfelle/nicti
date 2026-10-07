@@ -124,6 +124,12 @@ pub struct LookProfile {
     /// `crs:Clarity2012`, `crs:ToneCurvePV2012`. Callers should warn rather than silently drop
     /// them.
     pub unsupported_settings: Vec<String>,
+    /// The Look's own `crs:ToneCurvePV2012` master curve (#381): (x, y) control points in 0..1
+    /// (Adobe writes 0..255 pairs), in the same display-referred domain as the Develop panel's
+    /// point curve. Empty when the profile has none (or an unusable one, which is then listed in
+    /// `unsupported_settings`). Not applied by [`ProfileSolution`](crate::profile::ProfileSolution)
+    /// itself -- the render's point-curve stage composes it ahead of the user's own curve.
+    pub tone_curve: Vec<[f32; 2]>,
 }
 
 /// Base85-variant alphabet from `dng_big_table.cpp`'s `ASCIItoBinary` (a Z85-like scheme with an
@@ -522,6 +528,7 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
     // *only* an RGBTable-based look -- no `crs:LookTable` at all -- can be told apart from one
     // with no look at all: see the `table_id.ok_or(...)` check below.
     let mut rgb_table_id: Option<String> = None;
+    let mut tone_curve: Vec<[f32; 2]> = Vec::new();
 
     for node in doc.descendants() {
         for attr in node.attributes() {
@@ -555,9 +562,10 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
                     }
                 }
             }
-            "ToneCurvePV2012" => {
-                unsupported_settings.push("ToneCurvePV2012".to_string());
-            }
+            "ToneCurvePV2012" => match read_tone_curve(node) {
+                Some(points) => tone_curve = points,
+                None => unsupported_settings.push("ToneCurvePV2012".to_string()),
+            },
             "RGBTable" => {
                 // Unlike the attribute form above, an `<crs:RGBTable>` element carries no
                 // sibling `crs:Table_<id>`-style id to capture -- but it's still evidence of an
@@ -604,7 +612,28 @@ pub fn parse(xmp_text: &str) -> Result<LookProfile, LookProfileError> {
         look_table: decoded.look_table,
         encoding: decoded.encoding,
         unsupported_settings,
+        tone_curve,
     })
+}
+
+/// A `crs:ToneCurvePV2012` `rdf:Seq` of `"x, y"` pairs (0..255) as 0..1 points, or `None` when it
+/// has fewer than two usable points, a non-finite or out-of-range value, or x that isn't strictly
+/// increasing (the caller then reports it as unsupported rather than applying a guess).
+fn read_tone_curve(node: roxmltree::Node) -> Option<Vec<[f32; 2]>> {
+    let seq = node.children().find(|n| n.tag_name().name() == "Seq")?;
+    let mut points: Vec<[f32; 2]> = Vec::new();
+    for li in seq.children().filter(|n| n.tag_name().name() == "li") {
+        let (x, y) = li.text()?.split_once(',')?;
+        let (x, y) = (x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?);
+        if !(0.0..=255.0).contains(&x) || !(0.0..=255.0).contains(&y) {
+            return None;
+        }
+        if points.last().is_some_and(|l| x / 255.0 <= l[0]) {
+            return None;
+        }
+        points.push([x / 255.0, y / 255.0]);
+    }
+    (points.len() >= 2).then_some(points)
 }
 
 /// Test support: builds synthetic Look `.xmp` text so tests here and in downstream crates never
@@ -1019,6 +1048,66 @@ mod tests {
             .unsupported_settings
             .iter()
             .any(|s| s == "ToneCurvePV2012"));
+    }
+
+    fn xmp_with_curve(curve: &str) -> String {
+        let hue = 2;
+        let sat = 2;
+        let val = 2;
+        let data = synthetic_hue_sat_map(hue, sat, val);
+        let stream = encode_look_table_stream(hue, sat, val, &data, 0, None, None);
+        let encoded = big_table_encode(&stream);
+        let fake = DecodedLookTable {
+            look_table: HueSatMap {
+                hue_divisions: hue as usize,
+                sat_divisions: sat as usize,
+                val_divisions: val as usize,
+                data,
+            },
+            encoding: TableEncoding::Linear,
+            min_amount: 1.0,
+            max_amount: 1.0,
+            flags: 0,
+        };
+        let id = recompute_fingerprint(&fake);
+        format!(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:LookTable="{id}" crs:Table_{id}="{encoded}"><crs:ToneCurvePV2012><rdf:Seq>{curve}</rdf:Seq></crs:ToneCurvePV2012></rdf:Description></rdf:RDF></x:xmpmeta>"#
+        )
+    }
+
+    #[test]
+    fn a_looks_tone_curve_is_parsed_to_unit_points_and_not_reported_unsupported() {
+        let xmp = xmp_with_curve(
+            "<rdf:li>0, 0</rdf:li><rdf:li>64, 50</rdf:li><rdf:li>192, 220</rdf:li><rdf:li>255, 255</rdf:li>",
+        );
+        let look = parse(&xmp).unwrap();
+        assert_eq!(look.tone_curve.len(), 4);
+        assert!((look.tone_curve[1][0] - 64.0 / 255.0).abs() < 1e-6);
+        assert!((look.tone_curve[2][1] - 220.0 / 255.0).abs() < 1e-6);
+        assert!(!look
+            .unsupported_settings
+            .iter()
+            .any(|s| s == "ToneCurvePV2012"));
+    }
+
+    #[test]
+    fn a_malformed_looks_tone_curve_is_dropped_and_reported() {
+        for bad in [
+            "<rdf:li>0, 0</rdf:li>",
+            "<rdf:li>0, 0</rdf:li><rdf:li>nan, 4</rdf:li>",
+            "<rdf:li>0, 0</rdf:li><rdf:li>300, 4</rdf:li>",
+            "<rdf:li>100, 0</rdf:li><rdf:li>50, 255</rdf:li>",
+            "<rdf:li>0 0</rdf:li><rdf:li>255 255</rdf:li>",
+        ] {
+            let look = parse(&xmp_with_curve(bad)).unwrap();
+            assert!(look.tone_curve.is_empty(), "{bad}");
+            assert!(
+                look.unsupported_settings
+                    .iter()
+                    .any(|s| s == "ToneCurvePV2012"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -5,16 +5,16 @@
 //! (once #31 lands persistence) will read too.
 
 use nicti_tapetum::coat::{
-    ColorGradeParams, CropParams, DefringeParams, EffectsParams, ExposureParams, HslBand,
-    HslParams, LensParams, NoiseReductionParams, PointColorParams, PointCurveParams,
+    CalibrationParams, ColorGradeParams, CropParams, DefringeParams, EffectsParams, ExposureParams,
+    HslBand, HslParams, LensParams, NoiseReductionParams, PointColorParams, PointCurveParams,
     PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
     WbParams,
 };
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    COLOR_GRADE, CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION,
-    POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    CALIBRATION, COLOR_GRADE, CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS,
+    NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
 };
 
 use crate::fur::{self, SliderSpec, Track};
@@ -227,6 +227,14 @@ const DEFRINGE_GREEN_LO: SliderSpec =
     SliderSpec::new("lens.defringe_green_lo", "Green Hue Lo", 0.0, 1.0, 0.4);
 const DEFRINGE_GREEN_HI: SliderSpec =
     SliderSpec::new("lens.defringe_green_hi", "Green Hue Hi", 0.0, 1.0, 0.6);
+
+const CAL_SHADOW_TINT: SliderSpec = SliderSpec::bipolar("cal.shadow_tint", "Shadows Tint");
+const CAL_RED_HUE: SliderSpec = SliderSpec::bipolar("cal.red_hue", "Red Primary Hue");
+const CAL_RED_SAT: SliderSpec = SliderSpec::bipolar("cal.red_sat", "Red Primary Saturation");
+const CAL_GREEN_HUE: SliderSpec = SliderSpec::bipolar("cal.green_hue", "Green Primary Hue");
+const CAL_GREEN_SAT: SliderSpec = SliderSpec::bipolar("cal.green_sat", "Green Primary Saturation");
+const CAL_BLUE_HUE: SliderSpec = SliderSpec::bipolar("cal.blue_hue", "Blue Primary Hue");
+const CAL_BLUE_SAT: SliderSpec = SliderSpec::bipolar("cal.blue_sat", "Blue Primary Saturation");
 
 const VIGNETTE_AMOUNT: SliderSpec = SliderSpec::bipolar("fx.vignette_amount", "Amount");
 const VIGNETTE_MIDPOINT: SliderSpec =
@@ -549,6 +557,23 @@ pub fn show(
         develop.set_stage_params(EFFECTS, &fx);
     });
 
+    fur::section(ui, "calibration", "Calibration", false, |ui| {
+        let mut c: CalibrationParams = develop.stage_params(CALIBRATION);
+        let before = c;
+        slider(ui, &CAL_SHADOW_TINT, &mut c.shadow_tint);
+        fur::divider(ui);
+        slider(ui, &CAL_RED_HUE, &mut c.red_hue);
+        slider(ui, &CAL_RED_SAT, &mut c.red_sat);
+        slider(ui, &CAL_GREEN_HUE, &mut c.green_hue);
+        slider(ui, &CAL_GREEN_SAT, &mut c.green_sat);
+        slider(ui, &CAL_BLUE_HUE, &mut c.blue_hue);
+        slider(ui, &CAL_BLUE_SAT, &mut c.blue_sat);
+        // Write only on a real change: merely opening the section must not mark the photo edited.
+        if c != before {
+            develop.set_stage_params(CALIBRATION, &c);
+        }
+    });
+
     if heal.heal_active() {
         heal_tool::show_panel(ui, develop, heal, pounce);
     }
@@ -574,6 +599,7 @@ pub fn show(
             NOISE_REDUCTION,
             LENS,
             DEFRINGE,
+            CALIBRATION,
             CROP,
             EFFECTS,
             MASKS,

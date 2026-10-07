@@ -20,7 +20,8 @@
 //! image in the expected direction; not claimed to match Adobe's own temp/tint numbers exactly.
 
 use crate::coat::{
-    DefringeParams, HslParams, PointCurveParams, ToneCurveParams, ToneParams, WbParams,
+    CalibrationParams, DefringeParams, HslParams, PointCurveParams, ToneCurveParams, ToneParams,
+    WbParams,
 };
 
 pub type Mat3 = [[f32; 3]; 3];
@@ -205,6 +206,149 @@ pub fn camera_to_working_space_matrix(
     // cam_xyz_to_mat3 returns XYZ->camera (see its own doc comment); invert to get camera->XYZ.
     let cam_to_xyz = mat3_invert(&cam_xyz_to_mat3(cam_xyz));
     mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_mul(cam_to_xyz, wb_mat))
+}
+
+/// Calibration (#381) primaries: how far a slider at +-1 rotates a primary's chromaticity about
+/// the D50 white (degrees) and how much it scales the distance from white. **Untuned vs LRC** --
+/// the follow-up reference-machine run picks the real numbers.
+pub const CALIBRATION_MAX_HUE_DEG: f32 = 30.0;
+pub const CALIBRATION_MAX_SAT: f32 = 0.5;
+/// Shadows tint at +-1 changes green by this fraction in the deepest shadows. Untuned.
+pub const SHADOW_TINT_MAX_GAIN: f32 = 0.25;
+/// The shadow weight falls from 1 to 0 across this perceptual (cube-root luma) range. Mirrored in
+/// `live_suffix.wgsl`'s `apply_shadow_tint`.
+pub const SHADOW_TINT_KNEE: (f32, f32) = (0.15, 0.55);
+
+const D50_XY: [f32; 2] = [0.3457, 0.3585];
+/// Lowest chromaticity y a calibrated primary may reach.
+const CALIBRATION_MIN_Y: f32 = 0.02;
+
+fn mat3_det(m: &Mat3) -> f32 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// Folds the Calibration panel's primaries into the camera->working matrix `m` (columns = where
+/// camera R, G, B land in linear ProPhoto).
+///
+/// Each column is moved in xy chromaticity (hue = rotation about the D50 white, saturation = scale
+/// of the distance from it, luminance Y kept), then the three columns are re-scaled so they still
+/// sum to what they summed to before -- i.e. camera white keeps mapping to the same working-space
+/// white and a neutral stays neutral whatever the sliders say. A combination no valid re-scaling can
+/// satisfy is applied at the largest valid fraction of its strength (continuous in every slider);
+/// a primary with no usable luminance is left alone; a fully degenerate matrix returns `m`.
+pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
+    let p = p.sanitized();
+    if p.primaries_noop() {
+        return m;
+    }
+    if let Some(full) = calibrate_at(m, &p, 1.0) {
+        return full;
+    }
+    // The sliders together push the primaries somewhere no positive re-scaling of the columns can
+    // keep white fixed (e.g. green and blue rotated toward each other). Rather than dropping the
+    // whole adjustment -- which would make the picture jump back to uncalibrated as one slider
+    // crosses a threshold -- back off to the largest strength that is still valid, so the result
+    // moves continuously with every slider. Strength 0 is `m` itself, always valid.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    let mut best = m;
+    for _ in 0..14 {
+        let mid = 0.5 * (lo + hi);
+        match calibrate_at(m, &p, mid) {
+            Some(r) => {
+                best = r;
+                lo = mid;
+            }
+            None => hi = mid,
+        }
+    }
+    best
+}
+
+/// One attempt at [`calibrate_matrix`] with every slider scaled by `strength` (0..=1); `None` when
+/// the moved primaries cannot be re-scaled to sum to the original white with positive gains.
+fn calibrate_at(m: Mat3, p: &CalibrationParams, strength: f32) -> Option<Mat3> {
+    let to_xyz = mat3_invert(&XYZ_D50_TO_PROPHOTO);
+    let amounts = [
+        (p.red_hue, p.red_sat),
+        (p.green_hue, p.green_sat),
+        (p.blue_hue, p.blue_sat),
+    ];
+    let white = [
+        m[0][0] + m[0][1] + m[0][2],
+        m[1][0] + m[1][1] + m[1][2],
+        m[2][0] + m[2][1] + m[2][2],
+    ];
+    let mut cols = [[0.0f32; 3]; 3];
+    for (i, (hue, sat)) in amounts.into_iter().enumerate() {
+        let (hue, sat) = (hue * strength, sat * strength);
+        let col = [m[0][i], m[1][i], m[2][i]];
+        let xyz = mat3_apply(to_xyz, col);
+        let sum = xyz[0] + xyz[1] + xyz[2];
+        // A primary with no usable luminance or chromaticity (a real camera matrix can give a
+        // slightly negative Y for a deep blue) is left where it is; the others still move.
+        if !sum.is_finite() || sum.abs() <= 1e-9 || xyz[1] <= 1e-6 {
+            cols[i] = col;
+            continue;
+        }
+        let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+        let (dx, dy) = (x - D50_XY[0], y - D50_XY[1]);
+        let (sin, cos) = (hue * CALIBRATION_MAX_HUE_DEG).to_radians().sin_cos();
+        let mut scale = 1.0 + sat * CALIBRATION_MAX_SAT;
+        let (vx, vy) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        // A saturated primary (blue) can't be pushed past the bottom of the xy plane: stop at a
+        // small positive y instead of giving up on the whole adjustment.
+        if vy < 0.0 && D50_XY[1] + vy * scale < CALIBRATION_MIN_Y {
+            scale = (CALIBRATION_MIN_Y - D50_XY[1]) / vy;
+        }
+        let nx = D50_XY[0] + vx * scale;
+        let ny = D50_XY[1] + vy * scale;
+        if !ny.is_finite() || ny <= 1e-4 {
+            return None;
+        }
+        // Keep the primary's own luminance (Y), rebuild X and Z from the moved chromaticity.
+        let big_y = xyz[1];
+        let new_xyz = [nx * big_y / ny, big_y, (1.0 - nx - ny) * big_y / ny];
+        cols[i] = mat3_apply(XYZ_D50_TO_PROPHOTO, new_xyz);
+    }
+    // Columns as a matrix, then solve `C * k = white` for the per-column gains.
+    let c: Mat3 = [
+        [cols[0][0], cols[1][0], cols[2][0]],
+        [cols[0][1], cols[1][1], cols[2][1]],
+        [cols[0][2], cols[1][2], cols[2][2]],
+    ];
+    let det = mat3_det(&c);
+    if !det.is_finite() || det.abs() <= 1e-9 {
+        return None;
+    }
+    let k = mat3_apply(mat3_invert(&c), white);
+    if k.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return None;
+    }
+    Some([
+        [c[0][0] * k[0], c[0][1] * k[1], c[0][2] * k[2]],
+        [c[1][0] * k[0], c[1][1] * k[1], c[1][2] * k[2]],
+        [c[2][0] * k[0], c[2][1] * k[1], c[2][2] * k[2]],
+    ])
+}
+
+/// Shadows tint (#381): positive moves the shadows toward magenta (less green), negative toward
+/// green. `rgb` is linear working space right after the camera->working matrix; the effect is
+/// weighted by a shadow mask on perceptual luma. CPU twin of `live_suffix.wgsl`'s
+/// `apply_shadow_tint`.
+pub fn shadow_tint_pixel(rgb: [f32; 3], tint: f32) -> [f32; 3] {
+    if tint == 0.0 {
+        return rgb;
+    }
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let g = luma.max(0.0).cbrt();
+    let w = 1.0 - smoothstep(SHADOW_TINT_KNEE.0, SHADOW_TINT_KNEE.1, g);
+    [
+        rgb[0],
+        rgb[1] * (1.0 - tint.clamp(-1.0, 1.0) * SHADOW_TINT_MAX_GAIN * w),
+        rgb[2],
+    ]
 }
 
 pub fn exposure_multiplier(stops: f32) -> f32 {
@@ -437,14 +581,25 @@ pub fn apply_tone_curve(rgb: [f32; 3], lut: &[f32; 256]) -> [f32; 3] {
 }
 
 /// Per-channel point-curve LUTs (#432): rows are R, G, B, each 256 entries over the cube-root
-/// perceptual axis, with the master curve already composed in (`channel(master(x))`). `None` when
+/// perceptual axis, with the master curve already composed in (`channel(master(look(x)))`, where
+/// `look` is the selected Look profile's own curve, empty for none). `None` when
 /// every curve is the identity, so the shader can skip the stage and leave pixels bit-identical.
 /// Built from [`PointCurveParams::sanitized`] points with the same Fritsch-Carlson monotone spline
 /// the DCP profile curve uses (`nicti_calico::tonecurve::ToneCurve`).
-pub fn build_point_curve_luts(params: &PointCurveParams) -> Option<[[f32; 256]; 3]> {
+pub fn build_point_curve_luts(
+    params: &PointCurveParams,
+    look_curve: &[[f32; 2]],
+) -> Option<[[f32; 256]; 3]> {
     use nicti_calico::tonecurve::ToneCurve;
     let s = params.sanitized();
-    if s.master.is_empty() && s.red.is_empty() && s.green.is_empty() && s.blue.is_empty() {
+    // The selected Look profile's own master curve (#381) runs ahead of everything the user set.
+    let look_curve = crate::coat::sanitize_curve(look_curve);
+    if look_curve.is_empty()
+        && s.master.is_empty()
+        && s.red.is_empty()
+        && s.green.is_empty()
+        && s.blue.is_empty()
+    {
         return None;
     }
     let curve = |pts: &[[f32; 2]]| -> Option<ToneCurve> {
@@ -456,11 +611,13 @@ pub fn build_point_curve_luts(params: &PointCurveParams) -> Option<[[f32; 256]; 
             ToneCurve::new(&pts)
         })
     };
+    let look = curve(&look_curve);
     let master = curve(&s.master);
     let channels = [curve(&s.red), curve(&s.green), curve(&s.blue)];
     Some(std::array::from_fn(|c| {
         std::array::from_fn(|i| {
             let x = f64::from(i as f32 / 255.0);
+            let x = look.as_ref().map_or(x, |l| l.eval(x));
             let m = master.as_ref().map_or(x, |m| m.eval(x));
             let y = channels[c].as_ref().map_or(m, |ch| ch.eval(m));
             y.clamp(0.0, 1.0) as f32
@@ -624,6 +781,253 @@ pub fn srgb_oetf(linear: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::coat::HslBand;
+
+    /// A plausible camera->working matrix (columns roughly the ProPhoto image of sensor primaries).
+    fn camera_matrix() -> Mat3 {
+        // Camera primaries at roughly xy (0.67,0.30), (0.24,0.67), (0.14,0.09) in D50 XYZ.
+        mat3_mul(
+            XYZ_D50_TO_PROPHOTO,
+            [[0.55, 0.25, 0.15], [0.25, 0.7, 0.1], [0.02, 0.1, 0.85]],
+        )
+    }
+
+    fn chroma_of(rgb: [f32; 3]) -> (f32, f32) {
+        let xyz = mat3_apply(mat3_invert(&XYZ_D50_TO_PROPHOTO), rgb);
+        let s = xyz[0] + xyz[1] + xyz[2];
+        (xyz[0] / s - D50_XY[0], xyz[1] / s - D50_XY[1])
+    }
+
+    #[test]
+    fn calibrate_matrix_is_identity_at_defaults() {
+        let m = camera_matrix();
+        assert_eq!(calibrate_matrix(m, &CalibrationParams::default()), m);
+        // Shadows tint alone does not touch the matrix either.
+        let tint = CalibrationParams {
+            shadow_tint: 0.7,
+            ..Default::default()
+        };
+        assert_eq!(calibrate_matrix(m, &tint), m);
+    }
+
+    #[test]
+    fn calibrate_matrix_keeps_camera_white_fixed_for_any_slider() {
+        let m = camera_matrix();
+        let white = mat3_apply(m, [1.0, 1.0, 1.0]);
+        for p in [
+            CalibrationParams {
+                red_hue: 1.0,
+                ..Default::default()
+            },
+            CalibrationParams {
+                green_sat: -1.0,
+                blue_hue: -0.6,
+                ..Default::default()
+            },
+            CalibrationParams {
+                red_hue: 1.0,
+                red_sat: 1.0,
+                green_hue: -1.0,
+                green_sat: 1.0,
+                blue_hue: 1.0,
+                blue_sat: -1.0,
+                shadow_tint: 0.0,
+            },
+        ] {
+            let out = calibrate_matrix(m, &p);
+            let w = mat3_apply(out, [1.0, 1.0, 1.0]);
+            for c in 0..3 {
+                assert!(
+                    (w[c] - white[c]).abs() < 1e-4,
+                    "{p:?}: white drifted on channel {c}: {w:?} vs {white:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn calibrate_matrix_red_hue_rotates_the_red_primary_and_leaves_others_alone() {
+        let m = camera_matrix();
+        let p = CalibrationParams {
+            red_hue: 1.0,
+            ..Default::default()
+        };
+        let out = calibrate_matrix(m, &p);
+        let before = chroma_of(mat3_apply(m, [1.0, 0.0, 0.0]));
+        let after = chroma_of(mat3_apply(out, [1.0, 0.0, 0.0]));
+        let angle = |c: (f32, f32)| c.1.atan2(c.0).to_degrees();
+        let mut turned = angle(after) - angle(before);
+        if turned > 180.0 {
+            turned -= 360.0;
+        }
+        if turned < -180.0 {
+            turned += 360.0;
+        }
+        assert!(
+            (turned - CALIBRATION_MAX_HUE_DEG).abs() < 1.0,
+            "red primary turned {turned} degrees"
+        );
+        // The renormalisation moves the other primaries only a little, never their hue by tens of degrees.
+        let g_before = chroma_of(mat3_apply(m, [0.0, 1.0, 0.0]));
+        let g_after = chroma_of(mat3_apply(out, [0.0, 1.0, 0.0]));
+        assert!((angle(g_after) - angle(g_before)).abs() < 8.0);
+    }
+
+    #[test]
+    fn calibrate_matrix_saturation_scales_distance_from_white() {
+        let m = camera_matrix();
+        let dist = |mm: Mat3| {
+            let c = chroma_of(mat3_apply(mm, [0.0, 0.0, 1.0]));
+            (c.0 * c.0 + c.1 * c.1).sqrt()
+        };
+        let up = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                blue_sat: 1.0,
+                ..Default::default()
+            },
+        );
+        let down = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                blue_sat: -1.0,
+                ..Default::default()
+            },
+        );
+        assert!(dist(up) > dist(m) && dist(m) > dist(down));
+    }
+
+    #[test]
+    fn calibrate_matrix_never_drops_the_whole_adjustment_and_is_continuous() {
+        let m = camera_matrix();
+        let white = mat3_apply(m, [1.0, 1.0, 1.0]);
+        // Finding from review: green and blue rotated toward each other used to return `m`
+        // unchanged -- every slider, including the red ones, silently ignored.
+        let p = CalibrationParams {
+            red_hue: -1.0,
+            green_hue: -1.0,
+            blue_hue: 1.0,
+            ..Default::default()
+        };
+        let out = calibrate_matrix(m, &p);
+        assert_ne!(out, m, "an extreme combination must still do something");
+        let w = mat3_apply(out, [1.0, 1.0, 1.0]);
+        for c in 0..3 {
+            assert!((w[c] - white[c]).abs() < 1e-3, "white drifted: {w:?}");
+        }
+        // Sweeping one slider never makes the matrix jump: neighbours stay close.
+        let mut prev: Option<Mat3> = None;
+        for i in 0..=40 {
+            let q = CalibrationParams {
+                red_hue: -1.0,
+                green_hue: -1.0,
+                blue_hue: -1.0 + 2.0 * i as f32 / 40.0,
+                ..Default::default()
+            };
+            let cur = calibrate_matrix(m, &q);
+            if let Some(prev) = prev {
+                let jump = (0..3)
+                    .flat_map(|r| (0..3).map(move |c| (r, c)))
+                    .map(|(r, c)| (cur[r][c] - prev[r][c]).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(jump < 0.35, "matrix jumped by {jump} at step {i}");
+            }
+            prev = Some(cur);
+        }
+    }
+
+    #[test]
+    fn a_primary_with_negative_luminance_is_left_alone_and_the_rest_still_move() {
+        let mut m = camera_matrix();
+        // Make the blue column's Y slightly negative, as a real deep-blue primary can be.
+        let to_xyz = mat3_invert(&XYZ_D50_TO_PROPHOTO);
+        let mut xyz = mat3_apply(to_xyz, [m[0][2], m[1][2], m[2][2]]);
+        xyz[1] = -0.02;
+        let col = mat3_apply(XYZ_D50_TO_PROPHOTO, xyz);
+        (m[0][2], m[1][2], m[2][2]) = (col[0], col[1], col[2]);
+        let out = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                red_hue: 0.8,
+                ..Default::default()
+            },
+        );
+        assert_ne!(out, m, "red must still move");
+    }
+
+    #[test]
+    fn a_saturated_primary_is_stopped_at_the_bottom_of_the_xy_plane() {
+        // Blue +100 % saturation would push chromaticity y below zero; the clamp keeps it above
+        // CALIBRATION_MIN_Y instead of discarding the adjustment.
+        let m = camera_matrix();
+        let out = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                blue_sat: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_ne!(out, m);
+        let (_, dy) = chroma_of(mat3_apply(out, [0.0, 0.0, 1.0]));
+        assert!(
+            dy + D50_XY[1] >= CALIBRATION_MIN_Y - 1e-4,
+            "y = {}",
+            dy + D50_XY[1]
+        );
+    }
+
+    #[test]
+    fn calibrate_matrix_survives_a_degenerate_matrix_and_hostile_values() {
+        let singular: Mat3 = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]];
+        let p = CalibrationParams {
+            red_hue: f32::NAN,
+            green_sat: f32::INFINITY,
+            blue_hue: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(calibrate_matrix(singular, &p), singular);
+        let out = calibrate_matrix(camera_matrix(), &p);
+        assert!(out.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    /// #381: a Look's curve is composed ahead of the user's master curve, and nothing at all is
+    /// still `None` (so an unedited photo skips the stage).
+    #[test]
+    fn a_looks_curve_composes_ahead_of_the_users_master_curve() {
+        let none = PointCurveParams::default();
+        assert!(build_point_curve_luts(&none, &[]).is_none());
+        let look = [[0.0, 0.0], [0.5, 0.35], [1.0, 1.0]];
+        let only_look = build_point_curve_luts(&none, &look).expect("a look curve is an edit");
+        assert!(
+            only_look[0][128] < 128.0 / 255.0 - 0.05,
+            "contrasty look darkens mids"
+        );
+        assert_eq!(only_look[0], only_look[1]);
+        // With a user master curve the result differs from either alone (look first, then master).
+        let user = PointCurveParams {
+            master: vec![[0.0, 0.1], [1.0, 1.0]],
+            ..Default::default()
+        };
+        let both = build_point_curve_luts(&user, &look).unwrap();
+        let only_user = build_point_curve_luts(&user, &[]).unwrap();
+        assert_ne!(both[0], only_look[0]);
+        assert_ne!(both[0], only_user[0]);
+        // Floor of the user curve lifts black; the look keeps 0 -> 0, so black ends at the user's 0.1.
+        assert!((both[0][0] - 0.1).abs() < 1e-5);
+        // A garbage look curve is ignored rather than corrupting the table.
+        assert!(build_point_curve_luts(&none, &[[f32::NAN, 0.0], [1.0, 1.0]]).is_none());
+    }
+
+    #[test]
+    fn shadow_tint_moves_green_in_the_shadows_only() {
+        let dark = [0.01, 0.01, 0.01];
+        let bright = [0.8, 0.8, 0.8];
+        assert_eq!(shadow_tint_pixel(dark, 0.0), dark);
+        let magenta = shadow_tint_pixel(dark, 1.0);
+        let green = shadow_tint_pixel(dark, -1.0);
+        assert!(magenta[1] < dark[1] && green[1] > dark[1]);
+        assert_eq!((magenta[0], magenta[2]), (dark[0], dark[2]));
+        assert_eq!(shadow_tint_pixel(bright, 1.0), bright);
+    }
 
     #[test]
     fn mat3_invert_of_identity_is_identity() {

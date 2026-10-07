@@ -89,7 +89,7 @@ Full reasoning/history: `docs/decisions/color.md`.
   fingerprint change. Selection = `coat::CameraProfileParams` on `nicti.working_space` (blake3 of
   the file → cache key; none = `{}`). `nicti-pelt` `camera_profiles.rs` discovers the user's own
   profiles and Look `.xmp`s (bindings 11/12); **default is Matrix only**. Not applied yet:
-  `DefaultBlackRender` Auto handling, and a Look's `ToneCurvePV2012`/Clarity/RGBTable settings.
+  `DefaultBlackRender` Auto handling, and a Look's Clarity/RGBTable settings (its `ToneCurvePV2012` is applied since #381 -- parsed into `LookProfile::tone_curve`, composed in the point-curve LUT, see `render-graph`; LRC `CameraProfile` names resolve to these files at import, `lrc-migration`).
 
 ## Package contents
 

@@ -17,6 +17,7 @@ use nicti_pawprint::{EditDocument, StageEntry};
 use serde::Serialize;
 
 mod basic;
+mod calibration;
 mod crop;
 mod detail;
 mod effects;
@@ -26,6 +27,7 @@ mod heal;
 mod hsl;
 mod lens;
 mod masks;
+mod profile;
 
 pub use filters::FilterCounts;
 
@@ -67,6 +69,9 @@ pub struct Translation {
     pub untranslated: Vec<String>,
     pub filters: FilterCounts,
     pub stats: Stats,
+    /// The camera profile LRC renders with, when it is one nicti should look up (#381; see
+    /// `profile.rs` for what is skipped). Resolved to a real `.dcp`/Look by the import job, not here.
+    pub camera_profile: Option<String>,
 }
 
 impl Stats {
@@ -94,6 +99,7 @@ pub(crate) struct Tx<'a, 'v> {
     pub doc: EditDocument,
     pub filters: FilterCounts,
     pub stats: Stats,
+    pub camera_profile: Option<String>,
 }
 
 impl<'v> Tx<'_, 'v> {
@@ -288,6 +294,7 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
         doc: EditDocument::default(),
         filters: FilterCounts::default(),
         stats: Stats::default(),
+        camera_profile: None,
     };
 
     // PV2003/2010 are "10.0" and below; PV2012 and every later version (11.x ... 15.x, and whatever
@@ -308,6 +315,8 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
         basic::apply(&mut tx);
         hsl::apply(&mut tx);
         grade::apply(&mut tx);
+        calibration::apply(&mut tx);
+        profile::apply(&mut tx);
         detail::apply(&mut tx);
         effects::apply(&mut tx);
         lens::apply(&mut tx);
@@ -332,6 +341,7 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
         untranslated,
         filters: tx.filters,
         stats: tx.stats,
+        camera_profile: tx.camera_profile,
     })
 }
 

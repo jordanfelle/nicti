@@ -89,6 +89,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0218](0218-local-only-ai.md) | — | Local-only default for AI culling/suggestion features | Accepted |
 | [0249](0249-windows-installer-and-updates.md) | — | Windows installer, code signing, and auto-update | Proposed |
 | [0353](0353-baked-alpha-disk-tier.md) | — | Disk tier for baked AI mask alphas, and the background pre-bake (Stash) | Accepted |
+| [0381](0381-calibration-and-lrc-profile-resolution.md) | — | Camera Calibration, LRC camera-profile resolution, and a Look's own tone curve | Accepted |
 | [0432](0432-develop-curves-grading-point-color.md) | — | Develop UI: point curves, colour mixer, Color Grading and Point Color (OkLab) | Accepted |
 | [0428](0428-lens-stage-ca-dng-defringe.md) | — | The lens stage (DNG-embedded profile, automatic lateral CA) and global Defringe | Accepted |
 | [0380](0380-global-presence-and-effects.md) | — | Global Presence (texture/clarity/dehaze/saturation) and post-crop Effects (vignette/grain) | Accepted |

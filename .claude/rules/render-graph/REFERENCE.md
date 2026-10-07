@@ -18,7 +18,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 - **Stage order**: baked prefix `decode → demosaic (AHD) → denoise (SCUNet) → lens correction →
   heal/remove` → (#49, amends ADR-0044) the neutral render for AI masks taps **post-lens, pre-heal**, a
   keying-only node that is not executed → one
-  fused live dispatch `WB → HueSatMap → exposure → tone → vibrance → HSL → local corrections (masks)` → crop as
+  fused live dispatch `WB → (calibration) → HueSatMap → exposure → tone → vibrance → HSL → local corrections (masks)` → crop as
   an affine sample pass over the live suffix's own output only.
 - **Cache key**: `nicti_pawprint::chain` generalizes ADR-0021's flat one-upstream chain to a DAG;
   `nicti_tapetum::graph::RenderGraph::cache_key`/`invalidated_bakes`/`set_own_hash` are the tested,
@@ -78,6 +78,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   (`oklab::wheel_direction`); an out-of-gamut ProPhoto pixel clamps negative LMS to 0 before the cube root (the round-trip test needs in-gamut
   pixels); `LiveParams` gained fields, so any explicit initializer (tests in `mask/local.rs`, `stages.rs`) needs them. Constants are
   LightCraft's, untuned; LRC parity is a reference-machine follow-up.
+- **Calibration + Look curve (#381, `docs/adr/0381`)**: `nicti.calibration` (`coat::CalibrationParams`) is a Live stage right after `working_space`. Its primaries are **not a shader change**: `color::calibrate_matrix` folds them into the camera->working 3x3 in `spine::resolve_inputs` (LibRaw matrix or the DCP solution's), moving each column in xy then re-scaling the columns to sum to the original white so a neutral stays neutral; a degenerate matrix returns unchanged. Shadows Tint is a green gain in `defringe1.z` (`apply_shadow_tint` / `color::shadow_tint_pixel`). A selected Look's own `ToneCurvePV2012` rides `LiveParams::look_curve` and is composed *ahead of* the user's master curve in `build_point_curve_luts` (display-referred domain matches; the profile `tone_lut` is scene-linear so it is not used). Constants untuned vs LRC. Gotcha: a new `LiveParams` field needs adding to the explicit initializers in `mask/local.rs`/`stages.rs`.
 - **Lens stage + Defringe (#428)**: `nicti.lens` is its own baked resample pass (`slit.rs`,
   `shaders/slit.wgsl`; crop can't host it, it runs post-matrix in ProPhoto): per-plane inverse DNG
   `WarpRectilinear`, red/blue auto-CA scale about the optical centre, `FixVignetteRadial` gain at

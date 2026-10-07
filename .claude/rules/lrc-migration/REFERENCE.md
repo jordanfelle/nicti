@@ -66,12 +66,12 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   numeric columns by stored value); `LocalExposure2012` is stops/4; a radial's `MaskInverted=true`
   = effect outside; AI mask space = uncropped frame; legacy PV2003 keys (`Contrast`, `Shadows`,
   `Exposure` …) sit beside PV2012 ones in every image. Not translated: brushes, People masks, rotated
-  crops/geometric masks, retouch, `PointColors`, calibration (all in provenance). **#432** translates `ToneCurvePV2012{,Red,Green,Blue}` (flat 0..255 `x, y` lists) -> `nicti.point_curve` and Color Grading -> `nicti.color_grade` (`develop/grade.rs`): Shadows/Highlights hue+saturation are LRC's older `SplitToning*` keys, Midtones/Global are `ColorGrade*`, luminance is `ColorGrade<Wheel>Lum`, gated by `EnableSplitToning`; a wheel with no saturation and no luminance is not an edit even with a stray hue; values map numerically only (parity unmeasured). **#380** translates the global
+  crops/geometric masks, retouch, `PointColors` (all in provenance). **#432** translates `ToneCurvePV2012{,Red,Green,Blue}` (flat 0..255 `x, y` lists) -> `nicti.point_curve` and Color Grading -> `nicti.color_grade` (`develop/grade.rs`): Shadows/Highlights hue+saturation are LRC's older `SplitToning*` keys, Midtones/Global are `ColorGrade*`, luminance is `ColorGrade<Wheel>Lum`, gated by `EnableSplitToning`; a wheel with no saturation and no luminance is not an edit even with a stray hue; values map numerically only (parity unmeasured). **#380** translates the global
   `Texture`/`Clarity2012`/`Dehaze`/`Saturation` (-100..100 -> `nicti.presence`) and the Effects panel (`PostCropVignette*`,
   `Grain*`, gated by `EnableEffects`) -> `nicti.effects`; **a slider whose amount is 0 is ignored** (LRC writes a random
   `GrainSeed` + default sliders into every image, taking them would mark every photo edited); `OverrideLookVignette` stays untranslated. **#428** adds `develop/lens.rs`: `AutoLateralCA` -> `nicti.lens`
   `remove_ca`, `DefringePurple/Green{Amount (0..20),HueLo,HueHi}` -> `nicti.defringe` (gated by `EnableLensCorrections`; a
-  channel's hue sliders count only when its amount is non-zero); `LensProfile*`/manual distortion stay untranslated (#382).
+  channel's hue sliders count only when its amount is non-zero); `LensProfile*`/manual distortion stay untranslated (#382). **#381 (`docs/adr/0381`)**: `develop/calibration.rs` (`RedHue`..`BlueSaturation`/`ShadowTint`, /100) -> `nicti.calibration`; `develop/profile.rs` only extracts the `CameraProfile` *name* (`Translation::camera_profile`; `Adobe Standard`/`Embedded` request nothing, or every photo would look edited). The job resolves it through `ImportConfig::profile_resolver` (`ProfileResolver` trait, stray cannot read profile folders -- pelt's `camera_profiles::LrcProfileResolver` does: installed DCP by name, else a Look layered on that camera's Adobe Standard, else nothing) and writes the answer as `nicti.working_space` before the provenance snapshot; an unresolved name goes in `LrcImportReport::profiles_missing` + the image's untranslated list. Unknown camera make/model reaches the resolver as empty strings.
 
 ## Package contents
 
@@ -88,7 +88,7 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   path-gated. See `docs/research/shed-lrcat-schema.md` and `docs/adr/0158-lrc-hash-relink-seeding.md`.
 - **`crates/nicti-stray`** (#62/ADR-0062) — `open.rs` (guarded read-only open + v13 schema check,
   promoted from the spike), `read.rs` (paged `Reader`), `paths.rs` (remap, drive-letter mapping),
-  `develop/` (Lua → `EditDocument`: `basic`/`hsl`/`detail`/`crop`/`masks`/`heal`/`filters`),
+  `develop/` (Lua → `EditDocument`: `basic`/`hsl`/`detail`/`crop`/`masks`/`heal`/`filters`/`calibration`/`profile`), `resolver.rs` (`ProfileResolver`),
   `job.rs` (`LrcImportJob`), `report.rs`; `tests/import.rs` end to end on a synthetic `.lrcat`,
   `tests/real_catalog.rs` (`#[ignore]`, `NICTI_TEST_LRCAT=<closed backup>`) against a real one.
   UI: `nicti-pelt`'s `lrc_import.rs` (Library controls).

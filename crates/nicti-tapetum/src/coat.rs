@@ -637,6 +637,63 @@ impl DefringeParams {
     }
 }
 
+/// Camera Calibration panel (#381): per-primary hue/saturation plus the shadows tint. All fields
+/// are `-1..=1` (LRC -100..100); all zero is a no-op. The primaries are folded into the
+/// camera->working matrix on the CPU (`color::calibrate_matrix`), the tint is a live-suffix uniform
+/// (`color::shadow_tint_pixel`). Constants behind them are untuned against LRC.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalibrationParams {
+    pub red_hue: f32,
+    pub red_sat: f32,
+    pub green_hue: f32,
+    pub green_sat: f32,
+    pub blue_hue: f32,
+    pub blue_sat: f32,
+    /// Green(-)/magenta(+) shift confined to the shadows.
+    pub shadow_tint: f32,
+}
+
+impl CalibrationParams {
+    /// Whether the primaries need no matrix change.
+    pub fn primaries_noop(&self) -> bool {
+        [
+            self.red_hue,
+            self.red_sat,
+            self.green_hue,
+            self.green_sat,
+            self.blue_hue,
+            self.blue_sat,
+        ]
+        .iter()
+        .all(|v| *v == 0.0)
+    }
+
+    pub fn is_noop(&self) -> bool {
+        self.primaries_noop() && self.shadow_tint == 0.0
+    }
+
+    /// Clamped to `-1..=1` with NaN scrubbed (documents are untrusted).
+    pub fn sanitized(&self) -> Self {
+        let s = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            red_hue: s(self.red_hue),
+            red_sat: s(self.red_sat),
+            green_hue: s(self.green_hue),
+            green_sat: s(self.green_sat),
+            blue_hue: s(self.blue_hue),
+            blue_sat: s(self.blue_sat),
+            shadow_tint: s(self.shadow_tint),
+        }
+    }
+}
+
 /// One Color Grading wheel (#432). `hue` is degrees on the same HSV-style wheel the UI paints
 /// (`0..360`), `sat` is `0..1` (LRC 0..100), `lum` is `-1..1` (LRC -100..100). Zero `sat` and `lum`
 /// is a no-op whatever the hue.
@@ -844,7 +901,7 @@ pub struct PointCurveParams {
 /// One channel's points, cleaned: finite, clamped to 0..1, sorted by x, strictly increasing in x
 /// (a later point within 1e-4 of the previous x is dropped), capped at [`MAX_CURVE_POINTS`]. Fewer
 /// than two survivors, or exactly the identity diagonal, becomes empty (no-op).
-fn sanitize_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+pub(crate) fn sanitize_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     let mut pts: Vec<[f32; 2]> = points
         .iter()
         .filter(|p| p[0].is_finite() && p[1].is_finite())

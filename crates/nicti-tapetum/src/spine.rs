@@ -16,19 +16,19 @@ use nicti_cornea::LinearFrame;
 use nicti_pawprint::EditDocument;
 
 use crate::coat::{
-    self, CameraProfileParams, ColorGradeParams, CropParams, DefringeParams, EffectsParams,
-    ExposureParams, HealParams, HslParams, LensParams, NoiseReductionParams, PointColorParams,
-    PointCurveParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams,
-    WbParams,
+    self, CalibrationParams, CameraProfileParams, ColorGradeParams, CropParams, DefringeParams,
+    EffectsParams, ExposureParams, HealParams, HslParams, LensParams, NoiseReductionParams,
+    PointColorParams, PointCurveParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, WbParams,
 };
 use crate::color;
 use crate::frame::Extent;
 use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
-    self, LiveParams, COLOR_GRADE, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE,
-    HEAL, HSL, LENS, MASKS, NEUTRAL, NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN,
-    TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    self, LiveParams, CALIBRATION, COLOR_GRADE, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS,
+    EXPOSURE, HEAL, HSL, LENS, MASKS, NEUTRAL, NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE,
+    SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -36,9 +36,11 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 15] = [
+pub const LIVE_IDS: [&str; 16] = [
     WB,
     WORKING_SPACE,
+    // Camera Calibration (#381): primaries fold into the matrix, shadows tint right after it.
+    CALIBRATION,
     // Purple/green fringe desaturation (#428): same dispatch, right after the camera->working matrix.
     DEFRINGE,
     EXPOSURE,
@@ -138,6 +140,7 @@ render_stage_factory!(point_curve_factory, stages::point_curve_stage);
 render_stage_factory!(vibrance_factory, stages::vibrance_stage);
 render_stage_factory!(presence_factory, stages::presence_stage);
 render_stage_factory!(defringe_factory, stages::defringe_stage);
+render_stage_factory!(calibration_factory, stages::calibration_stage);
 render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(color_grade_factory, stages::color_grade_stage);
 render_stage_factory!(point_color_factory, stages::point_color_stage);
@@ -153,7 +156,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 23] = [
+    let entries: [StageFactoryEntry; 24] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -168,6 +171,7 @@ pub fn build_registry() -> StageRegistry {
         (VIBRANCE, vibrance_factory),
         (PRESENCE, presence_factory),
         (DEFRINGE, defringe_factory),
+        (CALIBRATION, calibration_factory),
         (HSL, hsl_factory),
         (COLOR_GRADE, color_grade_factory),
         (POINT_COLOR, point_color_factory),
@@ -307,9 +311,21 @@ pub fn resolve_inputs(
         }
         _ => None,
     };
-    let working_space_matrix = match &solution {
-        Some(s) => s.camera_to_working,
-        None => color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz, &wb),
+    let calibration: CalibrationParams = resolve::<CalibrationParams>(doc, CALIBRATION).sanitized();
+    // Calibration primaries (#381) fold into whichever camera->working matrix is in use, so with a
+    // DCP they land before its HueSatMap, as Adobe's calibration does.
+    let working_space_matrix = color::calibrate_matrix(
+        match &solution {
+            Some(s) => s.camera_to_working,
+            None => color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz, &wb),
+        },
+        &calibration,
+    );
+
+    // A Look's own tone curve (#381) applies only when the document actually selected that Look.
+    let look_curve: Vec<[f32; 2]> = match (&chosen.look, look) {
+        (Some(_), Some(look)) if solution.is_some() => look.tone_curve.clone(),
+        _ => Vec::new(),
     };
 
     let exposure: ExposureParams = resolve(doc, EXPOSURE);
@@ -332,11 +348,13 @@ pub fn resolve_inputs(
             tone,
             tone_curve,
             point_curve,
+            look_curve,
             color_grade,
             point_color,
             vibrance,
             presence,
             defringe: resolve::<DefringeParams>(doc, DEFRINGE).sanitized(),
+            calibration,
             hsl,
             sharpen,
             noise_reduction,
@@ -356,6 +374,220 @@ mod tests {
 
     fn id(n: u8) -> blake3::Hash {
         blake3::hash(&[n])
+    }
+
+    fn frame() -> LinearFrame {
+        LinearFrame {
+            make: "Test".to_string(),
+            model: "Synthetic".to_string(),
+            width: 2,
+            height: 2,
+            black: 100,
+            maximum: 1100,
+            cam_mul: [1.0, 1.0, 1.0, 1.0],
+            pre_mul: [1.0, 1.0, 1.0, 1.0],
+            // XYZ -> camera for primaries near xy (0.67,0.30), (0.24,0.67), (0.14,0.09).
+            cam_xyz: [
+                2.16047, -0.72939, -0.29545, -0.7774, 1.71545, -0.06463, 0.04062, -0.18466,
+                1.19103, 0.0, 0.0, 0.0,
+            ],
+            cblack: [0; 4],
+            pixels: vec![0; 12],
+            dng_opcode_list3: None,
+        }
+    }
+
+    fn doc_with(stage: &str, params: serde_json::Value) -> EditDocument {
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            stage.to_string(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params,
+            },
+        );
+        doc
+    }
+
+    const EXTENT: Extent = Extent {
+        width: 2,
+        height: 2,
+    };
+
+    /// #381: calibration primaries change the working-space matrix (and only that), keep camera
+    /// white fixed, and an empty document is untouched.
+    #[test]
+    fn calibration_primaries_fold_into_the_matrix_and_keep_white() {
+        let f = frame();
+        let plain = resolve_inputs(&EditDocument::default(), &f, EXTENT, None, None, 1.0);
+        let doc = doc_with(
+            CALIBRATION,
+            serde_json::json!({ "red_hue": 0.8, "blue_sat": -0.5, "shadow_tint": 0.4 }),
+        );
+        let cal = resolve_inputs(&doc, &f, EXTENT, None, None, 1.0);
+        assert_ne!(
+            plain.live.working_space_matrix,
+            cal.live.working_space_matrix
+        );
+        let white = |m: color::Mat3| color::mat3_apply(m, [1.0, 1.0, 1.0]);
+        let (a, b) = (
+            white(plain.live.working_space_matrix),
+            white(cal.live.working_space_matrix),
+        );
+        for c in 0..3 {
+            assert!((a[c] - b[c]).abs() < 1e-4, "white drifted: {a:?} vs {b:?}");
+        }
+        assert_eq!(cal.live.calibration.shadow_tint, 0.4);
+        assert_eq!(plain.live.calibration, CalibrationParams::default());
+    }
+
+    fn look_with_curve(curve: Vec<[f32; 2]>) -> nicti_calico::xmp_profile::LookProfile {
+        nicti_calico::xmp_profile::LookProfile {
+            name: "Vivid".into(),
+            look_table: nicti_calico::huesatmap::HueSatMap {
+                hue_divisions: 1,
+                sat_divisions: 1,
+                val_divisions: 1,
+                data: vec![[0.0, 1.0, 1.0]],
+            },
+            encoding: nicti_calico::dcp::TableEncoding::Linear,
+            unsupported_settings: vec![],
+            tone_curve: curve,
+        }
+    }
+
+    fn profile_doc(with_look: bool, extra: Option<(&str, serde_json::Value)>) -> EditDocument {
+        let mut ws = serde_json::json!({ "name": "P", "path": "p.dcp", "content_hash": "h" });
+        if with_look {
+            ws["look"] =
+                serde_json::json!({ "name": "Vivid", "path": "l.xmp", "content_hash": "lh" });
+        }
+        let mut doc = doc_with(WORKING_SPACE, ws);
+        if let Some((id, params)) = extra {
+            doc.stages.insert(
+                id.to_string(),
+                nicti_pawprint::StageEntry {
+                    schema_version: 1,
+                    params,
+                },
+            );
+        }
+        doc
+    }
+
+    fn dcp() -> DcpProfile {
+        DcpProfile::parse(&nicti_calico::dcp::testing::synthetic_dcp_bytes(
+            "Test Synthetic",
+            "P",
+            None,
+            None,
+            true,
+        ))
+        .expect("synthetic dcp parses")
+    }
+
+    /// #381 (review): with a DCP *and* a Look both selected and loaded, the Look's curve travels;
+    /// drop any one of the pieces and it does not.
+    #[test]
+    fn a_looks_tone_curve_travels_when_the_dcp_and_the_look_are_selected_and_loaded() {
+        let f = frame();
+        let curve = vec![[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]];
+        let look = look_with_curve(curve.clone());
+        let profile = dcp();
+        let all = resolve_inputs(
+            &profile_doc(true, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            Some(&look),
+            1.0,
+        );
+        assert_eq!(all.live.look_curve, curve);
+        // The document names no Look, or the caller has not loaded it, or no DCP is loaded.
+        let no_look_named = resolve_inputs(
+            &profile_doc(false, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            Some(&look),
+            1.0,
+        );
+        assert!(no_look_named.live.look_curve.is_empty());
+        let not_loaded = resolve_inputs(
+            &profile_doc(true, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            None,
+            1.0,
+        );
+        assert!(not_loaded.live.look_curve.is_empty());
+        let no_dcp = resolve_inputs(&profile_doc(true, None), &f, EXTENT, None, Some(&look), 1.0);
+        assert!(no_dcp.live.look_curve.is_empty());
+    }
+
+    /// #381 (review): calibration lands on the DCP solution's matrix too (before its HueSatMap),
+    /// not only on the plain LibRaw matrix.
+    #[test]
+    fn calibration_is_applied_on_top_of_a_selected_dcps_matrix() {
+        let f = frame();
+        let profile = dcp();
+        let p = CalibrationParams {
+            red_hue: 0.7,
+            blue_sat: -0.4,
+            ..Default::default()
+        };
+        let cal = serde_json::to_value(p).unwrap();
+        let plain = resolve_inputs(
+            &profile_doc(false, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            None,
+            1.0,
+        );
+        let with = resolve_inputs(
+            &profile_doc(false, Some((CALIBRATION, cal))),
+            &f,
+            EXTENT,
+            Some(&profile),
+            None,
+            1.0,
+        );
+        assert!(plain.live.camera_profile.is_some());
+        assert_eq!(
+            with.live.working_space_matrix,
+            color::calibrate_matrix(plain.live.working_space_matrix, &p)
+        );
+        assert_ne!(
+            with.live.working_space_matrix,
+            plain.live.working_space_matrix
+        );
+    }
+
+    /// #381: a Look's tone curve only travels with a selected, loaded Look on a selected profile.
+    #[test]
+    fn a_looks_tone_curve_needs_a_selected_profile_and_look() {
+        let f = frame();
+        let look = nicti_calico::xmp_profile::LookProfile {
+            name: "Vivid".into(),
+            look_table: nicti_calico::huesatmap::HueSatMap {
+                hue_divisions: 1,
+                sat_divisions: 1,
+                val_divisions: 1,
+                data: vec![[0.0, 1.0, 1.0]],
+            },
+            encoding: nicti_calico::dcp::TableEncoding::Linear,
+            unsupported_settings: vec![],
+            tone_curve: vec![[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]],
+        };
+        // Look named by the document but no DCP selected: nothing to layer it on, no curve.
+        let doc = doc_with(
+            WORKING_SPACE,
+            serde_json::json!({ "look": { "name": "Vivid", "path": "p", "content_hash": "h" } }),
+        );
+        let out = resolve_inputs(&doc, &f, EXTENT, None, Some(&look), 1.0);
+        assert!(out.live.look_curve.is_empty());
     }
 
     #[test]
