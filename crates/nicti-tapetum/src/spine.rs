@@ -16,19 +16,19 @@ use nicti_cornea::LinearFrame;
 use nicti_pawprint::EditDocument;
 
 use crate::coat::{
-    self, CameraProfileParams, ColorGradeParams, CropParams, DefringeParams, EffectsParams,
-    ExposureParams, HealParams, HslParams, LensParams, NoiseReductionParams, PointColorParams,
-    PointCurveParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams,
-    WbParams,
+    self, CalibrationParams, CameraProfileParams, ColorGradeParams, CropParams, DefringeParams,
+    EffectsParams, ExposureParams, HealParams, HslParams, LensParams, NoiseReductionParams,
+    PointColorParams, PointCurveParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, WbParams,
 };
 use crate::color;
 use crate::frame::Extent;
 use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
-    self, LiveParams, COLOR_GRADE, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE,
-    HEAL, HSL, LENS, MASKS, NEUTRAL, NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN,
-    TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    self, LiveParams, CALIBRATION, COLOR_GRADE, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS,
+    EXPOSURE, HEAL, HSL, LENS, MASKS, NEUTRAL, NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE,
+    SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -36,9 +36,11 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 15] = [
+pub const LIVE_IDS: [&str; 16] = [
     WB,
     WORKING_SPACE,
+    // Camera Calibration (#381): primaries fold into the matrix, shadows tint right after it.
+    CALIBRATION,
     // Purple/green fringe desaturation (#428): same dispatch, right after the camera->working matrix.
     DEFRINGE,
     EXPOSURE,
@@ -138,6 +140,7 @@ render_stage_factory!(point_curve_factory, stages::point_curve_stage);
 render_stage_factory!(vibrance_factory, stages::vibrance_stage);
 render_stage_factory!(presence_factory, stages::presence_stage);
 render_stage_factory!(defringe_factory, stages::defringe_stage);
+render_stage_factory!(calibration_factory, stages::calibration_stage);
 render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(color_grade_factory, stages::color_grade_stage);
 render_stage_factory!(point_color_factory, stages::point_color_stage);
@@ -153,7 +156,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 23] = [
+    let entries: [StageFactoryEntry; 24] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -168,6 +171,7 @@ pub fn build_registry() -> StageRegistry {
         (VIBRANCE, vibrance_factory),
         (PRESENCE, presence_factory),
         (DEFRINGE, defringe_factory),
+        (CALIBRATION, calibration_factory),
         (HSL, hsl_factory),
         (COLOR_GRADE, color_grade_factory),
         (POINT_COLOR, point_color_factory),
@@ -307,10 +311,16 @@ pub fn resolve_inputs(
         }
         _ => None,
     };
-    let working_space_matrix = match &solution {
-        Some(s) => s.camera_to_working,
-        None => color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz, &wb),
-    };
+    let calibration: CalibrationParams = resolve::<CalibrationParams>(doc, CALIBRATION).sanitized();
+    // Calibration primaries (#381) fold into whichever camera->working matrix is in use, so with a
+    // DCP they land before its HueSatMap, as Adobe's calibration does.
+    let working_space_matrix = color::calibrate_matrix(
+        match &solution {
+            Some(s) => s.camera_to_working,
+            None => color::camera_to_working_space_matrix(frame.cam_mul, &frame.cam_xyz, &wb),
+        },
+        &calibration,
+    );
 
     let exposure: ExposureParams = resolve(doc, EXPOSURE);
     let tone: ToneParams = resolve(doc, TONE);
@@ -337,6 +347,7 @@ pub fn resolve_inputs(
             vibrance,
             presence,
             defringe: resolve::<DefringeParams>(doc, DEFRINGE).sanitized(),
+            calibration,
             hsl,
             sharpen,
             noise_reduction,

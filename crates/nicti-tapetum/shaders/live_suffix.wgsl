@@ -38,7 +38,7 @@ struct Uniforms {
     // with the stacked local delta of the same name (a global +0.3 and a local +0.2 act as +0.5).
     presence: vec4<f32>,
     // #428 defringe: (purple amount, purple hue lo, purple hue hi, green amount), then
-    // (green hue lo, green hue hi, unused, unused). Amounts 0..1 (LRC 0..20), hues 0..1.
+    // (green hue lo, green hue hi, #381 shadows tint -1..1, unused). Amounts 0..1 (LRC 0..20), hues 0..1.
     defringe0: vec4<f32>,
     defringe1: vec4<f32>,
     // #432 point curves: x = enabled (point_curve_lut is only read when 1), yzw unused.
@@ -683,6 +683,14 @@ fn apply_defringe(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>
     return vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * (1.0 - k);
 }
 
+// ---- #381 shadows tint (color.rs::shadow_tint_pixel is the CPU twin; keep the constants in sync) ----
+fn apply_shadow_tint(rgb: vec3<f32>, tint: f32) -> vec3<f32> {
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let g = pow(max(luma, 0.0), 1.0 / 3.0);
+    let w = 1.0 - smoothstep(0.15, 0.55, g);
+    return vec3<f32>(rgb.x, rgb.y * (1.0 - clamp(tint, -1.0, 1.0) * 0.25 * w), rgb.z);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -694,6 +702,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = m * px.rgb;
     if (u.defringe0.x > 0.0 || u.defringe0.w > 0.0) {
         rgb = apply_defringe(rgb, i32(gid.x), i32(gid.y), max(dims.x, dims.y), m);
+    }
+    if (u.defringe1.z != 0.0) {
+        rgb = apply_shadow_tint(rgb, u.defringe1.z);
     }
 
     let has_locals = mu.header.x > 0.5;

@@ -20,7 +20,8 @@
 //! image in the expected direction; not claimed to match Adobe's own temp/tint numbers exactly.
 
 use crate::coat::{
-    DefringeParams, HslParams, PointCurveParams, ToneCurveParams, ToneParams, WbParams,
+    CalibrationParams, DefringeParams, HslParams, PointCurveParams, ToneCurveParams, ToneParams,
+    WbParams,
 };
 
 pub type Mat3 = [[f32; 3]; 3];
@@ -205,6 +206,117 @@ pub fn camera_to_working_space_matrix(
     // cam_xyz_to_mat3 returns XYZ->camera (see its own doc comment); invert to get camera->XYZ.
     let cam_to_xyz = mat3_invert(&cam_xyz_to_mat3(cam_xyz));
     mat3_mul(XYZ_D50_TO_PROPHOTO, mat3_mul(cam_to_xyz, wb_mat))
+}
+
+/// Calibration (#381) primaries: how far a slider at +-1 rotates a primary's chromaticity about
+/// the D50 white (degrees) and how much it scales the distance from white. **Untuned vs LRC** --
+/// the follow-up reference-machine run picks the real numbers.
+pub const CALIBRATION_MAX_HUE_DEG: f32 = 30.0;
+pub const CALIBRATION_MAX_SAT: f32 = 0.5;
+/// Shadows tint at +-1 changes green by this fraction in the deepest shadows. Untuned.
+pub const SHADOW_TINT_MAX_GAIN: f32 = 0.25;
+/// The shadow weight falls from 1 to 0 across this perceptual (cube-root luma) range. Mirrored in
+/// `live_suffix.wgsl`'s `apply_shadow_tint`.
+pub const SHADOW_TINT_KNEE: (f32, f32) = (0.15, 0.55);
+
+const D50_XY: [f32; 2] = [0.3457, 0.3585];
+/// Lowest chromaticity y a calibrated primary may reach.
+const CALIBRATION_MIN_Y: f32 = 0.02;
+
+fn mat3_det(m: &Mat3) -> f32 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// Folds the Calibration panel's primaries into the camera->working matrix `m` (columns = where
+/// camera R, G, B land in linear ProPhoto).
+///
+/// Each column is moved in xy chromaticity (hue = rotation about the D50 white, saturation = scale
+/// of the distance from it, luminance Y kept), then the three columns are re-scaled so they still
+/// sum to what they summed to before -- i.e. camera white keeps mapping to the same working-space
+/// white and a neutral stays neutral whatever the sliders say. A degenerate result (singular
+/// columns, non-finite gains) returns `m` unchanged rather than corrupting the render.
+pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
+    let p = p.sanitized();
+    if p.primaries_noop() {
+        return m;
+    }
+    let to_xyz = mat3_invert(&XYZ_D50_TO_PROPHOTO);
+    let amounts = [
+        (p.red_hue, p.red_sat),
+        (p.green_hue, p.green_sat),
+        (p.blue_hue, p.blue_sat),
+    ];
+    let white = [
+        m[0][0] + m[0][1] + m[0][2],
+        m[1][0] + m[1][1] + m[1][2],
+        m[2][0] + m[2][1] + m[2][2],
+    ];
+    let mut cols = [[0.0f32; 3]; 3];
+    for (i, (hue, sat)) in amounts.into_iter().enumerate() {
+        let col = [m[0][i], m[1][i], m[2][i]];
+        let xyz = mat3_apply(to_xyz, col);
+        let sum = xyz[0] + xyz[1] + xyz[2];
+        if !(sum.abs() > 1e-9) {
+            return m;
+        }
+        let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+        let (dx, dy) = (x - D50_XY[0], y - D50_XY[1]);
+        let (sin, cos) = (hue * CALIBRATION_MAX_HUE_DEG).to_radians().sin_cos();
+        let mut scale = 1.0 + sat * CALIBRATION_MAX_SAT;
+        let (vx, vy) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        // A saturated primary (blue) can't be pushed past the bottom of the xy plane: stop at a
+        // small positive y instead of giving up on the whole adjustment.
+        if vy < 0.0 && D50_XY[1] + vy * scale < CALIBRATION_MIN_Y {
+            scale = (CALIBRATION_MIN_Y - D50_XY[1]) / vy;
+        }
+        let nx = D50_XY[0] + vx * scale;
+        let ny = D50_XY[1] + vy * scale;
+        if !(ny > 1e-4) {
+            return m;
+        }
+        // Keep the primary's own luminance (Y), rebuild X and Z from the moved chromaticity.
+        let big_y = xyz[1];
+        let new_xyz = [nx * big_y / ny, big_y, (1.0 - nx - ny) * big_y / ny];
+        cols[i] = mat3_apply(XYZ_D50_TO_PROPHOTO, new_xyz);
+    }
+    // Columns as a matrix, then solve `C * k = white` for the per-column gains.
+    let c: Mat3 = [
+        [cols[0][0], cols[1][0], cols[2][0]],
+        [cols[0][1], cols[1][1], cols[2][1]],
+        [cols[0][2], cols[1][2], cols[2][2]],
+    ];
+    if !(mat3_det(&c).abs() > 1e-9) {
+        return m;
+    }
+    let k = mat3_apply(mat3_invert(&c), white);
+    if k.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return m;
+    }
+    [
+        [c[0][0] * k[0], c[0][1] * k[1], c[0][2] * k[2]],
+        [c[1][0] * k[0], c[1][1] * k[1], c[1][2] * k[2]],
+        [c[2][0] * k[0], c[2][1] * k[1], c[2][2] * k[2]],
+    ]
+}
+
+/// Shadows tint (#381): positive moves the shadows toward magenta (less green), negative toward
+/// green. `rgb` is linear working space right after the camera->working matrix; the effect is
+/// weighted by a shadow mask on perceptual luma. CPU twin of `live_suffix.wgsl`'s
+/// `apply_shadow_tint`.
+pub fn shadow_tint_pixel(rgb: [f32; 3], tint: f32) -> [f32; 3] {
+    if tint == 0.0 {
+        return rgb;
+    }
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let g = luma.max(0.0).cbrt();
+    let w = 1.0 - smoothstep(SHADOW_TINT_KNEE.0, SHADOW_TINT_KNEE.1, g);
+    [
+        rgb[0],
+        rgb[1] * (1.0 - tint.clamp(-1.0, 1.0) * SHADOW_TINT_MAX_GAIN * w),
+        rgb[2],
+    ]
 }
 
 pub fn exposure_multiplier(stops: f32) -> f32 {
@@ -624,6 +736,146 @@ pub fn srgb_oetf(linear: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::coat::HslBand;
+
+    /// A plausible camera->working matrix (columns roughly the ProPhoto image of sensor primaries).
+    fn camera_matrix() -> Mat3 {
+        // Camera primaries at roughly xy (0.67,0.30), (0.24,0.67), (0.14,0.09) in D50 XYZ.
+        mat3_mul(
+            XYZ_D50_TO_PROPHOTO,
+            [[0.55, 0.25, 0.15], [0.25, 0.7, 0.1], [0.02, 0.1, 0.85]],
+        )
+    }
+
+    fn chroma_of(rgb: [f32; 3]) -> (f32, f32) {
+        let xyz = mat3_apply(mat3_invert(&XYZ_D50_TO_PROPHOTO), rgb);
+        let s = xyz[0] + xyz[1] + xyz[2];
+        (xyz[0] / s - D50_XY[0], xyz[1] / s - D50_XY[1])
+    }
+
+    #[test]
+    fn calibrate_matrix_is_identity_at_defaults() {
+        let m = camera_matrix();
+        assert_eq!(calibrate_matrix(m, &CalibrationParams::default()), m);
+        // Shadows tint alone does not touch the matrix either.
+        let tint = CalibrationParams {
+            shadow_tint: 0.7,
+            ..Default::default()
+        };
+        assert_eq!(calibrate_matrix(m, &tint), m);
+    }
+
+    #[test]
+    fn calibrate_matrix_keeps_camera_white_fixed_for_any_slider() {
+        let m = camera_matrix();
+        let white = mat3_apply(m, [1.0, 1.0, 1.0]);
+        for p in [
+            CalibrationParams {
+                red_hue: 1.0,
+                ..Default::default()
+            },
+            CalibrationParams {
+                green_sat: -1.0,
+                blue_hue: -0.6,
+                ..Default::default()
+            },
+            CalibrationParams {
+                red_hue: 1.0,
+                red_sat: 1.0,
+                green_hue: -1.0,
+                green_sat: 1.0,
+                blue_hue: 1.0,
+                blue_sat: -1.0,
+                shadow_tint: 0.0,
+            },
+        ] {
+            let out = calibrate_matrix(m, &p);
+            let w = mat3_apply(out, [1.0, 1.0, 1.0]);
+            for c in 0..3 {
+                assert!(
+                    (w[c] - white[c]).abs() < 1e-4,
+                    "{p:?}: white drifted on channel {c}: {w:?} vs {white:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn calibrate_matrix_red_hue_rotates_the_red_primary_and_leaves_others_alone() {
+        let m = camera_matrix();
+        let p = CalibrationParams {
+            red_hue: 1.0,
+            ..Default::default()
+        };
+        let out = calibrate_matrix(m, &p);
+        let before = chroma_of(mat3_apply(m, [1.0, 0.0, 0.0]));
+        let after = chroma_of(mat3_apply(out, [1.0, 0.0, 0.0]));
+        let angle = |c: (f32, f32)| c.1.atan2(c.0).to_degrees();
+        let mut turned = angle(after) - angle(before);
+        if turned > 180.0 {
+            turned -= 360.0;
+        }
+        if turned < -180.0 {
+            turned += 360.0;
+        }
+        assert!(
+            (turned - CALIBRATION_MAX_HUE_DEG).abs() < 1.0,
+            "red primary turned {turned} degrees"
+        );
+        // The renormalisation moves the other primaries only a little, never their hue by tens of degrees.
+        let g_before = chroma_of(mat3_apply(m, [0.0, 1.0, 0.0]));
+        let g_after = chroma_of(mat3_apply(out, [0.0, 1.0, 0.0]));
+        assert!((angle(g_after) - angle(g_before)).abs() < 8.0);
+    }
+
+    #[test]
+    fn calibrate_matrix_saturation_scales_distance_from_white() {
+        let m = camera_matrix();
+        let dist = |mm: Mat3| {
+            let c = chroma_of(mat3_apply(mm, [0.0, 0.0, 1.0]));
+            (c.0 * c.0 + c.1 * c.1).sqrt()
+        };
+        let up = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                blue_sat: 1.0,
+                ..Default::default()
+            },
+        );
+        let down = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                blue_sat: -1.0,
+                ..Default::default()
+            },
+        );
+        assert!(dist(up) > dist(m) && dist(m) > dist(down));
+    }
+
+    #[test]
+    fn calibrate_matrix_survives_a_degenerate_matrix_and_hostile_values() {
+        let singular: Mat3 = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]];
+        let p = CalibrationParams {
+            red_hue: f32::NAN,
+            green_sat: f32::INFINITY,
+            blue_hue: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(calibrate_matrix(singular, &p), singular);
+        let out = calibrate_matrix(camera_matrix(), &p);
+        assert!(out.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn shadow_tint_moves_green_in_the_shadows_only() {
+        let dark = [0.01, 0.01, 0.01];
+        let bright = [0.8, 0.8, 0.8];
+        assert_eq!(shadow_tint_pixel(dark, 0.0), dark);
+        let magenta = shadow_tint_pixel(dark, 1.0);
+        let green = shadow_tint_pixel(dark, -1.0);
+        assert!(magenta[1] < dark[1] && green[1] > dark[1]);
+        assert_eq!((magenta[0], magenta[2]), (dark[0], dark[2]));
+        assert_eq!(shadow_tint_pixel(bright, 1.0), bright);
+    }
 
     #[test]
     fn mat3_invert_of_identity_is_identity() {
