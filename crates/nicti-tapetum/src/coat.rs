@@ -528,6 +528,115 @@ impl HealParams {
 /// deserialization failure (a schema this build genuinely can't parse) rather than propagating an
 /// error -- consistent with `nicti_claw::Registry::get`'s own "no recognized module -> `None`,
 /// never a hard failure" convention for an extension point.
+/// Lens corrections (#428), the baked `nicti.lens` stage.
+///
+/// Both switches are *serialized only when they differ from the default*, so the default params
+/// are `{}` -- exactly what the passthrough stage hashed before this stage was real. A photo whose
+/// lens stage does nothing (a NEF with `remove_ca` off) therefore keeps every baked-cache key and,
+/// through the keying-only `nicti.neutral` node, every on-disk AI alpha (#353) it had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensParams {
+    /// Automatic lateral chromatic aberration removal (LRC's `AutoLateralCA`). The scale is
+    /// estimated from the photo at bake time; skipped when the embedded profile already corrects
+    /// per-channel warp.
+    #[serde(skip_serializing_if = "is_false")]
+    pub remove_ca: bool,
+    /// Apply the DNG's own lens profile (`OpcodeList3` WarpRectilinear/FixVignetteRadial) when it
+    /// carries one. On by default: that is how every DNG reader renders the file. A no-op for
+    /// files without a profile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub embedded_profile: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+impl Default for LensParams {
+    fn default() -> Self {
+        Self {
+            remove_ca: false,
+            embedded_profile: true,
+        }
+    }
+}
+
+impl LensParams {
+    /// True when the stage can do nothing *for any file*: used only to pick the cheap texture copy
+    /// when the frame has no profile either (see `slit::LensExec`).
+    pub fn is_noop(&self) -> bool {
+        !self.remove_ca && !self.embedded_profile
+    }
+}
+
+/// Global Defringe (#428): desaturates purple and green colour fringes at high-contrast edges.
+///
+/// Two independent channels, each with an amount and a hue window. Ranges are LRC's normalized:
+/// amounts 0..20 -> 0..1, hue lo/hi 0..100 -> 0..1 (the hue window's ends within that fringe
+/// colour's range, see `color::defringe_pixel`). Both amounts 0 is a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefringeParams {
+    pub purple_amount: f32,
+    /// LRC default 30/100.
+    pub purple_hue_lo: f32,
+    /// LRC default 70/100.
+    pub purple_hue_hi: f32,
+    pub green_amount: f32,
+    /// LRC default 40/100.
+    pub green_hue_lo: f32,
+    /// LRC default 60/100.
+    pub green_hue_hi: f32,
+}
+
+impl Default for DefringeParams {
+    fn default() -> Self {
+        Self {
+            purple_amount: 0.0,
+            purple_hue_lo: 0.30,
+            purple_hue_hi: 0.70,
+            green_amount: 0.0,
+            green_hue_lo: 0.40,
+            green_hue_hi: 0.60,
+        }
+    }
+}
+
+impl DefringeParams {
+    /// Whether the shader has anything to do -- it skips every neighbour read otherwise.
+    pub fn is_noop(&self) -> bool {
+        self.purple_amount <= 0.0 && self.green_amount <= 0.0
+    }
+
+    /// Clamped to the documented ranges with NaN scrubbed (documents are untrusted), and each
+    /// window's high end kept at or above its low end.
+    pub fn sanitized(&self) -> Self {
+        let d = Self::default();
+        let unit = |v: f32, fallback: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                fallback
+            }
+        };
+        let purple_hue_lo = unit(self.purple_hue_lo, d.purple_hue_lo);
+        let green_hue_lo = unit(self.green_hue_lo, d.green_hue_lo);
+        Self {
+            purple_amount: unit(self.purple_amount, 0.0),
+            purple_hue_lo,
+            purple_hue_hi: unit(self.purple_hue_hi, d.purple_hue_hi).max(purple_hue_lo),
+            green_amount: unit(self.green_amount, 0.0),
+            green_hue_lo,
+            green_hue_hi: unit(self.green_hue_hi, d.green_hue_hi).max(green_hue_lo),
+        }
+    }
+}
+
 pub fn parse<T: serde::de::DeserializeOwned + Default>(params: &Value) -> T {
     serde_json::from_value(params.clone()).unwrap_or_default()
 }
@@ -541,6 +650,72 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defringe_sanitize_clamps_scrubs_nan_and_orders_the_windows() {
+        let s = DefringeParams {
+            purple_amount: f32::NAN,
+            purple_hue_lo: 0.9,
+            purple_hue_hi: 0.2,
+            green_amount: 7.0,
+            green_hue_lo: -3.0,
+            green_hue_hi: f32::INFINITY,
+        }
+        .sanitized();
+        assert_eq!(s.purple_amount, 0.0);
+        assert!(s.purple_hue_hi >= s.purple_hue_lo);
+        assert_eq!(s.green_amount, 1.0);
+        assert_eq!(s.green_hue_lo, 0.0);
+        assert_eq!(s.green_hue_hi, DefringeParams::default().green_hue_hi);
+        assert!(DefringeParams::default().is_noop());
+        assert!(!DefringeParams {
+            green_amount: 0.1,
+            ..Default::default()
+        }
+        .is_noop());
+    }
+
+    #[test]
+    fn default_lens_params_are_the_historical_empty_params() {
+        // Keeps every existing document's lens hash (and so its baked-cache and AI-alpha keys).
+        assert_eq!(default_value::<LensParams>(), serde_json::json!({}));
+        assert_eq!(
+            parse::<LensParams>(&serde_json::json!({})),
+            LensParams::default()
+        );
+        assert!(LensParams::default().embedded_profile && !LensParams::default().remove_ca);
+    }
+
+    #[test]
+    fn lens_params_round_trip_each_non_default_switch() {
+        for p in [
+            LensParams {
+                remove_ca: true,
+                embedded_profile: true,
+            },
+            LensParams {
+                remove_ca: false,
+                embedded_profile: false,
+            },
+            LensParams {
+                remove_ca: true,
+                embedded_profile: false,
+            },
+        ] {
+            let v = serde_json::to_value(p).unwrap();
+            assert_ne!(
+                v,
+                serde_json::json!({}),
+                "a non-default must change the hash input"
+            );
+            assert_eq!(parse::<LensParams>(&v), p);
+        }
+        // Garbage degrades to the default instead of erroring.
+        assert_eq!(
+            parse::<LensParams>(&serde_json::json!({ "remove_ca": "yes" })),
+            LensParams::default()
+        );
+    }
 
     #[test]
     fn no_camera_profile_serializes_to_the_historical_empty_params() {

@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::stages::{
-    CROP, EFFECTS, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE,
-    TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN,
+    TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 
 /// One row of the checklist: a stage and the label the user sees.
@@ -78,6 +78,16 @@ pub const GROUPS: &[StageGroup] = &[
     StageGroup {
         id: NOISE_REDUCTION,
         label: "Noise reduction",
+        default_on: true,
+    },
+    StageGroup {
+        id: LENS,
+        label: "Lens corrections (CA, embedded profile)",
+        default_on: true,
+    },
+    StageGroup {
+        id: DEFRINGE,
+        label: "Defringe",
         default_on: true,
     },
     StageGroup {
@@ -279,6 +289,20 @@ mod tests {
         );
         assert!(StageSet::all().contains(MASKS));
         assert_eq!(StageSet::all().iter().count(), GROUPS.len());
+    }
+
+    #[test]
+    fn lens_and_defringe_travel_with_copy_paste_sync_and_presets() {
+        // #428: a new Develop section must also be in GROUPS, or "Copy all" silently drops it.
+        for id in [LENS, DEFRINGE] {
+            assert!(
+                GROUPS.iter().any(|g| g.id == id),
+                "{id} missing from GROUPS"
+            );
+            assert!(StageSet::default().contains(id));
+            let clip = Clipboard::from_document(&doc(&[(id, 1.0)]), &StageSet::default());
+            assert_eq!(clip.apply(&EditDocument::default()).stages[id], entry(1.0));
+        }
     }
 
     #[test]

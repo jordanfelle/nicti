@@ -31,7 +31,9 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **Bake key** = `hash(neutral_key, recipe)`, independent of `invert`/`opacity`/`op`: a mask and its
   inverse share one model run. Bakes are requested for *enabled* corrections (a fresh Select Subject has
   no adjustment yet but the user is looking at it).
-- **Neutral render taps post-lens, PRE-heal** (`nicti.neutral`, keying-only, upstream `nicti.lens`): no
+- **Neutral render taps post-lens, PRE-heal** (`nicti.neutral`, keying-only, upstream `nicti.lens`) -- *the
+  key*, not the pixels: a lens change re-keys a bake, but the model's input image is still built from the
+  uncorrected `LinearFrame` (#358, see "Not done" below). No
   tone/WB/crop/local/heal edit can re-run a model. Renderer stays a linear chain; `Renderer::render_baked`
   bakes+submits first so the engine can read the baked frame (it cannot from inside `LiveExec::encode` --
   one encoder, submitted at the end).
@@ -83,8 +85,11 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   `NICTI_MODELS_DIR=<root>` with `birefnet/birefnet_fp32.onnx` at the exact pinned bytes +
   `NICTI_TEST_ORT_DYLIB`).
 - **Export applies masks (#354)**: `export/render_core.rs::render_live_frame` (`LiveSource.masks`) = `render_baked` -> `MaskEngine::prepare` -> `set_masks` -> `Renderer::render_live_from(baked)` (export's renderer has a zero baked-cache budget, so `render` after `render_baked` would bake twice). Gotchas: the `LiveSuffixKernel` is reused across photos, so `set_masks(None)` must run for every unmasked photo and after every masked one or the previous atlas leaks (regression test `local_adjustments_are_applied_without_a_warning_and_never_leak_into_the_next_photo`); AI alphas come from the Larder on the decode step (`ExportEnv.larder`, `stash::fetch_alpha`), export never bakes -- an unbaked AI component is skipped and the report warns per photo. Rendered previews (#145) still pass `masks: None` and stay marked partial (#399).
-- **Not done**: Moire/Defringe (#351), undo (#324), post-lens neutral image
-  when lens is real (#358), real-photo quality (#171).
+- **Not done**: local Moire/Defringe (#351; the *global* Defringe landed in #428, reusable pieces
+  are `live_suffix.wgsl`'s `apply_defringe` and `color::defringe_pixel`), undo (#324), a post-lens
+  neutral image (#358: the lens stage is real since #428, but the neutral image/removal frame are still
+  built from the uncorrected `LinearFrame`, which misaligns AI masks on a DNG whose profile warps),
+  real-photo quality (#171).
 
 ## Package contents
 

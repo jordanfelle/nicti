@@ -172,6 +172,34 @@ invalidation). Regression tests: `render.rs::two_photos_of_the_same_size_never_s
 and `export/jobs.rs::exports_every_photo_with_planned_names_and_distinct_pixels`, both confirmed to
 fail when the stamp is removed.
 
+## #428: the lens stage and global Defringe
+
+Full record: `docs/adr/0428-lens-stage-ca-dng-defringe.md`. `nicti.lens` stopped being a passthrough:
+`nicti-tapetum/src/slit.rs` + `shaders/slit.wgsl` resample the camera-RGB frame once, per channel (inverse
+DNG `WarpRectilinear` per colour plane, red/blue lateral-CA magnification about the optical centre, then the
+`FixVignetteRadial` gain evaluated at the green source position). It cannot be part of crop's pass because
+crop runs after the live suffix in ProPhoto, where the channels are already mixed. `LensExec` receives the
+`LinearFrame` (as `DecodeExec` does) and resolves the profile (`nicti_iris::dng::DngEmbedded`, parsing the
+DNG `OpcodeList3` blob LibRaw now hands across the shim) and the automatic CA estimate
+(`nicti_iris::lateral_ca`, LightCraft's estimator on a 2x-decimated copy so its +-3 px search covers +-6 px
+at full resolution; roughly 0.2-0.4 s at 45 MP in release, memoised, with a goodness-of-fit gate so noise and
+clipped highlights read as no CA) only on a baked-cache miss, and skips auto-CA when the
+profile's planes already differ. `LensParams` serialises to `{}` at its defaults and the stage's
+`impl_version` stays 0 deliberately: a NEF with default params still renders the old passthrough pixels, so
+its lens hash and, through the keying-only `nicti.neutral` node, every on-disk AI alpha (#353) stay valid.
+
+Global Defringe is a separate *live* stage, `nicti.defringe`, fused into `live_suffix.wgsl` right after the
+camera-to-working matrix: a slider drag is a uniform write (no rebake, no new binding, and it never re-keys
+an AI mask bake, which a baked-lens placement would). A pixel is desaturated toward its luma when it is
+saturated (HSV saturation gate), inside a purple (240-360 degrees across the slider) or green (60-180)
+hue window, and next to a luminance edge (perceptual-luma range over 8 compass taps `2 * long_edge / 4000`
+px away). `color::defringe_pixel` is the CPU twin the shader is proven against.
+
+Not verified: no real photo or profile-carrying DNG has been through it; the CA/defringe constants are
+LightCraft's untuned values; the opcode centre/radius are taken over the decoded frame (ActiveArea/
+DefaultCrop offsets ignored); no Vulkan-and-Dx12 run on the RTX 5080. AI masks and AI removal still infer
+from the uncorrected decode, which is #358.
+
 ## #380: global Presence and post-crop Effects
 
 Full decision: `docs/adr/0380-global-presence-and-effects.md`. Two new stages. `nicti.presence`

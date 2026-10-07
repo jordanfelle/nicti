@@ -89,6 +89,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0218](0218-local-only-ai.md) | — | Local-only default for AI culling/suggestion features | Accepted |
 | [0249](0249-windows-installer-and-updates.md) | — | Windows installer, code signing, and auto-update | Proposed |
 | [0353](0353-baked-alpha-disk-tier.md) | — | Disk tier for baked AI mask alphas, and the background pre-bake (Stash) | Accepted |
+| [0428](0428-lens-stage-ca-dng-defringe.md) | — | The lens stage (DNG-embedded profile, automatic lateral CA) and global Defringe | Accepted |
 | [0380](0380-global-presence-and-effects.md) | — | Global Presence (texture/clarity/dehaze/saturation) and post-crop Effects (vignette/grain) | Accepted |
 
 A per-topic summary (the actionable conclusion, without the full research trail) lives in

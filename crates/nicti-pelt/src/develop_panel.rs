@@ -5,15 +5,15 @@
 //! (once #31 lands persistence) will read too.
 
 use nicti_tapetum::coat::{
-    CropParams, EffectsParams, ExposureParams, HslBand, HslParams, NoiseReductionParams,
-    PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
-    WbParams,
+    CropParams, DefringeParams, EffectsParams, ExposureParams, HslBand, HslParams, LensParams,
+    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, VignetteStyle, WbParams,
 };
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    CROP, EFFECTS, EXPOSURE, HEAL, HSL, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE,
-    TONE_CURVE, VIBRANCE, WB,
+    CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN,
+    TONE, TONE_CURVE, VIBRANCE, WB,
 };
 
 use crate::fur::{self, SliderSpec, Track};
@@ -181,6 +181,19 @@ const SHARPEN_DETAIL: SliderSpec =
 const NR_LUMINANCE: SliderSpec = SliderSpec::new("nr.luminance", "NR Luminance", 0.0, 1.0, 0.0);
 const NR_COLOR: SliderSpec = SliderSpec::new("nr.color", "NR Color", 0.0, 1.0, 0.0);
 const NR_DETAIL: SliderSpec = SliderSpec::new("nr.detail", "NR Detail", 0.0, 1.0, 0.0);
+
+const DEFRINGE_PURPLE_AMOUNT: SliderSpec =
+    SliderSpec::new("lens.defringe_purple", "Purple Amount", 0.0, 1.0, 0.0);
+const DEFRINGE_PURPLE_LO: SliderSpec =
+    SliderSpec::new("lens.defringe_purple_lo", "Purple Hue Lo", 0.0, 1.0, 0.3);
+const DEFRINGE_PURPLE_HI: SliderSpec =
+    SliderSpec::new("lens.defringe_purple_hi", "Purple Hue Hi", 0.0, 1.0, 0.7);
+const DEFRINGE_GREEN_AMOUNT: SliderSpec =
+    SliderSpec::new("lens.defringe_green", "Green Amount", 0.0, 1.0, 0.0);
+const DEFRINGE_GREEN_LO: SliderSpec =
+    SliderSpec::new("lens.defringe_green_lo", "Green Hue Lo", 0.0, 1.0, 0.4);
+const DEFRINGE_GREEN_HI: SliderSpec =
+    SliderSpec::new("lens.defringe_green_hi", "Green Hue Hi", 0.0, 1.0, 0.6);
 
 const VIGNETTE_AMOUNT: SliderSpec = SliderSpec::bipolar("fx.vignette_amount", "Amount");
 const VIGNETTE_MIDPOINT: SliderSpec =
@@ -374,6 +387,25 @@ pub fn show(
         develop.set_stage_params(NOISE_REDUCTION, &nr);
     });
 
+    fur::section(ui, "lens", "Lens Corrections", false, |ui| {
+        let mut lens: LensParams = develop.stage_params(LENS);
+        ui.checkbox(&mut lens.remove_ca, "Remove chromatic aberration");
+        if develop.has_embedded_lens_profile() {
+            ui.checkbox(&mut lens.embedded_profile, "Use embedded lens profile");
+        }
+        develop.set_stage_params(LENS, &lens);
+        fur::divider(ui);
+        ui.label("Defringe");
+        let mut d: DefringeParams = develop.stage_params(DEFRINGE);
+        slider(ui, &DEFRINGE_PURPLE_AMOUNT, &mut d.purple_amount);
+        slider(ui, &DEFRINGE_PURPLE_LO, &mut d.purple_hue_lo);
+        slider(ui, &DEFRINGE_PURPLE_HI, &mut d.purple_hue_hi);
+        slider(ui, &DEFRINGE_GREEN_AMOUNT, &mut d.green_amount);
+        slider(ui, &DEFRINGE_GREEN_LO, &mut d.green_hue_lo);
+        slider(ui, &DEFRINGE_GREEN_HI, &mut d.green_hue_hi);
+        develop.set_stage_params(DEFRINGE, &d);
+    });
+
     fur::section(ui, "effects", "Effects", false, |ui| {
         let mut fx: EffectsParams = develop.stage_params(EFFECTS);
         ui.label("Post-crop vignette");
@@ -436,6 +468,8 @@ pub fn show(
             HSL,
             SHARPEN,
             NOISE_REDUCTION,
+            LENS,
+            DEFRINGE,
             CROP,
             EFFECTS,
             MASKS,

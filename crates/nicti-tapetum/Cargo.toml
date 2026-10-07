@@ -10,6 +10,7 @@ description = "Render stage extension point (ADR-0019 §8) plus Tapetum's (#44/#
 nicti-calico = { path = "../nicti-calico" }
 nicti-claw = { path = "../nicti-claw" }
 nicti-cornea = { path = "../nicti-cornea" }
+nicti-iris = { path = "../nicti-iris" }
 nicti-pawprint = { path = "../nicti-pawprint" }
 blake3 = "1"
 # Baked AI alpha disk tier (#353): deflate over the 8-bit alpha plane. Already in the tree via

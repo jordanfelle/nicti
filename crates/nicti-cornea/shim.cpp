@@ -184,6 +184,19 @@ void retina_cblack(const RetinaLibRaw *handle, uint32_t out[4]) {
   out[3] = src[3];
 }
 
+const uint8_t *retina_dng_opcode_list(const RetinaLibRaw *handle, int list, size_t *out_len) {
+  *out_len = 0;
+  if (list < 0 || list > 2) {
+    return nullptr;
+  }
+  const libraw_dng_rawopcode_t &op = as_libraw(handle)->imgdata.color.dng_levels.rawopcodes[list];
+  if (op.data == nullptr || op.len == 0) {
+    return nullptr;
+  }
+  *out_len = op.len;
+  return static_cast<const uint8_t *>(op.data);
+}
+
 // UNVERIFIED in this sandbox, same caveat as retina_libraw_process_linear above: calling
 // dcraw_process() a second time on the same handle (once via process_linear, once via this
 // function) is not attempted -- each retina_libraw_process_* call assumes it is the first and

@@ -507,6 +507,7 @@ mod tests {
                 cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                 cblack: [0, 0, 0, 0],
                 pixels: vec![0; 2 * 2 * 3],
+                dng_opcode_list3: None,
             })
         }
     }
@@ -715,6 +716,7 @@ mod tests {
                 cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                 cblack: [0, 0, 0, 0],
                 pixels: vec![0; 2 * 2 * 3],
+                dng_opcode_list3: None,
             })
         }
     }
@@ -815,6 +817,7 @@ mod tests {
                 cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                 cblack: [0, 0, 0, 0],
                 pixels: vec![0; 2 * 2 * 3],
+                dng_opcode_list3: None,
             })
         }
     }

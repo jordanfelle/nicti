@@ -111,6 +111,15 @@ void retina_cam_xyz(const RetinaLibRaw *handle, float out[12]);
 // patterns are out of scope for this research pass; see ADR-0038's Deferred section.
 void retina_cblack(const RetinaLibRaw *handle, uint32_t out[4]);
 
+// --- #428 support: DNG lens-correction opcodes ---
+//
+// Raw bytes of a DNG's OpcodeList1/2/3 (`list` = 0/1/2 -> tags 51008/51009/51022), straight from
+// imgdata.color.dng_levels.rawopcodes (LibRaw reads them, capped at 4MB each, but applies none of
+// them). Null with *out_len = 0 when the file has no such list (every non-DNG, and DNGs without
+// opcodes) or `list` is out of range. Valid until the next call on this handle or
+// retina_libraw_free; the Rust side copies it.
+const uint8_t *retina_dng_opcode_list(const RetinaLibRaw *handle, int list, size_t *out_len);
+
 // --- #40 support: classic demosaic + NR comparison (ADR-0040) ---
 //
 // Mirrors LibRaw's own `-q`/user_qual enum: 0=linear, 1=VNG, 2=PPG, 3=AHD, 4=DCB (patched build

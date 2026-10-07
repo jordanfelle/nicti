@@ -42,6 +42,11 @@ unsafe extern "C" {
     fn retina_pre_mul(handle: *const RetinaLibRawOpaque, out: *mut f32);
     fn retina_cam_xyz(handle: *const RetinaLibRawOpaque, out: *mut f32);
     fn retina_cblack(handle: *const RetinaLibRawOpaque, out: *mut u32);
+    fn retina_dng_opcode_list(
+        handle: *const RetinaLibRawOpaque,
+        list: i32,
+        out_len: *mut usize,
+    ) -> *const u8;
 
     fn retina_libraw_process_classic(
         handle: *mut RetinaLibRawOpaque,
@@ -228,6 +233,19 @@ impl LibRawHandle {
             cam_xyz,
             cblack,
         }
+    }
+
+    /// The raw bytes of the DNG `OpcodeList3` (tag 51022: where `WarpRectilinear` and
+    /// `FixVignetteRadial` live), or `None` when the file has none. LibRaw only stores these; it
+    /// applies none of them. #428.
+    pub fn dng_opcode_list3(&self) -> Option<Vec<u8>> {
+        let mut len = 0usize;
+        let ptr = unsafe { retina_dng_opcode_list(self.ptr, 2, &mut len as *mut usize) };
+        if ptr.is_null() || len == 0 {
+            return None;
+        }
+        // SAFETY: LibRaw reports `len` readable bytes at `ptr` for the life of the handle.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
     }
 
     /// Runs LibRaw's classic pipeline with WB applied and the caller's choice of demosaic

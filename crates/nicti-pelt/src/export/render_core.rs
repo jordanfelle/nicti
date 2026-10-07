@@ -16,6 +16,7 @@ use nicti_tapetum::mask::compose as mask_compose;
 use nicti_tapetum::mask::engine::{AiAlpha, MaskEngine, MaskInputs};
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
+use nicti_tapetum::slit::{LensExec, LensKernel};
 use nicti_tapetum::spine::{
     self, build_graph, build_registry, RenderInputs, GEOMETRY_IDS, LIVE_IDS,
 };
@@ -31,6 +32,7 @@ pub(crate) struct ExportRenderer {
     pub(crate) live_kernel: LiveSuffixKernel,
     pub(crate) crop_kernel: CropKernel,
     pub(crate) heal_kernel: HealKernel,
+    pub(crate) lens_kernel: LensKernel,
     pub(crate) graph: RenderGraph,
     pub(crate) registry: StageRegistry,
     pub(crate) renderer: Renderer,
@@ -47,6 +49,7 @@ impl ExportRenderer {
             live_kernel: LiveSuffixKernel::new(gpu),
             crop_kernel: CropKernel::new(gpu),
             heal_kernel: HealKernel::new(gpu),
+            lens_kernel: LensKernel::new(gpu),
             graph: build_graph(),
             registry: build_registry(),
             // A zero baked-cache budget: consecutive photos never share baked output, and a full
@@ -133,12 +136,17 @@ pub(crate) fn render_live_frame(
         params: &inputs.heal,
         removals: &no_removals,
     };
+    let lens_exec = LensExec {
+        kernel: &ctx.lens_kernel,
+        params: &inputs.lens,
+        frame,
+    };
     let passthrough = PassthroughExec;
     let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
         (DECODE, &decode_exec),
         (DEMOSAIC, &passthrough),
         (DENOISE, &passthrough),
-        (LENS, &passthrough),
+        (LENS, &lens_exec),
         (HEAL, &heal_exec),
     ];
     let req = RenderRequest {

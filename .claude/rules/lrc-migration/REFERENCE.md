@@ -69,7 +69,9 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   crops/geometric masks, retouch, point curves, colour grading (all in provenance). **#380** translates the global
   `Texture`/`Clarity2012`/`Dehaze`/`Saturation` (-100..100 -> `nicti.presence`) and the Effects panel (`PostCropVignette*`,
   `Grain*`, gated by `EnableEffects`) -> `nicti.effects`; **a slider whose amount is 0 is ignored** (LRC writes a random
-  `GrainSeed` + default sliders into every image, taking them would mark every photo edited); `OverrideLookVignette` stays untranslated.
+  `GrainSeed` + default sliders into every image, taking them would mark every photo edited); `OverrideLookVignette` stays untranslated. **#428** adds `develop/lens.rs`: `AutoLateralCA` -> `nicti.lens`
+  `remove_ca`, `DefringePurple/Green{Amount (0..20),HueLo,HueHi}` -> `nicti.defringe` (gated by `EnableLensCorrections`; a
+  channel's hue sliders count only when its amount is non-zero); `LensProfile*`/manual distortion stay untranslated (#382).
 
 ## Package contents
 

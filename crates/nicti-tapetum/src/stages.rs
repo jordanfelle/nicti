@@ -24,9 +24,9 @@ use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
 use crate::coat::{
-    self, CropParams, EffectsParams, ExposureParams, HslParams, NoiseReductionParams,
-    PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
-    WbParams,
+    self, CropParams, DefringeParams, EffectsParams, ExposureParams, HslParams,
+    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, VignetteStyle, WbParams,
 };
 use crate::color;
 use crate::detail::{self, MAX_BLUR_RADIUS};
@@ -50,6 +50,9 @@ pub const TONE_CURVE: &str = "nicti.tone_curve";
 pub const VIBRANCE: &str = "nicti.vibrance";
 /// Global Texture/Clarity/Dehaze/Saturation (#380); summed with the per-mask deltas in the shader.
 pub const PRESENCE: &str = "nicti.presence";
+/// Purple/green fringe desaturation (#428): fused into the live dispatch, right after the
+/// camera->working matrix, so a slider drag is a uniform write and never rebakes anything.
+pub const DEFRINGE: &str = "nicti.defringe";
 pub const HSL: &str = "nicti.hsl";
 pub const SHARPEN: &str = "nicti.sharpen";
 pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
@@ -131,12 +134,8 @@ pub fn denoise_stage() -> BasicStage {
         default_params: || json!({}),
     }
 }
-pub fn lens_stage() -> BasicStage {
-    BasicStage {
-        id: LENS,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
-    }
+pub fn lens_stage() -> crate::slit::LensStage {
+    crate::slit::LensStage
 }
 pub fn heal_stage() -> crate::heal::HealStage {
     crate::heal::HealStage
@@ -193,6 +192,13 @@ pub fn presence_stage() -> BasicStage {
         id: PRESENCE,
         kind: StageKind::Live,
         default_params: || coat::default_value::<PresenceParams>(),
+    }
+}
+pub fn defringe_stage() -> BasicStage {
+    BasicStage {
+        id: DEFRINGE,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<DefringeParams>(),
     }
 }
 pub fn effects_stage() -> BasicStage {
@@ -485,6 +491,10 @@ struct LiveUniforms {
     profile2: [f32; 4],
     /// #380: global Presence -- texture, clarity, dehaze, saturation.
     presence: [f32; 4],
+    /// #428: purple amount, purple hue lo, purple hue hi, green amount.
+    defringe0: [f32; 4],
+    /// #428: green hue lo, green hue hi, unused, unused.
+    defringe1: [f32; 4],
 }
 
 #[repr(C)]
@@ -520,6 +530,8 @@ pub struct LiveParams {
     /// caller must also bind a `MaskFrame` carrying the matching spatial bases (`MaskEngine::prepare`
     /// with this value) or the spatial part is skipped.
     pub presence: PresenceParams,
+    /// Purple/green fringe desaturation (#428), applied right after the camera->working matrix.
+    pub defringe: DefringeParams,
     pub hsl: HslParams,
     pub sharpen: SharpenParams,
     pub noise_reduction: NoiseReductionParams,
@@ -544,6 +556,7 @@ impl Default for LiveParams {
             tone_curve: ToneCurveParams::default(),
             vibrance: VibranceParams::default(),
             presence: PresenceParams::default(),
+            defringe: DefringeParams::default(),
             hsl: HslParams::default(),
             sharpen: SharpenParams::default(),
             noise_reduction: NoiseReductionParams::default(),
@@ -934,6 +947,18 @@ impl LiveSuffixKernel {
                 params.presence.clarity,
                 params.presence.dehaze,
                 params.presence.saturation,
+            ],
+            defringe0: [
+                params.defringe.purple_amount,
+                params.defringe.purple_hue_lo,
+                params.defringe.purple_hue_hi,
+                params.defringe.green_amount,
+            ],
+            defringe1: [
+                params.defringe.green_hue_lo,
+                params.defringe.green_hue_hi,
+                0.0,
+                0.0,
             ],
         };
         let mut u = u;
@@ -1615,6 +1640,7 @@ mod tests {
                 100, 120, 105, // (0,1) -- at/near black on every channel
                 800, 300, 950, // (1,1)
             ],
+            dng_opcode_list3: None,
         }
     }
 
@@ -1686,6 +1712,7 @@ mod tests {
                 500, 510, 520, // (1,1)
                 600, 610, 620, // (2,1)
             ],
+            dng_opcode_list3: None,
         };
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {
@@ -1736,6 +1763,7 @@ mod tests {
             cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             cblack: [0, 0, 0, 0],
             pixels: vec![100, 200, 300], // R, G, B -- 3 samples, odd total.
+            dng_opcode_list3: None,
         };
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {
@@ -2136,6 +2164,206 @@ mod tests {
                     rgb[c]
                 );
             }
+        }
+    }
+
+    /// Runs the live suffix over `data` with defringe on and off, checks every pixel of both against
+    /// the CPU twin (`color::defringe_pixel` after the matrix, then the neutral remainder of the
+    /// chain), and returns `(on, off)` for outcome assertions.
+    fn defringe_live_pass_matches_the_twin(
+        gpu: &GpuContext,
+        extent: crate::frame::Extent,
+        data: &[[f32; 4]],
+        matrix: color::Mat3,
+        defringe: DefringeParams,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        let (w, h) = (extent.width as usize, extent.height as usize);
+        let input = crate::test_util::upload_frame(gpu, extent, data);
+        let quantised = crate::test_util::read_frame(gpu, &input);
+        let kernel = LiveSuffixKernel::new(gpu);
+        let run = |defringe: DefringeParams| {
+            kernel.set_params(
+                gpu,
+                &LiveParams {
+                    working_space_matrix: matrix,
+                    defringe,
+                    ..Default::default()
+                },
+            );
+            let output = FrameTexture::new(gpu, extent);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(gpu, &output)
+        };
+        let on = run(defringe);
+        let off = run(DefringeParams::default());
+
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let r = color::defringe_radius(extent.width.max(extent.height));
+        let at = |x: i32, y: i32| {
+            let x = x.clamp(0, w as i32 - 1) as usize;
+            let y = y.clamp(0, h as i32 - 1) as usize;
+            let p = quantised[y * w + x];
+            color::mat3_apply(matrix, [p[0], p[1], p[2]])
+        };
+        let tail = |rgb: [f32; 3]| {
+            let rgb = color::apply_tone(rgb, &ToneParams::default());
+            let rgb = color::apply_tone_curve(rgb, &lut);
+            let rgb = color::apply_vibrance(rgb, 0.0);
+            color::apply_hsl(rgb, &HslParams::default())
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let centre = at(x as i32, y as i32);
+                let taps =
+                    color::DEFRINGE_TAPS.map(|(dx, dy)| at(x as i32 + dx * r, y as i32 + dy * r));
+                let expected_on = tail(color::defringe_pixel(centre, &taps, &defringe));
+                let expected_off = tail(centre);
+                for c in 0..3 {
+                    assert!(
+                        (on[y * w + x][c] - expected_on[c]).abs() < 0.01,
+                        "defringe ON ({x},{y}) channel {c}: gpu={} cpu={} (radius {r})",
+                        on[y * w + x][c],
+                        expected_on[c]
+                    );
+                    assert!(
+                        (off[y * w + x][c] - expected_off[c]).abs() < 0.01,
+                        "defringe OFF ({x},{y}) channel {c}: gpu={} cpu={}",
+                        off[y * w + x][c],
+                        expected_off[c]
+                    );
+                }
+            }
+        }
+        (on, off)
+    }
+
+    fn chroma_of(p: [f32; 4]) -> f32 {
+        let l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        (p[0] - l).abs() + (p[1] - l).abs() + (p[2] - l).abs()
+    }
+
+    /// #428: the fused live pass's defringe (shader) matches `color::defringe_pixel` (CPU twin) at
+    /// *partial* strength (so a wrong strength constant cannot hide), through a non-identity camera
+    /// matrix and full-width hue windows, and does what it is for.
+    #[test]
+    fn defringe_in_the_live_pass_matches_the_cpu_twin_and_removes_the_fringe() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 48,
+            height: 32,
+        };
+        let (w, h) = (extent.width as usize, extent.height as usize);
+        let mut data = vec![[0.05, 0.05, 0.05, 1.0]; w * h];
+        for y in 0..h {
+            for x in 24..w {
+                data[y * w + x] = [0.8, 0.8, 0.8, 1.0];
+            }
+        }
+        for y in 0..8 {
+            data[y * w + 23] = [0.45, 0.2, 0.55, 1.0]; // purple fringe
+        }
+        for y in 24..32 {
+            data[y * w + 23] = [0.25, 0.6, 0.2, 1.0]; // green fringe
+        }
+        for y in 12..18 {
+            for x in 4..10 {
+                data[y * w + x] = [0.45, 0.2, 0.55, 1.0]; // a flat purple object
+            }
+        }
+        let cam_mul = [1.8, 1.0, 1.3, 1.0];
+        let cam_xyz = [
+            0.55, 0.2, 0.1, 0.2, 0.7, 0.15, 0.05, 0.1, 0.85, 0.0, 0.0, 0.0,
+        ];
+        let matrix = color::camera_to_working_space_matrix(cam_mul, &cam_xyz, &WbParams::default());
+        let defringe = DefringeParams {
+            purple_amount: 0.6,
+            purple_hue_lo: 0.0,
+            purple_hue_hi: 1.0,
+            green_amount: 0.8,
+            green_hue_lo: 0.0,
+            green_hue_hi: 1.0,
+        };
+        let (on, off) = defringe_live_pass_matches_the_twin(&gpu, extent, &data, matrix, defringe);
+
+        // Fringes lose chroma in proportion to the amount (a 0.6 amount keeps ~40 %, 0.8 ~20 %).
+        let (p_on, p_off) = (chroma_of(on[3 * w + 23]), chroma_of(off[3 * w + 23]));
+        let (g_on, g_off) = (chroma_of(on[27 * w + 23]), chroma_of(off[27 * w + 23]));
+        assert!(
+            p_on < 0.6 * p_off && p_on > 0.1 * p_off,
+            "purple {p_off} -> {p_on}"
+        );
+        assert!(
+            g_on < 0.4 * g_off && g_on > 0.02 * g_off,
+            "green {g_off} -> {g_on}"
+        );
+        // The flat object's interior (all its taps land inside it) is untouched; its border pixels
+        // sit beside the dark background, which is what a fringe looks like.
+        for y in 13..17 {
+            for x in 5..9 {
+                assert_eq!(on[y * w + x], off[y * w + x], "flat object at ({x},{y})");
+            }
+        }
+    }
+
+    /// The same check where the other one cannot reach: a frame wide enough that the tap radius is
+    /// 2 (long edge 4000), an identity matrix so the pixels' hues are known, and LRC's *default*
+    /// hue windows with their shoulders.
+    #[test]
+    fn defringe_in_the_live_pass_matches_the_twin_at_radius_two_with_default_windows() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 4000,
+            height: 24,
+        };
+        let (w, h) = (extent.width as usize, extent.height as usize);
+        assert_eq!(color::defringe_radius(extent.width), 2);
+        let mut data = vec![[0.05, 0.05, 0.05, 1.0]; w * h];
+        for y in 0..h {
+            for x in 2000..w {
+                data[y * w + x] = [0.8, 0.8, 0.8, 1.0];
+            }
+        }
+        // Hue ~292 (inside the default purple window 276..324) and ~127 (inside green 108..132),
+        // one pixel off the edge at radius 2 and one a pixel further than any tap reaches.
+        for y in 0..8 {
+            data[y * w + 1999] = [0.55, 0.2, 0.6, 1.0];
+            // A wide purple block far from the edge: its interior is not an edge pixel.
+            for x in 1960..1980 {
+                data[y * w + x] = [0.55, 0.2, 0.6, 1.0];
+            }
+        }
+        for y in 16..24 {
+            data[y * w + 1999] = [0.2, 0.6, 0.25, 1.0];
+            for x in 1960..1980 {
+                data[y * w + x] = [0.2, 0.6, 0.25, 1.0];
+            }
+        }
+        let defringe = DefringeParams {
+            purple_amount: 0.7,
+            green_amount: 0.7,
+            ..Default::default()
+        };
+        let (on, off) = defringe_live_pass_matches_the_twin(
+            &gpu,
+            extent,
+            &data,
+            color::mat3_identity(),
+            defringe,
+        );
+        for (x, y) in [(1999usize, 3usize), (1999, 19)] {
+            let (a, b) = (chroma_of(on[y * w + x]), chroma_of(off[y * w + x]));
+            assert!(
+                a < 0.5 * b,
+                "fringe at ({x},{y}) kept its chroma: {b} -> {a}"
+            );
+        }
+        // The blocks' interiors (every tap inside them) are not edge pixels: untouched.
+        for (x, y) in [(1970usize, 3usize), (1970, 19)] {
+            assert_eq!(on[y * w + x], off[y * w + x], "block interior ({x},{y})");
         }
     }
 
@@ -2548,6 +2776,7 @@ mod tests {
                 tone_curve,
                 vibrance,
                 presence: PresenceParams::default(),
+                defringe: DefringeParams::default(),
                 hsl,
                 sharpen,
                 noise_reduction,

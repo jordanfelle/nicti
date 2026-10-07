@@ -847,6 +847,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            dng_opcode_list3: None,
         }
     }
 

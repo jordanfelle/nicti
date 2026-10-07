@@ -4,10 +4,8 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Lens-correction data extension point (ADR-0019 §8). Crate boundary only — correction data/application is owned by #39 (lens corrections)."
+description = "Lens-correction extension point (ADR-0019 §8) plus, since #428, the lens data model, the DNG-embedded OpcodeList3 provider and the automatic lateral-CA estimator. A lensfun/NEF-backed provider is #410."
 
 [dependencies]
 nicti-claw = { path = "../nicti-claw" }
-
-[dev-dependencies]
 serde_json = "1"

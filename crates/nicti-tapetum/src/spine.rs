@@ -16,17 +16,18 @@ use nicti_cornea::LinearFrame;
 use nicti_pawprint::EditDocument;
 
 use crate::coat::{
-    self, CameraProfileParams, CropParams, EffectsParams, ExposureParams, HealParams, HslParams,
-    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
-    VibranceParams, WbParams,
+    self, CameraProfileParams, CropParams, DefringeParams, EffectsParams, ExposureParams,
+    HealParams, HslParams, LensParams, NoiseReductionParams, PresenceParams, SharpenParams,
+    ToneCurveParams, ToneParams, VibranceParams, WbParams,
 };
 use crate::color;
 use crate::frame::Extent;
 use crate::geometry::{self, Affine2D, CropRect};
 use crate::graph::{RenderGraph, StageKind, StageNode};
 use crate::stages::{
-    self, LiveParams, CROP, DECODE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS,
-    NEUTRAL, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    self, LiveParams, CROP, DECODE, DEFRINGE, DEMOSAIC, DENOISE, EFFECTS, EXPOSURE, HEAL, HSL,
+    LENS, MASKS, NEUTRAL, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    WORKING_SPACE,
 };
 use crate::{RenderStage, StageRegistry};
 
@@ -34,9 +35,11 @@ use crate::{RenderStage, StageRegistry};
 pub const BAKED_IDS: [&str; 5] = [DECODE, DEMOSAIC, DENOISE, LENS, HEAL];
 
 /// The fused live suffix, in dependency order.
-pub const LIVE_IDS: [&str; 11] = [
+pub const LIVE_IDS: [&str; 12] = [
     WB,
     WORKING_SPACE,
+    // Purple/green fringe desaturation (#428): same dispatch, right after the camera->working matrix.
+    DEFRINGE,
     EXPOSURE,
     TONE,
     TONE_CURVE,
@@ -127,6 +130,7 @@ render_stage_factory!(tone_factory, stages::tone_stage);
 render_stage_factory!(tone_curve_factory, stages::tone_curve_stage);
 render_stage_factory!(vibrance_factory, stages::vibrance_stage);
 render_stage_factory!(presence_factory, stages::presence_stage);
+render_stage_factory!(defringe_factory, stages::defringe_stage);
 render_stage_factory!(hsl_factory, stages::hsl_stage);
 render_stage_factory!(sharpen_factory, stages::sharpen_stage);
 render_stage_factory!(noise_reduction_factory, stages::noise_reduction_stage);
@@ -140,7 +144,7 @@ type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 /// Every stage [`build_graph`] can reference.
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
-    let entries: [StageFactoryEntry; 19] = [
+    let entries: [StageFactoryEntry; 20] = [
         (DECODE, decode_factory),
         (DEMOSAIC, demosaic_factory),
         (DENOISE, denoise_factory),
@@ -153,6 +157,7 @@ pub fn build_registry() -> StageRegistry {
         (TONE_CURVE, tone_curve_factory),
         (VIBRANCE, vibrance_factory),
         (PRESENCE, presence_factory),
+        (DEFRINGE, defringe_factory),
         (HSL, hsl_factory),
         (SHARPEN, sharpen_factory),
         (NOISE_REDUCTION, noise_reduction_factory),
@@ -225,6 +230,8 @@ pub fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id:
 pub struct RenderInputs {
     /// For `LiveSuffixKernel::set_params`.
     pub live: LiveParams,
+    /// For `LensExec::params` (#428).
+    pub lens: LensParams,
     /// For `HealExec::params`.
     pub heal: HealParams,
     /// The crop rect in source pixels (the full frame for a default crop).
@@ -311,11 +318,13 @@ pub fn resolve_inputs(
             tone_curve,
             vibrance,
             presence,
+            defringe: resolve::<DefringeParams>(doc, DEFRINGE).sanitized(),
             hsl,
             sharpen,
             noise_reduction,
             pixel_scale,
         },
+        lens: resolve(doc, LENS),
         heal: resolve(doc, HEAL),
         crop_rect,
         crop_transform,

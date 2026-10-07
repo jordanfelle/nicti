@@ -115,6 +115,7 @@ mod tests {
             cam_xyz: [0.0; 12],
             cblack: [10, 20, 5, 0],
             pixels: (0..3 * 2 * 3).map(|i| 100 + i * 50).collect(),
+            dng_opcode_list3: None,
         };
         let expected = normalize_pixels(&frame);
         let src = FramePixels(Arc::new(frame));

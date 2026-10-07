@@ -94,6 +94,10 @@ pub struct LinearFrame {
     /// DNG-spec matrix/HueSatMap operation downstream, all defined over R/G/B). Length is
     /// `width * height * 3`.
     pub pixels: Vec<u16>,
+    /// The raw DNG `OpcodeList3` blob (tag 51022) when the file is a DNG that carries one, `None`
+    /// for every NEF and for DNGs without opcodes. Parsed by `nicti_iris::dng`, applied by the
+    /// Tapetum lens stage (#428); LibRaw itself applies none of it.
+    pub dng_opcode_list3: Option<Vec<u8>>,
 }
 
 /// The production `RawDecoder`: LibRaw (vendored `yogthos/LibRaw#nikon-he-decoder`, see
@@ -155,6 +159,7 @@ impl RawDecoder for LibRawDecoder {
             })?;
 
         let linear = handle.linear_metadata();
+        let dng_opcode_list3 = handle.dng_opcode_list3();
         let image = handle
             .linear_image()
             .map_err(|source| DecodeError::Decode {
@@ -191,6 +196,7 @@ impl RawDecoder for LibRawDecoder {
             cam_xyz: linear.cam_xyz,
             cblack: linear.cblack,
             pixels,
+            dng_opcode_list3,
         })
     }
 }

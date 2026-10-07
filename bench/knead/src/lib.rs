@@ -11,13 +11,14 @@ use std::sync::Arc;
 
 use image::RgbImage;
 use nicti_cornea::{LibRawDecoder, LinearFrame, RawDecoder};
-use nicti_tapetum::coat::{ExposureParams, ToneParams, VibranceParams, WbParams};
+use nicti_tapetum::coat::{ExposureParams, LensParams, ToneParams, VibranceParams, WbParams};
 use nicti_tapetum::color;
 use nicti_tapetum::frame::{read_frame, Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, Affine2D};
 use nicti_tapetum::gpu::{GpuContext, GpuPreference};
 use nicti_tapetum::graph::RenderGraph;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
+use nicti_tapetum::slit::{LensExec, LensKernel};
 use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveParams, LiveSuffixKernel, PassthroughExec, DECODE,
     DEMOSAIC, DENOISE, HEAL, LENS,
@@ -34,6 +35,7 @@ pub struct RealRender {
     pub decode_kernel: DecodeKernel,
     pub live_kernel: LiveSuffixKernel,
     pub crop_kernel: CropKernel,
+    pub lens_kernel: LensKernel,
     pub graph: RenderGraph,
 }
 
@@ -75,6 +77,7 @@ impl RealRender {
         );
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(Affine2D::IDENTITY);
+        let lens_kernel = LensKernel::new(&gpu);
 
         Ok(Self {
             gpu,
@@ -83,6 +86,7 @@ impl RealRender {
             decode_kernel,
             live_kernel,
             crop_kernel,
+            lens_kernel,
             graph: build_graph(),
         })
     }
@@ -94,12 +98,18 @@ impl RealRender {
             kernel: &self.decode_kernel,
             frame: &self.frame,
         };
+        let lens_params = LensParams::default();
+        let lens_exec = LensExec {
+            kernel: &self.lens_kernel,
+            params: &lens_params,
+            frame: &self.frame,
+        };
         let passthrough = PassthroughExec;
         let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
             (DECODE, &decode_exec),
             (DEMOSAIC, &passthrough),
             (DENOISE, &passthrough),
-            (LENS, &passthrough),
+            (LENS, &lens_exec),
             (HEAL, &passthrough),
         ];
         let mut renderer = Renderer::new(Arc::clone(&self.gpu), 2_000_000_000);
@@ -131,12 +141,18 @@ impl RealRender {
             kernel: &self.decode_kernel,
             frame: &self.frame,
         };
+        let lens_params = LensParams::default();
+        let lens_exec = LensExec {
+            kernel: &self.lens_kernel,
+            params: &lens_params,
+            frame: &self.frame,
+        };
         let passthrough = PassthroughExec;
         let baked_chain: [(&str, &dyn BakedExec); 5] = [
             (DECODE, &decode_exec),
             (DEMOSAIC, &passthrough),
             (DENOISE, &passthrough),
-            (LENS, &passthrough),
+            (LENS, &lens_exec),
             (HEAL, &passthrough),
         ];
         let mut current: Option<FrameTexture> = None;
