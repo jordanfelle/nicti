@@ -322,7 +322,11 @@ impl ExportUi {
 
         let mut action = Action::None;
         ui.horizontal(|ui| {
-            let start = ui.add_enabled(validity.is_ok(), egui::Button::new("Export"));
+            // Not while Browse is open: the pick would land after Export started with the old path.
+            let start = ui.add_enabled(
+                validity.is_ok() && !d.folder_picker.is_open(),
+                egui::Button::new("Export"),
+            );
             if start.clicked() {
                 action = Action::Start;
             }
