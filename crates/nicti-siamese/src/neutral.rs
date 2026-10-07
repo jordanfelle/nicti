@@ -1,6 +1,8 @@
 //! The neutral model image (ADR-0048): what every segmentation model is shown.
 //!
-//! It is built from the *baked* frame (linear camera RGB, post-lens, pre-heal) through
+//! It is keyed on the *baked* neutral render (post-lens, pre-heal), but the pixels it is built from are
+//! still the decoded, **uncorrected** `LinearFrame`'s linear camera RGB (#358: a DNG lens warp is not
+//! applied to them), through
 //! `nicti_groom`'s `SpaceMap` -- as-shot white balance, one exposure scale from the image's own
 //! highlights, the sRGB curve -- so it never depends on a slider. That is the whole point: a
 //! contrast or exposure edit must not be able to change what a model selects, so a tone drag can

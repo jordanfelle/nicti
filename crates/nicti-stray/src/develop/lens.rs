@@ -123,6 +123,27 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_process_version_image_with_default_defringe_sliders_reports_nothing_untranslated() {
+        // PV2003/2010 images skip `lens::apply` entirely, so nothing consumes the Defringe hue
+        // sliders LRC writes at their (non-zero) defaults; they must still read as noise.
+        let ctx = Context {
+            process_version: Some("5.7".into()),
+            ..Context::default()
+        };
+        let t = translate(
+            "s = { DefringePurpleHueLo = 30, DefringePurpleHueHi = 70, \
+                   DefringeGreenHueLo = 40, DefringeGreenHueHi = 60 }",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            t.stats.legacy_process_version, 1,
+            "the image must take the legacy path"
+        );
+        assert!(t.untranslated.is_empty(), "{:?}", t.untranslated);
+    }
+
+    #[test]
     fn a_disabled_panel_imports_nothing_but_still_consumes_its_keys() {
         let t = tr("s = { EnableLensCorrections = false, AutoLateralCA = 1, \
                     DefringePurpleAmount = 10 }");

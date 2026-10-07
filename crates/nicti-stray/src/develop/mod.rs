@@ -209,6 +209,12 @@ enum Known {
 const DEFAULTS: &[(&str, Known)] = &[
     ("ColorGradeBlending", Known::Num(50.0)),
     ("CurveRefineSaturation", Known::Num(100.0)),
+    // Consumed by `lens::apply`, which only runs for PV2012: a legacy-PV image's untouched sliders must
+    // still count as noise (same reason `GrainSize`/`GrainFrequency` stay listed).
+    ("DefringeGreenHueHi", Known::Num(60.0)),
+    ("DefringeGreenHueLo", Known::Num(40.0)),
+    ("DefringePurpleHueHi", Known::Num(70.0)),
+    ("DefringePurpleHueLo", Known::Num(30.0)),
     ("PerspectiveScale", Known::Num(100.0)),
     ("UprightCenterNormX", Known::Num(0.5)),
     ("UprightCenterNormY", Known::Num(0.5)),

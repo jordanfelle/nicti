@@ -31,7 +31,9 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **Bake key** = `hash(neutral_key, recipe)`, independent of `invert`/`opacity`/`op`: a mask and its
   inverse share one model run. Bakes are requested for *enabled* corrections (a fresh Select Subject has
   no adjustment yet but the user is looking at it).
-- **Neutral render taps post-lens, PRE-heal** (`nicti.neutral`, keying-only, upstream `nicti.lens`): no
+- **Neutral render taps post-lens, PRE-heal** (`nicti.neutral`, keying-only, upstream `nicti.lens`) -- *the
+  key*, not the pixels: a lens change re-keys a bake, but the model's input image is still built from the
+  uncorrected `LinearFrame` (#358, see "Not done" below). No
   tone/WB/crop/local/heal edit can re-run a model. Renderer stays a linear chain; `Renderer::render_baked`
   bakes+submits first so the engine can read the baked frame (it cannot from inside `LiveExec::encode` --
   one encoder, submitted at the end).
