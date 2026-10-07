@@ -41,7 +41,10 @@ fn distinct_feature_sets_never_share_an_artifact() {
     let a = support::build_dewclaw(&["no-export"]);
     let b = support::build_dewclaw(&["bad-abi"]);
     assert_ne!(a, b);
-    assert!(a.exists() && b.exists(), "both variants must remain on disk");
+    assert!(
+        a.exists() && b.exists(),
+        "both variants must remain on disk"
+    );
 }
 
 #[test]
