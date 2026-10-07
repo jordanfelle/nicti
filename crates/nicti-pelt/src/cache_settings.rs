@@ -241,6 +241,19 @@ impl ChunkedJob for CacheOpJob {
     }
 }
 
+/// A job Pounce cancels while still queued is dropped without `step` ever running (the Activity
+/// panel's cancel button does this); resolve the slot so the panel doesn't stay busy forever.
+impl Drop for CacheOpJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(Err(
+                "Cancelled; the preview cache was left unchanged.".into()
+            ));
+        }
+    }
+}
+
 /// UI-only state for the panel.
 #[derive(Default)]
 pub struct CacheSettingsUi {
@@ -632,6 +645,21 @@ mod tests {
             .contains("Cap set to 1.00 GiB"));
         assert_eq!(larder.lock().unwrap().stats().unwrap().cap_bytes, GIB);
         assert_eq!(load_cap(&catalog), Some(GIB));
+    }
+
+    #[test]
+    fn a_cancelled_job_frees_the_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        let larder = t2::open_larder(&catalog).unwrap();
+        let mut ui = CacheSettingsUi::default();
+        let (job, slot) = CacheOpJob::new(larder, catalog, CacheOp::Purge);
+        ui.op = Some(slot);
+        assert!(ui.busy());
+        drop(job); // what Pounce does with a job cancelled while queued
+        ui.poll_op();
+        assert!(!ui.busy());
+        assert!(ui.message.as_deref().unwrap().contains("Cancelled"));
     }
 
     #[test]
