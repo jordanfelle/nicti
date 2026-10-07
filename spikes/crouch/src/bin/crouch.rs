@@ -445,6 +445,9 @@ fn run_sim(
     lanes: Lanes,
     cpu_decode_threads: usize,
 ) -> anyhow::Result<()> {
+    if matches!(lanes, Lanes::One) && cpu_decode_threads != 1 {
+        anyhow::bail!("--cpu-decode-threads only applies to --lanes two");
+    }
     if matches!(lanes, Lanes::Two) && cpu_decode_threads == 0 {
         anyhow::bail!("--cpu-decode-threads must be at least 1, or no decode ever finishes");
     }

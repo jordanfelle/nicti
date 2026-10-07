@@ -641,9 +641,30 @@ mod tests {
             simulate_hero_bake_two_lane(1, 0, Duration::from_secs(10), cost, 1, ms(100), ms(5));
         // Dues at 100/200/300/400/500 fall in the idle window: all zero latency. Only the one due
         // exactly when the decode lands (500) overlaps the GPU start, delaying it by its cost.
-        assert!(result.foreground_latencies.len() >= 5);
         assert!(result.foreground_latencies[..5].iter().all(|l| l.is_zero()));
-        assert!(result.first_image_ready >= ms(500 + 5 + 100));
+        // GPU starts at 505; chunks end at 535/565/595/605. The due-at-600 request lands inside the
+        // last (10ms) chunk, waits 5ms, and its service pushes the finish to 610.
+        assert_eq!(result.foreground_latencies[5], ms(5));
+        assert_eq!(result.first_image_ready, ms(610));
+    }
+
+    #[test]
+    fn two_lane_decodes_and_bakes_in_cursor_priority_order() {
+        // Cursor starts at 1 and walks one image per 150ms, so the order of bakes (and the CPU
+        // lane's decode order) depends on `cursor_at` evaluated at the right clock: 1, 0, 2, 3.
+        let result = simulate_hero_bake_two_lane(
+            4,
+            1,
+            ms(150),
+            tiny_cost(),
+            1,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert_eq!(result.bake_finish, vec![ms(210), ms(110), ms(310), ms(410)]);
+        assert_eq!(result.first_image_ready, ms(110));
+        // Arrivals for images 1/2/3 are at 0/150/300ms; all three finish after arriving.
+        assert_eq!(result.stale_at_arrival, 3);
     }
 
     #[test]

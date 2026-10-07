@@ -300,7 +300,8 @@ simplification); (2) decode/mask-bake only block foreground *if* Pounce's one-se
 is read as "one worker for everything," when in practice CPU decode, GPU bake, and GPU live-render
 could be three separate lanes with their own concurrency limits (`throttle::Throttle` already
 supports this for CPU/disk work). Filed as a follow-up rather than resolved here (see
-Consequences).
+Consequences). **Superseded by #206 below**: that follow-up re-ran this sim on the two-lane model
+and found decode is no longer the bound.
 
 ### Follow-up measurement (#206): two-lane re-run of the tile-granular sim
 
@@ -356,7 +357,12 @@ finishes 83.3s sooner (2596.7s = 1.7s + 50 x 51.9s), and a single decode slot is
 image). The mask bake is the new bottleneck for foreground latency, and it is a hypothesis figure
 (ADR-0048): at the ~9s a CPU-provider bake takes (ADR-0048's build update), the bound is ~9s in
 *both* models, so decode stops mattering entirely. Neither `ort::Session::run` nor a CPU inference
-can be interrupted mid-call, so this can't be fixed by the scheduler alone. Filed as
+can be interrupted mid-call, so this can't be fixed by the scheduler alone. Caveat: a user-requested
+mask bake is itself `Priority::Foreground` by default (`MaskBakeJob`); the bound applies to a
+*different* foreground request waiting behind an in-flight bake, e.g. the Background pre-bake
+(#353) or an earlier bake. The sim treats every bake as background work, as ADR-0044's hero-bake
+framing does. Denoise isn't a real Pounce job yet either, so "tiles on `Lane::Gpu`" is the sim's
+assumption about where it will run, not a description of #55. Filed as
 [#466](https://github.com/jordanfelle/nicti/issues/466) (chunk the bake, move CPU-provider bakes
 onto `Lane::Cpu`, or accept and document the bound). #37 still has no streaming decode interface, so
 decode stays an atomic unit, but on the CPU lane it no longer delays anything foreground.
@@ -442,7 +448,7 @@ adversarial review above had itself just touched, one docs-only), all fixed:
   `spikes/crouch`'s `job`/`queue`/`cancel`/`admission`/`throttle`/`telemetry` modules into a real
   threaded runtime (`runtime::Pounce`), with Scruff/Patrol import/sync as its first real
   `Lane::Cpu` clients. Two lanes (GPU/CPU) structurally answer this ADR's own "one serial worker"
-  framing per #206's option 2 — see `docs/decisions/jobs.md`'s "#55: the production build" section
+  framing per #206's option 2 (the sim re-run followed, see #206 below) — see `docs/decisions/jobs.md`'s "#55: the production build" section
   for what changed versus this ADR's own research design (`take_next`/`finish` replacing
   `run_next`, an independent `CancelToken` registry fixing a real cancellation bug the new
   runtime's own tests caught). No real bake pipeline exists yet, so the GPU lane and VRAM admission
@@ -478,7 +484,7 @@ adversarial review above had itself just touched, one docs-only), all fixed:
 ## Spike: `spikes/crouch`
 
 Name: the motionless crouch before a pounce — the scheduler's idle/ready state, matching the
-Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 51 unit tests
+Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 52 unit tests
 (structural: priority ordering, cancellation, `IS_EDITING`, VRAM admission, throttling, sim chunk
 math, #205's own tile-count math, #206's two-lane sim), all passing in this sandbox (lavapipe/software GPU where
 GPU-dependent, real everywhere else). Modules: `job.rs` (`ChunkedJob`/`JobSpec`/`Step`), `queue.rs` (`Scheduler`, the two-class

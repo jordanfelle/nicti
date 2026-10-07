@@ -127,7 +127,7 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `rods::ai::TiledDenoiser::denoise`'s own stride/edge-clamp loop, used by #205's whole-frame cost
   estimate), `sim.rs` (tile-granular hero-scenario re-sim; #206 adds the two-lane
   `simulate_hero_bake_two_lane`). `src/bin/crouch.rs` exposes
-  `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands (`sim --lanes one|two`). 51 unit tests, real reference-hardware
+  `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands (`sim --lanes one|two`). 52 unit tests, real reference-hardware
   numbers for both contention cases (not just lavapipe correctness). See
   `docs/research/crouch-scheduler.md`.
 - **`Pounce::submitter()` (#57)**: a `Weak`-backed `Submitter` (`submit -> Option<JobId>`, `cancel`) so

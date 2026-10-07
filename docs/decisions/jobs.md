@@ -135,6 +135,8 @@ shaped its design.
   work that doesn't actually contend for the GPU queue the way a chunk-modeled dispatch would, and
   a real implementation could run CPU decode fully concurrently with GPU-side foreground rendering
   instead of serializing all three stage types into one worker timeline for simplicity.
+  **Superseded by #206** (see "#206: two-lane re-run of the sim" below): re-run on the two-lane
+  model, decode is no longer the bound, the unchunked mask bake is.
 - **Environment gap closed this pass**: `spikes/rods`'s own CUDA/cuDNN/onnxruntime-gpu/TensorRT
   install from #40's research was no longer present on the reference machine (checked via `find`
   for `onnxruntime*.dll`/`*.onnx` before assuming otherwise) — re-installed fresh, matching #40's
