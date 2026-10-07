@@ -46,6 +46,7 @@ mod test_gpu;
 #[cfg(test)]
 mod test_support;
 mod update;
+mod verify_ui;
 mod viewport;
 mod xmp_sync;
 

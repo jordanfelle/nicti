@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nicti_lair::patrol::SyncOptions;
-use nicti_lair::pounce_jobs::{IngestJob, SyncJob};
+use nicti_lair::pounce_jobs::{BaselineJob, IngestJob, SyncJob, VerifyJob};
 use nicti_lair::{CatalogStore, SqliteCatalog};
 use nicti_pounce::{JobState, Pounce};
 
@@ -196,4 +196,72 @@ fn resume_moves_job_driven_through_pounce_finishes_a_committed_cleanup() {
     assert!(!src.exists());
     assert!(dest_parent.join("event").join("b.nef").is_file());
     assert!(concrete.open_root_moves().unwrap().is_empty());
+}
+
+/// #386: ingest -> Verify (everything unhashed) -> Record baseline -> Verify (clean, all checked),
+/// each driven through a real Pounce runtime.
+#[test]
+fn baseline_then_verify_jobs_driven_through_pounce_end_clean() {
+    let concrete = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let store: Arc<dyn CatalogStore + Send + Sync> = concrete.clone();
+    let dir = tempfile::tempdir().unwrap();
+    write_fake_nef(dir.path(), "a.nef");
+    write_fake_nef(dir.path(), "b.nef");
+    let volume_id = concrete
+        .upsert_volume("test-volume", None, None, 1000)
+        .unwrap();
+    let root_id = concrete.ensure_root(volume_id, "").unwrap();
+    nicti_lair::scruff::ingest_root(store.as_ref(), root_id, dir.path()).unwrap();
+
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let done = |id| {
+        wait_until(
+            || {
+                pounce
+                    .snapshot()
+                    .into_iter()
+                    .any(|s| s.id == id && s.state == JobState::Done)
+            },
+            Duration::from_secs(5),
+        )
+    };
+
+    let (job, slot) = VerifyJob::new(store.clone(), root_id, dir.path());
+    assert!(done(pounce.submit(Box::new(job))), "VerifyJob never Done");
+    let before = slot.lock().unwrap().take().unwrap();
+    assert_eq!((before.checked, before.unhashed), (0, 2));
+
+    let (job, slot) = BaselineJob::new(store.clone(), root_id, dir.path());
+    assert!(done(pounce.submit(Box::new(job))), "BaselineJob never Done");
+    let base = slot.lock().unwrap().take().unwrap();
+    assert_eq!((base.recorded, base.skipped_changed), (2, 0));
+
+    let (job, slot) = VerifyJob::new(store, root_id, dir.path());
+    assert!(done(pounce.submit(Box::new(job))), "VerifyJob never Done");
+    let after = slot.lock().unwrap().take().unwrap();
+    pounce.shutdown();
+    assert_eq!((after.checked, after.matched, after.unhashed), (2, 2, 0));
+    assert!(after.is_clean());
+}
+
+/// #386: a job dropped before it finishes (cancelled) still resolves its slot, flagged cancelled.
+/// The unchecked-list and keep-what-was-hashed behaviour are unit-tested in `verify.rs`.
+#[test]
+fn dropping_verify_and_baseline_jobs_reports_cancelled() {
+    let concrete = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let store: Arc<dyn CatalogStore + Send + Sync> = concrete.clone();
+    let dir = tempfile::tempdir().unwrap();
+    write_fake_nef(dir.path(), "a.nef");
+    let volume_id = concrete.upsert_volume("v", None, None, 1000).unwrap();
+    let root_id = concrete.ensure_root(volume_id, "").unwrap();
+    nicti_lair::scruff::ingest_root(store.as_ref(), root_id, dir.path()).unwrap();
+    let (job, slot) = BaselineJob::new(store.clone(), root_id, dir.path());
+    drop(job); // never stepped: cancelled before it listed anything
+    let report = slot.lock().unwrap().take().unwrap();
+    assert!(report.cancelled);
+    assert_eq!(report.recorded, 0);
+
+    let (job, slot) = VerifyJob::new(store, root_id, dir.path());
+    drop(job);
+    assert!(slot.lock().unwrap().take().unwrap().cancelled);
 }
