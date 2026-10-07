@@ -104,7 +104,7 @@ pub fn handle_viewport(
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
     }
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        heal.tool = Tool::Crop;
+        heal.tool = Tool::Idle;
         return;
     }
     if !response.clicked() {
@@ -113,15 +113,15 @@ pub fn handle_viewport(
     let Some(p) = response.interact_pointer_pos() else {
         return;
     };
-    let source = develop.source_extent();
-    let n = to_norm(rect, source, p);
+    // The photo area shows the cropped canvas while idle (#272): map the click through the crop.
+    let n = develop.display_to_source_norm(to_norm(rect, develop.display_extent(), p));
     let working = thumb_for(ui.ctx(), develop).sample_working(n[0], n[1]);
     let mut params: PointColorParams = develop.stage_params(POINT_COLOR);
     match add_sample(&mut params, sample_from_working(working)) {
         Some(i) => {
             develop.set_stage_params(POINT_COLOR, &params);
             set_selected(ui.ctx(), i);
-            heal.tool = Tool::Crop;
+            heal.tool = Tool::Idle;
         }
         None => set_status(
             ui.ctx(),

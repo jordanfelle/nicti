@@ -37,6 +37,9 @@ use crate::render::DevelopDoc;
 /// Which on-image tool owns the Develop viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
+    /// No tool: the preview shows the cropped canvas (#272), and the viewport takes no gestures.
+    Idle,
+    /// The crop/straighten overlay on the whole, uncropped image.
     Crop,
     Heal,
     /// Local-adjustment masks (#49).
@@ -428,7 +431,7 @@ impl HealUi {
 
     pub fn new() -> Self {
         Self {
-            tool: Tool::Crop,
+            tool: Tool::Idle,
             kind: SpotKind::Heal,
             radius: 24.0,
             feather_frac: 0.3,
@@ -439,6 +442,11 @@ impl HealUi {
             needs_repair: false,
             service: RemovalService::new(),
         }
+    }
+
+    /// True while the Crop tool owns the viewport (the whole image + overlay, #272).
+    pub fn crop_active(&self) -> bool {
+        self.tool == Tool::Crop
     }
 
     pub fn heal_active(&self) -> bool {
@@ -819,11 +827,44 @@ fn draw_overlay(
 pub fn tool_switch(ui: &mut egui::Ui, heal: &mut HealUi) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Tool");
-        ui.selectable_value(&mut heal.tool, Tool::Crop, "Crop");
+        if ui
+            .selectable_label(heal.crop_active(), "Crop")
+            .on_hover_text("R: crop on the whole image; Esc or Enter: commit")
+            .clicked()
+        {
+            heal.tool = if heal.crop_active() {
+                Tool::Idle
+            } else {
+                Tool::Crop
+            };
+        }
         ui.selectable_value(&mut heal.tool, Tool::Heal, "Heal / Remove");
         ui.selectable_value(&mut heal.tool, Tool::Mask, "Masks");
         ui.selectable_value(&mut heal.tool, Tool::PointColor, "Pick Color");
     });
+}
+
+/// Develop-view keys for the crop tool (#272): **R** toggles it, **Esc**/**Enter** commit it.
+/// Ignored while a text field wants the keyboard.
+pub fn handle_tool_keys(ui: &egui::Ui, heal: &mut HealUi) {
+    if ui.ctx().egui_wants_keyboard_input() {
+        return;
+    }
+    let (r, done) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::R) && !i.modifiers.any(),
+            i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter),
+        )
+    });
+    if r {
+        heal.tool = if heal.crop_active() {
+            Tool::Idle
+        } else {
+            Tool::Crop
+        };
+    } else if done && heal.crop_active() {
+        heal.tool = Tool::Idle;
+    }
 }
 
 fn kind_label(kind: SpotKind) -> &'static str {
@@ -1927,5 +1968,48 @@ mod tests {
             before,
             "the new photo's own result was applied"
         );
+    }
+
+    /// #272: Develop opens with no tool (the cropped canvas); R toggles the crop tool and
+    /// Esc/Enter commit it.
+    #[test]
+    fn the_crop_tool_is_opt_in_with_r_and_committed_with_esc_or_enter() {
+        fn press(ctx: &egui::Context, heal: &mut HealUi, key: egui::Key) {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0))),
+                events: vec![Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| handle_tool_keys(ui, heal))
+                .drop_without_applying_deltas();
+        }
+        let ctx = egui::Context::default();
+        let mut heal = HealUi::new();
+        assert_eq!(heal.tool, Tool::Idle);
+        assert!(!heal.crop_active());
+
+        press(&ctx, &mut heal, egui::Key::R);
+        assert!(heal.crop_active());
+        press(&ctx, &mut heal, egui::Key::Escape);
+        assert_eq!(heal.tool, Tool::Idle);
+
+        press(&ctx, &mut heal, egui::Key::R);
+        press(&ctx, &mut heal, egui::Key::Enter);
+        assert_eq!(heal.tool, Tool::Idle);
+
+        press(&ctx, &mut heal, egui::Key::R);
+        press(&ctx, &mut heal, egui::Key::R);
+        assert_eq!(heal.tool, Tool::Idle, "R toggles");
+
+        // Esc outside the crop tool leaves the active tool alone.
+        heal.tool = Tool::Heal;
+        press(&ctx, &mut heal, egui::Key::Escape);
+        assert_eq!(heal.tool, Tool::Heal);
     }
 }

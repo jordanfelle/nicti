@@ -1013,7 +1013,7 @@ fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut Heal
         .clicked()
         {
             heal.tool = if active {
-                crate::heal_tool::Tool::Crop
+                crate::heal_tool::Tool::Idle
             } else {
                 crate::heal_tool::Tool::PointColor
             };

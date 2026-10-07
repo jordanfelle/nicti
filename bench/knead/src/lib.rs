@@ -121,6 +121,7 @@ impl RealRender {
             geometry: &self.crop_kernel,
             geometry_nodes: &GEOMETRY_IDS,
             extent: self.extent,
+            geometry_extent: self.extent,
         };
         renderer
             .render(&req)

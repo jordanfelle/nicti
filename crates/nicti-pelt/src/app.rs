@@ -52,7 +52,7 @@ use crate::preview_settings::{self, PreviewSettings, Surface};
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
-use crate::viewport::{fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
+use crate::viewport::{fit_rect, fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
 use crate::{catalog, CatalogOpenState};
 
@@ -1416,8 +1416,13 @@ impl eframe::App for PeltApp {
             // The heal tool works on the whole, uncropped image (see `heal_tool`'s docs). Set on
             // every frame and tied to the view: the Loupe renders the same `DevelopView`, and a
             // flag left over from Develop would show it without its crop and straighten.
+            if self.view == View::Develop {
+                crate::heal_tool::handle_tool_keys(ui, &mut self.heal_ui);
+            }
             d.uncropped_preview = self.view == View::Develop
-                && (self.heal_ui.heal_active() || self.heal_ui.mask_active());
+                && (self.heal_ui.heal_active()
+                    || self.heal_ui.mask_active()
+                    || self.heal_ui.crop_active());
             if self.view == View::Develop {
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
                 // Files this photo's baked alphas in the disk tier (#353).
@@ -1485,7 +1490,14 @@ impl eframe::App for PeltApp {
                     } else {
                         egui::Sense::drag()
                     };
-                    let (rect, response) = ui.allocate_exact_size(available, sense);
+                    // The frame is the crop rect while idle and the whole image under a tool (#272):
+                    // letterbox it at its own aspect ratio, and give every tool that fitted rect.
+                    let (area, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+                    let rect = fit_rect(
+                        area,
+                        (frame.extent.width as f32, frame.extent.height as f32),
+                    );
+                    let response = ui.interact(rect, ui.id().with("develop_viewport"), sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
                         ViewportCallback::identity(frame),
@@ -1516,7 +1528,7 @@ impl eframe::App for PeltApp {
                                 develop,
                                 &mut self.heal_ui,
                             );
-                        } else {
+                        } else if self.heal_ui.crop_active() {
                             crate::develop_panel::handle_viewport_gesture(
                                 ui, &response, rect, develop,
                             );
@@ -2633,7 +2645,8 @@ impl PeltApp {
             return;
         };
         let rendered = develop.render();
-        let tex_extent = develop.source_extent();
+        // The rendered frame is the crop rect, not the source (#272).
+        let tex_extent = (rendered.extent.width as f32, rendered.extent.height as f32);
 
         let available = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());

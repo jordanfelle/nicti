@@ -83,6 +83,10 @@ pub struct RenderRequest<'a> {
     pub geometry: &'a dyn GeometryExec,
     pub geometry_nodes: &'a [&'a str],
     pub extent: Extent,
+    /// The geometry (crop) pass's own output size (#272). Baked and live stages always render at
+    /// `extent`; only the final present/crop pass is sized to this, so a Develop preview can shrink
+    /// to the crop rect. Ignored by `render_live`/`render_live_from` (no geometry pass runs).
+    pub geometry_extent: Extent,
 }
 
 /// Folds `extent` into `key` -- every cache key this module stores or looks up must be scoped to
@@ -309,7 +313,8 @@ impl Renderer {
             return Ok(live_output);
         }
 
-        let geometry_key = composite_key(req.graph, req.geometry_nodes, live_key, req.extent)?;
+        let geometry_key =
+            composite_key(req.graph, req.geometry_nodes, live_key, req.geometry_extent)?;
         let geometry_output = if self.geometry_key == Some(geometry_key) {
             Arc::clone(
                 self.geometry_output
@@ -317,7 +322,7 @@ impl Renderer {
                     .expect("geometry_key set implies geometry_output set"),
             )
         } else {
-            let output = Arc::new(FrameTexture::new(&self.gpu, req.extent));
+            let output = Arc::new(FrameTexture::new(&self.gpu, req.geometry_extent));
             req.geometry
                 .encode(&self.gpu, &mut encoder, &live_output, &output);
             stats.geometry_dispatches += 1;
@@ -478,6 +483,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &[],
             extent: extent(),
+            geometry_extent: extent(),
         };
 
         renderer.render_live(&req).unwrap();
@@ -521,6 +527,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &[],
             extent: extent(),
+            geometry_extent: extent(),
         };
 
         let baked = renderer.render_baked(&req).unwrap();
@@ -569,6 +576,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &[],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
         assert_eq!(renderer.last_stats().live_dispatches, 1);
@@ -585,6 +593,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &[],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
         let stats = renderer.last_stats();
@@ -634,6 +643,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: screen_res,
+                geometry_extent: screen_res,
             })
             .unwrap();
         assert_eq!(out1.extent, screen_res);
@@ -647,6 +657,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: full_res,
+                geometry_extent: full_res,
             })
             .unwrap();
         let stats = renderer.last_stats();
@@ -680,6 +691,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &["crop"],
             extent: extent(),
+            geometry_extent: extent(),
         };
         renderer.render(&req1).unwrap();
         assert_eq!(renderer.last_stats().bake_dispatches, 5);
@@ -696,6 +708,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &["crop"],
             extent: extent(),
+            geometry_extent: extent(),
         };
         renderer.render(&req2).unwrap();
         assert_eq!(
@@ -726,6 +739,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &["crop"],
             extent: extent(),
+            geometry_extent: extent(),
         };
         let baked = renderer.render_baked(&req).unwrap();
         assert_eq!(baked.extent, extent());
@@ -768,6 +782,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &["crop"],
             extent: extent(),
+            geometry_extent: extent(),
         };
         renderer.render_baked(&req).unwrap();
         assert_eq!(
@@ -816,6 +831,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &[],
             extent: extent(),
+            geometry_extent: extent(),
         });
         assert!(matches!(err, Err(RenderError::EmptyBakedChain)));
     }
@@ -844,6 +860,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
         assert_eq!(renderer.last_stats().live_dispatches, 1);
@@ -857,6 +874,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
         assert_eq!(
@@ -885,6 +903,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
 
@@ -899,12 +918,58 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
 
         let stats = renderer.last_stats();
         assert_eq!(stats.bake_dispatches, 0);
         assert_eq!(stats.live_dispatches, 0);
+        assert_eq!(stats.geometry_dispatches, 1);
+    }
+
+    /// #272: only the geometry pass follows `geometry_extent`; a change to it costs one geometry
+    /// dispatch and no bake or live work, and the output is sized to it.
+    #[test]
+    fn a_geometry_extent_change_redispatches_only_the_geometry_pass() {
+        let Some(gpu) = test_gpu() else { return };
+        let baked_exec = CountingBaked(AtomicU32::new(0));
+        let live_exec = CountingLive(AtomicU32::new(0));
+        let geom_exec = CountingGeometry(AtomicU32::new(0));
+        let mut renderer = Renderer::new(gpu, 1_000_000_000);
+        let g = hero_graph(&[]);
+        let chain = baked_chain(&g, &baked_exec);
+        let small = Extent {
+            width: extent().width / 2,
+            height: extent().height / 2,
+        };
+        let mut render = |geometry_extent: Extent| {
+            let out = renderer
+                .render(&RenderRequest {
+                    graph: &g,
+                    baked_chain: &chain,
+                    live: &live_exec,
+                    live_nodes: &["wb", "tone"],
+                    geometry: &geom_exec,
+                    geometry_nodes: &["crop"],
+                    extent: extent(),
+                    geometry_extent,
+                })
+                .unwrap();
+            (out.extent, renderer.last_stats())
+        };
+
+        let (e, _) = render(extent());
+        assert_eq!(e, extent());
+        let (e, stats) = render(small);
+        assert_eq!(e, small, "the output is sized to geometry_extent");
+        assert_eq!(stats.bake_dispatches, 0);
+        assert_eq!(stats.live_dispatches, 0);
+        assert_eq!(stats.geometry_dispatches, 1);
+        let (_, stats) = render(small);
+        assert_eq!(stats.geometry_dispatches, 0, "an unchanged extent is a hit");
+        let (e, stats) = render(extent());
+        assert_eq!(e, extent());
         assert_eq!(stats.geometry_dispatches, 1);
     }
 
@@ -926,6 +991,7 @@ mod tests {
             geometry: &geom_exec,
             geometry_nodes: &["crop"],
             extent: extent(),
+            geometry_extent: extent(),
         };
         renderer.render(&req).unwrap();
         renderer.render(&req).unwrap();
@@ -955,6 +1021,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
 
@@ -969,6 +1036,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
         assert_eq!(renderer.last_stats().bake_dispatches, 4); // demosaic, denoise, lens, heal
@@ -985,6 +1053,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
         assert_eq!(
@@ -1013,6 +1082,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
 
@@ -1037,6 +1107,7 @@ mod tests {
                 geometry: &geom_exec,
                 geometry_nodes: &["crop"],
                 extent: extent(),
+                geometry_extent: extent(),
             })
             .unwrap();
 

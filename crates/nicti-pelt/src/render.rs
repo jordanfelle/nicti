@@ -590,6 +590,34 @@ impl DevelopDoc {
         (self.extent.width as f32, self.extent.height as f32)
     }
 
+    /// The displayed canvas's size in output pixels: the crop rect while idle (#272), the whole
+    /// frame while the crop/heal/mask tools or Before show it uncropped. Must match what
+    /// `DevelopEngine::render` allocates.
+    pub fn display_extent(&self) -> (f32, f32) {
+        if self.uncropped_preview || self.show_before {
+            return self.source_extent();
+        }
+        let crop: CropParams = self.stage_params(CROP);
+        let rect = crop.effective_rect(self.source_extent());
+        (rect.width.round().max(1.0), rect.height.round().max(1.0))
+    }
+
+    /// Maps a point on the displayed canvas, normalized to `0..=1` on each axis, to a normalized
+    /// point in the source image -- the same output -> source transform the crop kernel samples
+    /// with (`geometry::affine_for_crop`), or the identity while the uncropped frame is shown.
+    pub fn display_to_source_norm(&self, n: [f32; 2]) -> [f32; 2] {
+        let (src_w, src_h) = self.source_extent();
+        if self.uncropped_preview || self.show_before {
+            return n;
+        }
+        let crop: CropParams = self.stage_params(CROP);
+        let rect = crop.effective_rect((src_w, src_h));
+        let (dw, dh) = self.display_extent();
+        let (x, y) =
+            geometry::affine_for_crop(rect, crop.rotation_degrees).apply((n[0] * dw, n[1] * dh));
+        [x / src_w.max(1.0), y / src_h.max(1.0)]
+    }
+
     /// The Ctrl-drag-a-reference-line gesture (#47): given a drag vector `(dx, dy)` in the *same*
     /// pixel space the current render is displayed in, computes the correcting rotation and adds
     /// it to the crop's current `rotation_degrees` (clamped). Distinct from
@@ -705,6 +733,13 @@ impl DevelopEngine {
             (LENS, &lens_exec),
             (HEAL, &heal_exec),
         ];
+        // #272: the idle preview is sized to the crop rect; the crop tool, heal/mask tools and
+        // Before show the whole frame.
+        let (gw, gh) = dv.display_extent();
+        let geometry_extent = Extent {
+            width: (gw as u32).clamp(1, dv.extent.width.max(1)),
+            height: (gh as u32).clamp(1, dv.extent.height.max(1)),
+        };
         let req = RenderRequest {
             graph: &dv.graph,
             baked_chain: &baked_chain,
@@ -713,6 +748,7 @@ impl DevelopEngine {
             geometry: &self.crop_kernel,
             geometry_nodes: &GEOMETRY_IDS,
             extent: dv.extent,
+            geometry_extent,
         };
 
         // Local corrections (#49) and global Presence (#380). The engine needs the *baked* frame (AI refines and range masks
@@ -1834,5 +1870,114 @@ mod tests {
         assert_eq!(view.apply_auto_tone(), skipped);
         assert_eq!(view.apply_auto_straighten(), skipped);
         assert!(!view.has_edits());
+    }
+
+    /// #272: the idle preview is sized to the crop rect; the crop/heal/mask tools and Before show
+    /// the whole frame.
+    #[test]
+    fn the_idle_preview_is_the_crop_rect_and_a_tool_shows_the_whole_frame() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let (w, h) = view.source_extent();
+        let (cw, ch) = ((w / 2.0).floor(), (h / 4.0).floor());
+        view.set_stage_params(
+            CROP,
+            &CropParams {
+                x: 2.0,
+                y: 3.0,
+                width: cw,
+                height: ch,
+                rotation_degrees: 0.0,
+            },
+        );
+        let out = view.render();
+        assert_eq!(
+            (out.extent.width, out.extent.height),
+            (cw as u32, ch as u32)
+        );
+        assert_eq!(view.display_extent(), (cw, ch));
+
+        view.uncropped_preview = true;
+        let full = view.render();
+        assert_eq!(
+            (full.extent.width as f32, full.extent.height as f32),
+            (w, h)
+        );
+        view.uncropped_preview = false;
+
+        view.show_before = true;
+        let before = view.render();
+        assert_eq!(
+            (before.extent.width as f32, before.extent.height as f32),
+            (w, h)
+        );
+    }
+
+    /// #272: with no rotation, the cropped canvas's pixel (0, 0) is the uncropped frame's pixel at
+    /// the crop origin -- so the crop is the same picture, just resized.
+    #[test]
+    fn the_cropped_canvas_matches_the_uncropped_frame_at_the_crop_origin() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let (w, h) = view.source_extent();
+        let (x, y) = (4u32, 6u32);
+        view.set_stage_params(
+            CROP,
+            &CropParams {
+                x: x as f32,
+                y: y as f32,
+                width: w / 2.0,
+                height: h / 2.0,
+                rotation_degrees: 0.0,
+            },
+        );
+        let cropped = nicti_tapetum::frame::read_frame(&gpu, &view.render());
+        view.uncropped_preview = true;
+        let full_frame = view.render();
+        let full = nicti_tapetum::frame::read_frame(&gpu, &full_frame);
+        // Compare the interior pixel (1, 1) to stay off the bilinear edge.
+        let c = cropped[(w / 2.0) as usize + 1];
+        let f = full[((y + 1) * full_frame.extent.width + x + 1) as usize];
+        for i in 0..3 {
+            assert!((c[i] - f[i]).abs() < 1e-2, "{c:?} vs {f:?}");
+        }
+    }
+
+    /// #272: `display_to_source_norm` is the inverse of what the crop kernel samples.
+    #[test]
+    fn display_to_source_norm_follows_the_crop_and_its_rotation() {
+        let mut doc = DevelopDoc::new();
+        let (w, h) = doc.source_extent();
+        // No crop: identity.
+        let n = doc.display_to_source_norm([0.25, 0.75]);
+        assert!((n[0] - 0.25).abs() < 1e-5 && (n[1] - 0.75).abs() < 1e-5);
+        // Unrotated crop: the display origin is the crop origin, the far corner is its far corner.
+        doc.set_stage_params(
+            CROP,
+            &CropParams {
+                x: w / 4.0,
+                y: h / 4.0,
+                width: w / 2.0,
+                height: h / 2.0,
+                rotation_degrees: 0.0,
+            },
+        );
+        let o = doc.display_to_source_norm([0.0, 0.0]);
+        assert!((o[0] - 0.25).abs() < 0.02 && (o[1] - 0.25).abs() < 0.02);
+        let far = doc.display_to_source_norm([1.0, 1.0]);
+        assert!((far[0] - 0.75).abs() < 0.02 && (far[1] - 0.75).abs() < 0.02);
+        // Rotation keeps the display centre on the crop centre.
+        let mut crop: CropParams = doc.stage_params(CROP);
+        crop.rotation_degrees = 12.0;
+        doc.set_stage_params(CROP, &crop);
+        let c = doc.display_to_source_norm([0.5, 0.5]);
+        assert!((c[0] - 0.5).abs() < 0.02 && (c[1] - 0.5).abs() < 0.02);
+        // A tool showing the whole frame is the identity again.
+        doc.uncropped_preview = true;
+        assert_eq!(doc.display_to_source_norm([0.1, 0.9]), [0.1, 0.9]);
     }
 }

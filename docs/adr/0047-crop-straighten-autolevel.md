@@ -138,6 +138,9 @@ preview).
   rect's aspect/size in real time (today only pan+rotate visibly apply in the interactive preview;
   the crop rect itself is correctly modeled, cached, and already honored end-to-end by the existing
   full-res `TiledRender`/`MemorySink` export path, just not yet the low-res live preview canvas).
+  **Amendment (#272, done):** `RenderRequest` gained `geometry_extent`, so only the geometry pass is
+  resized. The idle Develop view now shows the cropped canvas; the Crop tool (key R; Esc/Enter commit)
+  shows the whole image with the overlay, as Lightroom Classic does.
 - Follow-up filed: **#273** -- tune `autolevel::detect_level_angle`'s Canny/Hough thresholds
   against real photos once a reference-machine pass (matching
   #149/#163/#164/#171/#200/#202/#222/#233/#236's own pattern) is available -- `needs-physical

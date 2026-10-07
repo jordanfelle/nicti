@@ -157,6 +157,7 @@ pub(crate) fn render_live_frame(
         geometry: &ctx.crop_kernel,
         geometry_nodes: &GEOMETRY_IDS,
         extent,
+        geometry_extent: extent,
     };
     // Local corrections only when the caller asked for them (`masks`); the global Presence's
     // clarity/texture/dehaze (#380) always needs the baked frame and bases, masks or not -- a

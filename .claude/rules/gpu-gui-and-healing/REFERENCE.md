@@ -146,8 +146,8 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     drag pans while zoomed. `viewport.rs`/`display.wgsl` gained `view_scale`/`view_offset` uniform
     fields and a real bilinear `wgpu::Sampler` (replacing the old `textureLoad`, which had no
     resampling at all) so the same shader serves both Fit (aspect-correct, `fit_scale`) and 100%
-    (`one_to_one_scale`) zoom; `ViewportCallback::identity(frame)` keeps the Develop tab's old
-    always-1:1-stretch mapping exactly. Known non-blocking follow-ups: #294 (unclamped 100% pan),
+    (`one_to_one_scale`) zoom; `ViewportCallback::identity(frame)` keeps the Develop tab's 1:1 mapping, now painted into
+    `viewport::fit_rect` (#272: aspect-correct, the frame is the crop rect while idle) rather than stretched. Known non-blocking follow-ups: #294 (unclamped 100% pan),
     #295 (a rare cache-eviction flicker back to the T0 fallback), #296 (NaN/Inf on a zero-dimension
     rect or corrupt asset in `fit_scale`/`one_to_one_scale`).
   - **#30 (virtualized library grid, landed) module breakdown**: `grid/layout.rs`'s `GridLayout`/
@@ -214,7 +214,8 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   cross-crate `ort` regression test, moved here from the deleted spike.
 - **`crates/nicti-stalk`'s `models.rs`** (#51) — the on-demand model store and pinned manifest
   (`MOBILE_SAM_*`, `LAMA`, `ORT_RUNTIME`, `ModelStore`, `RemovalModels::locate`).
-- **`crates/nicti-pelt`'s `heal_tool.rs`** (#51) — the Crop | Heal tool: `HealUi`, gestures
+- **`crates/nicti-pelt`'s `heal_tool.rs`** (#51; #272 adds `Tool::Idle`, the default -- cropped canvas, no gestures --
+  and `handle_tool_keys`: R toggles Crop, Esc/Enter commit) — the Crop | Heal tool: `HealUi`, gestures
   (`handle_viewport`), panel (`show_panel`), `RemovalService` (install + backend + pending jobs).
   `DevelopView` gained `uncropped_preview`, `set_removal`/`prune_removals`, `frame_arc`/`frame_key`.
 - ~~**`spikes/groom`**~~ (#50/ADR-0050) — deleted in #51; see `docs/research/groom-healing-removal.md`
