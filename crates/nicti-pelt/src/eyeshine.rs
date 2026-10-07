@@ -1832,7 +1832,14 @@ mod tests {
         t.svc
             .request(&t.fx.pounce, &t.store, t.id, 0, RenderPolicy::EditedOnly);
         assert!(b_flag.load(Ordering::SeqCst));
-        assert!(!t.svc.inflight.contains_key(&t.id));
+        // B's entry is gone. A fresh render of A may legitimately be queued instead (the Larder
+        // `try_lock` can lose to B's worker), so assert B isn't the one in flight, not that
+        // nothing is.
+        assert!(t
+            .svc
+            .inflight
+            .get(&t.id)
+            .is_none_or(|f| !Arc::ptr_eq(&f.cancelled, &b_flag)));
     }
 
     #[test]
