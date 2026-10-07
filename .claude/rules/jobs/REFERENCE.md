@@ -93,10 +93,9 @@ Full reasoning/history: `docs/decisions/jobs.md`.
 - **Sim finding (`sim.rs`, tile-granular extension of `loaf::sim`)**: chunking denoise into tiles
   bounds only *its own* worst-case preemption latency — decode (~1.7s, ADR-0037) and mask bake
   (~1.0s, ADR-0048) aren't chunked in this model, so they set the real worst-case foreground-
-  latency bound (`ChunkedBakeCost::worst_case_atomic_unit`), not the ~45ms denoise tile. Not solved
-  this pass — #37 has no streaming decode interface, and this sim (like `loaf`'s own) serializes
-  CPU decode into the same worker timeline as GPU work for simplicity, when a real implementation
-  could run them concurrently.
+  latency bound (`ChunkedBakeCost::worst_case_atomic_unit`), not the ~45ms denoise tile. That sim
+  serializes CPU decode into the same worker timeline as GPU work; #206's two-lane re-run (below)
+  models #55's real runtime instead.
 - **Environment note**: `spikes/rods`'s own CUDA/cuDNN/onnxruntime-gpu install from #40 wasn't
   present on the reference machine and was re-installed fresh this pass (Python 3.13 venv,
   `onnxruntime-gpu==1.30.0`, `nvidia-cudnn-cu13==9.26.0.51` — matching #40's own cited versions,
@@ -109,9 +108,13 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   whole-frame cost is ~4.9x *worse* (~88.1s vs. ~18.0s) — faster per call, worse in total. Moot for
   now: SCUNet's real path is cross-API CUDA, already found contention-free above; only matters for
   a hypothetical future same-API `wgpu` background chunk.
-- **Open follow-up**: [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake
-  chunking or explicit cross-lane concurrency, CPU decode vs. GPU work, to bound their own
-  worst-case latency).
+- **[#206](https://github.com/jordanfelle/nicti/issues/206), measured**: `crouch sim --lanes two`
+  (`sim::simulate_hero_bake_two_lane`, decode on `Lane::Cpu`, tiles + mask bake on `Lane::Gpu`) —
+  foreground bound drops from decode's 1.7s to the unchunked mask bake's 1.0s (measured worst
+  980ms vs. 1.688s at 500ms/16ms foreground load), run 83.3s shorter, 1 decode slot is enough. At
+  a 9s CPU-provider bake the bound is ~9s either way, so the mask bake is the remaining gap:
+  [#466](https://github.com/jordanfelle/nicti/issues/466). `--lanes one` (default) still reproduces
+  ADR-0044's 53.6s/2680s/50-50. See ADR-0054's "Follow-up measurement (#206)".
 
 ## Package contents
 
@@ -122,8 +125,9 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   harness), `ort_contend.rs` (`TileLoad`, trimmed from `spikes/rods::ai::TiledDenoiser`, the
   CUDA-vs-wgpu contention harness, plus `tiles_for_frame` — a pure helper mirroring
   `rods::ai::TiledDenoiser::denoise`'s own stride/edge-clamp loop, used by #205's whole-frame cost
-  estimate), `sim.rs` (tile-granular hero-scenario re-sim). `src/bin/crouch.rs` exposes
-  `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands. 42 unit tests, real reference-hardware
+  estimate), `sim.rs` (tile-granular hero-scenario re-sim; #206 adds the two-lane
+  `simulate_hero_bake_two_lane`). `src/bin/crouch.rs` exposes
+  `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands (`sim --lanes one|two`). 52 unit tests, real reference-hardware
   numbers for both contention cases (not just lavapipe correctness). See
   `docs/research/crouch-scheduler.md`.
 - **`Pounce::submitter()` (#57)**: a `Weak`-backed `Submitter` (`submit -> Option<JobId>`, `cancel`) so

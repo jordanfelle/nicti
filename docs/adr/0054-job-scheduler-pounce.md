@@ -300,7 +300,72 @@ simplification); (2) decode/mask-bake only block foreground *if* Pounce's one-se
 is read as "one worker for everything," when in practice CPU decode, GPU bake, and GPU live-render
 could be three separate lanes with their own concurrency limits (`throttle::Throttle` already
 supports this for CPU/disk work). Filed as a follow-up rather than resolved here (see
-Consequences).
+Consequences). **Superseded by #206 below**: that follow-up re-ran this sim on the two-lane model
+and found decode is no longer the bound.
+
+### Follow-up measurement (#206): two-lane re-run of the tile-granular sim
+
+The re-sim above serializes decode, denoise tiles and mask bake onto one worker timeline and found
+the worst-case foreground-preemption bound was decode (1700ms). #55 has since landed the real
+runtime, and it doesn't work that way: decode is `Lane::Cpu` (`nicti-pelt`'s `decode_job.rs`), mask
+bake is `Lane::Gpu` (`nicti-siamese`'s `job.rs`), the lanes are independent threads, and
+`queue::Scheduler::take_next` is only called between chunks, so a foreground job on the GPU lane
+waits for at most the GPU chunk in flight. #206 asked for the sim to be re-run on that model.
+
+**Model** (`sim::simulate_hero_bake_two_lane`, `crouch sim --lanes two`): the CPU lane has
+`--cpu-decode-threads` parallel slots (default 1); each free slot decodes the pending image nearest
+the cursor at that moment. The GPU lane runs one worker over the denoise tiles and mask bake
+(`ChunkedBakeCost::gpu_chunks`), starting an image once its decode has landed and idling in
+between. Foreground requests are served only by the GPU lane, at chunk boundaries, or on time if it
+is idle. Not modeled: RAM held by decoded-ahead frames (the CPU lane may run arbitrarily far ahead
+of the GPU lane, so this is the best case for the GPU lane), and the shared `EditingGate`.
+
+**Commands** (real ADR-0037/0040/0048 figures are the CLI defaults: decode 1700ms, denoise 50.9s in
+45ms tiles, mask bake 1000ms; 50 images, 100ms walk pace):
+
+```
+crouch sim --lanes one
+crouch sim --lanes two
+crouch sim --lanes one --foreground-interval-ms 500 --foreground-cost-ms 16
+crouch sim --lanes two --foreground-interval-ms 500 --foreground-cost-ms 16
+crouch sim --lanes two --cpu-decode-threads 4 --foreground-interval-ms 500 --foreground-cost-ms 16
+crouch sim --lanes one --mask-bake-ms 9000 --foreground-interval-ms 500 --foreground-cost-ms 16
+crouch sim --lanes two --mask-bake-ms 9000 --foreground-interval-ms 500 --foreground-cost-ms 16
+```
+
+**Raw output**:
+
+| Scenario | first_image_ready | total_wall_time | stale | atomic-unit bound | worst foreground latency (requests) |
+|---|---|---|---|---|---|
+| one lane, no foreground | 53.6s | 2680s | 50/50 | 1.7s | n/a |
+| two lanes, no foreground | 53.6s | 2596.7s | 50/50 | 1s | n/a |
+| one lane, fg 500ms/16ms | 55.36s | 2768.592s | 50/50 | 1.7s | 1.688s (5537) |
+| two lanes, fg 500ms/16ms | 55.312s | 2682.476s | 50/50 | 1s | 980ms (5364) |
+| two lanes, 4 decode threads, fg 500ms/16ms | 55.312s | 2682.476s | 50/50 | 1s | 980ms (5364) |
+| one lane, mask bake 9s, fg | 63.632s | 3181.808s | 50/50 | 9s | 8.96s (6363) |
+| two lanes, mask bake 9s, fg | 63.584s | 3095.708s | 50/50 | 9s | 8.996s (6191) |
+
+The one-lane no-foreground row reproduces ADR-0044's numbers exactly, so the new model sits next to
+the old one rather than replacing it.
+
+**Finding: the worst-case foreground-preemption bound is no longer decode.** With decode on its own
+lane, the bound (`ChunkedBakeCost::worst_case_gpu_atomic_unit`) is the larger of the denoise tile
+(45ms) and the **unchunked mask bake**: 1000ms on a CUDA-class bake, measured worst case 980ms,
+down from 1.688s. Decode is now hidden behind GPU work after the first image: the whole run
+finishes 83.3s sooner (2596.7s = 1.7s + 50 x 51.9s), and a single decode slot is already enough
+(4 slots gave identical results, since decode, 1.7s, is far cheaper than the ~51.9s of GPU work per
+image). The mask bake is the new bottleneck for foreground latency, and it is a hypothesis figure
+(ADR-0048): at the ~9s a CPU-provider bake takes (ADR-0048's build update), the bound is ~9s in
+*both* models, so decode stops mattering entirely. Neither `ort::Session::run` nor a CPU inference
+can be interrupted mid-call, so this can't be fixed by the scheduler alone. Caveat: a user-requested
+mask bake is itself `Priority::Foreground` by default (`MaskBakeJob`); the bound applies to a
+*different* foreground request waiting behind an in-flight bake, e.g. the Background pre-bake
+(#353) or an earlier bake. The sim treats every bake as background work, as ADR-0044's hero-bake
+framing does. Denoise isn't a real Pounce job yet either, so "tiles on `Lane::Gpu`" is the sim's
+assumption about where it will run, not a description of #55. Filed as
+[#466](https://github.com/jordanfelle/nicti/issues/466) (chunk the bake, move CPU-provider bakes
+onto `Lane::Cpu`, or accept and document the bound). #37 still has no streaming decode interface, so
+decode stays an atomic unit, but on the CPU lane it no longer delays anything foreground.
 
 ## Options considered
 
@@ -310,7 +375,7 @@ Consequences).
 | `governor` for CPU/disk throttling | No | Its `RateLimiter` is cells-per-unit-time shaped, not a concurrency-limit (semaphore) shape — bending it would cost more than the dozen-line hand-rolled `Throttle` it would replace |
 | `nvml-wrapper` for VRAM telemetry | No (documented fallback) | Vendor-locked to NVIDIA; DXGI is vendor-neutral and the v1 target is Windows-only anyway, so there's no cross-platform cost to being Windows-specific here that NVML would avoid |
 | Fire-and-forget background submission (no backpressure) | No | Confirmed on real hardware to crash the GPU device (Windows TDR) at moderate chunk sizes — kept only as an explicitly-flagged stress test, never the scheduler's real behavior |
-| Chunk decode/mask-bake to bound their own worst-case latency too | Not built this pass | Real engineering work (#37/#48 don't expose a streaming interface); flagged as a follow-up rather than solved speculatively here |
+| Chunk decode/mask-bake to bound their own worst-case latency too | Not built this pass | Real engineering work (#37/#48 don't expose a streaming interface). #206 found decode doesn't need it (it runs on `Lane::Cpu`); the mask bake still does, see #466 |
 
 ## Review findings, fixed before merge
 
@@ -383,7 +448,7 @@ adversarial review above had itself just touched, one docs-only), all fixed:
   `spikes/crouch`'s `job`/`queue`/`cancel`/`admission`/`throttle`/`telemetry` modules into a real
   threaded runtime (`runtime::Pounce`), with Scruff/Patrol import/sync as its first real
   `Lane::Cpu` clients. Two lanes (GPU/CPU) structurally answer this ADR's own "one serial worker"
-  framing per #206's option 2 — see `docs/decisions/jobs.md`'s "#55: the production build" section
+  framing per #206's option 2 (the sim re-run followed, see #206 below) — see `docs/decisions/jobs.md`'s "#55: the production build" section
   for what changed versus this ADR's own research design (`take_next`/`finish` replacing
   `run_next`, an independent `CancelToken` registry fixing a real cancellation bug the new
   runtime's own tests caught). No real bake pipeline exists yet, so the GPU lane and VRAM admission
@@ -399,12 +464,13 @@ adversarial review above had itself just touched, one docs-only), all fixed:
   Neither tile size is a fix if a same-API `wgpu` background chunk of comparable duration is ever
   introduced; moot for now since this ADR's own cross-API finding already found SCUNet's actual
   CUDA path has no contention cost.
-- **Real follow-up: decode/mask-bake chunking, or explicit cross-lane concurrency.** This ADR's
-  own sim shows foreground latency is currently bounded by whichever atomic (non-chunked) stage is
-  running, dominated by decode's ~1.7s. Not solved here — needs either a streaming decode interface
-  (#37's own scope) or confirmation that a real implementation runs CPU decode concurrently with
-  GPU work rather than serializing it into one timeline, which this pass's sim (like `loaf`'s own)
-  didn't model. Follow-up: [#206](https://github.com/jordanfelle/nicti/issues/206).
+- **[#206](https://github.com/jordanfelle/nicti/issues/206) measured, resolved**: re-running the
+  tile-granular sim on the two-lane model #55 actually built (see the Follow-up measurement
+  section above) takes decode out of the foreground-latency bound: worst case 980ms (the unchunked
+  mask bake) instead of 1.688s (decode), and the full run 83.3s shorter. Decode stays unchunked
+  (#37 has no streaming interface) but runs on `Lane::Cpu`, so it delays nothing foreground. The
+  mask bake is the new bound (~1s CUDA hypothesis, ~9s CPU): follow-up
+  [#466](https://github.com/jordanfelle/nicti/issues/466).
 - **`ort` CUDA-GPU environment (Python 3.13 venv, onnxruntime-gpu 1.30.0, nvidia-cudnn-cu13
   9.26.0.51) re-installed on the reference machine this pass** — same versions #40's own research
   used, via pip/winget, no NVIDIA login. `SCUNet-PSNR.onnx` re-downloaded from
@@ -418,9 +484,9 @@ adversarial review above had itself just touched, one docs-only), all fixed:
 ## Spike: `spikes/crouch`
 
 Name: the motionless crouch before a pounce — the scheduler's idle/ready state, matching the
-Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 42 unit tests
+Pounce codename's own cat-behavior naming (`CLAUDE.md`'s feline-naming convention). 52 unit tests
 (structural: priority ordering, cancellation, `IS_EDITING`, VRAM admission, throttling, sim chunk
-math, #205's own tile-count math), all passing in this sandbox (lavapipe/software GPU where
+math, #205's own tile-count math, #206's two-lane sim), all passing in this sandbox (lavapipe/software GPU where
 GPU-dependent, real everywhere else). Modules: `job.rs` (`ChunkedJob`/`JobSpec`/`Step`), `queue.rs` (`Scheduler`, the two-class
 priority queue), `cancel.rs` (`CancelToken`/`EditingGate`), `admission.rs` (VRAM budget
 reservation), `throttle.rs` (hand-rolled concurrency-limit semaphore), `telemetry.rs`
@@ -428,7 +494,7 @@ reservation), `throttle.rs` (hand-rolled concurrency-limit semaphore), `telemetr
 ADR-0044's own `priority_order`), `gpu_contend.rs` (persistent `busy.wgsl` kernel + throttled/
 unthrottled `BackgroundLoad`, the wgpu-vs-wgpu contention harness), `ort_contend.rs` (`TileLoad`,
 trimmed from `spikes/rods::ai::TiledDenoiser`, the CUDA-vs-wgpu contention harness), `sim.rs`
-(tile-granular hero-scenario re-sim). `src/bin/crouch.rs` exposes
+(tile-granular hero-scenario re-sim, plus #206's two-lane `simulate_hero_bake_two_lane`). `src/bin/crouch.rs` exposes
 `bench-wgpu`/`bench-ort`/`bench-tile`/`sim` subcommands, writing `nicti-prowl`-format reports to
 `bench-results/` (reusing `nicti_prowl::perf::Protocol`; `bench-tile` (#205) overrides the default
 1-warmup+5-measured protocol with a larger 5-warmup+50-measured sample, since its ~30-40ms

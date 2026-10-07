@@ -135,6 +135,8 @@ shaped its design.
   work that doesn't actually contend for the GPU queue the way a chunk-modeled dispatch would, and
   a real implementation could run CPU decode fully concurrently with GPU-side foreground rendering
   instead of serializing all three stage types into one worker timeline for simplicity.
+  **Superseded by #206** (see "#206: two-lane re-run of the sim" below): re-run on the two-lane
+  model, decode is no longer the bound, the unchunked mask bake is.
 - **Environment gap closed this pass**: `spikes/rods`'s own CUDA/cuDNN/onnxruntime-gpu/TensorRT
   install from #40's research was no longer present on the reference machine (checked via `find`
   for `onnxruntime*.dll`/`*.onnx` before assuming otherwise) — re-installed fresh, matching #40's
@@ -159,10 +161,9 @@ shaped its design.
   already found SCUNet's real CUDA path has no contention cost — this only matters for a
   hypothetical future same-API `wgpu` background chunk. See `docs/adr/0054`'s own "Follow-up
   measurement (#205)" section.
-- **Open follow-up**: [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake
-  chunking, or an explicit multi-lane concurrency model — CPU decode running independent of the
-  GPU/`ort` worker — to bound their own worst-case foreground-preemption latency) — not solved
-  this pass, a genuine gap in scope (#37 has no streaming decode interface yet).
+- **Follow-up, resolved**: [#206](https://github.com/jordanfelle/nicti/issues/206) (decode/mask-bake
+  chunking, or an explicit multi-lane concurrency model) — #55 built the two lanes, and #206 then
+  re-ran this sim on that model (below, "#206: two-lane re-run of the sim").
 
 ## #55: the production build
 
@@ -186,8 +187,8 @@ harness:
    worker rule (real VRAM admission); `Lane::Cpu` is a pool of worker threads gated by a
    live-adjustable `Throttle`, so Scruff/Patrol's CPU-bound scan never waits behind the GPU/`ort`
    worker — the structural half of #206's option 2 (an explicit multi-lane concurrency model). The
-   tile-granular sim re-run #206 also asked for is still open; commented on the issue rather than
-   closed by this ticket.
+   tile-granular sim re-run #206 also asked for was left open by this ticket and done afterwards,
+   see "#206: two-lane re-run of the sim" below.
 3. **A real concurrency bug this ticket's own tests caught**: cancelling a job by calling
    `Scheduler::cancel(id)` only reaches it if it's currently sitting in the scheduler's own
    `foreground`/`background` collections — a job a worker thread has already taken out via
@@ -210,8 +211,8 @@ explicit step-by-step state machines (one candidate file, or one already-catalog
 `sync_root` are now thin loops over these, preserving their existing test coverage exactly.
 
 **Consequences**: unblocks the first real bake-job follow-up (tied to #31/loupe and #27/preview
-cache) and #70 (shares `telemetry::TelemetrySampler`, not a second implementation). #206 stays
-open — the sim re-run against the new two-lane model hasn't happened yet.
+cache) and #70 (shares `telemetry::TelemetrySampler`, not a second implementation). #206's sim
+re-run against the new two-lane model came afterwards (see "#206: two-lane re-run of the sim").
 
 **#25's own client (landed)**: `pounce_jobs::BackupJob`, a third `Lane::Cpu`/`Priority::Background`
 client alongside `IngestJob`/`SyncJob`, and a new `JobKind::Backup` variant (nothing in this crate
@@ -226,6 +227,24 @@ cleanup happens on the *next* run's own first chunk instead (`ninelives::cleanup
 Not a defect in this ticket, just a real, previously-undocumented consequence of the "cooperative,
 between-chunks-only" cancellation model #54/#55 chose — recorded here since it's this crate's own
 scheduling contract, not something #25's own ADR should have to re-derive.
+
+## #206: two-lane re-run of the sim
+
+`spikes/crouch`'s `sim::simulate_hero_bake_two_lane` (`crouch sim --lanes two [--cpu-decode-threads
+N]`) re-runs ADR-0054's tile-granular hero-scenario sim on the model #55 actually built: decode on
+`Lane::Cpu` (`nicti-pelt`'s `decode_job.rs`), denoise tiles and mask bake on `Lane::Gpu`, foreground
+served only by the GPU lane at chunk boundaries (or on time while it idles waiting for a decode).
+`--lanes one` (the default) is the original single-timeline model, unchanged.
+
+Result with the real ADR-0037/0040/0048 figures: the worst-case foreground-preemption bound drops
+from 1.7s (decode) to 1.0s (the unchunked mask bake, `ChunkedBakeCost::worst_case_gpu_atomic_unit`);
+measured worst foreground latency 1.688s -> 980ms at a 500ms/16ms foreground load, and the full
+50-image run finishes 83.3s sooner (2680s -> 2596.7s). One decode slot is enough; 4 slots change
+nothing. At a 9s CPU-provider mask bake the bound is ~9s under both models. Decode stays an atomic
+unit (#37 has no streaming interface) but delays nothing foreground. The mask bake is the new
+bound: [#466](https://github.com/jordanfelle/nicti/issues/466). Not modeled: RAM held by
+decoded-ahead frames, the shared `EditingGate`. Full table and commands in `docs/adr/0054`'s
+"Follow-up measurement (#206)" section.
 
 ## #57: `Pounce::submitter()` for chained jobs
 

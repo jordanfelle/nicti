@@ -128,6 +128,11 @@ See ADR-0054's own Measured results for the full tables; summarized here:
   figures plugged in is 1700ms (decode), not the ~45ms denoise-tile figure — decode and mask bake
   aren't chunked in this model, so they (not the tile-chunked denoise) set the real worst-case
   foreground-preemption bound.
+- **Sim, two-lane re-run (#206)**: `crouch sim --lanes two` models #55's real runtime (decode on
+  its own CPU lane, denoise tiles + mask bake on the GPU lane). With the same figures the
+  worst-case foreground bound is 1000ms (the unchunked mask bake), measured 980ms vs. 1.688s
+  one-lane, and total wall time drops 2680s -> 2596.7s. At a 9s CPU-provider mask bake the bound is
+  ~9s either way. See ADR-0054's "Follow-up measurement (#206)" section for the full table.
 
 ## Follow-up pass (#205): SCUNet 128px tile timing
 
@@ -200,11 +205,11 @@ and #5), just not for the same-API-contention reason ADR-0044's own scheduling c
 worried about.
 
 The tile-granular sim's own finding — that decode and mask bake, not the tile-chunked denoise, set
-the real worst-case foreground-preemption bound — is a genuine gap in scope, not solved this pass:
-#37 (decode) has no streaming interface, and this sim (like `loaf`'s own) models one serial worker
-timeline across all three stage types for simplicity, when a real implementation could run
-CPU-only decode fully concurrently with GPU work instead. Filed as a follow-up rather than
-resolved speculatively here.
+the real worst-case foreground-preemption bound — was resolved for decode by #206: the original
+sim modeled one serial worker timeline across all three stage types for simplicity, but #55's real
+runtime runs CPU-only decode on its own lane, and re-running the sim that way (`--lanes two`) takes
+decode out of the bound entirely. The unchunked mask bake (~1s on CUDA, ~9s on CPU) is the
+remaining gap: #466.
 
 ## Cross-compile / reference-machine notes
 

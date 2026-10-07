@@ -36,14 +36,10 @@ pub struct ChunkedBakeCost {
 }
 
 impl ChunkedBakeCost {
-    /// The chunk-duration list this job's bake actually executes, in order: one decode chunk, N
-    /// denoise chunks (the last one truncated to whatever remains, never rounded up past the real
-    /// total), one mask-bake chunk.
-    fn chunks(&self) -> Vec<Duration> {
+    /// The denoise stage's tile list: `denoise_total` split into `denoise_chunk`-sized tiles,
+    /// the last one truncated to whatever remains, never rounded up past the real total.
+    fn denoise_chunks(&self) -> Vec<Duration> {
         let mut out = Vec::new();
-        if !self.decode.is_zero() {
-            out.push(self.decode);
-        }
         let mut remaining = self.denoise_total;
         // A zero-sized `denoise_chunk` with a nonzero `denoise_total` can't make progress through
         // the loop below (`remaining.min(ZERO)` is always `ZERO`, so `remaining` never shrinks) --
@@ -60,6 +56,29 @@ impl ChunkedBakeCost {
                 remaining = remaining.saturating_sub(chunk);
             }
         }
+        out
+    }
+
+    /// The GPU lane's chunk list under the two-lane model (`simulate_hero_bake_two_lane`): the
+    /// denoise tiles and the mask bake, without decode -- decode is CPU-only LibRaw work that runs
+    /// on `Lane::Cpu` (`nicti-pelt`'s `decode_job.rs`), never serialized behind this lane.
+    fn gpu_chunks(&self) -> Vec<Duration> {
+        let mut out = self.denoise_chunks();
+        if !self.mask_bake.is_zero() {
+            out.push(self.mask_bake);
+        }
+        out
+    }
+
+    /// The chunk-duration list this job's bake actually executes, in order: one decode chunk, N
+    /// denoise chunks (the last one truncated to whatever remains, never rounded up past the real
+    /// total), one mask-bake chunk.
+    fn chunks(&self) -> Vec<Duration> {
+        let mut out = Vec::new();
+        if !self.decode.is_zero() {
+            out.push(self.decode);
+        }
+        out.extend(self.denoise_chunks());
         if !self.mask_bake.is_zero() {
             out.push(self.mask_bake);
         }
@@ -77,12 +96,20 @@ impl ChunkedBakeCost {
     /// unchunked unit (see `chunks()`'s own handling of this), so its atomic size is the whole
     /// `denoise_total` in that case, not zero.
     pub fn worst_case_atomic_unit(&self) -> Duration {
+        self.decode.max(self.worst_case_gpu_atomic_unit())
+    }
+
+    /// The two-lane model's bound (#206): decode runs on the CPU lane, so only the GPU lane's
+    /// atomic units (an unchunked denoise if `denoise_chunk` is zero, the denoise tile, the mask
+    /// bake) can delay a foreground request. A zero `denoise_chunk` means denoise itself runs as
+    /// one unchunked unit, so its atomic size is the whole `denoise_total` in that case.
+    pub fn worst_case_gpu_atomic_unit(&self) -> Duration {
         let denoise_atomic = if self.denoise_chunk.is_zero() {
             self.denoise_total
         } else {
             self.denoise_chunk
         };
-        self.decode.max(denoise_atomic).max(self.mask_bake)
+        denoise_atomic.max(self.mask_bake)
     }
 }
 
@@ -173,7 +200,23 @@ pub fn simulate_hero_bake_chunked(
         pending.remove(&next);
     }
 
-    let total_wall_time = clock;
+    finish(
+        bake_finish,
+        cursor_start,
+        walk_pace,
+        clock,
+        foreground_latencies,
+    )
+}
+
+fn finish(
+    bake_finish: Vec<Duration>,
+    cursor_start: usize,
+    walk_pace: Duration,
+    total_wall_time: Duration,
+    foreground_latencies: Vec<Duration>,
+) -> ChunkedSimResult {
+    let n_images = bake_finish.len();
     let first_image_ready = bake_finish.get(cursor_start).copied().unwrap_or_default();
     let stale_at_arrival = (cursor_start..n_images)
         .map(|i| (i, walk_pace * (i - cursor_start) as u32))
@@ -187,6 +230,113 @@ pub fn simulate_hero_bake_chunked(
         stale_at_arrival,
         foreground_latencies,
     }
+}
+
+/// The two-lane variant of `simulate_hero_bake_chunked` (#206): models what #55's real
+/// `nicti-pounce` runtime actually does -- decode (`Lane::Cpu`, `nicti-pelt`'s `decode_job.rs`)
+/// runs concurrently with the GPU lane's denoise tiles and mask bake (`Lane::Gpu`), instead of
+/// serializing all three stage types on one worker timeline.
+///
+/// - **CPU lane**: `cpu_decode_threads` parallel decode slots. Whenever a slot frees up it decodes
+///   the pending image nearest the cursor *at that moment* (`prefetch::priority_order`). Decoded
+///   frames are never evicted and the lane may run arbitrarily far ahead of the GPU lane -- the
+///   RAM a real run-ahead would cost is not modeled, so this is the best case for the GPU lane.
+/// - **GPU lane**: one worker, picks the nearest-to-cursor image, starts it once that image's
+///   decode is ready (idle in between), then runs its denoise tiles and mask bake as chunks.
+/// - **Foreground**: only the GPU lane serves it (live render is GPU work), so it waits for at
+///   most the chunk in flight -- bounded by `ChunkedBakeCost::worst_case_gpu_atomic_unit`, not by
+///   decode. A request due while the GPU lane is idle (waiting on a decode) is served on time.
+///
+/// # Panics
+///
+/// Panics under the same foreground interval/cost condition as `simulate_hero_bake_chunked`, and
+/// if `cpu_decode_threads` is zero (no decode would ever finish).
+pub fn simulate_hero_bake_two_lane(
+    n_images: usize,
+    cursor_start: usize,
+    walk_pace: Duration,
+    cost: ChunkedBakeCost,
+    cpu_decode_threads: usize,
+    foreground_interval: Duration,
+    foreground_cost: Duration,
+) -> ChunkedSimResult {
+    assert!(
+        foreground_interval.is_zero() || foreground_cost < foreground_interval,
+        "foreground_cost ({foreground_cost:?}) must be strictly less than foreground_interval \
+         ({foreground_interval:?}), or the due-time backlog never clears"
+    );
+    assert!(
+        cpu_decode_threads > 0,
+        "cpu_decode_threads must be at least 1, or no decode ever finishes"
+    );
+
+    let gpu_chunks = cost.gpu_chunks();
+    let mut pending: BTreeSet<usize> = (0..n_images).collect();
+    let mut undecoded: BTreeSet<usize> = (0..n_images).collect();
+    let mut decode_ready: Vec<Option<Duration>> = vec![None; n_images];
+    let mut cpu_slot_free = vec![Duration::ZERO; cpu_decode_threads];
+    let mut bake_finish = vec![Duration::ZERO; n_images];
+    let mut clock = Duration::ZERO;
+    let mut next_foreground_due = foreground_interval;
+    let mut foreground_latencies = Vec::new();
+
+    while !pending.is_empty() {
+        let cursor = cursor_at(cursor_start, n_images, walk_pace, clock);
+        let next = prefetch::priority_order(&pending, cursor)[0];
+
+        // Advance the CPU lane until `next` has a decode-ready time. Each iteration decodes one
+        // image on whichever slot frees up first, in priority order for the cursor at that time.
+        while decode_ready[next].is_none() {
+            let (slot, &start) = cpu_slot_free
+                .iter()
+                .enumerate()
+                .min_by_key(|&(_, t)| *t)
+                .expect("cpu_decode_threads > 0");
+            let at_cursor = cursor_at(cursor_start, n_images, walk_pace, start);
+            let pick = prefetch::priority_order(&undecoded, at_cursor)[0];
+            let ready = start + cost.decode;
+            cpu_slot_free[slot] = ready;
+            decode_ready[pick] = Some(ready);
+            undecoded.remove(&pick);
+        }
+        let ready = decode_ready[next].expect("decoded above");
+
+        // GPU lane idles until the decode lands. A foreground request due in that window is
+        // served on time (zero latency); serving it can push the start past `ready`.
+        if ready > clock {
+            if !foreground_interval.is_zero() {
+                while next_foreground_due <= ready {
+                    foreground_latencies.push(Duration::ZERO);
+                    clock = next_foreground_due + foreground_cost;
+                    next_foreground_due += foreground_interval;
+                }
+            }
+            clock = clock.max(ready);
+        }
+
+        for &chunk in &gpu_chunks {
+            clock += chunk;
+            if !foreground_interval.is_zero() {
+                while next_foreground_due <= clock {
+                    let latency = clock.saturating_sub(next_foreground_due);
+                    foreground_latencies.push(latency);
+                    clock += foreground_cost;
+                    next_foreground_due += foreground_interval;
+                }
+            }
+        }
+
+        bake_finish[next] = clock;
+        pending.remove(&next);
+    }
+
+    finish(
+        bake_finish,
+        cursor_start,
+        walk_pace,
+        clock,
+        foreground_latencies,
+    )
 }
 
 #[cfg(test)]
@@ -351,5 +501,181 @@ mod tests {
         // Decode (1700ms) dwarfs both the denoise chunk (45ms) and mask bake (1000ms) -- real
         // ADR-0037/0040/0048 figures plugged in.
         assert_eq!(cost.worst_case_atomic_unit(), Duration::from_millis(1700));
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn gpu_chunks_are_the_denoise_tiles_plus_mask_bake_without_decode() {
+        assert_eq!(
+            tiny_cost().gpu_chunks(),
+            vec![ms(30), ms(30), ms(30), ms(10)]
+        );
+    }
+
+    #[test]
+    fn worst_case_gpu_atomic_unit_excludes_decode() {
+        let cost = ChunkedBakeCost {
+            decode: ms(1700),
+            denoise_total: ms(50_900),
+            denoise_chunk: ms(45),
+            mask_bake: ms(1000),
+        };
+        // #206: with decode on its own CPU lane, the unchunked mask bake (1000ms) -- not decode
+        // (1700ms) -- is what bounds foreground latency.
+        assert_eq!(cost.worst_case_gpu_atomic_unit(), ms(1000));
+        assert_eq!(cost.worst_case_atomic_unit(), ms(1700));
+    }
+
+    #[test]
+    fn two_lane_hides_decode_behind_gpu_work() {
+        // decode (10) < GPU work per image (100), one CPU slot: only the first decode is exposed.
+        let cost = tiny_cost();
+        let result = simulate_hero_bake_two_lane(
+            5,
+            0,
+            Duration::from_secs(10),
+            cost,
+            1,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert_eq!(result.first_image_ready, ms(10 + 100));
+        assert_eq!(result.total_wall_time, ms(10 + 5 * 100));
+        assert!(result.foreground_latencies.is_empty());
+    }
+
+    #[test]
+    fn two_lane_starves_the_gpu_when_decode_is_the_bottleneck() {
+        let cost = ChunkedBakeCost {
+            decode: ms(200),
+            ..tiny_cost()
+        };
+        let one_slot = simulate_hero_bake_two_lane(
+            3,
+            0,
+            Duration::from_secs(10),
+            cost,
+            1,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        // Decodes land at 200/400/600; each image then takes 100ms of GPU: 3*200 + 100.
+        assert_eq!(one_slot.total_wall_time, ms(700));
+        let two_slots = simulate_hero_bake_two_lane(
+            3,
+            0,
+            Duration::from_secs(10),
+            cost,
+            2,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        // Decodes land at 200/200/400; GPU never waits after the first image.
+        assert_eq!(two_slots.total_wall_time, ms(500));
+    }
+
+    #[test]
+    fn two_lane_is_never_slower_than_one_lane() {
+        let cost = tiny_cost();
+        let one = simulate_hero_bake_chunked(
+            8,
+            0,
+            Duration::from_secs(10),
+            cost,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        let two = simulate_hero_bake_two_lane(
+            8,
+            0,
+            Duration::from_secs(10),
+            cost,
+            1,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert!(two.total_wall_time <= one.total_wall_time);
+    }
+
+    #[test]
+    fn two_lane_foreground_latency_is_bounded_by_the_gpu_atomic_unit_not_decode() {
+        // Decode (500ms) dwarfs every GPU chunk; under the one-lane model it would set the bound.
+        let cost = ChunkedBakeCost {
+            decode: ms(500),
+            ..tiny_cost()
+        };
+        let bound = cost.worst_case_gpu_atomic_unit();
+        assert_eq!(bound, ms(30));
+        let result = simulate_hero_bake_two_lane(
+            6,
+            0,
+            Duration::from_secs(10),
+            cost,
+            1,
+            ms(7), // deliberately not a multiple of any chunk size
+            ms(2),
+        );
+        assert!(!result.foreground_latencies.is_empty());
+        for latency in &result.foreground_latencies {
+            assert!(
+                *latency <= bound,
+                "latency {latency:?} exceeded the GPU atomic unit {bound:?}"
+            );
+        }
+        let one_lane =
+            simulate_hero_bake_chunked(6, 0, Duration::from_secs(10), cost, ms(7), ms(2));
+        assert!(one_lane.foreground_worst_latency() > bound);
+    }
+
+    #[test]
+    fn two_lane_serves_foreground_on_time_while_the_gpu_waits_for_decode() {
+        // The only GPU wait is the first decode (0..500ms); requests due then see an idle GPU.
+        let cost = ChunkedBakeCost {
+            decode: ms(500),
+            ..tiny_cost()
+        };
+        let result =
+            simulate_hero_bake_two_lane(1, 0, Duration::from_secs(10), cost, 1, ms(100), ms(5));
+        // Dues at 100/200/300/400/500 fall in the idle window: all zero latency. Only the one due
+        // exactly when the decode lands (500) overlaps the GPU start, delaying it by its cost.
+        assert!(result.foreground_latencies[..5].iter().all(|l| l.is_zero()));
+        // GPU starts at 505; chunks end at 535/565/595/605. The due-at-600 request lands inside the
+        // last (10ms) chunk, waits 5ms, and its service pushes the finish to 610.
+        assert_eq!(result.foreground_latencies[5], ms(5));
+        assert_eq!(result.first_image_ready, ms(610));
+    }
+
+    #[test]
+    fn two_lane_decodes_and_bakes_in_cursor_priority_order() {
+        // Cursor starts at 1 and walks one image per 150ms, so the order of bakes (and the CPU
+        // lane's decode order) depends on `cursor_at` evaluated at the right clock: 1, 0, 2, 3.
+        let result = simulate_hero_bake_two_lane(
+            4,
+            1,
+            ms(150),
+            tiny_cost(),
+            1,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert_eq!(result.bake_finish, vec![ms(210), ms(110), ms(310), ms(410)]);
+        assert_eq!(result.first_image_ready, ms(110));
+        // Arrivals for images 1/2/3 are at 0/150/300ms; all three finish after arriving.
+        assert_eq!(result.stale_at_arrival, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "cpu_decode_threads must be at least 1")]
+    fn two_lane_rejects_zero_decode_threads() {
+        simulate_hero_bake_two_lane(3, 0, ms(1), tiny_cost(), 0, Duration::ZERO, Duration::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be strictly less than")]
+    fn two_lane_rejects_foreground_cost_equal_to_interval() {
+        simulate_hero_bake_two_lane(3, 0, ms(1), tiny_cost(), 1, ms(5), ms(5));
     }
 }
