@@ -24,9 +24,9 @@ use serde_json::{json, Value};
 use wgpu::util::DeviceExt;
 
 use crate::coat::{
-    self, CropParams, DefringeParams, EffectsParams, ExposureParams, HslParams,
-    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
-    VibranceParams, VignetteStyle, WbParams,
+    self, ColorGradeParams, CropParams, DefringeParams, EffectsParams, ExposureParams, HslParams,
+    NoiseReductionParams, PointColorParams, PointCurveParams, PresenceParams, SharpenParams,
+    ToneCurveParams, ToneParams, VibranceParams, VignetteStyle, WbParams,
 };
 use crate::color;
 use crate::detail::{self, MAX_BLUR_RADIUS};
@@ -47,6 +47,8 @@ pub const EXPOSURE: &str = "nicti.exposure";
 pub const WORKING_SPACE: &str = "nicti.working_space";
 pub const TONE: &str = "nicti.tone";
 pub const TONE_CURVE: &str = "nicti.tone_curve";
+/// Freeform RGB/R/G/B point curves (#432), applied right after the parametric tone curve.
+pub const POINT_CURVE: &str = "nicti.point_curve";
 pub const VIBRANCE: &str = "nicti.vibrance";
 /// Global Texture/Clarity/Dehaze/Saturation (#380); summed with the per-mask deltas in the shader.
 pub const PRESENCE: &str = "nicti.presence";
@@ -54,6 +56,10 @@ pub const PRESENCE: &str = "nicti.presence";
 /// camera->working matrix, so a slider drag is a uniform write and never rebakes anything.
 pub const DEFRINGE: &str = "nicti.defringe";
 pub const HSL: &str = "nicti.hsl";
+/// Color Grading wheels (#432), OkLab, after HSL.
+pub const COLOR_GRADE: &str = "nicti.color_grade";
+/// Point Color samples (#432), OkLCh, after Color Grading.
+pub const POINT_COLOR: &str = "nicti.point_color";
 pub const SHARPEN: &str = "nicti.sharpen";
 pub const NOISE_REDUCTION: &str = "nicti.noise_reduction";
 pub const CROP: &str = "nicti.crop";
@@ -192,6 +198,27 @@ pub fn presence_stage() -> BasicStage {
         id: PRESENCE,
         kind: StageKind::Live,
         default_params: || coat::default_value::<PresenceParams>(),
+    }
+}
+pub fn point_curve_stage() -> BasicStage {
+    BasicStage {
+        id: POINT_CURVE,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<PointCurveParams>(),
+    }
+}
+pub fn color_grade_stage() -> BasicStage {
+    BasicStage {
+        id: COLOR_GRADE,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<ColorGradeParams>(),
+    }
+}
+pub fn point_color_stage() -> BasicStage {
+    BasicStage {
+        id: POINT_COLOR,
+        kind: StageKind::Live,
+        default_params: || coat::default_value::<PointColorParams>(),
     }
 }
 pub fn defringe_stage() -> BasicStage {
@@ -495,6 +522,58 @@ struct LiveUniforms {
     defringe0: [f32; 4],
     /// #428: green hue lo, green hue hi, unused, unused.
     defringe1: [f32; 4],
+    /// #432: x = point curves enabled (the LUT texture at binding 13 is only read when 1), yzw unused.
+    point_curve: [f32; 4],
+    /// #432 OkLab ops (`oklab::OkLabOps`): x = any active, y = grading active, z = point colour
+    /// active, w unused.
+    ok_flags: [f32; 4],
+    /// ProPhoto -> LMS rows, then LMS -> ProPhoto rows (w unused).
+    ok_to: [[f32; 4]; 3],
+    ok_from: [[f32; 4]; 3],
+    /// Grading split midpoint and width, yzw unused.
+    grade_k: [f32; 4],
+    /// Shadows, midtones, highlights, global wheel offsets: (dL, da, db, unused).
+    grade_w: [[f32; 4]; 4],
+    /// Per point-colour slot, three vec4s: (L, chroma, hue rad, present), (hue/chroma/light half
+    /// widths, has hue), (hue shift rad, saturation, lightness shift, variance).
+    points: [[f32; 4]; POINT_COLOR_VEC4S],
+}
+
+const POINT_COLOR_VEC4S: usize = crate::coat::MAX_POINT_COLORS * 3;
+
+/// Writes `ops` (Color Grading + Point Color, #432) into `u`'s OkLab uniform fields.
+fn write_oklab(u: &mut LiveUniforms, ops: &crate::oklab::OkLabOps) {
+    let rows = |m: &color::Mat3| -> [[f32; 4]; 3] {
+        std::array::from_fn(|r| [m[r][0], m[r][1], m[r][2], 0.0])
+    };
+    u.ok_to = rows(&ops.to_lms);
+    u.ok_from = rows(&ops.from_lms);
+    (u.grade_k, u.grade_w) = match &ops.grade {
+        Some(g) => (
+            [g.split, g.width, 0.0, 0.0],
+            [g.shadows, g.midtones, g.highlights, g.global].map(|o| [o[0], o[1], o[2], 0.0]),
+        ),
+        None => ([0.0; 4], [[0.0; 4]; 4]),
+    };
+    u.points = [[0.0; 4]; POINT_COLOR_VEC4S];
+    for (i, p) in ops.points.iter().enumerate() {
+        if let Some(p) = p {
+            u.points[i * 3] = [p.l, p.c, p.h, 1.0];
+            u.points[i * 3 + 1] = [
+                p.hue_half,
+                p.chroma_half,
+                p.light_half,
+                f32::from(p.has_hue),
+            ];
+            u.points[i * 3 + 2] = [p.dh, p.sat, p.dl, p.var];
+        }
+    }
+    u.ok_flags = [
+        f32::from(!ops.is_noop()),
+        f32::from(ops.grade.is_some()),
+        f32::from(ops.points.iter().any(Option::is_some)),
+        0.0,
+    ];
 }
 
 #[repr(C)]
@@ -525,6 +604,12 @@ pub struct LiveParams {
     pub exposure: ExposureParams,
     pub tone: ToneParams,
     pub tone_curve: ToneCurveParams,
+    /// Freeform point curves (#432); [`PointCurveParams::sanitized`] by the caller or here.
+    pub point_curve: PointCurveParams,
+    /// Color Grading wheels (#432), OkLab, after HSL.
+    pub color_grade: ColorGradeParams,
+    /// Point Color samples (#432), OkLCh, after Color Grading.
+    pub point_color: PointColorParams,
     pub vibrance: VibranceParams,
     /// Global Texture/Clarity/Dehaze/Saturation (#380). When [`PresenceParams::needs_bases`], the
     /// caller must also bind a `MaskFrame` carrying the matching spatial bases (`MaskEngine::prepare`
@@ -554,6 +639,9 @@ impl Default for LiveParams {
             exposure: ExposureParams::default(),
             tone: ToneParams::default(),
             tone_curve: ToneCurveParams::default(),
+            point_curve: PointCurveParams::default(),
+            color_grade: ColorGradeParams::default(),
+            point_color: PointColorParams::default(),
             vibrance: VibranceParams::default(),
             presence: PresenceParams::default(),
             defringe: DefringeParams::default(),
@@ -645,6 +733,9 @@ pub struct LiveSuffixKernel {
     /// of each so `set_params` only re-uploads when content actually changed.
     profile_tables: std::sync::Mutex<ProfileTables>,
     profile_sampler: wgpu::Sampler,
+    /// The point-curve LUT texture (#432) currently bound (a 2x3 dummy when disabled) and a
+    /// fingerprint so `set_params` only re-uploads on a content change.
+    point_curve_tex: std::sync::Mutex<PointCurveTex>,
     /// Local corrections (#49): the uniform block (`count` + up to 16 corrections), the atlas
     /// currently bound (a 1x1 dummy and count 0 when there are none) and its sampler.
     mask_buf: wgpu::Buffer,
@@ -670,6 +761,11 @@ struct MaskBinding {
 const MASK_UNIFORM_BYTES: u64 = 32
     + (crate::mask::params::MAX_CORRECTIONS as u64)
         * std::mem::size_of::<crate::mask::local::LocalUniform>() as u64;
+
+struct PointCurveTex {
+    view: wgpu::TextureView,
+    fp: Option<u64>,
+}
 
 struct ProfileTables {
     hue_sat_view: wgpu::TextureView,
@@ -781,6 +877,41 @@ fn upload_tone_lut(gpu: &GpuContext, samples: &[f32]) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// The point-curve LUTs (#432) as a 256 x 3 `R32Float` texture, one row per channel (R, G, B),
+/// read with `textureLoad`. `None` uploads a never-read 256 x 3 dummy.
+fn upload_point_curve_luts(gpu: &GpuContext, luts: Option<&[[f32; 256]; 3]>) -> wgpu::TextureView {
+    let flat: Vec<f32> = match luts {
+        Some(l) => l.iter().flatten().copied().collect(),
+        None => vec![0.0; 256 * 3],
+    };
+    let size = wgpu::Extent3d {
+        width: 256,
+        height: 3,
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("point curve lut"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        bytemuck::cast_slice(&flat),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256 * 4),
+            rows_per_image: Some(3),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 fn dummy_tone_lut(gpu: &GpuContext) -> wgpu::TextureView {
     upload_tone_lut(gpu, &[0.0, 1.0])
 }
@@ -841,6 +972,10 @@ impl LiveSuffixKernel {
                 look_profile_fp: None,
                 tone_view: dummy_tone_lut(gpu),
                 tone_fp: None,
+            }),
+            point_curve_tex: std::sync::Mutex::new(PointCurveTex {
+                view: upload_point_curve_luts(gpu, None),
+                fp: None,
             }),
             profile_sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("dcp table sampler"),
@@ -960,8 +1095,32 @@ impl LiveSuffixKernel {
                 0.0,
                 0.0,
             ],
+            point_curve: [0.0; 4],
+            ok_flags: [0.0; 4],
+            ok_to: [[0.0; 4]; 3],
+            ok_from: [[0.0; 4]; 3],
+            grade_k: [0.0; 4],
+            grade_w: [[0.0; 4]; 4],
+            points: [[0.0; 4]; POINT_COLOR_VEC4S],
         };
         let mut u = u;
+        {
+            let ops = crate::oklab::OkLabOps::new(&params.color_grade, &params.point_color);
+            write_oklab(&mut u, &ops);
+        }
+        {
+            let luts = color::build_point_curve_luts(&params.point_curve);
+            let fp = luts.as_ref().map(|l| {
+                let hash = blake3::hash(bytemuck::cast_slice(l.as_slice()));
+                u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"))
+            });
+            let mut tex = self.point_curve_tex.lock().unwrap();
+            if fp != tex.fp {
+                tex.view = upload_point_curve_luts(gpu, luts.as_ref());
+                tex.fp = fp;
+            }
+            u.point_curve[0] = f32::from(luts.is_some());
+        }
         {
             let mut tables = self.profile_tables.lock().unwrap();
             let srgb = |e: TableEncoding| f32::from(e == TableEncoding::Srgb);
@@ -1036,6 +1195,7 @@ impl LiveSuffixKernel {
     ) {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
         let tables = self.profile_tables.lock().unwrap();
+        let point_curve = self.point_curve_tex.lock().unwrap();
         let mask_state = self.mask_state.lock().unwrap();
         let atlas_view = match &mask_state.frame {
             Some(f) => &f.atlas.array_view,
@@ -1113,8 +1273,13 @@ impl LiveSuffixKernel {
                     binding: 12,
                     resource: wgpu::BindingResource::TextureView(&tables.tone_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&point_curve.view),
+                },
             ],
         });
+        drop(point_curve);
         drop(mask_state);
         drop(tables);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2079,6 +2244,191 @@ mod tests {
         );
     }
 
+    /// #432: the fused live pass's point curves (shader) match `color::apply_point_curve` (CPU twin)
+    /// after the parametric curve, and an identity curve set leaves the pixel untouched.
+    #[test]
+    fn point_curves_in_the_live_pass_match_the_cpu_twin_and_identity_is_a_noop() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 2,
+            height: 2,
+        };
+        let input_data = vec![
+            [0.2, 0.3, 0.1, 1.0],
+            [0.5, 0.05, 0.4, 1.0],
+            [0.9, 0.9, 0.9, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let kernel = LiveSuffixKernel::new(&gpu);
+        let run = |point_curve: PointCurveParams| {
+            let output = FrameTexture::new(&gpu, extent);
+            kernel.set_params(
+                &gpu,
+                &LiveParams {
+                    point_curve,
+                    ..Default::default()
+                },
+            );
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(&gpu, &output)
+        };
+        let curves = PointCurveParams {
+            master: vec![[0.0, 0.0], [0.5, 0.65], [1.0, 1.0]],
+            red: vec![[0.0, 0.1], [1.0, 0.9]],
+            green: vec![],
+            blue: vec![[0.0, 0.0], [0.3, 0.2], [0.7, 0.8], [1.0, 1.0]],
+        };
+        let luts = color::build_point_curve_luts(&curves).expect("non-identity");
+        let baseline = run(PointCurveParams::default());
+        let actual = run(curves);
+        let identity = run(PointCurveParams {
+            master: vec![[0.0, 0.0], [1.0, 1.0]],
+            ..Default::default()
+        });
+        assert_eq!(
+            baseline, identity,
+            "an identity curve must be a bit-exact no-op"
+        );
+        assert_ne!(baseline, actual, "the curves must change the image");
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        for (i, px) in input_data.iter().enumerate() {
+            let mut rgb = color::mat3_apply(color::mat3_identity(), [px[0], px[1], px[2]]);
+            rgb = color::apply_tone(rgb, &ToneParams::default());
+            rgb = color::apply_tone_curve(rgb, &lut);
+            rgb = color::apply_point_curve(rgb, &luts);
+            for c in 0..3 {
+                assert!(
+                    (actual[i][c] - rgb[c]).abs() < 0.01,
+                    "pixel {i} channel {c}: gpu={} cpu={}",
+                    actual[i][c],
+                    rgb[c]
+                );
+            }
+        }
+    }
+
+    /// #432: Color Grading + Point Color in the fused live pass (shader) match
+    /// `oklab::OkLabOps::apply` (CPU twin), and neutral params are a bit-exact no-op.
+    #[test]
+    fn oklab_ops_in_the_live_pass_match_the_cpu_twin_and_neutral_is_a_noop() {
+        use crate::coat::{ColorGradeParams, GradeWheel, PointColorParams, PointColorSample};
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 2,
+            height: 2,
+        };
+        let input_data = vec![
+            [0.2, 0.3, 0.1, 1.0],
+            [0.5, 0.05, 0.4, 1.0],
+            [0.6, 0.55, 0.5, 1.0],
+            [0.02, 0.02, 0.03, 1.0],
+        ];
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let kernel = LiveSuffixKernel::new(&gpu);
+        let run = |color_grade: ColorGradeParams, point_color: PointColorParams| {
+            let output = FrameTexture::new(&gpu, extent);
+            kernel.set_params(
+                &gpu,
+                &LiveParams {
+                    color_grade,
+                    point_color,
+                    ..Default::default()
+                },
+            );
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            crate::test_util::read_frame(&gpu, &output)
+        };
+        let grade = ColorGradeParams {
+            shadows: GradeWheel {
+                hue: 230.0,
+                sat: 0.8,
+                lum: -0.2,
+            },
+            midtones: GradeWheel {
+                hue: 30.0,
+                sat: 0.3,
+                lum: 0.1,
+            },
+            highlights: GradeWheel {
+                hue: 60.0,
+                sat: 0.5,
+                lum: 0.0,
+            },
+            global: GradeWheel {
+                hue: 300.0,
+                sat: 0.1,
+                lum: 0.0,
+            },
+            blending: 0.6,
+            balance: 0.2,
+        };
+        // Sample the second pixel's own colour so Point Color has a real, nearby target.
+        let tone_free = |px: [f32; 3]| {
+            let lab = crate::oklab::lab_from_prophoto(px);
+            PointColorSample {
+                lum: lab[0],
+                chroma: lab[1].hypot(lab[2]),
+                hue: lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0),
+                hue_shift: 0.3,
+                sat_shift: 0.4,
+                lum_shift: 0.2,
+                variance: 0.2,
+                ..Default::default()
+            }
+        };
+        let mut points = PointColorParams {
+            count: 1,
+            ..Default::default()
+        };
+        points.samples[0] = tone_free([0.5, 0.05, 0.4]);
+
+        let baseline = run(ColorGradeParams::default(), PointColorParams::default());
+        let neutral_wheels = ColorGradeParams {
+            shadows: GradeWheel {
+                hue: 123.0,
+                sat: 0.0,
+                lum: 0.0,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            baseline,
+            run(neutral_wheels, PointColorParams::default()),
+            "neutral wheels must be a bit-exact no-op"
+        );
+        let actual = run(grade, points);
+        assert_ne!(
+            baseline, actual,
+            "grading + point colour must change the image"
+        );
+        let ops = crate::oklab::OkLabOps::new(&grade, &points);
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        for (i, px) in input_data.iter().enumerate() {
+            let mut rgb = [px[0], px[1], px[2]];
+            rgb = color::apply_tone(rgb, &ToneParams::default());
+            rgb = color::apply_tone_curve(rgb, &lut);
+            rgb = color::apply_hsl(rgb, &HslParams::default());
+            rgb = ops.apply(rgb);
+            for c in 0..3 {
+                assert!(
+                    (actual[i][c] - rgb[c]).abs() < 0.01,
+                    "pixel {i} channel {c}: gpu={} cpu={}",
+                    actual[i][c],
+                    rgb[c]
+                );
+            }
+        }
+    }
+
     #[test]
     fn live_suffix_gpu_matches_cpu_reference() {
         let Some(gpu) = test_gpu() else { return };
@@ -2774,6 +3124,9 @@ mod tests {
                 exposure,
                 tone,
                 tone_curve,
+                point_curve: PointCurveParams::default(),
+                color_grade: Default::default(),
+                point_color: Default::default(),
                 vibrance,
                 presence: PresenceParams::default(),
                 defringe: DefringeParams::default(),

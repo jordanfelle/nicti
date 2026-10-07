@@ -777,6 +777,26 @@ LightCraft's files carry no per-file header of their own, so the attribution is 
 its `NOTICE` excludes only the ArtCraft brand assets, none of which are used. Per #424's rules every
 constant is to be re-validated on real photos before it is trusted (see ADR-0428's "Not verified").
 
+## Update (2026-10-06, [#432](https://github.com/jordanfelle/nicti/issues/432)'s LightCraft curves / grading / Point Color port)
+
+No new crate enters the dependency graph (`cargo deny check licenses` is unaffected), and no data asset,
+model or font is added. **Ported source**, adapted from `storytold/lightcraft` at commit `265248c`
+(`MIT OR Apache-2.0`, "Copyright (c) 2026 ArtCraft Team and the LightCraft contributors"; same grant as
+the #425/#426/#428 ports above[^fur1]), with the copyright line kept in each file's header:
+
+- `crates/nicti-pelt/src/fur/whisker_curve.rs` -- the point-curve editor's interaction
+  (`crates/ui-egui/src/panels/edit.rs`, `curve_editor`); edits a plain point list instead of going through
+  LightCraft's command bus, draws with nicti's own `ToneCurve`, endpoints keep their x.
+- `crates/nicti-pelt/src/fur/iris_wheel.rs` -- the grading wheel (`edit.rs`, `grading`/`paint_wheel`).
+- `crates/nicti-tapetum/src/oklab.rs` and `shaders/live_suffix.wgsl` (`apply_oklab_ops`) -- the Color
+  Grading and Point Color formulas (`crates/pipeline/src/colorops.rs`: the tonal weights, wheel offsets and
+  Point Color soft boxes), re-expressed for ProPhoto rather than Rec.2020 and for nicti's normalized params.
+  The OkLab matrices are Ottosson's published ones (public domain / MIT), not LightCraft's.
+
+LightCraft's files carry no per-file header of their own, so the attribution is the repo-level grant above;
+its `NOTICE` excludes only the ArtCraft brand assets, none of which are used. Per #424's rules every
+constant is to be re-validated on real photos before it is trusted (see ADR-0432's "Consequences").
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23

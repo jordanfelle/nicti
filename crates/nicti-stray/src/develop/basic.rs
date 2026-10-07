@@ -165,9 +165,10 @@ mod tests {
     fn untranslated_lists_only_real_values_and_not_consumed_keys() {
         let t = tr(
             r#"s = { Clarity2012 = 12, Texture = 0, Dehaze = 5, Saturation = 0,
-                    ToneCurvePV2012 = { 0, 0, 64, 70, 255, 255, }, Exposure2012 = 1 }"#,
+                    RedHue = 10, Exposure2012 = 1 }"#,
         );
-        // Clarity/Dehaze are mapped now (#380); only the point curve has no nicti stage yet.
-        assert_eq!(t.untranslated, vec!["ToneCurvePV2012"]);
+        // Clarity/Dehaze are mapped now (#380) and so are the point curves (#432); camera
+        // calibration (#381) has no nicti stage yet.
+        assert_eq!(t.untranslated, vec!["RedHue"]);
     }
 }

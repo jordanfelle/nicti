@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::stages::{
-    CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN,
-    TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    COLOR_GRADE, CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION,
+    POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
 };
 
 /// One row of the checklist: a stage and the label the user sees.
@@ -56,6 +56,11 @@ pub const GROUPS: &[StageGroup] = &[
         default_on: true,
     },
     StageGroup {
+        id: POINT_CURVE,
+        label: "Point curves (RGB, R, G, B)",
+        default_on: true,
+    },
+    StageGroup {
         id: VIBRANCE,
         label: "Vibrance",
         default_on: true,
@@ -68,6 +73,16 @@ pub const GROUPS: &[StageGroup] = &[
     StageGroup {
         id: HSL,
         label: "Color mixer (HSL)",
+        default_on: true,
+    },
+    StageGroup {
+        id: COLOR_GRADE,
+        label: "Color grading",
+        default_on: true,
+    },
+    StageGroup {
+        id: POINT_COLOR,
+        label: "Point color",
         default_on: true,
     },
     StageGroup {
@@ -292,9 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn lens_and_defringe_travel_with_copy_paste_sync_and_presets() {
-        // #428: a new Develop section must also be in GROUPS, or "Copy all" silently drops it.
-        for id in [LENS, DEFRINGE] {
+    fn lens_defringe_and_the_432_colour_stages_travel_with_copy_paste_sync_and_presets() {
+        // #428/#432: a new Develop section must also be in GROUPS, or "Copy all" silently drops it.
+        for id in [LENS, DEFRINGE, POINT_CURVE, COLOR_GRADE, POINT_COLOR] {
             assert!(
                 GROUPS.iter().any(|g| g.id == id),
                 "{id} missing from GROUPS"

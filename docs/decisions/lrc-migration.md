@@ -90,3 +90,16 @@ whose *amount* is zero is ignored: LRC writes a random `GrainSeed` and the shape
 defaults into every image, so taking them would import every untouched photo as edited.
 `OverrideLookVignette` (a vignette baked into a Look profile) is not modelled and stays in the
 untranslated list when real. ADR-0062's "Not translated" list is updated accordingly.
+
+## #432: point curves and Color Grading (ADR-0432)
+
+`develop/grade.rs` translates `ToneCurvePV2012`, `ToneCurvePV2012Red/Green/Blue` (a flat Lua list of
+`x, y` pairs in 0..255, divided by 255; an identity or malformed list writes nothing) onto
+`nicti.point_curve`, and Color Grading onto `nicti.color_grade`. LRC keeps the Shadows and Highlights
+hue/saturation under the older `SplitToning*` keys, the Midtones and Global wheels under `ColorGrade*`,
+every wheel's luminance under `ColorGrade<Wheel>Lum`, and one shared `SplitToningBalance` and
+`ColorGradeBlending`; the panel toggle is `EnableSplitToning`. A wheel with no saturation and no
+luminance is not an edit even if LRC kept a stray hue. Not translated, still in provenance: `PointColors`
+(its string format needs its own research), calibration and `CameraProfile` (#381). Values are mapped
+numerically only: nicti's OkLab grading maths is tuned by eye, so a graded photo will not match LRC until
+the reference-machine parity pass fits it.

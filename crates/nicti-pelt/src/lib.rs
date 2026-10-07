@@ -14,6 +14,7 @@ mod archive_drives;
 mod cache_settings;
 mod camera_profiles;
 mod catalog;
+mod catseye;
 mod color_mgmt;
 mod cull;
 mod decode_job;

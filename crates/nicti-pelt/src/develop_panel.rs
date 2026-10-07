@@ -5,15 +5,16 @@
 //! (once #31 lands persistence) will read too.
 
 use nicti_tapetum::coat::{
-    CropParams, DefringeParams, EffectsParams, ExposureParams, HslBand, HslParams, LensParams,
-    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
-    VibranceParams, VignetteStyle, WbParams,
+    ColorGradeParams, CropParams, DefringeParams, EffectsParams, ExposureParams, HslBand,
+    HslParams, LensParams, NoiseReductionParams, PointColorParams, PointCurveParams,
+    PresenceParams, SharpenParams, ToneCurveParams, ToneParams, VibranceParams, VignetteStyle,
+    WbParams,
 };
 use nicti_tapetum::frame::FrameTexture;
 use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 use nicti_tapetum::stages::{
-    CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION, PRESENCE, SHARPEN,
-    TONE, TONE_CURVE, VIBRANCE, WB,
+    COLOR_GRADE, CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION,
+    POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
 };
 
 use crate::fur::{self, SliderSpec, Track};
@@ -22,7 +23,39 @@ use crate::render::{AutoApplied, DevelopDoc, DevelopEngine};
 use nicti_tapetum::auto::AutoReason;
 use std::time::{Duration, Instant};
 
-const HSL_BAND_NAMES: [&str; 8] = ["R", "O", "Y", "G", "A", "B", "P", "M"];
+const HSL_BAND_NAMES: [&str; 8] = [
+    "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+];
+
+/// The Tone Curve section's channel picker: the four-slider parametric curve, then the freeform
+/// point curves (#432) -- the RGB master and each colour channel.
+const CURVE_CHANNELS: [&str; 5] = ["Parametric", "RGB", "Red", "Green", "Blue"];
+const CURVE_CHANNEL_COLORS: [egui::Color32; 5] = [
+    egui::Color32::WHITE,
+    egui::Color32::from_gray(220),
+    egui::Color32::from_rgb(0xe0, 0x50, 0x50),
+    egui::Color32::from_rgb(0x50, 0xc0, 0x60),
+    egui::Color32::from_rgb(0x58, 0x90, 0xf0),
+];
+
+/// Color Grading's wheel picker (#432).
+const GRADE_WHEELS: [&str; 4] = ["Shadows", "Midtones", "Highlights", "Global"];
+const GRADE_HUE: SliderSpec = SliderSpec::new("grade.hue", "Hue", 0.0, 360.0, 0.0)
+    .step(1.0, 0)
+    .unit("°");
+const GRADE_SAT: SliderSpec = SliderSpec::new("grade.sat", "Saturation", 0.0, 1.0, 0.0);
+const GRADE_LUM: SliderSpec = SliderSpec::bipolar("grade.lum", "Luminance");
+const GRADE_BLENDING: SliderSpec = SliderSpec::new("grade.blending", "Blending", 0.0, 1.0, 0.5);
+const GRADE_BALANCE: SliderSpec = SliderSpec::bipolar("grade.balance", "Balance");
+
+const PC_HUE_SHIFT: SliderSpec = SliderSpec::bipolar("pc.hue_shift", "Hue Shift");
+const PC_SAT_SHIFT: SliderSpec = SliderSpec::bipolar("pc.sat_shift", "Saturation Shift");
+const PC_LUM_SHIFT: SliderSpec = SliderSpec::bipolar("pc.lum_shift", "Luminance Shift");
+const PC_VARIANCE: SliderSpec = SliderSpec::bipolar("pc.variance", "Variance");
+const PC_RANGE: SliderSpec = SliderSpec::new("pc.range", "Range", 0.0, 1.0, 0.5);
+const PC_HUE_RANGE: SliderSpec = SliderSpec::new("pc.hue_range", "Hue Range", 0.0, 1.0, 0.5);
+const PC_SAT_RANGE: SliderSpec = SliderSpec::new("pc.sat_range", "Saturation Range", 0.0, 1.0, 0.5);
+const PC_LUM_RANGE: SliderSpec = SliderSpec::new("pc.lum_range", "Luminance Range", 0.0, 1.0, 0.5);
 
 /// How long a transient auto-op hint stays under its button.
 const HINT_LIFETIME: Duration = Duration::from_secs(3);
@@ -304,17 +337,49 @@ pub fn show(
     });
 
     fur::section(ui, "tone_curve", "Tone Curve", false, |ui| {
-        let mut curve: ToneCurveParams = develop.stage_params(TONE_CURVE);
-        draw_curve_preview(ui, &curve);
-        slider(ui, &CURVE_SHADOWS, &mut curve.shadows);
-        slider(ui, &CURVE_DARKS, &mut curve.darks);
-        slider(ui, &CURVE_LIGHTS, &mut curve.lights);
-        slider(ui, &CURVE_HIGHLIGHTS, &mut curve.highlights);
-        develop.set_stage_params(TONE_CURVE, &curve);
+        let key = ui.id().with("curve-channel");
+        let mut channel: usize = ui.data(|d| d.get_temp(key)).unwrap_or(0);
+        if let Some(i) = fur::segmented(ui, &CURVE_CHANNELS, Some(channel), 5) {
+            channel = i;
+            ui.data_mut(|d| d.insert_temp(key, channel));
+        }
+        if channel == 0 {
+            let mut curve: ToneCurveParams = develop.stage_params(TONE_CURVE);
+            draw_curve_preview(ui, &curve);
+            slider(ui, &CURVE_SHADOWS, &mut curve.shadows);
+            slider(ui, &CURVE_DARKS, &mut curve.darks);
+            slider(ui, &CURVE_LIGHTS, &mut curve.lights);
+            slider(ui, &CURVE_HIGHLIGHTS, &mut curve.highlights);
+            develop.set_stage_params(TONE_CURVE, &curve);
+        } else {
+            let mut curves: PointCurveParams = develop.stage_params(POINT_CURVE);
+            let list = match channel {
+                1 => &mut curves.master,
+                2 => &mut curves.red,
+                3 => &mut curves.green,
+                _ => &mut curves.blue,
+            };
+            let edit = fur::whisker_curve(
+                ui,
+                ui.id().with(("point-curve", channel)),
+                CURVE_CHANNELS[channel],
+                CURVE_CHANNEL_COLORS[channel],
+                list,
+            );
+            if edit.changed {
+                // Dragging an endpoint back onto the diagonal (no other points) is the identity:
+                // store nothing, so the document compares equal to an untouched one.
+                if list.len() == 2 && list.iter().all(|p| (p[0] - p[1]).abs() < 1e-6) {
+                    list.clear();
+                }
+                develop.set_stage_params(POINT_CURVE, &curves);
+            }
+            ui.small("Drag a point, click to add one, double-click a point to remove it.");
+        }
     });
 
     fur::section(ui, "hsl", "HSL", false, |ui| {
-        if let Some(i) = fur::segmented(ui, &HSL_BAND_NAMES, Some(*hsl_band_selected), 8) {
+        if let Some(i) = fur::band_dots(ui, &HSL_BAND_NAMES, *hsl_band_selected) {
             *hsl_band_selected = i;
         }
         let band_no = *hsl_band_selected as u8;
@@ -329,6 +394,38 @@ pub fn show(
         slider(ui, &sat, &mut band.saturation);
         slider(ui, &lum, &mut band.luminance);
         develop.set_stage_params(HSL, &hsl);
+    });
+
+    fur::section(ui, "color_grading", "Color Grading", false, |ui| {
+        let key = ui.id().with("grade-wheel");
+        let mut sel: usize = ui.data(|d| d.get_temp(key)).unwrap_or(1);
+        if let Some(i) = fur::segmented(ui, &GRADE_WHEELS, Some(sel), 4) {
+            sel = i;
+            ui.data_mut(|d| d.insert_temp(key, sel));
+        }
+        let mut grade: ColorGradeParams = develop.stage_params(COLOR_GRADE);
+        {
+            let wheel = match sel {
+                0 => &mut grade.shadows,
+                1 => &mut grade.midtones,
+                2 => &mut grade.highlights,
+                _ => &mut grade.global,
+            };
+            ui.vertical_centered(|ui| {
+                fur::iris_wheel(ui, GRADE_WHEELS[sel], 56.0, wheel);
+            });
+            slider(ui, &GRADE_HUE, &mut wheel.hue);
+            slider(ui, &GRADE_SAT, &mut wheel.sat);
+            slider(ui, &GRADE_LUM, &mut wheel.lum);
+        }
+        fur::divider(ui);
+        slider(ui, &GRADE_BLENDING, &mut grade.blending);
+        slider(ui, &GRADE_BALANCE, &mut grade.balance);
+        develop.set_stage_params(COLOR_GRADE, &grade);
+    });
+
+    fur::section(ui, "point_color", "Point Color", false, |ui| {
+        show_point_color(ui, develop, heal);
     });
 
     fur::section(ui, "crop", "Crop & Straighten", false, |ui| {
@@ -463,9 +560,12 @@ pub fn show(
             EXPOSURE,
             TONE,
             TONE_CURVE,
+            POINT_CURVE,
             VIBRANCE,
             PRESENCE,
             HSL,
+            COLOR_GRADE,
+            POINT_COLOR,
             SHARPEN,
             NOISE_REDUCTION,
             LENS,
@@ -848,6 +948,97 @@ fn show_histogram(ui: &mut egui::Ui, gpu: Option<(&DevelopEngine, &FrameTexture)
             painter.rect_filled(bar, 0.0, color);
         }
     }
+}
+
+/// The Point Color section (#432): the eyedropper, one swatch per sample, and the selected
+/// sample's shift and range sliders.
+fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi) {
+    let mut pc: PointColorParams = develop.stage_params(POINT_COLOR);
+    let count = usize::from(pc.count).min(pc.samples.len());
+    let mut selected = crate::catseye::selected(ui.ctx()).min(count.saturating_sub(1));
+    let mut delete = false;
+    ui.horizontal(|ui| {
+        let active = heal.point_color_active();
+        let full = count >= pc.samples.len();
+        let tip = if full {
+            "Point Color holds 8 samples; delete one to pick another"
+        } else {
+            "Pick a colour from the photo"
+        };
+        if fur::icon_button(
+            ui,
+            fur::Icon::Picker,
+            egui::vec2(26.0, 26.0),
+            active,
+            !full,
+            tip,
+        )
+        .clicked()
+        {
+            heal.tool = if active {
+                crate::heal_tool::Tool::Crop
+            } else {
+                crate::heal_tool::Tool::PointColor
+            };
+            crate::catseye::set_status(ui.ctx(), None);
+        }
+        for (i, s) in pc.samples.iter().take(count).enumerate() {
+            let [r, g, b] = nicti_tapetum::oklab::srgb8_from_oklch(s.lum, s.chroma, s.hue);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Button,
+                    true,
+                    i == selected,
+                    format!("Point color sample {}", i + 1),
+                )
+            });
+            let painter = ui.painter();
+            painter.rect_filled(rect.shrink(2.0), 3.0, egui::Color32::from_rgb(r, g, b));
+            if i == selected {
+                painter.rect_stroke(
+                    rect,
+                    3.0,
+                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if resp.clicked() {
+                selected = i;
+                crate::catseye::set_selected(ui.ctx(), i);
+            }
+        }
+    });
+    if heal.point_color_active() {
+        ui.small("Click the photo to sample a colour (Esc cancels).");
+    }
+    if let Some(msg) = crate::catseye::status(ui.ctx()) {
+        ui.colored_label(egui::Color32::LIGHT_RED, msg);
+    }
+    if count == 0 {
+        ui.small("Use the eyedropper to pick a colour, then shift or widen it.");
+        return;
+    }
+    {
+        let sample = &mut pc.samples[selected];
+        slider(ui, &PC_HUE_SHIFT, &mut sample.hue_shift);
+        slider(ui, &PC_SAT_SHIFT, &mut sample.sat_shift);
+        slider(ui, &PC_LUM_SHIFT, &mut sample.lum_shift);
+        slider(ui, &PC_VARIANCE, &mut sample.variance);
+        fur::divider(ui);
+        slider(ui, &PC_RANGE, &mut sample.range);
+        slider(ui, &PC_HUE_RANGE, &mut sample.hue_range);
+        slider(ui, &PC_SAT_RANGE, &mut sample.sat_range);
+        slider(ui, &PC_LUM_RANGE, &mut sample.lum_range);
+    }
+    if ui.button("Delete sample").clicked() {
+        delete = true;
+    }
+    if delete {
+        crate::catseye::remove_sample(&mut pc, selected);
+        crate::catseye::set_selected(ui.ctx(), selected.saturating_sub(1));
+    }
+    develop.set_stage_params(POINT_COLOR, &pc);
 }
 
 /// A small preview of the tone-curve LUT (see `color::build_tone_curve_lut`) as a line from

@@ -637,6 +637,250 @@ impl DefringeParams {
     }
 }
 
+/// One Color Grading wheel (#432). `hue` is degrees on the same HSV-style wheel the UI paints
+/// (`0..360`), `sat` is `0..1` (LRC 0..100), `lum` is `-1..1` (LRC -100..100). Zero `sat` and `lum`
+/// is a no-op whatever the hue.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GradeWheel {
+    pub hue: f32,
+    pub sat: f32,
+    pub lum: f32,
+}
+
+/// Color Grading (#432): three tonal wheels plus a global one, evaluated in OkLab (see
+/// `oklab.rs`). `blending` is `0..1` (LRC 0..100, default 50) and widens the overlap between the
+/// tonal ranges; `balance` is `-1..1`: negative grows the shadow range, positive the highlight
+/// range (LRC's Balance direction).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorGradeParams {
+    pub shadows: GradeWheel,
+    pub midtones: GradeWheel,
+    pub highlights: GradeWheel,
+    pub global: GradeWheel,
+    pub blending: f32,
+    pub balance: f32,
+}
+
+impl Default for ColorGradeParams {
+    fn default() -> Self {
+        Self {
+            shadows: GradeWheel::default(),
+            midtones: GradeWheel::default(),
+            highlights: GradeWheel::default(),
+            global: GradeWheel::default(),
+            blending: 0.5,
+            balance: 0.0,
+        }
+    }
+}
+
+impl ColorGradeParams {
+    pub fn is_noop(&self) -> bool {
+        [self.shadows, self.midtones, self.highlights, self.global]
+            .iter()
+            .all(|w| w.sat == 0.0 && w.lum == 0.0)
+    }
+
+    /// Clamped to the documented ranges with NaN scrubbed (documents are untrusted).
+    pub fn sanitized(&self) -> Self {
+        let clamp = |v: f32, lo: f32, hi: f32, fallback: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
+        };
+        let wheel = |w: GradeWheel| GradeWheel {
+            hue: clamp(w.hue, 0.0, 360.0, 0.0),
+            sat: clamp(w.sat, 0.0, 1.0, 0.0),
+            lum: clamp(w.lum, -1.0, 1.0, 0.0),
+        };
+        Self {
+            shadows: wheel(self.shadows),
+            midtones: wheel(self.midtones),
+            highlights: wheel(self.highlights),
+            global: wheel(self.global),
+            blending: clamp(self.blending, 0.0, 1.0, 0.5),
+            balance: clamp(self.balance, -1.0, 1.0, 0.0),
+        }
+    }
+}
+
+/// Most Point Color samples one photo can carry.
+pub const MAX_POINT_COLORS: usize = 8;
+
+/// One Point Color sample (#432): a colour picked from the photo (in OkLCh: `lum` is OkLab L
+/// `0..1`, `chroma` `0..~0.37`, `hue` degrees) plus how far to move colours near it and how wide
+/// "near" is. Shifts and `variance` are `-1..1`; the four ranges are `0..1` with 0.5 the default
+/// (LRC's 50).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointColorSample {
+    pub lum: f32,
+    pub chroma: f32,
+    pub hue: f32,
+    pub hue_shift: f32,
+    pub sat_shift: f32,
+    pub lum_shift: f32,
+    pub variance: f32,
+    pub range: f32,
+    pub hue_range: f32,
+    pub sat_range: f32,
+    pub lum_range: f32,
+}
+
+impl Default for PointColorSample {
+    fn default() -> Self {
+        Self {
+            lum: 0.5,
+            chroma: 0.0,
+            hue: 0.0,
+            hue_shift: 0.0,
+            sat_shift: 0.0,
+            lum_shift: 0.0,
+            variance: 0.0,
+            range: 0.5,
+            hue_range: 0.5,
+            sat_range: 0.5,
+            lum_range: 0.5,
+        }
+    }
+}
+
+impl PointColorSample {
+    /// True when moving colours near this sample changes nothing.
+    pub fn is_noop(&self) -> bool {
+        self.hue_shift == 0.0
+            && self.sat_shift == 0.0
+            && self.lum_shift == 0.0
+            && self.variance == 0.0
+    }
+
+    pub fn sanitized(&self) -> Self {
+        let clamp = |v: f32, lo: f32, hi: f32, fallback: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
+        };
+        Self {
+            lum: clamp(self.lum, 0.0, 1.0, 0.5),
+            chroma: clamp(self.chroma, 0.0, 0.5, 0.0),
+            hue: clamp(self.hue, 0.0, 360.0, 0.0),
+            hue_shift: clamp(self.hue_shift, -1.0, 1.0, 0.0),
+            sat_shift: clamp(self.sat_shift, -1.0, 1.0, 0.0),
+            lum_shift: clamp(self.lum_shift, -1.0, 1.0, 0.0),
+            variance: clamp(self.variance, -1.0, 1.0, 0.0),
+            range: clamp(self.range, 0.0, 1.0, 0.5),
+            hue_range: clamp(self.hue_range, 0.0, 1.0, 0.5),
+            sat_range: clamp(self.sat_range, 0.0, 1.0, 0.5),
+            lum_range: clamp(self.lum_range, 0.0, 1.0, 0.5),
+        }
+    }
+}
+
+/// Point Color (#432): up to [`MAX_POINT_COLORS`] samples, applied in OkLCh after Color Grading.
+/// Fixed-size so the params stay `Copy`; only the first `count` samples are live.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointColorParams {
+    pub count: u8,
+    pub samples: [PointColorSample; MAX_POINT_COLORS],
+}
+
+impl PointColorParams {
+    pub fn is_noop(&self) -> bool {
+        self.live().all(|s| s.is_noop())
+    }
+
+    /// The live samples (the first `count`, capped).
+    pub fn live(&self) -> impl Iterator<Item = &PointColorSample> {
+        self.samples
+            .iter()
+            .take(usize::from(self.count).min(MAX_POINT_COLORS))
+    }
+
+    pub fn sanitized(&self) -> Self {
+        let count = self.count.min(MAX_POINT_COLORS as u8);
+        let mut samples = [PointColorSample::default(); MAX_POINT_COLORS];
+        for (dst, src) in samples
+            .iter_mut()
+            .zip(&self.samples)
+            .take(usize::from(count))
+        {
+            *dst = src.sanitized();
+        }
+        Self { count, samples }
+    }
+}
+
+/// Maximum control points per point-curve channel; extra points in an untrusted document are
+/// dropped by [`PointCurveParams::sanitized`].
+pub const MAX_CURVE_POINTS: usize = 32;
+
+/// Freeform point curves (#432): a master RGB curve plus one per channel, each a list of (x, y)
+/// control points in 0..1 (LRC's 0..255 `ToneCurvePV2012*` pairs divided by 255). An empty list is
+/// the identity. Applied right after the parametric [`ToneCurveParams`] in the same cube-root
+/// perceptual space; the master curve runs first, then the channel's own curve.
+///
+/// A separate stage from `nicti.tone_curve` so that stage stays `Copy` and its cache keys are
+/// unchanged. Serializes to `{}` at its defaults (every list empty).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointCurveParams {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub master: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub green: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blue: Vec<[f32; 2]>,
+}
+
+/// One channel's points, cleaned: finite, clamped to 0..1, sorted by x, strictly increasing in x
+/// (a later point within 1e-4 of the previous x is dropped), capped at [`MAX_CURVE_POINTS`]. Fewer
+/// than two survivors, or exactly the identity diagonal, becomes empty (no-op).
+fn sanitize_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut pts: Vec<[f32; 2]> = points
+        .iter()
+        .filter(|p| p[0].is_finite() && p[1].is_finite())
+        .map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)])
+        .collect();
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if out.last().is_none_or(|l| p[0] - l[0] > 1e-4) {
+            out.push(p);
+        }
+    }
+    out.truncate(MAX_CURVE_POINTS);
+    if out.len() < 2 || out.iter().all(|p| (p[0] - p[1]).abs() < 1e-6) {
+        out.clear();
+    }
+    out
+}
+
+impl PointCurveParams {
+    pub fn is_noop(&self) -> bool {
+        let s = self.sanitized();
+        s.master.is_empty() && s.red.is_empty() && s.green.is_empty() && s.blue.is_empty()
+    }
+
+    /// Every channel cleaned with [`sanitize_curve`] (documents are untrusted).
+    pub fn sanitized(&self) -> Self {
+        Self {
+            master: sanitize_curve(&self.master),
+            red: sanitize_curve(&self.red),
+            green: sanitize_curve(&self.green),
+            blue: sanitize_curve(&self.blue),
+        }
+    }
+}
+
 pub fn parse<T: serde::de::DeserializeOwned + Default>(params: &Value) -> T {
     serde_json::from_value(params.clone()).unwrap_or_default()
 }
@@ -650,6 +894,43 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_curve_defaults_serialize_to_nothing_and_sanitize_cleans_untrusted_points() {
+        assert_eq!(
+            serde_json::to_value(PointCurveParams::default()).unwrap(),
+            serde_json::json!({})
+        );
+        assert!(PointCurveParams::default().is_noop());
+        // The identity diagonal, a single point and an all-NaN list are all no-ops.
+        for pts in [
+            vec![[0.0, 0.0], [1.0, 1.0]],
+            vec![[0.5, 0.7]],
+            vec![[f32::NAN, 0.2], [0.4, f32::INFINITY]],
+        ] {
+            let p = PointCurveParams {
+                master: pts,
+                ..Default::default()
+            };
+            assert!(p.is_noop());
+        }
+        let s = PointCurveParams {
+            red: vec![[0.9, 2.0], [-1.0, -0.5], [0.9, 0.1], [0.5, 0.6]],
+            ..Default::default()
+        }
+        .sanitized();
+        // Sorted, clamped, the duplicate x at 0.9 dropped.
+        assert_eq!(s.red, vec![[0.0, 0.0], [0.5, 0.6], [0.9, 1.0]]);
+        let many: Vec<[f32; 2]> = (0..100)
+            .map(|i| [i as f32 / 99.0, (i as f32 / 99.0).powi(2)])
+            .collect();
+        let capped = PointCurveParams {
+            blue: many,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(capped.blue.len(), MAX_CURVE_POINTS);
+    }
 
     #[test]
     fn defringe_sanitize_clamps_scrubs_nan_and_orders_the_windows() {

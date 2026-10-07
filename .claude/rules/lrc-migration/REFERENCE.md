@@ -66,7 +66,7 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   numeric columns by stored value); `LocalExposure2012` is stops/4; a radial's `MaskInverted=true`
   = effect outside; AI mask space = uncropped frame; legacy PV2003 keys (`Contrast`, `Shadows`,
   `Exposure` …) sit beside PV2012 ones in every image. Not translated: brushes, People masks, rotated
-  crops/geometric masks, retouch, point curves, colour grading (all in provenance). **#380** translates the global
+  crops/geometric masks, retouch, `PointColors`, calibration (all in provenance). **#432** translates `ToneCurvePV2012{,Red,Green,Blue}` (flat 0..255 `x, y` lists) -> `nicti.point_curve` and Color Grading -> `nicti.color_grade` (`develop/grade.rs`): Shadows/Highlights hue+saturation are LRC's older `SplitToning*` keys, Midtones/Global are `ColorGrade*`, luminance is `ColorGrade<Wheel>Lum`, gated by `EnableSplitToning`; a wheel with no saturation and no luminance is not an edit even with a stray hue; values map numerically only (parity unmeasured). **#380** translates the global
   `Texture`/`Clarity2012`/`Dehaze`/`Saturation` (-100..100 -> `nicti.presence`) and the Effects panel (`PostCropVignette*`,
   `Grain*`, gated by `EnableEffects`) -> `nicti.effects`; **a slider whose amount is 0 is ignored** (LRC writes a random
   `GrainSeed` + default sliders into every image, taking them would mark every photo edited); `OverrideLookVignette` stays untranslated. **#428** adds `develop/lens.rs`: `AutoLateralCA` -> `nicti.lens`

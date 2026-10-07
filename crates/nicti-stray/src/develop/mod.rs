@@ -21,6 +21,7 @@ mod crop;
 mod detail;
 mod effects;
 mod filters;
+mod grade;
 mod heal;
 mod hsl;
 mod lens;
@@ -207,6 +208,7 @@ enum Known {
 }
 
 const DEFAULTS: &[(&str, Known)] = &[
+    // Consumed by `grade::apply` (PV2012 only): a legacy-PV image's untouched 50 stays noise.
     ("ColorGradeBlending", Known::Num(50.0)),
     ("CurveRefineSaturation", Known::Num(100.0)),
     // Consumed by `lens::apply`, which only runs for PV2012: a legacy-PV image's untouched sliders must
@@ -305,6 +307,7 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
     if !legacy {
         basic::apply(&mut tx);
         hsl::apply(&mut tx);
+        grade::apply(&mut tx);
         detail::apply(&mut tx);
         effects::apply(&mut tx);
         lens::apply(&mut tx);
@@ -370,14 +373,15 @@ mod tests {
     #[test]
     fn a_user_set_zero_on_a_key_with_a_nonzero_default_stays_visible_but_the_default_is_noise() {
         let t = translate(
-            // (The grain keys used to be this test's example; #380 translates them.)
-            "s = { ColorGradeBlending = 0, PerspectiveScale = 100, UprightFocalLength35mm = 50 }",
+            // (The grain keys, then ColorGradeBlending, used to be this test's example; #380 and
+            // #432 translate them.)
+            "s = { PerspectiveScale = 0, UprightCenterNormX = 0.5, UprightFocalLength35mm = 50 }",
             &Context::default(),
         )
         .unwrap();
         assert_eq!(
             t.untranslated,
-            vec!["ColorGradeBlending", "UprightFocalLength35mm"]
+            vec!["PerspectiveScale", "UprightFocalLength35mm"]
         );
     }
 }
