@@ -1,12 +1,100 @@
-//! Lens-correction data extension point (ADR-0019 §7/§8). `LensCorrection` settles identity and
-//! versioning only, via `Module` — the correction data source (lensfun Rust binding vs.
-//! embedded in-NEF data) and its application are owned by #39.
+//! Lens-correction extension point (ADR-0019 §7/§8) and, since #428, the data model and the
+//! pure-CPU math the Tapetum lens stage consumes.
+//!
+//! `LensCorrection` settles identity/versioning via `Module` and now has one method,
+//! [`LensCorrection::model`], returning a [`LensModel`]: plain data (per-plane warp, radial
+//! vignette, optical centre) that a GPU kernel can upload without knowing where it came from.
+//! The first provider is [`dng::DngEmbedded`] (OpcodeList3 from a DNG). A lensfun- or NEF-backed
+//! provider is #410's scope and plugs in behind the same trait.
+//!
+//! [`lateral_ca`] holds the automatic lateral-chromatic-aberration estimator, the no-profile
+//! fallback.
+
+pub mod dng;
+pub mod lateral_ca;
 
 use nicti_claw::{Module, Registry};
 
-/// A lens-correction data provider. No correction-application method is defined here yet —
-/// that signature belongs to #39.
-pub trait LensCorrection: Module {}
+/// DNG `WarpRectilinear`: per colour plane `[kr0, kr1, kr2, kr3, kt0, kt1]` (radial polynomial
+/// then tangential terms) plus the optical centre, normalised 0..1 over the image.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Warp {
+    /// One entry per plane (1..=4). A single entry applies to every channel; otherwise plane 0/1/2
+    /// are R/G/B.
+    pub planes: Vec<[f64; 6]>,
+    pub center: [f64; 2],
+}
+
+/// DNG `FixVignetteRadial`: gain `1 + k0 r² + k1 r⁴ + k2 r⁶ + k3 r⁸ + k4 r¹⁰`, `r` normalised so
+/// the farthest image corner is 1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vignette {
+    pub k: [f64; 5],
+    pub center: [f64; 2],
+}
+
+/// Everything a lens profile says about one image. Empty (`Default`) means "no correction".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LensModel {
+    pub warp: Option<Warp>,
+    pub vignette: Option<Vignette>,
+}
+
+impl Warp {
+    /// The coefficients for colour channel `ch` (0=R, 1=G, 2=B); a one-plane warp serves all.
+    pub fn plane(&self, ch: usize) -> &[f64; 6] {
+        self.planes.get(ch).unwrap_or(&self.planes[0])
+    }
+
+    /// True when the planes are not all identical, i.e. the profile already corrects lateral CA.
+    pub fn corrects_lateral_ca(&self) -> bool {
+        self.planes.iter().skip(1).any(|p| p != &self.planes[0])
+    }
+
+    /// Map a corrected-image point to the source point it samples. `dx`/`dy` are the offset from
+    /// the optical centre in pixels, `m` the centre-to-farthest-corner distance in pixels.
+    /// Returns the *source* offset from the centre in pixels.
+    pub fn source_offset(&self, ch: usize, dx: f64, dy: f64, m: f64) -> (f64, f64) {
+        let [kr0, kr1, kr2, kr3, kt0, kt1] = *self.plane(ch);
+        let (x, y) = (dx / m, dy / m);
+        let r2 = x * x + y * y;
+        let f = kr0 + r2 * (kr1 + r2 * (kr2 + r2 * kr3));
+        let sx = f * x + 2.0 * kt0 * x * y + kt1 * (r2 + 2.0 * x * x);
+        let sy = f * y + kt0 * (r2 + 2.0 * y * y) + 2.0 * kt1 * x * y;
+        (sx * m, sy * m)
+    }
+}
+
+impl Vignette {
+    /// Multiplicative gain at squared normalised radius `r2`.
+    pub fn gain(&self, r2: f64) -> f64 {
+        let [k0, k1, k2, k3, k4] = self.k;
+        1.0 + r2 * (k0 + r2 * (k1 + r2 * (k2 + r2 * (k3 + r2 * k4))))
+    }
+}
+
+/// Distance from `(cx, cy)` to the farthest corner of a `w`×`h` image, in pixels. The DNG
+/// normalisation radius `m`; never zero.
+pub fn farthest_corner(w: f64, h: f64, cx: f64, cy: f64) -> f64 {
+    let dx = cx.max(w - cx);
+    let dy = cy.max(h - cy);
+    dx.hypot(dy).max(1.0)
+}
+
+/// What a provider is given to identify a correction. Grows with new sources (#410).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LensSource<'a> {
+    pub make: &'a str,
+    pub model: &'a str,
+    /// The raw DNG `OpcodeList3` blob, when the file is a DNG that carries one.
+    pub dng_opcode_list3: Option<&'a [u8]>,
+}
+
+/// A lens-correction data provider.
+pub trait LensCorrection: Module {
+    /// The correction for this image, or `None` when the provider has nothing for it.
+    fn model(&self, source: &LensSource<'_>) -> Option<LensModel>;
+}
 
 /// Registry of lens-correction modules, keyed by namespaced id.
 pub type LensRegistry = Registry<dyn LensCorrection>;
@@ -34,7 +122,11 @@ mod tests {
         }
     }
 
-    impl LensCorrection for Dummy {}
+    impl LensCorrection for Dummy {
+        fn model(&self, _source: &LensSource<'_>) -> Option<LensModel> {
+            None
+        }
+    }
 
     fn make_dummy() -> Arc<dyn LensCorrection> {
         Arc::new(Dummy)
@@ -57,5 +149,68 @@ mod tests {
             .get("nicti.lens.dummy")
             .expect("dummy lens module is registered");
         assert_eq!(resolved.id(), "nicti.lens.dummy");
+        assert!(resolved.model(&LensSource::default()).is_none());
+    }
+
+    #[test]
+    fn identity_warp_maps_every_point_to_itself() {
+        let w = Warp {
+            planes: vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            center: [0.5, 0.5],
+        };
+        for (dx, dy) in [(0.0, 0.0), (120.0, -40.0), (-300.0, 250.0)] {
+            let (sx, sy) = w.source_offset(1, dx, dy, 500.0);
+            assert!((sx - dx).abs() < 1e-9 && (sy - dy).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn radial_term_scales_with_radius_and_tangential_is_zero_on_axis() {
+        let w = Warp {
+            planes: vec![[1.0, 0.1, 0.0, 0.0, 0.0, 0.0]],
+            center: [0.5, 0.5],
+        };
+        // On the x axis at r = 1 (the corner distance): f = 1.1.
+        let (sx, sy) = w.source_offset(0, 500.0, 0.0, 500.0);
+        assert!((sx - 550.0).abs() < 1e-9 && sy.abs() < 1e-9);
+        // The centre never moves.
+        assert_eq!(w.source_offset(0, 0.0, 0.0, 500.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn per_plane_warp_reports_lateral_ca_only_when_planes_differ() {
+        let same = Warp {
+            planes: vec![[1.0; 6]; 3],
+            center: [0.5; 2],
+        };
+        assert!(!same.corrects_lateral_ca());
+        let mut diff = same.clone();
+        diff.planes[0][0] = 1.001;
+        assert!(diff.corrects_lateral_ca());
+        // A single-plane warp serves all channels.
+        let one = Warp {
+            planes: vec![[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            center: [0.5; 2],
+        };
+        assert_eq!(one.plane(2), &[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(!one.corrects_lateral_ca());
+    }
+
+    #[test]
+    fn vignette_gain_is_one_at_centre_and_follows_the_polynomial() {
+        let v = Vignette {
+            k: [0.5, -0.1, 0.0, 0.0, 0.0],
+            center: [0.5; 2],
+        };
+        assert_eq!(v.gain(0.0), 1.0);
+        assert!((v.gain(1.0) - 1.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn farthest_corner_is_the_dng_normalisation_radius() {
+        assert!((farthest_corner(600.0, 800.0, 300.0, 400.0) - 500.0).abs() < 1e-9);
+        // Off-centre: the far corner dominates.
+        assert!((farthest_corner(100.0, 100.0, 0.0, 0.0) - 100.0f64.hypot(100.0)).abs() < 1e-9);
+        assert!(farthest_corner(0.0, 0.0, 0.0, 0.0) >= 1.0);
     }
 }
