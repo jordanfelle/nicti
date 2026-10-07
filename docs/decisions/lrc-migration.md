@@ -103,3 +103,18 @@ luminance is not an edit even if LRC kept a stray hue. Not translated, still in 
 (its string format needs its own research), calibration and `CameraProfile` (#381). Values are mapped
 numerically only: nicti's OkLab grading maths is tuned by eye, so a graded photo will not match LRC until
 the reference-machine parity pass fits it.
+
+## #381: calibration and camera-profile resolution (ADR-0381)
+
+`develop/calibration.rs` translates `RedHue`/`RedSaturation`/`GreenHue`/`GreenSaturation`/`BlueHue`/
+`BlueSaturation`/`ShadowTint` (-100..100, divided by 100, clamped; all-zero writes nothing) onto
+`nicti.calibration`. `develop/profile.rs` extracts only the `CameraProfile` name: `Adobe Standard` and
+`Embedded` request nothing, because LRC writes `Adobe Standard` into virtually every raw and nicti's own
+default is the plain camera matrix (taking it would mark every photo edited). The name is resolved by the
+app, not by `translate`: `ImportConfig::profile_resolver` (a `ProfileResolver`) is asked once per
+(make, model, name) per run, and its answer becomes the `nicti.working_space` stage, written before the
+provenance snapshot so a re-run never overwrites a later nicti edit. `nicti-pelt`'s
+`LrcProfileResolver` matches the name against the camera's installed DCPs, else a Look `.xmp` layered on
+that camera's Adobe Standard, else nothing; an unresolved name is counted by name in
+`LrcImportReport::profiles_missing` and listed on the image's untranslated keys, never substituted.
+Values map numerically only; calibration strengths are untuned against LRC.

@@ -17,7 +17,7 @@ and its colour maths is "tuned by eye", so every constant below is a starting po
 Out of scope, on purpose: a *measured* match against LRC renders. That needs the reference machine and
 the #149 harness, so it is #452 (`needs-physical-testing`), not a merge gate. Also out: targeted
 adjustment (dragging on the photo to move a curve/mixer value, #453), Point Color's "visualize range"
-overlay and LRC `PointColors` import (#454), and the camera Calibration panel (#381).
+overlay and LRC `PointColors` import (#454), and the camera Calibration panel (done in #381, ADR-0381).
 
 ## Decision
 
@@ -87,7 +87,7 @@ every value can be set precisely), and the Point Color section. The eyedropper i
 keys, Midtones and Global under `ColorGrade*`, luminance under `ColorGrade<Wheel>Lum`, shared
 `SplitToningBalance`/`ColorGradeBlending`; gated by `EnableSplitToning`). A wheel with no saturation and
 no luminance is not an edit even if LRC kept a stray hue. **Not translated, still in provenance:**
-`PointColors` (its string format needs its own research), calibration and `CameraProfile` (#381), and the
+`PointColors` (its string format needs its own research), calibration and `CameraProfile` (translated since, #381/ADR-0381), and the
 legacy Split Toning panel on pre-grading process versions.
 
 ## Consequences

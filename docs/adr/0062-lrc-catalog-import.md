@@ -88,9 +88,7 @@ is untranslatable (a partial selection would be wrong); geometric masks and crop
 originals or with a straighten angle (LRC's sign/orientation convention is unpinned), and radials with a non-zero `Angle` or `Roundness`;
 a radial's `Feather` is applied as nicti's outward feather (not verified against LRC renders); a
 skipped correction also leaves `MaskGroupBasedCorrections` in the untranslated list; retouch
-areas; point curves, colour grading, calibration, lens,
-transform/Upright, `CameraProfile` (a name with no resolvable `.dcp` has no render
-effect, so no stage is written), `FilterList` (counted per `Title`: Denoise / removal / Super
+areas; lens corrections beyond #428's, transform/Upright, `PointColors`, `FilterList` (counted per `Title`: Denoise / removal / Super
 Resolution), PV2003/2010 images. Non-RAW originals (JPEG/TIFF/PSD/video) are not Scruff candidates, so they match nothing and are
 reported as missing. A subset import (`only_roots`) creates only the keywords and collections that
 hold a matched photo. Smart collections are counted, not imported (rule mapping
@@ -108,8 +106,11 @@ now applied to every numeric column).
 
 ## Consequences
 
-- Follow-ups filed under #11: ~~global Clarity/Texture/Dehaze/Saturation/grain/vignette (#46)~~ (done in #380, ADR-0380); point
-  curves, colour grading, calibration and `.dcp` resolution (#42); lens (#39); transform (#47);
+- **Since landed**: point curves and Color Grading (#432, ADR-0432); calibration and `CameraProfile`
+  resolution (#381, ADR-0381: names resolve to an installed `.dcp`/Look through
+  `ImportConfig::profile_resolver`, an unresolved name is reported and no stage is written).
+- Follow-ups filed under #11: ~~global Clarity/Texture/Dehaze/Saturation/grain/vignette (#46)~~ (done in #380, ADR-0380); ~~point
+  curves, colour grading (#432), calibration and `.dcp` resolution (#381)~~; lens (#39); transform (#47);
   AI removal (#51); Super Resolution (#174); brush masks and retouch areas (units + source offset);
   crop/geometric masks on rotated originals and `CropAngle`; smart collections; IPTC fields; a
   variant UI; a native file picker; PV2003/2010; older catalog versions.
