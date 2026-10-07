@@ -52,6 +52,7 @@ use crate::preview_settings::{self, PreviewSettings, Surface};
 use crate::render::DevelopView;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
+use crate::verify_ui::{self, VerifyUi};
 use crate::viewport::{fit_rect, fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
 use crate::{catalog, CatalogOpenState};
@@ -217,6 +218,7 @@ pub struct PeltApp {
     xmp_ui: XmpUi,
     /// The Lightroom Classic catalog import panel (#62).
     lrc_ui: LrcImportUi,
+    verify_ui: VerifyUi,
     /// The asset whose cached T2 bytes failed to decode as an image, so the fallback doesn't
     /// re-read and re-decode them every frame.
     loupe_t2_undecodable: Option<i64>,
@@ -472,6 +474,7 @@ impl PeltApp {
             xmp,
             xmp_ui: XmpUi::default(),
             lrc_ui: LrcImportUi::default(),
+            verify_ui: VerifyUi::default(),
             loupe_t2_undecodable: None,
             loupe_t0_miss: None,
             loupe_t0_fetch: None,
@@ -689,9 +692,11 @@ impl PeltApp {
             JobKind::Move,
             JobKind::Delete,
             JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
         ]) {
             self.last_move_summary =
-                Some("Wait for the running import/sync/move/delete to finish first.".into());
+                Some("Wait for the running import/sync/move/delete/verify to finish first.".into());
             return;
         }
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -910,9 +915,12 @@ impl PeltApp {
             JobKind::Move,
             JobKind::Delete,
             JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
         ]) {
-            self.delete.last_summary =
-                Some("Wait for the running import, sync, move or delete to finish first.".into());
+            self.delete.last_summary = Some(
+                "Wait for the running import, sync, move, delete or verify to finish first.".into(),
+            );
             return;
         }
         self.delete.request(ids, scope);
@@ -932,9 +940,12 @@ impl PeltApp {
             JobKind::Move,
             JobKind::Delete,
             JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
         ]) {
-            self.delete.last_summary =
-                Some("Wait for the running import, sync, move or delete to finish first.".into());
+            self.delete.last_summary = Some(
+                "Wait for the running import, sync, move, delete or verify to finish first.".into(),
+            );
             return;
         }
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -1798,8 +1809,21 @@ impl PeltApp {
             JobKind::Move,
             JobKind::Delete,
             JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
         ]);
         let move_running = self.job_active(&[JobKind::Move]);
+        // Blocked by anything other than our own verify/baseline job, decided from the live job
+        // list (not `verify_ui.running()`, which lags a frame behind `poll`).
+        let other_busy = self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+        ]);
+        let blocked = other_busy
+            .then_some("An import, sync, move, delete or export is running; wait for it.");
         // Re-read on a busy edge or the cache's own cadence -- never per frame.
         // Nothing else repaints an idle window, so wake up when the cache goes stale.
         ui.ctx().request_repaint_after(folder_panel::CACHE_TTL);
@@ -1828,7 +1852,10 @@ impl PeltApp {
                         &self.archive_drives,
                         &mut set_archive,
                         selected_root,
+                        !moving,
                     );
+                    let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                    verify_ui::show(ui, &mut self.verify_ui, &dyn_store, &self.pounce, blocked);
                 });
             });
         if let Some((drive, archive)) = set_archive {
@@ -1853,6 +1880,37 @@ impl PeltApp {
         if let Some(r) = out.drop {
             self.submit_move_to(store, r.root_id, r.dest_parent);
         }
+        if let Some(root_id) = out.verify {
+            self.submit_verify(store, root_id);
+        }
+    }
+
+    /// #386: "Verify folder" from the folder panel's context menu. Refused while another job that
+    /// touches the folder's files is running -- a move re-points the root and a delete removes
+    /// files, either of which would turn into false `missing`s.
+    fn submit_verify(&mut self, store: &Arc<SqliteCatalog>, root_id: i64) {
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
+        ]) {
+            self.verify_ui
+                .refuse("Wait for the running import/sync/move/delete/verify to finish first.");
+            return;
+        }
+        let Some(root) = self.folder_cache.roots.iter().find(|r| r.id == root_id) else {
+            self.verify_ui
+                .refuse("That folder is no longer registered.");
+            return;
+        };
+        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+        let path = PathBuf::from(&root.path);
+        self.verify_ui
+            .submit_verify(&dyn_store, &self.pounce, root_id, path);
     }
 
     /// The import/sync/move controls and their status lines -- everything the Library view had
@@ -1955,8 +2013,12 @@ impl PeltApp {
                     JobKind::Move,
                     JobKind::Delete,
                     JobKind::Export,
+                    JobKind::Verify,
+                    JobKind::Baseline,
                 ])
-                .then_some("An import, sync, move, delete or export is running; wait for it.");
+                .then_some(
+                    "An import, sync, move, delete, export or verify is running; wait for it.",
+                );
             lrc_import::show(ui, &mut self.lrc_ui, &dyn_store, &self.pounce, blocked);
             ui.separator();
         }
@@ -1992,9 +2054,16 @@ impl PeltApp {
         let Some(path) = self.checked_import_path(true) else {
             return;
         };
-        if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
+        if self.job_active(&[
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
+        ]) {
             self.last_move_summary = Some(
-                "A folder move or delete is running; import/sync waits until it finishes.".into(),
+                "A folder move, delete or verify is running; import/sync waits until it finishes."
+                    .into(),
             );
             return;
         }

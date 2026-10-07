@@ -17,7 +17,7 @@ use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
 use crate::scruff::{Ingest, IngestReport};
 use crate::shred::{Shred, ShredOutcome};
-use crate::verify::{Verify, VerifyReport};
+use crate::verify::{Baseline, BaselineReport, Verify, VerifyReport};
 use crate::{CatalogStore, SqliteCatalog};
 
 /// A shared slot a caller can poll for the final report once a job reaches `Done`. Stays `None`
@@ -577,9 +577,88 @@ impl Drop for VerifyJob {
         let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             if let Some(v) = self.verify.take() {
-                let mut report = v.into_report();
-                report.cancelled = true;
-                *slot = Some(report);
+                *slot = Some(v.cancel_into_report());
+            }
+        }
+    }
+}
+
+/// Records a trusted baseline content hash for a root's unhashed assets (#386): steps [`Baseline`]
+/// one slice of one file per call, committing in batches. Never returns `Err`; a catalog failure is
+/// reported in [`BaselineReport::error`]. A cancelled job is dropped without reporting, so `Drop`
+/// writes the batch already hashed and fills the slot with what was done.
+pub struct BaselineJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    baseline: Option<Baseline>,
+    label: String,
+    progress: Progress,
+    result: ReportSlot<BaselineReport>,
+}
+
+impl BaselineJob {
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        root_id: i64,
+        root_path: &Path,
+    ) -> (Self, ReportSlot<BaselineReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = BaselineJob {
+            store,
+            baseline: Some(Baseline::new(root_id, root_path)),
+            label: format!("Record baseline: {}", root_path.display()),
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for BaselineJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Baseline,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let baseline = self
+            .baseline
+            .as_mut()
+            .expect("BaselineJob::step called again after it already reported Done");
+        let more = baseline.step(self.store.as_ref());
+        let (done, total) = baseline.progress();
+        self.progress = Progress {
+            done,
+            total: (total > 0).then_some(total),
+        };
+        if more {
+            Ok(Step::Yield)
+        } else {
+            let report = self.baseline.take().unwrap().into_report();
+            *self.result.lock().unwrap() = Some(report);
+            Ok(Step::Done)
+        }
+    }
+}
+
+impl Drop for BaselineJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            if let Some(b) = self.baseline.take() {
+                *slot = Some(b.cancel_into_report(self.store.as_ref()));
             }
         }
     }

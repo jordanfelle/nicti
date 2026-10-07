@@ -1632,6 +1632,29 @@ impl CatalogStore for SqliteCatalog {
         Ok(rows)
     }
 
+    fn record_baseline_hashes(
+        &self,
+        root_id: i64,
+        entries: &[(i64, u64, i64, String)],
+    ) -> Result<u64, CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut written = 0u64;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE asset SET content_hash = ?1 \
+                 WHERE id = ?2 AND root_id = ?3 AND content_hash IS NULL \
+                   AND size_bytes = ?4 AND mtime_unix = ?5",
+            )?;
+            for (asset_id, size, mtime, hash) in entries {
+                written +=
+                    stmt.execute(params![hash, asset_id, root_id, *size as i64, mtime])? as u64;
+            }
+        }
+        tx.commit()?;
+        Ok(written)
+    }
+
     fn set_asset_missing(
         &self,
         asset_id: i64,

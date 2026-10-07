@@ -56,6 +56,9 @@ pub enum JobKind {
     Delete,
     /// A re-hash of a folder against its stored content hashes (#304) -- disk-bound, CPU lane.
     Verify,
+    /// Recording a trusted baseline content hash for assets that have none (#386) -- disk-bound,
+    /// CPU lane.
+    Baseline,
     /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
     /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
     Decode,

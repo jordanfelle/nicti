@@ -31,6 +31,8 @@ pub struct PanelOutput {
     /// already-selected root again).
     pub select_root: Option<Option<i64>>,
     pub import_from: Option<String>,
+    /// The root whose "Verify folder" context-menu entry was clicked (#386).
+    pub verify: Option<i64>,
 }
 
 /// The root filter a click on `clicked` produces: toggles off when it is already `selected`.
@@ -211,6 +213,7 @@ pub fn show(
     archive: &ArchiveDrives,
     set_archive: &mut Option<(String, bool)>,
     selected_root: Option<i64>,
+    verify_enabled: bool,
 ) -> PanelOutput {
     let mut out = PanelOutput::default();
     if tree.is_empty() {
@@ -249,8 +252,18 @@ pub fn show(
                         out.import_from = Some(drive.path.clone());
                     }
                     for root in &drive.roots {
-                        if show_root(ui, root, moving, selected_root == Some(root.id)) {
+                        let row = show_root(
+                            ui,
+                            root,
+                            moving,
+                            selected_root == Some(root.id),
+                            verify_enabled,
+                        );
+                        if row.clicked {
                             out.select_root = Some(toggle_root(selected_root, root.id));
+                        }
+                        if row.verify {
+                            out.verify = Some(root.id);
                         }
                     }
                 });
@@ -288,10 +301,25 @@ fn find_root(tree: &[DriveNode], id: i64) -> Option<&Root> {
     tree.iter().flat_map(|d| &d.roots).find(|r| r.id == id)
 }
 
-/// One folder row: click selects it as the grid filter (returns true), drag starts a move.
+/// What one folder row reported this frame.
+struct RowOutput {
+    /// Clicked: selects the folder as the grid filter.
+    clicked: bool,
+    /// "Verify folder" was picked from the row's context menu (#386).
+    verify: bool,
+}
+
+/// One folder row: click selects it as the grid filter, drag starts a move, right-click opens a
+/// menu with "Verify folder" (disabled while `verify_enabled` is false).
 /// Deliberately not a drop target: `Carry` refuses any destination inside another registered
 /// root (overlapping roots), so "move into this folder" can only fail.
-fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool, selected: bool) -> bool {
+fn show_root(
+    ui: &mut egui::Ui,
+    root: &Root,
+    moving: bool,
+    selected: bool,
+    verify_enabled: bool,
+) -> RowOutput {
     let id = egui::Id::new(("folder_panel_root", root.id));
     let label = folder_name(&root.path);
     let icon = if root.archived {
@@ -318,8 +346,20 @@ fn show_root(ui: &mut egui::Ui, root: &Root, moving: bool, selected: bool) -> bo
         ui.interact(r.rect, id, egui::Sense::click())
     };
     let clicked = response.clicked() || label_clicked;
-    response.on_hover_text(&root.path);
-    clicked
+    let mut verify = false;
+    response.on_hover_text(&root.path).context_menu(|ui| {
+        let item = ui
+            .add_enabled(verify_enabled, egui::Button::new("Verify folder"))
+            .on_hover_text(
+                "Re-read every photo here and compare it to the checksum recorded \
+                 when it was copied.",
+            );
+        if item.clicked() {
+            verify = true;
+            ui.close();
+        }
+    });
+    RowOutput { clicked, verify }
 }
 
 #[cfg(test)]
@@ -432,6 +472,7 @@ mod tests {
                     &archive,
                     &mut set_archive,
                     selected,
+                    true,
                 );
                 if got != PanelOutput::default() {
                     *out = got;
@@ -453,6 +494,40 @@ mod tests {
         let out = click_in_panel("Import here\u{2026}", None);
         assert_eq!(out.import_from.as_deref(), Some("/mnt/d"));
         assert_eq!(out.select_root, None);
+    }
+
+    #[test]
+    fn the_folder_context_menu_requests_a_verify() {
+        use egui_kittest::kittest::Queryable;
+        let tree = build_tree(&[root(7, "/mnt/d/2026")], &[]);
+        let mut h = egui_kittest::Harness::new_ui_state(
+            move |ui, (out, tree): &mut (PanelOutput, Vec<DriveNode>)| {
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                let got = show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                );
+                if got != PanelOutput::default() {
+                    *out = got;
+                }
+            },
+            (PanelOutput::default(), tree),
+        );
+        h.get_by_label("\u{1F4C1} 2026").click_secondary();
+        h.run();
+        h.get_by_label("Verify folder").click();
+        h.run();
+        let out = h.state().0.clone();
+        assert_eq!(out.verify, Some(7));
+        assert_eq!(out.select_root, None, "the menu pick is not a folder click");
     }
 
     #[test]

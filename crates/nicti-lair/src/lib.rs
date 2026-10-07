@@ -359,6 +359,18 @@ pub trait CatalogStore: Module {
     /// absent here -- the verify pass (#304) counts them as unhashed.
     fn content_hashes_by_root(&self, root_id: i64) -> Result<Vec<(i64, String)>, CatalogError>;
 
+    /// Records a trusted baseline `content_hash` (#386) for assets that have none (a same-volume
+    /// rename, plain import or LRC import never recorded one). Each entry is `(asset_id,
+    /// size_bytes, mtime_unix, blake3_hex)`, where size/mtime are what the hasher saw on disk; a row
+    /// is written only if it still has no hash *and* its catalog size/mtime equal them, so an
+    /// existing hash is never overwritten and a file changed since ingest never gets a stale
+    /// baseline. One transaction. Returns how many rows were written.
+    fn record_baseline_hashes(
+        &self,
+        root_id: i64,
+        entries: &[(i64, u64, i64, String)],
+    ) -> Result<u64, CatalogError>;
+
     /// Sets or clears an asset's `missing_since` (#24). `Some(now_unix)` flags it as missing as of
     /// that time; `None` marks it present again (a file that reappeared at its cataloged path).
     /// Does not touch any other column — a `relink_asset` call clears this independently, since a

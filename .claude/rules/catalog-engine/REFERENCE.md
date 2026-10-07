@@ -78,7 +78,12 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   (`JobKind::Verify`, CPU lane). Re-reads every asset under a root that has `asset.content_hash`
   (16 MiB slice per step, cancellable) and reports mismatched / missing / unreadable; assets with
   no stored hash are only counted (`unhashed`). Read-only. `CatalogStore::content_hashes_by_root`.
-  No UI trigger and no `content_hash` backfill yet -- follow-ups.
+  **#386**: UI = `nicti-pelt`'s `verify_ui.rs` (folder-row context menu "Verify folder" -> report details;
+  `folder_panel.rs` `PanelOutput.verify`). A cancelled pass lists `VerifyReport::unchecked`; an NFD on-disk name
+  is matched through `verify::resolve_on_disk` (not a false `missing`; `patrol.rs` still has that limitation).
+  Backfill = `verify::Baseline` + `pounce_jobs::BaselineJob` (`JobKind::Baseline`) -> `CatalogStore::record_baseline_hashes`
+  (only rows with no hash and unchanged size/mtime; never overwrites). **Explicit user step**: it only proves a file
+  matches itself as it is now, so it is never run implicitly.
 
 - **Batch delete (#32, landed)**: `docs/adr/0032`, "Shred". `remove_assets` (chunked, one
   transaction, also clears the `delete_item` journal row) + `get_meta`/`set_meta` (batch marker
