@@ -3998,6 +3998,7 @@ dependencies = [
  "nicti-calico",
  "nicti-claw",
  "nicti-cornea",
+ "nicti-iris",
  "nicti-pawprint",
  "pollster",
  "serde",

@@ -131,12 +131,8 @@ pub fn denoise_stage() -> BasicStage {
         default_params: || json!({}),
     }
 }
-pub fn lens_stage() -> BasicStage {
-    BasicStage {
-        id: LENS,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
-    }
+pub fn lens_stage() -> crate::slit::LensStage {
+    crate::slit::LensStage
 }
 pub fn heal_stage() -> crate::heal::HealStage {
     crate::heal::HealStage

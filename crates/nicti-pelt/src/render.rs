@@ -32,6 +32,7 @@ use nicti_tapetum::mask::compose as mask_compose;
 use nicti_tapetum::mask::engine::{AiAlpha, MaskEngine, MaskInputs};
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::renderer::{BakedExec, RenderRequest, Renderer};
+use nicti_tapetum::slit::{LensExec, LensKernel};
 use nicti_tapetum::spine::{self, build_graph, build_registry, GEOMETRY_IDS, LIVE_IDS};
 use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
@@ -145,6 +146,7 @@ pub struct DevelopEngine {
     live_kernel: LiveSuffixKernel,
     crop_kernel: CropKernel,
     heal_kernel: HealKernel,
+    lens_kernel: LensKernel,
     /// Local-adjustment masks (#49): the engine that builds the atlas the live shader reads.
     mask_engine: MaskEngine,
     renderer: Renderer,
@@ -597,6 +599,7 @@ impl DevelopEngine {
         let crop_kernel = CropKernel::new(&gpu);
         crop_kernel.set_transform(geometry::Affine2D::IDENTITY);
         let heal_kernel = HealKernel::new(&gpu);
+        let lens_kernel = LensKernel::new(&gpu);
         let mask_engine = MaskEngine::new(&gpu);
         let renderer = Renderer::new(Arc::clone(&gpu), 500_000_000);
         Self {
@@ -605,6 +608,7 @@ impl DevelopEngine {
             live_kernel,
             crop_kernel,
             heal_kernel,
+            lens_kernel,
             mask_engine,
             renderer,
         }
@@ -675,12 +679,17 @@ impl DevelopEngine {
             params: &inputs.heal,
             removals: &dv.removals,
         };
+        let lens_exec = LensExec {
+            kernel: &self.lens_kernel,
+            params: &inputs.lens,
+            frame: &dv.frame,
+        };
         let passthrough = PassthroughExec;
         let baked_chain: Vec<(&str, &dyn BakedExec)> = vec![
             (DECODE, &decode_exec),
             (DEMOSAIC, &passthrough),
             (DENOISE, &passthrough),
-            (LENS, &passthrough),
+            (LENS, &lens_exec),
             (HEAL, &heal_exec),
         ];
         let req = RenderRequest {

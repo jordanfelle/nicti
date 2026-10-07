@@ -17,6 +17,18 @@ use crate::{LensModel, Vignette, Warp};
 const MAX_OPCODES: u32 = 256;
 const OP_WARP_RECTILINEAR: u32 = 1;
 const OP_FIX_VIGNETTE_RADIAL: u32 = 3;
+/// Real lens profiles keep every coefficient within a few units (the radial polynomial is in
+/// normalised radius); anything beyond this is a corrupt or hostile file, and would otherwise
+/// turn the resample into garbage (or, in f32 on the GPU, into infinities).
+const MAX_COEFFICIENT: f64 = 100.0;
+/// The optical centre is normalised over the image; a little outside [0, 1] is legal (a decentred
+/// sensor crop), a lot is not.
+const CENTER_RANGE: std::ops::RangeInclusive<f64> = -0.5..=1.5;
+
+fn sane(coefficients: &[f64], center: [f64; 2]) -> bool {
+    coefficients.iter().all(|c| c.abs() <= MAX_COEFFICIENT)
+        && center.iter().all(|c| CENTER_RANGE.contains(c))
+}
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -59,6 +71,9 @@ fn parse_warp(params: &[u8]) -> Option<Warp> {
         out.push(p);
     }
     let center = [r.f64()?, r.f64()?];
+    if !sane(&out.concat(), center) {
+        return None;
+    }
     Some(Warp {
         planes: out,
         center,
@@ -75,6 +90,9 @@ fn parse_vignette(params: &[u8]) -> Option<Vignette> {
         *v = r.f64()?;
     }
     let center = [r.f64()?, r.f64()?];
+    if !sane(&k, center) {
+        return None;
+    }
     Some(Vignette { k, center })
 }
 
@@ -248,6 +266,21 @@ mod tests {
             blob.extend_from_slice(&v.to_be_bytes());
         }
         assert_eq!(parse_opcode_list3(&blob), None);
+    }
+
+    #[test]
+    fn absurd_coefficients_and_centres_are_rejected() {
+        let mut m = sample();
+        m.warp.as_mut().unwrap().planes[1][3] = 1.0e30;
+        m.vignette.as_mut().unwrap().center = [9.0e8, 0.5];
+        assert_eq!(parse_opcode_list3(&write_opcode_list3(&m)), None);
+        // A slightly decentred but plausible profile is kept.
+        let mut ok = sample();
+        ok.warp.as_mut().unwrap().center = [0.52, 1.1];
+        assert!(parse_opcode_list3(&write_opcode_list3(&ok))
+            .unwrap()
+            .warp
+            .is_some());
     }
 
     #[test]

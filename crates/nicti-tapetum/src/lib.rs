@@ -23,6 +23,7 @@ pub mod mask;
 pub mod perk;
 pub mod prefetch;
 pub mod renderer;
+pub mod slit;
 pub mod spine;
 pub mod stages;
 pub mod tile;

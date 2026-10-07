@@ -17,7 +17,7 @@ use nicti_pawprint::EditDocument;
 
 use crate::coat::{
     self, CameraProfileParams, CropParams, EffectsParams, ExposureParams, HealParams, HslParams,
-    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    LensParams, NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
     VibranceParams, WbParams,
 };
 use crate::color;
@@ -225,6 +225,8 @@ pub fn resolve<T: serde::de::DeserializeOwned + Default>(doc: &EditDocument, id:
 pub struct RenderInputs {
     /// For `LiveSuffixKernel::set_params`.
     pub live: LiveParams,
+    /// For `LensExec::params` (#428).
+    pub lens: LensParams,
     /// For `HealExec::params`.
     pub heal: HealParams,
     /// The crop rect in source pixels (the full frame for a default crop).
@@ -316,6 +318,7 @@ pub fn resolve_inputs(
             noise_reduction,
             pixel_scale,
         },
+        lens: resolve(doc, LENS),
         heal: resolve(doc, HEAL),
         crop_rect,
         crop_transform,

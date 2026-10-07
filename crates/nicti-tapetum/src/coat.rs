@@ -528,6 +528,52 @@ impl HealParams {
 /// deserialization failure (a schema this build genuinely can't parse) rather than propagating an
 /// error -- consistent with `nicti_claw::Registry::get`'s own "no recognized module -> `None`,
 /// never a hard failure" convention for an extension point.
+/// Lens corrections (#428), the baked `nicti.lens` stage.
+///
+/// Both switches are *serialized only when they differ from the default*, so the default params
+/// are `{}` -- exactly what the passthrough stage hashed before this stage was real. A photo whose
+/// lens stage does nothing (a NEF with `remove_ca` off) therefore keeps every baked-cache key and,
+/// through the keying-only `nicti.neutral` node, every on-disk AI alpha (#353) it had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensParams {
+    /// Automatic lateral chromatic aberration removal (LRC's `AutoLateralCA`). The scale is
+    /// estimated from the photo at bake time; skipped when the embedded profile already corrects
+    /// per-channel warp.
+    #[serde(skip_serializing_if = "is_false")]
+    pub remove_ca: bool,
+    /// Apply the DNG's own lens profile (`OpcodeList3` WarpRectilinear/FixVignetteRadial) when it
+    /// carries one. On by default: that is how every DNG reader renders the file. A no-op for
+    /// files without a profile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub embedded_profile: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+impl Default for LensParams {
+    fn default() -> Self {
+        Self {
+            remove_ca: false,
+            embedded_profile: true,
+        }
+    }
+}
+
+impl LensParams {
+    /// True when the stage can do nothing *for any file*: used only to pick the cheap texture copy
+    /// when the frame has no profile either (see `slit::LensExec`).
+    pub fn is_noop(&self) -> bool {
+        !self.remove_ca && !self.embedded_profile
+    }
+}
+
 pub fn parse<T: serde::de::DeserializeOwned + Default>(params: &Value) -> T {
     serde_json::from_value(params.clone()).unwrap_or_default()
 }
@@ -541,6 +587,48 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_lens_params_are_the_historical_empty_params() {
+        // Keeps every existing document's lens hash (and so its baked-cache and AI-alpha keys).
+        assert_eq!(default_value::<LensParams>(), serde_json::json!({}));
+        assert_eq!(
+            parse::<LensParams>(&serde_json::json!({})),
+            LensParams::default()
+        );
+        assert!(LensParams::default().embedded_profile && !LensParams::default().remove_ca);
+    }
+
+    #[test]
+    fn lens_params_round_trip_each_non_default_switch() {
+        for p in [
+            LensParams {
+                remove_ca: true,
+                embedded_profile: true,
+            },
+            LensParams {
+                remove_ca: false,
+                embedded_profile: false,
+            },
+            LensParams {
+                remove_ca: true,
+                embedded_profile: false,
+            },
+        ] {
+            let v = serde_json::to_value(p).unwrap();
+            assert_ne!(
+                v,
+                serde_json::json!({}),
+                "a non-default must change the hash input"
+            );
+            assert_eq!(parse::<LensParams>(&v), p);
+        }
+        // Garbage degrades to the default instead of erroring.
+        assert_eq!(
+            parse::<LensParams>(&serde_json::json!({ "remove_ca": "yes" })),
+            LensParams::default()
+        );
+    }
 
     #[test]
     fn no_camera_profile_serializes_to_the_historical_empty_params() {
