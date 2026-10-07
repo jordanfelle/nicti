@@ -857,7 +857,12 @@ fn sanitize_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
             out.push(p);
         }
     }
-    out.truncate(MAX_CURVE_POINTS);
+    if out.len() > MAX_CURVE_POINTS {
+        // Keep the right-hand endpoint: dropping it would flat-extend the curve from mid-graph.
+        let last = out[out.len() - 1];
+        out.truncate(MAX_CURVE_POINTS - 1);
+        out.push(last);
+    }
     if out.len() < 2 || out.iter().all(|p| (p[0] - p[1]).abs() < 1e-6) {
         out.clear();
     }
@@ -930,6 +935,11 @@ mod tests {
         }
         .sanitized();
         assert_eq!(capped.blue.len(), MAX_CURVE_POINTS);
+        assert_eq!(
+            capped.blue.last(),
+            Some(&[1.0, 1.0]),
+            "the x = 1 endpoint survives"
+        );
     }
 
     #[test]

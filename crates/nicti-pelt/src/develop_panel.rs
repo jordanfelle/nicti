@@ -404,6 +404,7 @@ pub fn show(
             ui.data_mut(|d| d.insert_temp(key, sel));
         }
         let mut grade: ColorGradeParams = develop.stage_params(COLOR_GRADE);
+        let before = grade;
         {
             let wheel = match sel {
                 0 => &mut grade.shadows,
@@ -421,7 +422,10 @@ pub fn show(
         fur::divider(ui);
         slider(ui, &GRADE_BLENDING, &mut grade.blending);
         slider(ui, &GRADE_BALANCE, &mut grade.balance);
-        develop.set_stage_params(COLOR_GRADE, &grade);
+        // Write only on a real change: merely opening the section must not mark the photo edited.
+        if grade != before {
+            develop.set_stage_params(COLOR_GRADE, &grade);
+        }
     });
 
     fur::section(ui, "point_color", "Point Color", false, |ui| {

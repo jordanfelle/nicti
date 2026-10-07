@@ -240,6 +240,9 @@ pub struct OkLabOps {
 
 impl OkLabOps {
     pub fn new(grade: &ColorGradeParams, points: &PointColorParams) -> Self {
+        // Judge no-op-ness on the cleaned values, so a hand-edited out-of-range document that
+        // sanitizes to nothing does not pay for (and perturb pixels with) the OkLab round trip.
+        let grade = grade.sanitized();
         let to_lms = prophoto_to_lms();
         let mut slots = [None; MAX_POINT_COLORS];
         let sanitized = points.sanitized();
@@ -251,7 +254,7 @@ impl OkLabOps {
         Self {
             to_lms,
             from_lms: mat3_invert(&to_lms),
-            grade: (!grade.is_noop()).then(|| GradeK::new(grade)),
+            grade: (!grade.is_noop()).then(|| GradeK::new(&grade)),
             points: slots,
         }
     }
@@ -309,6 +312,19 @@ mod tests {
         let ops = OkLabOps::new(&ColorGradeParams::default(), &PointColorParams::default());
         assert!(ops.is_noop());
         assert_eq!(ops.apply([0.3, 0.2, 0.7]), [0.3, 0.2, 0.7]);
+    }
+
+    #[test]
+    fn out_of_range_values_that_sanitize_to_nothing_are_still_a_noop() {
+        let grade = ColorGradeParams {
+            global: GradeWheel {
+                hue: 10.0,
+                sat: -0.5,
+                lum: f32::NAN,
+            },
+            ..Default::default()
+        };
+        assert!(OkLabOps::new(&grade, &PointColorParams::default()).is_noop());
     }
 
     #[test]
