@@ -755,6 +755,28 @@ feature (no `wgpu`, so no adapter is ever needed). It is test-only, never linked
 No ML model, font, or other bundled data asset is introduced by this ticket. The golden PNGs under
 `crates/nicti-pelt/tests/snapshots/` are rendered by the harness from this repo's own UI.
 
+## Update (2026-10-06, [#428](https://github.com/jordanfelle/nicti/issues/428)'s LightCraft optics port)
+
+No new crate enters the dependency graph (`cargo deny check licenses` is unaffected), and no data asset,
+model or font is added. **Ported source**, adapted from `storytold/lightcraft` at commit `265248c`
+(`MIT OR Apache-2.0`, "Copyright (c) 2026 ArtCraft Team and the LightCraft contributors"; same grant as
+the #425/#426 ports above[^fur1]), with the copyright line kept in each file's header:
+
+- `crates/nicti-iris/src/lateral_ca.rs` -- the lateral-CA estimator (`crates/pipeline/src/optics.rs`,
+  `estimate_lateral_ca`), changed to run on a 2x-decimated copy, take an optical centre and drop the
+  global cache.
+- `crates/nicti-iris/src/dng.rs` -- the `OpcodeList3` reader for `WarpRectilinear`/`FixVignetteRadial`
+  (`crates/raw/src/opcodes.rs`), narrowed to those two opcodes and hardened for untrusted input.
+- `crates/nicti-tapetum/src/slit.rs`, `shaders/slit.wgsl` -- the warp/CA/vignette resample (`optics.rs`'s
+  `corrected_to_source`, `pipeline/src/geometry.rs`), reworked as a single camera-RGB pass.
+- `crates/nicti-tapetum/src/color.rs` (`defringe_pixel`) and `shaders/live_suffix.wgsl` (`apply_defringe`)
+  -- the defringe idea and its smoothstep bounds (`optics.rs` defringe, `finish.rs`/`finish.wgsl`), re-expressed
+  in HSV hue with a compass-tap edge test; not a line-for-line port.
+
+LightCraft's files carry no per-file header of their own, so the attribution is the repo-level grant above;
+its `NOTICE` excludes only the ArtCraft brand assets, none of which are used. Per #424's rules every
+constant is to be re-validated on real photos before it is trusted (see ADR-0428's "Not verified").
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23

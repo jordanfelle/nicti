@@ -8,8 +8,10 @@
 //! sits at `r·(1 + α_R)` in red, so the lens stage resamples red at `(1 + α_R)·offset` to line
 //! it back up.
 //!
-//! Ported from LightCraft's `estimate_lateral_ca` (`pipeline/src/optics.rs`,
-//! storytold/lightcraft@265248c, MIT OR Apache-2.0, see `docs/licensing.md`), with these changes:
+//! Adapted from storytold/lightcraft@265248c `crates/pipeline/src/optics.rs` (`estimate_lateral_ca`),
+//! Copyright (c) 2026 ArtCraft Team and the LightCraft contributors, MIT OR Apache-2.0
+//! (see `docs/licensing.md`).
+//! Changes:
 //!
 //! - Works on a 2x2-box-decimated copy, so the fixed ±[`MAX_SHIFT`] px search covers ±2× that at
 //!   full resolution. LightCraft searched ±3 px at full resolution, which caps the measurable α
@@ -325,6 +327,24 @@ mod tests {
         let [r, b] = estimate(&img, None);
         assert!((r - 0.004).abs() < 0.001, "red {r}");
         assert!((b + 0.003).abs() < 0.001, "blue {b}");
+    }
+
+    /// Cost at a Z8-sized frame (`cargo test -p nicti-iris --release lateral_ca::tests::throughput
+    /// -- --ignored --nocapture`). The estimate only runs on a baked-cache miss with Remove CA on.
+    #[test]
+    #[ignore = "benchmark: run explicitly in release"]
+    fn throughput_at_45mp() {
+        let (w, h) = (8256usize, 5504usize);
+        let px = ca_grid(w, h, 0.002, -0.0015, [0.5, 0.5]);
+        let img = frame(w, h, &px);
+        let started = std::time::Instant::now();
+        let [r, b] = estimate(&img, None);
+        eprintln!(
+            "estimate at {w}x{h} ({} MP): {:?} -> alpha ({r:.5}, {b:.5})",
+            w * h / 1_000_000,
+            started.elapsed()
+        );
+        assert!((r - 0.002).abs() < 0.001 && (b + 0.0015).abs() < 0.001);
     }
 
     #[test]

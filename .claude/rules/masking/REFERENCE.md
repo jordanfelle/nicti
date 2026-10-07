@@ -83,8 +83,11 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   `NICTI_MODELS_DIR=<root>` with `birefnet/birefnet_fp32.onnx` at the exact pinned bytes +
   `NICTI_TEST_ORT_DYLIB`).
 - **Export applies masks (#354)**: `export/render_core.rs::render_live_frame` (`LiveSource.masks`) = `render_baked` -> `MaskEngine::prepare` -> `set_masks` -> `Renderer::render_live_from(baked)` (export's renderer has a zero baked-cache budget, so `render` after `render_baked` would bake twice). Gotchas: the `LiveSuffixKernel` is reused across photos, so `set_masks(None)` must run for every unmasked photo and after every masked one or the previous atlas leaks (regression test `local_adjustments_are_applied_without_a_warning_and_never_leak_into_the_next_photo`); AI alphas come from the Larder on the decode step (`ExportEnv.larder`, `stash::fetch_alpha`), export never bakes -- an unbaked AI component is skipped and the report warns per photo. Rendered previews (#145) still pass `masks: None` and stay marked partial (#399).
-- **Not done**: Moire/Defringe (#351), undo (#324), post-lens neutral image
-  when lens is real (#358), real-photo quality (#171).
+- **Not done**: local Moire/Defringe (#351; the *global* Defringe landed in #428, reusable pieces
+  are `live_suffix.wgsl`'s `apply_defringe` and `color::defringe_pixel`), undo (#324), a post-lens
+  neutral image (#358: the lens stage is real since #428, but the neutral image/removal frame are still
+  built from the uncorrected `LinearFrame`, which misaligns AI masks on a DNG whose profile warps),
+  real-photo quality (#171).
 
 ## Package contents
 

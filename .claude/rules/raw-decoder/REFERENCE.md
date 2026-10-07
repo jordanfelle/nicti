@@ -46,7 +46,9 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
   now, promoted out of `spikes/retina`. `LibRawDecoder::decode_linear` demosaics one file with
   white balance/color-matrix/gamma all disabled via LibRaw's own params, returning a `LinearFrame`
   (linear camera RGB + the metadata `spikes/calico`'s color pipeline needs) directly, no TIFF/JSON
-  round-trip required for a production caller.
+  round-trip required for a production caller. **#428**: `LinearFrame.dng_opcode_list3` (the raw DNG `OpcodeList3`
+  bytes, via `retina_dng_opcode_list` / `LibRawHandle::dng_opcode_list3`; LibRaw stores but never applies them),
+  parsed by `nicti_iris::dng`; `tests/real_dng.rs` round-trips a synthetic DNG through the real shim.
   - **All of the above is gated behind a non-default `libraw` Cargo feature** (`LibRawDecoder`,
     `LibRawHandle`, `DemosaicQuality`, and `build.rs`'s entire C++ compile step are `#[cfg]`-gated
     on it, `cc`/`clap` are optional deps activated by it). `embedded` (below) is pure Rust and

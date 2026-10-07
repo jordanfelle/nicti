@@ -3,6 +3,10 @@
 // position, then scaled by the radial vignette gain. See `slit.rs` for the model and the CPU twin
 // (`slit::reference`) this shader is proven against.
 //
+// Adapted from storytold/lightcraft@265248c crates/gpu/src/wgsl/geom.wgsl and
+// crates/pipeline/src/optics.rs, Copyright (c) 2026 ArtCraft Team and the LightCraft
+// contributors, MIT OR Apache-2.0 (see docs/licensing.md).
+//
 // For an output pixel centre `p` (continuous coordinates, pixel centres at +0.5):
 //   1. inverse DNG WarpRectilinear, per colour plane: normalise `p - centre` by `m` (centre to the
 //      farthest corner), radial polynomial + tangential terms -> the source position;

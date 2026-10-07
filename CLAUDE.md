@@ -23,7 +23,7 @@ Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only
 `gpu-gui-and-healing` (0016/0068/0050/0051), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026),
 `preview-tiers` (0029, 0143, 0072, 0145), `raw-decoder` (0037), `volume-identity` (0071, 0024), `color` (0038, 0042),
 `lrc-migration` (0061, 0062, 0156, 0158, 0380), `masking` (0048, 0049, 0353), `culling` (0032, 0033, 0034, 0035, 0108), `denoise` (0040),
-`xmp-interop` (0059), `render-graph` (0044, 0047, 0380), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
+`xmp-interop` (0059), `render-graph` (0044, 0047, 0380, 0428), `develop` (0099, 0053, 0101, 0052), `jobs` (0054), `export` (0056, 0057),
 `release` (0249). A new ADR adds a
 bullet to both files of its topic (or a new topic) and to this list — not inline here.
 
@@ -115,8 +115,9 @@ terse index: crate/spike → purpose → owning topic.
   `nicti-calico/src/xmp_profile.rs`, selected via `DevelopView::select_look`, stored in
   `CameraProfileParams.look`
 - **`crates/nicti-iris`/`nicti-stalk`**
-  — extension-point crates (supertrait + `Registry` alias only, no execution methods yet):
-  `LensCorrection` (#39), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):
+  — extension-point crates (supertrait + `Registry` alias; `nicti-stalk` has no execution methods yet):
+  `LensCorrection` (`nicti-iris`, #428: `model()` -> plain-data `LensModel`; `dng::DngEmbedded`, `lateral_ca::estimate`, the shared
+  warp/vignette math), `ModelProvider` (#48-#53/#33-#36). `nicti-stalk` also has `models.rs` (#51):
   the on-demand, checksummed AI-model store + pinned manifest (ADR-0218), and (#49) the backend-
   agnostic `SegmentationProvider`/`Segmenter`/`SegmentationRegistry` layer that makes AI mask models
   pluggable, plus the pinned BiRefNet artifact and (#345) the optional NVIDIA GPU pack (`models::gpu_pack_artifacts`, multi-file `Payload::ZipMembers`)
@@ -140,8 +141,8 @@ terse index: crate/spike → purpose → owning topic.
   the shared wgpu `GpuContext` (`gpu.rs`) and GPU-resident `Rgba16Float` frame textures
   (`frame.rs`), `renderer.rs`'s graph-driven `Renderer` (proves ADR-0044's dispatch-count
   invariants against mock stages), and the real stages themselves (`stages.rs`): decode (uploads
-  a `nicti_cornea::LinearFrame`, runs `normalize.wgsl`), passthrough slots for demosaic/denoise/
-  lens (their own algorithms are #40/#39; heal is real, #51, `heal.rs`), the fused live suffix (WB + camera→working
+  a `nicti_cornea::LinearFrame`, runs `normalize.wgsl`), passthrough slots for demosaic/denoise
+  (algorithms #40; lens is real, #428, `slit.rs`; heal is real, #51, `heal.rs`), the fused live suffix (WB + camera→working
   -space color + exposure + tone + vibrance, `color.rs`, `live_suffix.wgsl`), and crop
   (`geometry.rs`, `present_sample.wgsl`) — every kernel has a GPU-vs-CPU parity test against a
   CPU reference, plus one end-to-end test wiring the whole chain through `Renderer`. These tests
@@ -151,7 +152,7 @@ terse index: crate/spike → purpose → owning topic.
   (#45 PR4). Promoted from `spikes/loaf` (now deleted) / `spikes/glint`, and renamed from
   `nicti-render` to `nicti-tapetum` once the whole #45 stack merged, matching the naming-convention
   section above. `spine.rs` (#57) is the shared graph/registry/`resolve_inputs` Develop, export and
-  `bench/knead` all use (#49 adds its keying-only `nicti.neutral` node and the `nicti.masks` live stage). **#380**: global Texture/Clarity/Dehaze/Saturation = `nicti.presence` (`coat::PresenceParams`, summed with local deltas in `live_suffix.wgsl`; bases via `MaskEngine::prepare`'s `presence` input) and post-crop vignette/grain = `nicti.effects` (`coat::EffectsParams`, `effects.rs` CPU reference, `present_sample.wgsl`, `RenderInputs::bind_effects`); LRC mapping in `nicti-stray`'s `develop/basic.rs` + `develop/effects.rs`; UI in `nicti-pelt`'s `develop_panel.rs` (Basic + Effects).
+  `bench/knead` all use (#49 adds its keying-only `nicti.neutral` node and the `nicti.masks` live stage). **#380**: global Texture/Clarity/Dehaze/Saturation = `nicti.presence` (`coat::PresenceParams`, summed with local deltas in `live_suffix.wgsl`; bases via `MaskEngine::prepare`'s `presence` input) and post-crop vignette/grain = `nicti.effects` (`coat::EffectsParams`, `effects.rs` CPU reference, `present_sample.wgsl`, `RenderInputs::bind_effects`); LRC mapping in `nicti-stray`'s `develop/basic.rs` + `develop/effects.rs`; UI in `nicti-pelt`'s `develop_panel.rs` (Basic + Effects). **#428**: real lens stage = `slit.rs`/`shaders/slit.wgsl` (`LensParams`, `LensExec`; DNG profile + auto-CA from `nicti-iris`), global Defringe = live `nicti.defringe` fused in `live_suffix.wgsl` (`color::defringe_pixel` twin), LRC mapping `nicti-stray`'s `develop/lens.rs`, UI = the Develop panel's Lens Corrections section.
   **`mask/`** (#49): the `nicti.masks` stage -- `params.rs` (data model), `raster.rs`/`compose.rs`
   (CPU references, fold, AI bake key), `kernels.rs`/`guided.rs`/`bases.rs` (GPU kernels), `local.rs` (per-mask
   adjustments' uniforms + CPU twin), `engine.rs` (`MaskEngine`, the caches) → [`masking`](.claude/rules/masking/REFERENCE.md).
@@ -170,7 +171,7 @@ terse index: crate/spike → purpose → owning topic.
   (`compare`/`sweep`/`scan`/`watch`/`dump-classic`/`dump-cfa`), now depending on this crate for its
   decode step instead of vendoring its own copy. #40's demosaic/NR algorithm choice is
   `spikes/rods`'s scope, not this crate's — `decode_linear` always uses LibRaw's own demosaic as a
-  placeholder. **The LibRaw FFI/build.rs/submodule is entirely behind a non-default `libraw`
+  placeholder (#428: it also carries a DNG's raw `OpcodeList3` on `LinearFrame.dng_opcode_list3`). **The LibRaw FFI/build.rs/submodule is entirely behind a non-default `libraw`
   Cargo feature** (`LibRawDecoder`, `LibRawHandle`, and `build.rs`'s C++ compile all `#[cfg]`-gated
   on it) — `nicti-lair` depends on this crate for `embedded` alone with the feature off, so it
   never needs `vendor/LibRaw` checked out or a C++ compiler; `spikes/retina` and the path-gated

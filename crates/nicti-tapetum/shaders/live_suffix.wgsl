@@ -488,6 +488,9 @@ fn dcp_apply_table(rgb: vec3<f32>, tex: texture_3d<f32>, srgb_value: bool) -> ve
 }
 
 // ---- #428 Defringe (color.rs::defringe_pixel is the CPU twin; keep the constants in sync) ----
+// Idea and smoothstep bounds adapted from storytold/lightcraft@265248c crates/pipeline/src/optics.rs,
+// Copyright (c) 2026 ArtCraft Team and the LightCraft contributors, MIT OR Apache-2.0 (see
+// docs/licensing.md).
 // Desaturates saturated purple/green pixels that sit next to a strong luminance edge. It runs
 // right after the camera->working matrix, in scene-linear working space, so it sees the colours
 // before any exposure/tone. The edge test reads 8 compass taps `r` px away in the baked input

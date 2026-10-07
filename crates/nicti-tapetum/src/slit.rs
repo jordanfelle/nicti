@@ -3,6 +3,11 @@
 //!
 //! Named for the cat's slit pupil, which narrows to correct for what the lens lets in.
 //!
+//! The warp/CA/vignette model is adapted from storytold/lightcraft@265248c
+//! `crates/pipeline/src/{optics,geometry}.rs`, Copyright (c) 2026 ArtCraft Team and the LightCraft contributors, MIT OR Apache-2.0
+//! (see `docs/licensing.md`).
+//! Changes: one camera-RGB pass (LightCraft warps Rec.2020), DNG coefficients per colour plane.
+//!
 //! It runs on the demosaiced, normalised, still camera-RGB frame -- *before* the camera-to-XYZ
 //! matrix mixes the channels (ADR-0044; `render-graph` topic) -- because per-channel lateral CA
 //! correction and the DNG per-plane warp are defined on those channels. Crop's own resample runs

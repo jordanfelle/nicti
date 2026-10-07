@@ -67,11 +67,22 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   this class of simulation).
 - **Lens correction**: confirmed in the baked prefix, before ADR-0038's color pipeline (#191) — CA
   correction is calibrated in camera-native RGB channel space, which no longer exists once
-  cam→XYZ mixes channels, so it must precede that matrix. Bakeability isn't a free second
-  argument, though: ADR-0061's LRC schema mapping shows LRC's own Lens Corrections panel has
-  manual distortion/vignette/defringe sliders, so this rests on the same "not a live-drag slider"
-  choice ADR-0050 made for heal/remove, for #39 to confirm once it designs that UX. #39's other
-  scope (correction-data source, lens coverage) stays open too.
+  cam→XYZ mixes channels, so it must precede that matrix. **Real since #428 (`docs/adr/0428`)** —
+  see the next bullet; the correction-data source for NEF (lensfun/embedded) is still #410.
+- **Lens stage + Defringe (#428)**: `nicti.lens` is its own baked resample pass (`slit.rs`,
+  `shaders/slit.wgsl`; crop can't host it, it runs post-matrix in ProPhoto): per-plane inverse DNG
+  `WarpRectilinear`, red/blue auto-CA scale about the optical centre, `FixVignetteRadial` gain at
+  the green source position. `LensExec` takes the `LinearFrame` and resolves profile + CA estimate
+  on a cache miss only (`LensPlan::resolve`); auto-CA is skipped when the profile's planes differ
+  (no double correction). **`LensParams` serialises to `{}` at its defaults and `impl_version` stays
+  0 on purpose** — a default NEF renders the old passthrough pixels, so its keys and on-disk AI alphas
+  stay valid; bump it only when the algorithm changes. Defringe is *not* in the lens node: it is the
+  live `nicti.defringe` (`DefringeParams`), fused in `live_suffix.wgsl` right after the
+  camera→working matrix (HSV hue window + chroma gate + 8 compass taps for the edge test), CPU twin
+  `color::defringe_pixel`, so a drag is a uniform write and never re-keys a mask bake. Gotchas: the
+  warp is *corrected→source* (inverse); `round` differs between WGSL (half-even) and Rust, so shared
+  radii use `floor(x + 0.5)`; AI masks/removal still infer from the *uncorrected* decode (#358).
+  Constants are LightCraft's, untuned on real photos.
 - **Full-res tiling** (#45 PR4, landed): `nicti_tapetum::tile::TilePlanner::plan` partitions an ROI
   into non-overlapping core tiles (each padded by a chain-wide halo, clamped to the source
   extent), bounded by both a max-dimension and a max-staging-bytes budget; `calibrate_core_size`

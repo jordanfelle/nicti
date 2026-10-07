@@ -2,10 +2,13 @@
 //! (opcode 3) out of an `OpcodeList3` blob, as pure data.
 //!
 //! The byte layout follows the DNG 1.6 spec (all fields big-endian): a `u32` opcode count, then
-//! per opcode `id, version, flags, size` (`u32` each) followed by `size` parameter bytes. Ported
-//! in shape from LightCraft's `raw/src/opcodes.rs` (storytold/lightcraft@265248c, MIT OR
-//! Apache-2.0, see `docs/licensing.md`), narrowed to the two lens opcodes and hardened: the blob
-//! comes from an untrusted file, so every count is bounded and every float must be finite.
+//! per opcode `id, version, flags, size` (`u32` each) followed by `size` parameter bytes.
+//!
+//! Adapted from storytold/lightcraft@265248c `crates/raw/src/opcodes.rs`,
+//! Copyright (c) 2026 ArtCraft Team and the LightCraft contributors, MIT OR Apache-2.0
+//! (see `docs/licensing.md`).
+//! Changes: narrowed to the two lens opcodes and hardened -- the blob comes from an untrusted file,
+//! so every count is bounded and every float must be finite and sane.
 //!
 //! Coordinates: the optical centre is normalised over the opcode's area (0..1 across width and
 //! height); the normalised radius `r` of a pixel is its distance from that centre divided by the

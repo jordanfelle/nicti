@@ -214,8 +214,11 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Edge test on the perceptual (cube-root luma) range across the neighbourhood, LightCraft's
-/// smoothstep bounds (`optics.rs`'s defringe, storytold/lightcraft@265248c).
+/// Edge test on the perceptual (cube-root luma) range across the neighbourhood, with LightCraft's
+/// smoothstep bounds. The defringe idea is adapted from storytold/lightcraft@265248c
+/// `crates/pipeline/src/optics.rs` (and `finish.rs`), Copyright (c) 2026 ArtCraft Team and the
+/// LightCraft contributors, MIT OR Apache-2.0 (see `docs/licensing.md`); re-expressed here in HSV hue
+/// with a compass-tap edge test rather than ported line for line.
 const DEFRINGE_EDGE: (f32, f32) = (0.08, 0.25);
 /// HSV saturation below which a pixel is too grey to carry a visible fringe.
 const DEFRINGE_SAT: (f32, f32) = (0.05, 0.20);
