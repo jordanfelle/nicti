@@ -441,6 +441,130 @@ mod tests {
         assert_eq!(plain.live.calibration, CalibrationParams::default());
     }
 
+    fn look_with_curve(curve: Vec<[f32; 2]>) -> nicti_calico::xmp_profile::LookProfile {
+        nicti_calico::xmp_profile::LookProfile {
+            name: "Vivid".into(),
+            look_table: nicti_calico::huesatmap::HueSatMap {
+                hue_divisions: 1,
+                sat_divisions: 1,
+                val_divisions: 1,
+                data: vec![[0.0, 1.0, 1.0]],
+            },
+            encoding: nicti_calico::dcp::TableEncoding::Linear,
+            unsupported_settings: vec![],
+            tone_curve: curve,
+        }
+    }
+
+    fn profile_doc(with_look: bool, extra: Option<(&str, serde_json::Value)>) -> EditDocument {
+        let mut ws = serde_json::json!({ "name": "P", "path": "p.dcp", "content_hash": "h" });
+        if with_look {
+            ws["look"] =
+                serde_json::json!({ "name": "Vivid", "path": "l.xmp", "content_hash": "lh" });
+        }
+        let mut doc = doc_with(WORKING_SPACE, ws);
+        if let Some((id, params)) = extra {
+            doc.stages.insert(
+                id.to_string(),
+                nicti_pawprint::StageEntry {
+                    schema_version: 1,
+                    params,
+                },
+            );
+        }
+        doc
+    }
+
+    fn dcp() -> DcpProfile {
+        DcpProfile::parse(&nicti_calico::dcp::testing::synthetic_dcp_bytes(
+            "Test Synthetic",
+            "P",
+            None,
+            None,
+            true,
+        ))
+        .expect("synthetic dcp parses")
+    }
+
+    /// #381 (review): with a DCP *and* a Look both selected and loaded, the Look's curve travels;
+    /// drop any one of the pieces and it does not.
+    #[test]
+    fn a_looks_tone_curve_travels_when_the_dcp_and_the_look_are_selected_and_loaded() {
+        let f = frame();
+        let curve = vec![[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]];
+        let look = look_with_curve(curve.clone());
+        let profile = dcp();
+        let all = resolve_inputs(
+            &profile_doc(true, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            Some(&look),
+            1.0,
+        );
+        assert_eq!(all.live.look_curve, curve);
+        // The document names no Look, or the caller has not loaded it, or no DCP is loaded.
+        let no_look_named = resolve_inputs(
+            &profile_doc(false, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            Some(&look),
+            1.0,
+        );
+        assert!(no_look_named.live.look_curve.is_empty());
+        let not_loaded = resolve_inputs(
+            &profile_doc(true, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            None,
+            1.0,
+        );
+        assert!(not_loaded.live.look_curve.is_empty());
+        let no_dcp = resolve_inputs(&profile_doc(true, None), &f, EXTENT, None, Some(&look), 1.0);
+        assert!(no_dcp.live.look_curve.is_empty());
+    }
+
+    /// #381 (review): calibration lands on the DCP solution's matrix too (before its HueSatMap),
+    /// not only on the plain LibRaw matrix.
+    #[test]
+    fn calibration_is_applied_on_top_of_a_selected_dcps_matrix() {
+        let f = frame();
+        let profile = dcp();
+        let p = CalibrationParams {
+            red_hue: 0.7,
+            blue_sat: -0.4,
+            ..Default::default()
+        };
+        let cal = serde_json::to_value(p).unwrap();
+        let plain = resolve_inputs(
+            &profile_doc(false, None),
+            &f,
+            EXTENT,
+            Some(&profile),
+            None,
+            1.0,
+        );
+        let with = resolve_inputs(
+            &profile_doc(false, Some((CALIBRATION, cal))),
+            &f,
+            EXTENT,
+            Some(&profile),
+            None,
+            1.0,
+        );
+        assert!(plain.live.camera_profile.is_some());
+        assert_eq!(
+            with.live.working_space_matrix,
+            color::calibrate_matrix(plain.live.working_space_matrix, &p)
+        );
+        assert_ne!(
+            with.live.working_space_matrix,
+            plain.live.working_space_matrix
+        );
+    }
+
     /// #381: a Look's tone curve only travels with a selected, loaded Look on a selected profile.
     #[test]
     fn a_looks_tone_curve_needs_a_selected_profile_and_look() {

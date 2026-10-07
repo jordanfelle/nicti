@@ -17,8 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::stages::{
-    COLOR_GRADE, CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS, NOISE_REDUCTION,
-    POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB, WORKING_SPACE,
+    CALIBRATION, COLOR_GRADE, CROP, DEFRINGE, EFFECTS, EXPOSURE, HEAL, HSL, LENS, MASKS,
+    NOISE_REDUCTION, POINT_COLOR, POINT_CURVE, PRESENCE, SHARPEN, TONE, TONE_CURVE, VIBRANCE, WB,
+    WORKING_SPACE,
 };
 
 /// One row of the checklist: a stage and the label the user sees.
@@ -103,6 +104,11 @@ pub const GROUPS: &[StageGroup] = &[
     StageGroup {
         id: DEFRINGE,
         label: "Defringe",
+        default_on: true,
+    },
+    StageGroup {
+        id: CALIBRATION,
+        label: "Calibration",
         default_on: true,
     },
     StageGroup {
@@ -309,7 +315,14 @@ mod tests {
     #[test]
     fn lens_defringe_and_the_432_colour_stages_travel_with_copy_paste_sync_and_presets() {
         // #428/#432: a new Develop section must also be in GROUPS, or "Copy all" silently drops it.
-        for id in [LENS, DEFRINGE, POINT_CURVE, COLOR_GRADE, POINT_COLOR] {
+        for id in [
+            LENS,
+            DEFRINGE,
+            CALIBRATION,
+            POINT_CURVE,
+            COLOR_GRADE,
+            POINT_COLOR,
+        ] {
             assert!(
                 GROUPS.iter().any(|g| g.id == id),
                 "{id} missing from GROUPS"

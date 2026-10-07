@@ -35,8 +35,13 @@ Out of scope: a *measured* match against LRC (needs the reference machine, track
   kept) and then re-scales the columns so they still **sum to the original white**. That last step is
   the point: camera white keeps mapping to the same working-space white, so a neutral stays neutral
   whatever the sliders say (pinned by a test over extreme settings). A primary that would leave the xy
-  plane is stopped at `y = 0.02` instead of being dropped; a degenerate matrix (singular, non-finite or
-  non-positive gains) is returned unchanged rather than corrupting the render.
+  plane is stopped at `y = 0.02` instead of being dropped, and a primary with no usable luminance (a
+  real camera matrix can give a deep blue a slightly negative Y) is left where it is while the others
+  still move. When the sliders *together* have no valid re-scaling (positive gains), the adjustment is
+  applied at the largest valid fraction of its strength (bisection), so the picture moves
+  continuously with every slider instead of snapping back to uncalibrated at a threshold (an
+  adversarial review found 900 of 15,624 slider combinations on a plausible matrix silently
+  ignored with the first version). Only a fully degenerate matrix returns unchanged.
   `spine::resolve_inputs` applies it to whichever matrix is in use, the LibRaw one **or** the DCP
   solution's, so with a profile it lands before the HueSatMap, as Adobe's calibration does.
 - **Shadows Tint** is a green gain (positive = magenta) weighted by a shadow mask on perceptual luma
@@ -78,6 +83,12 @@ heavy user tone curve the order differs slightly from Adobe's. Accepted, and par
   otherwise `None`. Nothing is substituted: an unresolved name is counted in
   `LrcImportReport::profiles_missing` (by name, so the user knows what to install), added to the image's
   untranslated list, and no stage is written.
+- `Adobe Color` is skipped like `Adobe Standard`: newer LRC catalogs write it as the untouched
+  default, so taking it would mark every photo edited.
+- **Unverified on a real catalog:** that Adobe Raw Looks are stored in `CameraProfile` by name. If LRC
+  keeps them in a separate `Look` table (with an `Amount`) the Look path will simply not fire for
+  those photos (nothing wrong is written) and `LookRef` carries no amount. Settle it with a real
+  `.lrcat` in the parity follow-up.
 - Calibration keys are translated in `develop/calibration.rs` (/100, clamped; all-zero writes nothing).
 
 ### 4. UI
@@ -91,6 +102,9 @@ Saturation), `Reset all` clears it. It edits `DevelopDoc`, so history and autosa
   correctness effect.
 - Calibration strengths and the Look-curve ordering are untuned: a reference-machine run against LRC
   exports is filed as a follow-up.
+- Shadows Tint is applied right after the matrix, *before* exposure and the DCP HueSatMap, with
+  Rec.709 luma weights on ProPhoto values: with a large positive exposure, pixels that end up as
+  midtones are still treated as shadows. Part of the parity follow-up.
 - A Look's `Clarity2012` and RGBTable-based Looks are still reported as unsupported.
 - A camera model not installed in Adobe's profile folders resolves nothing: the photo imports with the
   default matrix and the profile name in the report.

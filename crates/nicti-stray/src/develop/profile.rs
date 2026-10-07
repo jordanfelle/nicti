@@ -7,14 +7,15 @@
 //!
 //! Skipped on purpose (no profile is requested):
 //! - `Embedded`: the profile lives inside the file (a DNG's), nothing to look up.
-//! - `Adobe Standard`: what LRC writes into virtually every untouched raw. nicti's own default (no
-//!   profile selected) is the plain camera matrix, and taking this one would mark every imported
+//! - `Adobe Standard` and `Adobe Color`: LRC's untouched defaults (Adobe Standard on older
+//!   catalogs, Adobe Color on newer ones), written into virtually every raw. nicti's own default (no
+//!   profile selected) is the plain camera matrix, and taking either would mark every imported
 //!   photo as edited -- the same reason a zero-amount grain slider is ignored (`effects.rs`).
 
 use super::Tx;
 
 /// Profile names LRC writes for an untouched photo or one that carries its own profile.
-const NOT_A_CHOICE: &[&str] = &["adobe standard", "embedded"];
+const NOT_A_CHOICE: &[&str] = &["adobe standard", "adobe color", "embedded"];
 
 pub(super) fn apply(tx: &mut Tx) {
     let name = tx.text("CameraProfile").map(|n| n.trim().to_string());
@@ -44,7 +45,13 @@ mod tests {
 
     #[test]
     fn the_untouched_default_and_embedded_request_nothing() {
-        for n in ["Adobe Standard", "adobe standard", "Embedded", ""] {
+        for n in [
+            "Adobe Standard",
+            "adobe standard",
+            "Adobe Color",
+            "Embedded",
+            "",
+        ] {
             assert_eq!(
                 name(&format!(r#"s = {{ CameraProfile = "{n}" }}"#)),
                 None,

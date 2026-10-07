@@ -235,13 +235,40 @@ fn mat3_det(m: &Mat3) -> f32 {
 /// Each column is moved in xy chromaticity (hue = rotation about the D50 white, saturation = scale
 /// of the distance from it, luminance Y kept), then the three columns are re-scaled so they still
 /// sum to what they summed to before -- i.e. camera white keeps mapping to the same working-space
-/// white and a neutral stays neutral whatever the sliders say. A degenerate result (singular
-/// columns, non-finite gains) returns `m` unchanged rather than corrupting the render.
+/// white and a neutral stays neutral whatever the sliders say. A combination no valid re-scaling can
+/// satisfy is applied at the largest valid fraction of its strength (continuous in every slider);
+/// a primary with no usable luminance is left alone; a fully degenerate matrix returns `m`.
 pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
     let p = p.sanitized();
     if p.primaries_noop() {
         return m;
     }
+    if let Some(full) = calibrate_at(m, &p, 1.0) {
+        return full;
+    }
+    // The sliders together push the primaries somewhere no positive re-scaling of the columns can
+    // keep white fixed (e.g. green and blue rotated toward each other). Rather than dropping the
+    // whole adjustment -- which would make the picture jump back to uncalibrated as one slider
+    // crosses a threshold -- back off to the largest strength that is still valid, so the result
+    // moves continuously with every slider. Strength 0 is `m` itself, always valid.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    let mut best = m;
+    for _ in 0..14 {
+        let mid = 0.5 * (lo + hi);
+        match calibrate_at(m, &p, mid) {
+            Some(r) => {
+                best = r;
+                lo = mid;
+            }
+            None => hi = mid,
+        }
+    }
+    best
+}
+
+/// One attempt at [`calibrate_matrix`] with every slider scaled by `strength` (0..=1); `None` when
+/// the moved primaries cannot be re-scaled to sum to the original white with positive gains.
+fn calibrate_at(m: Mat3, p: &CalibrationParams, strength: f32) -> Option<Mat3> {
     let to_xyz = mat3_invert(&XYZ_D50_TO_PROPHOTO);
     let amounts = [
         (p.red_hue, p.red_sat),
@@ -255,11 +282,15 @@ pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
     ];
     let mut cols = [[0.0f32; 3]; 3];
     for (i, (hue, sat)) in amounts.into_iter().enumerate() {
+        let (hue, sat) = (hue * strength, sat * strength);
         let col = [m[0][i], m[1][i], m[2][i]];
         let xyz = mat3_apply(to_xyz, col);
         let sum = xyz[0] + xyz[1] + xyz[2];
-        if !sum.is_finite() || sum.abs() <= 1e-9 {
-            return m;
+        // A primary with no usable luminance or chromaticity (a real camera matrix can give a
+        // slightly negative Y for a deep blue) is left where it is; the others still move.
+        if !sum.is_finite() || sum.abs() <= 1e-9 || xyz[1] <= 1e-6 {
+            cols[i] = col;
+            continue;
         }
         let (x, y) = (xyz[0] / sum, xyz[1] / sum);
         let (dx, dy) = (x - D50_XY[0], y - D50_XY[1]);
@@ -274,7 +305,7 @@ pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
         let nx = D50_XY[0] + vx * scale;
         let ny = D50_XY[1] + vy * scale;
         if !ny.is_finite() || ny <= 1e-4 {
-            return m;
+            return None;
         }
         // Keep the primary's own luminance (Y), rebuild X and Z from the moved chromaticity.
         let big_y = xyz[1];
@@ -289,17 +320,17 @@ pub fn calibrate_matrix(m: Mat3, p: &CalibrationParams) -> Mat3 {
     ];
     let det = mat3_det(&c);
     if !det.is_finite() || det.abs() <= 1e-9 {
-        return m;
+        return None;
     }
     let k = mat3_apply(mat3_invert(&c), white);
     if k.iter().any(|v| !v.is_finite() || *v <= 0.0) {
-        return m;
+        return None;
     }
-    [
+    Some([
         [c[0][0] * k[0], c[0][1] * k[1], c[0][2] * k[2]],
         [c[1][0] * k[0], c[1][1] * k[1], c[1][2] * k[2]],
         [c[2][0] * k[0], c[2][1] * k[1], c[2][2] * k[2]],
-    ]
+    ])
 }
 
 /// Shadows tint (#381): positive moves the shadows toward magenta (less green), negative toward
@@ -863,6 +894,85 @@ mod tests {
             },
         );
         assert!(dist(up) > dist(m) && dist(m) > dist(down));
+    }
+
+    #[test]
+    fn calibrate_matrix_never_drops_the_whole_adjustment_and_is_continuous() {
+        let m = camera_matrix();
+        let white = mat3_apply(m, [1.0, 1.0, 1.0]);
+        // Finding from review: green and blue rotated toward each other used to return `m`
+        // unchanged -- every slider, including the red ones, silently ignored.
+        let p = CalibrationParams {
+            red_hue: -1.0,
+            green_hue: -1.0,
+            blue_hue: 1.0,
+            ..Default::default()
+        };
+        let out = calibrate_matrix(m, &p);
+        assert_ne!(out, m, "an extreme combination must still do something");
+        let w = mat3_apply(out, [1.0, 1.0, 1.0]);
+        for c in 0..3 {
+            assert!((w[c] - white[c]).abs() < 1e-3, "white drifted: {w:?}");
+        }
+        // Sweeping one slider never makes the matrix jump: neighbours stay close.
+        let mut prev: Option<Mat3> = None;
+        for i in 0..=40 {
+            let q = CalibrationParams {
+                red_hue: -1.0,
+                green_hue: -1.0,
+                blue_hue: -1.0 + 2.0 * i as f32 / 40.0,
+                ..Default::default()
+            };
+            let cur = calibrate_matrix(m, &q);
+            if let Some(prev) = prev {
+                let jump = (0..3)
+                    .flat_map(|r| (0..3).map(move |c| (r, c)))
+                    .map(|(r, c)| (cur[r][c] - prev[r][c]).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(jump < 0.35, "matrix jumped by {jump} at step {i}");
+            }
+            prev = Some(cur);
+        }
+    }
+
+    #[test]
+    fn a_primary_with_negative_luminance_is_left_alone_and_the_rest_still_move() {
+        let mut m = camera_matrix();
+        // Make the blue column's Y slightly negative, as a real deep-blue primary can be.
+        let to_xyz = mat3_invert(&XYZ_D50_TO_PROPHOTO);
+        let mut xyz = mat3_apply(to_xyz, [m[0][2], m[1][2], m[2][2]]);
+        xyz[1] = -0.02;
+        let col = mat3_apply(XYZ_D50_TO_PROPHOTO, xyz);
+        (m[0][2], m[1][2], m[2][2]) = (col[0], col[1], col[2]);
+        let out = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                red_hue: 0.8,
+                ..Default::default()
+            },
+        );
+        assert_ne!(out, m, "red must still move");
+    }
+
+    #[test]
+    fn a_saturated_primary_is_stopped_at_the_bottom_of_the_xy_plane() {
+        // Blue +100 % saturation would push chromaticity y below zero; the clamp keeps it above
+        // CALIBRATION_MIN_Y instead of discarding the adjustment.
+        let m = camera_matrix();
+        let out = calibrate_matrix(
+            m,
+            &CalibrationParams {
+                blue_sat: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_ne!(out, m);
+        let (_, dy) = chroma_of(mat3_apply(out, [0.0, 0.0, 1.0]));
+        assert!(
+            dy + D50_XY[1] >= CALIBRATION_MIN_Y - 1e-4,
+            "y = {}",
+            dy + D50_XY[1]
+        );
     }
 
     #[test]

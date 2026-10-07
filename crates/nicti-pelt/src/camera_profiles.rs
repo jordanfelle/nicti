@@ -611,6 +611,7 @@ mod tests {
             let looks = dir.path().join("Profiles");
             std::fs::create_dir_all(dcps.join("Camera/Nikon Z 8")).unwrap();
             std::fs::create_dir_all(dcps.join("Adobe Standard")).unwrap();
+            std::fs::create_dir_all(dcps.join("Camera/Nikon Z 6 2")).unwrap();
             std::fs::create_dir_all(&looks).unwrap();
             let write = |rel: &str, name: &str, model: &str| {
                 std::fs::write(
@@ -635,6 +636,12 @@ mod tests {
                 "Adobe Standard/NIKON Z 7 Adobe Standard.dcp",
                 "Adobe Standard",
                 "NIKON Z 7",
+            );
+            // A Z 6 II: Adobe spells it "Z 6 2". A Z 6 must never be handed this file.
+            write(
+                "Camera/Nikon Z 6 2/NIKON Z 6 2 Camera Flat.dcp",
+                "Camera Flat",
+                "NIKON Z 6_2",
             );
             std::fs::write(
                 looks.join("Adobe Vivid.xmp"),
@@ -710,6 +717,17 @@ mod tests {
                 .resolve("NIKON CORPORATION", "NIKON Z 8", "Adobe Standard")
                 .unwrap();
             assert!(z8.path.unwrap().contains("Z 8"));
+            // The Z 6 II's "Camera Flat" belongs to the Z 6 II only, never to a Z 6 or a Z 8.
+            let r = &f.resolver;
+            assert!(r
+                .resolve("NIKON CORPORATION", "NIKON Z 6", "Camera Flat")
+                .is_none());
+            assert!(r
+                .resolve("NIKON CORPORATION", "NIKON Z 8", "Camera Flat")
+                .is_none());
+            assert!(r
+                .resolve("NIKON CORPORATION", "NIKON Z 6_2", "Camera Flat")
+                .is_some());
         }
     }
 }

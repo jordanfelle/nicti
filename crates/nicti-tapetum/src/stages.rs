@@ -1111,7 +1111,7 @@ impl LiveSuffixKernel {
             defringe1: [
                 params.defringe.green_hue_lo,
                 params.defringe.green_hue_hi,
-                params.calibration.shadow_tint.clamp(-1.0, 1.0),
+                params.calibration.sanitized().shadow_tint,
                 0.0,
             ],
             point_curve: [0.0; 4],
