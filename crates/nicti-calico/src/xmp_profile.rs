@@ -485,7 +485,7 @@ fn read_alt_text(node: roxmltree::Node) -> Option<String> {
     let mut first: Option<String> = None;
     for li in alt.children().filter(|n| n.tag_name().name() == "li") {
         let text = li.text().unwrap_or("").to_string();
-        if li.attribute("lang") == Some("x-default") {
+        if li.attribute(("http://www.w3.org/XML/1998/namespace", "lang")) == Some("x-default") {
             return Some(text);
         }
         if first.is_none() {
@@ -745,6 +745,23 @@ mod tests {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use std::io::Write;
+
+    #[test]
+    fn alt_text_selects_xml_default_after_vendor_default() {
+        let xmp = r#"<crs:Name xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+                              xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+                              xmlns:vendor="urn:vendor">
+            <rdf:Alt>
+                <rdf:li vendor:lang="x-default">Vendor name</rdf:li>
+                <rdf:li xml:lang="x-default">Default name</rdf:li>
+            </rdf:Alt>
+        </crs:Name>"#;
+        let doc = roxmltree::Document::parse(xmp).unwrap();
+        assert_eq!(
+            read_alt_text(doc.root_element()).as_deref(),
+            Some("Default name")
+        );
+    }
 
     #[test]
     fn synthetic_round_trip_decodes_and_fingerprint_matches() {
