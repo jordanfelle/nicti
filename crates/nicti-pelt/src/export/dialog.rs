@@ -688,7 +688,10 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut Fo
             ui.label("Folder");
             let mut text = path.to_string_lossy().into_owned();
             if ui
-                .add(egui::TextEdit::singleline(&mut text).hint_text("C:\\Exports"))
+                .add_enabled(
+                    !picker.is_open(),
+                    egui::TextEdit::singleline(&mut text).hint_text("C:\\Exports"),
+                )
                 .changed()
             {
                 *path = PathBuf::from(text);

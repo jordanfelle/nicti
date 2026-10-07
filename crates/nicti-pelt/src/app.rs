@@ -1936,8 +1936,12 @@ impl PeltApp {
                 let store = store.clone();
                 ui.horizontal(|ui| {
                     ui.label("Folder:");
+                    // Read-only while Browse is open, so a pick can't clobber a newer edit.
                     if ui
-                        .text_edit_singleline(&mut self.import_path_input)
+                        .add_enabled(
+                            !self.import_picker.is_open(),
+                            egui::TextEdit::singleline(&mut self.import_path_input),
+                        )
                         .changed()
                     {
                         self.import_status = None;
@@ -1980,7 +1984,10 @@ impl PeltApp {
                 );
                 ui.horizontal(|ui| {
                     ui.label("Move into:");
-                    ui.text_edit_singleline(&mut self.move_dest_input);
+                    ui.add_enabled(
+                        !self.move_picker.is_open(),
+                        egui::TextEdit::singleline(&mut self.move_dest_input),
+                    );
                     if ui
                         .add_enabled(!self.move_picker.is_open(), egui::Button::new("Browse..."))
                         .clicked()
