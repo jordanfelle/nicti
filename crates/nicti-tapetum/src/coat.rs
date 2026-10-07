@@ -901,7 +901,7 @@ pub struct PointCurveParams {
 /// One channel's points, cleaned: finite, clamped to 0..1, sorted by x, strictly increasing in x
 /// (a later point within 1e-4 of the previous x is dropped), capped at [`MAX_CURVE_POINTS`]. Fewer
 /// than two survivors, or exactly the identity diagonal, becomes empty (no-op).
-fn sanitize_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+pub(crate) fn sanitize_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     let mut pts: Vec<[f32; 2]> = points
         .iter()
         .filter(|p| p[0].is_finite() && p[1].is_finite())

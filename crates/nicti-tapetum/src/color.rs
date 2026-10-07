@@ -549,14 +549,25 @@ pub fn apply_tone_curve(rgb: [f32; 3], lut: &[f32; 256]) -> [f32; 3] {
 }
 
 /// Per-channel point-curve LUTs (#432): rows are R, G, B, each 256 entries over the cube-root
-/// perceptual axis, with the master curve already composed in (`channel(master(x))`). `None` when
+/// perceptual axis, with the master curve already composed in (`channel(master(look(x)))`, where
+/// `look` is the selected Look profile's own curve, empty for none). `None` when
 /// every curve is the identity, so the shader can skip the stage and leave pixels bit-identical.
 /// Built from [`PointCurveParams::sanitized`] points with the same Fritsch-Carlson monotone spline
 /// the DCP profile curve uses (`nicti_calico::tonecurve::ToneCurve`).
-pub fn build_point_curve_luts(params: &PointCurveParams) -> Option<[[f32; 256]; 3]> {
+pub fn build_point_curve_luts(
+    params: &PointCurveParams,
+    look_curve: &[[f32; 2]],
+) -> Option<[[f32; 256]; 3]> {
     use nicti_calico::tonecurve::ToneCurve;
     let s = params.sanitized();
-    if s.master.is_empty() && s.red.is_empty() && s.green.is_empty() && s.blue.is_empty() {
+    // The selected Look profile's own master curve (#381) runs ahead of everything the user set.
+    let look_curve = crate::coat::sanitize_curve(look_curve);
+    if look_curve.is_empty()
+        && s.master.is_empty()
+        && s.red.is_empty()
+        && s.green.is_empty()
+        && s.blue.is_empty()
+    {
         return None;
     }
     let curve = |pts: &[[f32; 2]]| -> Option<ToneCurve> {
@@ -568,11 +579,13 @@ pub fn build_point_curve_luts(params: &PointCurveParams) -> Option<[[f32; 256]; 
             ToneCurve::new(&pts)
         })
     };
+    let look = curve(&look_curve);
     let master = curve(&s.master);
     let channels = [curve(&s.red), curve(&s.green), curve(&s.blue)];
     Some(std::array::from_fn(|c| {
         std::array::from_fn(|i| {
             let x = f64::from(i as f32 / 255.0);
+            let x = look.as_ref().map_or(x, |l| l.eval(x));
             let m = master.as_ref().map_or(x, |m| m.eval(x));
             let y = channels[c].as_ref().map_or(m, |ch| ch.eval(m));
             y.clamp(0.0, 1.0) as f32
@@ -863,6 +876,34 @@ mod tests {
         assert_eq!(calibrate_matrix(singular, &p), singular);
         let out = calibrate_matrix(camera_matrix(), &p);
         assert!(out.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    /// #381: a Look's curve is composed ahead of the user's master curve, and nothing at all is
+    /// still `None` (so an unedited photo skips the stage).
+    #[test]
+    fn a_looks_curve_composes_ahead_of_the_users_master_curve() {
+        let none = PointCurveParams::default();
+        assert!(build_point_curve_luts(&none, &[]).is_none());
+        let look = [[0.0, 0.0], [0.5, 0.35], [1.0, 1.0]];
+        let only_look = build_point_curve_luts(&none, &look).expect("a look curve is an edit");
+        assert!(
+            only_look[0][128] < 128.0 / 255.0 - 0.05,
+            "contrasty look darkens mids"
+        );
+        assert_eq!(only_look[0], only_look[1]);
+        // With a user master curve the result differs from either alone (look first, then master).
+        let user = PointCurveParams {
+            master: vec![[0.0, 0.1], [1.0, 1.0]],
+            ..Default::default()
+        };
+        let both = build_point_curve_luts(&user, &look).unwrap();
+        let only_user = build_point_curve_luts(&user, &[]).unwrap();
+        assert_ne!(both[0], only_look[0]);
+        assert_ne!(both[0], only_user[0]);
+        // Floor of the user curve lifts black; the look keeps 0 -> 0, so black ends at the user's 0.1.
+        assert!((both[0][0] - 0.1).abs() < 1e-5);
+        // A garbage look curve is ignored rather than corrupting the table.
+        assert!(build_point_curve_luts(&none, &[[f32::NAN, 0.0], [1.0, 1.0]]).is_none());
     }
 
     #[test]

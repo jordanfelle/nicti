@@ -322,6 +322,12 @@ pub fn resolve_inputs(
         &calibration,
     );
 
+    // A Look's own tone curve (#381) applies only when the document actually selected that Look.
+    let look_curve: Vec<[f32; 2]> = match (&chosen.look, look) {
+        (Some(_), Some(look)) if solution.is_some() => look.tone_curve.clone(),
+        _ => Vec::new(),
+    };
+
     let exposure: ExposureParams = resolve(doc, EXPOSURE);
     let tone: ToneParams = resolve(doc, TONE);
     let tone_curve: ToneCurveParams = resolve(doc, TONE_CURVE);
@@ -342,6 +348,7 @@ pub fn resolve_inputs(
             tone,
             tone_curve,
             point_curve,
+            look_curve,
             color_grade,
             point_color,
             vibrance,
@@ -367,6 +374,96 @@ mod tests {
 
     fn id(n: u8) -> blake3::Hash {
         blake3::hash(&[n])
+    }
+
+    fn frame() -> LinearFrame {
+        LinearFrame {
+            make: "Test".to_string(),
+            model: "Synthetic".to_string(),
+            width: 2,
+            height: 2,
+            black: 100,
+            maximum: 1100,
+            cam_mul: [1.0, 1.0, 1.0, 1.0],
+            pre_mul: [1.0, 1.0, 1.0, 1.0],
+            // XYZ -> camera for primaries near xy (0.67,0.30), (0.24,0.67), (0.14,0.09).
+            cam_xyz: [
+                2.16047, -0.72939, -0.29545, -0.7774, 1.71545, -0.06463, 0.04062, -0.18466,
+                1.19103, 0.0, 0.0, 0.0,
+            ],
+            cblack: [0; 4],
+            pixels: vec![0; 12],
+            dng_opcode_list3: None,
+        }
+    }
+
+    fn doc_with(stage: &str, params: serde_json::Value) -> EditDocument {
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            stage.to_string(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params,
+            },
+        );
+        doc
+    }
+
+    const EXTENT: Extent = Extent {
+        width: 2,
+        height: 2,
+    };
+
+    /// #381: calibration primaries change the working-space matrix (and only that), keep camera
+    /// white fixed, and an empty document is untouched.
+    #[test]
+    fn calibration_primaries_fold_into_the_matrix_and_keep_white() {
+        let f = frame();
+        let plain = resolve_inputs(&EditDocument::default(), &f, EXTENT, None, None, 1.0);
+        let doc = doc_with(
+            CALIBRATION,
+            serde_json::json!({ "red_hue": 0.8, "blue_sat": -0.5, "shadow_tint": 0.4 }),
+        );
+        let cal = resolve_inputs(&doc, &f, EXTENT, None, None, 1.0);
+        assert_ne!(
+            plain.live.working_space_matrix,
+            cal.live.working_space_matrix
+        );
+        let white = |m: color::Mat3| color::mat3_apply(m, [1.0, 1.0, 1.0]);
+        let (a, b) = (
+            white(plain.live.working_space_matrix),
+            white(cal.live.working_space_matrix),
+        );
+        for c in 0..3 {
+            assert!((a[c] - b[c]).abs() < 1e-4, "white drifted: {a:?} vs {b:?}");
+        }
+        assert_eq!(cal.live.calibration.shadow_tint, 0.4);
+        assert_eq!(plain.live.calibration, CalibrationParams::default());
+    }
+
+    /// #381: a Look's tone curve only travels with a selected, loaded Look on a selected profile.
+    #[test]
+    fn a_looks_tone_curve_needs_a_selected_profile_and_look() {
+        let f = frame();
+        let look = nicti_calico::xmp_profile::LookProfile {
+            name: "Vivid".into(),
+            look_table: nicti_calico::huesatmap::HueSatMap {
+                hue_divisions: 1,
+                sat_divisions: 1,
+                val_divisions: 1,
+                data: vec![[0.0, 1.0, 1.0]],
+            },
+            encoding: nicti_calico::dcp::TableEncoding::Linear,
+            unsupported_settings: vec![],
+            tone_curve: vec![[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]],
+        };
+        // Look named by the document but no DCP selected: nothing to layer it on, no curve.
+        let doc = doc_with(
+            WORKING_SPACE,
+            serde_json::json!({ "look": { "name": "Vivid", "path": "p", "content_hash": "h" } }),
+        );
+        let out = resolve_inputs(&doc, &f, EXTENT, None, Some(&look), 1.0);
+        assert!(out.live.look_curve.is_empty());
     }
 
     #[test]

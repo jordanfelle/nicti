@@ -617,6 +617,9 @@ pub struct LiveParams {
     pub tone_curve: ToneCurveParams,
     /// Freeform point curves (#432); [`PointCurveParams::sanitized`] by the caller or here.
     pub point_curve: PointCurveParams,
+    /// The selected Look profile's own tone curve (#381), composed ahead of `point_curve`'s master
+    /// curve. Empty = none.
+    pub look_curve: Vec<[f32; 2]>,
     /// Color Grading wheels (#432), OkLab, after HSL.
     pub color_grade: ColorGradeParams,
     /// Point Color samples (#432), OkLCh, after Color Grading.
@@ -654,6 +657,7 @@ impl Default for LiveParams {
             tone: ToneParams::default(),
             tone_curve: ToneCurveParams::default(),
             point_curve: PointCurveParams::default(),
+            look_curve: Vec::new(),
             color_grade: ColorGradeParams::default(),
             point_color: PointColorParams::default(),
             vibrance: VibranceParams::default(),
@@ -1124,7 +1128,7 @@ impl LiveSuffixKernel {
             write_oklab(&mut u, &ops);
         }
         {
-            let luts = color::build_point_curve_luts(&params.point_curve);
+            let luts = color::build_point_curve_luts(&params.point_curve, &params.look_curve);
             let fp = luts.as_ref().map(|l| {
                 let hash = blake3::hash(bytemuck::cast_slice(l.as_slice()));
                 u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"))
@@ -2086,6 +2090,7 @@ mod tests {
             look_table: smooth_table(6, 3, 3, 5.0),
             encoding: TableEncoding::Srgb,
             unsupported_settings: vec![],
+            tone_curve: vec![],
         };
         let solution = Arc::new(synthetic_profile().solve(gains).with_look(&look));
         let params = LiveParams {
@@ -2298,7 +2303,7 @@ mod tests {
             green: vec![],
             blue: vec![[0.0, 0.0], [0.3, 0.2], [0.7, 0.8], [1.0, 1.0]],
         };
-        let luts = color::build_point_curve_luts(&curves).expect("non-identity");
+        let luts = color::build_point_curve_luts(&curves, &[]).expect("non-identity");
         let baseline = run(PointCurveParams::default());
         let actual = run(curves);
         let identity = run(PointCurveParams {
@@ -3212,6 +3217,7 @@ mod tests {
                 tone,
                 tone_curve,
                 point_curve: PointCurveParams::default(),
+                look_curve: Vec::new(),
                 color_grade: Default::default(),
                 point_color: Default::default(),
                 vibrance,
