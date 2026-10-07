@@ -599,7 +599,11 @@ impl DevelopDoc {
         }
         let crop: CropParams = self.stage_params(CROP);
         let rect = crop.effective_rect(self.source_extent());
-        (rect.width.round().max(1.0), rect.height.round().max(1.0))
+        let (src_w, src_h) = self.source_extent();
+        (
+            rect.width.round().clamp(1.0, src_w.max(1.0)),
+            rect.height.round().clamp(1.0, src_h.max(1.0)),
+        )
     }
 
     /// Maps a point on the displayed canvas, normalized to `0..=1` on each axis, to a normalized
@@ -737,8 +741,8 @@ impl DevelopEngine {
         // Before show the whole frame.
         let (gw, gh) = dv.display_extent();
         let geometry_extent = Extent {
-            width: (gw as u32).clamp(1, dv.extent.width.max(1)),
-            height: (gh as u32).clamp(1, dv.extent.height.max(1)),
+            width: gw as u32,
+            height: gh as u32,
         };
         let req = RenderRequest {
             graph: &dv.graph,
@@ -1976,6 +1980,17 @@ mod tests {
         doc.set_stage_params(CROP, &crop);
         let c = doc.display_to_source_norm([0.5, 0.5]);
         assert!((c[0] - 0.5).abs() < 0.02 && (c[1] - 0.5).abs() < 0.02);
+        // Off-centre with rotation: must equal the crop kernel's own affine (not just the centre,
+        // which any rotation about the crop centre leaves fixed).
+        let rect = crop.effective_rect((w, h));
+        let (dw, dh) = doc.display_extent();
+        let (ex, ey) = geometry::affine_for_crop(rect, 12.0).apply((0.9 * dw, 0.2 * dh));
+        let got = doc.display_to_source_norm([0.9, 0.2]);
+        assert!((got[0] - ex / w).abs() < 1e-5 && (got[1] - ey / h).abs() < 1e-5);
+        assert!(
+            (got[0] - 0.75).abs() > 1e-3 || (got[1] - 0.25).abs() > 1e-3,
+            "a 12 degree rotation must move an off-centre point"
+        );
         // A tool showing the whole frame is the identity again.
         doc.uncropped_preview = true;
         assert_eq!(doc.display_to_source_norm([0.1, 0.9]), [0.1, 0.9]);

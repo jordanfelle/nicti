@@ -449,6 +449,11 @@ impl HealUi {
         self.tool == Tool::Crop
     }
 
+    /// Whether the active tool works on the whole, uncropped image (#272).
+    pub fn shows_uncropped(&self) -> bool {
+        self.heal_active() || self.mask_active() || self.crop_active()
+    }
+
     pub fn heal_active(&self) -> bool {
         self.tool == Tool::Heal
     }
@@ -838,9 +843,16 @@ pub fn tool_switch(ui: &mut egui::Ui, heal: &mut HealUi) {
                 Tool::Crop
             };
         }
-        ui.selectable_value(&mut heal.tool, Tool::Heal, "Heal / Remove");
-        ui.selectable_value(&mut heal.tool, Tool::Mask, "Masks");
-        ui.selectable_value(&mut heal.tool, Tool::PointColor, "Pick Color");
+        // Clicking the active tool again returns to the idle (cropped) canvas.
+        for (tool, label) in [
+            (Tool::Heal, "Heal / Remove"),
+            (Tool::Mask, "Masks"),
+            (Tool::PointColor, "Pick Color"),
+        ] {
+            if ui.selectable_label(heal.tool == tool, label).clicked() {
+                heal.tool = if heal.tool == tool { Tool::Idle } else { tool };
+            }
+        }
     });
 }
 

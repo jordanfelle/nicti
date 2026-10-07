@@ -1419,10 +1419,7 @@ impl eframe::App for PeltApp {
             if self.view == View::Develop {
                 crate::heal_tool::handle_tool_keys(ui, &mut self.heal_ui);
             }
-            d.uncropped_preview = self.view == View::Develop
-                && (self.heal_ui.heal_active()
-                    || self.heal_ui.mask_active()
-                    || self.heal_ui.crop_active());
+            d.uncropped_preview = self.view == View::Develop && self.heal_ui.shows_uncropped();
             if self.view == View::Develop {
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
                 // Files this photo's baked alphas in the disk tier (#353).
@@ -1464,6 +1461,11 @@ impl eframe::App for PeltApp {
                 });
         }
 
+        // The panel above may have switched tool this frame: re-derive the flag so the frame we
+        // paint (and hit-test against) matches the tool that will handle it, not last frame's.
+        if let Some(d) = self.develop.as_mut() {
+            d.uncropped_preview = self.view == View::Develop && self.heal_ui.shows_uncropped();
+        }
         let viewport_frame = if self.view == View::Develop {
             self.develop.as_mut().map(|d| d.render())
         } else {
