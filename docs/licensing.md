@@ -797,6 +797,16 @@ LightCraft's files carry no per-file header of their own, so the attribution is 
 its `NOTICE` excludes only the ArtCraft brand assets, none of which are used. Per #424's rules every
 constant is to be re-validated on real photos before it is trusted (see ADR-0432's "Consequences").
 
+## Update (2026-10-07, [#342](https://github.com/jordanfelle/nicti/issues/342)'s native folder picker)
+
+`nicti-pelt` gains one direct dependency, [`rfd`](https://crates.io/crates/rfd) 0.17 (`MIT`, per its
+crate metadata), for the Browse... buttons on the Import/Move/Export path fields. It is built with
+`default-features = false, features = ["xdg-portal"]`: on Windows (the shipping target) it calls the native
+Win32 dialog with no extra code, and on Linux it talks to the desktop's XDG portal over D-Bus instead of
+linking GTK3 (`gtk3` is LGPL, and would have been a large native dependency for a dev-only platform).
+Its one new transitive crate of note, `pollster` (`Apache-2.0 OR MIT`), is already allowlisted.
+`cargo deny check licenses bans` passes with no `deny.toml` change; no data asset, model or font is added.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23

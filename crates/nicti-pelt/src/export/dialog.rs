@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::folder_dialog::FolderPicker;
 use nicti_preen::naming::{AssetFacts, Template};
 use nicti_preen::spec::{
     Anchor, BitDepth, CollisionPolicy, DestinationBase, ExportFormat, ExportSpace, ExportSpec,
@@ -105,6 +106,8 @@ struct Dialog {
     preset_name: String,
     selected_preset: Option<String>,
     message: Option<String>,
+    /// #342: the destination folder's native Browse dialog.
+    folder_picker: FolderPicker,
 }
 
 pub struct ExportUi {
@@ -156,6 +159,7 @@ impl ExportUi {
             preset_name: String::new(),
             selected_preset: None,
             message: None,
+            folder_picker: FolderPicker::default(),
         });
     }
 
@@ -302,7 +306,7 @@ impl ExportUi {
         ui.separator();
         naming_section(ui, d);
         ui.separator();
-        destination_section(ui, &mut d.spec);
+        destination_section(ui, &mut d.spec, &mut d.folder_picker);
         ui.add_space(6.0);
 
         let validity = d.spec.validate();
@@ -665,7 +669,7 @@ fn preview_names(spec: &ExportSpec, samples: &[AssetFacts]) -> Result<Vec<String
         .collect())
 }
 
-fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
+fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut FolderPicker) {
     ui.strong("Destination");
     let mut same = matches!(spec.destination.base, DestinationBase::SameAsSource);
     ui.horizontal(|ui| {
@@ -688,6 +692,15 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                 .changed()
             {
                 *path = PathBuf::from(text);
+            }
+            if ui
+                .add_enabled(!picker.is_open(), egui::Button::new("Browse..."))
+                .clicked()
+            {
+                picker.open(ui.ctx(), "Export destination", &path.to_string_lossy());
+            }
+            if let Some(chosen) = picker.poll() {
+                *path = chosen;
             }
         });
     }

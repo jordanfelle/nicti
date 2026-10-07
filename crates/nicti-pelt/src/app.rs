@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::folder_dialog::FolderPicker;
 use crate::folder_panel;
 use nicti_cornea::{LibRawDecoder, RawDecoder};
 use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
@@ -130,6 +131,9 @@ pub struct PeltApp {
     /// returns `None` that whole time), distinct from a classified `Idle`.
     bottleneck: Option<hackles::Verdict>,
     import_path_input: String,
+    /// #342: Browse dialogs for the Import/Sync folder and the Move destination.
+    import_picker: FolderPicker,
+    move_picker: FolderPicker,
     /// #367: why the last Import/Sync/Open in Loupe click did nothing (blank, missing or
     /// non-directory path, registration failure). Cleared on the next valid submit.
     import_status: Option<String>,
@@ -436,6 +440,8 @@ impl PeltApp {
             telemetry,
             bottleneck: None,
             import_path_input: String::new(),
+            import_picker: FolderPicker::default(),
+            move_picker: FolderPicker::default(),
             import_status: None,
             update,
             nine_lives,
@@ -1927,6 +1933,23 @@ impl PeltApp {
                     {
                         self.import_status = None;
                     }
+                    if ui
+                        .add_enabled(
+                            !self.import_picker.is_open(),
+                            egui::Button::new("Browse..."),
+                        )
+                        .clicked()
+                    {
+                        self.import_picker.open(
+                            ui.ctx(),
+                            "Choose a folder",
+                            &self.import_path_input,
+                        );
+                    }
+                    if let Some(chosen) = self.import_picker.poll() {
+                        self.import_path_input = chosen.to_string_lossy().into_owned();
+                        self.import_status = None;
+                    }
                     if ui.button("Import").clicked() {
                         self.submit_root_job(&store, RootAction::Import);
                     }
@@ -1953,6 +1976,16 @@ impl PeltApp {
                 ui.horizontal(|ui| {
                     ui.label("Move into:");
                     ui.text_edit_singleline(&mut self.move_dest_input);
+                    if ui
+                        .add_enabled(!self.move_picker.is_open(), egui::Button::new("Browse..."))
+                        .clicked()
+                    {
+                        self.move_picker
+                            .open(ui.ctx(), "Move into folder", &self.move_dest_input);
+                    }
+                    if let Some(chosen) = self.move_picker.poll() {
+                        self.move_dest_input = chosen.to_string_lossy().into_owned();
+                    }
                 });
                 let mut move_root = None;
                 match store.list_roots() {
