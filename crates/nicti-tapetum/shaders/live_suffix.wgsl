@@ -501,7 +501,6 @@ const DEFRINGE_EDGE_HI: f32 = 0.25;
 const DEFRINGE_SAT_LO: f32 = 0.05;
 const DEFRINGE_SAT_HI: f32 = 0.20;
 const DEFRINGE_SHOULDER: f32 = 8.0;
-const DEFRINGE_FULL_AMOUNT: f32 = 0.4;
 const DEFRINGE_PURPLE_BASE: f32 = 240.0;
 const DEFRINGE_GREEN_BASE: f32 = 60.0;
 const DEFRINGE_HUE_SPAN: f32 = 120.0;
@@ -529,8 +528,8 @@ fn tap_l(x: i32, y: i32, m: mat3x3<f32>) -> f32 {
 
 fn apply_defringe(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>) -> vec3<f32> {
     let hs = dcp_rgb_to_hsv(rgb);
-    let strength_p = min(u.defringe0.x / DEFRINGE_FULL_AMOUNT, 1.0);
-    let strength_g = min(u.defringe0.w / DEFRINGE_FULL_AMOUNT, 1.0);
+    let strength_p = clamp(u.defringe0.x, 0.0, 1.0);
+    let strength_g = clamp(u.defringe0.w, 0.0, 1.0);
     let purple = strength_p * hue_window(
         hs.x,
         DEFRINGE_PURPLE_BASE + DEFRINGE_HUE_SPAN * u.defringe0.y,

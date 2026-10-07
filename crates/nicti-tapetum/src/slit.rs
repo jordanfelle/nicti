@@ -44,8 +44,62 @@ use crate::renderer::BakedExec;
 use crate::stages::{PassthroughExec, LENS};
 use crate::RenderStage;
 
+/// Estimates already computed, keyed by [`ca_key`]. `LensExec::encode` runs on every baked-cache
+/// miss of the lens node (an eviction under memory pressure, say), and the estimate is a pure
+/// function of the frame, so redoing ~0.2-0.4 s of CPU work each time would stall the render path.
+static CA_MEMO: std::sync::Mutex<Vec<(u64, [f64; 2])>> = std::sync::Mutex::new(Vec::new());
+const CA_MEMO_ENTRIES: usize = 8;
+
+/// Counts real estimator runs (not memo hits), for the test that proves the memo works.
+#[cfg(test)]
+static CA_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A cheap content fingerprint of `frame` (dimensions, levels and ~4096 sampled pixels) plus the
+/// centre the estimate is taken about.
+fn ca_key(frame: &LinearFrame, center: Option<[f64; 2]>) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(&frame.width.to_le_bytes());
+    h.update(&frame.height.to_le_bytes());
+    h.update(&frame.black.to_le_bytes());
+    h.update(&frame.maximum.to_le_bytes());
+    for c in center.unwrap_or([f64::NAN; 2]) {
+        h.update(&c.to_bits().to_le_bytes());
+    }
+    let stride = (frame.pixels.len() / 4096).max(1);
+    for v in frame.pixels.iter().step_by(stride) {
+        h.update(&v.to_le_bytes());
+    }
+    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
+}
+
+fn estimate_ca_memoised(frame: &LinearFrame, center: Option<[f64; 2]>) -> [f64; 2] {
+    let key = ca_key(frame, center);
+    if let Some((_, v)) = CA_MEMO.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return *v;
+    }
+    #[cfg(test)]
+    CA_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let img = RgbU16 {
+        width: frame.width as usize,
+        height: frame.height as usize,
+        pixels: &frame.pixels,
+        black: frame.black as f32,
+        white: frame.maximum as f32,
+    };
+    let v = lateral_ca::estimate(&img, center);
+    let mut memo = CA_MEMO.lock().unwrap();
+    memo.push((key, v));
+    if memo.len() > CA_MEMO_ENTRIES {
+        memo.remove(0);
+    }
+    v
+}
+
 /// See the module doc: 0 keeps every pre-#428 document's lens key valid.
 pub const IMPL_VERSION: u32 = 0;
+
+/// Upper bound on the vignette gain (the lower is 0): see `slit.wgsl`.
+pub const MAX_VIGNETTE_GAIN: f32 = 16.0;
 
 /// Largest |alpha| honored. Real lateral CA is well under 0.5 %; this bounds what a bad estimate
 /// (or a hostile profile) can do to the image.
@@ -188,14 +242,7 @@ impl LensPlan {
                 .as_ref()
                 .and_then(|m| m.warp.as_ref())
                 .map(|w| w.center);
-            let img = RgbU16 {
-                width: frame.width as usize,
-                height: frame.height as usize,
-                pixels: &frame.pixels,
-                black: frame.black as f32,
-                white: frame.maximum as f32,
-            };
-            (lateral_ca::estimate(&img, center), center)
+            (estimate_ca_memoised(frame, center), center)
         } else {
             ([0.0; 2], None)
         };
@@ -401,7 +448,8 @@ pub(crate) mod reference {
             (s[1] - v.center[1]) / v.radius,
         );
         let r2 = dx * dx + dy * dy;
-        1.0 + r2 * (v.k[0] + r2 * (v.k[1] + r2 * (v.k[2] + r2 * (v.k[3] + r2 * v.k[4]))))
+        (1.0 + r2 * (v.k[0] + r2 * (v.k[1] + r2 * (v.k[2] + r2 * (v.k[3] + r2 * v.k[4])))))
+            .clamp(0.0, super::MAX_VIGNETTE_GAIN)
     }
 
     pub(crate) fn apply(img: &[[f32; 4]], e: Extent, plan: &LensPlan) -> Vec<[f32; 4]> {
@@ -655,6 +703,19 @@ mod tests {
                 None,
                 e,
             ),
+            // A hostile vignette whose polynomial goes strongly negative: clamped, never NaN.
+            LensPlan::new(
+                Some(&LensModel {
+                    warp: None,
+                    vignette: Some(Vignette {
+                        k: [-50.0, 30.0, 0.0, 0.0, 0.0],
+                        center: [0.5, 0.5],
+                    }),
+                }),
+                [0.0; 2],
+                None,
+                e,
+            ),
             // Warp only.
             LensPlan::new(
                 Some(&LensModel {
@@ -681,6 +742,11 @@ mod tests {
             let expected = reference::apply(&quantised, e, plan);
             for (px, (a, b)) in actual.iter().zip(&expected).enumerate() {
                 for c in 0..3 {
+                    assert!(
+                        a[c].is_finite() && a[c] >= 0.0,
+                        "case {i} pixel {px} channel {c} is {}",
+                        a[c]
+                    );
                     assert!(
                         (a[c] - b[c]).abs() < 4.0e-3,
                         "case {i} pixel ({}, {}) channel {c}: gpu={} cpu={}",
@@ -728,6 +794,44 @@ mod tests {
         exec.encode(&gpu, &mut encoder, Some(&input), &output);
         gpu.queue.submit(Some(encoder.finish()));
         assert_eq!(read_frame(&gpu, &input), read_frame(&gpu, &output));
+    }
+
+    #[test]
+    fn the_ca_estimate_runs_once_per_frame_not_once_per_cache_miss() {
+        use std::sync::atomic::Ordering;
+        let (w, h) = (96usize, 64usize);
+        let frame = nicti_cornea::LinearFrame {
+            make: "T".into(),
+            model: "S".into(),
+            width: w as u32,
+            height: h as u32,
+            black: 0,
+            maximum: 65535,
+            cam_mul: [1.0; 4],
+            pre_mul: [1.0; 4],
+            cam_xyz: [0.0; 12],
+            cblack: [0; 4],
+            // A pixel pattern unique to this test, so no other test can prime its memo entry.
+            pixels: (0..w * h * 3).map(|i| (i * 7919 % 60001) as u16).collect(),
+            dng_opcode_list3: None,
+        };
+        let params = LensParams {
+            remove_ca: true,
+            embedded_profile: true,
+        };
+        let e = ext(w as u32, h as u32);
+        let before = CA_RUNS.load(Ordering::SeqCst);
+        let a = LensPlan::resolve(&params, &frame, e);
+        let b = LensPlan::resolve(&params, &frame, e);
+        let runs = CA_RUNS.load(Ordering::SeqCst) - before;
+        assert_eq!(a, b);
+        assert_eq!(runs, 1, "the second resolve must hit the memo");
+        // A different photo is a different key.
+        let mut other = frame.clone();
+        other.pixels[0] = other.pixels[0].wrapping_add(1);
+        other.pixels[1] = 12345;
+        let _ = LensPlan::resolve(&params, &other, e);
+        assert_eq!(CA_RUNS.load(Ordering::SeqCst) - before, 2);
     }
 
     #[test]

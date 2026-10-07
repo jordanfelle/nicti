@@ -218,6 +218,26 @@ mod tests {
         }
     }
 
+    /// A list assembled byte by byte from the DNG layout (big-endian: count; then per opcode id,
+    /// version, flags, size; then the parameters), independently of `write_opcode_list3`.
+    #[test]
+    fn parses_a_hand_assembled_big_endian_vignette_list() {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&[0, 0, 0, 1]); // one opcode
+        b.extend_from_slice(&[0, 0, 0, 3]); // id 3: FixVignetteRadial
+        b.extend_from_slice(&[1, 3, 0, 0]); // version 1.3.0.0
+        b.extend_from_slice(&[0, 0, 0, 0]); // flags
+        b.extend_from_slice(&[0, 0, 0, 56]); // 7 f64
+        for v in [0.25f64, -0.5, 1.0, 2.0, 4.0, 0.5, 0.75] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        let m = parse_opcode_list3(&b).expect("a valid list");
+        let v = m.vignette.expect("a vignette");
+        assert_eq!(v.k, [0.25, -0.5, 1.0, 2.0, 4.0]);
+        assert_eq!(v.center, [0.5, 0.75]);
+        assert!(m.warp.is_none());
+    }
+
     #[test]
     fn round_trips_warp_and_vignette() {
         let m = sample();

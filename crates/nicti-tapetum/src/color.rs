@@ -224,9 +224,6 @@ const DEFRINGE_EDGE: (f32, f32) = (0.08, 0.25);
 const DEFRINGE_SAT: (f32, f32) = (0.05, 0.20);
 /// Soft shoulder on both ends of a hue window, in degrees.
 const DEFRINGE_SHOULDER_DEG: f32 = 8.0;
-/// The slider position (normalized amount, LRC 8 of 20) at which the desaturation is complete;
-/// the rest of the range is headroom, as in LightCraft.
-pub const DEFRINGE_FULL_AMOUNT: f32 = 0.4;
 /// The 0..1 hue sliders span these HSV hue ranges (degrees, 120 wide each): purple/magenta 240..360,
 /// green 60..180. LightCraft gates in OkLab hue; HSV hue of the linear working space is what the
 /// live shader already has, so the same windows are expressed there. **Not yet tuned on real
@@ -303,7 +300,9 @@ pub fn defringe_pixel(rgb: [f32; 3], taps: &[[f32; 3]; 8], p: &DefringeParams) -
         return rgb;
     }
     let (hue, sat) = hue_sat(rgb);
-    let strength = |amount: f32| (amount / DEFRINGE_FULL_AMOUNT).min(1.0);
+    // Linear in the normalized amount (LRC 0..20): every slider position does something, so an
+    // imported LRC amount of 8 and of 20 stay distinguishable. (LightCraft saturated at 8 of 20.)
+    let strength = |amount: f32| amount.clamp(0.0, 1.0);
     let window = |base: f32, lo: f32, hi: f32| {
         hue_window(
             hue,
@@ -947,7 +946,7 @@ mod tests {
     #[test]
     fn defringe_desaturates_purple_at_an_edge_but_not_a_flat_purple_area() {
         let p = DefringeParams {
-            purple_amount: 0.5,
+            purple_amount: 1.0,
             ..Default::default()
         };
         let fringed = defringe_pixel(purple(), &edge_taps(), &p);
@@ -959,7 +958,7 @@ mod tests {
     #[test]
     fn defringe_green_channel_works_and_the_channels_do_not_cross() {
         let green_only = DefringeParams {
-            green_amount: 0.5,
+            green_amount: 1.0,
             ..Default::default()
         };
         assert!(chroma(defringe_pixel(green(), &edge_taps(), &green_only)) < 0.1 * chroma(green()));
@@ -969,7 +968,7 @@ mod tests {
             purple()
         );
         let purple_only = DefringeParams {
-            purple_amount: 0.5,
+            purple_amount: 1.0,
             ..Default::default()
         };
         assert_eq!(defringe_pixel(green(), &edge_taps(), &purple_only), green());
@@ -994,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn defringe_strength_scales_with_the_amount_and_saturates() {
+    fn defringe_strength_is_linear_across_the_whole_slider() {
         let at = |amount: f32| {
             chroma(defringe_pixel(
                 purple(),
@@ -1005,9 +1004,13 @@ mod tests {
                 },
             ))
         };
-        assert!(at(0.1) > at(0.2) && at(0.2) > at(0.3));
-        // Past DEFRINGE_FULL_AMOUNT the amount is headroom: the effect is already complete.
-        assert!((at(0.4) - at(1.0)).abs() < 1e-6);
+        // No dead range: each step of the slider removes more chroma, all the way to the end.
+        let steps: Vec<f32> = [0.2, 0.4, 0.6, 0.8, 1.0].map(at).to_vec();
+        assert!(steps.windows(2).all(|w| w[1] < w[0]), "{steps:?}");
+        assert!(
+            steps[4] < 1e-5,
+            "full amount removes all the chroma: {steps:?}"
+        );
     }
 
     #[test]

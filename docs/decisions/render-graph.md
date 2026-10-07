@@ -182,7 +182,8 @@ crop runs after the live suffix in ProPhoto, where the channels are already mixe
 `LinearFrame` (as `DecodeExec` does) and resolves the profile (`nicti_iris::dng::DngEmbedded`, parsing the
 DNG `OpcodeList3` blob LibRaw now hands across the shim) and the automatic CA estimate
 (`nicti_iris::lateral_ca`, LightCraft's estimator on a 2x-decimated copy so its +-3 px search covers +-6 px
-at full resolution; 220 ms at 45 MP in release) only on a baked-cache miss, and skips auto-CA when the
+at full resolution; roughly 0.2-0.4 s at 45 MP in release, memoised, with a goodness-of-fit gate so noise and
+clipped highlights read as no CA) only on a baked-cache miss, and skips auto-CA when the
 profile's planes already differ. `LensParams` serialises to `{}` at its defaults and the stage's
 `impl_version` stays 0 deliberately: a NEF with default params still renders the old passthrough pixels, so
 its lens hash and, through the keying-only `nicti.neutral` node, every on-disk AI alpha (#353) stay valid.

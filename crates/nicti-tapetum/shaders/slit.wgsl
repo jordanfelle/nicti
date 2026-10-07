@@ -18,6 +18,8 @@
 // Input is read through a sampled `texture_2d` + `textureLoad` (never a read-mode storage texture:
 // ADR-0051 / #49, garbage on the RTX 5080 under Dx12) and written to a write-only storage texture.
 
+const MAX_VIGNETTE_GAIN: f32 = 16.0;
+
 struct Uniforms {
     // x: width, y: height (pixels), z: 1 when the warp is active, w: 1 when the vignette is.
     dims: vec4<f32>,
@@ -85,7 +87,9 @@ fn vignette_gain(s: vec2<f32>) -> f32 {
     let r2 = dot(d, d);
     let a = u.vig_k[0];
     let b = u.vig_k[1];
-    return 1.0 + r2 * (a.x + r2 * (a.y + r2 * (a.z + r2 * (a.w + r2 * b.x))));
+    // Bounded: a hostile or corrupt profile must not turn the frame negative (which the live shader's
+    // cube roots turn into NaN) or blow it out. Real vignette gains stay under ~4 stops.
+    return clamp(1.0 + r2 * (a.x + r2 * (a.y + r2 * (a.z + r2 * (a.w + r2 * b.x)))), 0.0, MAX_VIGNETTE_GAIN);
 }
 
 @compute @workgroup_size(8, 8, 1)

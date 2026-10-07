@@ -26,8 +26,9 @@ already mixed, while per-channel CA correction and the DNG per-plane warp are de
 channels (the `render-graph` topic's "Lens correction" rule). So `nicti.lens` is a real `BakedExec`
 (`nicti-tapetum/src/slit.rs` + `shaders/slit.wgsl`): one bilinear resample of the normalised frame in
 which red, green and blue are each sampled at their own source position, then multiplied by the vignette
-gain. It stays upstream of heal and of the keying-only `nicti.neutral` node, so AI masks see the
-corrected frame (#358).
+gain. It stays upstream of heal and of the keying-only `nicti.neutral` node, so a lens change
+re-keys an AI mask bake. **That is the key, not the pixels**: the model's neutral image is still built
+from the uncorrected decode, so the masks do not yet see the corrected frame (#358; see Consequences).
 
 Per output pixel centre `p` (continuous coordinates):
 
@@ -63,15 +64,23 @@ Changes from LightCraft (`nicti-iris/src/lateral_ca.rs`):
   `3/r` and *silently discards* every larger match, biasing the result toward zero. A test plants a
   ~7 px corner shift that the old window could not hold.
 - **It fits about the optical centre** (the profile's, when there is one), not always the middle.
-- **No hidden global cache.** The result is a pure function of the pixels; the lens node's key chains
-  from the decode identity, so it needs none.
+- **A goodness-of-fit gate.** LightCraft accepts any 12 matches. On pure white noise (and on frames
+  with clipped highlights) matches still appear, scattered, and the fit returned a confident
+  `alpha` of ~1e-3: about a pixel of red/blue fringe at the corners on an image with no CA. Lateral
+  CA makes the displacement proportional to radius, so the radial-scale model must explain at least
+  half of the displacement's weighted energy (`MIN_R_SQUARED`) or the plane reads as no estimate.
+  Tests cover noise at three levels and clipped highlights.
+- **The estimate is memoised** (8 entries, keyed by a content fingerprint of the frame and the
+  centre): it is a pure function of the frame, and `LensExec` runs on every baked-cache miss of the
+  lens node, on the render path.
 
 **No double correction.** LightCraft estimates CA on the source and *adds* it to a DNG profile's
 per-plane warp, correcting a profile-corrected image twice. Here auto-CA is skipped when the embedded
 warp's planes differ (`Warp::corrects_lateral_ca`).
 
-Cost, measured: **220 ms for a 45 MP (8256x5504) frame** in release (`lateral_ca::tests::throughput_at_45mp`),
-CPU, only when Remove CA is on and the baked cache misses. `|alpha|` is clamped to 0.02 (real lateral CA
+Cost, measured: **roughly 0.2-0.4 s for a 45 MP (8256x5504) frame** in release
+(`lateral_ca::tests::throughput_at_45mp`: 220-425 ms across runs on a shared WSL machine; one number would
+overstate the precision), CPU, only when Remove CA is on and the memo misses. `|alpha|` is clamped to 0.02 (real lateral CA
 is well under 0.5 %).
 
 ### 4. Defringe is a *live* stage, in the fused dispatch
@@ -83,8 +92,9 @@ drag is a uniform write: **no rebake, no extra pass, no new binding**.
 
 A pixel is desaturated toward its luma when it is (a) saturated (HSV saturation smoothstep 0.05..0.20),
 (b) inside a hue window, and (c) next to a strong luminance edge (perceptual-luma range across the
-neighbourhood, smoothstep 0.08..0.25). Strength is `min(amount / 0.4, 1)`, so the effect is complete
-at LRC's 8 of 20.
+neighbourhood, smoothstep 0.08..0.25). Strength is linear in the normalised amount (LRC 0..20 -> 0..1), so every slider position
+does something and an imported LRC amount of 8 and of 20 stay distinguishable. (LightCraft saturated at
+8 of 20; copying that left 60 % of the range dead, which review caught.)
 
 Deviations from LightCraft's global defringe, each deliberate:
 
@@ -151,6 +161,12 @@ and the six Defringe sliders.
   in `r^2`, tangential terms `kt0`/`kt1`, vignette `1 + k0 r^2 + ... + k4 r^10`), implemented from the
   spec text and cross-read against LightCraft's implementation. They have **not** been checked against
   Adobe's `dng_sdk` or a reference render of a real profile-carrying DNG.
+- **Only `OpcodeList3` is read.** If a real DNG puts `FixVignetteRadial` in list 1 or 2, its corners
+  render darker than in other DNG readers. Unconfirmed without a real profile-carrying file.
+- **Hostile profiles.** Coefficients and the centre are bounded at parse time, and the vignette gain
+  is clamped to 0..16 in the shader (a negative gain would turn the frame negative and the live
+  shader's cube roots into NaN); a profile whose planes differ by float noise (< 1e-6) is not treated
+  as already correcting CA.
 - **Opcode order.** The vignette gain is evaluated at the green *source* position (vignette-before-warp),
   as LightCraft does; a DNG whose list applies them in the other order would differ slightly.
 - **Colour space.** DNG per-plane coefficients are meant for camera RGB, which is what this pass runs on
@@ -167,6 +183,8 @@ and the six Defringe sliders.
   now partly unblocked. A NEF is barely affected (no profile; auto-CA moves only red and blue by
   well under 0.5 %, green, which dominates the model's luminance, not at all), so this bites only a
   DNG with a warping profile.
+- The `docs/licensing.md` entry says ported files carry the copyright line in their header; LightCraft's
+  own files have none, so the attribution is the repo-level grant plus our header lines.
 - Defringe's extra neighbour reads cost only while a defringe amount is non-zero; not measured at 45 MP.
 
 **Not done:** NEF lens profiles (#410); local Defringe and Moire (#351: the live shader's `defringe`

@@ -44,6 +44,8 @@ const MAX_SSD_PER_SAMPLE: f32 = 0.3;
 /// Fewer matches than this and the plane is reported as `0` (no estimate).
 const MIN_MATCHES: usize = 12;
 const MIN_MATCHES_AFTER_TRIM: usize = 8;
+/// Share of the displacement's (weighted) energy the radial-scale model must explain.
+const MIN_R_SQUARED: f64 = 0.5;
 /// Outlier trim: drop residuals beyond `TRIM_MADS` × the median residual (floored).
 const TRIM_MADS: f64 = 2.5;
 const TRIM_FLOOR: f64 = 0.05;
@@ -143,6 +145,19 @@ fn fit(obs: &[(f64, f64, f64)]) -> f64 {
             break;
         }
         alpha = solve(&keep);
+    }
+    // Goodness of fit: lateral CA makes the displacement *proportional to the radius*, so the
+    // model has to explain most of the displacement's own energy. Noise, clipped highlights and
+    // texture produce matches too, but scattered ones that no radial scale explains; without this
+    // gate they yielded a confident alpha of ~1e-3 (about a pixel of fringe at the corners) on
+    // frames that have no CA at all.
+    let (mut ss_total, mut ss_resid) = (0.0, 0.0);
+    for (r, d, wt) in obs {
+        ss_total += wt * d * d;
+        ss_resid += wt * (d - alpha * r).powi(2);
+    }
+    if ss_total <= 0.0 || 1.0 - ss_resid / ss_total < MIN_R_SQUARED {
+        return 0.0;
     }
     alpha
 }
@@ -327,6 +342,60 @@ mod tests {
         let [r, b] = estimate(&img, None);
         assert!((r - 0.004).abs() < 0.001, "red {r}");
         assert!((b + 0.003).abs() < 0.001, "blue {b}");
+    }
+
+    /// Independent white noise per channel: there is no CA to find, so any confident non-zero
+    /// answer would paint fringes onto a clean high-ISO frame.
+    fn noise_frame(w: usize, h: usize, seed: u64, level: f64) -> Vec<u16> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..w * h * 3)
+            .map(|_| ((0.3 + level * (next() - 0.5)) * 65535.0).clamp(0.0, 65535.0) as u16)
+            .collect()
+    }
+
+    #[test]
+    fn pure_noise_reports_no_ca() {
+        for level in [0.1, 0.3, 0.6] {
+            for seed in 1..=3u64 {
+                let px = noise_frame(1200, 800, seed, level);
+                let [r, b] = estimate(&frame(1200, 800, &px), None);
+                assert!(
+                    r.abs() < 2.0e-4 && b.abs() < 2.0e-4,
+                    "noise level {level} seed {seed}: alpha ({r}, {b}) from a frame with no CA"
+                );
+            }
+        }
+    }
+
+    /// Blown highlights clip each channel at its own boundary; that is not lateral CA either.
+    #[test]
+    fn clipped_highlights_report_no_ca() {
+        let (w, h) = (1200usize, 800usize);
+        let cell = w as f64 / 10.0;
+        let mut px = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (
+                    (x as f64 / cell).fract() - 0.5,
+                    (y as f64 / cell).fract() - 0.5,
+                );
+                let d = fx.hypot(fy) * cell - cell * 0.28;
+                let base = 1.4 - 1.6 * (d / 1.2).clamp(-0.5, 0.5);
+                // Different gain per channel, all clipping at 1.0: boundaries land at different
+                // places per channel, with no radial scale relationship.
+                for gain in [1.25, 1.0, 0.8] {
+                    px.push(((base * gain).clamp(0.0, 1.0) * 65535.0) as u16);
+                }
+            }
+        }
+        let [r, b] = estimate(&frame(w, h, &px), None);
+        assert!(r.abs() < 2.0e-4 && b.abs() < 2.0e-4, "alpha ({r}, {b})");
     }
 
     /// Cost at a Z8-sized frame (`cargo test -p nicti-iris --release lateral_ca::tests::throughput

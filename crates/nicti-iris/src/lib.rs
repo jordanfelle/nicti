@@ -46,9 +46,16 @@ impl Warp {
         self.planes.get(ch).unwrap_or(&self.planes[0])
     }
 
-    /// True when the planes are not all identical, i.e. the profile already corrects lateral CA.
+    /// True when the planes differ in a way that matters, i.e. the profile already corrects lateral
+    /// CA. Compared with a tolerance: a profile whose planes differ by float noise (1e-12) has no
+    /// per-channel correction, and treating it as having one would disable auto-CA for nothing.
     pub fn corrects_lateral_ca(&self) -> bool {
-        self.planes.iter().skip(1).any(|p| p != &self.planes[0])
+        const TOLERANCE: f64 = 1.0e-6;
+        self.planes.iter().skip(1).any(|p| {
+            p.iter()
+                .zip(&self.planes[0])
+                .any(|(a, b)| (a - b).abs() > TOLERANCE)
+        })
     }
 
     /// Map a corrected-image point to the source point it samples. `dx`/`dy` are the offset from
@@ -194,6 +201,37 @@ mod tests {
         };
         assert_eq!(one.plane(2), &[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert!(!one.corrects_lateral_ca());
+    }
+
+    #[test]
+    fn planes_that_differ_only_by_float_noise_do_not_count_as_ca_correction() {
+        let mut w = Warp {
+            planes: vec![[1.0, 0.01, 0.0, 0.0, 0.0, 0.0]; 3],
+            center: [0.5; 2],
+        };
+        w.planes[2][0] += 1.0e-12;
+        assert!(!w.corrects_lateral_ca());
+        w.planes[2][0] += 1.0e-3;
+        assert!(w.corrects_lateral_ca());
+    }
+
+    /// Hand-computed from the DNG specification's equations, not from this crate's code: x = 0.5,
+    /// y = 0.25 (m = 1), kr = [1, 0.1, 0, 0], kt = [0.01, 0.02]:
+    ///   r2 = 0.3125, f = 1 + 0.1 * 0.3125 = 1.03125
+    ///   x' = f*x + 2*kt0*x*y + kt1*(r2 + 2*x^2) = 0.515625 + 0.0025 + 0.01625 = 0.534375
+    ///   y' = f*y + kt0*(r2 + 2*y^2) + 2*kt1*x*y = 0.2578125 + 0.004375 + 0.005 = 0.2671875
+    #[test]
+    fn the_warp_matches_a_hand_computed_specification_vector() {
+        let w = Warp {
+            planes: vec![[1.0, 0.1, 0.0, 0.0, 0.01, 0.02]],
+            center: [0.5; 2],
+        };
+        let (sx, sy) = w.source_offset(1, 0.5, 0.25, 1.0);
+        assert!((sx - 0.534375).abs() < 1e-12, "{sx}");
+        assert!((sy - 0.2671875).abs() < 1e-12, "{sy}");
+        // And the scale: the same point at m = 100 px gives 100x the offset.
+        let (sx, sy) = w.source_offset(1, 50.0, 25.0, 100.0);
+        assert!((sx - 53.4375).abs() < 1e-9 && (sy - 26.71875).abs() < 1e-9);
     }
 
     #[test]
