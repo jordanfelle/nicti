@@ -574,6 +574,69 @@ impl LensParams {
     }
 }
 
+/// Global Defringe (#428): desaturates purple and green colour fringes at high-contrast edges.
+///
+/// Two independent channels, each with an amount and a hue window. Ranges are LRC's normalized:
+/// amounts 0..20 -> 0..1, hue lo/hi 0..100 -> 0..1 (the hue window's ends within that fringe
+/// colour's range, see `color::defringe_pixel`). Both amounts 0 is a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefringeParams {
+    pub purple_amount: f32,
+    /// LRC default 30/100.
+    pub purple_hue_lo: f32,
+    /// LRC default 70/100.
+    pub purple_hue_hi: f32,
+    pub green_amount: f32,
+    /// LRC default 40/100.
+    pub green_hue_lo: f32,
+    /// LRC default 60/100.
+    pub green_hue_hi: f32,
+}
+
+impl Default for DefringeParams {
+    fn default() -> Self {
+        Self {
+            purple_amount: 0.0,
+            purple_hue_lo: 0.30,
+            purple_hue_hi: 0.70,
+            green_amount: 0.0,
+            green_hue_lo: 0.40,
+            green_hue_hi: 0.60,
+        }
+    }
+}
+
+impl DefringeParams {
+    /// Whether the shader has anything to do -- it skips every neighbour read otherwise.
+    pub fn is_noop(&self) -> bool {
+        self.purple_amount <= 0.0 && self.green_amount <= 0.0
+    }
+
+    /// Clamped to the documented ranges with NaN scrubbed (documents are untrusted), and each
+    /// window's high end kept at or above its low end.
+    pub fn sanitized(&self) -> Self {
+        let d = Self::default();
+        let unit = |v: f32, fallback: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                fallback
+            }
+        };
+        let purple_hue_lo = unit(self.purple_hue_lo, d.purple_hue_lo);
+        let green_hue_lo = unit(self.green_hue_lo, d.green_hue_lo);
+        Self {
+            purple_amount: unit(self.purple_amount, 0.0),
+            purple_hue_lo,
+            purple_hue_hi: unit(self.purple_hue_hi, d.purple_hue_hi).max(purple_hue_lo),
+            green_amount: unit(self.green_amount, 0.0),
+            green_hue_lo,
+            green_hue_hi: unit(self.green_hue_hi, d.green_hue_hi).max(green_hue_lo),
+        }
+    }
+}
+
 pub fn parse<T: serde::de::DeserializeOwned + Default>(params: &Value) -> T {
     serde_json::from_value(params.clone()).unwrap_or_default()
 }
@@ -587,6 +650,30 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defringe_sanitize_clamps_scrubs_nan_and_orders_the_windows() {
+        let s = DefringeParams {
+            purple_amount: f32::NAN,
+            purple_hue_lo: 0.9,
+            purple_hue_hi: 0.2,
+            green_amount: 7.0,
+            green_hue_lo: -3.0,
+            green_hue_hi: f32::INFINITY,
+        }
+        .sanitized();
+        assert_eq!(s.purple_amount, 0.0);
+        assert!(s.purple_hue_hi >= s.purple_hue_lo);
+        assert_eq!(s.green_amount, 1.0);
+        assert_eq!(s.green_hue_lo, 0.0);
+        assert_eq!(s.green_hue_hi, DefringeParams::default().green_hue_hi);
+        assert!(DefringeParams::default().is_noop());
+        assert!(!DefringeParams {
+            green_amount: 0.1,
+            ..Default::default()
+        }
+        .is_noop());
+    }
 
     #[test]
     fn default_lens_params_are_the_historical_empty_params() {

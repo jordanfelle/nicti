@@ -19,7 +19,7 @@
 //! is available -- #42's still-Proposed scope). Good enough for a manual WB slider to move the
 //! image in the expected direction; not claimed to match Adobe's own temp/tint numbers exactly.
 
-use crate::coat::{HslParams, ToneCurveParams, ToneParams, WbParams};
+use crate::coat::{DefringeParams, HslParams, ToneCurveParams, ToneParams, WbParams};
 
 pub type Mat3 = [[f32; 3]; 3];
 
@@ -212,6 +212,120 @@ pub fn exposure_multiplier(stops: f32) -> f32 {
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Edge test on the perceptual (cube-root luma) range across the neighbourhood, LightCraft's
+/// smoothstep bounds (`optics.rs`'s defringe, storytold/lightcraft@265248c).
+const DEFRINGE_EDGE: (f32, f32) = (0.08, 0.25);
+/// HSV saturation below which a pixel is too grey to carry a visible fringe.
+const DEFRINGE_SAT: (f32, f32) = (0.05, 0.20);
+/// Soft shoulder on both ends of a hue window, in degrees.
+const DEFRINGE_SHOULDER_DEG: f32 = 8.0;
+/// The slider position (normalized amount, LRC 8 of 20) at which the desaturation is complete;
+/// the rest of the range is headroom, as in LightCraft.
+pub const DEFRINGE_FULL_AMOUNT: f32 = 0.4;
+/// The 0..1 hue sliders span these HSV hue ranges (degrees, 120 wide each): purple/magenta 240..360,
+/// green 60..180. LightCraft gates in OkLab hue; HSV hue of the linear working space is what the
+/// live shader already has, so the same windows are expressed there. **Not yet tuned on real
+/// photos** (#428's exit asks for it).
+const DEFRINGE_PURPLE_BASE: f32 = 240.0;
+const DEFRINGE_GREEN_BASE: f32 = 60.0;
+const DEFRINGE_HUE_SPAN: f32 = 120.0;
+
+/// Pixels between the centre and each of the 8 compass-direction taps the edge test reads, for a
+/// frame whose long edge is `long_edge` px: 2 px at 4000 px across, scaled with resolution so the
+/// same *content* is considered an edge at any size. Mirrored in `live_suffix.wgsl`.
+pub fn defringe_radius(long_edge: u32) -> i32 {
+    // `floor(x + 0.5)`, not `round`: WGSL rounds halves to even, Rust away from zero.
+    ((2.0 * long_edge as f32 / 4000.0 + 0.5).floor()).clamp(1.0, 6.0) as i32
+}
+
+/// The 8 tap offsets (in units of [`defringe_radius`]) both implementations read.
+pub const DEFRINGE_TAPS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// DNG-spec HSV hue (degrees) and saturation of a linear working-space pixel -- the same math as
+/// `live_suffix.wgsl`'s `dcp_rgb_to_hsv`.
+fn hue_sat(rgb: [f32; 3]) -> (f32, f32) {
+    let max_c = rgb[0].max(rgb[1]).max(rgb[2]);
+    let min_c = rgb[0].min(rgb[1]).min(rgb[2]);
+    let delta = max_c - min_c;
+    let mut h = 0.0;
+    if delta > 1e-6 {
+        h = if max_c == rgb[0] {
+            60.0 * (((rgb[1] - rgb[2]) / delta) % 6.0)
+        } else if max_c == rgb[1] {
+            60.0 * ((rgb[2] - rgb[0]) / delta + 2.0)
+        } else {
+            60.0 * ((rgb[0] - rgb[1]) / delta + 4.0)
+        };
+    }
+    if h < 0.0 {
+        h += 360.0;
+    }
+    let s = if max_c > 0.0 { delta / max_c } else { 0.0 };
+    (h, s)
+}
+
+/// 1 inside `[lo, hi]` degrees, falling to 0 over the shoulder on each side; also true across the
+/// 360/0 seam (a window ending at 360 still catches hue 4).
+fn hue_window(h: f32, lo: f32, hi: f32) -> f32 {
+    let at = |h: f32| {
+        smoothstep(lo - DEFRINGE_SHOULDER_DEG, lo, h)
+            * (1.0 - smoothstep(hi, hi + DEFRINGE_SHOULDER_DEG, h))
+    };
+    at(h).max(at(h + 360.0))
+}
+
+fn perceptual_l(rgb: [f32; 3]) -> f32 {
+    (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2])
+        .max(0.0)
+        .cbrt()
+}
+
+/// Defringe (#428): desaturates `rgb` (linear working space, as it leaves the camera->working
+/// matrix) toward its luma when it is a saturated purple/green pixel next to a strong luminance
+/// edge. `taps` are the 8 neighbours at [`defringe_radius`] in [`DEFRINGE_TAPS`] order, in the
+/// same space. CPU twin of `live_suffix.wgsl`'s `apply_defringe`.
+pub fn defringe_pixel(rgb: [f32; 3], taps: &[[f32; 3]; 8], p: &DefringeParams) -> [f32; 3] {
+    if p.is_noop() {
+        return rgb;
+    }
+    let (hue, sat) = hue_sat(rgb);
+    let strength = |amount: f32| (amount / DEFRINGE_FULL_AMOUNT).min(1.0);
+    let window = |base: f32, lo: f32, hi: f32| {
+        hue_window(
+            hue,
+            base + DEFRINGE_HUE_SPAN * lo,
+            base + DEFRINGE_HUE_SPAN * hi,
+        )
+    };
+    let purple =
+        strength(p.purple_amount) * window(DEFRINGE_PURPLE_BASE, p.purple_hue_lo, p.purple_hue_hi);
+    let green =
+        strength(p.green_amount) * window(DEFRINGE_GREEN_BASE, p.green_hue_lo, p.green_hue_hi);
+    let gate = purple.max(green) * smoothstep(DEFRINGE_SAT.0, DEFRINGE_SAT.1, sat);
+    if gate <= 0.0 {
+        return rgb;
+    }
+    let l = perceptual_l(rgb);
+    let (mut lo, mut hi) = (l, l);
+    for t in taps {
+        let v = perceptual_l(*t);
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    let k = gate * smoothstep(DEFRINGE_EDGE.0, DEFRINGE_EDGE.1, hi - lo);
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    rgb.map(|c| luma + (c - luma) * (1.0 - k))
 }
 
 /// Basic-panel tone controls in a rough perceptual (cube-root) space: whites/blacks remap the
@@ -792,6 +906,138 @@ mod tests {
         for (a, b) in rgb.iter().zip(out.iter()) {
             assert!((a - b).abs() < 1e-2, "{a} vs {b}");
         }
+    }
+
+    fn dark() -> [f32; 3] {
+        [0.05, 0.05, 0.05]
+    }
+    fn bright() -> [f32; 3] {
+        [0.8, 0.8, 0.8]
+    }
+    fn purple() -> [f32; 3] {
+        [0.45, 0.2, 0.55]
+    }
+    fn green() -> [f32; 3] {
+        [0.25, 0.6, 0.2]
+    }
+    /// Taps straddling an edge: some dark, some bright.
+    fn edge_taps() -> [[f32; 3]; 8] {
+        [
+            dark(),
+            dark(),
+            dark(),
+            dark(),
+            bright(),
+            bright(),
+            bright(),
+            bright(),
+        ]
+    }
+    fn flat_taps(c: [f32; 3]) -> [[f32; 3]; 8] {
+        [c; 8]
+    }
+    fn chroma(c: [f32; 3]) -> f32 {
+        let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        c.iter().map(|v| (v - l).abs()).sum()
+    }
+
+    #[test]
+    fn defringe_desaturates_purple_at_an_edge_but_not_a_flat_purple_area() {
+        let p = DefringeParams {
+            purple_amount: 0.5,
+            ..Default::default()
+        };
+        let fringed = defringe_pixel(purple(), &edge_taps(), &p);
+        assert!(chroma(fringed) < 0.1 * chroma(purple()), "{fringed:?}");
+        // The same colour with no edge around it is a real purple object: untouched.
+        assert_eq!(defringe_pixel(purple(), &flat_taps(purple()), &p), purple());
+    }
+
+    #[test]
+    fn defringe_green_channel_works_and_the_channels_do_not_cross() {
+        let green_only = DefringeParams {
+            green_amount: 0.5,
+            ..Default::default()
+        };
+        assert!(chroma(defringe_pixel(green(), &edge_taps(), &green_only)) < 0.1 * chroma(green()));
+        // A purple pixel is outside the green window.
+        assert_eq!(
+            defringe_pixel(purple(), &edge_taps(), &green_only),
+            purple()
+        );
+        let purple_only = DefringeParams {
+            purple_amount: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(defringe_pixel(green(), &edge_taps(), &purple_only), green());
+    }
+
+    #[test]
+    fn defringe_leaves_greys_and_other_hues_alone() {
+        let p = DefringeParams {
+            purple_amount: 1.0,
+            green_amount: 1.0,
+            ..Default::default()
+        };
+        // Neutral edge pixel, and an orange one (hue ~30 degrees: in neither window).
+        assert_eq!(defringe_pixel(bright(), &edge_taps(), &p), bright());
+        let orange = [0.7, 0.4, 0.1];
+        assert_eq!(defringe_pixel(orange, &edge_taps(), &p), orange);
+        assert_eq!(
+            defringe_pixel(purple(), &edge_taps(), &DefringeParams::default()),
+            purple(),
+            "amount 0 is the identity"
+        );
+    }
+
+    #[test]
+    fn defringe_strength_scales_with_the_amount_and_saturates() {
+        let at = |amount: f32| {
+            chroma(defringe_pixel(
+                purple(),
+                &edge_taps(),
+                &DefringeParams {
+                    purple_amount: amount,
+                    ..Default::default()
+                },
+            ))
+        };
+        assert!(at(0.1) > at(0.2) && at(0.2) > at(0.3));
+        // Past DEFRINGE_FULL_AMOUNT the amount is headroom: the effect is already complete.
+        assert!((at(0.4) - at(1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn defringe_hue_window_follows_the_sliders_and_wraps_the_seam() {
+        // A magenta-red pixel at hue ~350: inside the default purple window? 240 + 120*[0.3,0.7]
+        // = 276..324 -> no. Widening the window to its top end (hi = 1.0 -> 360) catches it, via
+        // the seam wrap.
+        let magenta = [0.6, 0.15, 0.2];
+        let (h, _) = hue_sat(magenta);
+        assert!(h > 330.0 && h < 360.0, "hue {h}");
+        let narrow = DefringeParams {
+            purple_amount: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(defringe_pixel(magenta, &edge_taps(), &narrow), magenta);
+        let wide = DefringeParams {
+            purple_amount: 1.0,
+            purple_hue_hi: 1.0,
+            ..Default::default()
+        };
+        assert!(chroma(defringe_pixel(magenta, &edge_taps(), &wide)) < chroma(magenta));
+        // Seam: a window ending at 360 still catches hue 1 (the far side of the wrap).
+        assert!(hue_window(1.0, 300.0, 360.0) > 0.9);
+    }
+
+    #[test]
+    fn defringe_radius_scales_with_resolution_and_is_bounded() {
+        assert_eq!(defringe_radius(100), 1);
+        assert_eq!(defringe_radius(4000), 2);
+        assert_eq!(defringe_radius(8256), 4);
+        assert_eq!(defringe_radius(1_000_000), 6);
+        // The half-way case rounds the same way the shader's floor(x + 0.5) does.
+        assert_eq!(defringe_radius(5000), 3);
     }
 
     #[test]

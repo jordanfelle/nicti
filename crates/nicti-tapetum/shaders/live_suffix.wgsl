@@ -37,6 +37,10 @@ struct Uniforms {
     // #380 global Presence: x = texture, y = clarity, z = dehaze, w = saturation. Each is summed
     // with the stacked local delta of the same name (a global +0.3 and a local +0.2 act as +0.5).
     presence: vec4<f32>,
+    // #428 defringe: (purple amount, purple hue lo, purple hue hi, green amount), then
+    // (green hue lo, green hue hi, unused, unused). Amounts 0..1 (LRC 0..20), hues 0..1.
+    defringe0: vec4<f32>,
+    defringe1: vec4<f32>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -483,6 +487,78 @@ fn dcp_apply_table(rgb: vec3<f32>, tex: texture_3d<f32>, srgb_value: bool) -> ve
     return dcp_hsv_to_rgb(vec3<f32>(hsv.x + adj.x, clamp(hsv.y * adj.y, 0.0, 1.0), v_out));
 }
 
+// ---- #428 Defringe (color.rs::defringe_pixel is the CPU twin; keep the constants in sync) ----
+// Desaturates saturated purple/green pixels that sit next to a strong luminance edge. It runs
+// right after the camera->working matrix, in scene-linear working space, so it sees the colours
+// before any exposure/tone. The edge test reads 8 compass taps `r` px away in the baked input
+// (cheap, and only reached when the hue/chroma gate already passed), where LightCraft used a full
+// min/max box.
+const DEFRINGE_EDGE_LO: f32 = 0.08;
+const DEFRINGE_EDGE_HI: f32 = 0.25;
+const DEFRINGE_SAT_LO: f32 = 0.05;
+const DEFRINGE_SAT_HI: f32 = 0.20;
+const DEFRINGE_SHOULDER: f32 = 8.0;
+const DEFRINGE_FULL_AMOUNT: f32 = 0.4;
+const DEFRINGE_PURPLE_BASE: f32 = 240.0;
+const DEFRINGE_GREEN_BASE: f32 = 60.0;
+const DEFRINGE_HUE_SPAN: f32 = 120.0;
+
+fn perceptual_l(rgb: vec3<f32>) -> f32 {
+    return pow(max(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0), 1.0 / 3.0);
+}
+
+fn hue_window_at(h: f32, lo: f32, hi: f32) -> f32 {
+    return smoothstep(lo - DEFRINGE_SHOULDER, lo, h) * (1.0 - smoothstep(hi, hi + DEFRINGE_SHOULDER, h));
+}
+
+// Also true across the 360/0 seam.
+fn hue_window(h: f32, lo: f32, hi: f32) -> f32 {
+    return max(hue_window_at(h, lo, hi), hue_window_at(h + 360.0, lo, hi));
+}
+
+// The perceptual L of the input pixel at `(x, y)` after the camera->working matrix, clamped to the
+// frame.
+fn tap_l(x: i32, y: i32, m: mat3x3<f32>) -> f32 {
+    let d = vec2<i32>(textureDimensions(input_tex));
+    let c = clamp(vec2<i32>(x, y), vec2<i32>(0, 0), d - vec2<i32>(1, 1));
+    return perceptual_l(m * textureLoad(input_tex, c, 0).rgb);
+}
+
+fn apply_defringe(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>) -> vec3<f32> {
+    let hs = dcp_rgb_to_hsv(rgb);
+    let strength_p = min(u.defringe0.x / DEFRINGE_FULL_AMOUNT, 1.0);
+    let strength_g = min(u.defringe0.w / DEFRINGE_FULL_AMOUNT, 1.0);
+    let purple = strength_p * hue_window(
+        hs.x,
+        DEFRINGE_PURPLE_BASE + DEFRINGE_HUE_SPAN * u.defringe0.y,
+        DEFRINGE_PURPLE_BASE + DEFRINGE_HUE_SPAN * u.defringe0.z,
+    );
+    let green = strength_g * hue_window(
+        hs.x,
+        DEFRINGE_GREEN_BASE + DEFRINGE_HUE_SPAN * u.defringe1.x,
+        DEFRINGE_GREEN_BASE + DEFRINGE_HUE_SPAN * u.defringe1.y,
+    );
+    let gate = max(purple, green) * smoothstep(DEFRINGE_SAT_LO, DEFRINGE_SAT_HI, hs.y);
+    if (gate <= 0.0) {
+        return rgb;
+    }
+    let r = i32(clamp(floor(2.0 * f32(long_edge) / 4000.0 + 0.5), 1.0, 6.0));
+    let l = perceptual_l(rgb);
+    var lo = l;
+    var hi = l;
+    var v = tap_l(x - r, y - r, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x, y - r, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x + r, y - r, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x - r, y, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x + r, y, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x - r, y + r, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x, y + r, m); lo = min(lo, v); hi = max(hi, v);
+    v = tap_l(x + r, y + r, m); lo = min(lo, v); hi = max(hi, v);
+    let k = gate * smoothstep(DEFRINGE_EDGE_LO, DEFRINGE_EDGE_HI, hi - lo);
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * (1.0 - k);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -492,6 +568,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
     var rgb = m * px.rgb;
+    if (u.defringe0.x > 0.0 || u.defringe0.w > 0.0) {
+        rgb = apply_defringe(rgb, i32(gid.x), i32(gid.y), max(dims.x, dims.y), m);
+    }
 
     let has_locals = mu.header.x > 0.5;
     var locals: LocalSums;
