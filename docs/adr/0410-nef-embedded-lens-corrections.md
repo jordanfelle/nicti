@@ -46,8 +46,11 @@ What the research found:
 3. **Refit onto the existing model, don't extend it.** `Warp` is an even polynomial in `r^2`
    (`kr0..kr3`) and `Vignette` is `1 + k0 r^2 + ... + k4 r^10`. Nikon's polynomials include odd powers
    and the vignette is `1 / sqrt(poly)`, so each is least-squares fitted over `r` in 0..1 onto those
-   forms (`fit_even`, 64 samples). An even-only distortion polynomial refits exactly; a general one to
-   about 2e-3 (tested). This keeps the GPU kernel, the CPU twin and the cache key untouched.
+   forms (`fit_even`, 64 samples). An even-only distortion polynomial refits exactly; the one mixed
+   odd/even set in the tests refits to about 2e-3. The fit is **checked**: a profile whose refit is off
+   by more than 0.01 anywhere in 0..1 (a large odd term the even basis cannot represent), or whose
+   distortion scale leaves 1 +/- 0.5, is dropped rather than rendered wrongly. This keeps the GPU
+   kernel, the CPU twin and the cache key untouched.
 4. **Opt-in until verified.** Because decision-relevant semantics are unconfirmed, the provider sits
    behind `LensParams::nikon_profile`, **default off** (serialised only when on). A default NEF
    therefore renders exactly as before, `LensStage::IMPL_VERSION` stays 0, and no baked key or on-disk
@@ -60,12 +63,19 @@ What the research found:
    a follow-up.
 7. **Hardening.** The blob comes from an untrusted file: the locate step caps its size (64 KiB), the
    decoder bounds the entry and coefficient counts, rejects zero denominators and non-finite values,
-   drops a block on its own, and the provider rejects `|c| > 100` and a non-positive vignette falloff.
+   drops a block on its own (a later corrupt duplicate entry cannot erase an earlier good one), and the
+   provider rejects `|c| > 10` and a non-positive vignette falloff. The SubIFD scan is capped at 16 and
+   stops at the walker's IFD budget, so a hostile SubIFDs count cannot grow work with the file size.
    The camera's own flag is honoured (`Off`/`NoLens` produce no model).
 
 ## Consequences
 
 - No NEF user sees a change unless they tick the new switch.
+- **Assumptions the parity follow-up must confirm**, all unverified on real files: the polynomial form
+  and direction (corrected->source), `r = 1` at the recorded image's corner (DX-crop frames), the flag
+  values (0 no lens, 1 on, 2 off, 3 on/required, from ExifTool's `DistortionCorrection`), and that the
+  block fields use the inner TIFF header's byte order (both orders are unit-tested, but only against
+  our own writer).
 - **Unverified:** nothing here has run on a real Z-series file. This sandbox has none, so the
   real-file test (`nicti-tapetum/tests/real_nef_lens.rs`, `NICTI_TEST_REAL_NEF_DIR`) skips. The
   parity follow-up converts the same NEFs with Adobe DNG Converter (which turns Nikon's data into

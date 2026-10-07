@@ -96,6 +96,8 @@ pub const TAG_NIKON_LENS_INFO: u16 = 0xC7D5;
 pub(crate) const NIKON_BLOB_HEADER_LEN: usize = 18;
 /// Real blobs are 448-976 bytes; anything past this is corrupt, not a bigger profile.
 const MAX_NIKON_LENS_INFO_BYTES: u64 = 64 * 1024;
+/// More SubIFDs than this and the lens-info lookup gives up (real NEFs have 2-4).
+const MAX_SUB_IFDS_SCANNED: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewSource {
@@ -381,16 +383,28 @@ impl<S: ByteSource> Walker<S> {
     /// such tag or its payload doesn't start with `"Nikon\0"`; parsing the blob itself is
     /// `nikon_lens::parse`'s job, so this stays a locate-and-read step. A SubIFD that fails to read
     /// is skipped rather than failing the whole lookup -- a missing profile is a normal outcome.
+    ///
+    /// Use a fresh `Walker` for this: like `find_embedded_jpegs` it starts by reading IFD0, and the
+    /// walker's cycle guard remembers it, so a second call on the same walker reports a cycle.
     pub fn find_nikon_lens_info(&mut self) -> Result<Option<Vec<u8>>, IfdError> {
         let ifd0_off = self.ifd0_offset();
         let (ifd0, _) = self.read_ifd(0, ifd0_off)?;
         let Some(sub_entry) = Self::find_entry(&ifd0, TAG_SUB_IFDS) else {
             return Ok(None);
         };
-        let offsets = self.read_offset_array(&sub_entry)?;
+        // Real files have 2-4 SubIFDs; a hostile count must not make this scan (and the cycle
+        // guard's visited set) grow with the file size.
+        if sub_entry.count as usize > MAX_SUB_IFDS_SCANNED {
+            return Ok(None);
+        }
+        let Ok(offsets) = self.read_offset_array(&sub_entry) else {
+            return Ok(None);
+        };
         for off in offsets {
-            let Ok((entries, _)) = self.read_ifd(0, off) else {
-                continue;
+            let (entries, _) = match self.read_ifd(0, off) {
+                Ok(v) => v,
+                Err(IfdError::TooManyIfds) => break,
+                Err(_) => continue,
             };
             let Some(e) = Self::find_entry(&entries, TAG_NIKON_LENS_INFO) else {
                 continue;
@@ -768,11 +782,44 @@ mod tests {
     #[test]
     fn nikon_lens_info_truncated_file_is_none_not_panic() {
         let data = nef_with_lens_blob(&fake_lens_blob());
-        // Chop the file inside the blob: the read comes back short and is skipped.
-        let cut = &data[..20.min(data.len())];
-        if let Ok(mut w) = Walker::new(SliceSource::new(cut)) {
-            let _ = w.find_nikon_lens_info();
+        // Chop the file inside the blob (the blob is the first thing after the 8-byte header): the
+        // IFDs that point at it are gone or the read comes back short, so there is nothing to find.
+        for cut in [8, 20, 100, 300] {
+            if let Ok(mut w) = Walker::new(SliceSource::new(&data[..cut])) {
+                assert!(
+                    matches!(w.find_nikon_lens_info(), Ok(None) | Err(_)),
+                    "cut {cut}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn nikon_lens_info_size_bounds_and_hostile_subifd_counts_are_rejected() {
+        // Below the 18-byte header and above the 64 KiB cap.
+        let mut tiny = b"Nikon\0".to_vec();
+        tiny.resize(10, 0);
+        assert_eq!(
+            walk(&nef_with_lens_blob(&tiny))
+                .find_nikon_lens_info()
+                .unwrap(),
+            None
+        );
+        let mut huge = b"Nikon\0".to_vec();
+        huge.resize(70_000, 0);
+        assert_eq!(
+            walk(&nef_with_lens_blob(&huge))
+                .find_nikon_lens_info()
+                .unwrap(),
+            None
+        );
+
+        // A SubIFDs entry claiming a million offsets is refused without scanning them.
+        let mut b = FileBuilder::new();
+        let arr = b.append_bytes(&[0u8; 64]);
+        let (ifd0, _) = b.append_ifd(&[(TAG_SUB_IFDS, TY_LONG, 1_000_000, arr)], 0);
+        let data = b.finish(ifd0);
+        assert_eq!(walk(&data).find_nikon_lens_info().unwrap(), None);
     }
 
     #[test]

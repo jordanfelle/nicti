@@ -157,9 +157,12 @@ pub fn parse(blob: &[u8]) -> Option<NikonLensInfo> {
             continue;
         };
         let block = parse_block(bo, data);
-        match tag {
-            ENTRY_DISTORTION => info.distortion = block,
-            _ => info.vignette = block,
+        // A later corrupt duplicate must not erase an earlier good block.
+        if block.is_some() {
+            match tag {
+                ENTRY_DISTORTION => info.distortion = block,
+                _ => info.vignette = block,
+            }
         }
     }
     (info.distortion.is_some() || info.vignette.is_some()).then_some(info)
@@ -194,7 +197,12 @@ fn parse_block(bo: ByteOrder, data: &[u8]) -> Option<LensBlock> {
 }
 
 /// Coefficients beyond this are a corrupt or hostile file (real ones are well under 1).
-const MAX_COEFFICIENT: f64 = 100.0;
+const MAX_COEFFICIENT: f64 = 10.0;
+/// Largest accepted refit error (distortion scale / vignette gain): a profile the even-power basis
+/// cannot represent is dropped rather than rendered wrongly.
+const MAX_FIT_RESIDUAL: f64 = 0.01;
+/// Real distortion is a few percent; beyond this the source sample runs far off the frame.
+const MAX_DISTORTION_SCALE_DEVIATION: f64 = 0.5;
 /// The correction is defined over the normalised radius 0..=1 (the recorded image's farthest
 /// corner is 1); the refit samples that range.
 const FIT_SAMPLES: usize = 64;
@@ -256,6 +264,21 @@ fn fit_even<const N: usize>(first_power: usize, target: impl Fn(f64) -> f64) -> 
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
+/// The refit must track the target everywhere in 0..=1 (checked between the fit's own sample
+/// points too) and stay within `max_abs`.
+fn within_bounds(
+    fitted: impl Fn(f64) -> f64,
+    target: impl Fn(f64) -> f64,
+    max_residual: f64,
+    max_abs: f64,
+) -> bool {
+    (0..=4 * FIT_SAMPLES).all(|i| {
+        let r = i as f64 / (4 * FIT_SAMPLES) as f64;
+        let f = fitted(r);
+        f.is_finite() && (f - target(r)).abs() <= max_residual && (f - 1.0).abs() <= max_abs
+    })
+}
+
 fn sane(block: &LensBlock) -> bool {
     block.flag.applies()
         && block
@@ -269,7 +292,20 @@ fn warp_from(block: &LensBlock) -> Option<Warp> {
     if !sane(block) {
         return None;
     }
-    let [k0, k1, k2, k3] = fit_even::<4>(0, |r| horner(&block.coefficients, r))?;
+    let target = |r: f64| horner(&block.coefficients, r);
+    let [k0, k1, k2, k3] = fit_even::<4>(0, target)?;
+    let fitted = |r: f64| {
+        let r2 = r * r;
+        k0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+    };
+    if !within_bounds(
+        fitted,
+        target,
+        MAX_FIT_RESIDUAL,
+        MAX_DISTORTION_SCALE_DEVIATION,
+    ) {
+        return None;
+    }
     Some(Warp {
         planes: vec![[k0, k1, k2, k3, 0.0, 0.0]],
         center: [0.5, 0.5],
@@ -289,7 +325,16 @@ fn vignette_from(block: &LensBlock) -> Option<Vignette> {
             return None;
         }
     }
-    let k = fit_even::<5>(1, |r| 1.0 / horner(&block.coefficients, r).sqrt() - 1.0)?;
+    let target = |r: f64| 1.0 / horner(&block.coefficients, r).sqrt();
+    let k = fit_even::<5>(1, |r| target(r) - 1.0)?;
+    let v = Vignette {
+        k,
+        center: [0.5, 0.5],
+    };
+    let fitted = |r: f64| v.gain(r * r);
+    if !within_bounds(fitted, target, MAX_FIT_RESIDUAL, MAX_VIGNETTE_GAIN - 1.0) {
+        return None;
+    }
     Some(Vignette {
         k,
         center: [0.5, 0.5],
@@ -335,17 +380,47 @@ impl LensCorrection for NikonEmbedded {
 /// Test/fixture writer: assembles a big-endian blob with the given blocks, the inverse of
 /// [`parse`]. `(flag, coefficients)` per block; rationals use a fixed denominator of 1_000_000.
 pub fn write_blob(distortion: Option<(u8, &[f64])>, vignette: Option<(u8, &[f64])>) -> Vec<u8> {
-    fn block(flag: u8, coeffs: &[f64]) -> Vec<u8> {
+    write_blob_with(true, distortion, vignette)
+}
+
+/// [`write_blob`] with a choice of byte order for the inner TIFF header and block fields.
+pub fn write_blob_with(
+    big: bool,
+    distortion: Option<(u8, &[f64])>,
+    vignette: Option<(u8, &[f64])>,
+) -> Vec<u8> {
+    let u16b = |v: u16| {
+        if big {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
+    };
+    let u32b = |v: u32| {
+        if big {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
+    };
+    let i32b = |v: i32| {
+        if big {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
+    };
+    let block = |flag: u8, coeffs: &[f64]| -> Vec<u8> {
         let mut b = vec![0u8; BLOCK_COEFFS_AT];
         b[0..4].copy_from_slice(b"0100");
         b[4] = flag;
-        b[BLOCK_COUNT_AT..BLOCK_COUNT_AT + 4].copy_from_slice(&(coeffs.len() as u32).to_be_bytes());
+        b[BLOCK_COUNT_AT..BLOCK_COUNT_AT + 4].copy_from_slice(&u32b(coeffs.len() as u32));
         for c in coeffs {
-            b.extend_from_slice(&((c * 1e6).round() as i32).to_be_bytes());
-            b.extend_from_slice(&1_000_000i32.to_be_bytes());
+            b.extend_from_slice(&i32b((c * 1e6).round() as i32));
+            b.extend_from_slice(&i32b(1_000_000));
         }
         b
-    }
+    };
     let blocks: Vec<(u16, Vec<u8>)> = [(ENTRY_DISTORTION, distortion), (ENTRY_VIGNETTE, vignette)]
         .into_iter()
         .filter_map(|(tag, b)| b.map(|(f, c)| (tag, block(f, c))))
@@ -353,19 +428,21 @@ pub fn write_blob(distortion: Option<(u8, &[f64])>, vignette: Option<(u8, &[f64]
 
     let mut out = Vec::new();
     out.extend_from_slice(b"Nikon\0\x02\x00\x00\x00");
-    out.extend_from_slice(b"MM\x00\x2a\x00\x00\x00\x08");
+    out.extend_from_slice(if big { b"MM" } else { b"II" });
+    out.extend_from_slice(&u16b(42));
+    out.extend_from_slice(&u32b(8));
     // IFD at inner offset 8: count, entries, next-IFD pointer.
     let ifd_len = 2 + blocks.len() * 12 + 4;
     let mut data_at = 8 + ifd_len;
-    out.extend_from_slice(&(blocks.len() as u16).to_be_bytes());
+    out.extend_from_slice(&u16b(blocks.len() as u16));
     for (tag, b) in &blocks {
-        out.extend_from_slice(&tag.to_be_bytes());
-        out.extend_from_slice(&7u16.to_be_bytes()); // UNDEFINED
-        out.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        out.extend_from_slice(&(data_at as u32).to_be_bytes());
+        out.extend_from_slice(&u16b(*tag));
+        out.extend_from_slice(&u16b(7)); // UNDEFINED
+        out.extend_from_slice(&u32b(b.len() as u32));
+        out.extend_from_slice(&u32b(data_at as u32));
         data_at += b.len();
     }
-    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&u32b(0));
     for (_, b) in &blocks {
         out.extend_from_slice(b);
     }
@@ -532,5 +609,38 @@ mod tests {
     #[test]
     fn no_blob_no_model() {
         assert!(NikonEmbedded.model(&LensSource::default()).is_none());
+    }
+
+    #[test]
+    fn little_endian_blob_round_trips() {
+        let blob = write_blob_with(false, Some((1, &DIST)), Some((3, &VIG)));
+        assert_eq!(&blob[10..12], b"II");
+        let info = parse(&blob).expect("parses");
+        assert_eq!(info.distortion.unwrap().coefficients, DIST);
+        assert_eq!(info.vignette.unwrap().coefficients, VIG);
+    }
+
+    #[test]
+    fn a_corrupt_duplicate_entry_does_not_erase_a_good_block() {
+        let mut blob = write_blob(Some((1, &DIST)), Some((1, &VIG)));
+        // Retag the vignette entry (second) as a second distortion entry, then zero its count so
+        // that block fails to parse: the first, good distortion block must survive.
+        let second_entry = 10 + 8 + 2 + 12;
+        blob[second_entry..second_entry + 2].copy_from_slice(&ENTRY_DISTORTION.to_be_bytes());
+        let vig_block = 10 + 8 + 2 + 2 * 12 + 4 + BLOCK_COEFFS_AT + DIST.len() * 8;
+        blob[vig_block + BLOCK_COUNT_AT..vig_block + BLOCK_COUNT_AT + 4]
+            .copy_from_slice(&0u32.to_be_bytes());
+        let info = parse(&blob).expect("good block survives");
+        assert_eq!(info.distortion.unwrap().coefficients, DIST);
+    }
+
+    #[test]
+    fn a_profile_the_even_basis_cannot_represent_is_dropped() {
+        // A large linear (odd) term: no even polynomial tracks it within the residual bound.
+        let blob = write_blob(Some((1, &[0.0, 0.0, 0.0, 0.4])), None);
+        assert!(NikonEmbedded.model(&source(&blob)).is_none());
+        // And an absurdly large radial scale is rejected outright.
+        let blob = write_blob(Some((1, &[9.0, 0.0, 0.0, 0.0])), None);
+        assert!(NikonEmbedded.model(&source(&blob)).is_none());
     }
 }
