@@ -23,6 +23,7 @@ mod effects;
 mod filters;
 mod heal;
 mod hsl;
+mod lens;
 mod masks;
 
 pub use filters::FilterCounts;
@@ -208,10 +209,6 @@ enum Known {
 const DEFAULTS: &[(&str, Known)] = &[
     ("ColorGradeBlending", Known::Num(50.0)),
     ("CurveRefineSaturation", Known::Num(100.0)),
-    ("DefringeGreenHueHi", Known::Num(60.0)),
-    ("DefringeGreenHueLo", Known::Num(40.0)),
-    ("DefringePurpleHueHi", Known::Num(70.0)),
-    ("DefringePurpleHueLo", Known::Num(30.0)),
     ("PerspectiveScale", Known::Num(100.0)),
     ("UprightCenterNormX", Known::Num(0.5)),
     ("UprightCenterNormY", Known::Num(0.5)),
@@ -304,6 +301,7 @@ pub fn translate(text: &str, ctx: &Context) -> Result<Translation, DevelopError>
         hsl::apply(&mut tx);
         detail::apply(&mut tx);
         effects::apply(&mut tx);
+        lens::apply(&mut tx);
         crop::apply(&mut tx);
         heal::apply(&mut tx);
         masks::apply(&mut tx);
