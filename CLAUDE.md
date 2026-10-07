@@ -206,6 +206,7 @@ terse index: crate/spike → purpose → owning topic.
   delete-to-Recycle-Bin with a journal) + `pounce_jobs::DeleteJob` — see `culling`. **#57** adds
   `CatalogStore::get_master_edit`/`put_master_edit` (the Develop edit document) — see `catalog-engine`. **#52** adds the batch
   `get_master_edits`/`put_master_edits` (one transaction) — see `develop`.
+- **Native folder picker (#342)**: `nicti-pelt/src/folder_dialog.rs` (`FolderPicker`, threaded `rfd` dialog + `poll`) backs the "Browse..." buttons on the Library Import/Sync folder and Move destination (`app.rs::show_library_controls`) and the Export destination (`export/dialog.rs::destination_section`).
 - **`crates/nicti-pelt`** (#241, landed) — the production app shell ADR-0068 points to: one
   eframe/egui window sharing its wgpu device with `crates/nicti-tapetum`'s `GpuContext`
   (ADR-0016), a Tapetum-rendered frame painted via `egui_wgpu::CallbackTrait` (`viewport.rs`,

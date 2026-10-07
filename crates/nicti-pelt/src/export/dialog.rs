@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::folder_dialog::FolderPicker;
 use nicti_preen::naming::{AssetFacts, Template};
 use nicti_preen::spec::{
     Anchor, BitDepth, CollisionPolicy, DestinationBase, ExportFormat, ExportSpace, ExportSpec,
@@ -105,6 +106,8 @@ struct Dialog {
     preset_name: String,
     selected_preset: Option<String>,
     message: Option<String>,
+    /// #342: the destination folder's native Browse dialog.
+    folder_picker: FolderPicker,
 }
 
 pub struct ExportUi {
@@ -156,6 +159,7 @@ impl ExportUi {
             preset_name: String::new(),
             selected_preset: None,
             message: None,
+            folder_picker: FolderPicker::default(),
         });
     }
 
@@ -302,7 +306,7 @@ impl ExportUi {
         ui.separator();
         naming_section(ui, d);
         ui.separator();
-        destination_section(ui, &mut d.spec);
+        destination_section(ui, &mut d.spec, &mut d.folder_picker);
         ui.add_space(6.0);
 
         let validity = d.spec.validate();
@@ -318,7 +322,11 @@ impl ExportUi {
 
         let mut action = Action::None;
         ui.horizontal(|ui| {
-            let start = ui.add_enabled(validity.is_ok(), egui::Button::new("Export"));
+            // Not while Browse is open: the pick would land after Export started with the old path.
+            let start = ui.add_enabled(
+                validity.is_ok() && !d.folder_picker.is_open(),
+                egui::Button::new("Export"),
+            );
             if start.clicked() {
                 action = Action::Start;
             }
@@ -665,7 +673,7 @@ fn preview_names(spec: &ExportSpec, samples: &[AssetFacts]) -> Result<Vec<String
         .collect())
 }
 
-fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
+fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut FolderPicker) {
     ui.strong("Destination");
     let mut same = matches!(spec.destination.base, DestinationBase::SameAsSource);
     ui.horizontal(|ui| {
@@ -684,12 +692,28 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             ui.label("Folder");
             let mut text = path.to_string_lossy().into_owned();
             if ui
-                .add(egui::TextEdit::singleline(&mut text).hint_text("C:\\Exports"))
+                .add_enabled(
+                    !picker.is_open(),
+                    egui::TextEdit::singleline(&mut text).hint_text("C:\\Exports"),
+                )
                 .changed()
             {
                 *path = PathBuf::from(text);
             }
+            if ui
+                .add_enabled(!picker.is_open(), egui::Button::new("Browse..."))
+                .clicked()
+            {
+                picker.open(ui.ctx(), "Export destination", &path.to_string_lossy());
+            }
         });
+    }
+    // Polled whether or not the Folder row is showing, so a pick made before switching to "Next to
+    // each original" is dropped instead of overwriting the path when the user switches back.
+    if let Some(chosen) = picker.poll() {
+        if let DestinationBase::Folder(path) = &mut spec.destination.base {
+            *path = chosen;
+        }
     }
     let mut sub = spec.destination.subfolder.clone().unwrap_or_default();
     ui.horizontal(|ui| {

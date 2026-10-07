@@ -38,6 +38,7 @@ nicti-siamese = { path = "../nicti-siamese" }
 nicti-preen = { path = "../nicti-preen" }
 thiserror = "2"
 nicti-stalk = { path = "../nicti-stalk" }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
 tempfile = "3"
