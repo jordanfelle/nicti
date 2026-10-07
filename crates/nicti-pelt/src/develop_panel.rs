@@ -958,6 +958,7 @@ fn show_histogram(ui: &mut egui::Ui, gpu: Option<(&DevelopEngine, &FrameTexture)
 /// sample's shift and range sliders.
 fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi) {
     let mut pc: PointColorParams = develop.stage_params(POINT_COLOR);
+    let before = pc;
     let count = usize::from(pc.count).min(pc.samples.len());
     let mut selected = crate::catseye::selected(ui.ctx()).min(count.saturating_sub(1));
     let mut delete = false;
@@ -1042,7 +1043,11 @@ fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut Heal
         crate::catseye::remove_sample(&mut pc, selected);
         crate::catseye::set_selected(ui.ctx(), selected.saturating_sub(1));
     }
-    develop.set_stage_params(POINT_COLOR, &pc);
+    // Write only on a real change: opening the section must not rewrite (and so mark edited, or
+    // strip unknown fields from) an entry the user did not touch.
+    if pc != before {
+        develop.set_stage_params(POINT_COLOR, &pc);
+    }
 }
 
 /// A small preview of the tone-curve LUT (see `color::build_tone_curve_lut`) as a line from
