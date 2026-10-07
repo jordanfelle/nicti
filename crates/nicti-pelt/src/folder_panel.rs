@@ -351,7 +351,8 @@ fn show_root(
         let item = ui
             .add_enabled(verify_enabled, egui::Button::new("Verify folder"))
             .on_hover_text(
-                "Re-read every photo here and compare it to the checksum recorded when it                  was copied.",
+                "Re-read every photo here and compare it to the checksum recorded \
+                 when it was copied.",
             );
         if item.clicked() {
             verify = true;
