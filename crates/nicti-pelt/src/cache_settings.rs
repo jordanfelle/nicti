@@ -4,19 +4,24 @@
 //! Every Larder touch from the UI thread uses `try_lock_larder`, never a blocking lock: a running
 //! `CompactJob` can hold it for minutes, and the panel must not freeze the window on that. A busy
 //! Larder shows the last stats it read and refuses an action with a message instead of queueing
-//! it. Once the lock is held, a big cap shrink (per-entry eviction) or purge still runs inline
-//! on the UI thread -- a possible brief frame stall, tracked as a follow-up.
+//! it. A cap change or purge (#327: per-entry eviction / deleting the multi-GB pack) runs as a
+//! Pounce [`CacheOpJob`] that blocks on the lock like `CompactJob` does, never on the UI thread;
+//! the panel disables the buttons while one is in flight.
 //! Purging empties the whole Larder -- the camera T2 and (#145) the rendered tier -- and `purge_all` reclaims disk
 //! immediately where `purge_tier` would leave dead bytes for a later compaction. A T0 purge is a
 //! catalog `preview` table operation the Larder doesn't cover; left out on purpose (the ticket
 //! marks it optional).
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nicti_lair::larder::{LarderConfig, LarderStats};
 use nicti_lair::pounce_jobs::ReportSlot;
-use nicti_pounce::Pounce;
+use nicti_pounce::{
+    ChunkedJob, JobError, JobKind, JobSpec, Lane, Pounce, Priority, Progress, Step,
+};
 
 use crate::t2::{self, CompactJob, CompactResult, SharedLarder};
 
@@ -114,6 +119,128 @@ pub fn larder_config_for(catalog_path: &Path) -> LarderConfig {
     cfg
 }
 
+/// A Larder-wide operation too slow for the UI thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheOp {
+    SetCap(u64),
+    Purge,
+}
+
+/// What a finished [`CacheOp`] did. `save_error` is a cap that applied for this session but could
+/// not be persisted.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CacheOpDone {
+    Cap {
+        bytes: u64,
+        save_error: Option<String>,
+    },
+    Purged {
+        freed: u64,
+    },
+}
+
+pub type CacheOpResult = Result<CacheOpDone, String>;
+
+/// Runs `op` to completion, blocking on the Larder lock (the caller is a worker thread, or a test).
+/// A cap change persists itself, so it survives the panel being closed before the job finishes.
+pub fn run_cache_op(larder: &SharedLarder, catalog_path: &Path, op: CacheOp) -> CacheOpResult {
+    let mut guard = larder.lock().unwrap_or_else(|poisoned| {
+        // Same repair `try_lock_larder` does: a panicked `put` can leave its transaction open.
+        let mut guard = poisoned.into_inner();
+        guard.recover_after_panic();
+        larder.clear_poison();
+        guard
+    });
+    match op {
+        CacheOp::SetCap(bytes) => {
+            let previous = guard.stats().ok().map(|s| s.cap_bytes);
+            if let Err(e) = guard.set_cap(bytes) {
+                // `set_cap` assigns the new cap before evicting, so a mid-eviction error would
+                // leave the live cache on a cap that was never persisted; put the old one back.
+                if let Some(previous) = previous {
+                    let _ = guard.set_cap(previous);
+                }
+                return Err(format!("Setting the cap failed: {e}"));
+            }
+            drop(guard);
+            Ok(CacheOpDone::Cap {
+                bytes,
+                save_error: save_cap(catalog_path, bytes).err().map(|e| e.to_string()),
+            })
+        }
+        CacheOp::Purge => guard
+            .purge_all()
+            .map(|freed| CacheOpDone::Purged { freed })
+            .map_err(|e| format!("Purge failed: {e}")),
+    }
+}
+
+/// Runs a [`CacheOp`] as a Pounce background job.
+pub struct CacheOpJob {
+    larder: SharedLarder,
+    catalog_path: PathBuf,
+    op: CacheOp,
+    done: bool,
+    result: ReportSlot<CacheOpResult>,
+}
+
+impl CacheOpJob {
+    pub fn new(
+        larder: SharedLarder,
+        catalog_path: PathBuf,
+        op: CacheOp,
+    ) -> (Self, ReportSlot<CacheOpResult>) {
+        let result = Arc::new(Mutex::new(None));
+        (
+            CacheOpJob {
+                larder,
+                catalog_path,
+                op,
+                done: false,
+                result: result.clone(),
+            },
+            result,
+        )
+    }
+}
+
+impl ChunkedJob for CacheOpJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Preview,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self.op {
+            CacheOp::SetCap(_) => "Resize preview cache".to_string(),
+            CacheOp::Purge => "Purge preview cache".to_string(),
+        }
+    }
+
+    fn progress(&self) -> Progress {
+        Progress {
+            done: u64::from(self.done),
+            total: Some(1),
+        }
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        // Must resolve the slot even on a panic, or the panel waits on it forever.
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            run_cache_op(&self.larder, &self.catalog_path, self.op)
+        }))
+        .unwrap_or_else(|_| Err("preview cache operation panicked".to_string()));
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        self.done = true;
+        Ok(Step::Done)
+    }
+}
+
 /// UI-only state for the panel.
 #[derive(Default)]
 pub struct CacheSettingsUi {
@@ -127,6 +254,8 @@ pub struct CacheSettingsUi {
     /// finds the destructive button already showing.
     confirm_purge: Option<Instant>,
     compaction: Option<ReportSlot<CompactResult>>,
+    /// The in-flight cap change / purge -- at most one at a time.
+    op: Option<ReportSlot<CacheOpResult>>,
 }
 
 impl CacheSettingsUi {
@@ -164,42 +293,56 @@ impl CacheSettingsUi {
         self.last_refresh = None;
     }
 
-    fn apply_cap(&mut self, larder: &SharedLarder, catalog_path: &Path, bytes: u64) {
-        let Some(mut guard) = t2::try_lock_larder(larder) else {
-            self.message = Some("Preview cache is busy; try again in a moment.".into());
+    fn busy(&self) -> bool {
+        self.compaction.is_some() || self.op.is_some()
+    }
+
+    fn poll_op(&mut self) {
+        let Some(slot) = &self.op else {
             return;
         };
-        let previous = guard.stats().ok().map(|s| s.cap_bytes);
-        if let Err(e) = guard.set_cap(bytes) {
-            // `set_cap` assigns the new cap before evicting, so a mid-eviction error would leave
-            // the live cache on a cap that was never persisted; put the old one back.
-            if let Some(previous) = previous {
-                let _ = guard.set_cap(previous);
-            }
-            self.message = Some(format!("Setting the cap failed: {e}"));
+        let Some(result) = slot.lock().ok().and_then(|mut s| s.take()) else {
             return;
-        }
-        drop(guard);
-        self.message = Some(match save_cap(catalog_path, bytes) {
-            Ok(()) => format!("Cap set to {}.", format_bytes(bytes)),
-            Err(e) => format!(
+        };
+        self.message = Some(match result {
+            Ok(CacheOpDone::Cap {
+                bytes,
+                save_error: None,
+            }) => format!("Cap set to {}.", format_bytes(bytes)),
+            Ok(CacheOpDone::Cap {
+                bytes,
+                save_error: Some(e),
+            }) => format!(
                 "Cap set to {} for this session, but saving it failed: {e}",
                 format_bytes(bytes)
             ),
+            Ok(CacheOpDone::Purged { freed }) => {
+                format!("Purged {} of cached previews.", format_bytes(freed))
+            }
+            Err(e) => e,
         });
+        self.op = None;
         self.last_refresh = None;
     }
 
-    fn purge(&mut self, larder: &SharedLarder) {
-        let Some(mut guard) = t2::try_lock_larder(larder) else {
+    fn start_op(
+        &mut self,
+        larder: &SharedLarder,
+        catalog_path: &Path,
+        pounce: &Pounce,
+        op: CacheOp,
+    ) {
+        if self.busy() {
             self.message = Some("Preview cache is busy; try again in a moment.".into());
             return;
-        };
-        self.message = Some(match guard.purge_all() {
-            Ok(freed) => format!("Purged {} of cached previews.", format_bytes(freed)),
-            Err(e) => format!("Purge failed: {e}"),
+        }
+        let (job, slot) = CacheOpJob::new(larder.clone(), catalog_path.to_path_buf(), op);
+        pounce.submit(Box::new(job));
+        self.op = Some(slot);
+        self.message = Some(match op {
+            CacheOp::SetCap(_) => "Applying the cap in the background...".into(),
+            CacheOp::Purge => "Purging previews in the background...".into(),
         });
-        self.last_refresh = None;
     }
 }
 
@@ -218,13 +361,15 @@ pub fn show(
     };
 
     state.poll_compaction();
+    state.poll_op();
     state.refresh_stats(larder);
-    if state.compaction.is_some() {
+    if state.busy() {
         ui.ctx().request_repaint_after(Duration::from_millis(300));
     } else {
         ui.ctx().request_repaint_after(STATS_REFRESH);
     }
 
+    let idle = !state.busy();
     let Some(stats) = state.stats else {
         ui.label("Reading preview cache...");
         return;
@@ -255,24 +400,27 @@ pub fn show(
         ui.label("Cap (GiB):");
         let response = ui.add(egui::TextEdit::singleline(cap_input).desired_width(60.0));
         let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if ui.button("Apply").clicked() || enter {
+        if ui.add_enabled(idle, egui::Button::new("Apply")).clicked() || (enter && idle) {
             apply = Some(parse_cap_gib(cap_input));
         }
-        if ui.button("Default (8)").clicked() {
+        if ui
+            .add_enabled(idle, egui::Button::new("Default (8)"))
+            .clicked()
+        {
             *cap_input = cap_text(LarderConfig::default().cap_bytes);
             apply = Some(Ok(LarderConfig::default().cap_bytes));
         }
     });
     match apply {
-        Some(Ok(bytes)) => state.apply_cap(larder, catalog_path, bytes),
+        Some(Ok(bytes)) => state.start_op(larder, catalog_path, pounce, CacheOp::SetCap(bytes)),
         Some(Err(e)) => state.message = Some(e),
         None => {}
     }
 
     ui.horizontal(|ui| {
-        let compacting = state.compaction.is_some();
+        let busy = state.busy();
         if ui
-            .add_enabled(!compacting, egui::Button::new("Reclaim disk space"))
+            .add_enabled(!busy, egui::Button::new("Reclaim disk space"))
             .clicked()
         {
             let (job, slot) = CompactJob::new(larder.clone());
@@ -281,14 +429,20 @@ pub fn show(
             state.message = Some("Reclaiming space in the background...".into());
         }
         if state.purge_armed() {
-            if ui.button("Really purge all previews").clicked() {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Really purge all previews"))
+                .clicked()
+            {
                 state.confirm_purge = None;
-                state.purge(larder);
+                state.start_op(larder, catalog_path, pounce, CacheOp::Purge);
             }
             if ui.button("Cancel").clicked() {
                 state.confirm_purge = None;
             }
-        } else if ui.button("Purge all previews").clicked() {
+        } else if ui
+            .add_enabled(!busy, egui::Button::new("Purge all previews"))
+            .clicked()
+        {
             state.confirm_purge = Some(Instant::now());
         }
     });
@@ -370,8 +524,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let catalog = dir.path().join("cat.db");
         let larder = t2::open_larder(&catalog).unwrap();
-        let mut ui = CacheSettingsUi::default();
-        ui.apply_cap(&larder, &catalog, GIB);
+        let done = run_cache_op(&larder, &catalog, CacheOp::SetCap(GIB)).unwrap();
+        assert_eq!(
+            done,
+            CacheOpDone::Cap {
+                bytes: GIB,
+                save_error: None
+            }
+        );
         assert_eq!(larder.lock().unwrap().stats().unwrap().cap_bytes, GIB);
         assert_eq!(load_cap(&catalog), Some(GIB));
         // A fresh session opens with the saved cap.
@@ -399,8 +559,7 @@ mod tests {
             }
             assert!(l.stats().unwrap().live_bytes > MIN_CAP_BYTES);
         }
-        let mut ui = CacheSettingsUi::default();
-        ui.apply_cap(&larder, &catalog, MIN_CAP_BYTES);
+        run_cache_op(&larder, &catalog, CacheOp::SetCap(MIN_CAP_BYTES)).unwrap();
         let stats = larder.lock().unwrap().stats().unwrap();
         assert_eq!(stats.cap_bytes, MIN_CAP_BYTES);
         assert!(stats.live_bytes <= MIN_CAP_BYTES, "{stats:?}");
@@ -429,28 +588,69 @@ mod tests {
             render_hash: "h",
         };
         assert!(larder.lock().unwrap().put(key, &[7u8; 4096]).unwrap());
-        let mut ui = CacheSettingsUi::default();
-        ui.purge(&larder);
+        let done = run_cache_op(&larder, &catalog, CacheOp::Purge).unwrap();
+        assert_eq!(done, CacheOpDone::Purged { freed: 4096 });
         let stats = larder.lock().unwrap().stats().unwrap();
         assert_eq!(
             (stats.entry_count, stats.live_bytes, stats.file_bytes),
             (0, 0, 0)
         );
-        assert!(ui.message.unwrap().contains("4 KiB"));
+    }
+
+    /// Polls the panel until its in-flight op resolves (the job runs on a Pounce worker).
+    fn finish(ui: &mut CacheSettingsUi) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while ui.op.is_some() {
+            ui.poll_op();
+            assert!(Instant::now() < deadline, "cache op never resolved");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
-    fn actions_refuse_rather_than_block_while_the_larder_is_busy() {
+    fn cap_change_runs_off_the_calling_thread_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = dir.path().join("cat.db");
         let larder = t2::open_larder(&catalog).unwrap();
-        let held = larder.lock().unwrap();
+        let pounce = Pounce::new(0, 2, 2, || {});
         let mut ui = CacheSettingsUi::default();
-        ui.apply_cap(&larder, &catalog, GIB);
-        assert!(ui.message.as_deref().unwrap().contains("busy"));
-        ui.purge(&larder);
+        // Holding the lock stands in for a slow eviction: `start_op` must return immediately
+        // (it would deadlock this thread if it ran the op inline) and the op must wait for it.
+        let held = larder.lock().unwrap();
+        ui.start_op(&larder, &catalog, &pounce, CacheOp::SetCap(GIB));
+        assert!(ui.busy());
+        assert!(ui.message.as_deref().unwrap().contains("background"));
+        // A second action while one is in flight is refused, not queued.
+        ui.start_op(&larder, &catalog, &pounce, CacheOp::Purge);
         assert!(ui.message.as_deref().unwrap().contains("busy"));
         drop(held);
-        assert_eq!(load_cap(&catalog), None, "a refused apply must not persist");
+        finish(&mut ui);
+        assert!(ui
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("Cap set to 1.00 GiB"));
+        assert_eq!(larder.lock().unwrap().stats().unwrap().cap_bytes, GIB);
+        assert_eq!(load_cap(&catalog), Some(GIB));
+    }
+
+    #[test]
+    fn purge_job_reports_freed_bytes() {
+        use nicti_lair::larder::{LarderKey, LarderTier};
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("cat.db");
+        let larder = t2::open_larder(&catalog).unwrap();
+        let key = LarderKey {
+            asset_id: 1,
+            tier: LarderTier::T2,
+            render_hash: "h",
+        };
+        assert!(larder.lock().unwrap().put(key, &[7u8; 4096]).unwrap());
+        let pounce = Pounce::new(0, 2, 2, || {});
+        let mut ui = CacheSettingsUi::default();
+        ui.start_op(&larder, &catalog, &pounce, CacheOp::Purge);
+        finish(&mut ui);
+        assert!(ui.message.as_deref().unwrap().contains("4 KiB"));
+        assert_eq!(larder.lock().unwrap().stats().unwrap().entry_count, 0);
     }
 }
