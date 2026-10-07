@@ -34,6 +34,16 @@ fn mismatched_abi_version_is_rejected_cleanly() {
     }
 }
 
+/// The structural guarantee behind the flake fix: variants never share an artifact path, so a
+/// concurrent build of one cannot replace the dylib another test is about to load.
+#[test]
+fn distinct_feature_sets_never_share_an_artifact() {
+    let a = support::build_dewclaw(&["no-export"]);
+    let b = support::build_dewclaw(&["bad-abi"]);
+    assert_ne!(a, b);
+    assert!(a.exists() && b.exists(), "both variants must remain on disk");
+}
+
 #[test]
 fn missing_export_is_rejected_cleanly() {
     let path = support::build_dewclaw(&["no-export"]);
