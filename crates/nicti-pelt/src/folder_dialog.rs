@@ -29,12 +29,13 @@ impl FolderPicker {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let title = title.to_owned();
-        let start = start_dir(start);
+        let start = start.to_owned();
         let spawned = std::thread::Builder::new()
             .name("folder-dialog".into())
             .spawn(move || {
+                // Off the UI thread: `is_dir` on a dead mapped drive/UNC path can block for seconds.
                 let mut dialog = rfd::FileDialog::new().set_title(title);
-                if let Some(dir) = start {
+                if let Some(dir) = start_dir(&start) {
                     dialog = dialog.set_directory(dir);
                 }
                 let _ = tx.send(dialog.pick_folder());

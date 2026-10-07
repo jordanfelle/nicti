@@ -699,10 +699,14 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut Fo
             {
                 picker.open(ui.ctx(), "Export destination", &path.to_string_lossy());
             }
-            if let Some(chosen) = picker.poll() {
-                *path = chosen;
-            }
         });
+    }
+    // Polled whether or not the Folder row is showing, so a pick made before switching to "Next to
+    // each original" is dropped instead of overwriting the path when the user switches back.
+    if let Some(chosen) = picker.poll() {
+        if let DestinationBase::Folder(path) = &mut spec.destination.base {
+            *path = chosen;
+        }
     }
     let mut sub = spec.destination.subfolder.clone().unwrap_or_default();
     ui.horizontal(|ui| {

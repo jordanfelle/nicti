@@ -802,9 +802,9 @@ constant is to be re-validated on real photos before it is trusted (see ADR-0432
 `nicti-pelt` gains one direct dependency, [`rfd`](https://crates.io/crates/rfd) 0.17 (`MIT`, per its
 crate metadata), for the Browse... buttons on the Import/Move/Export path fields. It is built with
 `default-features = false, features = ["xdg-portal"]`: on Windows (the shipping target) it calls the native
-Win32 dialog with no extra code, and on Linux it talks to the desktop's XDG portal over D-Bus instead of
+Win32 dialog with no extra code, and on Linux it asks the desktop's XDG portal (libdbus loaded at runtime, zenity fallback) instead of
 linking GTK3 (`gtk3` is LGPL, and would have been a large native dependency for a dev-only platform).
-Its one new transitive crate of note, `pollster` (`Apache-2.0 OR MIT`), is already allowlisted.
+Its one new transitive crate, `pollster` 0.4 (`Apache-2.0 OR MIT`), is allowlisted but duplicates the `pollster` 1.0 already in the tree (a `cargo deny` duplicate warning, not a failure).
 `cargo deny check licenses bans` passes with no `deny.toml` change; no data asset, model or font is added.
 
 ## Footnotes

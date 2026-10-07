@@ -1783,6 +1783,15 @@ impl PeltApp {
             ui.label(summary);
         }
 
+        // Polled outside the collapsing header so a pick made while it is collapsed lands now,
+        // not whenever the header is next opened.
+        if let Some(chosen) = self.import_picker.poll() {
+            self.import_path_input = chosen.to_string_lossy().into_owned();
+            self.import_status = None;
+        }
+        if let Some(chosen) = self.move_picker.poll() {
+            self.move_dest_input = chosen.to_string_lossy().into_owned();
+        }
         egui::CollapsingHeader::new("Folders: import, sync, move")
             .id_salt("nicti_pelt_library_folders")
             .default_open(true)
@@ -1946,10 +1955,6 @@ impl PeltApp {
                             &self.import_path_input,
                         );
                     }
-                    if let Some(chosen) = self.import_picker.poll() {
-                        self.import_path_input = chosen.to_string_lossy().into_owned();
-                        self.import_status = None;
-                    }
                     if ui.button("Import").clicked() {
                         self.submit_root_job(&store, RootAction::Import);
                     }
@@ -1982,9 +1987,6 @@ impl PeltApp {
                     {
                         self.move_picker
                             .open(ui.ctx(), "Move into folder", &self.move_dest_input);
-                    }
-                    if let Some(chosen) = self.move_picker.poll() {
-                        self.move_dest_input = chosen.to_string_lossy().into_owned();
                     }
                 });
                 let mut move_root = None;
