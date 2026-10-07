@@ -73,6 +73,7 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
         ],
         cblack: [0, 0, 0, 0],
         pixels,
+        dng_opcode_list3: None,
     }
 }
 

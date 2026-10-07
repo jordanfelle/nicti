@@ -1615,6 +1615,7 @@ mod tests {
                 100, 120, 105, // (0,1) -- at/near black on every channel
                 800, 300, 950, // (1,1)
             ],
+            dng_opcode_list3: None,
         }
     }
 
@@ -1686,6 +1687,7 @@ mod tests {
                 500, 510, 520, // (1,1)
                 600, 610, 620, // (2,1)
             ],
+            dng_opcode_list3: None,
         };
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {
@@ -1736,6 +1738,7 @@ mod tests {
             cam_xyz: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             cblack: [0, 0, 0, 0],
             pixels: vec![100, 200, 300], // R, G, B -- 3 samples, odd total.
+            dng_opcode_list3: None,
         };
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {
