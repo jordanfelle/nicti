@@ -101,6 +101,7 @@ fn imports_one_real_root_into_a_throwaway_catalog() {
             catalog_path: lrcat.into(),
             remaps: vec![],
             only_roots: vec![root],
+            profile_resolver: None,
         },
     );
     let started = Instant::now();

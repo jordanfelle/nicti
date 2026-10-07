@@ -29,7 +29,10 @@ use nicti_lair::{
     AssetMeta, CatalogStore, Collection, CollectionKind as NictiCollectionKind, LrcItem,
     LrcProvenance,
 };
+use nicti_pawprint::StageEntry;
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
+use nicti_tapetum::coat::CameraProfileParams;
+use nicti_tapetum::stages::WORKING_SPACE;
 use rusqlite::Connection;
 
 use crate::develop::{translate, Context};
@@ -54,6 +57,9 @@ pub struct ImportConfig {
     pub remaps: Vec<RootRemap>,
     /// Import only these LRC root folder ids (`AgLibraryRootFolder.id_local`); empty = all roots.
     pub only_roots: Vec<i64>,
+    /// Resolves LRC camera-profile names to installed `.dcp`/Look files (#381). `None` = profiles
+    /// are not imported (each such photo is counted in `LrcImportReport::profiles_missing`).
+    pub profile_resolver: Option<crate::resolver::ResolverHandle>,
 }
 
 struct RootWork {
@@ -114,6 +120,11 @@ pub struct LrcImportJob {
     /// master's asset: they share its file).
     image_asset: HashMap<i64, i64>,
     asset_dims: HashMap<i64, (u32, u32)>,
+    /// Asset id -> (make, model), for resolving a camera profile by name. Only assets whose EXIF
+    /// carried both are present.
+    asset_cameras: HashMap<i64, (String, String)>,
+    /// One resolution per (make, model, profile name) per run: the resolver reads the disk.
+    profile_cache: HashMap<(String, String, String), Option<CameraProfileParams>>,
     total_images: u64,
     done_images: u64,
     tagged: HashSet<i64>,
@@ -138,6 +149,8 @@ impl LrcImportJob {
             roots: Vec::new(),
             image_asset: HashMap::new(),
             asset_dims: HashMap::new(),
+            asset_cameras: HashMap::new(),
+            profile_cache: HashMap::new(),
             total_images: 0,
             done_images: 0,
             tagged: HashSet::new(),
@@ -279,6 +292,10 @@ impl LrcImportJob {
                 for asset in self.store.list_assets_by_root(local_root_id)? {
                     if let (Some(w), Some(h)) = (asset.width, asset.height) {
                         self.asset_dims.insert(asset.id, (w, h));
+                    }
+                    if let (Some(make), Some(model)) = (&asset.make, &asset.model) {
+                        self.asset_cameras
+                            .insert(asset.id, (make.clone(), model.clone()));
                     }
                     map.insert(asset.rel_path_fold, asset.id);
                 }
@@ -514,6 +531,22 @@ impl LrcImportJob {
         Ok(Step::Yield)
     }
 
+    /// LRC's profile `name` for this asset's camera -> the stage params that select it, or `None`.
+    fn resolve_profile(&mut self, asset_id: i64, name: &str) -> Option<CameraProfileParams> {
+        let resolver = self.config.profile_resolver.as_ref()?.0.clone();
+        // An unknown camera is passed through as empty strings: it is the resolver's call that
+        // nothing can be matched without one (and a test resolver does not need EXIF).
+        let (make, model) = self
+            .asset_cameras
+            .get(&asset_id)
+            .cloned()
+            .unwrap_or_default();
+        self.profile_cache
+            .entry((make.clone(), model.clone(), name.to_string()))
+            .or_insert_with(|| resolver.resolve(&make, &model, name))
+            .clone()
+    }
+
     /// One image -> its chunk item, folding develop-translation counters into the report. `None`
     /// when the image has no matched asset.
     fn item_for(&mut self, img: &LrcImage) -> Option<LrcItem> {
@@ -545,7 +578,28 @@ impl LrcImportJob {
                 process_version: dev.process_version.clone(),
             };
             match translate(&dev.text, &ctx) {
-                Ok(t) => {
+                Ok(mut t) => {
+                    if let Some(name) = t.camera_profile.take() {
+                        match self.resolve_profile(asset_id, &name) {
+                            Some(params) => {
+                                if let Ok(value) = serde_json::to_value(&params) {
+                                    t.document.stages.insert(
+                                        WORKING_SPACE.to_string(),
+                                        StageEntry {
+                                            schema_version: 1,
+                                            params: value,
+                                        },
+                                    );
+                                    self.report.profiles_resolved += 1;
+                                }
+                            }
+                            None => {
+                                *self.report.profiles_missing.entry(name).or_default() += 1;
+                                t.untranslated.push("CameraProfile".to_string());
+                                t.untranslated.sort();
+                            }
+                        }
+                    }
                     for key in &t.untranslated {
                         *self.report.untranslated.entry(key.clone()).or_default() += 1;
                     }

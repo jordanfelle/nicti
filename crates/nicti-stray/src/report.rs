@@ -53,6 +53,11 @@ pub struct LrcImportReport {
     pub sidecars_marked: u64,
     /// Develop keys with real values that nicti has no stage for, by number of images using them.
     pub untranslated: BTreeMap<String, u64>,
+    /// Photos whose LRC camera profile (#381) resolved to an installed `.dcp`/Look and was written.
+    pub profiles_resolved: u64,
+    /// Camera profiles LRC uses that nicti could not resolve (not installed for that camera, no
+    /// resolver configured, or camera unknown), by profile name -- what the user should install.
+    pub profiles_missing: BTreeMap<String, u64>,
     pub filters: FilterCounts,
     pub stats: Stats,
 }

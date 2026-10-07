@@ -105,6 +105,7 @@ impl LrcImportUi {
             catalog_path: PathBuf::from(self.path.trim()),
             remaps: remaps_of(rows),
             only_roots,
+            profile_resolver: None,
         })
     }
 

@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use nicti_lair::{AssetMeta, CatalogStore, SqliteCatalog};
 use nicti_pounce::{ChunkedJob, Step};
-use nicti_stray::{ImportConfig, LrcImportJob, LrcImportReport};
+use nicti_stray::{ImportConfig, LrcImportJob, LrcImportReport, ProfileResolver, ResolverHandle};
+use nicti_tapetum::coat::CameraProfileParams;
 use rusqlite::Connection;
 use test_fixture::*;
 
@@ -22,7 +23,7 @@ struct World {
     lrcat: PathBuf,
 }
 
-const DEV_A: &str = "s = { Exposure2012 = 0.5, Contrast2012 = 20, RedHue = 10 }";
+const DEV_A: &str = "s = { Exposure2012 = 0.5, Contrast2012 = 20, PerspectiveVertical = 10 }";
 
 fn world() -> World {
     let dir = tempfile::tempdir().unwrap();
@@ -116,6 +117,14 @@ fn world() -> World {
 }
 
 fn run(store: &Arc<SqliteCatalog>, lrcat: &Path) -> LrcImportReport {
+    run_with(store, lrcat, None)
+}
+
+fn run_with(
+    store: &Arc<SqliteCatalog>,
+    lrcat: &Path,
+    profile_resolver: Option<ResolverHandle>,
+) -> LrcImportReport {
     let dynamic: Arc<dyn CatalogStore + Send + Sync> = store.clone();
     let (mut job, slot) = LrcImportJob::new(
         dynamic,
@@ -123,6 +132,7 @@ fn run(store: &Arc<SqliteCatalog>, lrcat: &Path) -> LrcImportReport {
             catalog_path: lrcat.to_path_buf(),
             remaps: vec![],
             only_roots: vec![],
+            profile_resolver,
         },
     );
     loop {
@@ -167,7 +177,7 @@ fn imports_metadata_keywords_collections_variants_and_provenance() {
     assert_eq!(report.roots[0].missing_examples, vec!["2026/gone.NEF"]);
     assert_eq!(report.virtual_copies, 1);
     assert_eq!(report.develop_parse_failures, 1);
-    assert_eq!(report.untranslated.get("RedHue"), Some(&1));
+    assert_eq!(report.untranslated.get("PerspectiveVertical"), Some(&1));
 
     let a = asset_id(&store, &w.root, "2026/Event/a.NEF");
     let b = asset_id(&store, &w.root, "2026/Event/b.NEF");
@@ -201,7 +211,7 @@ fn imports_metadata_keywords_collections_variants_and_provenance() {
     assert_eq!(doc.stages["nicti.exposure"].params["stops"], 0.5);
     let prov = store.lrc_provenance("G1").unwrap().unwrap();
     assert_eq!(prov.develop_text.as_deref(), Some(DEV_A));
-    assert_eq!(prov.untranslated, vec!["RedHue".to_string()]);
+    assert_eq!(prov.untranslated, vec!["PerspectiveVertical".to_string()]);
     assert_eq!(prov.iptc_caption.as_deref(), Some("a caption"));
 
     // Virtual copy: an extra variant with its own edit; the master's markers untouched by it.
@@ -332,6 +342,7 @@ fn dropping_the_job_early_resolves_the_slot_as_cancelled() {
             catalog_path: w.lrcat.clone(),
             remaps: vec![],
             only_roots: vec![],
+            profile_resolver: None,
         },
     );
     assert!(matches!(job.step().unwrap(), Step::Yield));
@@ -368,6 +379,7 @@ fn only_the_selected_roots_are_ingested_and_imported() {
             catalog_path: w.lrcat.clone(),
             remaps: vec![],
             only_roots: vec![2],
+            profile_resolver: None,
         },
     );
     while matches!(job.step().unwrap(), Step::Yield) {}
@@ -442,4 +454,120 @@ fn an_unrated_lrc_photo_never_erases_a_rating_already_in_nicti() {
     let report = run(&store, &w.lrcat);
     assert_eq!(report.error, None);
     assert_eq!(store.get_meta(&[b]).unwrap()[&b].rating, Some(5));
+}
+
+/// Knows "Camera Landscape" only; records every ask so the tests can see the per-run cache work.
+struct FakeResolver(std::sync::Mutex<Vec<String>>);
+
+impl ProfileResolver for FakeResolver {
+    fn resolve(&self, _make: &str, _model: &str, name: &str) -> Option<CameraProfileParams> {
+        self.0.lock().unwrap().push(name.to_string());
+        (name == "Camera Landscape").then(|| CameraProfileParams {
+            name: Some(name.to_string()),
+            path: Some("C:/Profiles/NIKON Z 8 Camera Landscape.dcp".into()),
+            content_hash: Some("abc123".into()),
+            look: None,
+        })
+    }
+}
+
+/// #381: a develop text naming a camera profile gets its resolved `.dcp` written as the
+/// `nicti.working_space` stage; a name the resolver does not know is reported, not guessed; the
+/// untouched "Adobe Standard" requests nothing; and the resolver is asked once per distinct name.
+#[test]
+fn camera_profiles_are_resolved_written_and_reported() {
+    let w = world();
+    {
+        let conn = Connection::open(&w.lrcat).unwrap();
+        add_develop(
+            &conn,
+            2,
+            r#"s = { Exposure2012 = 1, CameraProfile = "Camera Landscape" }"#,
+        );
+        // The virtual copy asks for the same profile, so the cache must absorb its lookup.
+        conn.execute(
+            "DELETE FROM Adobe_imageDevelopSettings WHERE image IN (1, 3)",
+            [],
+        )
+        .unwrap();
+        add_develop(
+            &conn,
+            3,
+            r#"s = { Exposure2012 = -1, CameraProfile = "Camera Landscape" }"#,
+        );
+        add_develop(
+            &conn,
+            1,
+            r#"s = { Exposure2012 = 0.5, CameraProfile = "Adobe Vivid" }"#,
+        );
+    }
+    let store = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let resolver = Arc::new(FakeResolver(Default::default()));
+    struct Shared(Arc<FakeResolver>);
+    impl ProfileResolver for Shared {
+        fn resolve(&self, make: &str, model: &str, name: &str) -> Option<CameraProfileParams> {
+            self.0.resolve(make, model, name)
+        }
+    }
+    let report = run_with(
+        &store,
+        &w.lrcat,
+        Some(ResolverHandle::new(Shared(resolver.clone()))),
+    );
+    assert_eq!(report.error, None);
+
+    let b = asset_id(&store, &w.root, "2026/Event/b.NEF");
+    for doc in [
+        store.get_master_edit(b).unwrap().unwrap(),
+        store.get_variant_edit(b, "Copy 1").unwrap().unwrap(),
+    ] {
+        let ws = &doc.stages["nicti.working_space"].params;
+        assert_eq!(ws["name"], "Camera Landscape");
+        assert_eq!(ws["content_hash"], "abc123");
+    }
+    // Resolved twice (master + copy), asked once.
+    assert_eq!(report.profiles_resolved, 2);
+    let asks = resolver.0.lock().unwrap().clone();
+    assert_eq!(
+        asks.iter().filter(|n| *n == "Camera Landscape").count(),
+        1,
+        "{asks:?}"
+    );
+
+    // "Adobe Vivid" is unknown to the resolver: no profile stage, counted by name, and listed on
+    // the image's provenance so it is not lost.
+    let a = asset_id(&store, &w.root, "2026/Event/a.NEF");
+    let doc = store.get_master_edit(a).unwrap().unwrap();
+    assert!(!doc.stages.contains_key("nicti.working_space"));
+    assert_eq!(report.profiles_missing.get("Adobe Vivid"), Some(&1));
+    assert_eq!(report.untranslated.get("CameraProfile"), Some(&1));
+    assert!(store
+        .lrc_provenance("G1")
+        .unwrap()
+        .unwrap()
+        .untranslated
+        .contains(&"CameraProfile".to_string()));
+}
+
+/// #381: with no resolver configured every non-default profile is reported as missing and none is
+/// written, rather than silently dropped.
+#[test]
+fn without_a_resolver_profiles_are_reported_not_written() {
+    let w = world();
+    {
+        let conn = Connection::open(&w.lrcat).unwrap();
+        add_develop(
+            &conn,
+            2,
+            r#"s = { Exposure2012 = 1, CameraProfile = "Camera Landscape" }"#,
+        );
+    }
+    let store = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let report = run(&store, &w.lrcat);
+    let b = asset_id(&store, &w.root, "2026/Event/b.NEF");
+    let doc = store.get_master_edit(b).unwrap().unwrap();
+    assert_eq!(doc.stages["nicti.exposure"].params["stops"], 1.0);
+    assert!(!doc.stages.contains_key("nicti.working_space"));
+    assert_eq!(report.profiles_resolved, 0);
+    assert_eq!(report.profiles_missing.get("Camera Landscape"), Some(&1));
 }
