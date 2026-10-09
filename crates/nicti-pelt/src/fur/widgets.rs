@@ -6,20 +6,71 @@
 //! Changes: no i18n and no automation registry (#426 owns a harness), the section header owns its
 //! open state, and the segmented control reports itself to screen readers.
 
+use std::collections::BTreeMap;
+
 use egui::{pos2, vec2, Align2, CornerRadius, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 
 use super::icons::{paint, Icon};
 use super::slider::{hex, BAND_COLORS};
 use super::tokens::Tokens;
 
-/// A collapsible section: a header row (chevron + title) and `body` while open. The open state
-/// lives in egui's temp memory under `id`, so it survives frames but not a restart.
+/// Which sections the user opened or closed, by section id. Held in egui's memory while the app
+/// runs; the app seeds it with [`install_section_states`] and writes it back whenever
+/// [`take_changed_section_states`] reports a change, so the layout survives a restart.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SectionStates(BTreeMap<String, bool>);
+
+#[derive(Clone, Default)]
+struct SectionMemory {
+    states: SectionStates,
+    dirty: bool,
+}
+
+fn section_memory_id() -> egui::Id {
+    egui::Id::new("fur-section-states")
+}
+
+/// Seeds the remembered open/closed state (call once at startup).
+pub fn install_section_states(ctx: &egui::Context, states: SectionStates) {
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            section_memory_id(),
+            SectionMemory {
+                states,
+                dirty: false,
+            },
+        )
+    });
+}
+
+/// The state if a section was toggled since the last call, for the app to persist.
+pub fn take_changed_section_states(ctx: &egui::Context) -> Option<SectionStates> {
+    ctx.data_mut(|d| {
+        let mem = d.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
+        std::mem::take(&mut mem.dirty).then(|| mem.states.clone())
+    })
+}
+
+/// A collapsible section: a header row (chevron + title) and `body` while open. The open state is
+/// remembered per `id` (unique across the app) in [`SectionStates`], so it survives restarts once
+/// the app persists it; `default_open` applies until the user first toggles the section.
 pub fn section(ui: &mut Ui, id: &str, title: &str, default_open: bool, body: impl FnOnce(&mut Ui)) {
-    let key = ui.id().with(("fur-section", id));
-    let open = ui.data_mut(|d| *d.get_temp_mut_or(key, default_open));
+    let open = ui.data_mut(|d| {
+        let mem = d.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
+        mem.states.0.get(id).copied().unwrap_or(default_open)
+    });
     let resp = section_header(ui, title, open);
-    let open = if resp.clicked() { !open } else { open };
-    ui.data_mut(|d| d.insert_temp(key, open));
+    let open = if resp.clicked() {
+        ui.data_mut(|d| {
+            let mem = d.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
+            mem.states.0.insert(id.to_owned(), !open);
+            mem.dirty = true;
+        });
+        !open
+    } else {
+        open
+    };
     if open {
         body(ui);
         ui.add_space(6.0);
@@ -275,5 +326,54 @@ mod tests {
             divider(ui);
         });
         assert_eq!(out, None, "no click, no selection change");
+    }
+
+    /// Toggling a section reports the new state once for the app to save, and a fresh context
+    /// seeded with it (a restart) draws the section as the user left it.
+    #[test]
+    fn section_state_survives_a_restart() {
+        let ctx = themed_ctx();
+        let at = egui::pos2(60.0, 20.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut t = 0.0;
+        let mut frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
+            t += 0.02;
+            let input = egui::RawInput {
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut shown = false;
+            let mut out = ctx.run_ui(input, |ui| {
+                section(ui, "s", "Section", false, |_| shown = true);
+            });
+            out.textures_delta.clear();
+            shown
+        };
+        frame(&ctx, vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(
+            take_changed_section_states(&ctx),
+            None,
+            "nothing toggled yet"
+        );
+        frame(&ctx, vec![click(true)]);
+        frame(&ctx, vec![click(false)]);
+        let saved = take_changed_section_states(&ctx).expect("the toggle is reported");
+        assert_eq!(take_changed_section_states(&ctx), None, "reported once");
+
+        let text = serde_json::to_string(&saved).unwrap();
+        let restored: SectionStates = serde_json::from_str(&text).unwrap();
+        let fresh = themed_ctx();
+        install_section_states(&fresh, restored);
+        assert!(frame(&fresh, vec![]), "reopened after the restart");
+        assert!(
+            !frame(&themed_ctx(), vec![]),
+            "an unseeded context uses the default"
+        );
     }
 }

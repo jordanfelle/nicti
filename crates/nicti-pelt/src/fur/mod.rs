@@ -18,4 +18,7 @@ pub use iris_wheel::show as iris_wheel;
 pub use slider::{slider, SliderOut, SliderSpec, Track};
 pub use tokens::{apply, install_fonts};
 pub use whisker_curve::show as whisker_curve;
-pub use widgets::{band_dots, divider, icon_button, section, segmented};
+pub use widgets::{
+    band_dots, divider, icon_button, install_section_states, section, segmented,
+    take_changed_section_states, SectionStates,
+};

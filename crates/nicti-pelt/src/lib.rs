@@ -37,6 +37,7 @@ mod prebake;
 mod preview_color;
 mod preview_settings;
 mod render;
+mod section_state;
 mod stash;
 #[cfg(test)]
 mod swat;

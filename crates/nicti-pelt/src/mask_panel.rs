@@ -18,6 +18,7 @@ use nicti_tapetum::mask::params::{LocalAdjust, MaskParams, MaskSource, Op, MAX_C
 use nicti_tapetum::stages::MASKS;
 
 use crate::develop_panel::{image_to_screen, screen_to_image};
+use crate::fur::{self, SliderSpec};
 use crate::mask_edit::{
     add_color_sample, add_component, add_correction, begin_stroke, delete, duplicate,
     extend_stroke, has_brush, has_color_range, linear_ends, new_correction, next_id,
@@ -228,38 +229,36 @@ fn op_label(op: Op) -> &'static str {
     }
 }
 
+/// A fur slider row for `spec`; returns whether the value changed.
+fn fur_slider(ui: &mut egui::Ui, spec: &SliderSpec, value: &mut f32) -> bool {
+    fur::slider(ui, spec, value, true).changed
+}
+
 /// A slider for a normalized -1..1 value, shown like LRC's -100..100. Double-click resets.
-fn percent_slider(ui: &mut egui::Ui, label: &str, value: &mut f32) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let r = ui.add(
-            egui::Slider::new(value, -1.0..=1.0)
-                .custom_formatter(|n, _| format!("{:.0}", n * 100.0))
-                .custom_parser(|s| s.trim().parse::<f64>().ok().map(|v| v / 100.0)),
-        );
-        if r.double_clicked() {
-            *value = 0.0;
-            changed = true;
-        }
-        changed |= r.changed();
-    });
-    changed
+fn percent_slider(ui: &mut egui::Ui, label: &'static str, value: &mut f32) -> bool {
+    fur_slider(ui, &SliderSpec::bipolar(label, label).percent(), value)
+}
+
+/// A `0..=1` fraction shown as `0..=100`, resetting to `default`.
+fn fraction_slider(ui: &mut egui::Ui, label: &'static str, value: &mut f32, default: f32) -> bool {
+    fur_slider(
+        ui,
+        &SliderSpec::new(label, label, 0.0, 1.0, default).percent(),
+        value,
+    )
 }
 
 /// Renders the adjustment sliders of `a`; returns whether anything changed.
 fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
     let mut changed = false;
     ui.label("Light");
-    ui.horizontal(|ui| {
-        ui.label("Exposure");
-        let r = ui.add(egui::Slider::new(&mut a.exposure, -5.0..=5.0).fixed_decimals(2));
-        if r.double_clicked() {
-            a.exposure = 0.0;
-            changed = true;
-        }
-        changed |= r.changed();
-    });
+    changed |= fur_slider(
+        ui,
+        &SliderSpec::new("Exposure", "Exposure", -5.0, 5.0, 0.0)
+            .step(0.01, 2)
+            .signed(),
+        &mut a.exposure,
+    );
     for (label, v) in [
         ("Contrast", &mut a.contrast),
         ("Highlights", &mut a.highlights),
@@ -280,16 +279,14 @@ fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
     }
     let mut overlay = a.color.unwrap_or_default();
     let mut overlay_changed = false;
-    ui.horizontal(|ui| {
-        ui.label("Colour tint");
-        let hue = ui.add(egui::Slider::new(&mut overlay.hue_deg, 0.0..=360.0).suffix("°"));
-        let amount = ui.add(egui::Slider::new(&mut overlay.saturation, 0.0..=1.0));
-        overlay_changed |= hue.changed() || amount.changed();
-        if hue.double_clicked() || amount.double_clicked() {
-            overlay = Default::default();
-            overlay_changed = true;
-        }
-    });
+    overlay_changed |= fur_slider(
+        ui,
+        &SliderSpec::new("tint-hue", "Tint hue", 0.0, 360.0, 0.0)
+            .step(1.0, 0)
+            .unit("°"),
+        &mut overlay.hue_deg,
+    );
+    overlay_changed |= fraction_slider(ui, "Tint amount", &mut overlay.saturation, 0.0);
     if overlay_changed {
         // Keep a chosen hue even while the amount is still 0 (an all-default tint is "none").
         a.color = (overlay != Default::default()).then_some(overlay);
@@ -512,83 +509,82 @@ fn show_selected(
     ui.label("Mask");
     let mut remove = None;
     for (i, comp) in c.mask.components.iter_mut().enumerate() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(source_label(&comp.source));
-            egui::ComboBox::from_id_salt(("mask-op", sel, i))
-                .selected_text(op_label(comp.op))
-                .width(80.0)
-                .show_ui(ui, |ui| {
-                    for op in [Op::Add, Op::Subtract, Op::Intersect] {
-                        edited |= ui
-                            .selectable_value(&mut comp.op, op, op_label(op))
-                            .changed();
+        // Salted per component so each one's sliders have their own widget ids.
+        ui.push_id(("mask-comp", i), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(source_label(&comp.source));
+                egui::ComboBox::from_id_salt(("mask-op", sel, i))
+                    .selected_text(op_label(comp.op))
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for op in [Op::Add, Op::Subtract, Op::Intersect] {
+                            edited |= ui
+                                .selectable_value(&mut comp.op, op, op_label(op))
+                                .changed();
+                        }
+                    });
+                edited |= ui.checkbox(&mut comp.invert, "Invert").changed();
+                if ui
+                    .small_button("x")
+                    .on_hover_text("Remove component")
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+                match ai_state(mask, develop, &comp.source) {
+                    Some(AiState::Selecting) => {
+                        ui.spinner();
+                        ui.label("Selecting...");
                     }
-                });
-            edited |= ui.checkbox(&mut comp.invert, "Invert").changed();
-            edited |= ui
-                .add(egui::Slider::new(&mut comp.opacity, 0.0..=1.0).text("Opacity"))
-                .changed();
-            if ui
-                .small_button("x")
-                .on_hover_text("Remove component")
-                .clicked()
-            {
-                remove = Some(i);
-            }
-            match ai_state(mask, develop, &comp.source) {
-                Some(AiState::Selecting) => {
-                    ui.spinner();
-                    ui.label("Selecting...");
+                    Some(AiState::NeedsModel) => {
+                        ui.colored_label(egui::Color32::from_rgb(255, 180, 0), "needs the model");
+                    }
+                    Some(AiState::Failed(m)) => {
+                        ui.colored_label(egui::Color32::from_rgb(255, 90, 90), m);
+                    }
+                    Some(AiState::Unavailable) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 90, 90),
+                            "model unavailable in this build",
+                        );
+                    }
+                    Some(AiState::Ready) | None => {}
                 }
-                Some(AiState::NeedsModel) => {
-                    ui.colored_label(egui::Color32::from_rgb(255, 180, 0), "needs the model");
+            });
+            edited |= fraction_slider(ui, "Opacity", &mut comp.opacity, 1.0);
+            // The range controls live with their component.
+            match &mut comp.source {
+                MaskSource::LuminanceRange { lo, hi, smooth } => {
+                    edited |= fraction_slider(ui, "From", lo, 0.65);
+                    edited |= fraction_slider(ui, "To", hi, 1.0);
+                    edited |= fraction_slider(ui, "Smooth", smooth, 0.1);
                 }
-                Some(AiState::Failed(m)) => {
-                    ui.colored_label(egui::Color32::from_rgb(255, 90, 90), m);
-                }
-                Some(AiState::Unavailable) => {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 90, 90),
-                        "model unavailable in this build",
+                MaskSource::ColorRange { samples, tolerance } => {
+                    edited |= fur_slider(
+                        ui,
+                        &SliderSpec::new("Range", "Range", 1.0, 100.0, 25.0).step(1.0, 0),
+                        tolerance,
                     );
+                    if !samples.is_empty() && ui.button("Clear samples").clicked() {
+                        samples.clear();
+                        edited = true;
+                    }
                 }
-                Some(AiState::Ready) | None => {}
+                MaskSource::RadialGradient {
+                    angle_deg, feather, ..
+                } => {
+                    edited |= fur_slider(
+                        ui,
+                        &SliderSpec::new("Angle", "Angle", -180.0, 180.0, 0.0)
+                            .step(1.0, 0)
+                            .unit("°"),
+                        angle_deg,
+                    );
+                    edited |= fraction_slider(ui, "Feather", feather, 0.1);
+                }
+                _ => {}
             }
         });
-        // The range controls live with their component.
-        match &mut comp.source {
-            MaskSource::LuminanceRange { lo, hi, smooth } => {
-                edited |= ui
-                    .add(egui::Slider::new(lo, 0.0..=1.0).text("From"))
-                    .changed();
-                edited |= ui
-                    .add(egui::Slider::new(hi, 0.0..=1.0).text("To"))
-                    .changed();
-                edited |= ui
-                    .add(egui::Slider::new(smooth, 0.0..=1.0).text("Smooth"))
-                    .changed();
-            }
-            MaskSource::ColorRange { samples, tolerance } => {
-                edited |= ui
-                    .add(egui::Slider::new(tolerance, 1.0..=100.0).text("Range"))
-                    .changed();
-                if !samples.is_empty() && ui.button("Clear samples").clicked() {
-                    samples.clear();
-                    edited = true;
-                }
-            }
-            MaskSource::RadialGradient {
-                angle_deg, feather, ..
-            } => {
-                edited |= ui
-                    .add(egui::Slider::new(angle_deg, -180.0..=180.0).text("Angle"))
-                    .changed();
-                edited |= ui
-                    .add(egui::Slider::new(feather, 0.0..=1.0).text("Feather"))
-                    .changed();
-            }
-            _ => {}
-        }
     }
     if let Some(i) = remove {
         c.mask.components.remove(i);
@@ -642,14 +638,25 @@ fn show_selected(
         });
     });
     if mask.arm == Arm::Brush {
-        ui.add(
-            egui::Slider::new(&mut mask.brush.radius, MIN_BRUSH_RADIUS..=MAX_BRUSH_RADIUS)
-                .logarithmic(true)
-                .text("Size"),
-        );
+        // Radius and feather are fractions of the image, shown as a percentage of it.
+        let size = SliderSpec::new(
+            "brush-size",
+            "Size",
+            MIN_BRUSH_RADIUS,
+            MAX_BRUSH_RADIUS,
+            0.03,
+        )
+        .scaled(100.0, 1)
+        .log();
+        fur_slider(ui, &size, &mut mask.brush.radius);
         mask.brush.feather = mask.brush.feather.min(mask.brush.radius);
-        ui.add(egui::Slider::new(&mut mask.brush.feather, 0.0..=mask.brush.radius).text("Feather"));
-        ui.add(egui::Slider::new(&mut mask.brush.flow, 0.0..=1.0).text("Flow"));
+        let mut feather = SliderSpec::new("brush-feather", "Feather", 0.0, 1.0, 0.012)
+            .scaled(100.0, 1)
+            .step(0.001, 1);
+        feather.max = mask.brush.radius;
+        feather.default = feather.default.min(feather.max);
+        fur_slider(ui, &feather, &mut mask.brush.feather);
+        fraction_slider(ui, "Flow", &mut mask.brush.flow, 1.0);
     }
     ui.checkbox(&mut mask.show_overlay, "Show mask overlay");
 
@@ -662,15 +669,7 @@ fn show_selected(
             edited = true;
         }
     });
-    ui.horizontal(|ui| {
-        ui.label("Amount");
-        let r = ui.add(egui::Slider::new(&mut c.amount, 0.0..=1.0));
-        if r.double_clicked() {
-            c.amount = 1.0;
-            edited = true;
-        }
-        edited |= r.changed();
-    });
+    edited |= fraction_slider(ui, "Amount", &mut c.amount, 1.0);
     edited |= adjust_sliders(ui, &mut c.adjust);
     edited
 }

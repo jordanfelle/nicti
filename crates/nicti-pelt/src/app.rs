@@ -51,6 +51,7 @@ use crate::mask_panel::MaskUi;
 use crate::prebake::{self, PrebakeService};
 use crate::preview_settings::{self, PreviewSettings, Surface};
 use crate::render::DevelopView;
+use crate::section_state;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
 use crate::verify_ui::{self, VerifyUi};
@@ -411,6 +412,7 @@ impl PeltApp {
             _ => None,
         });
         let preview_settings = preview_settings::load(&catalog_path);
+        crate::fur::install_section_states(&cc.egui_ctx, section_state::load(&catalog_path));
         let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
             eyeshine::Env::new(
                 Arc::new(LibRawDecoder),
@@ -1239,6 +1241,11 @@ impl eframe::App for PeltApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // A section toggled last frame: remember it across restarts. Best effort; the layout is
+        // not worth a notice if the disk write fails.
+        if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
+            let _ = section_state::save(&self.catalog_path, &states);
+        }
         self.color.handle_shortcuts(ui.ctx());
         self.color.sync(frame);
         self.sync_preview_color();
