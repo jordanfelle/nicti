@@ -127,6 +127,12 @@ impl SliderSpec {
         self
     }
 
+    /// Whether the track is actually logarithmic: `log` needs a positive minimum, otherwise the
+    /// spec behaves as an ordinary linear one (track, stepping and nudges alike).
+    fn is_log(&self) -> bool {
+        self.log && self.min > 0.0
+    }
+
     /// The value as the row shows it: fixed decimals, `+` on positives when `signed`, and a plain
     /// `0` for anything that rounds to zero.
     pub fn display(&self, v: f32) -> String {
@@ -141,17 +147,26 @@ impl SliderSpec {
 
     /// The bare number the typed-entry box starts from: scaled, fixed decimals, no sign or unit.
     pub fn edit_text(&self, v: f32) -> String {
-        format!("{:.*}", self.decimals, f64::from(v) * f64::from(self.scale))
+        let text = format!("{:.*}", self.decimals, f64::from(v) * f64::from(self.scale));
+        // No negative zero ("-0" for -0.001 shown to whole numbers).
+        if text.parse::<f64>().is_ok_and(|n| n == 0.0) {
+            text.trim_start_matches('-').to_owned()
+        } else {
+            text
+        }
     }
 
     /// What the user typed as a value: the unit, a leading `+` and surrounding space are
-    /// ignored, and the result is clamped to the range (but not snapped, so Temp and Rotation
-    /// take exact values). `None` for anything that isn't a finite number.
+    /// ignored, the number is rounded to the decimals the row shows (so what is stored is what is
+    /// displayed) and clamped to the range. It is not snapped to `step`, so Temp and Rotation take
+    /// exact values. `None` for anything that isn't a finite number.
     pub fn parse_input(&self, text: &str) -> Option<f32> {
         let t = text.trim();
         let t = t.strip_suffix(self.unit).unwrap_or(t).trim();
         let t = t.strip_prefix('+').unwrap_or(t);
         let n: f64 = t.parse().ok()?;
+        let places = 10f64.powi(self.decimals.min(9) as i32);
+        let n = (n * places).round() / places;
         let v = n / f64::from(self.scale.max(1e-9));
         v.is_finite()
             .then(|| v.clamp(f64::from(self.min), f64::from(self.max)) as f32)
@@ -171,7 +186,7 @@ pub struct SliderOut {
 /// `value` moved by `steps` keyboard nudges: one nudge is about 1/200 of the range, rounded to a
 /// whole number of the control's steps.
 pub fn nudged(spec: &SliderSpec, value: f32, steps: f32) -> f32 {
-    if spec.log && spec.min > 0.0 {
+    if spec.is_log() {
         // 1/200 of the track's ratio per nudge.
         let ratio = (f64::from(spec.max) / f64::from(spec.min)).powf(f64::from(steps) / 200.0);
         return snap(spec, f64::from(value) * ratio);
@@ -183,7 +198,7 @@ pub fn nudged(spec: &SliderSpec, value: f32, steps: f32) -> f32 {
 }
 
 fn snap(spec: &SliderSpec, v: f64) -> f32 {
-    if spec.log {
+    if spec.is_log() {
         return v.clamp(f64::from(spec.min), f64::from(spec.max)) as f32;
     }
     let step = f64::from(spec.step).max(1e-9);
@@ -197,7 +212,7 @@ fn snap(spec: &SliderSpec, v: f64) -> f32 {
 /// Position of `v` along the track, `0..=1`.
 fn to_frac(spec: &SliderSpec, v: f64) -> f64 {
     let (min, max) = (f64::from(spec.min), f64::from(spec.max));
-    let f = if spec.log && min > 0.0 {
+    let f = if spec.is_log() {
         (v.max(min) / min).ln() / (max / min).ln().max(1e-9)
     } else {
         (v - min) / (max - min).max(1e-9)
@@ -209,7 +224,7 @@ fn to_frac(spec: &SliderSpec, v: f64) -> f64 {
 fn from_frac(spec: &SliderSpec, f: f64) -> f64 {
     let (min, max) = (f64::from(spec.min), f64::from(spec.max));
     let f = f.clamp(0.0, 1.0);
-    if spec.log && min > 0.0 {
+    if spec.is_log() {
         min * (max / min).powf(f)
     } else {
         min + f * (max - min)
@@ -494,10 +509,16 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
                 st.store(ui.ctx(), te_id);
             }
         }
-        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        if escape || (r.lost_focus() && !start_edit) {
+        // The box owns Escape while it has focus: consume it so Esc-to-commit tools don't also act.
+        let escape = r.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        // An edit that is no longer focused (and didn't just start) is over: committed when focus
+        // was lost this frame, otherwise abandoned, e.g. the row was not drawn while it was open
+        // (section collapsed, selection changed) and the box came back unfocused.
+        let ended = !start_edit && !r.has_focus();
+        if !enabled || escape || ended {
             ui.data_mut(|d| d.remove_temp::<String>(edit_id));
-            if !escape {
+            if enabled && !escape && r.lost_focus() {
                 typed = spec.parse_input(&text);
             }
         } else {
@@ -753,6 +774,7 @@ mod tests {
         assert_eq!(pct.display(0.5), "+50");
         assert_eq!(pct.display(-1.0), "-100");
         assert_eq!(pct.edit_text(-0.25), "-25");
+        assert_eq!(pct.edit_text(-0.001), "0", "no negative zero in the box");
         assert_eq!(pct.parse_input("40"), Some(0.4));
         assert_eq!(pct.parse_input(" +40 "), Some(0.4));
         assert_eq!(pct.parse_input("250"), Some(1.0), "clamped to the range");
@@ -767,7 +789,12 @@ mod tests {
         let rot = SliderSpec::new("t.rot", "Rotation", -45.0, 45.0, 0.0)
             .step(0.1, 1)
             .unit("\u{b0}");
-        assert_eq!(rot.parse_input("-3.25\u{b0}"), Some(-3.25));
+        assert_eq!(rot.parse_input("-3.2\u{b0}"), Some(-3.2));
+        assert_eq!(
+            rot.parse_input("-3.26"),
+            Some(-3.3),
+            "rounded to the shown decimals"
+        );
         assert_eq!(rot.parse_input("12.5"), Some(12.5));
         for bad in ["", "abc", "1,5", "nan", "inf", "--3"] {
             assert_eq!(rot.parse_input(bad), None, "{bad:?}");
@@ -858,6 +885,72 @@ mod tests {
             !outs.iter().any(|o| o.reset),
             "the value box does not reset"
         );
+    }
+
+    /// An edit left open while the row isn't drawn (section collapsed) or is disabled never
+    /// commits, and doesn't come back as a stuck box: later typing changes nothing.
+    #[test]
+    fn an_abandoned_or_disabled_edit_commits_nothing() {
+        // `mode`: 0 = hide the row after opening the box, 1 = disable it after opening the box.
+        let run = |mode: u8| {
+            let ctx = super::super::tokens::testing::themed_ctx();
+            let root = std::cell::Cell::new(None);
+            let mut v = 5500.0_f32;
+            let mut t = 0.0;
+            let mut frame = |events: Vec<egui::Event>, v: &mut f32, draw: bool, enabled: bool| {
+                t += 0.02;
+                let input = egui::RawInput {
+                    time: Some(t),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    root.set(Some(ui.id()));
+                    if draw {
+                        slider(ui, &TEMP, v, enabled);
+                    }
+                });
+                out.textures_delta.clear();
+            };
+            let at = egui::pos2(760.0, 13.0);
+            let click = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            let key = |k| egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            };
+            frame(vec![egui::Event::PointerMoved(at)], &mut v, true, true);
+            for _ in 0..2 {
+                frame(vec![click(true)], &mut v, true, true);
+                frame(vec![click(false)], &mut v, true, true);
+            }
+            frame(vec![egui::Event::Text("6523".into())], &mut v, true, true);
+            // The edit is open with typed text; now the row goes away / is disabled.
+            frame(vec![], &mut v, mode == 1, false);
+            frame(vec![key(egui::Key::Enter)], &mut v, mode == 1, false);
+            // Back to normal: the stale edit must not resurface and commit anything.
+            frame(vec![], &mut v, true, true);
+            let edit_id = root.get().unwrap().with(TEMP.id).with("edit");
+            let stuck = ctx.data(|d| d.get_temp::<String>(edit_id)).is_some();
+            assert!(!stuck, "the abandoned edit left a box open");
+            frame(vec![egui::Event::Text("9999".into())], &mut v, true, true);
+            frame(vec![key(egui::Key::Enter)], &mut v, true, true);
+            frame(vec![], &mut v, true, true);
+            v
+        };
+        assert_eq!(run(0), 5500.0, "hidden row");
+        assert_eq!(run(1), 5500.0, "disabled row");
     }
 
     #[test]

@@ -424,16 +424,7 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             };
         }
         match &mut spec.format {
-            FormatSpec::Jpeg {
-                quality,
-                subsampling,
-            } => {
-                let mut q = f32::from(*quality);
-                const QUALITY: SliderSpec =
-                    SliderSpec::new("export-quality", "Quality", 1.0, 100.0, 90.0).step(1.0, 0);
-                if fur::slider(ui, &QUALITY, &mut q, true).changed {
-                    *quality = q.round() as u8;
-                }
+            FormatSpec::Jpeg { subsampling, .. } => {
                 egui::ComboBox::from_id_salt("export_subsampling")
                     .selected_text(match subsampling {
                         Subsampling::S420 => "4:2:0",
@@ -465,6 +456,15 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             }
         }
     });
+    // A full-width row of its own: a fur slider takes the rest of its line.
+    if let FormatSpec::Jpeg { quality, .. } = &mut spec.format {
+        const QUALITY: SliderSpec =
+            SliderSpec::new("export-quality", "Quality", 1.0, 100.0, 90.0).step(1.0, 0);
+        let mut q = f32::from(*quality);
+        if fur::slider(ui, &QUALITY, &mut q, true).changed {
+            *quality = q.round() as u8;
+        }
+    }
     ui.horizontal(|ui| {
         ui.label("Color space");
         egui::ComboBox::from_id_salt("export_space")
