@@ -185,13 +185,19 @@ impl LoupeSession {
         let hi = (self.cursor + PREFETCH_RADIUS).min(self.asset_ids.len() - 1);
         for index in lo..=hi {
             let asset_id = self.asset_ids[index];
-            if self.inflight.contains_key(&asset_id) {
-                continue;
-            }
             let Some(asset) = store.get_asset(asset_id)? else {
                 continue;
             };
             let key = asset_cache_key(&asset);
+            if let Some(running) = self.inflight.get(&asset_id) {
+                if running.cache_key == key {
+                    continue;
+                }
+                // A re-ingest changed the identity under a job still tracked for the old one
+                // (#390): drop it so the new revision is requested, not skipped.
+                pounce.cancel(running.job_id);
+                self.inflight.remove(&asset_id);
+            }
             if let Some((error_key, _)) = self.errors.get(&asset_id) {
                 if *error_key == key {
                     continue; // still the same failed revision -- wait for an explicit retry
@@ -245,13 +251,19 @@ impl LoupeSession {
             return Ok(());
         };
         let asset_id = self.asset_ids[index];
-        if t2.inflight.contains_key(&asset_id) {
-            return Ok(());
-        }
         let Some(asset) = store.get_asset(asset_id)? else {
             return Ok(());
         };
         let identity = asset_cache_key(&asset);
+        if let Some(running) = t2.inflight.get(&asset_id) {
+            if running.identity == identity {
+                return Ok(());
+            }
+            // Same as `request_prefetch`: a job for a superseded revision must not shadow the
+            // current one (#390).
+            pounce.cancel(running.job_id);
+            t2.inflight.remove(&asset_id);
+        }
         match t2.failed.get(&asset_id) {
             Some(failed_identity) if *failed_identity == identity => return Ok(()),
             Some(_) => {
@@ -1081,6 +1093,34 @@ mod tests {
             session.current_t2(&store).is_some()
         });
         assert_eq!(dims(&session.current_t2(&store).unwrap()), (640, 480));
+    }
+
+    /// #390: a job still in `inflight` for the *previous* identity must not stop the re-ingested
+    /// revision being requested. Deterministic: the session is never polled between the first
+    /// T2 landing and the re-ingest, so the old job is guaranteed to still be tracked.
+    #[test]
+    fn a_re_ingest_replaces_a_still_tracked_job_for_the_old_identity() {
+        let (dir, store, ids, pounce, larder) =
+            t2_setup(&[("0.NEF", tiff_with_jpeg(&jpeg_of(800, 600)))]);
+        let mut session = LoupeSession::new(ids, counting_decoder(), u64::MAX).with_larder(larder);
+        session.set_cursor(0, &store, &pounce).unwrap();
+        wait_for(|| session.current_t2(&store).is_some());
+
+        let mut changed = new_asset("0.NEF");
+        changed.fingerprint = Some("fp-0.NEF-changed".to_string());
+        let root_id = store.list_roots().unwrap()[0].id;
+        std::fs::write(
+            dir.path().join("photos").join("0.NEF"),
+            tiff_with_jpeg(&jpeg_of(640, 480)),
+        )
+        .unwrap();
+        let asset_id = store.insert_asset(root_id, &changed, None).unwrap();
+        let new_identity = asset_cache_key(&store.get_asset(asset_id).unwrap().unwrap());
+
+        session.set_cursor(0, &store, &pounce).unwrap();
+        let t2 = session.t2.as_ref().unwrap();
+        assert_eq!(t2.inflight[&asset_id].identity, new_identity);
+        assert_eq!(session.inflight[&asset_id].cache_key, new_identity);
     }
 
     #[test]
