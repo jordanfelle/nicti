@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::folder_dialog::FolderPicker;
+use crate::fur::{self, SliderSpec};
 use nicti_preen::naming::{AssetFacts, Template};
 use nicti_preen::spec::{
     Anchor, BitDepth, CollisionPolicy, DestinationBase, ExportFormat, ExportSpace, ExportSpec,
@@ -423,11 +424,7 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             };
         }
         match &mut spec.format {
-            FormatSpec::Jpeg {
-                quality,
-                subsampling,
-            } => {
-                ui.add(egui::Slider::new(quality, 1..=100).text("quality"));
+            FormatSpec::Jpeg { subsampling, .. } => {
                 egui::ComboBox::from_id_salt("export_subsampling")
                     .selected_text(match subsampling {
                         Subsampling::S420 => "4:2:0",
@@ -459,6 +456,15 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             }
         }
     });
+    // A full-width row of its own: a fur slider takes the rest of its line.
+    if let FormatSpec::Jpeg { quality, .. } = &mut spec.format {
+        const QUALITY: SliderSpec =
+            SliderSpec::new("export-quality", "Quality", 1.0, 100.0, 90.0).step(1.0, 0);
+        let mut q = f32::from(*quality);
+        if fur::slider(ui, &QUALITY, &mut q, true).changed {
+            *quality = q.round() as u8;
+        }
+    }
     ui.horizontal(|ui| {
         ui.label("Color space");
         egui::ComboBox::from_id_salt("export_space")
@@ -598,12 +604,18 @@ fn watermark_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                     ui.selectable_value(&mut w.anchor, a, anchor_label(a));
                 }
             });
-        ui.add(egui::Slider::new(&mut w.scale_pct, 1.0..=100.0).text("% width"));
     });
-    ui.horizontal(|ui| {
-        ui.add(egui::Slider::new(&mut w.opacity, 0.05..=1.0).text("opacity"));
-        ui.add(egui::Slider::new(&mut w.inset_pct, 0.0..=20.0).text("% inset"));
-    });
+    const WIDTH: SliderSpec = SliderSpec::new("export-wm-width", "Width", 1.0, 100.0, 15.0)
+        .step(1.0, 0)
+        .unit("%");
+    const OPACITY: SliderSpec =
+        SliderSpec::new("export-wm-opacity", "Opacity", 0.05, 1.0, 1.0).percent();
+    const INSET: SliderSpec = SliderSpec::new("export-wm-inset", "Inset", 0.0, 20.0, 2.0)
+        .step(0.5, 1)
+        .unit("%");
+    fur::slider(ui, &WIDTH, &mut w.scale_pct, true);
+    fur::slider(ui, &OPACITY, &mut w.opacity, true);
+    fur::slider(ui, &INSET, &mut w.inset_pct, true);
 }
 
 const ANCHORS: [Anchor; 9] = [

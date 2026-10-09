@@ -47,6 +47,11 @@ pub struct SliderSpec {
     pub signed: bool,
     /// Appended to the shown value (for example `°`).
     pub unit: &'static str,
+    /// The shown value is `value * scale` (100 shows a `0..=1` fraction as a percentage).
+    pub scale: f32,
+    /// Logarithmic track (needs `min > 0`): equal thumb travel is an equal ratio. Values are not
+    /// snapped to `step`, only clamped.
+    pub log: bool,
 }
 
 impl SliderSpec {
@@ -68,6 +73,8 @@ impl SliderSpec {
             track: Track::Plain,
             signed: false,
             unit: "",
+            scale: 1.0,
+            log: false,
         }
     }
 
@@ -100,16 +107,69 @@ impl SliderSpec {
         self
     }
 
+    /// Shows the value times `scale`, to `decimals` places (`step` stays in value units).
+    pub const fn scaled(mut self, scale: f32, decimals: usize) -> Self {
+        self.scale = scale;
+        self.decimals = decimals;
+        self
+    }
+
+    /// A fraction shown as a whole-number percentage (`-1..=1` reads `-100..=100`), one
+    /// percentage point per step.
+    pub const fn percent(self) -> Self {
+        let mut s = self.scaled(100.0, 0);
+        s.step = 0.01;
+        s
+    }
+
+    pub const fn log(mut self) -> Self {
+        self.log = true;
+        self
+    }
+
+    /// Whether the track is actually logarithmic: `log` needs a positive minimum, otherwise the
+    /// spec behaves as an ordinary linear one (track, stepping and nudges alike).
+    fn is_log(&self) -> bool {
+        self.log && self.min > 0.0
+    }
+
     /// The value as the row shows it: fixed decimals, `+` on positives when `signed`, and a plain
     /// `0` for anything that rounds to zero.
     pub fn display(&self, v: f32) -> String {
-        let text = format!("{v:.*}", self.decimals);
+        let text = self.edit_text(v);
         let zero = text.parse::<f64>().is_ok_and(|n| n == 0.0);
         if zero {
             return format!("0{}", self.unit);
         }
         let sign = if self.signed && v > 0.0 { "+" } else { "" };
         format!("{sign}{text}{}", self.unit)
+    }
+
+    /// The bare number the typed-entry box starts from: scaled, fixed decimals, no sign or unit.
+    pub fn edit_text(&self, v: f32) -> String {
+        let text = format!("{:.*}", self.decimals, f64::from(v) * f64::from(self.scale));
+        // No negative zero ("-0" for -0.001 shown to whole numbers).
+        if text.parse::<f64>().is_ok_and(|n| n == 0.0) {
+            text.trim_start_matches('-').to_owned()
+        } else {
+            text
+        }
+    }
+
+    /// What the user typed as a value: the unit, a leading `+` and surrounding space are
+    /// ignored, the number is rounded to the decimals the row shows (so what is stored is what is
+    /// displayed) and clamped to the range. It is not snapped to `step`, so Temp and Rotation take
+    /// exact values. `None` for anything that isn't a finite number.
+    pub fn parse_input(&self, text: &str) -> Option<f32> {
+        let t = text.trim();
+        let t = t.strip_suffix(self.unit).unwrap_or(t).trim();
+        let t = t.strip_prefix('+').unwrap_or(t);
+        let n: f64 = t.parse().ok()?;
+        let places = 10f64.powi(self.decimals.min(9) as i32);
+        let n = (n * places).round() / places;
+        let v = n / f64::from(self.scale.max(1e-9));
+        v.is_finite()
+            .then(|| v.clamp(f64::from(self.min), f64::from(self.max)) as f32)
     }
 }
 
@@ -126,6 +186,11 @@ pub struct SliderOut {
 /// `value` moved by `steps` keyboard nudges: one nudge is about 1/200 of the range, rounded to a
 /// whole number of the control's steps.
 pub fn nudged(spec: &SliderSpec, value: f32, steps: f32) -> f32 {
+    if spec.is_log() {
+        // 1/200 of the track's ratio per nudge.
+        let ratio = (f64::from(spec.max) / f64::from(spec.min)).powf(f64::from(steps) / 200.0);
+        return snap(spec, f64::from(value) * ratio);
+    }
     let step = f64::from(spec.step).max(1e-9);
     let span = f64::from(spec.max - spec.min);
     let unit = (span / 200.0 / step).round().max(1.0) * step;
@@ -133,6 +198,9 @@ pub fn nudged(spec: &SliderSpec, value: f32, steps: f32) -> f32 {
 }
 
 fn snap(spec: &SliderSpec, v: f64) -> f32 {
+    if spec.is_log() {
+        return v.clamp(f64::from(spec.min), f64::from(spec.max)) as f32;
+    }
     let step = f64::from(spec.step).max(1e-9);
     let snapped = (v / step).round() * step;
     snapped.clamp(f64::from(spec.min), f64::from(spec.max)) as f32
@@ -141,6 +209,28 @@ fn snap(spec: &SliderSpec, v: f64) -> f32 {
 /// Shift-drag: the unrounded value after a pointer move of `dx` points, at a tenth of the normal
 /// speed. Kept unrounded between frames; rounding it each frame would swallow every move smaller
 /// than half a step.
+/// Position of `v` along the track, `0..=1`.
+fn to_frac(spec: &SliderSpec, v: f64) -> f64 {
+    let (min, max) = (f64::from(spec.min), f64::from(spec.max));
+    let f = if spec.is_log() {
+        (v.max(min) / min).ln() / (max / min).ln().max(1e-9)
+    } else {
+        (v - min) / (max - min).max(1e-9)
+    };
+    f.clamp(0.0, 1.0)
+}
+
+/// The value at track position `f` (`0..=1`).
+fn from_frac(spec: &SliderSpec, f: f64) -> f64 {
+    let (min, max) = (f64::from(spec.min), f64::from(spec.max));
+    let f = f.clamp(0.0, 1.0);
+    if spec.is_log() {
+        min * (max / min).powf(f)
+    } else {
+        min + f * (max - min)
+    }
+}
+
 fn fine_accumulate(acc: f64, dx: f32, span: f64, track_width: f32) -> f64 {
     acc + f64::from(dx) * span / f64::from(track_width.max(1.0)) * 0.1
 }
@@ -247,7 +337,10 @@ fn paint_track(ui: &Ui, rect: Rect, track: Track, t: &Tokens, thumb_x: f32, ring
     );
 }
 
-/// A slider row. Double-click the label or track to reset; shift-drag is a fine adjustment;
+/// Width of the clickable value text at the right of a row's label line.
+const VALUE_BOX_W: f32 = 64.0;
+
+/// A slider row. Double-click the value to type one; double-click the label or track to reset; shift-drag is a fine adjustment;
 /// ArrowUp/Down while hovering nudge (shift: five times as much).
 pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) -> SliderOut {
     let t = Tokens::get(ui.ctx());
@@ -279,14 +372,33 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
     let current = *value;
     resp.widget_info(|| egui::WidgetInfo::slider(enabled, f64::from(current), spec.label));
     let label_resp = ui.interact(label_rect, id.with("label"), Sense::click());
+    // The value text on the right: double-click to type an exact number. Declared after the label
+    // so it wins where they overlap (a double-click there edits instead of resetting).
+    let value_rect = Rect::from_min_max(
+        pos2(label_rect.right() - VALUE_BOX_W, label_rect.top()),
+        label_rect.max,
+    );
+    let value_resp = ui.interact(
+        value_rect,
+        id.with("value"),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let edit_id = id.with("edit");
+    let mut editing = ui.data(|d| d.get_temp::<String>(edit_id));
+    let mut start_edit = false;
+    if enabled && editing.is_none() && value_resp.double_clicked() {
+        editing = Some(spec.edit_text(*value));
+        start_edit = true;
+    }
 
     let mut out = SliderOut::default();
-    let (min, max) = (f64::from(spec.min), f64::from(spec.max));
-    let span = (max - min).max(1e-9);
     let width = track_rect.width();
-    let to_x =
-        |v: f32| track_rect.left() + ((f64::from(v) - min) / span).clamp(0.0, 1.0) as f32 * width;
-    let from_x = |x: f32| min + f64::from(((x - track_rect.left()) / width).clamp(0.0, 1.0)) * span;
+    let to_x = |v: f32| track_rect.left() + to_frac(spec, f64::from(v)) as f32 * width;
+    let from_x = |x: f32| from_frac(spec, f64::from((x - track_rect.left()) / width));
     let fine_id = id.with("fine");
     let mut new_value = None;
 
@@ -307,12 +419,13 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
                 )
             });
             let nv = if shift {
+                // Accumulated as a track fraction, so a log track fine-drags by ratio.
                 let acc = ui
                     .data(|d| d.get_temp::<f64>(fine_id))
-                    .unwrap_or_else(|| f64::from(current));
-                let acc = fine_accumulate(acc, dx, span, width).clamp(min, max);
+                    .unwrap_or_else(|| to_frac(spec, f64::from(current)));
+                let acc = fine_accumulate(acc, dx, 1.0, width).clamp(0.0, 1.0);
                 ui.data_mut(|d| d.insert_temp(fine_id, acc));
-                snap(spec, acc)
+                snap(spec, from_frac(spec, acc))
             } else {
                 ui.data_mut(|d| d.remove_temp::<f64>(fine_id));
                 // `drag_started` fires only after the pointer crossed the drag threshold, so the
@@ -371,6 +484,57 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
         out.changed = true;
     }
 
+    // typed entry: Enter or focus loss commits, Escape cancels
+    let mut typed = None;
+    if let Some(mut text) = editing {
+        let te_id = id.with("textedit");
+        let r = ui.put(
+            value_rect,
+            egui::TextEdit::singleline(&mut text)
+                .id(te_id)
+                .font(t.font(12.5))
+                .horizontal_align(egui::Align::Max)
+                .desired_width(value_rect.width()),
+        );
+        if start_edit {
+            r.request_focus();
+        }
+        if r.gained_focus() {
+            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), te_id) {
+                let end = egui::text::CCursor::new(text.chars().count());
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    end,
+                )));
+                st.store(ui.ctx(), te_id);
+            }
+        }
+        // Escape cancels. egui drops a TextEdit's focus on Escape before this runs, so detect the
+        // key itself (not focus), and consume it so Esc-to-commit tools don't also act on it.
+        let escape = !start_edit
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        // An edit that is no longer focused (and didn't just start) is over: committed when focus
+        // was lost this frame, otherwise abandoned, e.g. the row was not drawn while it was open
+        // (section collapsed, selection changed) and the box came back unfocused. Memory focus,
+        // not `has_focus()`: an OS window blur must not end the edit.
+        let ended = !start_edit && !ui.memory(|m| m.has_focus(te_id));
+        if !enabled || escape || ended {
+            ui.data_mut(|d| d.remove_temp::<String>(edit_id));
+            if enabled && !escape && r.lost_focus() {
+                typed = spec.parse_input(&text);
+            }
+        } else {
+            ui.data_mut(|d| d.insert_temp(edit_id, text));
+        }
+    }
+    if let Some(nv) = typed.filter(|nv| (nv - *value).abs() > f32::EPSILON) {
+        *value = nv;
+        out.changed = true;
+        out.drag_started = true;
+        out.drag_stopped = true;
+    }
+    let editing_now = ui.data(|d| d.get_temp::<String>(edit_id)).is_some();
+
     // paint
     let v = *value;
     let hovered = resp.hovered() || resp.dragged();
@@ -387,13 +551,15 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
         t.font(12.5),
         text_c,
     );
-    p.text(
-        label_rect.right_center(),
-        Align2::RIGHT_CENTER,
-        spec.display(v),
-        t.font(12.5),
-        text_c,
-    );
+    if !editing_now {
+        p.text(
+            label_rect.right_center(),
+            Align2::RIGHT_CENTER,
+            spec.display(v),
+            t.font(12.5),
+            text_c,
+        );
+    }
     let ring = 7.0;
     let tx = to_x(v);
     paint_track(ui, track_rect, spec.track, &t, tx, ring);
@@ -602,6 +768,240 @@ mod tests {
         };
         assert_ne!(nudge(false), 0.0, "the arrow nudges a hovered slider");
         assert_eq!(nudge(true), 0.0, "a focused text field keeps the arrow");
+    }
+
+    #[test]
+    fn percent_scales_display_and_input() {
+        let pct = SliderSpec::bipolar("t.pct", "Contrast").percent();
+        assert_eq!(pct.display(0.5), "+50");
+        assert_eq!(pct.display(-1.0), "-100");
+        assert_eq!(pct.edit_text(-0.25), "-25");
+        assert_eq!(pct.edit_text(-0.001), "0", "no negative zero in the box");
+        assert_eq!(pct.parse_input("40"), Some(0.4));
+        assert_eq!(pct.parse_input(" +40 "), Some(0.4));
+        assert_eq!(pct.parse_input("250"), Some(1.0), "clamped to the range");
+    }
+
+    #[test]
+    fn typed_input_is_exact_clamped_and_rejects_junk() {
+        // Not snapped to the 50-step grid: Temp takes exactly what was typed.
+        assert_eq!(TEMP.parse_input("5523"), Some(5523.0));
+        assert_eq!(TEMP.parse_input("99999"), Some(50000.0));
+        assert_eq!(TEMP.parse_input("1"), Some(2000.0));
+        let rot = SliderSpec::new("t.rot", "Rotation", -45.0, 45.0, 0.0)
+            .step(0.1, 1)
+            .unit("\u{b0}");
+        assert_eq!(rot.parse_input("-3.2\u{b0}"), Some(-3.2));
+        assert_eq!(
+            rot.parse_input("-3.26"),
+            Some(-3.3),
+            "rounded to the shown decimals"
+        );
+        assert_eq!(rot.parse_input("12.5"), Some(12.5));
+        for bad in ["", "abc", "1,5", "nan", "inf", "--3"] {
+            assert_eq!(rot.parse_input(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn log_track_maps_by_ratio_and_does_not_snap() {
+        let size = SliderSpec::new("t.size", "Size", 0.002, 0.5, 0.05)
+            .scaled(1.0, 3)
+            .log();
+        assert!((to_frac(&size, 0.002)).abs() < 1e-9);
+        assert!((to_frac(&size, 0.5) - 1.0).abs() < 1e-9);
+        // The geometric mean sits mid-track.
+        let mid = (0.002_f64 * 0.5).sqrt();
+        assert!((to_frac(&size, mid) - 0.5).abs() < 1e-6);
+        assert!((from_frac(&size, 0.5) - mid).abs() < 1e-6);
+        assert_eq!(
+            snap(&size, 0.0123),
+            0.0123,
+            "log values are clamped, not stepped"
+        );
+        assert_eq!(snap(&size, 9.0), 0.5);
+        let up = nudged(&size, 0.01, 1.0);
+        assert!(
+            up > 0.01 && up < 0.0105,
+            "one nudge is ~1/200 of the ratio, got {up}"
+        );
+    }
+
+    /// Double-clicking the value text opens a box; typing a number and pressing Enter sets it
+    /// exactly, and the row reports one undo unit.
+    #[test]
+    fn double_clicking_the_value_types_an_exact_number() {
+        let ctx = super::super::tokens::testing::themed_ctx();
+        let mut v = 5500.0_f32;
+        let mut t = 0.0;
+        let mut outs = Vec::new();
+        let mut frame = |events: Vec<egui::Event>, v: &mut f32| {
+            t += 0.02;
+            let input = egui::RawInput {
+                time: Some(t),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut o = None;
+            let mut out = ctx.run_ui(input, |ui| {
+                o = Some(slider(ui, &TEMP, v, true));
+            });
+            out.textures_delta.clear();
+            outs.push(o.unwrap());
+        };
+        // The value text is at the right end of the label line (row top + ~13).
+        let at = egui::pos2(800.0 - 40.0, 13.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at)], &mut v);
+        for _ in 0..2 {
+            frame(vec![click(true)], &mut v);
+            frame(vec![click(false)], &mut v);
+        }
+        frame(vec![egui::Event::Text("6523".into())], &mut v);
+        assert_eq!(v, 5500.0, "nothing is applied until Enter");
+        frame(
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            &mut v,
+        );
+        frame(vec![], &mut v);
+        assert_eq!(v, 6523.0);
+        assert!(outs
+            .iter()
+            .any(|o| o.changed && o.drag_started && o.drag_stopped));
+        assert!(
+            !outs.iter().any(|o| o.reset),
+            "the value box does not reset"
+        );
+    }
+
+    /// Escape cancels a typed edit: the value is unchanged and the box closes.
+    #[test]
+    fn escape_cancels_a_typed_edit() {
+        let ctx = super::super::tokens::testing::themed_ctx();
+        let mut v = 5500.0_f32;
+        let mut t = 0.0;
+        let mut frame = |events: Vec<egui::Event>, v: &mut f32| {
+            t += 0.02;
+            let input = egui::RawInput {
+                time: Some(t),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                slider(ui, &TEMP, v, true);
+            });
+            out.textures_delta.clear();
+        };
+        let at = egui::pos2(760.0, 13.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at)], &mut v);
+        for _ in 0..2 {
+            frame(vec![click(true)], &mut v);
+            frame(vec![click(false)], &mut v);
+        }
+        frame(vec![egui::Event::Text("6523".into())], &mut v);
+        frame(
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            &mut v,
+        );
+        frame(vec![], &mut v);
+        assert_eq!(v, 5500.0, "Escape discards the typed number");
+    }
+
+    /// An edit left open while the row isn't drawn (section collapsed) or is disabled never
+    /// commits, and doesn't come back as a stuck box: later typing changes nothing.
+    #[test]
+    fn an_abandoned_or_disabled_edit_commits_nothing() {
+        // `mode`: 0 = hide the row after opening the box, 1 = disable it after opening the box.
+        let run = |mode: u8| {
+            let ctx = super::super::tokens::testing::themed_ctx();
+            let root = std::cell::Cell::new(None);
+            let mut v = 5500.0_f32;
+            let mut t = 0.0;
+            let mut frame = |events: Vec<egui::Event>, v: &mut f32, draw: bool, enabled: bool| {
+                t += 0.02;
+                let input = egui::RawInput {
+                    time: Some(t),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    root.set(Some(ui.id()));
+                    if draw {
+                        slider(ui, &TEMP, v, enabled);
+                    }
+                });
+                out.textures_delta.clear();
+            };
+            let at = egui::pos2(760.0, 13.0);
+            let click = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            let key = |k| egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            };
+            frame(vec![egui::Event::PointerMoved(at)], &mut v, true, true);
+            for _ in 0..2 {
+                frame(vec![click(true)], &mut v, true, true);
+                frame(vec![click(false)], &mut v, true, true);
+            }
+            frame(vec![egui::Event::Text("6523".into())], &mut v, true, true);
+            // The edit is open with typed text; now the row goes away / is disabled.
+            frame(vec![], &mut v, mode == 1, false);
+            frame(vec![key(egui::Key::Enter)], &mut v, mode == 1, false);
+            // Back to normal: the stale edit must not resurface and commit anything.
+            frame(vec![], &mut v, true, true);
+            let edit_id = root.get().unwrap().with(TEMP.id).with("edit");
+            let stuck = ctx.data(|d| d.get_temp::<String>(edit_id)).is_some();
+            assert!(!stuck, "the abandoned edit left a box open");
+            frame(vec![egui::Event::Text("9999".into())], &mut v, true, true);
+            frame(vec![key(egui::Key::Enter)], &mut v, true, true);
+            frame(vec![], &mut v, true, true);
+            v
+        };
+        assert_eq!(run(0), 5500.0, "hidden row");
+        assert_eq!(run(1), 5500.0, "disabled row");
     }
 
     #[test]

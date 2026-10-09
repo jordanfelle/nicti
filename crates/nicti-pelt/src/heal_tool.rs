@@ -32,6 +32,7 @@ use nicti_tapetum::heal::{spot_key, RemovalPatch, MAX_RADIUS, MAX_SPOTS};
 use nicti_tapetum::stages::HEAL;
 
 use crate::develop_panel::{image_to_screen, screen_to_image};
+use crate::fur::{self, SliderSpec};
 use crate::render::DevelopDoc;
 
 /// Which on-image tool owns the Develop viewport.
@@ -888,6 +889,16 @@ fn kind_label(kind: SpotKind) -> &'static str {
 }
 
 /// The Heal / Remove controls: spot kind and size, the spot list, and the AI-model download.
+const SIZE: SliderSpec = SliderSpec::new("heal-size", "Size", MIN_RADIUS, MAX_RADIUS, 24.0)
+    .scaled(1.0, 0)
+    .log();
+const FEATHER: SliderSpec = SliderSpec::new("heal-feather", "Feather", 0.0, 1.0, 0.3).percent();
+const OPACITY: SliderSpec = SliderSpec::new("heal-opacity", "Opacity", 0.0, 1.0, 1.0).percent();
+
+fn heal_slider(ui: &mut egui::Ui, spec: &SliderSpec, value: &mut f32) -> bool {
+    fur::slider(ui, spec, value, true).changed
+}
+
 pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi, pounce: &Pounce) {
     ui.separator();
     ui.heading("Heal / Remove");
@@ -918,31 +929,17 @@ pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi
             } else {
                 0.0
             };
-            edited |= ui
-                .add(
-                    egui::Slider::new(&mut s.radius, MIN_RADIUS..=MAX_RADIUS)
-                        .logarithmic(true)
-                        .text("Size"),
-                )
-                .changed();
-            edited |= ui
-                .add(egui::Slider::new(&mut frac, 0.0..=1.0).text("Feather"))
-                .changed();
-            edited |= ui
-                .add(egui::Slider::new(&mut s.opacity, 0.0..=1.0).text("Opacity"))
-                .changed();
+            edited |= heal_slider(ui, &SIZE, &mut s.radius);
+            edited |= heal_slider(ui, &FEATHER, &mut frac);
+            edited |= heal_slider(ui, &OPACITY, &mut s.opacity);
             s.radius = clamp_radius(s.radius);
             s.feather = frac * s.radius;
         }
         None => {
             ui.label("New spot");
-            ui.add(
-                egui::Slider::new(&mut heal.radius, MIN_RADIUS..=MAX_RADIUS)
-                    .logarithmic(true)
-                    .text("Size"),
-            );
-            ui.add(egui::Slider::new(&mut heal.feather_frac, 0.0..=1.0).text("Feather"));
-            ui.add(egui::Slider::new(&mut heal.opacity, 0.0..=1.0).text("Opacity"));
+            heal_slider(ui, &SIZE, &mut heal.radius);
+            heal_slider(ui, &FEATHER, &mut heal.feather_frac);
+            heal_slider(ui, &OPACITY, &mut heal.opacity);
         }
     }
     if edited {
