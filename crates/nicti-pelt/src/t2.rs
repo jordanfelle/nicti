@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
+use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageReader};
 use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 use nicti_lair::larder::{Larder, LarderKey, LarderTier};
@@ -60,9 +61,10 @@ const MAX_EMBEDDED_JPEG_BYTES: u64 = 256 * 1024 * 1024;
 ///
 /// `v2` (#319): T2s stored before `resize_and_encode` kept the source ICC profile are untagged JPEGs
 /// of Display P3 / Adobe RGB pixels; the version makes them read as stale (a miss, regenerated
-/// with their profile) instead of being shown as sRGB forever.
+/// with their profile) instead of being shown as sRGB forever. `v3` (#309): a RAW's rotation lives
+/// in its IFD0 Orientation, which earlier T2s ignored, so portrait shots were cached sideways.
 pub fn render_hash(identity: &blake3::Hash) -> String {
-    format!("embedded:v2:{}", identity.to_hex())
+    format!("embedded:v3:{}", identity.to_hex())
 }
 
 /// Where a session's Larder lives: a sibling of the catalog file, so it moves with it and never
@@ -112,14 +114,23 @@ fn pick_embedded(mut found: Vec<EmbeddedJpeg>) -> Option<EmbeddedJpeg> {
 }
 
 /// Decodes `jpeg`, downscales to [`T2_LONG_EDGE`] (never upscaling) and re-encodes as JPEG.
-fn resize_and_encode(jpeg: &[u8]) -> Result<Vec<u8>, String> {
+/// `container_orientation` is the RAW container's IFD0 rotation (#309); it applies only when the
+/// JPEG carries no rotation of its own.
+fn resize_and_encode(
+    jpeg: &[u8],
+    container_orientation: Option<Orientation>,
+) -> Result<Vec<u8>, String> {
     let mut decoder = ImageReader::new(Cursor::new(jpeg))
         .with_guessed_format()
         .map_err(|e| e.to_string())?
         .into_decoder()
         .map_err(|e| e.to_string())?;
     // A portrait phone JPEG carries its rotation as an EXIF tag, not in the pixels.
-    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    let own = decoder.orientation().map_err(|e| e.to_string())?;
+    let orientation = match container_orientation {
+        Some(o) if own == Orientation::NoTransforms => o,
+        _ => own,
+    };
     // Keep the source's color space (#319): the T2 is shown through the display conversion, which
     // needs to know it was Display P3 / Adobe RGB rather than assume sRGB. Only an RGB profile
     // describes the RGB we re-encode (a gray/CMYK one would mislabel it).
@@ -162,7 +173,7 @@ pub fn generate_t2(path: &Path) -> Result<Vec<u8>, String> {
             return Err(format!("{}: JPEG too large ({len} bytes)", path.display()));
         }
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        return resize_and_encode(&bytes);
+        return resize_and_encode(&bytes, None);
     }
     let source = FileSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut walker = Walker::new(source).map_err(|e| e.to_string())?;
@@ -172,7 +183,13 @@ pub fn generate_t2(path: &Path) -> Result<Vec<u8>, String> {
     let bytes = walker
         .read_range(jpeg.file_offset, len)
         .map_err(|e| e.to_string())?;
-    resize_and_encode(&bytes)
+    // A missing/odd tag just means no rotation; it must not fail the T2.
+    let container_orientation = walker
+        .ifd0_orientation()
+        .ok()
+        .flatten()
+        .and_then(Orientation::from_exif);
+    resize_and_encode(&bytes, container_orientation)
 }
 
 /// A T2 job's outcome, stored in its slot rather than returned as a job error -- same reasoning as
@@ -430,19 +447,19 @@ mod tests {
 
     #[test]
     fn a_large_source_is_downscaled_to_the_t2_long_edge() {
-        let out = resize_and_encode(&jpeg_of(5000, 3000)).unwrap();
+        let out = resize_and_encode(&jpeg_of(5000, 3000), None).unwrap();
         assert_eq!(dims(&out), (T2_LONG_EDGE, 2304));
     }
 
     #[test]
     fn a_portrait_source_is_bounded_by_its_height() {
-        let out = resize_and_encode(&jpeg_of(3000, 5000)).unwrap();
+        let out = resize_and_encode(&jpeg_of(3000, 5000), None).unwrap();
         assert_eq!(dims(&out), (2304, T2_LONG_EDGE));
     }
 
     #[test]
     fn a_small_source_is_never_upscaled() {
-        let out = resize_and_encode(&jpeg_of(640, 480)).unwrap();
+        let out = resize_and_encode(&jpeg_of(640, 480), None).unwrap();
         assert_eq!(dims(&out), (640, 480));
     }
 
@@ -462,14 +479,14 @@ mod tests {
             nicti_calico::icc::profile_bytes(nicti_calico::space::OutputSpace::DisplayP3).unwrap();
         let src =
             crate::preview_color::testutil::tagged_jpeg(5000, 3000, [200, 120, 60], Some(&p3));
-        let out = resize_and_encode(&src).unwrap();
+        let out = resize_and_encode(&src, None).unwrap();
         assert_eq!(dims(&out), (T2_LONG_EDGE, 2304));
         assert_eq!(icc_of(&out).as_deref(), Some(p3.as_slice()));
     }
 
     #[test]
     fn an_untagged_source_stays_untagged() {
-        let out = resize_and_encode(&jpeg_of(640, 480)).unwrap();
+        let out = resize_and_encode(&jpeg_of(640, 480), None).unwrap();
         assert!(icc_of(&out).is_none());
     }
 
@@ -480,13 +497,13 @@ mod tests {
             nicti_calico::icc::profile_bytes(nicti_calico::space::OutputSpace::Srgb).unwrap();
         gray[16..20].copy_from_slice(b"GRAY");
         let src = crate::preview_color::testutil::tagged_jpeg(64, 64, [9, 9, 9], Some(&gray));
-        let out = resize_and_encode(&src).unwrap();
+        let out = resize_and_encode(&src, None).unwrap();
         assert!(icc_of(&out).is_none());
     }
 
     #[test]
     fn garbage_bytes_are_an_error_not_a_panic() {
-        assert!(resize_and_encode(b"definitely not a jpeg").is_err());
+        assert!(resize_and_encode(b"definitely not a jpeg", None).is_err());
     }
 
     #[test]
@@ -503,6 +520,58 @@ mod tests {
         let path = dir.path().join("a.NEF");
         std::fs::write(&path, tiff_with_jpeg(&jpeg_of(4200, 2800))).unwrap();
         assert_eq!(dims(&generate_t2(&path).unwrap()), (T2_LONG_EDGE, 2560));
+    }
+
+    /// `tiff_with_jpeg` plus an IFD0 Orientation entry (a SHORT, inline).
+    fn tiff_with_jpeg_and_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+        let jpeg_offset: u32 = 8 + 2 + 3 * 12 + 4;
+        let mut t = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
+        t.extend_from_slice(&3u16.to_le_bytes());
+        // Entries must be in tag order: 0x0112, 0x0201, 0x0202.
+        t.extend_from_slice(&0x0112u16.to_le_bytes());
+        t.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+        t.extend_from_slice(&1u32.to_le_bytes());
+        t.extend_from_slice(&u32::from(orientation).to_le_bytes());
+        for (tag, value) in [(0x0201u16, jpeg_offset), (0x0202u16, jpeg.len() as u32)] {
+            t.extend_from_slice(&tag.to_le_bytes());
+            t.extend_from_slice(&4u16.to_le_bytes()); // LONG
+            t.extend_from_slice(&1u32.to_le_bytes());
+            t.extend_from_slice(&value.to_le_bytes());
+        }
+        t.extend_from_slice(&0u32.to_le_bytes());
+        t.extend_from_slice(jpeg);
+        t
+    }
+
+    #[test]
+    fn a_raw_containers_ifd0_orientation_rotates_the_t2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("portrait.NEF");
+        // A landscape preview the container says is rotated 90 degrees (Orientation 6).
+        std::fs::write(
+            &path,
+            tiff_with_jpeg_and_orientation(&jpeg_of(4200, 2800), 6),
+        )
+        .unwrap();
+        assert_eq!(dims(&generate_t2(&path).unwrap()), (2560, T2_LONG_EDGE));
+    }
+
+    #[test]
+    fn an_orientation_of_one_or_an_invalid_value_leaves_the_t2_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, o) in [1u16, 0, 9, 300].into_iter().enumerate() {
+            let path = dir.path().join(format!("{i}.NEF"));
+            std::fs::write(
+                &path,
+                tiff_with_jpeg_and_orientation(&jpeg_of(4200, 2800), o),
+            )
+            .unwrap();
+            assert_eq!(
+                dims(&generate_t2(&path).unwrap()),
+                (T2_LONG_EDGE, 2560),
+                "orientation {o}"
+            );
+        }
     }
 
     #[test]
