@@ -321,6 +321,7 @@ mod tests {
             .unwrap()
         };
         bake(&mut b);
+        assert_eq!(b.neutral.len(), 1, "the bake cached its neutral image");
         let used = b.last_used.expect("a bake records its time");
         assert_eq!(LOADS.load(Ordering::SeqCst), loads_before + 1);
 
@@ -333,6 +334,10 @@ mod tests {
         // Due: dropped, and the next bake loads again.
         assert!(b.unload_if_idle(used + ttl, ttl));
         assert!(!b.is_loaded("test.fake", "1"));
+        assert!(
+            b.neutral.is_empty(),
+            "the neutral cache goes with the models"
+        );
         assert_eq!(b.idle_unload_in(used + ttl, ttl), None);
         bake(&mut b);
         assert_eq!(LOADS.load(Ordering::SeqCst), loads_before + 2);

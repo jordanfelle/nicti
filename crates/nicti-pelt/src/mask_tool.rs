@@ -621,9 +621,9 @@ mod tests {
         }
     }
 
-    /// A backend that reports itself idle-unloadable and counts the unloads.
+    /// A backend that reports a fixed idle time left and counts unloads.
     struct Idle {
-        loaded: bool,
+        left: Option<Duration>,
         unloads: Arc<AtomicUsize>,
     }
 
@@ -631,68 +631,103 @@ mod tests {
         fn bake(&mut self, _req: &BakeRequest<'_>) -> Result<AlphaMap, SegmentError> {
             unreachable!("no bakes in this test")
         }
-        fn idle_unload_in(&self, _now: Instant, ttl: Duration) -> Option<Duration> {
-            // Loaded and idle for exactly half the ttl.
-            self.loaded.then(|| ttl / 2)
+        fn idle_unload_in(&self, _now: Instant, _ttl: Duration) -> Option<Duration> {
+            self.left
         }
         fn unload_if_idle(&mut self, _now: Instant, _ttl: Duration) -> bool {
             self.unloads.fetch_add(1, Ordering::SeqCst);
-            self.loaded = false;
+            self.left = None;
             true
         }
     }
 
-    #[test]
-    fn idle_unload_waits_out_the_ttl_then_queues_exactly_one_job() {
-        let p = pounce();
-        let ttl = Duration::from_secs(60);
-        let mut svc = MaskBakeService::with_store(None);
-        assert_eq!(
-            svc.poll_idle_unload(&p, Instant::now(), ttl),
-            None,
-            "no backend yet, nothing to free"
-        );
+    const TTL: Duration = Duration::from_secs(60);
 
+    fn idle_service(
+        left: Option<Duration>,
+    ) -> (MaskBakeService, Arc<Mutex<Idle>>, Arc<AtomicUsize>) {
         let unloads = Arc::new(AtomicUsize::new(0));
         let backend = Arc::new(Mutex::new(Idle {
-            loaded: true,
+            left,
             unloads: Arc::clone(&unloads),
         }));
+        let mut svc = MaskBakeService::with_store(None);
         svc.backend_override = Some(backend.clone());
-        // Not due yet: reports the time left and queues nothing.
-        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), ttl), Some(ttl / 2));
+        (svc, backend, unloads)
+    }
+
+    #[test]
+    fn idle_unload_does_nothing_without_a_backend_or_loaded_models() {
+        let p = pounce();
+        let mut svc = MaskBakeService::with_store(None);
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), None);
+        let (mut svc, _b, unloads) = idle_service(None);
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), None);
         drain(&p);
         assert_eq!(unloads.load(Ordering::SeqCst), 0);
+    }
 
-        // Due: make the fake report zero remaining.
-        struct Due(Idle);
-        impl MaskBackend for Due {
-            fn bake(&mut self, r: &BakeRequest<'_>) -> Result<AlphaMap, SegmentError> {
-                self.0.bake(r)
-            }
-            fn idle_unload_in(&self, _n: Instant, _t: Duration) -> Option<Duration> {
-                self.0.loaded.then_some(Duration::ZERO)
-            }
-            fn unload_if_idle(&mut self, n: Instant, t: Duration) -> bool {
-                self.0.unload_if_idle(n, t)
-            }
-        }
-        let due = Arc::new(Mutex::new(Due(Idle {
-            loaded: true,
-            unloads: Arc::clone(&unloads),
-        })));
-        svc.backend_override = Some(due);
-        svc.poll_idle_unload(&p, Instant::now(), ttl);
+    #[test]
+    fn idle_unload_waits_out_the_ttl_and_reports_the_time_left() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(TTL / 2));
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), Some(TTL / 2));
         drain(&p);
-        assert_eq!(unloads.load(Ordering::SeqCst), 1, "one job ran");
-        assert!(
-            !svc.unload_in_flight.load(Ordering::SeqCst),
-            "flag cleared once the job is gone"
-        );
-        // Nothing loaded any more: no further jobs.
-        svc.poll_idle_unload(&p, Instant::now(), ttl);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0, "not due: nothing queued");
+    }
+
+    #[test]
+    fn a_due_idle_unload_runs_once_and_clears_its_flag() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(Duration::ZERO));
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
         drain(&p);
         assert_eq!(unloads.load(Ordering::SeqCst), 1);
+        assert!(!svc.unload_in_flight.load(Ordering::SeqCst));
+        // The fake now reports nothing loaded: no further jobs.
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), None);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_due_idle_unload_is_not_queued_twice_while_one_is_in_flight() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(Duration::ZERO));
+        svc.unload_in_flight.store(true, Ordering::SeqCst);
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0, "a job is already queued");
+    }
+
+    #[test]
+    fn a_due_idle_unload_waits_for_pending_or_deferred_bakes() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(Duration::ZERO));
+        svc.deferred.insert(blake3::hash(b"prebake in flight"));
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(
+            unloads.load(Ordering::SeqCst),
+            0,
+            "a bake is about to need it"
+        );
+        svc.deferred.clear();
+        svc.pending.push(Arc::new(Mutex::new(None)));
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn idle_unload_never_blocks_on_a_backend_that_is_mid_bake() {
+        let p = pounce();
+        let (mut svc, backend, unloads) = idle_service(Some(Duration::ZERO));
+        let held = backend.lock().unwrap(); // what a running bake does
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), Some(TTL));
+        drop(held);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0);
     }
 
     fn pounce() -> Pounce {
