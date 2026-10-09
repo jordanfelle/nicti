@@ -23,7 +23,7 @@ pub struct DropRequest {
 }
 
 /// What the user clicked this frame (#368). A click on a folder filters the Library grid to it; a
-/// click on the drive's "Import here" button seeds the Folder field with the drive path.
+/// click on the drive's "Import here" button opens the native folder picker on that drive.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PanelOutput {
     pub drop: Option<DropRequest>,
@@ -243,10 +243,7 @@ pub fn show(
                     if drive.path != "/"
                         && ui
                             .small_button("Import here\u{2026}")
-                            .on_hover_text(
-                                "Put this drive's path in the (empty) Folder field, then \
-                                 append the folder to import.",
-                            )
+                            .on_hover_text("Pick a folder on this drive to import.")
                             .clicked()
                     {
                         out.import_from = Some(drive.path.clone());
@@ -486,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_folder_row_selects_it_and_a_drive_button_seeds_import() {
+    fn clicking_a_folder_row_selects_it_and_a_drive_button_requests_the_import_picker() {
         let out = click_in_panel("\u{1F4C1} 2026", None);
         assert_eq!(out.select_root, Some(Some(7)));
         let out = click_in_panel("\u{1F4C1} 2026", Some(7));
