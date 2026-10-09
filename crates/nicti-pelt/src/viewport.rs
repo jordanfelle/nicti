@@ -407,6 +407,42 @@ pub fn one_to_one_scale(rect_size_px: (f32, f32), tex_size_px: (f32, f32)) -> [f
     ]
 }
 
+/// Clamps a loupe `view_offset` so the visible window never leaves the image (#294). The shader
+/// samples texture UV `(uv - 0.5) * scale + 0.5 + offset`, so the window is `scale` wide centred on
+/// `0.5 + offset`; it stays inside `[0, 1]` while `|offset| <= (1 - scale) / 2`. An axis where the
+/// image is no larger than the viewport (`scale >= 1`, or a non-finite scale) has nothing to pan
+/// and stays centred.
+pub fn clamp_pan(pan: [f32; 2], scale: [f32; 2]) -> [f32; 2] {
+    let axis = |p: f32, s: f32| {
+        if s.is_finite() && s < 1.0 && p.is_finite() {
+            let limit = (1.0 - s) / 2.0;
+            p.clamp(-limit, limit)
+        } else {
+            0.0
+        }
+    };
+    [axis(pan[0], scale[0]), axis(pan[1], scale[1])]
+}
+
+/// Applies a drag of `drag_px` physical pixels to `pan` and clamps the result (#294). Dividing by
+/// the physical-pixel screen extent the current scale maps to (`rect_px / scale`) keeps the drag
+/// 1:1 with the cursor regardless of zoom factor or display scaling.
+pub fn pan_after_drag(
+    pan: [f32; 2],
+    drag_px: (f32, f32),
+    rect_px: (f32, f32),
+    scale: [f32; 2],
+) -> [f32; 2] {
+    let mut pan = pan;
+    if scale[0] > 0.0 {
+        pan[0] -= drag_px.0 / (rect_px.0 / scale[0]);
+    }
+    if scale[1] > 0.0 {
+        pan[1] -= drag_px.1 / (rect_px.1 / scale[1]);
+    }
+    clamp_pan(pan, scale)
+}
+
 impl CallbackTrait for ViewportCallback {
     fn prepare(
         &self,
@@ -965,5 +1001,35 @@ mod tests {
             one_to_one_scale((1600.0, 1200.0), (1600.0, 1200.0)),
             [1.0, 1.0]
         );
+    }
+
+    #[test]
+    fn clamp_pan_keeps_the_window_inside_the_image() {
+        // Window is a quarter of the image wide: centre may move 0.375 either way.
+        let scale = [0.25, 0.5];
+        assert_eq!(clamp_pan([0.1, -0.1], scale), [0.1, -0.1]);
+        assert_eq!(clamp_pan([9.0, -9.0], scale), [0.375, -0.25]);
+    }
+
+    #[test]
+    fn clamp_pan_centres_an_axis_the_image_does_not_fill() {
+        assert_eq!(clamp_pan([0.4, 0.4], [2.0, 1.0]), [0.0, 0.0]);
+        assert_eq!(clamp_pan([0.4, 0.4], [f32::NAN, f32::INFINITY]), [0.0, 0.0]);
+        assert_eq!(clamp_pan([f32::NAN, 0.0], [0.5, 0.5]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn pan_after_drag_is_one_to_one_then_clamped() {
+        // 1000px rect showing a 4000px-wide image: scale 0.25. A 100px drag right moves the
+        // window 100/4000 = 0.025 of the image left.
+        let scale = [0.25, 1.0];
+        let p = pan_after_drag([0.0, 0.0], (100.0, 0.0), (1000.0, 800.0), scale);
+        assert!((p[0] + 0.025).abs() < 1e-6 && p[1] == 0.0);
+        // A huge drag stops at the image edge instead of winding up.
+        let p = pan_after_drag([0.0, 0.0], (-1e6, 0.0), (1000.0, 800.0), scale);
+        assert_eq!(p[0], 0.375);
+        // A resize that widens the window shrinks the allowed range: the stored pan is pulled in.
+        let p = pan_after_drag([0.375, 0.0], (0.0, 0.0), (2000.0, 800.0), [0.5, 1.0]);
+        assert_eq!(p[0], 0.25);
     }
 }

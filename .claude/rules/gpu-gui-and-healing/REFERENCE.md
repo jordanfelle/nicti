@@ -147,7 +147,7 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     fields and a real bilinear `wgpu::Sampler` (replacing the old `textureLoad`, which had no
     resampling at all) so the same shader serves both Fit (aspect-correct, `fit_scale`) and 100%
     (`one_to_one_scale`) zoom; `ViewportCallback::identity(frame)` keeps the Develop tab's 1:1 mapping, now painted into
-    `viewport::fit_rect` (#272: aspect-correct, the frame is the crop rect while idle) rather than stretched. Known non-blocking follow-ups: #294 (unclamped 100% pan),
+    `viewport::fit_rect` (#272: aspect-correct, the frame is the crop rect while idle) rather than stretched. The 100% pan is clamped to the image (#294, `viewport::pan_after_drag`/`clamp_pan`). Known non-blocking follow-ups:
     #295 (a rare cache-eviction flicker back to the T0 fallback), #296 (NaN/Inf on a zero-dimension
     rect or corrupt asset in `fit_scale`/`one_to_one_scale`).
   - **#30 (virtualized library grid, landed) module breakdown**: `grid/layout.rs`'s `GridLayout`/

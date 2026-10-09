@@ -2781,19 +2781,16 @@ impl PeltApp {
             fit_scale(rect_size, tex_extent)
         };
 
-        if self.loupe_zoomed && response.dragged() {
+        let drag_px = if self.loupe_zoomed && response.dragged() {
             let delta = response.drag_delta();
-            // Screen-pixel drag -> texture-UV delta: dividing by the physical-pixel screen extent
-            // the current scale maps to (rect size / scale) keeps the drag 1:1 with the cursor
-            // regardless of the actual zoom factor or display scaling.
-            if scale[0] > 0.0 {
-                self.loupe_pan[0] -= (delta.x * ppp) / (rect_size_px.0 / scale[0]);
-            }
-            if scale[1] > 0.0 {
-                self.loupe_pan[1] -= (delta.y * ppp) / (rect_size_px.1 / scale[1]);
-            }
-        }
+            (delta.x * ppp, delta.y * ppp)
+        } else {
+            (0.0, 0.0)
+        };
         let offset = if self.loupe_zoomed {
+            // Also re-clamps after a window resize, which changes `scale` under a stored pan.
+            self.loupe_pan =
+                crate::viewport::pan_after_drag(self.loupe_pan, drag_px, rect_size_px, scale);
             self.loupe_pan
         } else {
             [0.0, 0.0]
