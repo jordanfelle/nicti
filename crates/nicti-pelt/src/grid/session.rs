@@ -768,9 +768,23 @@ mod tests {
         let budget = 100 * 64 * 48 * 4;
         let (mut session, ids, ctx, pounce) = loaded_session(1000, budget, |_| false);
         for start in (0..1000).step_by(64) {
-            session.request_visible(start..(start + 64).min(1000), &pounce);
-            wait_for(&mut session, &ctx, &pounce, |s| s.inflight_batches() == 0);
+            let window = start..(start + 64).min(1000);
+            session.request_visible(window.clone(), &pounce);
+            // Like the grid view, touch the visible cells every frame: the overscan batches
+            // decode on several workers in any order, and without the touch a late one can evict
+            // the window's own cells (the cache evicts by last use), which made the final
+            // assertion racy.
+            let touch = |s: &mut GridSession| {
+                for i in window.clone() {
+                    let _ = s.texture(ids[i]);
+                }
+            };
             wait_for(&mut session, &ctx, &pounce, |s| {
+                touch(s);
+                s.inflight_batches() == 0
+            });
+            wait_for(&mut session, &ctx, &pounce, |s| {
+                touch(s);
                 s.pending_uploads.is_empty()
             });
             let stats = session.texture_stats();
