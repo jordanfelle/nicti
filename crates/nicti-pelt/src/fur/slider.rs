@@ -509,13 +509,15 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
                 st.store(ui.ctx(), te_id);
             }
         }
-        // The box owns Escape while it has focus: consume it so Esc-to-commit tools don't also act.
-        let escape = r.has_focus()
+        // Escape cancels. egui drops a TextEdit's focus on Escape before this runs, so detect the
+        // key itself (not focus), and consume it so Esc-to-commit tools don't also act on it.
+        let escape = !start_edit
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         // An edit that is no longer focused (and didn't just start) is over: committed when focus
         // was lost this frame, otherwise abandoned, e.g. the row was not drawn while it was open
-        // (section collapsed, selection changed) and the box came back unfocused.
-        let ended = !start_edit && !r.has_focus();
+        // (section collapsed, selection changed) and the box came back unfocused. Memory focus,
+        // not `has_focus()`: an OS window blur must not end the edit.
+        let ended = !start_edit && !ui.memory(|m| m.has_focus(te_id));
         if !enabled || escape || ended {
             ui.data_mut(|d| d.remove_temp::<String>(edit_id));
             if enabled && !escape && r.lost_focus() {
@@ -885,6 +887,55 @@ mod tests {
             !outs.iter().any(|o| o.reset),
             "the value box does not reset"
         );
+    }
+
+    /// Escape cancels a typed edit: the value is unchanged and the box closes.
+    #[test]
+    fn escape_cancels_a_typed_edit() {
+        let ctx = super::super::tokens::testing::themed_ctx();
+        let mut v = 5500.0_f32;
+        let mut t = 0.0;
+        let mut frame = |events: Vec<egui::Event>, v: &mut f32| {
+            t += 0.02;
+            let input = egui::RawInput {
+                time: Some(t),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                slider(ui, &TEMP, v, true);
+            });
+            out.textures_delta.clear();
+        };
+        let at = egui::pos2(760.0, 13.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at)], &mut v);
+        for _ in 0..2 {
+            frame(vec![click(true)], &mut v);
+            frame(vec![click(false)], &mut v);
+        }
+        frame(vec![egui::Event::Text("6523".into())], &mut v);
+        frame(
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            &mut v,
+        );
+        frame(vec![], &mut v);
+        assert_eq!(v, 5500.0, "Escape discards the typed number");
     }
 
     /// An edit left open while the row isn't drawn (section collapsed) or is disabled never
