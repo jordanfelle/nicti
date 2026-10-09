@@ -4,10 +4,14 @@
 //! can swap in a fake. Loading is **lazy and retried**: nothing is loaded until the first bake
 //! (reading and verifying ~1 GB must not happen at start-up for a user who never makes an AI
 //! mask), and a failed load is *not* cached -- the user may have finished the download since.
+//! Loaded segmenters are also dropped after [`IDLE_UNLOAD_AFTER`] without a bake (#356): BiRefNet
+//! is ~970 MB of weights plus activations, which should not stay resident for a whole session
+//! because the user selected a subject once. The next bake reloads it lazily (and re-verifies).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use nicti_groom::PixelSource;
 use nicti_stalk::models::ModelStore;
@@ -18,6 +22,9 @@ use nicti_stalk::{
 use nicti_tapetum::coat::MaskRecipe;
 
 use crate::neutral::{NeutralCache, NeutralImage};
+
+/// How long a loaded segmenter may sit unused before [`MaskBackend::unload_if_idle`] drops it.
+pub const IDLE_UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// One bake: which photo, and which recipe to run on it.
 pub struct BakeRequest<'a> {
@@ -32,6 +39,19 @@ pub struct BakeRequest<'a> {
 /// Something that can run a bake. `Send` so a Pounce worker can own it.
 pub trait MaskBackend: Send {
     fn bake(&mut self, req: &BakeRequest<'_>) -> Result<AlphaMap, SegmentError>;
+
+    /// How long until the loaded models have been idle for `ttl` (`Duration::ZERO` = due now);
+    /// `None` when nothing is loaded. Lets the caller sleep until then instead of polling.
+    fn idle_unload_in(&self, _now: Instant, _ttl: Duration) -> Option<Duration> {
+        None
+    }
+
+    /// Drops every loaded model if they have been idle for `ttl`; true if it did. Dropping an ONNX
+    /// session touches the shared ORT environment, so callers run this on the GPU lane (see
+    /// `job::UnloadIdleJob`), serialized with bakes and removals.
+    fn unload_if_idle(&mut self, _now: Instant, _ttl: Duration) -> bool {
+        false
+    }
 }
 
 pub struct RegistryBackend {
@@ -41,6 +61,8 @@ pub struct RegistryBackend {
     /// Loaded segmenters by `(model_id, model_version)`.
     loaded: HashMap<(String, String), Box<dyn Segmenter>>,
     neutral: NeutralCache,
+    /// When the last bake finished (success or not); `None` until the first.
+    last_used: Option<Instant>,
 }
 
 impl RegistryBackend {
@@ -55,6 +77,7 @@ impl RegistryBackend {
             ort_dylib,
             loaded: HashMap::new(),
             neutral: NeutralCache::new(),
+            last_used: None,
         }
     }
 
@@ -67,6 +90,31 @@ impl RegistryBackend {
 
 impl MaskBackend for RegistryBackend {
     fn bake(&mut self, req: &BakeRequest<'_>) -> Result<AlphaMap, SegmentError> {
+        let result = self.run_bake(req);
+        self.last_used = Some(Instant::now());
+        result
+    }
+
+    fn idle_unload_in(&self, now: Instant, ttl: Duration) -> Option<Duration> {
+        if self.loaded.is_empty() {
+            return None;
+        }
+        let idle = now.saturating_duration_since(self.last_used?);
+        Some(ttl.saturating_sub(idle))
+    }
+
+    fn unload_if_idle(&mut self, now: Instant, ttl: Duration) -> bool {
+        if self.idle_unload_in(now, ttl) != Some(Duration::ZERO) {
+            return false;
+        }
+        self.loaded.clear();
+        self.neutral = NeutralCache::new();
+        true
+    }
+}
+
+impl RegistryBackend {
+    fn run_bake(&mut self, req: &BakeRequest<'_>) -> Result<AlphaMap, SegmentError> {
         let recipe = req.recipe;
         let target = SegmentTarget::from_params(&recipe.params)?;
         let provider = resolve_provider(
@@ -243,5 +291,50 @@ mod tests {
             Err(SegmentError::UnsupportedTarget(_))
         ));
         assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+
+        idle_models_are_dropped_after_the_ttl_and_reload_on_the_next_bake();
+    }
+
+    // Called from the test above rather than being its own `#[test]`: it reads the same
+    // process-global load counter.
+    fn idle_models_are_dropped_after_the_ttl_and_reload_on_the_next_bake() {
+        let mut b = backend();
+        let img = photo();
+        let good = recipe("1");
+        let ttl = Duration::from_secs(60);
+        let t0 = Instant::now();
+        assert_eq!(
+            b.idle_unload_in(t0, ttl),
+            None,
+            "nothing loaded, nothing to unload"
+        );
+        assert!(!b.unload_if_idle(t0 + ttl * 2, ttl));
+
+        let loads_before = LOADS.load(Ordering::SeqCst);
+        let bake = |b: &mut RegistryBackend| {
+            b.bake(&BakeRequest {
+                image_key: 1,
+                source: &img,
+                cam_mul: [1.0; 4],
+                recipe: &good,
+            })
+            .unwrap()
+        };
+        bake(&mut b);
+        let used = b.last_used.expect("a bake records its time");
+        assert_eq!(LOADS.load(Ordering::SeqCst), loads_before + 1);
+
+        // Not yet due: reports the time left and keeps the model.
+        let left = b.idle_unload_in(used + Duration::from_secs(20), ttl);
+        assert_eq!(left, Some(Duration::from_secs(40)));
+        assert!(!b.unload_if_idle(used + Duration::from_secs(59), ttl));
+        assert!(b.is_loaded("test.fake", "1"));
+
+        // Due: dropped, and the next bake loads again.
+        assert!(b.unload_if_idle(used + ttl, ttl));
+        assert!(!b.is_loaded("test.fake", "1"));
+        assert_eq!(b.idle_unload_in(used + ttl, ttl), None);
+        bake(&mut b);
+        assert_eq!(LOADS.load(Ordering::SeqCst), loads_before + 2);
     }
 }

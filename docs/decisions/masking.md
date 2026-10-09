@@ -70,3 +70,17 @@ the same name in `live_suffix.wgsl` (ADR-0380), so a global +0.3 and a local +0.
 the spatial ones read the same cached bases. `MaskEngine::prepare` takes `MaskInputs.presence` and
 builds the bands/haze bases even with no active correction (returning a `MaskFrame` with no
 corrections); it returns `None` only when neither a correction nor a spatial presence needs anything.
+
+## Idle unload of the AI model (#356)
+
+`RegistryBackend` used to keep a loaded segmenter for the life of the process; BiRefNet is ~970 MB of
+weights plus activations, so one Select Subject pinned that much memory for the whole session. It now
+drops every loaded segmenter (and the neutral-image cache) after `IDLE_UNLOAD_AFTER` (5 minutes)
+without a bake. The next bake reloads lazily, which re-verifies the download as a first load does.
+
+The drop runs as a Background `UnloadIdleJob` on the GPU lane, not from a timer thread: tearing down
+an ONNX session touches the shared ORT environment, and the GPU lane's single worker is what already
+serializes bakes against removals. The job re-checks idleness when it runs, so a bake queued ahead of
+it wins and the models stay. `MaskBakeService::poll_idle_unload` queues it (at most one at a time),
+skips while bakes are pending, never blocks on a backend that is mid-bake, and returns the time until
+the next check so the otherwise-idle window can ask egui for a repaint then.
