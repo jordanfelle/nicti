@@ -424,6 +424,25 @@ pub fn clamp_pan(pan: [f32; 2], scale: [f32; 2]) -> [f32; 2] {
     [axis(pan[0], scale[0]), axis(pan[1], scale[1])]
 }
 
+/// Applies a drag of `drag_px` physical pixels to `pan` and clamps the result (#294). Dividing by
+/// the physical-pixel screen extent the current scale maps to (`rect_px / scale`) keeps the drag
+/// 1:1 with the cursor regardless of zoom factor or display scaling.
+pub fn pan_after_drag(
+    pan: [f32; 2],
+    drag_px: (f32, f32),
+    rect_px: (f32, f32),
+    scale: [f32; 2],
+) -> [f32; 2] {
+    let mut pan = pan;
+    if scale[0] > 0.0 {
+        pan[0] -= drag_px.0 / (rect_px.0 / scale[0]);
+    }
+    if scale[1] > 0.0 {
+        pan[1] -= drag_px.1 / (rect_px.1 / scale[1]);
+    }
+    clamp_pan(pan, scale)
+}
+
 impl CallbackTrait for ViewportCallback {
     fn prepare(
         &self,
@@ -997,5 +1016,20 @@ mod tests {
         assert_eq!(clamp_pan([0.4, 0.4], [2.0, 1.0]), [0.0, 0.0]);
         assert_eq!(clamp_pan([0.4, 0.4], [f32::NAN, f32::INFINITY]), [0.0, 0.0]);
         assert_eq!(clamp_pan([f32::NAN, 0.0], [0.5, 0.5]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn pan_after_drag_is_one_to_one_then_clamped() {
+        // 1000px rect showing a 4000px-wide image: scale 0.25. A 100px drag right moves the
+        // window 100/4000 = 0.025 of the image left.
+        let scale = [0.25, 1.0];
+        let p = pan_after_drag([0.0, 0.0], (100.0, 0.0), (1000.0, 800.0), scale);
+        assert!((p[0] + 0.025).abs() < 1e-6 && p[1] == 0.0);
+        // A huge drag stops at the image edge instead of winding up.
+        let p = pan_after_drag([0.0, 0.0], (-1e6, 0.0), (1000.0, 800.0), scale);
+        assert_eq!(p[0], 0.375);
+        // A resize that widens the window shrinks the allowed range: the stored pan is pulled in.
+        let p = pan_after_drag([0.375, 0.0], (0.0, 0.0), (2000.0, 800.0), [0.5, 1.0]);
+        assert_eq!(p[0], 0.25);
     }
 }
