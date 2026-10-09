@@ -891,7 +891,8 @@ mod tests {
             frame(&mut svc, &p, &mut first).is_empty(),
             "a miss is no event"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "...and has not baked yet");
+        // No "has not baked yet" check here: that frame's `request_missing` has just queued the
+        // bake, which a Pounce worker may already have run -- asserting 0 raced it.
         let events = frame(&mut svc, &p, &mut first); // the bake lands; its store is queued
         assert!(events[0].result.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
