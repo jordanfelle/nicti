@@ -1883,14 +1883,10 @@ impl PeltApp {
             self.grid_root = sel;
         }
         if let Some(drive) = out.import_from {
-            // Never clobber what the user already typed.
-            if self.import_path_input.trim().is_empty() {
-                self.import_path_input = drive;
-                self.import_status = None;
-            } else {
-                self.import_status =
-                    Some("The Folder field already has a path -- clear it first.".to_string());
-            }
+            // Same native dialog as "Browse...", opened on the drive; the pick lands in the Folder
+            // field via `import_picker.poll`. No-op while a dialog is already open.
+            self.import_picker
+                .open(ui.ctx(), "Choose a folder to import", &drive);
         }
         if let Some(r) = out.drop {
             self.submit_move_to(store, r.root_id, r.dest_parent);
