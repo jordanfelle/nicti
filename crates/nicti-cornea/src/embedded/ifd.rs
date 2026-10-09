@@ -80,6 +80,8 @@ impl IfdEntry {
 
 pub const TAG_NEW_SUBFILE_TYPE: u16 = 0x00FE;
 pub const TAG_COMPRESSION: u16 = 0x0103;
+/// EXIF/TIFF Orientation (#309): the container's own rotation, 1-8.
+pub const TAG_ORIENTATION: u16 = 0x0112;
 pub const TAG_IMAGE_WIDTH: u16 = 0x0100;
 pub const TAG_IMAGE_LENGTH: u16 = 0x0101;
 pub const TAG_STRIP_OFFSETS: u16 = 0x0111;
@@ -200,6 +202,34 @@ impl<S: ByteSource> Walker<S> {
     /// `find_embedded_jpegs` has returned its offset/len, without re-walking the IFD tree.
     pub fn read_range(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, IfdError> {
         Ok(self.source.read_at(offset, len)?)
+    }
+
+    /// IFD0's Orientation tag (#309), as the EXIF value 1-8. `None` when absent or out of range.
+    ///
+    /// A RAW's rotation lives here, not in the embedded preview JPEG (Nikon's `JpgFromRaw` carries
+    /// no EXIF of its own). Safe to call before or after `find_embedded_jpegs` on the same walker:
+    /// IFD0 is un-marked afterwards so that call's cycle guard doesn't trip.
+    pub fn ifd0_orientation(&mut self) -> Result<Option<u8>, IfdError> {
+        let off = self.ifd0_offset();
+        let seen_before = self.visited.contains(&u64::from(off));
+        let counted = self.ifds_visited;
+        if seen_before {
+            self.visited.remove(&u64::from(off));
+        }
+        let read = self.read_ifd(0, off);
+        // Restore the guard to exactly what it was before this call.
+        if !seen_before {
+            self.visited.remove(&u64::from(off));
+        } else {
+            self.visited.insert(u64::from(off));
+        }
+        self.ifds_visited = counted;
+        let (entries, _) = read?;
+        Ok(Self::find_entry(&entries, TAG_ORIENTATION)
+            .filter(|e| e.field_type == 3 && e.count == 1)
+            .map(|e| e.as_u32(self.bo))
+            .and_then(|v| u8::try_from(v).ok())
+            .filter(|v| (1..=8).contains(v)))
     }
 
     /// Reads one IFD at `offset` (relative to `base`, which is 0 for the main TIFF header and
@@ -513,6 +543,44 @@ mod tests {
 
     fn walk(data: &[u8]) -> Walker<SliceSource<'_>> {
         Walker::new(SliceSource::new(data)).expect("valid header")
+    }
+
+    /// Big-endian TIFF whose IFD0 holds one Orientation entry of `field_type`/`count`.
+    fn tiff_with_orientation(field_type: u16, count: u32, value: u16) -> Vec<u8> {
+        let mut t = vec![b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1];
+        t.extend_from_slice(&TAG_ORIENTATION.to_be_bytes());
+        t.extend_from_slice(&field_type.to_be_bytes());
+        t.extend_from_slice(&count.to_be_bytes());
+        t.extend_from_slice(&value.to_be_bytes());
+        t.extend_from_slice(&[0, 0]);
+        t.extend_from_slice(&0u32.to_be_bytes());
+        t
+    }
+
+    #[test]
+    fn ifd0_orientation_reads_a_valid_short_in_either_call_order() {
+        let data = tiff_with_orientation(3, 1, 6);
+        assert_eq!(walk(&data).ifd0_orientation().unwrap(), Some(6));
+        // Neither order may trip the walker's cycle guard on IFD0.
+        let mut w = walk(&data);
+        w.find_embedded_jpegs().unwrap();
+        assert_eq!(w.ifd0_orientation().unwrap(), Some(6));
+        assert_eq!(w.ifd0_orientation().unwrap(), Some(6));
+        let mut w = walk(&data);
+        assert_eq!(w.ifd0_orientation().unwrap(), Some(6));
+        w.find_embedded_jpegs().unwrap();
+    }
+
+    #[test]
+    fn ifd0_orientation_rejects_out_of_range_and_malformed_entries() {
+        for (ty, count, v) in [(3, 1, 0), (3, 1, 9), (4, 1, 6), (3, 2, 6)] {
+            let data = tiff_with_orientation(ty, count, v);
+            assert_eq!(
+                walk(&data).ifd0_orientation().unwrap(),
+                None,
+                "{ty}/{count}/{v}"
+            );
+        }
     }
 
     /// `Walker<FileSource>` (ranged reads) must find the exact same embedded JPEGs as
