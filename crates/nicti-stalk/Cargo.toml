@@ -13,7 +13,7 @@ sha2 = "0.11"
 thiserror = "2"
 # Only the ORT runtime artifact ships as a zip (Windows); deflate via flate2's pure-Rust backend
 # keeps this off the C/zstd/bzip2 defaults, none of which a release zip needs.
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # ureq's native-tls feature rides the OS trust store (Windows SChannel) rather than bundling
 # webpki-roots, whose CDLA-Permissive-2.0 license isn't on deny.toml's allowlist -- same choice,
