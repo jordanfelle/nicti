@@ -114,8 +114,9 @@ fn pick_embedded(mut found: Vec<EmbeddedJpeg>) -> Option<EmbeddedJpeg> {
 }
 
 /// Decodes `jpeg`, downscales to [`T2_LONG_EDGE`] (never upscaling) and re-encodes as JPEG.
-/// `container_orientation` is the RAW container's IFD0 rotation (#309); it applies only when the
-/// JPEG carries no rotation of its own.
+/// `container_orientation` is the RAW container's IFD0 rotation (#309); it is used only when the
+/// JPEG's own EXIF yields no rotation (absent, or an explicit 1 -- the decoder can't tell those
+/// apart), so a preview that is already oriented is never rotated twice.
 fn resize_and_encode(
     jpeg: &[u8],
     container_orientation: Option<Orientation>,
@@ -554,6 +555,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dims(&generate_t2(&path).unwrap()), (2560, T2_LONG_EDGE));
+    }
+
+    /// `jpeg` with an APP1/EXIF segment carrying `orientation` right after SOI.
+    fn jpeg_with_exif_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+        let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&u32::from(orientation).to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        let mut seg = b"Exif\0\0".to_vec();
+        seg.extend_from_slice(&tiff);
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&((seg.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&seg);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn the_container_orientation_rotates_a_jpeg_with_no_exif() {
+        let out = resize_and_encode(&jpeg_of(4200, 2800), Some(Orientation::Rotate90)).unwrap();
+        assert_eq!(dims(&out), (2560, T2_LONG_EDGE));
+    }
+
+    #[test]
+    fn a_jpeg_with_its_own_orientation_is_not_rotated_again_by_the_container() {
+        let src = jpeg_with_exif_orientation(&jpeg_of(4200, 2800), 6);
+        // Own rotation only: portrait. A second (container) rotation would flip it to 180 degrees.
+        let out = resize_and_encode(&src, Some(Orientation::Rotate90)).unwrap();
+        assert_eq!(dims(&out), (2560, T2_LONG_EDGE));
+        let out = resize_and_encode(&src, Some(Orientation::Rotate180)).unwrap();
+        assert_eq!(dims(&out), (2560, T2_LONG_EDGE));
     }
 
     #[test]
