@@ -2794,6 +2794,8 @@ impl PeltApp {
             }
         }
         let offset = if self.loupe_zoomed {
+            // Also re-clamps after a window resize, which changes `scale` under a stored pan.
+            self.loupe_pan = crate::viewport::clamp_pan(self.loupe_pan, scale);
             self.loupe_pan
         } else {
             [0.0, 0.0]
