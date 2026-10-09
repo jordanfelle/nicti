@@ -19,14 +19,17 @@
 //!   finishes after the user has left the photo, since the work is still valid.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use nicti_groom::install::{InstallHandle, InstallModelsJob};
 use nicti_groom::FramePixels;
 use nicti_pounce::Pounce;
 use nicti_siamese::backend::RegistryBackend;
-use nicti_siamese::job::{MaskBakeJob, MaskBakeOutcome, SharedBackend, Slot, CANCELLED};
+use nicti_siamese::job::{
+    MaskBakeJob, MaskBakeOutcome, SharedBackend, Slot, UnloadIdleJob, CANCELLED,
+};
 use nicti_siamese::providers::segmentation_registry;
 use nicti_stalk::models::{self, HttpDownloader, ModelStore, Status};
 use nicti_stalk::SegmentationRegistry;
@@ -49,6 +52,8 @@ pub struct MaskBakeService {
     store: Option<ModelStore>,
     registry: Arc<SegmentationRegistry>,
     backend: Option<SharedBackend>,
+    /// An `UnloadIdleJob` is queued or running (#356).
+    unload_in_flight: Arc<AtomicBool>,
     install: Option<InstallHandle>,
     /// Whether the running/last install is the optional NVIDIA GPU pack (for the panel's message).
     install_is_gpu_pack: bool,
@@ -119,6 +124,7 @@ impl MaskBakeService {
             store,
             registry: Arc::new(segmentation_registry()),
             backend: None,
+            unload_in_flight: Arc::new(AtomicBool::new(false)),
             install: None,
             install_is_gpu_pack: false,
             pending: Vec::new(),
@@ -323,6 +329,50 @@ impl MaskBakeService {
             self.failed.clear();
         }
         Some(done)
+    }
+
+    /// Frees the loaded AI models once they have been idle for `ttl` (#356) by queueing an
+    /// `UnloadIdleJob` on the GPU lane. Returns how long until this is worth calling again (the
+    /// caller schedules a repaint then, since an idle window runs no frames), or `None` when
+    /// nothing is loaded. Never blocks: a backend mid-bake (its mutex held) is simply busy.
+    pub fn poll_idle_unload(
+        &mut self,
+        pounce: &Pounce,
+        now: Instant,
+        ttl: Duration,
+    ) -> Option<Duration> {
+        let backend = self.existing_backend()?;
+        if self.unload_in_flight.load(Ordering::SeqCst) {
+            return Some(ttl);
+        }
+        let Ok(guard) = backend.try_lock() else {
+            // Mid-bake; it will have been used just now, so look again after a full ttl.
+            return Some(ttl);
+        };
+        let left = guard.idle_unload_in(now, ttl)?;
+        drop(guard);
+        if left > Duration::ZERO {
+            return Some(left);
+        }
+        // Queued or in-flight bakes would just reload it; wait for them.
+        if self.pending_count() > 0 || !self.deferred.is_empty() {
+            return Some(ttl);
+        }
+        pounce.submit(Box::new(UnloadIdleJob::new(
+            Arc::clone(backend),
+            ttl,
+            Arc::clone(&self.unload_in_flight),
+        )));
+        Some(ttl)
+    }
+
+    /// The shared backend if one has been created; unlike `shared_backend` never makes one.
+    fn existing_backend(&self) -> Option<&SharedBackend> {
+        #[cfg(test)]
+        if let Some(b) = &self.backend_override {
+            return Some(b);
+        }
+        self.backend.as_ref()
     }
 
     /// The shared backend, created (with nothing loaded) on first use.
@@ -569,6 +619,115 @@ mod tests {
             }
             AlphaMap::new(2, 2, vec![1.0, 1.0, 0.0, 0.0])
         }
+    }
+
+    /// A backend that reports a fixed idle time left and counts unloads.
+    struct Idle {
+        left: Option<Duration>,
+        unloads: Arc<AtomicUsize>,
+    }
+
+    impl MaskBackend for Idle {
+        fn bake(&mut self, _req: &BakeRequest<'_>) -> Result<AlphaMap, SegmentError> {
+            unreachable!("no bakes in this test")
+        }
+        fn idle_unload_in(&self, _now: Instant, _ttl: Duration) -> Option<Duration> {
+            self.left
+        }
+        fn unload_if_idle(&mut self, _now: Instant, _ttl: Duration) -> bool {
+            self.unloads.fetch_add(1, Ordering::SeqCst);
+            self.left = None;
+            true
+        }
+    }
+
+    const TTL: Duration = Duration::from_secs(60);
+
+    fn idle_service(
+        left: Option<Duration>,
+    ) -> (MaskBakeService, Arc<Mutex<Idle>>, Arc<AtomicUsize>) {
+        let unloads = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(Mutex::new(Idle {
+            left,
+            unloads: Arc::clone(&unloads),
+        }));
+        let mut svc = MaskBakeService::with_store(None);
+        svc.backend_override = Some(backend.clone());
+        (svc, backend, unloads)
+    }
+
+    #[test]
+    fn idle_unload_does_nothing_without_a_backend_or_loaded_models() {
+        let p = pounce();
+        let mut svc = MaskBakeService::with_store(None);
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), None);
+        let (mut svc, _b, unloads) = idle_service(None);
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), None);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn idle_unload_waits_out_the_ttl_and_reports_the_time_left() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(TTL / 2));
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), Some(TTL / 2));
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0, "not due: nothing queued");
+    }
+
+    #[test]
+    fn a_due_idle_unload_runs_once_and_clears_its_flag() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(Duration::ZERO));
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 1);
+        assert!(!svc.unload_in_flight.load(Ordering::SeqCst));
+        // The fake now reports nothing loaded: no further jobs.
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), None);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_due_idle_unload_is_not_queued_twice_while_one_is_in_flight() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(Duration::ZERO));
+        svc.unload_in_flight.store(true, Ordering::SeqCst);
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0, "a job is already queued");
+    }
+
+    #[test]
+    fn a_due_idle_unload_waits_for_pending_or_deferred_bakes() {
+        let p = pounce();
+        let (mut svc, _b, unloads) = idle_service(Some(Duration::ZERO));
+        svc.deferred.insert(blake3::hash(b"prebake in flight"));
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(
+            unloads.load(Ordering::SeqCst),
+            0,
+            "a bake is about to need it"
+        );
+        svc.deferred.clear();
+        svc.pending.push(Arc::new(Mutex::new(None)));
+        svc.poll_idle_unload(&p, Instant::now(), TTL);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn idle_unload_never_blocks_on_a_backend_that_is_mid_bake() {
+        let p = pounce();
+        let (mut svc, backend, unloads) = idle_service(Some(Duration::ZERO));
+        let held = backend.lock().unwrap(); // what a running bake does
+        assert_eq!(svc.poll_idle_unload(&p, Instant::now(), TTL), Some(TTL));
+        drop(held);
+        drain(&p);
+        assert_eq!(unloads.load(Ordering::SeqCst), 0);
     }
 
     fn pounce() -> Pounce {

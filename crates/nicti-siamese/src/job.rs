@@ -11,7 +11,9 @@
 //! - **The result names the photo.** [`MaskBakeOutcome::image_key`] lets a result that lands after
 //!   the user moved to another photo be recognised and dropped.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use nicti_groom::PixelSource;
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
@@ -177,6 +179,69 @@ impl Drop for MaskBakeJob {
     }
 }
 
+/// Drops the backend's loaded models if they have sat idle for `ttl` (#356). A job rather than a
+/// timer thread because tearing down an ONNX session touches the ORT environment, which only the
+/// GPU lane's single worker may do (see the module doc). It re-checks idleness when it runs, so a
+/// bake that was queued ahead of it wins and the models stay.
+pub struct UnloadIdleJob {
+    backend: SharedBackend,
+    ttl: Duration,
+    /// True from submission until this job is dropped (run *or* cancelled), so the submitter
+    /// doesn't queue a second one meanwhile.
+    in_flight: Arc<AtomicBool>,
+    done: bool,
+}
+
+impl UnloadIdleJob {
+    pub fn new(backend: SharedBackend, ttl: Duration, in_flight: Arc<AtomicBool>) -> Self {
+        in_flight.store(true, Ordering::SeqCst);
+        Self {
+            backend,
+            ttl,
+            in_flight,
+            done: false,
+        }
+    }
+}
+
+impl ChunkedJob for UnloadIdleJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Bake,
+            lane: Lane::Gpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        "Free AI mask model".to_owned()
+    }
+
+    fn progress(&self) -> Progress {
+        Progress {
+            done: u64::from(self.done),
+            total: Some(1),
+        }
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        // A poisoned lock means a bake panicked mid-way; leave that to the bake path's refusal.
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.unload_if_idle(Instant::now(), self.ttl);
+        }
+        self.done = true;
+        Ok(Step::Done)
+    }
+}
+
+impl Drop for UnloadIdleJob {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +318,29 @@ mod tests {
         assert_eq!(spec.priority, Priority::Foreground);
         assert_eq!(spec.vram_bytes, 0);
         assert_eq!(job.label(), "Select subject");
+    }
+
+    #[test]
+    fn the_unload_job_is_a_background_gpu_lane_job_that_tracks_its_in_flight_flag() {
+        let shared: SharedBackend = Arc::new(Mutex::new(Fake { ok: true, calls: 0 }));
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut job = UnloadIdleJob::new(shared, Duration::from_secs(1), Arc::clone(&flag));
+        assert!(flag.load(Ordering::SeqCst), "set on construction");
+        let spec = job.spec();
+        assert_eq!(
+            (spec.lane, spec.priority, spec.vram_bytes),
+            (Lane::Gpu, Priority::Background, 0)
+        );
+        assert!(matches!(job.step(), Ok(Step::Done)));
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "still set until the job is dropped"
+        );
+        drop(job);
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "cleared on drop, run or cancelled"
+        );
     }
 
     #[test]

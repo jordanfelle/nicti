@@ -2882,6 +2882,15 @@ impl PeltApp {
         if self.prebake.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+        // Free the AI model after a quiet spell (#356); an idle window runs no frames, so ask to
+        // be woken when it falls due.
+        if let Some(wait) = self.mask_ui.service.poll_idle_unload(
+            &self.pounce,
+            std::time::Instant::now(),
+            nicti_siamese::backend::IDLE_UNLOAD_AFTER,
+        ) {
+            ctx.request_repaint_after(wait.max(std::time::Duration::from_secs(1)));
+        }
     }
 
     /// Queues the photos a paste/sync touched for background mask pre-baking, nearest the grid
