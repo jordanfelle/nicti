@@ -44,7 +44,9 @@ struct Uniforms {
     pad: u32,
 }
 
-@group(0) @binding(0) var input_tex: texture_storage_2d<rgba16float, read>;
+// Read through an ordinary sampled texture (`texture_2d` + `textureLoad`), never a read-mode storage
+// texture: that is a UAV under Dx12 and hazards with the preceding pass's write (#355, ADR-0051).
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u: Uniforms;
 
@@ -162,10 +164,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fx = sx - floor(sx);
     let fy = sy - floor(sy);
 
-    let c00 = textureLoad(input_tex, vec2<i32>(i32(x0), i32(y0)));
-    let c10 = textureLoad(input_tex, vec2<i32>(i32(x1), i32(y0)));
-    let c01 = textureLoad(input_tex, vec2<i32>(i32(x0), i32(y1)));
-    let c11 = textureLoad(input_tex, vec2<i32>(i32(x1), i32(y1)));
+    let c00 = textureLoad(input_tex, vec2<i32>(i32(x0), i32(y0)), 0);
+    let c10 = textureLoad(input_tex, vec2<i32>(i32(x1), i32(y0)), 0);
+    let c01 = textureLoad(input_tex, vec2<i32>(i32(x0), i32(y1)), 0);
+    let c11 = textureLoad(input_tex, vec2<i32>(i32(x1), i32(y1)), 0);
 
     let top = mix(c00, c10, fx);
     let bottom = mix(c01, c11, fx);
