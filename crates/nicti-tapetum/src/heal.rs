@@ -172,8 +172,9 @@ pub enum PatchError {
 pub struct RemovalPatch {
     pub center: (i32, i32),
     pub side: u32,
-    /// Row-major `side * side` texels as f16 bit patterns.
-    texels: Vec<[u16; 4]>,
+    /// Row-major `side * side` RGBA texels as little-endian f16 bytes (8 per pixel): exactly what
+    /// `write_texture` takes, so a rebake uploads this slice with no per-rebake allocation.
+    texels: Vec<u8>,
 }
 
 impl RemovalPatch {
@@ -196,7 +197,10 @@ impl RemovalPatch {
         }
         let texels = pixels
             .iter()
-            .map(|px| px.map(|c| half::f16::from_f32(c).to_bits()))
+            .flat_map(|px| {
+                px.iter()
+                    .flat_map(|&c| half::f16::from_f32(c).to_le_bytes())
+            })
             .collect();
         Ok(Self {
             center,
@@ -207,20 +211,13 @@ impl RemovalPatch {
 
     /// The pixel at row-major index `i`, widened back to f32 (what the GPU samples).
     pub fn pixel(&self, i: usize) -> [f32; 4] {
-        self.texels[i].map(|b| half::f16::from_bits(b).to_f32())
+        let t = &self.texels[i * 8..i * 8 + 8];
+        std::array::from_fn(|c| half::f16::from_le_bytes([t[2 * c], t[2 * c + 1]]).to_f32())
     }
 
     /// Every pixel, row-major, widened to f32.
     pub fn pixels(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
-        (0..self.texels.len()).map(|i| self.pixel(i))
-    }
-
-    /// The texels as little-endian `Rgba16Float` bytes, ready for `write_texture`.
-    fn texel_bytes(&self) -> Vec<u8> {
-        self.texels
-            .iter()
-            .flat_map(|t| t.iter().flat_map(|b| b.to_le_bytes()))
-            .collect()
+        (0..self.texels.len() / 8).map(|i| self.pixel(i))
     }
 
     /// Content hash: what identifies "this exact fill" in the heal stage's cache key.
@@ -229,11 +226,7 @@ impl RemovalPatch {
         h.update(&self.center.0.to_le_bytes());
         h.update(&self.center.1.to_le_bytes());
         h.update(&self.side.to_le_bytes());
-        for t in &self.texels {
-            for b in t {
-                h.update(&b.to_le_bytes());
-            }
-        }
+        h.update(&self.texels);
         h.finalize()
     }
 }
@@ -614,7 +607,6 @@ impl HealKernel {
             height: patch.side,
         };
         let tex = FrameTexture::new(gpu, extent);
-        let bytes = patch.texel_bytes();
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &tex.texture,
@@ -622,7 +614,7 @@ impl HealKernel {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &bytes,
+            &patch.texels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(patch.side * 8),
@@ -1274,6 +1266,28 @@ mod tests {
             &removals_for(&remove, patch),
         );
         assert!(max_diff(&expected, &actual) < 0.02);
+    }
+
+    #[test]
+    fn removal_patch_stores_gpu_ready_f16_bytes_and_a_stable_hash() {
+        let px: Vec<[f32; 4]> = (0..9).map(|i| [i as f32 * 0.37, 1e5, -0.25, 0.5]).collect();
+        let p = RemovalPatch::new((3, -4), 3, px.clone()).unwrap();
+        let want: Vec<u8> = px
+            .iter()
+            .flat_map(|q| q.iter().flat_map(|&c| half::f16::from_f32(c).to_le_bytes()))
+            .collect();
+        assert_eq!(p.texels, want);
+        for (i, q) in px.iter().enumerate() {
+            assert_eq!(p.pixel(i), q.map(|c| half::f16::from_f32(c).to_f32()));
+        }
+        assert_eq!(p.pixels().count(), 9);
+        assert_eq!(p.content_hash(), p.clone().content_hash());
+        let mut other = px;
+        other[4][0] += 1.0;
+        assert_ne!(
+            p.content_hash(),
+            RemovalPatch::new((3, -4), 3, other).unwrap().content_hash()
+        );
     }
 
     #[test]
