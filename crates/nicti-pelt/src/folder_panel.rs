@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nicti_lair::carry::Resolution;
 use nicti_lair::{MoveState, Root, RootMove};
 
 use crate::archive_drives::ArchiveDrives;
@@ -33,6 +34,8 @@ pub struct PanelOutput {
     pub import_from: Option<String>,
     /// The root whose "Verify folder" context-menu entry was clicked (#386).
     pub verify: Option<i64>,
+    /// A stuck journal row's resolution button that was clicked (#334): `(journal id, choice)`.
+    pub resolve: Option<(i64, Resolution)>,
 }
 
 /// The root filter a click on `clicked` produces: toggles off when it is already `selected`.
@@ -152,6 +155,11 @@ pub struct Cache {
 }
 
 impl Cache {
+    /// Drops the cached scan so the next frame re-reads it (a stuck move was just settled).
+    pub fn invalidate(&mut self) {
+        self.at = None;
+    }
+
     /// Refreshes if stale, or right away when `busy` (an import/sync/move is running) just changed
     /// -- a finishing move has just re-pointed a root.
     pub fn refresh(&mut self, busy: bool, read: impl FnOnce() -> (Vec<Root>, Vec<RootMove>)) {
@@ -173,9 +181,20 @@ pub fn is_noop_or_cyclic(dragged: &Path, dest_parent: &Path) -> bool {
     dest_parent.starts_with(dragged) || dragged.parent() == Some(dest_parent)
 }
 
+/// One interrupted move for the panel's warning block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionItem {
+    /// The `root_move` journal row.
+    pub move_id: i64,
+    pub text: String,
+    /// `copying`/`renaming` rows can be settled by the user (#334); a `committed` row is only
+    /// waiting for its source cleanup, which finishes on its own at the next start.
+    pub resolvable: bool,
+}
+
 /// What an interrupted move needs the user to look at, for the panel's warning block.
 /// (Leftovers from a *finished* move aren't journal rows -- they're in the move summary.)
-pub fn attention_lines(open: &[RootMove], move_running: bool) -> Vec<String> {
+pub fn attention_items(open: &[RootMove], move_running: bool) -> Vec<AttentionItem> {
     // While our own MoveJob runs its journal row is legitimately open.
     if move_running {
         return Vec::new();
@@ -187,7 +206,11 @@ pub fn attention_lines(open: &[RootMove], move_running: bool) -> Vec<String> {
                 MoveState::Renaming => "rename in doubt",
                 MoveState::Committed => "source cleanup pending",
             };
-            format!("{} -> {} ({what})", m.src_path, m.dest_path)
+            AttentionItem {
+                move_id: m.id,
+                text: format!("{} -> {} ({what})", m.src_path, m.dest_path),
+                resolvable: m.state != MoveState::Committed,
+            }
         })
         .collect()
 }
@@ -200,6 +223,25 @@ fn folder_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// The buttons under a stuck move (#334). None of them deletes or copies a file.
+const RESOLUTIONS: [(&str, Resolution, &str); 3] = [
+    (
+        "Keep source",
+        Resolution::KeepSource,
+        "The catalog stays on the original folder. The destination folder is left on disk.",
+    ),
+    (
+        "Keep destination",
+        Resolution::KeepDestination,
+        "Point the catalog at the destination folder. The original folder is left on disk.",
+    ),
+    (
+        "Abandon",
+        Resolution::Abandon,
+        "Only clear this warning; the catalog and both folders stay exactly as they are.",
+    ),
+];
+
 /// Draws the tree. Reports the drop the user made this frame, if any (only drives accept drops),
 /// and any folder/drive click (#368). `moving` disables dropping (a scan or another move is
 /// running -- same guard as the text-field path); `selected_root` is the grid's current filter.
@@ -207,7 +249,7 @@ fn folder_name(path: &str) -> &str {
 pub fn show(
     ui: &mut egui::Ui,
     tree: &[DriveNode],
-    attention: &[String],
+    attention: &[AttentionItem],
     status: Option<&str>,
     moving: bool,
     archive: &ArchiveDrives,
@@ -283,8 +325,18 @@ pub fn show(
             ui.visuals().warn_fg_color,
             "Interrupted moves need attention (check both folders):",
         );
-        for line in attention {
-            ui.label(line);
+        for item in attention {
+            ui.label(&item.text);
+            if !item.resolvable {
+                continue;
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (label, how, hint) in RESOLUTIONS {
+                    if ui.small_button(label).on_hover_text(hint).clicked() {
+                        out.resolve = Some((item.move_id, how));
+                    }
+                }
+            });
         }
     }
     if let Some(status) = status {
@@ -428,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_lines_hidden_while_our_move_runs() {
+    fn attention_hidden_while_our_move_runs() {
         let m = RootMove {
             id: 1,
             root_id: 1,
@@ -436,9 +488,11 @@ mod tests {
             dest_path: "/b".into(),
             state: MoveState::Committed,
         };
-        assert!(attention_lines(std::slice::from_ref(&m), true).is_empty());
-        let lines = attention_lines(&[m], false);
-        assert_eq!(lines, ["/a -> /b (source cleanup pending)"]);
+        assert!(attention_items(std::slice::from_ref(&m), true).is_empty());
+        let items = attention_items(&[m], false);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "/a -> /b (source cleanup pending)");
+        assert!(!items[0].resolvable, "cleanup settles itself");
     }
 
     #[test]
@@ -525,6 +579,58 @@ mod tests {
         let out = h.state().0.clone();
         assert_eq!(out.verify, Some(7));
         assert_eq!(out.select_root, None, "the menu pick is not a folder click");
+    }
+
+    #[test]
+    fn a_stuck_move_offers_resolution_buttons_but_a_pending_cleanup_does_not() {
+        use egui_kittest::kittest::Queryable;
+        let stuck = RootMove {
+            id: 5,
+            root_id: 7,
+            src_path: "/a".into(),
+            dest_path: "/b".into(),
+            state: MoveState::Renaming,
+        };
+        let cleanup = RootMove {
+            id: 6,
+            state: MoveState::Committed,
+            ..stuck.clone()
+        };
+        let items = attention_items(&[stuck, cleanup], false);
+        assert_eq!(
+            items.iter().map(|i| i.resolvable).collect::<Vec<_>>(),
+            [true, false]
+        );
+        let mut h = egui_kittest::Harness::new_ui_state(
+            move |ui, (out, items): &mut (PanelOutput, Vec<AttentionItem>)| {
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                let got = show(
+                    ui,
+                    &[],
+                    items,
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                );
+                if got != PanelOutput::default() {
+                    *out = got;
+                }
+            },
+            (PanelOutput::default(), items),
+        );
+        h.run();
+        assert_eq!(
+            h.query_all_by_label("Keep destination").count(),
+            1,
+            "only the resolvable row gets buttons"
+        );
+        h.get_by_label("Keep destination").click();
+        h.run();
+        assert_eq!(h.state().0.resolve, Some((5, Resolution::KeepDestination)));
     }
 
     #[test]

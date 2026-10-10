@@ -1879,7 +1879,7 @@ impl PeltApp {
             )
         });
         let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
-        let attention = folder_panel::attention_lines(&self.folder_cache.open_moves, move_running);
+        let attention = folder_panel::attention_items(&self.folder_cache.open_moves, move_running);
         let mut out = folder_panel::PanelOutput::default();
         let mut set_archive = None;
         let selected_root = self.grid_root;
@@ -1924,6 +1924,48 @@ impl PeltApp {
         if let Some(root_id) = out.verify {
             self.submit_verify(store, root_id);
         }
+        if let Some((move_id, how)) = out.resolve {
+            self.resolve_stuck_move(store, move_id, how);
+        }
+    }
+
+    /// #334: settles a stuck `root_move` journal row from the folder panel's buttons. The panel
+    /// hides those while a move runs, but a click can land the same frame one starts, so re-check.
+    fn resolve_stuck_move(
+        &mut self,
+        store: &Arc<SqliteCatalog>,
+        move_id: i64,
+        how: carry::Resolution,
+    ) {
+        if self.job_active(&[JobKind::Move]) {
+            self.last_move_summary = Some("Wait for the running move to finish first.".into());
+            return;
+        }
+        let root_id = self
+            .folder_cache
+            .open_moves
+            .iter()
+            .find(|m| m.id == move_id)
+            .map(|m| m.root_id);
+        self.last_move_summary = Some(match carry::resolve_stuck_move(&**store, move_id, how) {
+            Ok(()) => {
+                if let (carry::Resolution::KeepDestination, Some(root_id)) = (how, root_id) {
+                    reconcile_tier(&**store, root_id, &self.archive_drives);
+                }
+                if let Some(grid) = self.grid.as_mut() {
+                    grid.refresh(&self.pounce);
+                }
+                match how {
+                    carry::Resolution::KeepSource => "Kept the original folder.".to_string(),
+                    carry::Resolution::KeepDestination => {
+                        "Pointed the catalog at the destination folder.".to_string()
+                    }
+                    carry::Resolution::Abandon => "Cleared the interrupted move.".to_string(),
+                }
+            }
+            Err(e) => format!("Couldn't settle the interrupted move: {e}"),
+        });
+        self.folder_cache.invalidate();
     }
 
     /// #386: "Verify folder" from the folder panel's context menu. Refused while another job that
