@@ -1179,27 +1179,33 @@ pub fn resolve_stuck_move(
             }
             if has_partial_copy(dest) {
                 return Err(format!(
-                    "{} holds an unfinished copy ({PARTIAL_SUFFIX} files); not re-pointing \
-                     the catalog at it",
+                    "{} holds an unfinished copy ({PARTIAL_SUFFIX} files) or can't be fully \
+                     read; not re-pointing the catalog at it",
                     m.dest_path
                 ));
             }
             store
                 .commit_root_move(m.id, &[])
-                .and_then(|_| store.finish_root_move(m.id))
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            store.finish_root_move(m.id).map_err(|e| {
+                format!(
+                    "the catalog now points at the destination, but closing the journal row \
+                     failed ({e}); it will be settled at the next start"
+                )
+            })
         }
         Resolution::Abandon => store.finish_root_move(m.id).map_err(|e| e.to_string()),
     }
     .map(|()| m.root_id)
 }
 
-/// `true` if any file under `dir` is one of our own `.nicti-partial` temp copies.
+/// `true` if any file under `dir` is one of our own `.nicti-partial` temp copies, **or** the
+/// tree can't be fully read (an unreadable subfolder might hide one, so refuse).
 fn has_partial_copy(dir: &Path) -> bool {
-    WalkDir::new(dir)
-        .into_iter()
-        .flatten()
-        .any(|e| e.file_name().to_string_lossy().ends_with(PARTIAL_SUFFIX))
+    WalkDir::new(dir).into_iter().any(|e| match e {
+        Ok(e) => e.file_name().to_string_lossy().ends_with(PARTIAL_SUFFIX),
+        Err(_) => true,
+    })
 }
 
 /// Deletes every file under `src` whose counterpart under `dest` has identical content, then

@@ -326,6 +326,7 @@ pub fn show(
             "Interrupted moves need attention (check both folders):",
         );
         for item in attention {
+            ui.add_space(4.0);
             ui.label(&item.text);
             if !item.resolvable {
                 continue;
