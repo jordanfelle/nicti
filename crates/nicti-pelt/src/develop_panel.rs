@@ -287,6 +287,24 @@ pub fn show(
         if ui.button(before_label).clicked() || ui.input(|i| i.key_pressed(egui::Key::Backslash)) {
             develop.show_before = !develop.show_before;
         }
+        if ui
+            .add_enabled(develop.can_undo(), egui::Button::new("Undo"))
+            .on_hover_text("Ctrl+Z")
+            .clicked()
+        {
+            develop.undo();
+            heal.clear_selection();
+            mask.selected = None;
+        }
+        if ui
+            .add_enabled(develop.can_redo(), egui::Button::new("Redo"))
+            .on_hover_text("Ctrl+Shift+Z")
+            .clicked()
+        {
+            develop.redo();
+            heal.clear_selection();
+            mask.selected = None;
+        }
         let auto_tone = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto"));
         if let (true, Some((engine, _))) = (auto_tone.clicked(), gpu.as_mut()) {
             let result = engine.apply_auto_tone(develop);
@@ -589,7 +607,7 @@ pub fn show(
 
     ui.separator();
     if ui.button("Reset all").clicked() {
-        for id in [
+        develop.reset_stages(&[
             HEAL,
             WB,
             EXPOSURE,
@@ -609,14 +627,13 @@ pub fn show(
             CROP,
             EFFECTS,
             MASKS,
-        ] {
-            develop.reset_stage(id);
-        }
-        // The heal spots are gone, so their finished removals (up to tens of MB each) are too --
-        // and so are the local corrections, whose finished AI alphas go with them.
+        ]);
+        // The heal spots are gone, so their finished removals are unreferenced (trimmed once
+        // more than a few are held) -- and so are the local corrections, whose finished AI alphas go with them.
         develop.prune_removals();
         develop.prune_ai_alphas();
         mask.selected = None;
+        heal.clear_selection();
     }
 }
 

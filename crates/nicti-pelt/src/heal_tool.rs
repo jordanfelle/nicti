@@ -8,9 +8,10 @@
 //! (`develop_panel::screen_to_image`) and spots live directly in the `HealParams` coordinate space.
 //! A spot's circle is drawn as an ellipse because that stretch can be anisotropic.
 //!
-//! **Undo.** The Develop view doesn't route edits through `nicti_pawprint::History` yet, so
-//! nothing here is undoable; deleting a spot is the way back. (Adding history is a Develop-wide
-//! job, not this tool's.)
+//! **Undo.** Spot edits go through `DevelopDoc::set_stage_params`, so they are undoable with the
+//! rest of Develop (#324). A Remove spot stores only its recipe, so after a reload or an undo its
+//! fill is re-run from that recipe ([`RemovalService::rerun_missing`]); fills computed this session
+//! stay cached, so undoing a deletion is instant.
 //!
 //! The state that isn't UI ([`RemovalService`]: model install, the lazily-loaded removal backend,
 //! in-flight removal jobs) is kept apart from the egui code so it can be tested without a window.
@@ -58,6 +59,9 @@ const RESIZE_STEP: f32 = 1.12;
 /// upgrade is an explicit re-run rather than a silent change to an old edit (ADR-0021).
 const RECIPE_MODEL_ID: &str = "nicti.remove.mobilesam-lama";
 const RECIPE_MODEL_VERSION: &str = "1";
+
+/// How often to look for installed models again while a notice says they're missing.
+const MODELS_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------------------------
 // Pure helpers
@@ -143,6 +147,10 @@ pub struct RemovalEvent {
     /// The photo the removal was computed for; a result for any other photo is dropped.
     pub image_key: u64,
     pub key: String,
+    /// True for a removal re-run from the stored recipe (see [`RemovalService::rerun_missing`]),
+    /// not one the user just placed: its spot is already in the document and must survive a
+    /// failure.
+    pub rerun: bool,
     pub result: Result<Arc<RemovalPatch>, String>,
 }
 
@@ -154,6 +162,19 @@ pub struct RemovalService {
     /// (photo, spot) pairs with a job in flight. Keyed by photo too: the same spot at the same
     /// coordinates on a *different* photo is a different removal and must get its own job.
     pending_keys: HashSet<(u64, String)>,
+    /// The subset of `pending_keys` that is a re-run of a spot already in the document.
+    reruns: HashSet<(u64, String)>,
+    /// Re-runs that failed, so a failing spot is reported once instead of retried every frame.
+    /// Cleared when a model install/repair succeeds; a spot the user edits gets a new key and so a
+    /// fresh attempt.
+    failed_reruns: HashSet<(u64, String)>,
+    /// The photo the "needs the model download" notice was shown for: shown once per photo, not
+    /// every frame. Reset when an install finishes.
+    models_missing_for: Option<u64>,
+    /// When the models were last looked for on disk while `models_missing_for` was set, so a
+    /// hand-dropped or externally installed set is noticed within [`MODELS_RECHECK`] without a
+    /// filesystem stat every frame.
+    models_checked: Option<std::time::Instant>,
     /// Test seams: pretend the models are installed / substitute the backend, so gesture tests can
     /// exercise the whole click -> job -> patch path without ~250 MB of weights.
     #[cfg(test)]
@@ -186,6 +207,10 @@ impl RemovalService {
             install: None,
             pending: Vec::new(),
             pending_keys: HashSet::new(),
+            reruns: HashSet::new(),
+            failed_reruns: HashSet::new(),
+            models_missing_for: None,
+            models_checked: None,
             #[cfg(test)]
             models_override: None,
             #[cfg(test)]
@@ -278,8 +303,12 @@ impl RemovalService {
         self.install = None;
         if done.is_ok() {
             // The files on disk may have just been replaced (a repair), so any backend built over
-            // the old ones must not survive to run removals on stale sessions.
+            // the old ones must not survive to run removals on stale sessions. Spots whose re-run
+            // failed (an integrity check, say) get another go with the fixed models.
             self.backend = None;
+            self.failed_reruns.clear();
+            self.models_missing_for = None;
+            self.models_checked = None;
         }
         Some(done)
     }
@@ -366,17 +395,99 @@ impl RemovalService {
         self.pending.len()
     }
 
+    /// Queues a removal for every AI Remove spot in the document that has no finished patch, no
+    /// job in flight and no failed earlier attempt -- what a photo opened with saved removals, or
+    /// an undo that restored one, needs, since only a spot's recipe (the model prompt) is stored,
+    /// never its pixels (#324). A recipe from another model, or one that can't be parsed, is
+    /// reported and left alone; the spot stays in the document either way, so a failed re-run
+    /// loses nothing. `Err` is a message for the status line.
+    pub fn rerun_missing(&mut self, pounce: &Pounce, develop: &DevelopDoc) -> Result<(), String> {
+        let image_key = develop.frame_key();
+        let params: HealParams = develop.stage_params(HEAL);
+        let mut missing = Vec::new();
+        let mut unsupported = 0;
+        for spot in params.spots.iter().filter(|s| s.kind == SpotKind::Remove) {
+            let id = (image_key, spot_key(spot));
+            if develop.has_removal(&id.1)
+                || self.pending_keys.contains(&id)
+                || self.failed_reruns.contains(&id)
+            {
+                continue;
+            }
+            let prompt = spot
+                .mask_recipe
+                .as_ref()
+                .filter(|r| {
+                    r.model_id == RECIPE_MODEL_ID && r.model_version == RECIPE_MODEL_VERSION
+                })
+                .and_then(|r| Prompt::from_json(&r.params));
+            match prompt {
+                Some(prompt) => missing.push((spot, prompt)),
+                None => {
+                    self.failed_reruns.insert(id);
+                    unsupported += 1;
+                }
+            }
+        }
+        let mut problems = Vec::new();
+        if unsupported > 0 {
+            problems.push(format!(
+                "{unsupported} AI removal spot(s) were made with a model this version can't re-run."
+            ));
+        }
+        if !missing.is_empty() {
+            let known_missing = self.models_missing_for == Some(image_key)
+                && self
+                    .models_checked
+                    .is_some_and(|t| t.elapsed() < MODELS_RECHECK);
+            if known_missing {
+                // Already told the user, and looked recently: stay quiet and don't hit the disk.
+            } else if self.models().is_none() {
+                self.models_checked = Some(std::time::Instant::now());
+                if self.models_missing_for != Some(image_key) {
+                    problems.push(format!(
+                        "{} AI removal spot(s) need the model download to be re-applied.",
+                        missing.len()
+                    ));
+                }
+                self.models_missing_for = Some(image_key);
+            } else {
+                self.models_missing_for = None;
+                for (spot, prompt) in missing {
+                    let id = (image_key, spot_key(spot));
+                    // Only a job that actually queued is a re-run.
+                    match self.submit(pounce, develop, spot, prompt) {
+                        Ok(()) => {
+                            self.reruns.insert(id);
+                        }
+                        Err(e) => problems.push(e),
+                    }
+                }
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join(" "))
+        }
+    }
+
     /// Collects every removal that has finished since the last call.
     pub fn poll_removals(&mut self) -> Vec<RemovalEvent> {
         let mut events = Vec::new();
         self.pending
             .retain(|slot| match slot.lock().unwrap().take() {
                 Some(outcome) => {
-                    self.pending_keys
-                        .remove(&(outcome.image_key, outcome.spot_key.clone()));
+                    let id = (outcome.image_key, outcome.spot_key.clone());
+                    self.pending_keys.remove(&id);
+                    let rerun = self.reruns.remove(&id);
+                    if rerun && outcome.result.is_err() {
+                        self.failed_reruns.insert(id);
+                    }
                     events.push(RemovalEvent {
                         image_key: outcome.image_key,
                         key: outcome.spot_key,
+                        rerun,
                         result: outcome.result,
                     });
                     false
@@ -508,8 +619,21 @@ pub fn poll(ui: &egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi) {
                         heal.status = Some("Object removed.".to_owned());
                     }
                 }
+                Err(message) if event.rerun => {
+                    // The spot was already part of the user's edit: keep it (its recipe is in the
+                    // document) and say why its fill is missing, rather than dropping it.
+                    if message.contains("integrity check") {
+                        heal.needs_repair = true;
+                    }
+                    heal.status = Some(format!("Couldn't re-apply an AI removal: {message}"));
+                }
                 Err(message) => {
                     if let Some(i) = params.spots.iter().position(|s| spot_key(s) == event.key) {
+                        // The drop below is an undoable step; undoing it must not quietly retry a
+                        // removal that just failed.
+                        heal.service
+                            .failed_reruns
+                            .insert((event.image_key, event.key.clone()));
                         // A failed removal leaves nothing useful behind: drop its placeholder
                         // spot instead of leaving it pending forever.
                         delete_spot(develop, &mut params, i);
@@ -523,9 +647,23 @@ pub fn poll(ui: &egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi) {
             }
         }
     }
+    let spots = develop.stage_params::<HealParams>(HEAL).spots.len();
+    if heal.selected.is_some_and(|i| i >= spots) {
+        // An undo can shrink the spot list under the selection.
+        heal.selected = None;
+    }
     if heal.service.pending_count() > 0 || heal.service.is_installing() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Re-runs the AI removals the document references but has no patch for (see
+/// [`RemovalService::rerun_missing`]). Call once per frame while the Develop view is up, after
+/// [`poll`]. A problem is reported once per spot (or once for missing models), so it can replace the status line without being re-set every frame.
+pub fn rerun_missing_removals(develop: &DevelopDoc, heal: &mut HealUi, pounce: &Pounce) {
+    if let Err(message) = heal.service.rerun_missing(pounce, develop) {
+        heal.status = Some(message);
     }
 }
 
@@ -1341,16 +1479,30 @@ mod tests {
         let mut svc = RemovalService::with_store(None);
 
         svc.backend = Some((fake_models(), Arc::clone(&backend)));
+        svc.failed_reruns.insert((1, "k".into()));
+        svc.models_missing_for = Some(1);
+        svc.models_checked = Some(std::time::Instant::now());
         svc.install = Some(handle(Ok(())));
         assert!(svc.poll_install().unwrap().is_ok());
+        assert!(
+            svc.failed_reruns.is_empty()
+                && svc.models_missing_for.is_none()
+                && svc.models_checked.is_none(),
+            "a fresh install gives failed re-runs and the missing-models notice a clean slate"
+        );
         assert!(
             svc.backend.is_none(),
             "a repair may have replaced the files it was built over"
         );
 
         svc.backend = Some((fake_models(), backend));
+        svc.failed_reruns.insert((1, "k".into()));
         svc.install = Some(handle(Err("network down".into())));
         assert!(svc.poll_install().unwrap().is_err());
+        assert!(
+            !svc.failed_reruns.is_empty(),
+            "a failed install fixes nothing"
+        );
         assert!(svc.backend.is_some(), "nothing changed on disk, so keep it");
     }
 
@@ -1826,6 +1978,232 @@ mod tests {
             "a failed removal must not leave a dead spot behind"
         );
         assert!(heal.status.as_deref().unwrap_or("").contains("no object"));
+    }
+
+    /// A photo opened with a saved AI Remove spot has the recipe but no fill: the fill is re-run
+    /// from the recipe (#324), and undoing the spot's deletion afterwards needs no second run.
+    #[test]
+    fn a_saved_remove_spot_is_re_run_from_its_recipe_and_survives_delete_and_undo() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: false })));
+        let spot = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(
+            HEAL,
+            &HealParams {
+                spots: vec![spot.clone()],
+            },
+        );
+        let key = spot_key(&spot);
+        assert!(!develop.has_removal(&key), "only the recipe is stored");
+
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert!(heal.service.is_pending(develop.frame_key(), &key));
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(heal.service.pending_count(), 1, "one job per spot");
+        drain(&p);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert!(develop.has_removal(&key), "the fill is back");
+
+        // Delete the spot and undo: the cached fill is still there, so nothing re-runs.
+        develop.disable_gesture_merging();
+        crate::render::wait_for_next_ms();
+        develop.set_stage_params(HEAL, &HealParams::default());
+        assert!(spots(&develop).is_empty());
+        assert!(develop.undo());
+        assert_eq!(spots(&develop).len(), 1);
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(
+            heal.service.pending_count(),
+            0,
+            "the fill survived the delete"
+        );
+    }
+
+    /// A re-run that fails must leave the user's spot in place, say why, and not retry every frame.
+    #[test]
+    fn a_failed_re_run_keeps_the_spot_and_reports_once() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: true })));
+        let spot = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(HEAL, &HealParams { spots: vec![spot] });
+        rerun_missing_removals(&develop, &mut heal, &p);
+        drain(&p);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(spots(&develop).len(), 1, "the spot is not dropped");
+        assert!(heal
+            .status
+            .as_deref()
+            .unwrap_or("")
+            .contains("Couldn't re-apply"));
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(
+            heal.service.pending_count(),
+            0,
+            "a failed spot isn't retried"
+        );
+    }
+
+    /// Without the models the spot can't be re-run: say so, keep the spot.
+    #[test]
+    fn a_re_run_without_models_reports_and_keeps_the_spot() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        let spot = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(HEAL, &HealParams { spots: vec![spot] });
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(spots(&develop).len(), 1);
+        assert_eq!(heal.service.pending_count(), 0);
+        assert!(heal
+            .status
+            .as_deref()
+            .unwrap_or("")
+            .contains("model download"));
+    }
+
+    /// The auto-drop of a failed placement is an undoable step; undoing it must bring the spot
+    /// back without quietly retrying the removal that just failed.
+    #[test]
+    fn undoing_a_failed_placements_drop_does_not_retry_it() {
+        let Some((mut develop, mut heal, p, mut h)) = rig() else {
+            return;
+        };
+        develop.disable_gesture_merging();
+        heal.kind = SpotKind::Remove;
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: true })));
+        h.click(h.at(0.5, 0.5), &mut develop, &mut heal, &p);
+        drain(&p);
+        crate::render::wait_for_next_ms();
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            poll(ui, &mut develop, &mut heal)
+        })
+        .drop_without_applying_deltas();
+        assert!(spots(&develop).is_empty());
+        assert!(develop.undo());
+        assert_eq!(spots(&develop).len(), 1, "undo restores the dropped spot");
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(heal.service.pending_count(), 0, "but doesn't re-run it");
+    }
+
+    /// The missing-models notice is shown once, not re-set (or re-checked on disk) every frame.
+    #[test]
+    fn the_missing_models_notice_is_reported_once() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        let spot = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(HEAL, &HealParams { spots: vec![spot] });
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert!(heal.status.is_some());
+        heal.status = None; // the user dismissed it
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert!(heal.status.is_none(), "not shown again every frame");
+
+        // A different photo with missing removals is told too.
+        heal.service.models_missing_for = Some(develop.frame_key().wrapping_add(1));
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert!(heal.status.is_some(), "the notice is per photo");
+    }
+
+    /// Models that appear after the notice (dropped in by hand, say) are picked up on the next
+    /// recheck, and the spot is then re-run -- the notice's quiet period never strands it.
+    #[test]
+    fn re_runs_start_once_the_models_appear_after_the_recheck_interval() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        let spot = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(HEAL, &HealParams { spots: vec![spot] });
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(heal.service.pending_count(), 0);
+
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: false })));
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(
+            heal.service.pending_count(),
+            0,
+            "still inside the recheck interval: no disk look yet"
+        );
+        heal.service.models_checked = std::time::Instant::now().checked_sub(MODELS_RECHECK * 2);
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(
+            heal.service.pending_count(),
+            1,
+            "re-run queued once models exist"
+        );
+    }
+
+    /// An unsupported recipe and absent models are both reported, not one hiding the other.
+    #[test]
+    fn an_unsupported_recipe_is_reported_alongside_missing_models() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        let mut foreign = Spot::remove_spot(
+            (60.0, 60.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 60.0, y: 60.0 }),
+        );
+        foreign.mask_recipe.as_mut().unwrap().model_id = "someone.else".to_owned();
+        let valid = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(
+            HEAL,
+            &HealParams {
+                spots: vec![foreign, valid],
+            },
+        );
+        rerun_missing_removals(&develop, &mut heal, &p);
+        let status = heal.status.unwrap_or_default();
+        assert!(status.contains("can't re-run"), "{status}");
+        assert!(status.contains("model download"), "{status}");
     }
 
     #[test]

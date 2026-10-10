@@ -77,6 +77,20 @@ impl History {
         self.log.is_empty()
     }
 
+    /// Whether `undo` would change the document (a snapshot marker has nothing to undo).
+    pub fn can_undo(&self) -> bool {
+        self.log[..self.cursor]
+            .iter()
+            .any(|e| matches!(e, LogEntry::Delta(_)))
+    }
+
+    /// Whether `redo` would change the document.
+    pub fn can_redo(&self) -> bool {
+        self.log[self.cursor..]
+            .iter()
+            .any(|e| matches!(e, LogEntry::Delta(_)))
+    }
+
     /// Approximate on-disk size of the log as it stands, by actually serializing it (not a
     /// guessed per-entry constant) -- used for the ADR's sizing table.
     pub fn serialized_len(&self) -> usize {
@@ -101,9 +115,20 @@ impl History {
     ) {
         self.push_delta(
             Uuid::new_v4(),
-            vec![(stage_id.to_string(), after)],
+            vec![(stage_id.to_string(), Some(after))],
             Some(control),
             timestamp_ms,
+        );
+    }
+
+    /// Remove a stage's entry (back to its default) as one history step -- a slider's
+    /// double-click reset. A no-op, creating no step, when the stage already has no entry.
+    pub fn reset(&mut self, stage_id: &str, control: &str) {
+        self.push_delta(
+            Uuid::new_v4(),
+            vec![(stage_id.to_string(), None)],
+            Some(control),
+            now_ms(),
         );
     }
 
@@ -111,7 +136,16 @@ impl History {
     /// whole batch is one entry per photo (not one per changed stage) and undoes/redoes
     /// atomically by construction.
     pub fn apply_batch(&mut self, batch_id: Uuid, changes: Vec<(String, StageEntry)>) {
+        let changes = changes.into_iter().map(|(id, e)| (id, Some(e))).collect();
         self.push_delta(batch_id, changes, None, now_ms());
+    }
+
+    /// [`Self::apply_batch`] with a fresh batch id, for a caller with no batch identity of its own
+    /// (an interactive multi-stage edit such as Auto tone).
+    /// A `None` entry removes that stage (back to its default), so a reset of several stages is
+    /// one step too.
+    pub fn apply_group(&mut self, changes: Vec<(String, Option<StageEntry>)>) {
+        self.push_delta(Uuid::new_v4(), changes, None, now_ms());
     }
 
     /// ADR-0101 rule 6 (#312): a delta whose every change has `before == after` appends no step and
@@ -121,13 +155,13 @@ impl History {
     fn push_delta(
         &mut self,
         batch_id: Uuid,
-        changes: Vec<(String, StageEntry)>,
+        changes: Vec<(String, Option<StageEntry>)>,
         control: Option<&str>,
         timestamp_ms: u128,
     ) {
         let unchanged = changes
             .iter()
-            .all(|(id, after)| self.document.stages.get(id) == Some(after));
+            .all(|(id, after)| self.document.stages.get(id) == after.as_ref());
         if unchanged {
             return;
         }
@@ -135,11 +169,18 @@ impl History {
         let mut recorded = Vec::with_capacity(changes.len());
         for (stage_id, after) in changes {
             let before = self.document.stages.get(&stage_id).cloned();
-            self.document.stages.insert(stage_id.clone(), after.clone());
+            match &after {
+                Some(entry) => {
+                    self.document.stages.insert(stage_id.clone(), entry.clone());
+                }
+                None => {
+                    self.document.stages.remove(&stage_id);
+                }
+            }
             recorded.push(StageChange {
                 stage_id,
                 before,
-                after: Some(after),
+                after,
             });
         }
         self.log.push(LogEntry::Delta(Delta {
@@ -405,5 +446,31 @@ mod tests {
             h.document().stages["nicti.exposure"].params,
             serde_json::json!({ "v": 1 })
         );
+    }
+
+    #[test]
+    fn reset_removes_the_stage_as_one_undoable_step() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("a", "a_slider", entry(1), 0);
+        h.reset("a", "a_slider");
+        assert!(!h.document().stages.contains_key("a"));
+        assert_eq!(h.len(), 2);
+        assert!(h.undo());
+        assert_eq!(
+            h.document().stages["a"].params,
+            serde_json::json!({ "v": 1 })
+        );
+        assert!(h.redo());
+        assert!(!h.document().stages.contains_key("a"));
+    }
+
+    #[test]
+    fn resetting_an_absent_stage_is_a_no_op_that_keeps_redo() {
+        let mut h = History::new(EditDocument::default());
+        h.apply_at("a", "a_slider", entry(1), 0);
+        assert!(h.undo());
+        h.reset("a", "a_slider");
+        assert_eq!(h.len(), 1, "nothing to remove: no step, redo tail intact");
+        assert!(h.redo());
     }
 }

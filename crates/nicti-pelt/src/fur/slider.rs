@@ -174,7 +174,7 @@ impl SliderSpec {
 }
 
 /// What a slider did this frame. `drag_started`/`drag_stopped` bracket one undo unit (a click or
-/// keyboard nudge sets both), for when edits grow a history (#324).
+/// keyboard nudge sets both), for a gesture-aware history; `DevelopDoc` (#324) groups by time window instead.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct SliderOut {
     pub changed: bool,

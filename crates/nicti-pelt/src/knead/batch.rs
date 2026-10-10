@@ -1,7 +1,7 @@
 //! Runs a paste/sync/preset against the catalog, and undoes it (#52).
 //!
 //! Undo is session-local: `LastBatch` keeps each changed photo's previous document in memory until
-//! the next batch replaces it. It stands in until #324 wires real History into Develop.
+//! the next batch replaces it. It is a catalog-wide undo across photos; Develop's own per-photo History (#324) covers one open photo.
 
 use nicti_lair::{CatalogError, CatalogStore};
 use nicti_pawprint::EditDocument;

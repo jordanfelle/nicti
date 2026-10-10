@@ -87,5 +87,16 @@ Full reasoning/history: `docs/decisions/develop.md`.
   decision rule reads). See `docs/research/purr-ai-auto-tone.md` for the full module breakdown.
 - **Persistence (#57)**: Develop's `EditDocument` is now saved to the catalog's master edit row
   (`DevelopView::is_dirty`/`mark_saved`, `load_real_frame(frame, identity, doc)`). `has_edits` is
-  test-only now. AI Remove spots' recipes persist but their patches don't (#324), so a reloaded
-  photo shows no removal until it is re-run.
+  test-only now. AI Remove spots' recipes persist but their patches don't, so after a reload
+  `heal_tool::rerun_missing_removals` re-runs them from the recipe (#324).
+- **Undo/redo (#324)**: `DevelopDoc` owns a `nicti_pawprint::History` (document + log, fresh per
+  loaded photo or `replace_document`, session-local; the catalog still stores only the document).
+  `set_stage_params`/`reset_stage` write through it: a value equal to the *effective* current one
+  is a no-op (panels write every frame), and writes to one stage within `GESTURE_WINDOW_MS` (600)
+  `compact` into one step (a drag). Multi-stage edits use `stage_edit` + `apply_stage_edits`
+  (`apply_group`, one step; Auto tone). `History::reset` removes a stage as a step. Ctrl+Z /
+  Ctrl+Shift+Z / Ctrl+Y in Develop and the panel's Undo/Redo buttons; `is_dirty` compares to the
+  last saved document, so undoing back to it is clean. Removal fills stay cached for the photo
+  (`prune_removals` only trims unreferenced fills past 32), so undoing a delete is instant; a failed
+  re-run keeps the spot and reports it. Not persisted: the log itself (`edit_history`), so Undo
+  doesn't survive reopening a photo.
