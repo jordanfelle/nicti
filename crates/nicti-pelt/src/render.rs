@@ -706,7 +706,8 @@ impl DevelopDoc {
     /// spot is edited or deleted so Undo brings the fill straight back instead of re-running a
     /// multi-second model. Only once more than [`MAX_RETAINED_REMOVALS`] are held (a patch can be
     /// tens of MB) are the ones the document no longer references trimmed, down to that many;
-    /// ones it does reference are never dropped.
+    /// ones it does reference are never dropped. Which spares survive is arbitrary, so Undo of a
+    /// delete is only guaranteed instant while few photos' worth of removals have been discarded.
     pub fn prune_removals(&mut self) {
         if self.removals.len() <= MAX_RETAINED_REMOVALS {
             return;
@@ -2290,5 +2291,56 @@ mod tests {
         doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 2.0 });
         assert!(doc.undo());
         assert_eq!(doc.document(), &other, "undo stops at the loaded document");
+    }
+
+    fn remove_spot(x: f32) -> nicti_tapetum::coat::Spot {
+        nicti_tapetum::coat::Spot::remove_spot((x, 20.0), 10.0, 2.0, {
+            let mut r = nicti_tapetum::coat::MaskRecipe {
+                model_id: "m".into(),
+                model_version: "1".into(),
+                params: serde_json::json!({ "click": [x, 20.0] }),
+                seed: None,
+            };
+            r.seed = None;
+            r
+        })
+    }
+
+    fn patch() -> Arc<RemovalPatch> {
+        Arc::new(RemovalPatch::new((0, 0), 1, vec![[0.0; 4]]).unwrap())
+    }
+
+    /// Fills for deleted spots are kept for Undo, but only a bounded number of them; fills the
+    /// document references are never dropped.
+    #[test]
+    fn prune_removals_keeps_live_fills_and_bounds_the_spares() {
+        let mut doc = DevelopDoc::new();
+        let spots: Vec<_> = (0..40).map(|i| remove_spot(i as f32 * 3.0)).collect();
+        doc.set_stage_params(
+            HEAL,
+            &HealParams {
+                spots: spots.clone(),
+            },
+        );
+        for s in &spots {
+            doc.set_removal(heal::spot_key(s), patch());
+        }
+        for i in 0..50 {
+            doc.set_removal(format!("stale-{i}"), patch());
+        }
+        doc.prune_removals();
+        assert!(
+            spots.iter().all(|s| doc.has_removal(&heal::spot_key(s))),
+            "a fill the document references is never dropped, even over the cap"
+        );
+        assert_eq!(doc.removals.len(), 40 + MAX_RETAINED_REMOVALS);
+
+        // Under the cap nothing is trimmed, so Undo of a delete keeps its fill.
+        let mut small = DevelopDoc::new();
+        for i in 0..MAX_RETAINED_REMOVALS {
+            small.set_removal(format!("stale-{i}"), patch());
+        }
+        small.prune_removals();
+        assert_eq!(small.removals.len(), MAX_RETAINED_REMOVALS);
     }
 }

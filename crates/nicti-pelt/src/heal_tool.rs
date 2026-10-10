@@ -2141,6 +2141,40 @@ mod tests {
         assert!(heal.status.is_some(), "the notice is per photo");
     }
 
+    /// Models that appear after the notice (dropped in by hand, say) are picked up on the next
+    /// recheck, and the spot is then re-run -- the notice's quiet period never strands it.
+    #[test]
+    fn re_runs_start_once_the_models_appear_after_the_recheck_interval() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        let spot = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(HEAL, &HealParams { spots: vec![spot] });
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(heal.service.pending_count(), 0);
+
+        heal.service.models_override = Some(fake_models());
+        heal.service.backend_override = Some(Arc::new(Mutex::new(Fake { fail: false })));
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(
+            heal.service.pending_count(),
+            0,
+            "still inside the recheck interval: no disk look yet"
+        );
+        heal.service.models_checked = std::time::Instant::now().checked_sub(MODELS_RECHECK * 2);
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert_eq!(
+            heal.service.pending_count(),
+            1,
+            "re-run queued once models exist"
+        );
+    }
+
     /// An unsupported recipe and absent models are both reported, not one hiding the other.
     #[test]
     fn an_unsupported_recipe_is_reported_alongside_missing_models() {
