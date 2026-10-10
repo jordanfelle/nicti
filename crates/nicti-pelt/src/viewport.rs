@@ -376,14 +376,33 @@ impl ViewportCallback {
 /// other gets scaled up so the excess maps outside `[0,1]` texture UV (rendered as the letterbox
 /// background by `display.wgsl`'s own bounds check) rather than the image being cropped or
 /// stretched. Pure and GPU-independent -- see the `tests` module below for the derivation's actual
-/// worked cases.
+/// worked cases. A zero/negative/non-finite extent (a collapsed panel, a corrupt asset) returns the
+/// identity `[1.0, 1.0]` instead of `NaN`/`Inf` (#296).
 pub fn fit_scale(rect_size: (f32, f32), tex_size: (f32, f32)) -> [f32; 2] {
+    if !positive_finite(rect_size) || !positive_finite(tex_size) {
+        return [1.0, 1.0];
+    }
     let rect_aspect = rect_size.0 / rect_size.1;
     let tex_aspect = tex_size.0 / tex_size.1;
-    [
+    let scale = [
         (rect_aspect / tex_aspect).max(1.0),
         (tex_aspect / rect_aspect).max(1.0),
-    ]
+    ];
+    finite_or_identity(scale)
+}
+
+/// Both components strictly positive and finite -- the only extents a scale can be derived from.
+fn positive_finite(size: (f32, f32)) -> bool {
+    size.0.is_finite() && size.1.is_finite() && size.0 > 0.0 && size.1 > 0.0
+}
+
+/// Extreme-but-valid extents can still overflow the division; fall back to the identity then.
+fn finite_or_identity(scale: [f32; 2]) -> [f32; 2] {
+    if scale[0].is_finite() && scale[1].is_finite() {
+        scale
+    } else {
+        [1.0, 1.0]
+    }
 }
 
 /// The largest rect of `tex_size`'s aspect ratio that fits inside `area`, centred in it (#272). A
@@ -399,12 +418,16 @@ pub fn fit_rect(area: egui::Rect, tex_size: (f32, f32)) -> egui::Rect {
     )
 }
 
-/// The `view_scale` for "100%": exactly one texture texel maps to one screen pixel on each axis.
+/// The `view_scale` for "100%": exactly one texture texel maps to one screen pixel on each axis. A
+/// zero/negative/non-finite extent returns the identity `[1.0, 1.0]` instead of `NaN`/`Inf` (#296).
 pub fn one_to_one_scale(rect_size_px: (f32, f32), tex_size_px: (f32, f32)) -> [f32; 2] {
-    [
+    if !positive_finite(rect_size_px) || !positive_finite(tex_size_px) {
+        return [1.0, 1.0];
+    }
+    finite_or_identity([
         rect_size_px.0 / tex_size_px.0,
         rect_size_px.1 / tex_size_px.1,
-    ]
+    ])
 }
 
 /// Clamps a loupe `view_offset` so the visible window never leaves the image (#294). The shader
@@ -999,6 +1022,38 @@ mod tests {
         );
         assert_eq!(
             one_to_one_scale((1600.0, 1200.0), (1600.0, 1200.0)),
+            [1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn scales_are_finite_for_degenerate_extents() {
+        let bad = [
+            (0.0, 0.0),
+            (800.0, 0.0),
+            (0.0, 600.0),
+            (-1.0, 600.0),
+            (f32::NAN, 600.0),
+            (800.0, f32::INFINITY),
+        ];
+        for b in bad {
+            for (rect, tex) in [(b, (1600.0, 1200.0)), ((800.0, 600.0), b)] {
+                assert_eq!(fit_scale(rect, tex), [1.0, 1.0], "fit {rect:?} {tex:?}");
+                assert_eq!(
+                    one_to_one_scale(rect, tex),
+                    [1.0, 1.0],
+                    "1:1 {rect:?} {tex:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scales_stay_finite_when_valid_extents_overflow_the_division() {
+        let (huge, tiny) = ((f32::MAX, 1.0), (1.0, f32::MAX));
+        assert_eq!(fit_scale(huge, tiny), [1.0, 1.0]);
+        assert_eq!(
+            one_to_one_scale((f32::MAX, 1.0), (f32::MIN_POSITIVE, 1.0)),
             [1.0, 1.0]
         );
     }
