@@ -1113,6 +1113,102 @@ fn resume_unfinished(store: &dyn CatalogStore, m: &RootMove, out: &mut Vec<Resum
     }
 }
 
+/// How the user settles a journal row that [`resume_open_moves`] left open as
+/// [`Resumed::Stuck`] (#334). None of these deletes or copies a file: recovery's fail-safe stance
+/// ("never delete either side") is only lifted for the journal row itself, so a wrong choice
+/// loses nothing on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// The catalog keeps pointing at the source folder; the journal row is closed. The
+    /// destination folder (if any) is left on disk for the user to deal with.
+    KeepSource,
+    /// The catalog is re-pointed at the destination folder (as a finished move would have done)
+    /// and the journal row is closed. The source folder (if any) is left on disk.
+    KeepDestination,
+    /// Just close the journal row: the catalog and both folders are left exactly as they are.
+    /// For when neither folder exists any more.
+    Abandon,
+}
+
+/// Settles one stuck `copying`/`renaming` journal row (#334). Refuses (`Err`, row untouched) a
+/// row that doesn't exist, a `committed` row (that is source cleanup, [`ResumeMoves`]' job, not
+/// a decision), and a choice whose folder isn't on disk: [`Resolution::KeepSource`] needs the
+/// source, [`Resolution::KeepDestination`] needs a destination that is non-empty and holds no
+/// `.nicti-partial` temp copy (an empty or half-built folder is exactly what recovery refuses to
+/// re-point the catalog at). Returns the row's root id. The caller must make sure no job that
+/// touches the root's files is running (a move's own row is legitimately open).
+///
+/// `KeepDestination` closes the row in a second statement after the commit; if that second step
+/// fails the row stays `committed` and the next start's source cleanup removes only source files
+/// that are byte-identical to the destination's.
+pub fn resolve_stuck_move(
+    store: &dyn CatalogStore,
+    move_id: i64,
+    how: Resolution,
+) -> Result<i64, String> {
+    let m = store
+        .open_root_moves()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|m| m.id == move_id)
+        .ok_or_else(|| "that move is no longer open".to_string())?;
+    if m.state == MoveState::Committed {
+        return Err(
+            "this move already re-pointed the catalog; only its source cleanup \
+                    is pending, which finishes on the next start"
+                .into(),
+        );
+    }
+    match how {
+        Resolution::KeepSource => {
+            if !Path::new(&m.src_path).is_dir() {
+                return Err(format!("{} doesn't exist", m.src_path));
+            }
+            store.finish_root_move(m.id).map_err(|e| e.to_string())
+        }
+        Resolution::KeepDestination => {
+            let dest = Path::new(&m.dest_path);
+            if !dest.is_dir() {
+                return Err(format!("{} doesn't exist", m.dest_path));
+            }
+            if dir_is_empty(dest) {
+                return Err(format!(
+                    "{} is empty; not re-pointing the catalog at it",
+                    m.dest_path
+                ));
+            }
+            if has_partial_copy(dest) {
+                return Err(format!(
+                    "{} holds an unfinished copy ({PARTIAL_SUFFIX} files) or can't be fully \
+                     read; not re-pointing the catalog at it",
+                    m.dest_path
+                ));
+            }
+            store
+                .commit_root_move(m.id, &[])
+                .map_err(|e| e.to_string())?;
+            store.finish_root_move(m.id).map_err(|e| {
+                format!(
+                    "the catalog now points at the destination, but closing the journal row \
+                     failed ({e}); at the next start the leftover source files that are \
+                     byte-identical to the destination's will be removed"
+                )
+            })
+        }
+        Resolution::Abandon => store.finish_root_move(m.id).map_err(|e| e.to_string()),
+    }
+    .map(|()| m.root_id)
+}
+
+/// `true` if any file under `dir` is one of our own `.nicti-partial` temp copies, **or** the
+/// tree can't be fully read (an unreadable subfolder might hide one, so refuse).
+fn has_partial_copy(dir: &Path) -> bool {
+    WalkDir::new(dir).into_iter().any(|e| match e {
+        Ok(e) => e.file_name().to_string_lossy().ends_with(PARTIAL_SUFFIX),
+        Err(_) => true,
+    })
+}
+
 /// Deletes every file under `src` whose counterpart under `dest` has identical content, then
 /// prunes empty directories. Returns how many source files remain.
 fn cleanup_matching(src: &Path, dest: &Path) -> u64 {
@@ -2055,6 +2151,147 @@ mod tests {
             f.cat.get_root_path(f.root_id).unwrap().unwrap(),
             f.src.to_string_lossy()
         );
+    }
+
+    /// A `renaming` row with the folder present at both locations: stuck, per recovery.
+    fn stuck_at_both_locations(f: &Fixture) -> (i64, PathBuf) {
+        let dest = f.dest_parent.join("event-2026");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("a.NEF"), vec![7u8; 3_000_000]).unwrap();
+        let id = f
+            .cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
+            .unwrap();
+        f.cat.set_root_move_state(id, MoveState::Renaming).unwrap();
+        let r = resume_open_moves(&*f.cat);
+        assert!(matches!(r[..], [Resumed::Stuck { .. }]), "{r:?}");
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+        (id, dest)
+    }
+
+    #[test]
+    fn keep_source_closes_the_row_and_leaves_both_folders_alone() {
+        let f = fixture();
+        let (id, dest) = stuck_at_both_locations(&f);
+        resolve_stuck_move(&*f.cat, id, Resolution::KeepSource).unwrap();
+        no_journal(&f);
+        assert_eq!(
+            f.cat.get_root_path(f.root_id).unwrap().unwrap(),
+            f.src.to_string_lossy()
+        );
+        assert!(f.src.join("a.NEF").is_file());
+        assert!(dest.join("a.NEF").is_file(), "destination never deleted");
+        // The root is movable again.
+        f.cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 2)
+            .unwrap();
+    }
+
+    #[test]
+    fn keep_destination_repoints_the_catalog_and_leaves_both_folders_alone() {
+        let f = fixture();
+        let (id, dest) = stuck_at_both_locations(&f);
+        resolve_stuck_move(&*f.cat, id, Resolution::KeepDestination).unwrap();
+        no_journal(&f);
+        assert_eq!(
+            f.cat.get_root_path(f.root_id).unwrap().unwrap(),
+            dest.to_string_lossy()
+        );
+        assert!(f.src.join("a.NEF").is_file(), "source never deleted");
+        assert!(dest.join("a.NEF").is_file());
+    }
+
+    #[test]
+    fn abandon_only_closes_the_row() {
+        let f = fixture();
+        let dest = f.dest_parent.join("event-2026");
+        let id = f
+            .cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
+            .unwrap();
+        fs::remove_dir_all(&f.src).unwrap(); // neither folder exists
+        let r = resume_open_moves(&*f.cat);
+        assert!(matches!(r[..], [Resumed::Stuck { .. }]), "{r:?}");
+
+        resolve_stuck_move(&*f.cat, id, Resolution::Abandon).unwrap();
+        no_journal(&f);
+        assert_eq!(
+            f.cat.get_root_path(f.root_id).unwrap().unwrap(),
+            f.src.to_string_lossy(),
+            "catalog untouched"
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_a_choice_whose_folder_is_missing_and_keeps_the_row_open() {
+        let f = fixture();
+        let dest = f.dest_parent.join("event-2026");
+        let id = f
+            .cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
+            .unwrap();
+        fs::remove_dir_all(&f.src).unwrap();
+
+        // Both folders are gone: neither "keep" may succeed, and nothing changes.
+        assert!(resolve_stuck_move(&*f.cat, id, Resolution::KeepDestination).is_err());
+        assert!(resolve_stuck_move(&*f.cat, id, Resolution::KeepSource).is_err());
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+        assert_eq!(
+            f.cat.get_root_path(f.root_id).unwrap().unwrap(),
+            f.src.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn keep_destination_refuses_an_empty_or_half_built_destination() {
+        let f = fixture();
+        let dest = f.dest_parent.join("event-2026");
+        fs::create_dir_all(&dest).unwrap();
+        let id = f
+            .cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
+            .unwrap();
+        f.cat.set_root_move_state(id, MoveState::Renaming).unwrap();
+        fs::remove_dir_all(&f.src).unwrap(); // e.g. the source drive went away
+
+        assert!(resolve_stuck_move(&*f.cat, id, Resolution::KeepDestination).is_err());
+        fs::write(dest.join("a.NEF.nicti-partial"), b"half").unwrap();
+        assert!(resolve_stuck_move(&*f.cat, id, Resolution::KeepDestination).is_err());
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+        assert_eq!(
+            f.cat.get_root_path(f.root_id).unwrap().unwrap(),
+            f.src.to_string_lossy(),
+            "catalog untouched"
+        );
+        // Abandon is still available.
+        assert_eq!(
+            resolve_stuck_move(&*f.cat, id, Resolution::Abandon),
+            Ok(f.root_id)
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_a_committed_row_and_an_unknown_id() {
+        let f = fixture();
+        let mut c = carry(&f, true);
+        loop {
+            assert!(c.step().is_none());
+            if c.committed {
+                break;
+            }
+        }
+        std::mem::forget(c);
+        let open = f.cat.open_root_moves().unwrap();
+        assert_eq!(open[0].state, MoveState::Committed);
+        for how in [
+            Resolution::KeepSource,
+            Resolution::KeepDestination,
+            Resolution::Abandon,
+        ] {
+            assert!(resolve_stuck_move(&*f.cat, open[0].id, how).is_err());
+        }
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+        assert!(resolve_stuck_move(&*f.cat, 9_999, Resolution::Abandon).is_err());
     }
 
     #[test]

@@ -1879,7 +1879,7 @@ impl PeltApp {
             )
         });
         let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
-        let attention = folder_panel::attention_lines(&self.folder_cache.open_moves, move_running);
+        let attention = folder_panel::attention_items(&self.folder_cache.open_moves, move_running);
         let mut out = folder_panel::PanelOutput::default();
         let mut set_archive = None;
         let selected_root = self.grid_root;
@@ -1924,6 +1924,64 @@ impl PeltApp {
         if let Some(root_id) = out.verify {
             self.submit_verify(store, root_id);
         }
+        if let Some((move_id, how)) = out.resolve {
+            self.resolve_stuck_move(store, move_id, how);
+        }
+    }
+
+    /// #334: settles a stuck `root_move` journal row from the folder panel's buttons. The panel
+    /// hides those while a move runs, but a click can land the same frame one starts, so re-check.
+    fn resolve_stuck_move(
+        &mut self,
+        store: &Arc<SqliteCatalog>,
+        move_id: i64,
+        how: carry::Resolution,
+    ) {
+        // Same guard as starting a move: a scan/verify walking the root would race the re-point.
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
+        ]) {
+            self.last_move_summary =
+                Some("Wait for the running import/sync/move/delete/verify to finish first.".into());
+            return;
+        }
+        let result = carry::resolve_stuck_move(&**store, move_id, how);
+        // A failed close after a successful re-point leaves the row `committed`: the catalog
+        // already moved, so the tier/grid still need to follow.
+        let repointed_root = match &result {
+            Ok(root_id) => (how == carry::Resolution::KeepDestination).then_some(*root_id),
+            Err(_) => store
+                .open_root_moves()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|m| m.id == move_id && m.state == nicti_lair::MoveState::Committed)
+                .map(|m| m.root_id),
+        };
+        if let Some(root_id) = repointed_root {
+            reconcile_tier(&**store, root_id, &self.archive_drives);
+        }
+        if result.is_ok() || repointed_root.is_some() {
+            if let Some(grid) = self.grid.as_mut() {
+                grid.refresh(&self.pounce);
+            }
+        }
+        self.last_move_summary = Some(match result {
+            Ok(_) => match how {
+                carry::Resolution::KeepSource => "Kept the original folder.".to_string(),
+                carry::Resolution::KeepDestination => {
+                    "Pointed the catalog at the destination folder.".to_string()
+                }
+                carry::Resolution::Abandon => "Cleared the interrupted move.".to_string(),
+            },
+            Err(e) => format!("Couldn't settle the interrupted move: {e}"),
+        });
+        self.folder_cache.invalidate();
     }
 
     /// #386: "Verify folder" from the folder panel's context menu. Refused while another job that
