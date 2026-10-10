@@ -633,6 +633,7 @@ pub fn show(
         develop.prune_removals();
         develop.prune_ai_alphas();
         mask.selected = None;
+        heal.clear_selection();
     }
 }
 

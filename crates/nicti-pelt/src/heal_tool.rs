@@ -60,6 +60,9 @@ const RESIZE_STEP: f32 = 1.12;
 const RECIPE_MODEL_ID: &str = "nicti.remove.mobilesam-lama";
 const RECIPE_MODEL_VERSION: &str = "1";
 
+/// How often to look for installed models again while a notice says they're missing.
+const MODELS_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
 // ---------------------------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------------------------
@@ -165,9 +168,13 @@ pub struct RemovalService {
     /// Cleared when a model install/repair succeeds; a spot the user edits gets a new key and so a
     /// fresh attempt.
     failed_reruns: HashSet<(u64, String)>,
-    /// The "needs the model download" notice was shown, so it is neither repeated every frame nor
-    /// re-checked against the disk every frame. Reset when an install finishes.
-    models_missing_reported: bool,
+    /// The photo the "needs the model download" notice was shown for: shown once per photo, not
+    /// every frame. Reset when an install finishes.
+    models_missing_for: Option<u64>,
+    /// When the models were last looked for on disk while `models_missing_for` was set, so a
+    /// hand-dropped or externally installed set is noticed within [`MODELS_RECHECK`] without a
+    /// filesystem stat every frame.
+    models_checked: Option<std::time::Instant>,
     /// Test seams: pretend the models are installed / substitute the backend, so gesture tests can
     /// exercise the whole click -> job -> patch path without ~250 MB of weights.
     #[cfg(test)]
@@ -202,7 +209,8 @@ impl RemovalService {
             pending_keys: HashSet::new(),
             reruns: HashSet::new(),
             failed_reruns: HashSet::new(),
-            models_missing_reported: false,
+            models_missing_for: None,
+            models_checked: None,
             #[cfg(test)]
             models_override: None,
             #[cfg(test)]
@@ -299,7 +307,8 @@ impl RemovalService {
             // failed (an integrity check, say) get another go with the fixed models.
             self.backend = None;
             self.failed_reruns.clear();
-            self.models_missing_reported = false;
+            self.models_missing_for = None;
+            self.models_checked = None;
         }
         Some(done)
     }
@@ -393,9 +402,6 @@ impl RemovalService {
     /// reported and left alone; the spot stays in the document either way, so a failed re-run
     /// loses nothing. `Err` is a message for the status line.
     pub fn rerun_missing(&mut self, pounce: &Pounce, develop: &DevelopDoc) -> Result<(), String> {
-        if self.models_missing_reported {
-            return Ok(());
-        }
         let image_key = develop.frame_key();
         let params: HealParams = develop.stage_params(HEAL);
         let mut missing = Vec::new();
@@ -423,17 +429,30 @@ impl RemovalService {
                 }
             }
         }
-        let mut problem = (unsupported > 0).then(|| {
-            format!("{unsupported} AI removal spot(s) were made with a model this version can't re-run.")
-        });
+        let mut problems = Vec::new();
+        if unsupported > 0 {
+            problems.push(format!(
+                "{unsupported} AI removal spot(s) were made with a model this version can't re-run."
+            ));
+        }
         if !missing.is_empty() {
-            if self.models().is_none() {
-                self.models_missing_reported = true;
-                problem = Some(format!(
-                    "{} AI removal spot(s) need the model download to be re-applied.",
-                    missing.len()
-                ));
+            let known_missing = self.models_missing_for == Some(image_key)
+                && self
+                    .models_checked
+                    .is_some_and(|t| t.elapsed() < MODELS_RECHECK);
+            if known_missing {
+                // Already told the user, and looked recently: stay quiet and don't hit the disk.
+            } else if self.models().is_none() {
+                self.models_checked = Some(std::time::Instant::now());
+                if self.models_missing_for != Some(image_key) {
+                    problems.push(format!(
+                        "{} AI removal spot(s) need the model download to be re-applied.",
+                        missing.len()
+                    ));
+                }
+                self.models_missing_for = Some(image_key);
             } else {
+                self.models_missing_for = None;
                 for (spot, prompt) in missing {
                     let id = (image_key, spot_key(spot));
                     // Only a job that actually queued is a re-run.
@@ -441,12 +460,16 @@ impl RemovalService {
                         Ok(()) => {
                             self.reruns.insert(id);
                         }
-                        Err(e) => problem = Some(e),
+                        Err(e) => problems.push(e),
                     }
                 }
             }
         }
-        problem.map_or(Ok(()), Err)
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join(" "))
+        }
     }
 
     /// Collects every removal that has finished since the last call.
@@ -1456,16 +1479,30 @@ mod tests {
         let mut svc = RemovalService::with_store(None);
 
         svc.backend = Some((fake_models(), Arc::clone(&backend)));
+        svc.failed_reruns.insert((1, "k".into()));
+        svc.models_missing_for = Some(1);
+        svc.models_checked = Some(std::time::Instant::now());
         svc.install = Some(handle(Ok(())));
         assert!(svc.poll_install().unwrap().is_ok());
+        assert!(
+            svc.failed_reruns.is_empty()
+                && svc.models_missing_for.is_none()
+                && svc.models_checked.is_none(),
+            "a fresh install gives failed re-runs and the missing-models notice a clean slate"
+        );
         assert!(
             svc.backend.is_none(),
             "a repair may have replaced the files it was built over"
         );
 
         svc.backend = Some((fake_models(), backend));
+        svc.failed_reruns.insert((1, "k".into()));
         svc.install = Some(handle(Err("network down".into())));
         assert!(svc.poll_install().unwrap().is_err());
+        assert!(
+            !svc.failed_reruns.is_empty(),
+            "a failed install fixes nothing"
+        );
         assert!(svc.backend.is_some(), "nothing changed on disk, so keep it");
     }
 
@@ -2097,6 +2134,42 @@ mod tests {
         heal.status = None; // the user dismissed it
         rerun_missing_removals(&develop, &mut heal, &p);
         assert!(heal.status.is_none(), "not shown again every frame");
+
+        // A different photo with missing removals is told too.
+        heal.service.models_missing_for = Some(develop.frame_key().wrapping_add(1));
+        rerun_missing_removals(&develop, &mut heal, &p);
+        assert!(heal.status.is_some(), "the notice is per photo");
+    }
+
+    /// An unsupported recipe and absent models are both reported, not one hiding the other.
+    #[test]
+    fn an_unsupported_recipe_is_reported_alongside_missing_models() {
+        let Some((mut develop, mut heal, p, _)) = rig() else {
+            return;
+        };
+        let mut foreign = Spot::remove_spot(
+            (60.0, 60.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 60.0, y: 60.0 }),
+        );
+        foreign.mask_recipe.as_mut().unwrap().model_id = "someone.else".to_owned();
+        let valid = Spot::remove_spot(
+            (20.0, 20.0),
+            10.0,
+            2.0,
+            removal_recipe(Prompt::Click { x: 20.0, y: 20.0 }),
+        );
+        develop.set_stage_params(
+            HEAL,
+            &HealParams {
+                spots: vec![foreign, valid],
+            },
+        );
+        rerun_missing_removals(&develop, &mut heal, &p);
+        let status = heal.status.unwrap_or_default();
+        assert!(status.contains("can't re-run"), "{status}");
+        assert!(status.contains("model download"), "{status}");
     }
 
     #[test]

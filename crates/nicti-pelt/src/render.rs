@@ -705,18 +705,26 @@ impl DevelopDoc {
     /// content, so a stale one can't be mistaken for a current spot -- and it is kept after its
     /// spot is edited or deleted so Undo brings the fill straight back instead of re-running a
     /// multi-second model. Only once more than [`MAX_RETAINED_REMOVALS`] are held (a patch can be
-    /// tens of MB) are the ones the document no longer references dropped.
+    /// tens of MB) are the ones the document no longer references trimmed, down to that many;
+    /// ones it does reference are never dropped.
     pub fn prune_removals(&mut self) {
         if self.removals.len() <= MAX_RETAINED_REMOVALS {
             return;
         }
+        let mut spare = MAX_RETAINED_REMOVALS;
         let live: std::collections::HashSet<String> = self
             .stage_params::<HealParams>(HEAL)
             .spots
             .iter()
             .map(heal::spot_key)
             .collect();
-        self.removals.retain(|k, _| live.contains(k));
+        self.removals.retain(|k, _| {
+            live.contains(k)
+                || (spare > 0 && {
+                    spare -= 1;
+                    true
+                })
+        });
     }
 
     /// The source frame's own extent, in pixels -- what a crop/straighten UI needs to map a
