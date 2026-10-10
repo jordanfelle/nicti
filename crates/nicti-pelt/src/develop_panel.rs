@@ -287,6 +287,20 @@ pub fn show(
         if ui.button(before_label).clicked() || ui.input(|i| i.key_pressed(egui::Key::Backslash)) {
             develop.show_before = !develop.show_before;
         }
+        if ui
+            .add_enabled(develop.can_undo(), egui::Button::new("Undo"))
+            .on_hover_text("Ctrl+Z")
+            .clicked()
+        {
+            develop.undo();
+        }
+        if ui
+            .add_enabled(develop.can_redo(), egui::Button::new("Redo"))
+            .on_hover_text("Ctrl+Shift+Z")
+            .clicked()
+        {
+            develop.redo();
+        }
         let auto_tone = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto"));
         if let (true, Some((engine, _))) = (auto_tone.clicked(), gpu.as_mut()) {
             let result = engine.apply_auto_tone(develop);

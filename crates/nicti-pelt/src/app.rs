@@ -1291,6 +1291,28 @@ impl eframe::App for PeltApp {
                 self.handle_knead_action(action);
             }
         }
+        // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y: undo and redo Develop's edits (#324). Redo is matched first:
+        // egui lets a plain-Ctrl shortcut also match a chord that adds Shift.
+        if self.view == View::Develop && !ui.ctx().egui_wants_keyboard_input() {
+            let key = |mods, key| egui::KeyboardShortcut::new(mods, key);
+            let redo = ui.ctx().input_mut(|i| {
+                i.consume_shortcut(&key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Z,
+                )) || i.consume_shortcut(&key(egui::Modifiers::COMMAND, egui::Key::Y))
+            });
+            let undo = !redo
+                && ui.ctx().input_mut(|i| {
+                    i.consume_shortcut(&key(egui::Modifiers::COMMAND, egui::Key::Z))
+                });
+            if let Some(d) = self.develop.as_mut() {
+                if redo {
+                    d.redo();
+                } else if undo {
+                    d.undo();
+                }
+            }
+        }
         // Autosave Develop's edits once the pointer is up (not on every slider-drag frame).
         if !ui.ctx().input(|i| i.pointer.any_down()) {
             self.save_develop_edits(false);
@@ -1446,6 +1468,7 @@ impl eframe::App for PeltApp {
             d.uncropped_preview = self.view == View::Develop && self.heal_ui.shows_uncropped();
             if self.view == View::Develop {
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
+                crate::heal_tool::rerun_missing_removals(d, &mut self.heal_ui, &self.pounce);
                 // Files this photo's baked alphas in the disk tier (#353).
                 self.mask_ui
                     .service

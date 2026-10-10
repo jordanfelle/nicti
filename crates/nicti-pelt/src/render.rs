@@ -19,6 +19,7 @@ use std::sync::Arc;
 use crate::camera_profiles::{self, LookEntry, ProfileEntry};
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::LinearFrame;
+use nicti_pawprint::history::History;
 use nicti_pawprint::{EditDocument, StageEntry};
 use nicti_tapetum::auto::{AutoOutcome, AutoReason};
 use nicti_tapetum::coat::{self, CameraProfileParams, CropParams, HealParams};
@@ -79,6 +80,9 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
     }
 }
 
+/// Writes to one stage closer together than this are one undo step (a slider or brush drag).
+const GESTURE_WINDOW_MS: u128 = 600;
+
 /// The GPU-free half of the Develop view: the loaded frame, the user's edit document, the render
 /// graph/registry (pure data, hashing only), and everything the Develop panel reads or writes
 /// (stage params, camera/look profiles, finished AI removals and alphas). Constructible and fully
@@ -92,9 +96,11 @@ pub struct DevelopDoc {
     extent: Extent,
     graph: RenderGraph,
     registry: StageRegistry,
-    /// The user's actual edits. Persisted to the catalog by the app (`PeltApp::save_develop_edits`,
-    /// #57) whenever [`Self::is_dirty`].
-    document: EditDocument,
+    /// The user's actual edits and their undo/redo log (#324). The document is persisted to the
+    /// catalog by the app (`PeltApp::save_develop_edits`, #57) whenever [`Self::is_dirty`]; the log
+    /// is session-local and starts empty each time a photo is loaded, so Undo never reaches past
+    /// what the catalog held when the photo was opened.
+    history: History,
     /// The document as last loaded from / saved to the catalog: what `is_dirty` compares against.
     saved: EditDocument,
     /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
@@ -233,7 +239,7 @@ impl DevelopDoc {
             extent,
             graph: build_graph(),
             registry: build_registry(),
-            document: EditDocument::default(),
+            history: History::new(EditDocument::default()),
             saved: EditDocument::default(),
             removals: RemovalSet::new(),
             ai_alphas: std::collections::HashMap::new(),
@@ -332,7 +338,7 @@ impl DevelopDoc {
     /// Reloads the document's Look, leaving `active_look` off and recording the reason on failure.
     fn reload_active_look(&mut self) {
         self.active_look = None;
-        match camera_profiles::load_look_for_document(&self.document) {
+        match camera_profiles::load_look_for_document(self.history.document()) {
             Ok(look) => self.active_look = look,
             Err(e) => {
                 self.profile_error.get_or_insert(e);
@@ -345,15 +351,36 @@ impl DevelopDoc {
     /// changes what `render()` itself uses); a UI slider always reflects the real edit, not
     /// whatever the before/after toggle happens to show right now.
     pub fn stage_params<T: serde::de::DeserializeOwned + Default>(&self, stage_id: &str) -> T {
-        match self.document.stages.get(stage_id) {
+        match self.history.document().stages.get(stage_id) {
             Some(entry) => coat::parse(&entry.params),
             None => T::default(),
         }
     }
 
     /// Sets a stage's params from a typed value, replacing any existing entry -- the write half
-    /// of [`Self::stage_params`].
-    pub fn set_stage_params<T: serde::Serialize + 'static>(&mut self, stage_id: &str, params: &T) {
+    /// of [`Self::stage_params`]. Goes through the undo history (#324): a value equal to the
+    /// *effective* current one (an absent entry counts as the stage default, ADR-0101 rule 6)
+    /// writes nothing, so the panels can call this every frame without dirtying the document or
+    /// creating steps; successive writes to one stage within [`GESTURE_WINDOW_MS`] are one step
+    /// (a slider or brush drag).
+    pub fn set_stage_params<T>(&mut self, stage_id: &str, params: &T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
+    {
+        let Some((_, entry)) = self.stage_edit(stage_id, params) else {
+            return;
+        };
+        self.history.apply(stage_id, stage_id, entry);
+        self.history.compact(GESTURE_WINDOW_MS);
+    }
+
+    /// The entry [`Self::set_stage_params`] would write for `params`, or `None` when it equals the
+    /// effective current value. Lets a caller that edits several stages at once collect the real
+    /// changes and commit them as one step with [`Self::apply_stage_edits`].
+    pub fn stage_edit<T>(&self, stage_id: &str, params: &T) -> Option<(String, StageEntry)>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
+    {
         let mut value =
             serde_json::to_value(params).expect("a coat params struct always serializes");
         // A NaN serializes to JSON `null`, which the canonical stage hasher refuses, and
@@ -366,19 +393,84 @@ impl DevelopDoc {
                 value = serde_json::to_value(masks.sanitized()).expect("mask params serialize");
             }
         }
-        self.document.stages.insert(
-            stage_id.to_string(),
-            StageEntry {
-                schema_version: 1,
-                params: value,
-            },
-        );
+        let effective = serde_json::to_value(self.stage_params::<T>(stage_id))
+            .expect("a coat params struct always serializes");
+        (value != effective).then(|| {
+            (
+                stage_id.to_string(),
+                StageEntry {
+                    schema_version: 1,
+                    params: value,
+                },
+            )
+        })
+    }
+
+    /// Commits several stage edits (from [`Self::stage_edit`]) as a single undo step -- one Auto
+    /// tone click is one step, not one per stage (ADR-0101 rule 6). Never coalesces with a drag.
+    pub fn apply_stage_edits(&mut self, edits: Vec<(String, StageEntry)>) {
+        if !edits.is_empty() {
+            self.history.apply_group(edits);
+        }
     }
 
     /// Removes a stage's entry entirely, reverting it to its own default -- what a slider's
-    /// double-click-to-reset gesture calls.
+    /// double-click-to-reset gesture calls. One undo step; a no-op for a stage with no entry.
     pub fn reset_stage(&mut self, stage_id: &str) {
-        self.document.stages.remove(stage_id);
+        self.history.reset(stage_id, stage_id);
+        self.history.compact(GESTURE_WINDOW_MS);
+    }
+
+    /// Whether [`Self::undo`] has a step to reverse.
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    /// Whether [`Self::redo`] has a step to re-apply.
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// Reverses the most recent edit step (a whole drag, a whole batch). `false` when there is
+    /// nothing to undo. AI removal patches stay cached, so undoing a deleted spot brings its fill
+    /// straight back; one that was evicted is re-run by the heal tool's poll.
+    pub fn undo(&mut self) -> bool {
+        let moved = self.history.undo();
+        if moved {
+            self.after_history_move();
+        }
+        moved
+    }
+
+    /// Re-applies the step [`Self::undo`] reversed. `false` when there is nothing to redo.
+    pub fn redo(&mut self) -> bool {
+        let moved = self.history.redo();
+        if moved {
+            self.after_history_move();
+        }
+        moved
+    }
+
+    /// An undo/redo can change the selected camera profile or Look, which live outside the
+    /// document, so reload them from what the document now says.
+    fn after_history_move(&mut self) {
+        self.reload_profiles();
+    }
+
+    /// Reloads the camera profile and Look the current document selects, leaving them off (and
+    /// recording the reason in [`Self::profile_error`]) when they can't be loaded.
+    fn reload_profiles(&mut self) {
+        self.active_profile = None;
+        self.profile_error = None;
+        match camera_profiles::load_for_document(
+            self.history.document(),
+            &self.frame.make,
+            &self.frame.model,
+        ) {
+            Ok(profile) => self.active_profile = profile,
+            Err(e) => self.profile_error = Some(e),
+        }
+        self.reload_active_look();
     }
 
     /// Cache key of the neutral render AI masks infer on (see `build_graph`'s `NEUTRAL` node):
@@ -440,23 +532,23 @@ impl DevelopDoc {
     /// all.
     #[cfg(test)]
     pub fn has_edits(&self) -> bool {
-        !self.document.stages.is_empty()
+        !self.history.document().stages.is_empty()
     }
 
     /// The current edits.
     pub fn document(&self) -> &EditDocument {
-        &self.document
+        self.history.document()
     }
 
     /// Whether the edits differ from what the catalog has (`load_real_frame`'s `doc` or the last
     /// [`Self::mark_saved`]).
     pub fn is_dirty(&self) -> bool {
-        self.document != self.saved
+        self.history.document() != &self.saved
     }
 
     /// Records that the current edits are now persisted.
     pub fn mark_saved(&mut self) {
-        self.saved = self.document.clone();
+        self.saved = self.history.document().clone();
     }
 
     /// Swaps in `doc` as the loaded photo's edits, already persisted (#52): a paste/sync/undo wrote
@@ -465,20 +557,10 @@ impl DevelopDoc {
     /// mask it does), and reloads the camera profile, which `doc` may have changed.
     pub fn replace_document(&mut self, doc: EditDocument) {
         self.saved = doc.clone();
-        self.document = doc;
+        self.history = History::new(doc);
         self.prune_removals();
         self.prune_ai_alphas();
-        self.active_profile = None;
-        self.profile_error = None;
-        match camera_profiles::load_for_document(
-            &self.document,
-            &self.frame.make,
-            &self.frame.model,
-        ) {
-            Ok(profile) => self.active_profile = profile,
-            Err(e) => self.profile_error = Some(e),
-        }
-        self.reload_active_look();
+        self.reload_profiles();
     }
 
     /// Loads a real decoded photo (#31 phase 3) in place of whatever frame is currently showing,
@@ -491,8 +573,8 @@ impl DevelopDoc {
     ///
     /// A camera profile the document selects is reloaded and verified against the hash the
     /// document recorded; on failure the profile is left off and [`Self::profile_error`] says why.
-    /// AI removals are not persisted (#324): `doc` keeps their recipes, but no patch exists until
-    /// the removal is re-run.
+    /// AI removals' patches are not persisted: `doc` keeps their recipes, and the heal tool re-runs
+    /// them from those (#324, `heal_tool::rerun_missing_removals`). The undo history starts empty.
     pub fn load_real_frame(
         &mut self,
         frame: Arc<LinearFrame>,
@@ -505,22 +587,12 @@ impl DevelopDoc {
         };
         self.frame = frame;
         self.saved = doc.clone();
-        self.document = doc;
+        self.history = History::new(doc);
         self.removals.clear();
         self.ai_alphas.clear();
         self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
         self.show_before = false;
-        self.active_profile = None;
-        self.profile_error = None;
-        match camera_profiles::load_for_document(
-            &self.document,
-            &self.frame.make,
-            &self.frame.model,
-        ) {
-            Ok(profile) => self.active_profile = profile,
-            Err(e) => self.profile_error = Some(e),
-        }
-        self.reload_active_look();
+        self.reload_profiles();
         if !self.looks_discovered {
             self.look_choices = camera_profiles::discover_looks();
             self.looks_discovered = true;
@@ -571,9 +643,20 @@ impl DevelopDoc {
         self.removals.insert(spot_key, patch);
     }
 
-    /// Drops removal patches whose spot is no longer in the document's heal entry, so an edited
-    /// or deleted spot's stale fill can't linger (or be re-stamped into the cache key).
+    /// Whether a finished AI removal is held for `spot_key`.
+    pub fn has_removal(&self, spot_key: &str) -> bool {
+        self.removals.contains_key(spot_key)
+    }
+
+    /// Bounds the removal patches held for this photo. A patch is keyed by its spot's whole
+    /// content, so a stale one can't be mistaken for a current spot -- and it is kept after its
+    /// spot is edited or deleted so Undo brings the fill straight back instead of re-running a
+    /// multi-second model. Only once more than twice [`MAX_SPOTS`] are held are the ones the
+    /// document no longer references dropped.
     pub fn prune_removals(&mut self) {
+        if self.removals.len() <= 2 * heal::MAX_SPOTS {
+            return;
+        }
         let live: std::collections::HashSet<String> = self
             .stage_params::<HealParams>(HEAL)
             .spots
@@ -669,7 +752,7 @@ impl DevelopEngine {
         } else {
             // The heal entry is stamped with which AI removals are ready, so a patch arriving (or
             // changing) rebakes the heal stage through the normal cache-key path.
-            let mut d = dv.document.clone();
+            let mut d = dv.history.document().clone();
             heal::stamp_removal_state(&mut d, &dv.removals);
             if dv.uncropped_preview {
                 // Removing the entry (rather than only ignoring it below) also gives the crop node
@@ -823,7 +906,7 @@ impl DevelopEngine {
     /// `document` -- see `perk.rs`'s own doc comment for why this is provisional (candidate A,
     /// pending #202). Per ADR-0101 (#311): a result equal to the *effective* current params (an
     /// absent entry counts as its default) writes nothing and reports [`AutoApplied::Unchanged`],
-    /// so a click never dirties the document or (once #324 wires `History`) creates a step; a
+    /// so a click never dirties the document or creates a history step; a
     /// low-confidence result is still applied and reported as
     /// [`AutoApplied::AppliedLowConfidence`] so the panel can mark the control.
     pub fn apply_auto_tone(&mut self, dv: &mut DevelopDoc) -> AutoApplied {
@@ -854,8 +937,11 @@ impl DevelopEngine {
         if exposure == current_exposure && tone == current_tone {
             return AutoApplied::Unchanged;
         }
-        dv.set_stage_params(EXPOSURE, &exposure);
-        dv.set_stage_params(TONE, &tone);
+        let edits = [
+            dv.stage_edit(EXPOSURE, &exposure),
+            dv.stage_edit(TONE, &tone),
+        ];
+        dv.apply_stage_edits(edits.into_iter().flatten().collect());
         match outcome {
             AutoOutcome::LowConfidence(_, reason) => AutoApplied::AppliedLowConfidence(reason),
             _ => AutoApplied::Applied,
@@ -882,14 +968,12 @@ impl DevelopEngine {
                 low_confidence: false,
             };
         }
-        let had_crop = dv.document.stages.remove(CROP);
-        let was_before = dv.show_before;
+        let (was_before, was_uncropped) = (dv.show_before, dv.uncropped_preview);
         dv.show_before = false;
+        dv.uncropped_preview = true;
         let uncropped = self.render(dv);
         dv.show_before = was_before;
-        if let Some(entry) = had_crop {
-            dv.document.stages.insert(CROP.to_string(), entry);
-        }
+        dv.uncropped_preview = was_uncropped;
 
         let pixels = nicti_tapetum::frame::read_frame(&self.gpu, &uncropped);
         let display: Vec<[f32; 4]> = pixels
@@ -1812,7 +1896,7 @@ mod tests {
     }
 
     /// ADR-0101: an Auto click whose result equals what's already there must not touch the
-    /// document (no dirtying, no history step once #324 wires one in).
+    /// document (no dirtying, no history step).
     #[test]
     fn a_second_auto_tone_click_is_unchanged_and_leaves_the_document_alone() {
         let Some(gpu) = crate::test_gpu::shared() else {
@@ -1994,5 +2078,123 @@ mod tests {
         // A tool showing the whole frame is the identity again.
         doc.uncropped_preview = true;
         assert_eq!(doc.display_to_source_norm([0.1, 0.9]), [0.1, 0.9]);
+    }
+
+    /// A drag of one slider is many `set_stage_params` calls but one undo step, and its undo
+    /// target is the pre-drag value (#324).
+    #[test]
+    fn a_slider_drag_is_one_undo_step_back_to_the_pre_drag_value() {
+        let mut doc = DevelopDoc::new();
+        for stops in [0.2, 0.5, 0.9, 1.3] {
+            doc.set_stage_params(EXPOSURE, &ExposureParams { stops });
+        }
+        assert!(doc.can_undo() && !doc.can_redo());
+        assert!(doc.undo());
+        assert_eq!(doc.stage_params::<ExposureParams>(EXPOSURE).stops, 0.0);
+        assert!(!doc.can_undo(), "the whole drag was a single step");
+        assert!(doc.redo());
+        assert_eq!(doc.stage_params::<ExposureParams>(EXPOSURE).stops, 1.3);
+        assert!(!doc.redo());
+    }
+
+    /// ADR-0101 rule 6 at the Develop level: the panels write every stage every frame, so an
+    /// unchanged value (including a default over an absent entry) must create no step and must
+    /// not dirty the document.
+    #[test]
+    fn rewriting_the_effective_value_makes_no_step_and_no_dirt() {
+        let mut doc = DevelopDoc::new();
+        doc.set_stage_params(EXPOSURE, &ExposureParams::default());
+        doc.set_stage_params(TONE, &ToneParams::default());
+        assert!(!doc.can_undo() && !doc.is_dirty() && !doc.has_edits());
+
+        doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 1.0 });
+        assert!(doc.undo());
+        assert!(doc.can_redo());
+        // A no-op write must not truncate the redo stack.
+        doc.set_stage_params(EXPOSURE, &ExposureParams::default());
+        assert!(doc.can_redo(), "an unchanged write keeps redo");
+    }
+
+    /// Undoing back to what the catalog holds is not dirty, so the autosave has nothing to write.
+    #[test]
+    fn undoing_back_to_the_saved_document_is_clean() {
+        let mut doc = DevelopDoc::new();
+        doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 1.0 });
+        assert!(doc.is_dirty());
+        doc.undo();
+        assert!(!doc.is_dirty());
+        doc.redo();
+        assert!(doc.is_dirty());
+    }
+
+    #[test]
+    fn reset_stage_is_an_undoable_step() {
+        let mut doc = DevelopDoc::new();
+        doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 1.0 });
+        doc.mark_saved();
+        // Not within the drag window of the write above: a separate gesture.
+        std::thread::sleep(std::time::Duration::from_millis(
+            GESTURE_WINDOW_MS as u64 + 50,
+        ));
+        doc.reset_stage(EXPOSURE);
+        assert!(!doc.has_edits());
+        assert!(doc.undo());
+        assert_eq!(doc.stage_params::<ExposureParams>(EXPOSURE).stops, 1.0);
+        doc.reset_stage(CROP);
+        assert!(
+            doc.can_redo(),
+            "resetting an absent stage is no step and keeps redo"
+        );
+    }
+
+    /// Exposure + Tone written together (Auto tone) undo together.
+    #[test]
+    fn a_multi_stage_edit_is_one_step() {
+        let mut doc = DevelopDoc::new();
+        let exposure = ExposureParams { stops: 0.7 };
+        let tone = ToneParams {
+            contrast: 20.0,
+            ..ToneParams::default()
+        };
+        let edits = [
+            doc.stage_edit(EXPOSURE, &exposure),
+            doc.stage_edit(TONE, &tone),
+            doc.stage_edit(WB, &WbParams::default()),
+        ];
+        doc.apply_stage_edits(edits.into_iter().flatten().collect());
+        assert_eq!(
+            doc.document().stages.len(),
+            2,
+            "the unchanged WB is skipped"
+        );
+        assert!(doc.undo());
+        assert!(!doc.has_edits());
+        assert!(!doc.can_undo());
+    }
+
+    /// Loading a photo (or a pasted document) starts a fresh history: Undo never reaches into the
+    /// previous photo's edits.
+    #[test]
+    fn loading_a_document_clears_the_history() {
+        let mut doc = DevelopDoc::new();
+        doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 1.0 });
+        let mut other = EditDocument::default();
+        other.stages.insert(
+            TONE.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(ToneParams {
+                    contrast: 5.0,
+                    ..ToneParams::default()
+                })
+                .unwrap(),
+            },
+        );
+        doc.replace_document(other.clone());
+        assert!(!doc.can_undo() && !doc.undo());
+        assert_eq!(doc.document(), &other);
+        doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 2.0 });
+        assert!(doc.undo());
+        assert_eq!(doc.document(), &other, "undo stops at the loaded document");
     }
 }
