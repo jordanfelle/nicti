@@ -142,8 +142,10 @@ impl History {
 
     /// [`Self::apply_batch`] with a fresh batch id, for a caller with no batch identity of its own
     /// (an interactive multi-stage edit such as Auto tone).
-    pub fn apply_group(&mut self, changes: Vec<(String, StageEntry)>) {
-        self.apply_batch(Uuid::new_v4(), changes);
+    /// A `None` entry removes that stage (back to its default), so a reset of several stages is
+    /// one step too.
+    pub fn apply_group(&mut self, changes: Vec<(String, Option<StageEntry>)>) {
+        self.push_delta(Uuid::new_v4(), changes, None, now_ms());
     }
 
     /// ADR-0101 rule 6 (#312): a delta whose every change has `before == after` appends no step and

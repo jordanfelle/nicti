@@ -293,6 +293,8 @@ pub fn show(
             .clicked()
         {
             develop.undo();
+            heal.clear_selection();
+            mask.selected = None;
         }
         if ui
             .add_enabled(develop.can_redo(), egui::Button::new("Redo"))
@@ -300,6 +302,8 @@ pub fn show(
             .clicked()
         {
             develop.redo();
+            heal.clear_selection();
+            mask.selected = None;
         }
         let auto_tone = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto"));
         if let (true, Some((engine, _))) = (auto_tone.clicked(), gpu.as_mut()) {
@@ -603,7 +607,7 @@ pub fn show(
 
     ui.separator();
     if ui.button("Reset all").clicked() {
-        for id in [
+        develop.reset_stages(&[
             HEAL,
             WB,
             EXPOSURE,
@@ -623,11 +627,9 @@ pub fn show(
             CROP,
             EFFECTS,
             MASKS,
-        ] {
-            develop.reset_stage(id);
-        }
-        // The heal spots are gone, so their finished removals (up to tens of MB each) are too --
-        // and so are the local corrections, whose finished AI alphas go with them.
+        ]);
+        // The heal spots are gone, so their finished removals are unreferenced (trimmed once
+        // more than a few are held) -- and so are the local corrections, whose finished AI alphas go with them.
         develop.prune_removals();
         develop.prune_ai_alphas();
         mask.selected = None;

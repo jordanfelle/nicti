@@ -83,6 +83,25 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
 /// Writes to one stage closer together than this are one undo step (a slider or brush drag).
 const GESTURE_WINDOW_MS: u128 = 600;
 
+/// Blocks until the history's millisecond clock has advanced, so two writes can't share a
+/// timestamp (with merging disabled that is what keeps them separate steps).
+#[cfg(test)]
+pub fn wait_for_next_ms() {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
+    let start = now();
+    while now() == start {
+        std::hint::spin_loop();
+    }
+}
+
+/// Finished AI removals kept for the photo beyond the ones its document references.
+const MAX_RETAINED_REMOVALS: usize = 32;
+
 /// The GPU-free half of the Develop view: the loaded frame, the user's edit document, the render
 /// graph/registry (pure data, hashing only), and everything the Develop panel reads or writes
 /// (stage params, camera/look profiles, finished AI removals and alphas). Constructible and fully
@@ -101,6 +120,9 @@ pub struct DevelopDoc {
     /// is session-local and starts empty each time a photo is loaded, so Undo never reaches past
     /// what the catalog held when the photo was opened.
     history: History,
+    /// Writes to one stage closer together than this are one undo step; a field so tests can end
+    /// a gesture without waiting out the clock.
+    gesture_window_ms: u128,
     /// The document as last loaded from / saved to the catalog: what `is_dirty` compares against.
     saved: EditDocument,
     /// Finished AI removals for the current photo, keyed by `heal::spot_key`. Cleared whenever the
@@ -240,6 +262,7 @@ impl DevelopDoc {
             graph: build_graph(),
             registry: build_registry(),
             history: History::new(EditDocument::default()),
+            gesture_window_ms: GESTURE_WINDOW_MS,
             saved: EditDocument::default(),
             removals: RemovalSet::new(),
             ai_alphas: std::collections::HashMap::new(),
@@ -367,17 +390,26 @@ impl DevelopDoc {
     where
         T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
     {
-        let Some((_, entry)) = self.stage_edit(stage_id, params) else {
-            return;
-        };
-        self.history.apply(stage_id, stage_id, entry);
-        self.history.compact(GESTURE_WINDOW_MS);
+        match self.stage_edit(stage_id, params) {
+            None => {}
+            Some((_, Some(entry))) => {
+                self.history.apply(stage_id, stage_id, entry);
+                self.history.compact(self.gesture_window_ms);
+            }
+            // Dragged back to the default: drop the entry rather than store a default over it, so
+            // a drag that returns to its start nets to nothing and leaves the document clean.
+            Some((_, None)) => {
+                self.history.reset(stage_id, stage_id);
+                self.history.compact(self.gesture_window_ms);
+            }
+        }
     }
 
-    /// The entry [`Self::set_stage_params`] would write for `params`, or `None` when it equals the
-    /// effective current value. Lets a caller that edits several stages at once collect the real
-    /// changes and commit them as one step with [`Self::apply_stage_edits`].
-    pub fn stage_edit<T>(&self, stage_id: &str, params: &T) -> Option<(String, StageEntry)>
+    /// The edit [`Self::set_stage_params`] would make for `params`, or `None` when it equals the
+    /// effective current value. `Some((id, None))` means "remove the entry": the new value is the
+    /// stage default. Lets a caller that edits several stages at once collect the real changes and
+    /// commit them as one step with [`Self::apply_stage_edits`].
+    pub fn stage_edit<T>(&self, stage_id: &str, params: &T) -> Option<(String, Option<StageEntry>)>
     where
         T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
     {
@@ -395,30 +427,53 @@ impl DevelopDoc {
         }
         let effective = serde_json::to_value(self.stage_params::<T>(stage_id))
             .expect("a coat params struct always serializes");
-        (value != effective).then(|| {
-            (
-                stage_id.to_string(),
-                StageEntry {
-                    schema_version: 1,
-                    params: value,
-                },
-            )
-        })
+        if value == effective {
+            return None;
+        }
+        let default = serde_json::to_value(T::default()).expect("a coat params struct serializes");
+        let entry = if value == default {
+            None
+        } else {
+            Some(StageEntry {
+                schema_version: 1,
+                params: value,
+            })
+        };
+        Some((stage_id.to_string(), entry))
     }
 
     /// Commits several stage edits (from [`Self::stage_edit`]) as a single undo step -- one Auto
     /// tone click is one step, not one per stage (ADR-0101 rule 6). Never coalesces with a drag.
-    pub fn apply_stage_edits(&mut self, edits: Vec<(String, StageEntry)>) {
+    pub fn apply_stage_edits(&mut self, edits: Vec<(String, Option<StageEntry>)>) {
         if !edits.is_empty() {
             self.history.apply_group(edits);
         }
     }
 
+    /// Removes every listed stage that has an entry, as one undo step ("Reset all").
+    pub fn reset_stages(&mut self, stage_ids: &[&str]) {
+        let doc = self.history.document();
+        let edits = stage_ids
+            .iter()
+            .filter(|id| doc.stages.contains_key(**id))
+            .map(|id| ((*id).to_string(), None))
+            .collect();
+        self.apply_stage_edits(edits);
+    }
+
     /// Removes a stage's entry entirely, reverting it to its own default -- what a slider's
     /// double-click-to-reset gesture calls. One undo step; a no-op for a stage with no entry.
     pub fn reset_stage(&mut self, stage_id: &str) {
-        self.history.reset(stage_id, stage_id);
-        self.history.compact(GESTURE_WINDOW_MS);
+        // Its own control key: a Reset right after a drag must be a separate step, not merge into it.
+        self.history.reset(stage_id, &format!("{stage_id}.reset"));
+        self.history.compact(self.gesture_window_ms);
+    }
+
+    /// Test seam: makes every write its own gesture once the clock has ticked over (see
+    /// [`wait_for_next_ms`]), so tests need no real-time waits.
+    #[cfg(test)]
+    pub fn disable_gesture_merging(&mut self) {
+        self.gesture_window_ms = 0;
     }
 
     /// Whether [`Self::undo`] has a step to reverse.
@@ -435,26 +490,24 @@ impl DevelopDoc {
     /// nothing to undo. AI removal patches stay cached, so undoing a deleted spot brings its fill
     /// straight back; one that was evicted is re-run by the heal tool's poll.
     pub fn undo(&mut self) -> bool {
-        let moved = self.history.undo();
-        if moved {
-            self.after_history_move();
-        }
-        moved
+        self.history_move(History::undo)
     }
 
     /// Re-applies the step [`Self::undo`] reversed. `false` when there is nothing to redo.
     pub fn redo(&mut self) -> bool {
-        let moved = self.history.redo();
-        if moved {
-            self.after_history_move();
-        }
-        moved
+        self.history_move(History::redo)
     }
 
-    /// An undo/redo can change the selected camera profile or Look, which live outside the
-    /// document, so reload them from what the document now says.
-    fn after_history_move(&mut self) {
-        self.reload_profiles();
+    /// Runs an undo/redo. It can change the selected camera profile or Look, which live outside
+    /// the document, so those are reloaded -- but only when that stage actually moved, since a
+    /// reload re-reads and re-hashes files from disk.
+    fn history_move(&mut self, step: fn(&mut History) -> bool) -> bool {
+        let before = self.history.document().stages.get(WORKING_SPACE).cloned();
+        let moved = step(&mut self.history);
+        if moved && self.history.document().stages.get(WORKING_SPACE) != before.as_ref() {
+            self.reload_profiles();
+        }
+        moved
     }
 
     /// Reloads the camera profile and Look the current document selects, leaving them off (and
@@ -651,10 +704,10 @@ impl DevelopDoc {
     /// Bounds the removal patches held for this photo. A patch is keyed by its spot's whole
     /// content, so a stale one can't be mistaken for a current spot -- and it is kept after its
     /// spot is edited or deleted so Undo brings the fill straight back instead of re-running a
-    /// multi-second model. Only once more than twice [`MAX_SPOTS`] are held are the ones the
-    /// document no longer references dropped.
+    /// multi-second model. Only once more than [`MAX_RETAINED_REMOVALS`] are held (a patch can be
+    /// tens of MB) are the ones the document no longer references dropped.
     pub fn prune_removals(&mut self) {
-        if self.removals.len() <= 2 * heal::MAX_SPOTS {
+        if self.removals.len() <= MAX_RETAINED_REMOVALS {
             return;
         }
         let live: std::collections::HashSet<String> = self
@@ -2132,19 +2185,52 @@ mod tests {
         let mut doc = DevelopDoc::new();
         doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 1.0 });
         doc.mark_saved();
-        // Not within the drag window of the write above: a separate gesture.
-        std::thread::sleep(std::time::Duration::from_millis(
-            GESTURE_WINDOW_MS as u64 + 50,
-        ));
         doc.reset_stage(EXPOSURE);
         assert!(!doc.has_edits());
-        assert!(doc.undo());
+        assert!(
+            doc.undo(),
+            "the reset is its own step, not merged into the drag"
+        );
         assert_eq!(doc.stage_params::<ExposureParams>(EXPOSURE).stops, 1.0);
         doc.reset_stage(CROP);
         assert!(
             doc.can_redo(),
             "resetting an absent stage is no step and keeps redo"
         );
+    }
+
+    /// Dragging a slider away from an absent stage and back to its default nets to nothing: no
+    /// step, no dirt (a stored default over an absent entry would be both).
+    #[test]
+    fn a_drag_that_returns_to_the_default_leaves_nothing_behind() {
+        let mut doc = DevelopDoc::new();
+        for stops in [0.2, 0.5, 0.0] {
+            doc.set_stage_params(EXPOSURE, &ExposureParams { stops });
+        }
+        assert!(!doc.can_undo(), "the run netted to no change");
+        assert!(!doc.is_dirty() && !doc.has_edits());
+    }
+
+    /// "Reset all" is one undo step however many stages it clears.
+    #[test]
+    fn reset_stages_is_one_step_and_skips_absent_stages() {
+        let mut doc = DevelopDoc::new();
+        doc.disable_gesture_merging();
+        doc.set_stage_params(EXPOSURE, &ExposureParams { stops: 1.0 });
+        wait_for_next_ms();
+        doc.set_stage_params(
+            TONE,
+            &ToneParams {
+                contrast: 20.0,
+                ..ToneParams::default()
+            },
+        );
+        doc.reset_stages(&[EXPOSURE, TONE, WB, CROP]);
+        assert!(!doc.has_edits());
+        assert!(doc.undo());
+        assert_eq!(doc.document().stages.len(), 2, "both stages came back");
+        doc.reset_stages(&[WB, CROP]);
+        assert!(doc.can_redo(), "nothing to reset is no step");
     }
 
     /// Exposure + Tone written together (Auto tone) undo together.

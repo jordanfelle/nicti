@@ -97,6 +97,6 @@ Full reasoning/history: `docs/decisions/develop.md`.
   (`apply_group`, one step; Auto tone). `History::reset` removes a stage as a step. Ctrl+Z /
   Ctrl+Shift+Z / Ctrl+Y in Develop and the panel's Undo/Redo buttons; `is_dirty` compares to the
   last saved document, so undoing back to it is clean. Removal fills stay cached for the photo
-  (`prune_removals` only trims past `2 * MAX_SPOTS`), so undoing a delete is instant; a failed
+  (`prune_removals` only trims unreferenced fills past 32), so undoing a delete is instant; a failed
   re-run keeps the spot and reports it. Not persisted: the log itself (`edit_history`), so Undo
   doesn't survive reopening a photo.

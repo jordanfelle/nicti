@@ -1306,10 +1306,10 @@ impl eframe::App for PeltApp {
                     i.consume_shortcut(&key(egui::Modifiers::COMMAND, egui::Key::Z))
                 });
             if let Some(d) = self.develop.as_mut() {
-                if redo {
-                    d.redo();
-                } else if undo {
-                    d.undo();
+                if (redo && d.redo()) || (undo && d.undo()) {
+                    // Indices into the spot / correction lists mean something else now.
+                    self.heal_ui.clear_selection();
+                    self.mask_ui.selected = None;
                 }
             }
         }
