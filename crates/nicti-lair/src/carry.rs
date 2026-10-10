@@ -1190,7 +1190,8 @@ pub fn resolve_stuck_move(
             store.finish_root_move(m.id).map_err(|e| {
                 format!(
                     "the catalog now points at the destination, but closing the journal row \
-                     failed ({e}); it will be settled at the next start"
+                     failed ({e}); at the next start the leftover source files that are \
+                     byte-identical to the destination's will be removed"
                 )
             })
         }

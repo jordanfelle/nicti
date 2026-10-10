@@ -1951,22 +1951,34 @@ impl PeltApp {
                 Some("Wait for the running import/sync/move/delete/verify to finish first.".into());
             return;
         }
-        self.last_move_summary = Some(match carry::resolve_stuck_move(&**store, move_id, how) {
-            Ok(root_id) => {
-                if how == carry::Resolution::KeepDestination {
-                    reconcile_tier(&**store, root_id, &self.archive_drives);
-                }
-                if let Some(grid) = self.grid.as_mut() {
-                    grid.refresh(&self.pounce);
-                }
-                match how {
-                    carry::Resolution::KeepSource => "Kept the original folder.".to_string(),
-                    carry::Resolution::KeepDestination => {
-                        "Pointed the catalog at the destination folder.".to_string()
-                    }
-                    carry::Resolution::Abandon => "Cleared the interrupted move.".to_string(),
-                }
+        let result = carry::resolve_stuck_move(&**store, move_id, how);
+        // A failed close after a successful re-point leaves the row `committed`: the catalog
+        // already moved, so the tier/grid still need to follow.
+        let repointed_root = match &result {
+            Ok(root_id) => (how == carry::Resolution::KeepDestination).then_some(*root_id),
+            Err(_) => store
+                .open_root_moves()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|m| m.id == move_id && m.state == nicti_lair::MoveState::Committed)
+                .map(|m| m.root_id),
+        };
+        if let Some(root_id) = repointed_root {
+            reconcile_tier(&**store, root_id, &self.archive_drives);
+        }
+        if result.is_ok() || repointed_root.is_some() {
+            if let Some(grid) = self.grid.as_mut() {
+                grid.refresh(&self.pounce);
             }
+        }
+        self.last_move_summary = Some(match result {
+            Ok(_) => match how {
+                carry::Resolution::KeepSource => "Kept the original folder.".to_string(),
+                carry::Resolution::KeepDestination => {
+                    "Pointed the catalog at the destination folder.".to_string()
+                }
+                carry::Resolution::Abandon => "Cleared the interrupted move.".to_string(),
+            },
             Err(e) => format!("Couldn't settle the interrupted move: {e}"),
         });
         self.folder_cache.invalidate();
