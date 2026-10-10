@@ -1937,19 +1937,23 @@ impl PeltApp {
         move_id: i64,
         how: carry::Resolution,
     ) {
-        if self.job_active(&[JobKind::Move]) {
-            self.last_move_summary = Some("Wait for the running move to finish first.".into());
+        // Same guard as starting a move: a scan/verify walking the root would race the re-point.
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+            JobKind::Verify,
+            JobKind::Baseline,
+        ]) {
+            self.last_move_summary =
+                Some("Wait for the running import/sync/move/delete/verify to finish first.".into());
             return;
         }
-        let root_id = self
-            .folder_cache
-            .open_moves
-            .iter()
-            .find(|m| m.id == move_id)
-            .map(|m| m.root_id);
         self.last_move_summary = Some(match carry::resolve_stuck_move(&**store, move_id, how) {
-            Ok(()) => {
-                if let (carry::Resolution::KeepDestination, Some(root_id)) = (how, root_id) {
+            Ok(root_id) => {
+                if how == carry::Resolution::KeepDestination {
                     reconcile_tier(&**store, root_id, &self.archive_drives);
                 }
                 if let Some(grid) = self.grid.as_mut() {

@@ -1133,14 +1133,19 @@ pub enum Resolution {
 /// Settles one stuck `copying`/`renaming` journal row (#334). Refuses (`Err`, row untouched) a
 /// row that doesn't exist, a `committed` row (that is source cleanup, [`ResumeMoves`]' job, not
 /// a decision), and a choice whose folder isn't on disk: [`Resolution::KeepSource`] needs the
-/// source, [`Resolution::KeepDestination`] needs the destination, so the catalog can never be
-/// pointed at a folder that isn't there by this call. The caller must make sure no move job is
-/// running (its own row is legitimately open).
+/// source, [`Resolution::KeepDestination`] needs a destination that is non-empty and holds no
+/// `.nicti-partial` temp copy (an empty or half-built folder is exactly what recovery refuses to
+/// re-point the catalog at). Returns the row's root id. The caller must make sure no job that
+/// touches the root's files is running (a move's own row is legitimately open).
+///
+/// `KeepDestination` closes the row in a second statement after the commit; if that second step
+/// fails the row stays `committed` and the next start's source cleanup removes only source files
+/// that are byte-identical to the destination's.
 pub fn resolve_stuck_move(
     store: &dyn CatalogStore,
     move_id: i64,
     how: Resolution,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let m = store
         .open_root_moves()
         .map_err(|e| e.to_string())?
@@ -1162,8 +1167,22 @@ pub fn resolve_stuck_move(
             store.finish_root_move(m.id).map_err(|e| e.to_string())
         }
         Resolution::KeepDestination => {
-            if !Path::new(&m.dest_path).is_dir() {
+            let dest = Path::new(&m.dest_path);
+            if !dest.is_dir() {
                 return Err(format!("{} doesn't exist", m.dest_path));
+            }
+            if dir_is_empty(dest) {
+                return Err(format!(
+                    "{} is empty; not re-pointing the catalog at it",
+                    m.dest_path
+                ));
+            }
+            if has_partial_copy(dest) {
+                return Err(format!(
+                    "{} holds an unfinished copy ({PARTIAL_SUFFIX} files); not re-pointing \
+                     the catalog at it",
+                    m.dest_path
+                ));
             }
             store
                 .commit_root_move(m.id, &[])
@@ -1172,6 +1191,15 @@ pub fn resolve_stuck_move(
         }
         Resolution::Abandon => store.finish_root_move(m.id).map_err(|e| e.to_string()),
     }
+    .map(|()| m.root_id)
+}
+
+/// `true` if any file under `dir` is one of our own `.nicti-partial` temp copies.
+fn has_partial_copy(dir: &Path) -> bool {
+    WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(PARTIAL_SUFFIX))
 }
 
 /// Deletes every file under `src` whose counterpart under `dest` has identical content, then
@@ -2204,6 +2232,34 @@ mod tests {
         assert_eq!(
             f.cat.get_root_path(f.root_id).unwrap().unwrap(),
             f.src.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn keep_destination_refuses_an_empty_or_half_built_destination() {
+        let f = fixture();
+        let dest = f.dest_parent.join("event-2026");
+        fs::create_dir_all(&dest).unwrap();
+        let id = f
+            .cat
+            .begin_root_move(f.root_id, &dest.to_string_lossy(), 1)
+            .unwrap();
+        f.cat.set_root_move_state(id, MoveState::Renaming).unwrap();
+        fs::remove_dir_all(&f.src).unwrap(); // e.g. the source drive went away
+
+        assert!(resolve_stuck_move(&*f.cat, id, Resolution::KeepDestination).is_err());
+        fs::write(dest.join("a.NEF.nicti-partial"), b"half").unwrap();
+        assert!(resolve_stuck_move(&*f.cat, id, Resolution::KeepDestination).is_err());
+        assert_eq!(f.cat.open_root_moves().unwrap().len(), 1);
+        assert_eq!(
+            f.cat.get_root_path(f.root_id).unwrap().unwrap(),
+            f.src.to_string_lossy(),
+            "catalog untouched"
+        );
+        // Abandon is still available.
+        assert_eq!(
+            resolve_stuck_move(&*f.cat, id, Resolution::Abandon),
+            Ok(f.root_id)
         );
     }
 
