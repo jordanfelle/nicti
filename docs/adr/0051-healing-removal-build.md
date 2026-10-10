@@ -201,8 +201,10 @@ A single heal spot up to r≈100 is well inside ADR-0050's 16 ms interactive bud
 spot (r=300) and ten heal spots each reach or exceed it** on a busy GPU, so dragging one of those
 would stutter; a heal spot's cost is mostly its Jacobi passes (a clone spot costs a fraction).
 These figures are after the review fix that added two passes per heal spot (r=24 was ~1 ms
-before). The AI-patch row is dominated by the CPU converting and uploading the patch as f16 on
-every rebake, not by the GPU (#325).
+before). The AI-patch row was dominated by the CPU converting the patch to f16 on every rebake,
+not by the GPU; `RemovalPatch` now stores its texels pre-converted (#325), so a rebake only uploads
+them. That row predates the change and is to be re-measured with `heal::tests::throughput` on a
+real GPU (not available where #325 was implemented).
 
 **AI removal**, real MobileSAM/LaMa weights, ONNX Runtime 1.28.0 **CPU** execution provider, Linux,
 release build, session load excluded (`crates/nicti-groom/tests/real_models.rs`):
@@ -242,7 +244,7 @@ the tensor contracts, not that removals look good on real photos.
   photos ([#323](https://github.com/jordanfelle/nicti/issues/323)); undo/redo and persistence of the
   edit document, which Develop-wide work removal patches (recomputed, not stored) will depend on
   ([#324](https://github.com/jordanfelle/nicti/issues/324)); pre-converting the patch's f16 upload
-  ([#325](https://github.com/jordanfelle/nicti/issues/325)).
+  ([#325](https://github.com/jordanfelle/nicti/issues/325), done: `RemovalPatch` stores f16 texels).
 - **Freehand brush geometry** for spots remains the additive `Geometry` enum ADR-0050 sketched;
   circles only for now. PatchMatch-style auto-source is likewise still a possible upgrade over the
   SSD baseline.

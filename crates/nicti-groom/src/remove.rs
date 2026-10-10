@@ -359,7 +359,7 @@ mod tests {
         if px < 0 || py < 0 || px >= patch.side as i32 || py >= patch.side as i32 {
             return 0.0;
         }
-        patch.pixels[(py * patch.side as i32 + px) as usize][3]
+        patch.pixel((py * patch.side as i32 + px) as usize)[3]
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
         assert!(weight_at(&patch, 400, 300) > 0.99);
         assert!(weight_at(&patch, 400 + 30 + 40, 300) < 0.01);
         // And every pixel with weight has a finite fill.
-        assert!(patch.pixels.iter().all(|p| p.iter().all(|v| v.is_finite())));
+        assert!(patch.pixels().all(|p| p.iter().all(|v| v.is_finite())));
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
         let space = e.cached.as_ref().unwrap().space;
         let expected = space.to_camera([0.5, 0.5, 0.5]);
         let half = patch.side as i32 / 2;
-        let px = patch.pixels[(half * patch.side as i32 + half) as usize];
+        let px = patch.pixel((half * patch.side as i32 + half) as usize);
         for c in 0..3 {
             assert!(
                 (px[c] - expected[c]).abs() < 1e-3,
@@ -495,8 +495,7 @@ mod tests {
         req.cam_mul = [1.0e6, 1.0, 1.0e-6, 1.0];
         let patch = e.remove(&req).unwrap();
         assert!(patch
-            .pixels
-            .iter()
+            .pixels()
             .all(|p| p.iter().all(|v| v.is_finite() && *v <= MAX_FILL)));
     }
 

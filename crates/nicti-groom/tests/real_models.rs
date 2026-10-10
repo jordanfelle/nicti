@@ -210,7 +210,7 @@ fn a_click_removes_the_object_end_to_end() {
                 x as i32 - patch.center.0 + half,
                 y as i32 - patch.center.1 + half,
             );
-            let p = patch.pixels[(py * patch.side as i32 + px) as usize];
+            let p = patch.pixel((py * patch.side as i32 + px) as usize);
             assert!(
                 p[3] > 0.99,
                 "object pixel ({x},{y}) not fully covered: weight {}",

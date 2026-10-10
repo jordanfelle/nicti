@@ -159,16 +159,21 @@ pub enum PatchError {
 /// A finished AI removal (#51): a square patch of already-inpainted pixels, in the same space as
 /// the heal stage's input (linear camera RGB), ready to be blended over the frame.
 ///
-/// `pixels` is row-major `side * side`; `.rgb` is the fill and `.a` the fill weight in `[0, 1]`
+/// Pixels are row-major `side * side`; `.rgb` is the fill and `.a` the fill weight in `[0, 1]`
 /// (the object mask, already feathered -- so the shader needs no radius or feather of its own).
 /// The patch is centered on `center`: patch pixel `(px, py)` covers frame pixel
 /// `(center.0 + px - side/2, center.1 + py - side/2)`. Producing a *square* patch is the
 /// producer's job (pad with zero weight); it keeps the GPU side to one shape.
+///
+/// The pixels are stored already rounded to f16 (the `Rgba16Float` texel the GPU samples, #325):
+/// a heal-stage rebake uploads them as-is instead of converting ~263k texels on the CPU each
+/// time. The rounding is lossless for rendering, since the GPU would round them identically.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemovalPatch {
     pub center: (i32, i32),
     pub side: u32,
-    pub pixels: Vec<[f32; 4]>,
+    /// Row-major `side * side` texels as f16 bit patterns.
+    texels: Vec<[u16; 4]>,
 }
 
 impl RemovalPatch {
@@ -189,11 +194,33 @@ impl RemovalPatch {
                 expected,
             });
         }
+        let texels = pixels
+            .iter()
+            .map(|px| px.map(|c| half::f16::from_f32(c).to_bits()))
+            .collect();
         Ok(Self {
             center,
             side,
-            pixels,
+            texels,
         })
+    }
+
+    /// The pixel at row-major index `i`, widened back to f32 (what the GPU samples).
+    pub fn pixel(&self, i: usize) -> [f32; 4] {
+        self.texels[i].map(|b| half::f16::from_bits(b).to_f32())
+    }
+
+    /// Every pixel, row-major, widened to f32.
+    pub fn pixels(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
+        (0..self.texels.len()).map(|i| self.pixel(i))
+    }
+
+    /// The texels as little-endian `Rgba16Float` bytes, ready for `write_texture`.
+    fn texel_bytes(&self) -> Vec<u8> {
+        self.texels
+            .iter()
+            .flat_map(|t| t.iter().flat_map(|b| b.to_le_bytes()))
+            .collect()
     }
 
     /// Content hash: what identifies "this exact fill" in the heal stage's cache key.
@@ -202,7 +229,11 @@ impl RemovalPatch {
         h.update(&self.center.0.to_le_bytes());
         h.update(&self.center.1.to_le_bytes());
         h.update(&self.side.to_le_bytes());
-        h.update(bytemuck::cast_slice(&self.pixels));
+        for t in &self.texels {
+            for b in t {
+                h.update(&b.to_le_bytes());
+            }
+        }
         h.finalize()
     }
 }
@@ -583,14 +614,7 @@ impl HealKernel {
             height: patch.side,
         };
         let tex = FrameTexture::new(gpu, extent);
-        let bytes: Vec<u8> = patch
-            .pixels
-            .iter()
-            .flat_map(|px| {
-                px.iter()
-                    .flat_map(|&c| half::f16::from_f32(c).to_le_bytes())
-            })
-            .collect();
+        let bytes = patch.texel_bytes();
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &tex.texture,
@@ -883,7 +907,7 @@ pub(crate) mod reference {
                 if fx < 0 || fy < 0 || fx >= w || fy >= h {
                     continue;
                 }
-                let fill = patch.pixels[(py * patch.side as i32 + px) as usize];
+                let fill = patch.pixel((py * patch.side as i32 + px) as usize);
                 let wgt = fill[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0);
                 let dst = &mut frame[(fy * w + fx) as usize];
                 for c in 0..3 {
