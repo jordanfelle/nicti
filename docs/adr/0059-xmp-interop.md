@@ -309,7 +309,7 @@ The `scent` spike was promoted to `crates/nicti-scent` (spike deleted); `nicti-l
 Reject=`-1`, Pick and label-text mappings below are the best guess until #187's hands-on LRC pass
 confirms or amends them; #60 builds against them as written.
 
-- **Scope**: `.xmp` sidecars for NEF/NRW only (Scruff doesn't ingest JPEG/DNG yet, so the embedded
+- **Scope**: `.xmp` sidecars for NEF/NRW, plus DNG once #428 made Scruff ingest it (#372; the DNG itself is never rewritten). Scruff does not ingest JPEG, so the embedded
   JPEG writer is ported but has no caller). Layer (a) only -- rating/reject, label, keywords --
   plus Pick as `nicti:pick="1"` on the Description (no LRC-side mapping, per above). Layers (b)
   (`nicti:editDocument`) and (c) (`crs:`) are not wired.

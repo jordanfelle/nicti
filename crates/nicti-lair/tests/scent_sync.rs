@@ -1,5 +1,5 @@
 //! Integration tests for #60's XMP sidecar sync (`scent_sync`), against a real temp-file SQLite
-//! catalog and real `.xmp` files on disk. No RAW decoding is involved -- the `.NEF` beside each
+//! catalog and real `.xmp` files on disk. No RAW decoding is involved -- the `.NEF`/`.DNG` beside each
 //! sidecar is a placeholder, since sync only ever derives the sidecar path from it.
 
 use std::fs;
@@ -37,17 +37,19 @@ fn new_asset(rel: &str) -> NewAsset {
 }
 
 fn fixture() -> Fixture {
+    fixture_named("IMG_0001.NEF")
+}
+
+fn fixture_named(name: &str) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let catalog = SqliteCatalog::open(&dir.path().join("catalog.db")).unwrap();
     let vol = catalog.upsert_volume("vol", None, None, 1).unwrap();
     let root = catalog
         .ensure_root(vol, dir.path().to_str().unwrap())
         .unwrap();
-    let raw = dir.path().join("IMG_0001.NEF");
+    let raw = dir.path().join(name);
     fs::write(&raw, b"raw!").unwrap();
-    let asset_id = catalog
-        .insert_asset(root, &new_asset("IMG_0001.NEF"), None)
-        .unwrap();
+    let asset_id = catalog.insert_asset(root, &new_asset(name), None).unwrap();
     Fixture {
         _dir: dir,
         catalog,
@@ -615,4 +617,72 @@ fn a_dirty_catalog_is_pushed_to_an_unchanged_sidecar_on_rescan() {
     );
     let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
     assert_eq!(lrc_fields::read(&text).unwrap().rating, Some(5));
+}
+
+/// ADR-0059: a DNG is never rewritten; its markers live in `<stem>.xmp` beside it, exactly like a
+/// NEF's (#372). The DNG bytes must be left untouched by a write.
+#[test]
+fn a_dng_round_trips_through_its_xmp_sidecar_and_is_never_modified() {
+    let f = fixture_named("IMG_0001.DNG");
+    set(&f, Some(4), Some("Green"));
+    let dng_before = fs::read(&f.raw).unwrap();
+
+    assert_eq!(
+        write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::WroteSidecar
+    );
+    assert_eq!(sidecar(&f.raw).file_name().unwrap(), "IMG_0001.xmp");
+    let parsed = lrc_fields::read(&fs::read_to_string(sidecar(&f.raw)).unwrap()).unwrap();
+    assert_eq!(parsed.rating, Some(4));
+    assert_eq!(parsed.label.as_deref(), Some("Green"));
+    assert_eq!(fs::read(&f.raw).unwrap(), dng_before);
+
+    // LRC rewrites the sidecar; the next import picks it up.
+    bump_mtime(&sidecar(&f.raw));
+    fs::write(sidecar(&f.raw), xmp("xmp:Rating=\"1\"", "")).unwrap();
+    bump_mtime(&sidecar(&f.raw));
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    assert_eq!(
+        catalog_markers(&f.catalog, f.asset_id).unwrap().rating,
+        Some(1)
+    );
+}
+
+#[test]
+fn ingesting_a_dng_with_an_xmp_pair_imports_its_markers() {
+    use nicti_lair::scruff::ingest_root;
+
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = SqliteCatalog::open(&dir.path().join("catalog.db")).unwrap();
+    let vol = catalog.upsert_volume("vol", None, None, 1).unwrap();
+    let shots = dir.path().join("shots");
+    fs::create_dir(&shots).unwrap();
+    let root = catalog.ensure_root(vol, shots.to_str().unwrap()).unwrap();
+
+    let raw = shots.join("IMG_0001.dng");
+    fs::write(&raw, b"not a real dng, just bytes").unwrap();
+    fs::write(
+        sidecar(&raw),
+        xmp(
+            "xmp:Rating=\"3\" xmp:Label=\"Red\"",
+            &bag("dc:subject", &["owl"]),
+        ),
+    )
+    .unwrap();
+
+    let report = ingest_root(&catalog, root, &shots).unwrap();
+    assert_eq!(report.added, 1);
+    assert!(
+        report.sidecar_errors.is_empty(),
+        "{:?}",
+        report.sidecar_errors
+    );
+    let a = catalog
+        .find_asset_by_path(root, "IMG_0001.dng")
+        .unwrap()
+        .unwrap();
+    let m = catalog_markers(&catalog, a.id).unwrap();
+    assert_eq!(m.rating, Some(3));
+    assert_eq!(m.label.as_deref(), Some("Red"));
+    assert_eq!(m.keywords.len(), 1);
 }
