@@ -76,6 +76,7 @@ struct EntryMemo {
 impl std::fmt::Debug for EntryMemo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EntryMemo")
+            .field("stage", &self.stage.id())
             .field("hash", &self.hash)
             .finish_non_exhaustive()
     }
@@ -796,6 +797,7 @@ mod tests {
     #[test]
     fn apply_document_only_rehashes_an_entry_that_changed() {
         use std::sync::atomic::Ordering;
+        HASHED.store(0, Ordering::SeqCst);
         let registry = counting_registry();
         let mut g = RenderGraph::new();
         g.add_node(StageNode {
