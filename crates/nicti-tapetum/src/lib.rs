@@ -59,6 +59,9 @@ pub trait RenderStage: Module {
     /// This stage's contribution to its own `graph::StageNode::own_hash` -- the id (so two
     /// different stages with coincidentally identical params never collide), `impl_version`, and
     /// the entry's own canonical hash, all chained together.
+    ///
+    /// Must be a pure function of `(self, entry)`: `RenderGraph::apply_document` (#362) reuses the
+    /// previous result whenever the same stage object sees an equal entry.
     fn cache_contribution(&self, entry: &StageEntry) -> Result<blake3::Hash, CanonicalError> {
         nicti_pawprint::hash_value(&(self.id(), self.impl_version(), entry))
     }
