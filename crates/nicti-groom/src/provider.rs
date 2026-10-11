@@ -15,15 +15,15 @@ use crate::{ort_err, RemovalError};
 
 /// What one removal claims from Pounce's VRAM budget while the sessions are on a GPU provider.
 ///
-/// **An estimate, not a measurement**: MobileSAM's encoder (1024-px frame, ~40 MB of weights) plus
+/// **TEMPORARY ESTIMATE (#322), not a measurement**: MobileSAM's encoder (1024-px frame, ~40 MB of weights) plus
 /// LaMa fp32 (512x512, ~200 MB of weights, FFC spectral activations) with the bounded CUDA arena
 /// from `nicti_haw::session_builder`. It is deliberately generous; replace it with the peak
-/// measured on the RTX 5080 reference machine (the way BiRefNet's `GPU_VRAM_BYTES` was, #345).
-pub const GPU_VRAM_BYTES: u64 = 3 << 30;
+/// measured on the RTX 5080 reference machine (the way BiRefNet's `GPU_VRAM_BYTES_ESTIMATE` was, #345).
+pub const GPU_VRAM_BYTES_ESTIMATE: u64 = 3 << 30;
 
 static DECLARED_VRAM: AtomicU64 = AtomicU64::new(0);
 
-/// What a removal job declares in its `JobSpec`: [`GPU_VRAM_BYTES`] once the sessions are running
+/// What a removal job declares in its `JobSpec`: [`GPU_VRAM_BYTES_ESTIMATE`] once the sessions are running
 /// on a GPU provider, else 0 (the CPU provider uses no VRAM, and nothing is loaded before the
 /// first removal -- so the first GPU removal's own load runs under a 0 claim, as BiRefNet's does).
 /// Process-wide, last writer wins: it is not shared with BiRefNet's own claim. Lock-free because `RemoveJob::spec` runs on the UI thread while a removal may
@@ -35,7 +35,7 @@ pub fn declared_vram_bytes() -> u64 {
 pub(crate) fn vram_for(active: ExecutionProvider) -> u64 {
     match active {
         ExecutionProvider::Cpu => 0,
-        _ => GPU_VRAM_BYTES,
+        _ => GPU_VRAM_BYTES_ESTIMATE,
     }
 }
 
@@ -83,8 +83,11 @@ mod tests {
     #[test]
     fn only_a_gpu_provider_claims_vram() {
         assert_eq!(vram_for(ExecutionProvider::Cpu), 0);
-        assert_eq!(vram_for(ExecutionProvider::Cuda), GPU_VRAM_BYTES);
-        assert_eq!(vram_for(ExecutionProvider::DirectMl), GPU_VRAM_BYTES);
+        assert_eq!(vram_for(ExecutionProvider::Cuda), GPU_VRAM_BYTES_ESTIMATE);
+        assert_eq!(
+            vram_for(ExecutionProvider::DirectMl),
+            GPU_VRAM_BYTES_ESTIMATE
+        );
     }
 
     #[test]
