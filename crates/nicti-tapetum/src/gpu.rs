@@ -43,6 +43,10 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_name: String,
+    /// PCI vendor/device ids of the adapter this device was created on -- how a VRAM telemetry
+    /// source picks the same physical GPU (a hybrid laptop's iGPU is not the one wgpu chose).
+    pub vendor_id: u32,
+    pub device_id: u32,
     pub backend: wgpu::Backend,
     pub limits: wgpu::Limits,
     pub features: wgpu::Features,
@@ -124,6 +128,8 @@ impl GpuContext {
             device,
             queue,
             adapter_name: info.name,
+            vendor_id: info.vendor,
+            device_id: info.device,
             backend: info.backend,
             limits,
             features,

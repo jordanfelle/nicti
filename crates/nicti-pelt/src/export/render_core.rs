@@ -8,6 +8,7 @@ use std::sync::Arc;
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::LinearFrame;
 use nicti_pawprint::EditDocument;
+use nicti_pounce::Submitter;
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::graph::RenderGraph;
@@ -58,6 +59,46 @@ impl ExportRenderer {
             mask_engine: None,
         }
     }
+}
+
+/// How many nodes the baked chain `render_live_frame` runs has (decode, demosaic, denoise, lens,
+/// heal). Asserted there, so the VRAM estimate below can't silently go stale.
+const BAKED_CHAIN_NODES: u64 = 5;
+/// Full-extent frames the live suffix allocates beyond its output when sharpen, noise reduction
+/// or local detail is on: `stage_a` plus two blurs of a horizontal and a vertical pass each
+/// (`LiveSuffixKernel::encode`/`run_blur`). Counted unconditionally -- the bound is per photo
+/// worst case, not per edit.
+const DETAIL_SCRATCH_FRAMES: u64 = 5;
+/// The renderer keeps the previous photo's live output until the next one replaces it
+/// (`Renderer::live_output`), and the kernels are reused across photos.
+const RETAINED_LIVE_FRAMES: u64 = 1;
+/// The decode stage's packed u16 RGB strip buffers: 6 bytes/pixel, rounded up to a whole frame.
+const DECODE_BUFFER_FRAMES: u64 = 1;
+
+/// A bound on the VRAM one render of an `extent` frame holds (#255), for the job's declared
+/// `vram_bytes`. With a zero baked-cache budget the renderer still allocates one full-extent
+/// `FrameTexture` per baked-chain node plus one for the live suffix, and all stay referenced by
+/// the single command encoder until it is submitted, so they are live together; the detail
+/// scratch, retained previous output and decode buffers are on top (consts above).
+/// `tile_bytes` is the tiled crop pass's staging cap (`TileBudget::max_staging_bytes`); a padded
+/// input and output tile are each bounded by it. **Not counted:** the mask engine's atlas, bases
+/// and guided textures (only when a photo has masks, or global clarity/texture/dehaze; several GB
+/// at 45 MP per `render_live_frame`), so for such photos this is a lower bound.
+pub(crate) fn render_vram_estimate(extent: Extent, tile_bytes: u64) -> u64 {
+    let frame = u64::from(extent.width) * u64::from(extent.height) * 8;
+    let frames =
+        BAKED_CHAIN_NODES + 1 + DETAIL_SCRATCH_FRAMES + RETAINED_LIVE_FRAMES + DECODE_BUFFER_FRAMES;
+    frames * frame + 2 * tile_bytes
+}
+
+/// [`render_vram_estimate`] clamped to the GPU lane's total budget. Pounce drops a background job
+/// declaring more than the total outright (no terminal status, so its result slot would never
+/// settle), so a frame bigger than the whole lane is declared as the entire lane instead: it runs
+/// alone rather than not at all. `0` once the runtime is gone (the submit is refused anyway).
+pub(crate) fn declared_render_vram(extent: Extent, tile_bytes: u64, submitter: &Submitter) -> u64 {
+    submitter.gpu_vram_budget().map_or(0, |budget| {
+        render_vram_estimate(extent, tile_bytes).min(budget)
+    })
 }
 
 /// A photo's full-extent live-suffix frame plus what the crop pass needs.
@@ -149,6 +190,7 @@ pub(crate) fn render_live_frame(
         (LENS, &lens_exec),
         (HEAL, &heal_exec),
     ];
+    debug_assert_eq!(baked_chain.len() as u64, BAKED_CHAIN_NODES);
     let req = RenderRequest {
         graph: &ctx.graph,
         baked_chain: &baked_chain,
@@ -223,4 +265,58 @@ pub(crate) fn render_live_frame(
     }
     let live = live.map_err(|e| format!("render failed: {e:?}"))?;
     Ok(LiveRender { live, inputs })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nicti_pounce::Pounce;
+
+    const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn estimate_counts_every_full_extent_frame_plus_tile_scratch() {
+        // 8280 x 5520 is ADR-0044's ~349 MB full-res frame: 5 baked + 1 live + 5 detail scratch
+        // + 1 retained + 1 decode = 13 of them, plus two 64 MiB tiles.
+        let extent = Extent {
+            width: 8280,
+            height: 5520,
+        };
+        let frame = 8280u64 * 5520 * 8;
+        assert_eq!(
+            render_vram_estimate(extent, 64 * MIB),
+            13 * frame + 128 * MIB
+        );
+    }
+
+    #[test]
+    fn declaration_is_clamped_to_the_lane_budget_not_dropped() {
+        let big = Extent {
+            width: 8280,
+            height: 5520,
+        };
+        let small = Extent {
+            width: 64,
+            height: 64,
+        };
+        let pounce = Pounce::new(1024 * MIB, 1, 1, || {});
+        let sub = pounce.submitter();
+        // A frame whose estimate exceeds the whole lane declares the whole lane (it runs alone).
+        assert!(render_vram_estimate(big, 64 * MIB) > 1024 * MIB);
+        assert_eq!(declared_render_vram(big, 64 * MIB, &sub), 1024 * MIB);
+        // A small frame declares its own, nonzero, estimate.
+        let est = render_vram_estimate(small, 64 * MIB);
+        assert_eq!(declared_render_vram(small, 64 * MIB, &sub), est);
+        assert!(est > 0);
+    }
+
+    #[test]
+    fn declaration_is_zero_once_the_runtime_is_gone() {
+        let sub = Pounce::new(1024 * MIB, 1, 1, || {}).submitter();
+        let extent = Extent {
+            width: 64,
+            height: 64,
+        };
+        assert_eq!(declared_render_vram(extent, 64 * MIB, &sub), 0);
+    }
 }

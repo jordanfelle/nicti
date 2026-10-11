@@ -20,7 +20,9 @@ use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, ResumeM
 use nicti_lair::shred;
 use nicti_lair::{CatalogError, CatalogStore, Sort, SortDirection, SortField, SqliteCatalog};
 use nicti_pounce::hackles;
-use nicti_pounce::telemetry::{default_load_source, default_vram_source, TelemetrySampler};
+use nicti_pounce::telemetry::{
+    default_load_source, default_vram_source, gpu_lane_budget, TelemetrySampler,
+};
 use nicti_pounce::{JobKind, JobState, Pounce};
 use nicti_preen::exporters::builtin_registry;
 use nicti_preen::ExporterRegistry;
@@ -59,16 +61,11 @@ use crate::viewport::{fit_rect, fit_scale, one_to_one_scale, ViewportCallback, V
 use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
 use crate::{catalog, CatalogOpenState};
 
-/// VRAM Pounce's GPU-lane admission control (ADR-0054 decision rule #5) budgets against -- a
-/// placeholder until a real bake pipeline (Tapetum's own cache tiers) exists to size this from
-/// actual measured usage; nothing this shell submits to the GPU lane yet declares any VRAM cost.
-const PLACEHOLDER_VRAM_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 /// Telemetry is throttled independently of egui's own repaint rate -- see `telemetry.rs`'s own
 /// doc comment for why re-sampling `sysinfo`/DXGI on every frame would be wasteful.
 const TELEMETRY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// RAM budget for the loupe's decoded-frame cache (#31) -- a placeholder pending real tuning
-/// against actual machine RAM, matching `PLACEHOLDER_VRAM_BUDGET_BYTES`'s own "not measured yet"
-/// status.
+/// against actual machine RAM, not measured yet.
 const PLACEHOLDER_LOUPE_CACHE_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// VRAM budget for the library grid's thumbnail textures (#30) -- a placeholder like the two
 /// above. ~4.2 GiB would hold every 256px thumbnail of a 1M-asset catalog; 512 MiB holds ~8k, far
@@ -363,8 +360,15 @@ impl PeltApp {
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
+        // A software adapter (lavapipe, or WARP, which DXGI does list) reports system RAM, not
+        // VRAM, so it gets the fallback rather than a "measured" budget.
+        let (vram_budget, _source) = gpu_lane_budget(
+            (!gpu.is_software)
+                .then(|| default_vram_source().query_for(gpu.vendor_id, gpu.device_id))
+                .flatten(),
+        );
         let pounce = Pounce::new(
-            PLACEHOLDER_VRAM_BUDGET_BYTES,
+            vram_budget,
             cpu_threads,
             (cpu_threads / 2).max(1),
             move || egui_ctx.request_repaint(),

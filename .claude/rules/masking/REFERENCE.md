@@ -74,7 +74,7 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
   by a test). Never downloads a model; its in-flight keys are `set_deferred_keys`'d so the foreground waits instead
   of baking twice (opening the photo mid-chain abandons it to the foreground); cancelling a decode or bake from the
   activity panel stops the whole run. Background `MaskBakeJob`s declare 0 VRAM (Pounce drops a Background job whose
-  declaration exceeds the lane's total budget -- the GPU pack's 8 GiB vs the 512 MiB placeholder would kill every one).
+  declaration exceeds the lane's total budget -- the GPU pack's 8 GiB can exceed a small lane budget, which would kill every one; the lane budget is now DXGI-derived, #255).
 - **Idle unload (#356)**: `RegistryBackend` drops its loaded segmenters (+ neutral cache) after `backend::IDLE_UNLOAD_AFTER` (5 min) without a bake; the next bake reloads lazily and re-verifies. Dropping an ORT session touches the shared environment, so it is a Background `job::UnloadIdleJob` on the GPU lane (never a timer thread), queued by `MaskBakeService::poll_idle_unload` (called from `app.rs::poll_prebake`; returns the wait so the idle window schedules its own repaint). The job re-checks idleness when it runs, so a queued bake wins. Resident-set numbers after a real bake are not measured yet (needs the weights).
 - **Sky** = interim flood-filled heuristic (`nicti-siamese/src/sky.rs`), beta (#347).
 - **Real-hardware numbers (RTX 5080, 45 MP)**: 16 stacked masks +1.4 ms (Vulkan)/+1.9 ms (Dx12) over the

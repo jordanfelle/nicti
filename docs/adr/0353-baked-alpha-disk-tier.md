@@ -66,7 +66,7 @@ photo can carry several AI masks (subject, sky, ...), each with its own bake key
    queued foreground mask is taken ahead of them and a slider drag pauses them (`IS_EDITING`); a
    bake already running finishes first (one GPU worker, one non-interruptible chunk). A Background
    bake declares 0 VRAM: Pounce drops a Background job whose declaration exceeds the lane's whole
-   budget, which the GPU pack's 8 GiB would do against today's 512 MiB placeholder;
+   budget, which the GPU pack's 8 GiB could do against a small lane budget (DXGI-derived since #255);
    an `AlphaStoreJob` per alpha, with a finished flag, so the photo's keys stay "in flight" until
    its alphas are actually on disk.
 7. **No download, no duplicate work.** A recipe whose model is not installed is skipped: the

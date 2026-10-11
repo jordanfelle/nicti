@@ -56,7 +56,9 @@ use nicti_tapetum::spine;
 use nicti_tapetum::stages::MASKS;
 use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
-use super::render_core::{render_live_frame, ExportRenderer, LiveRender, LiveSource};
+use super::render_core::{
+    declared_render_vram, render_live_frame, ExportRenderer, LiveRender, LiveSource,
+};
 use super::sink::AccumSink;
 use crate::camera_profiles;
 use crate::loupe::asset_cache_key;
@@ -730,6 +732,8 @@ struct RenderPhase {
 struct RenderJob {
     shared: Arc<Shared>,
     label: String,
+    /// The render's declared VRAM, clamped to the lane budget (see `declared_render_vram`).
+    vram_bytes: u64,
     ready: Option<Ready>,
     phase: Option<RenderPhase>,
     finished: bool,
@@ -738,8 +742,17 @@ struct RenderJob {
 
 impl RenderJob {
     fn new(shared: Arc<Shared>, ready: Ready) -> Self {
+        let vram_bytes = declared_render_vram(
+            Extent {
+                width: ready.frame.width,
+                height: ready.frame.height,
+            },
+            TILE_MAX_STAGING_BYTES,
+            &shared.submitter,
+        );
         RenderJob {
             label: format!("Export: render {}", ready.ticket.item().name),
+            vram_bytes,
             shared,
             ready: Some(ready),
             phase: None,
@@ -846,10 +859,7 @@ impl ChunkedJob for RenderJob {
             priority: Priority::Background,
             kind: JobKind::Export,
             lane: Lane::Gpu,
-            // Deliberately 0: Pounce drops a background job that declares more than the *total*
-            // VRAM budget, and a 45 MP frame's textures exceed the placeholder budget. The render
-            // is serialized by the one GPU worker regardless. (`RemoveJob` does the same.)
-            vram_bytes: 0,
+            vram_bytes: self.vram_bytes,
             image_index: None,
         }
     }

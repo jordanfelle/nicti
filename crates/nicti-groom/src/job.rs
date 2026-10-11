@@ -87,7 +87,8 @@ impl ChunkedJob for RemoveJob {
             kind: JobKind::Bake,
             lane: Lane::Gpu,
             // The default ONNX Runtime build is the CPU execution provider, so no VRAM is claimed.
-            // A CUDA/DirectML build would declare the sessions' real footprint here.
+            // A CUDA/DirectML build would declare the sessions' real footprint here (#322); the
+            // render jobs' own footprint is `nicti-pelt`'s `render_vram_estimate` (#255).
             vram_bytes: 0,
             image_index: None,
         }

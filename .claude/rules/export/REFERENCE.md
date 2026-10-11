@@ -56,7 +56,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   (GPU-free, catalog-free: `export_frame(WorkingFrame, ExportContext, ExporterRegistry)` does
   size → linear-light resize → orient → output matrix → watermark → quantize → encode); render +
   jobs = `crates/nicti-pelt/src/export/` (`jobs.rs` `ExportRun`, `dialog.rs` `ExportUi`,
-  `presets.rs`, `sink.rs`). Per photo: decode (CPU lane) → render (GPU lane, one tile/step, `vram_bytes: 0`)
+  `presets.rs`, `sink.rs`). Per photo: decode (CPU lane) → render (GPU lane, one tile/step, lane-clamped `vram_bytes`, #255)
   → encode+write (CPU lane), chained through `Pounce::submitter()`; one `Ticket` per photo settles
   exactly once, so the report always adds up. Memory bounded by `advance()` (~2.4 GB worst case at
   45 MP full size).

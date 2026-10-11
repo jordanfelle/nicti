@@ -261,7 +261,7 @@ delta over that. Warm = 1 warm-up + 5 measured runs.
 - **Footprint is declared, not enforced:** `MaskBakeJob::spec().vram_bytes` is 8 GiB once the session is
   on a GPU provider (`birefnet::GPU_VRAM_BYTES`), 0 on CPU. Pounce never reserves for a Foreground
   job (`queue.rs::take_next`), so today this is bookkeeping; if bakes ever become Background jobs the
-  512 MiB placeholder budget in `nicti-pelt` must grow first.
+  lane budget (DXGI-derived since #255, `telemetry::gpu_lane_budget`) must be checked first, or the declaration clamped.
 - **Safety nets:** the GPU provider is only requested when the runtime directory holds
   `onnxruntime_providers_cuda.dll` (`ExecutionProvider::for_runtime`); a provider that fails to
   register, a model that fails to load on it, or a GPU `run` that errors (cuDNN missing, out of VRAM

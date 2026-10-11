@@ -27,7 +27,7 @@ Nothing rendered an edited photo to a screen-size image or cached one, and the L
    `EYESHINE_VERSION` whenever the render pipeline's output changes.
 3. **The render job ("Eyeshine", `nicti-pelt/src/eyeshine.rs`)**: three chained Pounce jobs per
    photo, the lane split export (#57) uses -- decode (CPU) -> render, one tile per step (GPU,
-   `vram_bytes: 0`) -> encode + store (CPU) -- through a `Submitter`. The render step is shared with
+   real, lane-clamped `vram_bytes`, #255) -> encode + store (CPU) -- through a `Submitter`. The render step is shared with
    export (`export/render_core.rs`: `ExportRenderer`, `render_live_frame`). The crop is tiled
    straight to a 3840px long edge (the crop transform's input axes scaled by the downscale), so the
    ~540 MB full-crop linear buffer export needs is never allocated. Encode is JPEG q85 sRGB through

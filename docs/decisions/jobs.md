@@ -256,3 +256,26 @@ keeps the runtime alive, never joins anything, and `submit` returns `None` once 
 down (the un-run job is dropped, so its `Drop` still settles anything it owns). `Pounce::submit`'s
 body moved into `Inner::submit` so both share it. Tests cover chaining, `None` after shutdown/drop,
 and dropping the last `Pounce` while a queued job holds a `Submitter`.
+
+## #255: real VRAM budget and per-job footprints
+
+The first real GPU-lane bake jobs (rendered previews #145, export render #57) existed but declared
+`vram_bytes: 0`, because the app's 512 MiB placeholder budget was smaller than one 45 MP render
+and Pounce drops a background job over the *total* budget. Now:
+
+- **Budget**: `telemetry::gpu_lane_budget` takes `GPU_LANE_BUDGET_PERCENT` (50%) of the DXGI
+  `Budget` for the adapter wgpu actually chose (`VramSource::query_for(vendor, device)`), floored at
+  512 MiB; with no telemetry (non-Windows, software adapter) it is a 2 GiB fallback. The 50% share
+  and the fallback are **hypotheses, unmeasured** -- re-tune on real hardware.
+- **Footprint**: `export/render_core.rs::render_vram_estimate` = (baked-chain nodes + 1)
+  full-extent `Rgba16Float` frames (a zero baked-cache renderer keeps them all referenced by one
+  encoder until submit) + 5 detail-blur scratch frames + the previous photo's retained live output
+  + the decode buffers (13 frames in all) + two tile-staging caps; mask-engine textures are not
+  counted, so a masked photo's figure is a lower bound.
+  `declared_render_vram` clamps it to the lane total so an oversized frame runs alone instead of
+  being dropped.
+- **Unchanged, deliberately**: reservations stay per-chunk (`admit`/`release` bracket one `step()`),
+  so with one GPU worker admission never overlaps two jobs, and it does not serialize jobs across a
+  `Yield`. Eyeshine's `RenderClaim` (and thus its GPU stage's `image_index: None`) therefore stays.
+  Job-lifetime reservations would change that, and are a separate decision.
+- Develop's interactive render is not a Pounce job: it is the foreground path admission protects.

@@ -35,7 +35,9 @@ use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
 use crate::camera_profiles;
-use crate::export::render_core::{render_live_frame, ExportRenderer, LiveRender, LiveSource};
+use crate::export::render_core::{
+    declared_render_vram, render_live_frame, ExportRenderer, LiveRender, LiveSource,
+};
 use crate::export::sink::AccumSink;
 use crate::loupe::asset_cache_key;
 use crate::t2::{lock_larder_within, try_lock_larder, SharedLarder, T2Outcome};
@@ -264,7 +266,8 @@ pub struct Env {
     pub render_ctx: Arc<Mutex<Option<ExportRenderer>>>,
     /// Held by the one photo whose render is in progress. Pounce may interleave two GPU jobs
     /// between tiles; without this a second photo would build its own kernels and hold a second
-    /// full-extent frame texture (~350 MB at 45 MP) while `vram_bytes` says 0.
+    /// full-extent frame texture (~350 MB at 45 MP). Admission reservations are per-chunk, so they
+    /// don't stop two renders interleaving across a `Yield`; this claim does.
     render_busy: Arc<AtomicBool>,
     /// Pipelines submitted and not yet settled -- including ones the service evicted from its own
     /// table whose queued job hasn't been reached by a worker (and so still holds a decoded
@@ -405,8 +408,8 @@ fn spec(lane: Lane, task: &Task) -> JobSpec {
         // be picked forever and starve the claim holder at a farther one (the claim never
         // released, the worker spinning). With no index every render sorts equal and equal keys
         // are FIFO, so the holder and the waiters take turns. The CPU decode keeps the index.
-        // Deliberately 0, like export's render job: a 45 MP frame's textures exceed the
-        // placeholder VRAM budget and Pounce drops a job over the *total* budget.
+        // 0 here: the GPU stage overrides it with the render's real footprint
+        // (`declared_render_vram`); the decode stage holds no VRAM.
         vram_bytes: 0,
         image_index: (lane == Lane::Cpu).then_some(task.req.image_index),
     }
@@ -444,8 +447,17 @@ impl ChunkedJob for DecodeJob {
         match outcome {
             Err(done) => settle.settle(done),
             Ok(ready) => {
+                let vram_bytes = declared_render_vram(
+                    Extent {
+                        width: ready.frame.width,
+                        height: ready.frame.height,
+                    },
+                    TILE_MAX_STAGING_BYTES,
+                    &task.env.submitter,
+                );
                 let job = RenderJob {
                     label: format!("Render preview: {}", task.req.path.display()),
+                    vram_bytes,
                     task: task.clone(),
                     ready: Some((ready, settle)),
                     phase: None,
@@ -520,6 +532,8 @@ struct RenderPhase {
 struct RenderJob {
     task: Arc<Task>,
     label: String,
+    /// The render's declared VRAM, clamped to the lane budget (see `declared_render_vram`).
+    vram_bytes: u64,
     ready: Option<(Decoded, Settle)>,
     phase: Option<RenderPhase>,
     tiles_total: u64,
@@ -648,7 +662,10 @@ pub fn screen_geometry(crop_w: f32, crop_h: f32, crop: Affine2D) -> (u32, u32, A
 
 impl ChunkedJob for RenderJob {
     fn spec(&self) -> JobSpec {
-        spec(Lane::Gpu, &self.task)
+        JobSpec {
+            vram_bytes: self.vram_bytes,
+            ..spec(Lane::Gpu, &self.task)
+        }
     }
     fn label(&self) -> String {
         self.label.clone()

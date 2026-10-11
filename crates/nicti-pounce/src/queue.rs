@@ -184,10 +184,9 @@ impl Scheduler {
             // An over-budget (but not cancelled) background job is also dropped here, unchanged
             // from the original spike behavior -- see this method's own doc comment above. It is
             // *not* reported through `cancelled_while_queued` (a distinct outcome from
-            // cancellation), and today has the same "never reaches a terminal status" gap this
-            // field otherwise fixes for cancellation -- pre-existing, not introduced by this
-            // change, and not exercised by any real caller yet (no job submitted anywhere in this
-            // codebase declares a nonzero `vram_bytes`).
+            // cancellation), so it never reaches a terminal status -- the gap this field fixes for
+            // cancellation. Callers must therefore clamp a declaration to the lane total
+            // (`Pounce::gpu_vram_budget`), as the render jobs do (#255), or declare 0.
             entry.job.spec().vram_bytes <= budget
         });
 
@@ -488,6 +487,25 @@ mod tests {
         );
         assert!(run_one(&mut scheduler).is_some());
         assert_eq!(*ticks.lock().unwrap(), vec!["fits"]);
+    }
+
+    #[test]
+    fn background_job_declaring_exactly_the_total_budget_runs_alone() {
+        // What the render jobs declare for a frame bigger than the whole lane (#255): clamped to
+        // the total, which is admittable (`<=`), so it runs rather than being dropped.
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        scheduler.submit(
+            JobId(0),
+            Box::new(CountingJob {
+                spec: spec_with_vram(Priority::Background, 0, 100),
+                remaining: 1,
+                ticks: ticks.clone(),
+                label: "whole-lane",
+            }),
+        );
+        assert!(run_one(&mut scheduler).is_some());
+        assert_eq!(*ticks.lock().unwrap(), vec!["whole-lane"]);
     }
 
     #[test]

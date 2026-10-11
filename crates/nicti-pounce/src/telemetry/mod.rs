@@ -82,6 +82,14 @@ pub struct VramUsage {
 /// substitute a fabricated number, per this repo's own measured-vs-hypothesis convention.
 pub trait VramSource: Send + Sync {
     fn query(&self) -> Option<VramUsage>;
+
+    /// Like [`query`](Self::query) but for the adapter with this PCI vendor/device id -- the one
+    /// wgpu actually rendered on, which on a hybrid machine is not necessarily DXGI's adapter 0.
+    /// `None` if no such adapter is queryable. The default ignores the ids (a source with only
+    /// one adapter to report).
+    fn query_for(&self, _vendor_id: u32, _device_id: u32) -> Option<VramUsage> {
+        self.query()
+    }
 }
 
 #[cfg(windows)]
@@ -93,28 +101,48 @@ pub mod windows_impl {
     use super::{VramSource, VramUsage};
     use windows::core::Interface;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
-        DXGI_QUERY_VIDEO_MEMORY_INFO,
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1,
+        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
     };
 
     pub struct DxgiVramSource;
+
+    /// `QueryVideoMemoryInfo` for one adapter's dedicated (local) segment.
+    unsafe fn usage_of(adapter: &IDXGIAdapter1) -> Option<VramUsage> {
+        let adapter3: IDXGIAdapter3 = adapter.cast().ok()?;
+        let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        adapter3
+            .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)
+            .ok()?;
+        Some(VramUsage {
+            used_bytes: info.CurrentUsage,
+            budget_bytes: info.Budget,
+        })
+    }
 
     impl VramSource for DxgiVramSource {
         fn query(&self) -> Option<VramUsage> {
             unsafe {
                 let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
                 let adapter = factory.EnumAdapters1(0).ok()?;
-                let adapter3: IDXGIAdapter3 = adapter.cast().ok()?;
+                usage_of(&adapter)
+            }
+        }
 
-                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-                adapter3
-                    .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)
-                    .ok()?;
-
-                Some(VramUsage {
-                    used_bytes: info.CurrentUsage,
-                    budget_bytes: info.Budget,
-                })
+        fn query_for(&self, vendor_id: u32, device_id: u32) -> Option<VramUsage> {
+            unsafe {
+                let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+                let mut index = 0;
+                // `EnumAdapters1` errors (DXGI_ERROR_NOT_FOUND) past the last adapter.
+                while let Ok(adapter) = factory.EnumAdapters1(index) {
+                    index += 1;
+                    if let Ok(desc) = adapter.GetDesc1() {
+                        if desc.VendorId == vendor_id && desc.DeviceId == device_id {
+                            return usage_of(&adapter);
+                        }
+                    }
+                }
+                None
             }
         }
     }
@@ -140,6 +168,42 @@ pub fn default_vram_source() -> Box<dyn VramSource> {
     #[cfg(not(windows))]
     {
         Box::new(UnavailableVramSource)
+    }
+}
+
+/// Percent of the OS-granted dedicated-VRAM budget the GPU lane's admission control may reserve;
+/// the rest is held back for the live Develop render, the compositor and other processes.
+/// A hypothesis (#255), not a measurement -- re-tune on real hardware.
+pub const GPU_LANE_BUDGET_PERCENT: u64 = 50;
+
+/// The lane budget when no VRAM telemetry resolves (non-Windows, software adapter, DXGI failure).
+/// A hypothesis (#255), not a measurement: sized so one 45 MP render fits with headroom.
+pub const GPU_LANE_FALLBACK_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Floor under a *measured* lane budget, so a nearly-full GPU doesn't shrink it below what a
+/// small render needs (such a render then waits for the lane rather than being dropped).
+pub const GPU_LANE_MIN_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Where [`gpu_lane_budget`]'s number came from, so a caller can tell a measured budget from the
+/// fallback and never present the latter as measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetSource {
+    /// A share of the adapter's real DXGI budget.
+    Measured,
+    /// The unmeasured fallback constant.
+    Fallback,
+}
+
+/// The GPU lane's total VRAM admission budget for Pounce (ADR-0054 decision rule #5), from the
+/// adapter's reported usage when there is one.
+pub fn gpu_lane_budget(usage: Option<VramUsage>) -> (u64, BudgetSource) {
+    match usage {
+        Some(u) if u.budget_bytes > 0 => (
+            ((u128::from(u.budget_bytes) * u128::from(GPU_LANE_BUDGET_PERCENT) / 100) as u64)
+                .max(GPU_LANE_MIN_BUDGET_BYTES),
+            BudgetSource::Measured,
+        ),
+        _ => (GPU_LANE_FALLBACK_BUDGET_BYTES, BudgetSource::Fallback),
     }
 }
 
@@ -286,6 +350,49 @@ impl Drop for TelemetrySampler {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn lane_budget_falls_back_when_telemetry_is_unavailable() {
+        assert_eq!(
+            gpu_lane_budget(None),
+            (GPU_LANE_FALLBACK_BUDGET_BYTES, BudgetSource::Fallback)
+        );
+        let zero = VramUsage {
+            used_bytes: 0,
+            budget_bytes: 0,
+        };
+        assert_eq!(gpu_lane_budget(Some(zero)).1, BudgetSource::Fallback);
+    }
+
+    #[test]
+    fn lane_budget_is_a_share_of_the_measured_budget() {
+        let gib = 1024 * 1024 * 1024;
+        let usage = VramUsage {
+            used_bytes: gib,
+            budget_bytes: 8 * gib,
+        };
+        assert_eq!(
+            gpu_lane_budget(Some(usage)),
+            (4 * gib, BudgetSource::Measured)
+        );
+    }
+
+    #[test]
+    fn lane_budget_never_drops_below_the_floor() {
+        let usage = VramUsage {
+            used_bytes: 0,
+            budget_bytes: 64 * 1024 * 1024,
+        };
+        assert_eq!(
+            gpu_lane_budget(Some(usage)),
+            (GPU_LANE_MIN_BUDGET_BYTES, BudgetSource::Measured)
+        );
+    }
+
+    #[test]
+    fn query_for_defaults_to_query() {
+        assert_eq!(UnavailableVramSource.query_for(0x10de, 0x2704), None);
+    }
 
     #[test]
     fn unavailable_vram_source_reports_none() {
