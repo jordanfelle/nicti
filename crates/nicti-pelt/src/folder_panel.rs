@@ -14,6 +14,7 @@ use nicti_lair::carry::Resolution;
 use nicti_lair::{MoveState, Root, RootMove};
 
 use crate::archive_drives::ArchiveDrives;
+use crate::pending::Pending;
 
 /// A move the user asked for by dropping `root_id` on a drive or another folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,35 +142,129 @@ pub fn mounted_drives() -> Vec<String> {
 }
 
 /// How long a scan of the catalog/filesystem is reused: roots, journal rows and mounted drives
-/// are read on this cadence, not per frame (`mounted_drives` can stall on a dead network drive,
-/// and the catalog calls contend with import/sync/move jobs for the connection mutex).
+/// are re-read on this cadence, not per frame. Both reads run on worker threads (#332) -- the
+/// drive probe can stall for seconds on a dead network drive, and the catalog calls contend with
+/// import/sync/move jobs for the connection mutex -- so the panel keeps drawing the last result
+/// until the new one lands.
 pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-#[derive(Default)]
-pub struct Cache {
+type CatalogRead = (Vec<Root>, Vec<RootMove>);
+
+/// One periodically re-read value: at most one worker in flight, so a read that hangs costs one
+/// stuck thread rather than one per [`CACHE_TTL`].
+struct Source<T> {
+    job: Option<Pending<T>>,
+    /// When the last read finished (or died).
     at: Option<std::time::Instant>,
+    /// Re-read as soon as no worker is in flight, regardless of age. Stays set when it is raised
+    /// while a read is running, because that read may predate whatever raised it.
+    stale: bool,
+    /// A result has arrived at least once.
+    loaded: bool,
+}
+
+impl<T> Default for Source<T> {
+    fn default() -> Self {
+        Self {
+            job: None,
+            at: None,
+            stale: false,
+            loaded: false,
+        }
+    }
+}
+
+impl<T: Send + 'static> Source<T> {
+    /// Collects a finished read and starts the next one when due. Returns the new value, if one
+    /// landed this call.
+    fn step(
+        &mut self,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let mut landed = None;
+        if let Some(job) = &self.job {
+            match job.poll() {
+                Ok(None) => return None,
+                Ok(Some(v)) => {
+                    self.loaded = true;
+                    landed = Some(v);
+                }
+                // The worker panicked: keep the old value and retry on the normal cadence.
+                Err(_) => {}
+            }
+            self.job = None;
+            self.at = Some(std::time::Instant::now());
+        }
+        if self.stale || self.at.is_none_or(|t| t.elapsed() >= CACHE_TTL) {
+            self.stale = false;
+            self.job = Some(Pending::spawn(ctx, work));
+        }
+        landed
+    }
+}
+
+pub struct Cache {
     was_busy: bool,
+    catalog: Source<CatalogRead>,
+    mounted: Source<Vec<String>>,
+    probe: fn() -> Vec<String>,
     pub roots: Vec<Root>,
     pub drives: Vec<String>,
     pub open_moves: Vec<RootMove>,
 }
 
+impl Default for Cache {
+    fn default() -> Self {
+        Self::with_probe(mounted_drives)
+    }
+}
+
 impl Cache {
-    /// Drops the cached scan so the next frame re-reads it (a stuck move was just settled).
-    pub fn invalidate(&mut self) {
-        self.at = None;
+    fn with_probe(probe: fn() -> Vec<String>) -> Self {
+        Self {
+            was_busy: false,
+            catalog: Source::default(),
+            mounted: Source::default(),
+            probe,
+            roots: Vec::new(),
+            drives: Vec::new(),
+            open_moves: Vec::new(),
+        }
     }
 
-    /// Refreshes if stale, or right away when `busy` (an import/sync/move is running) just changed
-    /// -- a finishing move has just re-pointed a root.
-    pub fn refresh(&mut self, busy: bool, read: impl FnOnce() -> (Vec<Root>, Vec<RootMove>)) {
-        let force = std::mem::replace(&mut self.was_busy, busy) != busy;
-        if !force && self.at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
-            return;
+    /// Marks the cached catalog scan out of date so it is re-read on the next frame (a stuck move
+    /// was just settled). The old value keeps showing until the new one lands.
+    pub fn invalidate(&mut self) {
+        self.catalog.stale = true;
+    }
+
+    /// True once the first catalog read has landed -- before that `roots` is empty because
+    /// nothing was read, not because there are no folders.
+    pub fn loaded(&self) -> bool {
+        self.catalog.loaded
+    }
+
+    /// Swaps in finished reads and starts the next ones when due; never blocks. The catalog read
+    /// runs again right away when `busy` (an import/sync/move is running) just changed -- a
+    /// finishing move has just re-pointed a root. The drive probe is independent, so a hung drive
+    /// can't hold the catalog read back.
+    pub fn refresh(
+        &mut self,
+        ctx: &egui::Context,
+        busy: bool,
+        read: impl FnOnce() -> CatalogRead + Send + 'static,
+    ) {
+        if std::mem::replace(&mut self.was_busy, busy) != busy {
+            self.invalidate();
         }
-        (self.roots, self.open_moves) = read();
-        self.drives = mounted_drives();
-        self.at = Some(std::time::Instant::now());
+        if let Some((roots, open_moves)) = self.catalog.step(ctx, read) {
+            self.roots = roots;
+            self.open_moves = open_moves;
+        }
+        if let Some(drives) = self.mounted.step(ctx, self.probe) {
+            self.drives = drives;
+        }
     }
 }
 
@@ -638,5 +733,142 @@ mod tests {
     fn folder_name_handles_trailing_separators() {
         assert_eq!(folder_name(r"D:\Photos\2026\"), "2026");
         assert_eq!(folder_name("/mnt/d"), "d");
+    }
+
+    // ---- Cache (#332): reads run on workers, never on the calling thread ----
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn no_drives() -> Vec<String> {
+        Vec::new()
+    }
+
+    static RELEASE_PROBE: AtomicBool = AtomicBool::new(false);
+
+    fn hung_probe() -> Vec<String> {
+        while !RELEASE_PROBE.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Vec::new()
+    }
+
+    fn one_root(id: i64) -> CatalogRead {
+        (vec![root(id, "/mnt/d/x")], Vec::new())
+    }
+
+    /// Calls `refresh` until `done` holds or a generous deadline passes (never a fixed wait).
+    fn pump(
+        cache: &mut Cache,
+        ctx: &egui::Context,
+        read: impl Fn() -> CatalogRead + Clone + Send + 'static,
+        done: impl Fn(&Cache) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            cache.refresh(ctx, false, read.clone());
+            if done(cache) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    #[test]
+    fn refresh_returns_before_a_slow_read_finishes() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::with_probe(no_drives);
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(gate));
+        let read = move || {
+            let _ = gate.lock().unwrap().recv();
+            one_root(1)
+        };
+        cache.refresh(&ctx, false, read);
+        assert!(!cache.loaded(), "the read is still blocked");
+        assert!(cache.roots.is_empty());
+        release.send(()).unwrap();
+        let done = pump(&mut cache, &ctx, || one_root(1), Cache::loaded);
+        assert!(done, "the result lands once the read is released");
+        assert_eq!(cache.roots.len(), 1);
+    }
+
+    #[test]
+    fn a_hung_drive_probe_does_not_hold_back_the_catalog() {
+        RELEASE_PROBE.store(false, Ordering::Relaxed);
+        let ctx = egui::Context::default();
+        let mut cache = Cache::with_probe(hung_probe);
+        let done = pump(&mut cache, &ctx, || one_root(2), Cache::loaded);
+        RELEASE_PROBE.store(true, Ordering::Relaxed);
+        assert!(done, "roots arrive while the probe is still hung");
+        assert!(cache.drives.is_empty());
+    }
+
+    #[test]
+    fn no_second_read_within_the_ttl() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::with_probe(no_drives);
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let read = move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            one_root(1)
+        };
+        assert!(pump(&mut cache, &ctx, read.clone(), Cache::loaded));
+        for _ in 0..20 {
+            cache.refresh(&ctx, false, read.clone());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn invalidating_during_a_read_rereads_after_it_lands() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::with_probe(no_drives);
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(gate));
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        // The first read is held open; the settle happens while it runs.
+        cache.refresh(&ctx, false, move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            let _ = gate.lock().unwrap().recv();
+            one_root(1)
+        });
+        cache.invalidate();
+        release.send(()).unwrap();
+        let c = calls.clone();
+        let second = move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            one_root(2)
+        };
+        // The step that collects the first (possibly pre-settle) result must already have started
+        // the next read -- not left it for the TTL.
+        assert!(pump(&mut cache, &ctx, second.clone(), Cache::loaded));
+        assert!(
+            cache.catalog.job.is_some(),
+            "a read raised stale mid-flight is re-run right after it lands"
+        );
+        let done = pump(&mut cache, &ctx, second, |c| {
+            c.roots.first().is_some_and(|r| r.id == 2)
+        });
+        assert!(done, "the stale first result is superseded by a fresh read");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_busy_edge_rereads_immediately() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::with_probe(no_drives);
+        assert!(pump(&mut cache, &ctx, || one_root(1), Cache::loaded));
+        // Within the TTL, but `busy` flipped: a finishing move just re-pointed a root.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cache.roots.first().is_none_or(|r| r.id != 9) && Instant::now() < deadline {
+            cache.refresh(&ctx, true, || one_root(9));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(cache.roots[0].id, 9);
     }
 }
