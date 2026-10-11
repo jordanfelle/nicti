@@ -190,7 +190,8 @@ impl<T: Send + 'static> Source<T> {
                     self.loaded = true;
                     landed = Some(v);
                 }
-                // The worker panicked: keep the old value and retry on the normal cadence.
+                // The worker panicked: keep the old value (`loaded` stays as it was) and retry on the
+                // normal cadence.
                 Err(_) => {}
             }
             self.job = None;
@@ -237,6 +238,19 @@ impl Cache {
     /// was just settled). The old value keeps showing until the new one lands.
     pub fn invalidate(&mut self) {
         self.catalog.stale = true;
+    }
+
+    /// Drops a just-settled journal row from the cached list so its buttons vanish this frame
+    /// instead of waiting for the re-read (a second click would be refused as "no longer open").
+    pub fn forget_move(&mut self, move_id: i64) {
+        self.open_moves.retain(|m| m.id != move_id);
+    }
+
+    /// False while the cached roots may predate a change we know about (an invalidate or busy
+    /// edge whose re-read hasn't landed, or any read in flight). Anything that acts on a root's
+    /// *path* should wait for this -- a just-moved root still shows its old location until then.
+    pub fn settled(&self) -> bool {
+        !self.catalog.stale && self.catalog.job.is_none()
     }
 
     /// True once the first catalog read has landed -- before that `roots` is empty because
@@ -863,7 +877,14 @@ mod tests {
         let ctx = egui::Context::default();
         let mut cache = Cache::with_probe(no_drives);
         assert!(pump(&mut cache, &ctx, || one_root(1), Cache::loaded));
-        // Within the TTL, but `busy` flipped: a finishing move just re-pointed a root.
+        // Within the TTL, but `busy` flipped: a finishing move just re-pointed a root. The very
+        // call that sees the edge must already have the re-read running (not left for the TTL).
+        cache.refresh(&ctx, true, || one_root(9));
+        assert!(cache.catalog.job.is_some());
+        assert!(
+            !cache.settled(),
+            "roots may predate the move until it lands"
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         while cache.roots.first().is_none_or(|r| r.id != 9) && Instant::now() < deadline {
             cache.refresh(&ctx, true, || one_root(9));

@@ -1979,6 +1979,7 @@ impl PeltApp {
                 grid.refresh(&self.pounce);
             }
         }
+        let result_ok = result.is_ok();
         self.last_move_summary = Some(match result {
             Ok(_) => match how {
                 carry::Resolution::KeepSource => "Kept the original folder.".to_string(),
@@ -1989,6 +1990,9 @@ impl PeltApp {
             },
             Err(e) => format!("Couldn't settle the interrupted move: {e}"),
         });
+        if result_ok {
+            self.folder_cache.forget_move(move_id);
+        }
         self.folder_cache.invalidate();
     }
 
@@ -2007,6 +2011,13 @@ impl PeltApp {
         ]) {
             self.verify_ui
                 .refuse("Wait for the running import/sync/move/delete/verify to finish first.");
+            return;
+        }
+        if !self.folder_cache.settled() {
+            // A move may just have re-pointed this root; hashing its cached (old) path would
+            // report every file missing.
+            self.verify_ui
+                .refuse("The folder list is refreshing; try again in a moment.");
             return;
         }
         let Some(root) = self.folder_cache.roots.iter().find(|r| r.id == root_id) else {
