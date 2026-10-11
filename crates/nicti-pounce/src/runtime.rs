@@ -78,6 +78,8 @@ impl LaneState {
 
 struct Inner {
     gpu: LaneState,
+    /// The GPU lane's total VRAM budget, kept here because `Admission` sits behind the scheduler lock.
+    gpu_vram_budget_bytes: u64,
     cpu: LaneState,
     cpu_throttle: Throttle,
     editing_gate: EditingGate,
@@ -220,6 +222,7 @@ impl Pounce {
         let editing_gate = EditingGate::new();
         let inner = Arc::new(Inner {
             gpu: LaneState::new(editing_gate.clone(), vram_budget_bytes),
+            gpu_vram_budget_bytes: vram_budget_bytes,
             cpu: LaneState::new(editing_gate.clone(), u64::MAX),
             cpu_throttle: Throttle::new(cpu_limit),
             editing_gate,
@@ -264,6 +267,12 @@ impl Pounce {
     /// never mid-chunk (this crate's cooperative-cancellation contract throughout).
     pub fn cancel(&self, id: JobId) {
         self.inner.cancel(id);
+    }
+
+    /// The GPU lane's total VRAM admission budget -- what a job's declared `vram_bytes` is clamped
+    /// to, since a background job declaring more than this is dropped outright.
+    pub fn gpu_vram_budget(&self) -> u64 {
+        self.inner.gpu_vram_budget_bytes
     }
 
     /// A handle a *job* can hold to submit follow-up jobs (#57's export stages chain
@@ -364,6 +373,11 @@ impl Submitter {
             return None;
         }
         Some(inner.submit(job))
+    }
+
+    /// [`Pounce::gpu_vram_budget`], or `None` once the runtime is gone.
+    pub fn gpu_vram_budget(&self) -> Option<u64> {
+        self.inner.upgrade().map(|i| i.gpu_vram_budget_bytes)
     }
 
     /// Cancels a job by id; a no-op once the runtime is gone.

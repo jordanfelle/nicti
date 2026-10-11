@@ -23,10 +23,13 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   `CancelToken` registry rather than delegating to `Scheduler::cancel` — the scheduler's own
   `cancel` only finds a job still sitting in its queue, which most of a fast-yielding job's
   lifetime isn't (a real bug this ticket's own tests caught: cancelling a job with no per-job
-  delay raced the job to completion before `Scheduler::cancel` ever found it queued). No bake
-  pipeline exists yet (Tapetum has no worker; Develop renders synchronously every frame), so the
-  GPU lane and VRAM admission are exercised only by synthetic jobs in `nicti-pounce`'s own tests —
-  the first real bake job is a follow-up tied to #31/#27.
+  delay raced the job to completion before `Scheduler::cancel` ever found it queued). The real
+  GPU-lane jobs are the rendered-preview (`eyeshine.rs`) and export render jobs (#145/#57) plus
+  `RemoveJob` (#51); Develop's own interactive render stays on the UI thread by design (it is the
+  foreground path admission protects, not work to schedule). #255: the render jobs declare a real,
+  lane-clamped `vram_bytes` (`export/render_core.rs::declared_render_vram`) against a budget sized
+  from DXGI (`telemetry::gpu_lane_budget`; the 50% share and 2 GiB no-telemetry fallback are
+  unmeasured hypotheses).
 - **UI (#55, landed): `crates/nicti-pelt/src/activity.rs`** — a bottom status bar reading
   `Pounce::snapshot()`: collapsed, running/queued counts + a `TelemetrySampler` readout (CPU/RAM/
   VRAM, VRAM shown "n/a" rather than fabricated when unavailable); expanded, one row per job with
@@ -136,5 +139,6 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   thread. `Submitter::submit` returns `None` after shutdown. A job's `Drop` can run inside the
   scheduler's lock, so it must never submit (take other locks only); the export run chains from
   `step()` and backstops from the UI thread. `JobKind::Export` jobs are folded into one line in
-  `activity.rs`. A GPU-lane job over the *total* VRAM budget is dropped — export's render job
-  declares `vram_bytes: 0`.
+  `activity.rs`. A GPU-lane job over the *total* VRAM budget is dropped, so a job whose estimate
+  exceeds the lane declares the whole lane instead (it runs alone). Reservations are still
+  per-chunk, so they don't serialize jobs across a `Yield` — eyeshine's `RenderClaim` still does that.

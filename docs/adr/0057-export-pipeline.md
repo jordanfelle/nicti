@@ -45,9 +45,10 @@ ADR-0054's ~16 ms chunks) -> **encode + write** (CPU lane). One job doing all th
 when it sees the last handle, and a queued job could become that last handle on a worker thread).
 `advance()` is the single place that decides what may start, bounding memory: at most one photo
 decoded/decoding ahead, one rendering, and `rendered + encoding <= 2` (roughly 2.4 GB worst case at
-45 MP full size; downsized exports need far less). The render job declares `vram_bytes: 0`:
-Pounce silently drops a background job that declares more than the *total* VRAM budget, which a
-45 MP frame's textures exceed under the placeholder budget (same as `RemoveJob`).
+45 MP full size; downsized exports need far less). The render job declares a real
+`vram_bytes` (#255, `render_core::declared_render_vram`), clamped to the GPU lane's total budget:
+Pounce silently drops a background job that declares more than the *total*, so a frame bigger than
+the whole lane declares the whole lane and runs alone.
 
 Each photo has one `Ticket` that settles exactly once (exported / skipped / failed / cancelled); a
 dropped ticket settles as cancelled, so the report always accounts for every photo and is
