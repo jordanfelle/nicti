@@ -345,6 +345,22 @@ impl HealKernel {
         spots: &[Spot],
         removals: &RemovalSet,
     ) {
+        self.encode_spots_with_budget(gpu, encoder, frame, spots, removals, MAX_JACOBI_PASSES);
+    }
+
+    /// [`Self::encode_spots`] with an explicit Jacobi-pass budget. Production always passes
+    /// [`MAX_JACOBI_PASSES`]; tests pass a small one to exercise the skip-when-exhausted rule
+    /// without recording a 12k-pass command buffer (which crashes some drivers, see
+    /// `heal_beyond_the_jacobi_budget_is_skipped_not_queued`).
+    fn encode_spots_with_budget(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameTexture,
+        spots: &[Spot],
+        removals: &RemovalSet,
+        jacobi_budget: u32,
+    ) {
         enum Op<'a> {
             Classic(&'a Spot, SpotGeometry),
             Patch(&'a Spot, &'a RemovalPatch),
@@ -389,7 +405,7 @@ impl HealKernel {
             ),
         };
 
-        let mut jacobi_budget = MAX_JACOBI_PASSES;
+        let mut jacobi_budget = jacobi_budget;
         for op in ops {
             match op {
                 Op::Classic(spot, g) => self.encode_classic(
@@ -911,7 +927,18 @@ pub(crate) mod reference {
 
     /// Applies every Clone/Heal spot in order onto `frame` (row-major, `w` x `h`).
     pub fn apply_spots(frame: &mut [[f32; 4]], w: i32, h: i32, spots: &[Spot]) {
-        let mut budget = MAX_JACOBI_PASSES;
+        apply_spots_with_budget(frame, w, h, spots, MAX_JACOBI_PASSES);
+    }
+
+    /// [`apply_spots`] with an explicit Jacobi-pass budget (the twin of
+    /// `HealKernel::encode_spots_with_budget`).
+    pub fn apply_spots_with_budget(
+        frame: &mut [[f32; 4]],
+        w: i32,
+        h: i32,
+        spots: &[Spot],
+        mut budget: u32,
+    ) {
         for spot in spots {
             if !matches!(spot.kind, SpotKind::Clone | SpotKind::Heal) {
                 continue;
@@ -1594,18 +1621,69 @@ mod tests {
     fn heal_beyond_the_jacobi_budget_is_skipped_not_queued() {
         let Some(gpu) = test_gpu() else { return };
         let (w, h) = (64i32, 64i32);
-        let data = blemish_frame(w, h, 0.0);
-        // r=24 costs 50 passes each; more than budget/50 of them exhausts the budget, after which
-        // a further heal spot must pass through untouched.
+        // A dark blemish exactly where the over-budget spot sits, on an otherwise flat frame: only
+        // that spot changes anything, so applying it (instead of skipping it) is visible.
+        let data: Vec<[f32; 4]> = (0..w * h)
+            .map(|i| {
+                let (dx, dy) = ((i % w - 40) as f32, (i / w - 40) as f32);
+                let v = if (dx * dx + dy * dy).sqrt() < 4.0 {
+                    0.1
+                } else {
+                    0.5
+                };
+                [v, v, v, 1.0]
+            })
+            .collect();
+        // r=24 costs 50 passes each; a budget of exactly `fit` of them is exhausted by those
+        // spots, after which a further heal spot must pass through untouched. A small explicit
+        // budget (not MAX_JACOBI_PASSES) keeps the command buffer small: recording the full 12k
+        // passes crashes the Intel ANV Vulkan driver in `vkEndCommandBuffer` (Mesa 26.0.8).
         let per = jacobi_iterations(49);
-        let fit = (MAX_JACOBI_PASSES / per) as usize;
+        let fit = 4usize;
+        let budget = per * fit as u32;
         let mut spots = vec![Spot::heal_spot((10.0, 10.0), 24.0, (20.0, 0.0), 0.0); fit];
         let mut last = Spot::heal_spot((40.0, 40.0), 8.0, (-20.0, -20.0), 0.0);
         last.feather = 0.0;
         spots.push(last);
         let mut cpu = data.clone();
-        reference::apply_spots(&mut cpu, w, h, &spots);
-        let out = run_gpu(&gpu, w as u32, h as u32, &data, &spots);
+        reference::apply_spots_with_budget(&mut cpu, w, h, &spots, budget);
+        let skipped_last = {
+            let mut without = data.clone();
+            reference::apply_spots_with_budget(&mut without, w, h, &spots[..fit], budget);
+            max_diff(&cpu, &without) < 1e-6
+        };
+        assert!(
+            skipped_last,
+            "the over-budget spot must be skipped by the reference too"
+        );
+        let mut unbudgeted = data.clone();
+        reference::apply_spots(&mut unbudgeted, w, h, &spots);
+        assert!(
+            max_diff(&cpu, &unbudgeted) > 0.1,
+            "applying the last spot must visibly change the frame, or skipping it proves nothing"
+        );
+
+        let extent = Extent {
+            width: w as u32,
+            height: h as u32,
+        };
+        let input = upload_frame(&gpu, extent, &data);
+        let output = FrameTexture::new(&gpu, extent);
+        let kernel = HealKernel::new(&gpu);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        PassthroughExec.encode(&gpu, &mut encoder, Some(&input), &output);
+        kernel.encode_spots_with_budget(
+            &gpu,
+            &mut encoder,
+            &output,
+            &spots,
+            &RemovalSet::default(),
+            budget,
+        );
+        gpu.queue.submit(Some(encoder.finish()));
+        let out = read_frame(&gpu, &output);
         assert!(max_diff(&cpu, &out) < 0.02);
     }
 
