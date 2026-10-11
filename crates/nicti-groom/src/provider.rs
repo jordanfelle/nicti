@@ -70,7 +70,14 @@ pub(crate) fn open_session(
                 "nicti-groom: {} failed to load on {active:?} ({e}); using the CPU",
                 model.display()
             );
-            open_session(model, dylib, ExecutionProvider::Cpu)
+            // Keep the GPU error in the chain: if the CPU fails too, "why did it fall back?" is
+            // the first question.
+            open_session(model, dylib, ExecutionProvider::Cpu).map_err(|cpu| match cpu {
+                RemovalError::Ort(c) => RemovalError::Ort(format!(
+                    "{c} (after the {active:?} provider also failed to load it: {e})"
+                )),
+                other => other,
+            })
         }
         Err(e) => Err(ort_err(e)),
     }
