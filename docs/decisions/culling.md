@@ -95,7 +95,9 @@ Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX bui
   mutex (even a no-op rewrite costs ~23 us/row; a rating change ~70 us/row: the three rating indexes
   and `trg_facet_asset_update`, not the statement). `Selection::remap` over a select-all ~190 ms per
   snapshot change. **Fixed**: the worker reads/writes in 20k-row chunks (`worker.rs` `CHUNK`), so the
-  mutex is held ~3 s at a stretch instead of ~80 s (a mid-way failure records the written part as an
+  mutex is held ~3 s at a stretch instead of ~80 s for other catalog users (grid snapshot/thumbnail
+  reads; the marker reads queued on the same writer thread still wait for the whole run, and a
+  non-worker writer can now interleave between chunks) (a mid-way failure records the written part as an
   undo entry); `remap` returns at once when the id snapshot is unchanged (190 ms -> 0.7 ms). **Not
   fixed (follow-ups)**: the UI-thread `mark`/`poll` cost of the per-id `pending` map at 1M (needs a
   range/bulk pending representation), `remap`'s `HashSet` on a real snapshot change, the marker

@@ -37,6 +37,8 @@ struct FakeStore {
     writes_left: AtomicUsize,
     fail_reads: AtomicBool,
     reads: AtomicUsize,
+    /// Successful `set_meta` calls.
+    write_calls: AtomicUsize,
     /// Every photo id `set_meta` was asked to write, in order.
     written: Mutex<Vec<i64>>,
 }
@@ -50,6 +52,7 @@ impl FakeStore {
             writes_left: AtomicUsize::new(usize::MAX),
             fail_reads: AtomicBool::new(false),
             reads: AtomicUsize::new(0),
+            write_calls: AtomicUsize::new(0),
             written: Mutex::new(Vec::new()),
         })
     }
@@ -89,6 +92,7 @@ impl MetaStore for FakeStore {
         {
             return Err("disk is on fire".into());
         }
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
         let mut rows = self.rows.lock().unwrap();
         self.written
             .lock()
@@ -951,6 +955,12 @@ fn a_big_mark_is_written_in_chunks() {
     cull.mark((0..n).collect(), CullAction::SetRating(Some(2)));
     cull.settle_all();
     assert_eq!(store.written.lock().unwrap().len(), n as usize);
+    assert_eq!(
+        store.write_calls.load(Ordering::SeqCst),
+        3,
+        "one write per chunk"
+    );
+    assert_eq!(store.reads.load(Ordering::SeqCst), 3, "one read per chunk");
     assert_eq!(store.row(n - 1), stars(2));
     cull.undo();
     cull.barrier();
@@ -968,7 +978,11 @@ fn a_chunked_mark_that_fails_midway_keeps_the_written_part_undoable() {
     let mut cull = state(&store);
     cull.mark((0..n).collect(), CullAction::SetRating(Some(2)));
     cull.settle_all();
-    assert!(cull.last_error().is_some());
+    let error = cull.last_error().unwrap();
+    assert!(
+        error.contains(&format!("first {chunk} photos were saved")),
+        "{error}"
+    );
     assert_eq!(store.row(0), stars(2));
     assert_eq!(store.row(chunk - 1), stars(2));
     assert_eq!(store.row(chunk), AssetMeta::default());

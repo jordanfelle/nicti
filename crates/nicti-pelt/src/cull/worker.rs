@@ -41,7 +41,8 @@ impl MetaStore for CatalogMeta {
 
 /// Rows per catalog call. One `set_meta` is one transaction holding the catalog mutex, and at 1M
 /// rows that is ~80 s (#335: the marker indexes and the facet trigger, not the statement) during
-/// which the grid's own reads stall. Chunking lets them interleave.
+/// which other catalog users (the grid's snapshot and thumbnail reads) stall. Chunking lets them
+/// interleave; the marker reads queued behind it on this same thread still wait for the whole run.
 pub(super) const CHUNK: usize = 20_000;
 
 /// `get_meta` over `ids` a chunk at a time, so the catalog mutex is released in between.
@@ -307,8 +308,16 @@ fn apply(
         if written > 0 {
             entry.before.truncate(written);
             entry.after.truncate(written);
+            // `truncate` keeps the allocation, and the ring's budget counts only `len`.
+            entry.before.shrink_to_fit();
+            entry.after.shrink_to_fit();
             ring.push(entry);
         }
+        let message = if written > 0 {
+            format!("{message} (the first {written} photos were saved; Ctrl+Z reverts them)")
+        } else {
+            message
+        };
         return Err(message);
     }
     let changed = entry.after.clone();

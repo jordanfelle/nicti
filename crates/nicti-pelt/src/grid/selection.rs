@@ -248,6 +248,15 @@ mod tests {
     }
 
     #[test]
+    fn remap_against_an_unchanged_snapshot_changes_nothing() {
+        let mut s = sel(&[0..2, 5..6]);
+        s.set_anchor(Some(5));
+        let before = s.clone();
+        s.remap(&[1, 2, 3, 4, 5, 6], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(s, before);
+    }
+
+    #[test]
     fn remap_with_nothing_selected_is_free_and_leaves_it_empty() {
         let mut s = Selection::default();
         s.remap(&[1, 2], &[3, 4]);
