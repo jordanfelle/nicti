@@ -314,13 +314,13 @@ mod tests {
     /// backend case too).
     #[test]
     fn explicit_backend_preference_errors_if_that_backend_has_no_adapter() {
+        // Enumerate each candidate via `Backends::from(b)`, exactly as `new()` does for an explicit
+        // request: `Backends::PRIMARY` excludes Gl, so a PRIMARY-only enumeration would call Gl
+        // "absent" on a host where `new(Backend(Gl))` does find a GL adapter (#364).
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::Backends::all(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
-        let present: std::collections::HashSet<wgpu::Backend> =
-            adapters.iter().map(|a| a.get_info().backend).collect();
         let Some(absent) = [
             wgpu::Backend::Vulkan,
             wgpu::Backend::Dx12,
@@ -328,7 +328,11 @@ mod tests {
             wgpu::Backend::Gl,
         ]
         .into_iter()
-        .find(|b| !present.contains(b)) else {
+        .find(|b| {
+            pollster::block_on(instance.enumerate_adapters(wgpu::Backends::from(*b)))
+                .iter()
+                .all(|a| a.get_info().backend != *b)
+        }) else {
             eprintln!("every backend has an adapter in this environment, skipping");
             return;
         };
