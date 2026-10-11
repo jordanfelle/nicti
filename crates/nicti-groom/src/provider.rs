@@ -25,7 +25,8 @@ static DECLARED_VRAM: AtomicU64 = AtomicU64::new(0);
 
 /// What a removal job declares in its `JobSpec`: [`GPU_VRAM_BYTES`] once the sessions are running
 /// on a GPU provider, else 0 (the CPU provider uses no VRAM, and nothing is loaded before the
-/// first removal). Lock-free because `RemoveJob::spec` runs on the UI thread while a removal may
+/// first removal -- so the first GPU removal's own load runs under a 0 claim, as BiRefNet's does).
+/// Process-wide, last writer wins: it is not shared with BiRefNet's own claim. Lock-free because `RemoveJob::spec` runs on the UI thread while a removal may
 /// hold the backend.
 pub fn declared_vram_bytes() -> u64 {
     DECLARED_VRAM.load(Ordering::Relaxed)

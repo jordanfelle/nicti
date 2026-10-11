@@ -53,24 +53,47 @@ impl LazyBackend {
 }
 
 impl LazyBackend {
+    /// Replaces the engine with fresh sessions on `requested`. The old engine is dropped first, so
+    /// a failed load leaves a consistent "nothing loaded, nothing declared" state (the next
+    /// removal loads from scratch) rather than a stale GPU engine, and the new sessions never
+    /// coexist with the old ones in VRAM.
     fn load_engine(&mut self, requested: ExecutionProvider) -> Result<(), RemovalError> {
+        self.engine = None;
+        self.active = ExecutionProvider::Cpu;
+        provider::declare(ExecutionProvider::Cpu);
         let models = &self.models;
-        let sam = MobileSam::load_on(
+        let mut sam = MobileSam::load_on(
             &models.sam_encoder,
             &models.sam_decoder,
             &models.ort_dylib,
             requested,
         )?;
-        let lama = Lama::load_on(&models.lama, &models.ort_dylib, requested)?;
-        // One provider for the pair: SAM can't fall back on its own without LaMa following.
-        self.active = if sam.active_provider() == lama.active_provider() {
-            sam.active_provider()
-        } else {
-            ExecutionProvider::Cpu
-        };
+        let mut lama = Lama::load_on(&models.lama, &models.ort_dylib, requested)?;
+        if sam.active_provider() != lama.active_provider() {
+            // One fell back to the CPU on its own (a model that won't load on the GPU provider):
+            // run the pair on the CPU so the retry guard and the VRAM claim describe reality.
+            drop((sam, lama));
+            sam = MobileSam::load_on(
+                &models.sam_encoder,
+                &models.sam_decoder,
+                &models.ort_dylib,
+                ExecutionProvider::Cpu,
+            )?;
+            lama = Lama::load_on(&models.lama, &models.ort_dylib, ExecutionProvider::Cpu)?;
+        }
+        self.active = sam.active_provider();
         provider::declare(self.active);
         self.engine = Some(RemovalEngine::new(sam, lama));
         Ok(())
+    }
+}
+
+impl Drop for LazyBackend {
+    fn drop(&mut self) {
+        // The sessions go with the backend; so does their claim on the VRAM budget.
+        if self.active != ExecutionProvider::Cpu {
+            provider::declare(ExecutionProvider::Cpu);
+        }
     }
 }
 
@@ -84,6 +107,8 @@ impl RemovalBackend for LazyBackend {
             self.load_engine(requested)?;
         }
         match self.engine.as_mut().expect("just loaded").remove(req) {
+            // Any `Ort` error counts, not only GPU ones (the variant carries no origin): a
+            // deterministic model/input bug costs one wasted CPU retry and returns the CPU's error.
             // The GPU provider registered but can't run (cuDNN missing from the pack, out of VRAM
             // beside the renderer, a driver reset): redo this removal -- and every later one -- on
             // the CPU rather than failing it.
