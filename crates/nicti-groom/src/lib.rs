@@ -21,6 +21,7 @@ pub mod geom;
 pub mod install;
 pub mod job;
 pub mod lama;
+pub mod provider;
 pub mod real;
 pub mod remove;
 pub mod sam;

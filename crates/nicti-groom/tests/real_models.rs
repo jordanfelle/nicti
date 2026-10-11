@@ -191,7 +191,19 @@ fn a_click_removes_the_object_end_to_end() {
     );
     let t = Instant::now();
     engine.remove(&req).expect("second removal");
-    println!("end-to-end removal (embedding cached): {:?}", t.elapsed());
+    let cached = t.elapsed();
+    println!("end-to-end removal (embedding cached): {cached:?}");
+    // ADR-0050's target (#322): set `NICTI_REMOVAL_MAX_SECS=2` on the GPU reference machine
+    // (a CUDA `NICTI_ORT_DYLIB`) to enforce it; unset, this only reports.
+    if let Some(max) = std::env::var("NICTI_REMOVAL_MAX_SECS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        assert!(
+            cached.as_secs_f64() < max,
+            "cached removal took {cached:?}, over the {max} s budget"
+        );
+    }
 
     // Compare the patch's fill inside the object against the true background there.
     let half = patch.side as i32 / 2;
