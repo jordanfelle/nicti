@@ -311,12 +311,25 @@ impl Drop for BackgroundLoad {
 mod tests {
     use super::*;
 
+    /// Held for a whole test: two tests creating (and dropping) their own wgpu instance/device at
+    /// the same time intermittently SIGSEGV on real drivers (seen ~1 run in 20 on the Intel ANV
+    /// Vulkan driver), so the GPU tests take turns. Declared before `ctx` in each test so it is
+    /// released after the device is dropped.
+    static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn gpu_turn() -> std::sync::MutexGuard<'static, ()> {
+        GPU_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn first_ctx() -> Option<GpuContext> {
         GpuContext::enumerate().into_iter().next()
     }
 
     #[test]
     fn busy_kernel_dispatch_completes() {
+        let _turn = gpu_turn();
         let Some(ctx) = first_ctx() else {
             eprintln!("no wgpu adapter available in this sandbox, skipping");
             return;
@@ -328,6 +341,7 @@ mod tests {
 
     #[test]
     fn background_load_reports_nonzero_chunks() {
+        let _turn = gpu_turn();
         let Some(ctx) = first_ctx() else {
             eprintln!("no wgpu adapter available in this sandbox, skipping");
             return;
