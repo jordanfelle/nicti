@@ -245,3 +245,54 @@ fn marker_filters_at_one_million_assets() {
     assert_eq!(n as usize, expected, "count and id list must agree");
     assert!(took < Duration::from_secs(10));
 }
+
+/// #335: what "select all, then mark" costs the catalog at 1M assets. `CullState::mark` hands the
+/// worker every selected id; the worker does one `get_meta` over all of them, then one `set_meta`
+/// transaction over every row that changes, holding the catalog mutex throughout. Read the printed
+/// numbers; the assertions are loose tripwires.
+#[test]
+#[ignore = "seeds 1M rows; run manually with --ignored --nocapture"]
+fn select_all_mark_at_one_million_assets() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteCatalog::open(&dir.path().join("catalog.db")).unwrap();
+    let volume = store.upsert_volume("scale", None, None, 0).unwrap();
+    let root = store.ensure_root(volume, "/photos").unwrap();
+    time("seed 1M assets", || {
+        store.bulk_seed(root, ASSETS, None).unwrap()
+    });
+    let sort = Sort {
+        field: SortField::Filename,
+        direction: SortDirection::Asc,
+    };
+    let all = store.hunt_ids(&Filter::default(), sort).unwrap();
+
+    let (current, _) = time("get_meta (1M ids)", || store.get_meta(&all).unwrap());
+    let items: Vec<(i64, nicti_lair::AssetMeta)> = all
+        .iter()
+        .map(|id| {
+            let mut m = current[id].clone();
+            m.rating = Some(3);
+            (*id, m)
+        })
+        .collect();
+    // One transaction per 20k rows (the worker's chunk): the longest one is how long the catalog
+    // mutex is held at a stretch, i.e. how long a grid read can stall behind a select-all mark.
+    let mut longest = Duration::ZERO;
+    let (_, took) = time("set_meta (1M rows, 20k per transaction)", || {
+        for chunk in items.chunks(20_000) {
+            let start = Instant::now();
+            store.set_meta(chunk).unwrap();
+            longest = longest.max(start.elapsed());
+        }
+    });
+    println!("longest single transaction: {longest:.2?}");
+    assert!(took < Duration::from_secs(600), "set_meta took {took:?}");
+    assert!(
+        longest < Duration::from_secs(10),
+        "chunk held the mutex {longest:?}"
+    );
+    // How long a concurrent reader (the UI's thumbnail/marker reads) would wait behind it.
+    let (_, _) = time("get_meta (64 ids) after the write", || {
+        store.get_meta(&all[..64]).unwrap()
+    });
+}
