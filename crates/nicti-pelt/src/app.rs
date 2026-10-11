@@ -2865,7 +2865,7 @@ impl PeltApp {
     /// Whether `develop` already holds the full-res frame of `asset_id`'s *current* revision.
     /// #295: the loupe's frame cache can evict a decode after `develop` loaded it (or a freshly
     /// reopened session hasn't decoded yet); `current_frame` is then `None` again, but dropping
-    /// to the T0 preview would downgrade a photo whose correct full-res frame is on screen-ready
+    /// to the T0 preview would downgrade a photo whose correct full-res frame is ready to paint
     /// in `develop`. Keyed on (id, identity) like the load check, so a re-ingested file whose
     /// loaded frame is now stale still falls back.
     fn develop_holds_current_revision(&self, store: &dyn CatalogStore, asset_id: i64) -> bool {
