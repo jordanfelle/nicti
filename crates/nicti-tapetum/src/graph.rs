@@ -17,11 +17,12 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use nicti_pawprint::{CanonicalError, EditDocument, StageEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::StageRegistry;
+use crate::{RenderStage, StageRegistry};
 
 /// Whether a node's output is baked (cached, invalidated only when it or an upstream node
 /// changes) or live (recomputed every frame, never itself cached) or geometry (a per-frame
@@ -57,6 +58,27 @@ pub struct RenderGraph {
     /// Memoized cache keys, persisted across calls. `set_own_hash` clears exactly the entries for
     /// nodes it invalidates; nothing else touches this map.
     memo: RefCell<BTreeMap<String, blake3::Hash>>,
+    /// Per-node record of the last entry `apply_document` hashed, so an entry that did not change
+    /// between renders (every stage but the one being dragged) skips re-canonicalising its params
+    /// -- 4 ms at 20 000 brush points, ~45 ms at the 200 000 cap (#362).
+    entry_memo: BTreeMap<String, EntryMemo>,
+}
+
+/// The last `(stage, entry) -> own_hash` result `apply_document` computed for one node.
+struct EntryMemo {
+    /// Pointer-compared, because `RenderStage::cache_contribution` is overridable: the same entry
+    /// under a different stage object (another registry) must not reuse this hash.
+    stage: Arc<dyn RenderStage>,
+    entry: StageEntry,
+    hash: blake3::Hash,
+}
+
+impl std::fmt::Debug for EntryMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntryMemo")
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -291,17 +313,34 @@ impl RenderGraph {
             let stage = registry
                 .get(&id)
                 .ok_or_else(|| ApplyDocumentError::UnregisteredStage(id.clone()))?;
-            let entry = document
-                .stages
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| StageEntry {
-                    schema_version: stage.schema_version(),
-                    params: stage.default_params(),
-                });
-            let hash = stage
-                .cache_contribution(&entry)
-                .map_err(|e| ApplyDocumentError::Canonical(id.clone(), e))?;
+            let default_entry;
+            let entry = match document.stages.get(&id) {
+                Some(entry) => entry,
+                None => {
+                    default_entry = StageEntry {
+                        schema_version: stage.schema_version(),
+                        params: stage.default_params(),
+                    };
+                    &default_entry
+                }
+            };
+            let hash = match self.entry_memo.get(&id) {
+                Some(m) if Arc::ptr_eq(&m.stage, &stage) && m.entry == *entry => m.hash,
+                _ => {
+                    let hash = stage
+                        .cache_contribution(entry)
+                        .map_err(|e| ApplyDocumentError::Canonical(id.clone(), e))?;
+                    self.entry_memo.insert(
+                        id.clone(),
+                        EntryMemo {
+                            stage: stage.clone(),
+                            entry: entry.clone(),
+                            hash,
+                        },
+                    );
+                    hash
+                }
+            };
             if self.nodes.get(&id).map(|n| n.own_hash) == Some(hash) {
                 continue;
             }
@@ -704,6 +743,127 @@ mod tests {
             "re-applying an unchanged document must invalidate nothing: {invalidation:?}"
         );
         assert_eq!(g.cache_key(crate::stages::TONE).unwrap(), key_before);
+    }
+
+    /// A stage that counts how often its params are actually hashed (#362).
+    struct CountingStage;
+
+    static HASHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    impl nicti_claw::Module for CountingStage {
+        fn id(&self) -> &str {
+            "nicti.test.counting"
+        }
+        fn schema_version(&self) -> u32 {
+            1
+        }
+        fn migrate_params(&self, _: u32, p: serde_json::Value) -> Option<serde_json::Value> {
+            Some(p)
+        }
+    }
+
+    impl RenderStage for CountingStage {
+        fn kind(&self) -> StageKind {
+            StageKind::Live
+        }
+        fn default_params(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn cache_contribution(&self, entry: &StageEntry) -> Result<blake3::Hash, CanonicalError> {
+            HASHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            nicti_pawprint::hash_value(entry)
+        }
+    }
+
+    fn make_counting_stage() -> Arc<dyn RenderStage> {
+        Arc::new(CountingStage)
+    }
+
+    fn counting_registry() -> StageRegistry {
+        let mut registry = StageRegistry::new();
+        registry
+            .register(
+                nicti_claw::Descriptor {
+                    id: "nicti.test.counting",
+                    schema_version: 1,
+                },
+                make_counting_stage,
+            )
+            .unwrap();
+        registry
+    }
+
+    #[test]
+    fn apply_document_only_rehashes_an_entry_that_changed() {
+        use std::sync::atomic::Ordering;
+        let registry = counting_registry();
+        let mut g = RenderGraph::new();
+        g.add_node(StageNode {
+            id: "nicti.test.counting".to_string(),
+            kind: StageKind::Live,
+            upstream: vec![],
+            own_hash: blake3::hash(b"placeholder"),
+        })
+        .unwrap();
+        let mut doc = EditDocument::default();
+        let set = |doc: &mut EditDocument, v: f64| {
+            doc.stages.insert(
+                "nicti.test.counting".to_string(),
+                StageEntry {
+                    schema_version: 1,
+                    params: serde_json::json!({ "v": v }),
+                },
+            );
+        };
+
+        // Absent entry (stage default) is memoised too.
+        g.apply_document(&doc, &registry).unwrap();
+        g.apply_document(&doc, &registry).unwrap();
+        assert_eq!(HASHED.load(Ordering::SeqCst), 1);
+
+        set(&mut doc, 1.0);
+        g.apply_document(&doc, &registry).unwrap();
+        assert_eq!(HASHED.load(Ordering::SeqCst), 2, "changed entry is hashed");
+        let key = g.cache_key("nicti.test.counting").unwrap();
+        g.apply_document(&doc, &registry).unwrap();
+        assert_eq!(HASHED.load(Ordering::SeqCst), 2, "unchanged entry is not");
+        assert_eq!(g.cache_key("nicti.test.counting").unwrap(), key);
+
+        // Back to the earlier value is a change relative to the *last* entry, and still correct.
+        set(&mut doc, 2.0);
+        g.apply_document(&doc, &registry).unwrap();
+        assert_ne!(g.cache_key("nicti.test.counting").unwrap(), key);
+        set(&mut doc, 1.0);
+        g.apply_document(&doc, &registry).unwrap();
+        assert_eq!(g.cache_key("nicti.test.counting").unwrap(), key);
+
+        // The same entry under a different stage object (another registry) is not reused.
+        let before = HASHED.load(Ordering::SeqCst);
+        let other = counting_registry();
+        g.apply_document(&doc, &other).unwrap();
+        assert_eq!(HASHED.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn a_failed_hash_is_not_memoised_and_the_next_valid_entry_still_applies() {
+        let registry = tone_and_wb_registry();
+        let mut g = tone_and_wb_graph();
+        let entry = |params| StageEntry {
+            schema_version: 1,
+            params,
+        };
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            crate::stages::TONE.to_string(),
+            entry(serde_json::json!({"contrast": null})),
+        );
+        assert!(g.apply_document(&doc, &registry).is_err());
+        assert!(g.apply_document(&doc, &registry).is_err(), "still refused");
+        doc.stages.insert(
+            crate::stages::TONE.to_string(),
+            entry(serde_json::json!({"contrast": 0.5})),
+        );
+        g.apply_document(&doc, &registry).unwrap();
     }
 
     #[test]
