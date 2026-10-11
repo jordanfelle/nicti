@@ -638,7 +638,6 @@ fn a_dng_round_trips_through_its_xmp_sidecar_and_is_never_modified() {
     assert_eq!(fs::read(&f.raw).unwrap(), dng_before);
 
     // LRC rewrites the sidecar; the next import picks it up.
-    bump_mtime(&sidecar(&f.raw));
     fs::write(sidecar(&f.raw), xmp("xmp:Rating=\"1\"", "")).unwrap();
     bump_mtime(&sidecar(&f.raw));
     import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
