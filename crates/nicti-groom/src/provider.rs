@@ -18,7 +18,7 @@ use crate::{ort_err, RemovalError};
 /// **TEMPORARY ESTIMATE (#322), not a measurement**: MobileSAM's encoder (1024-px frame, ~40 MB of weights) plus
 /// LaMa fp32 (512x512, ~200 MB of weights, FFC spectral activations) with the bounded CUDA arena
 /// from `nicti_haw::session_builder`. It is deliberately generous; replace it with the peak
-/// measured on the RTX 5080 reference machine (the way BiRefNet's `GPU_VRAM_BYTES_ESTIMATE` was, #345).
+/// measured on the RTX 5080 reference machine (the way BiRefNet's `GPU_VRAM_BYTES` was, #345).
 pub const GPU_VRAM_BYTES_ESTIMATE: u64 = 3 << 30;
 
 static DECLARED_VRAM: AtomicU64 = AtomicU64::new(0);
