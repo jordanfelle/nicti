@@ -152,7 +152,7 @@ is installed, deletes the files that fail, and downloads only those.
 DX12 GPU, but DirectML ships through NuGet (with a separate `DirectML.dll` package) rather than as
 a single pinnable release asset, and it was not evaluated. The CPU build is one official,
 hash-pinnable zip. The cost is speed (see Measured results); the
-`ExecutionProviderKind`-style seam is left for a GPU build to slot in. **(#345 update: the GPU build that slotted in is CUDA, not DirectML -- DirectML measured no faster than the CPU provider for BiRefNet, and its NuGet package stops at ORT 1.24.4. It is the optional NVIDIA GPU pack; when installed, its ONNX Runtime also serves removal, which stays on the CPU provider until #322 moves it. See ADR-0049's measured results.)** The zip carries debug
+`ExecutionProviderKind`-style seam is left for a GPU build to slot in. **(#345 update: the GPU build that slotted in is CUDA, not DirectML -- DirectML measured no faster than the CPU provider for BiRefNet, and its NuGet package stops at ORT 1.24.4. It is the optional NVIDIA GPU pack; when installed, its ONNX Runtime also serves removal, and #322 moved removal onto it: MobileSAM's encoder and LaMa run on the CUDA provider (the decoder stays on the CPU), falling back to the CPU if the provider can't register, load or run, and `RemoveJob` declares a VRAM estimate to Pounce once on the GPU. **The <2 s figure is not yet measured on the RTX 5080 reference machine, and the VRAM figure is an estimate -- see the Measured results table when it is.** See ADR-0049's measured results.)** The zip carries debug
 symbols, hence 79 MB for a 16 MB DLL. The store exposes `NICTI_ORT_DYLIB` and `NICTI_MODELS_DIR`
 overrides for development and non-Windows machines.
 

@@ -13,12 +13,13 @@
 
 use std::path::Path;
 
+use nicti_haw::ExecutionProvider;
 use ort::session::Session;
 use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::space::SpaceMap;
-use crate::{ort_err, PixelSource, RemovalError};
+use crate::{ort_err, provider, PixelSource, RemovalError};
 
 /// SAM's working resolution: the longest side of the frame the encoder sees.
 pub const MODEL_SIZE: usize = 1024;
@@ -153,26 +154,43 @@ pub struct MobileSam {
     encoder: Session,
     decoder: Session,
     embedding: Option<(u64, Vec<f32>)>,
-}
-
-fn load_session(model: &Path, dylib: &Path) -> Result<Session, RemovalError> {
-    if !model.is_file() {
-        return Err(RemovalError::ModelNotFound(model.to_path_buf()));
-    }
-    nicti_haw::ensure_ort_environment(dylib).map_err(ort_err)?;
-    Session::builder()
-        .map_err(ort_err)?
-        .commit_from_file(model)
-        .map_err(ort_err)
+    /// The provider the encoder is on (the decoder always runs on the CPU).
+    active: ExecutionProvider,
 }
 
 impl MobileSam {
+    /// Loads the encoder on the provider the runtime offers (CUDA for the GPU pack's build, else
+    /// the CPU). The decoder is ~40 ms on the CPU, with small dynamic-shape inputs that gain
+    /// nothing from a device round trip, so it always stays there.
     pub fn load(encoder: &Path, decoder: &Path, ort_dylib: &Path) -> Result<Self, RemovalError> {
+        Self::load_on(
+            encoder,
+            decoder,
+            ort_dylib,
+            provider::requested_for(ort_dylib),
+        )
+    }
+
+    /// As [`Self::load`], with the encoder's provider chosen by the caller.
+    pub fn load_on(
+        encoder: &Path,
+        decoder: &Path,
+        ort_dylib: &Path,
+        requested: ExecutionProvider,
+    ) -> Result<Self, RemovalError> {
+        let (encoder, active) = provider::open_session(encoder, ort_dylib, requested)?;
+        let (decoder, _) = provider::open_session(decoder, ort_dylib, ExecutionProvider::Cpu)?;
         Ok(Self {
-            encoder: load_session(encoder, ort_dylib)?,
-            decoder: load_session(decoder, ort_dylib)?,
+            encoder,
+            decoder,
             embedding: None,
+            active,
         })
+    }
+
+    /// The execution provider the encoder is really running on.
+    pub fn active_provider(&self) -> ExecutionProvider {
+        self.active
     }
 
     fn encode(&mut self, frame: &ModelFrame) -> Result<Vec<f32>, RemovalError> {

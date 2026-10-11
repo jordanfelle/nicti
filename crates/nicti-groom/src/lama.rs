@@ -8,10 +8,11 @@
 
 use std::path::Path;
 
+use nicti_haw::ExecutionProvider;
 use ort::session::Session;
 use ort::value::Tensor;
 
-use crate::{ort_err, RemovalError};
+use crate::{ort_err, provider, RemovalError};
 
 /// The model's fixed spatial size.
 pub const SIZE: usize = 512;
@@ -28,19 +29,28 @@ pub trait Inpainter {
 
 pub struct Lama {
     session: Session,
+    active: ExecutionProvider,
 }
 
 impl Lama {
+    /// Loads on the provider the runtime offers (CUDA for the GPU pack's build, else the CPU).
     pub fn load(model: &Path, ort_dylib: &Path) -> Result<Self, RemovalError> {
-        if !model.is_file() {
-            return Err(RemovalError::ModelNotFound(model.to_path_buf()));
-        }
-        nicti_haw::ensure_ort_environment(ort_dylib).map_err(ort_err)?;
-        let session = Session::builder()
-            .map_err(ort_err)?
-            .commit_from_file(model)
-            .map_err(ort_err)?;
-        Ok(Self { session })
+        Self::load_on(model, ort_dylib, provider::requested_for(ort_dylib))
+    }
+
+    /// Loads on `requested`, falling back to the CPU if it can't start.
+    pub fn load_on(
+        model: &Path,
+        ort_dylib: &Path,
+        requested: ExecutionProvider,
+    ) -> Result<Self, RemovalError> {
+        let (session, active) = provider::open_session(model, ort_dylib, requested)?;
+        Ok(Self { session, active })
+    }
+
+    /// The execution provider the session is really running on.
+    pub fn active_provider(&self) -> ExecutionProvider {
+        self.active
     }
 }
 

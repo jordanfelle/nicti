@@ -6,10 +6,12 @@
 //! [`crate::job::RemoveJob`] on Pounce's GPU-lane worker thread. A failed load is retried on the
 //! next removal (the user may have fixed the install) rather than cached as a permanent failure.
 
+use nicti_haw::ExecutionProvider;
 use nicti_stalk::models::RemovalModels;
 use nicti_tapetum::heal::RemovalPatch;
 
 use crate::lama::Lama;
+use crate::provider;
 use crate::remove::{RemovalBackend, RemovalEngine, RemovalRequest};
 use crate::sam::MobileSam;
 use crate::RemovalError;
@@ -21,6 +23,8 @@ pub struct LazyBackend {
     models: RemovalModels,
     verify: Option<Verifier>,
     engine: Option<RemovalEngine<MobileSam, Lama>>,
+    /// The provider the loaded sessions run on (CPU until loaded).
+    active: ExecutionProvider,
 }
 
 impl LazyBackend {
@@ -29,6 +33,7 @@ impl LazyBackend {
             models,
             verify: None,
             engine: None,
+            active: ExecutionProvider::Cpu,
         }
     }
 
@@ -47,21 +52,76 @@ impl LazyBackend {
     }
 }
 
+impl LazyBackend {
+    /// Replaces the engine with fresh sessions on `requested`. The old engine is dropped first, so
+    /// a failed load leaves a consistent "nothing loaded, nothing declared" state (the next
+    /// removal loads from scratch) rather than a stale GPU engine, and the new sessions never
+    /// coexist with the old ones in VRAM.
+    fn load_engine(&mut self, requested: ExecutionProvider) -> Result<(), RemovalError> {
+        self.engine = None;
+        self.active = ExecutionProvider::Cpu;
+        provider::declare(ExecutionProvider::Cpu);
+        let models = &self.models;
+        let mut sam = MobileSam::load_on(
+            &models.sam_encoder,
+            &models.sam_decoder,
+            &models.ort_dylib,
+            requested,
+        )?;
+        let mut lama = Lama::load_on(&models.lama, &models.ort_dylib, requested)?;
+        if sam.active_provider() != lama.active_provider() {
+            // One fell back to the CPU on its own (a model that won't load on the GPU provider):
+            // run the pair on the CPU so the retry guard and the VRAM claim describe reality.
+            drop((sam, lama));
+            sam = MobileSam::load_on(
+                &models.sam_encoder,
+                &models.sam_decoder,
+                &models.ort_dylib,
+                ExecutionProvider::Cpu,
+            )?;
+            lama = Lama::load_on(&models.lama, &models.ort_dylib, ExecutionProvider::Cpu)?;
+        }
+        self.active = sam.active_provider();
+        provider::declare(self.active);
+        self.engine = Some(RemovalEngine::new(sam, lama));
+        Ok(())
+    }
+}
+
+impl Drop for LazyBackend {
+    fn drop(&mut self) {
+        // The sessions go with the backend; so does their claim on the VRAM budget.
+        if self.active != ExecutionProvider::Cpu {
+            provider::declare(ExecutionProvider::Cpu);
+        }
+    }
+}
+
 impl RemovalBackend for LazyBackend {
     fn remove(&mut self, req: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
         if self.engine.is_none() {
             if let Some(verify) = &self.verify {
                 verify().map_err(RemovalError::Integrity)?;
             }
-            let sam = MobileSam::load(
-                &self.models.sam_encoder,
-                &self.models.sam_decoder,
-                &self.models.ort_dylib,
-            )?;
-            let lama = Lama::load(&self.models.lama, &self.models.ort_dylib)?;
-            self.engine = Some(RemovalEngine::new(sam, lama));
+            let requested = provider::requested_for(&self.models.ort_dylib);
+            self.load_engine(requested)?;
         }
-        self.engine.as_mut().expect("just loaded").remove(req)
+        match self.engine.as_mut().expect("just loaded").remove(req) {
+            // Any `Ort` error counts, not only GPU ones (the variant carries no origin): a
+            // deterministic model/input bug costs one wasted CPU retry and returns the CPU's error.
+            // The GPU provider registered but can't run (cuDNN missing from the pack, out of VRAM
+            // beside the renderer, a driver reset): redo this removal -- and every later one -- on
+            // the CPU rather than failing it.
+            Err(RemovalError::Ort(e)) if self.active != ExecutionProvider::Cpu => {
+                eprintln!(
+                    "nicti-groom: removal failed on {:?} ({e}); using the CPU",
+                    self.active
+                );
+                self.load_engine(ExecutionProvider::Cpu)?;
+                self.engine.as_mut().expect("just loaded").remove(req)
+            }
+            other => other,
+        }
     }
 }
 
