@@ -249,6 +249,7 @@ impl Cache {
     /// False while the cached roots may predate a change we know about (an invalidate or busy
     /// edge whose re-read hasn't landed, or any read in flight). Anything that acts on a root's
     /// *path* should wait for this -- a just-moved root still shows its old location until then.
+    /// Only the catalog read counts; the drive probe is deliberately not considered.
     pub fn settled(&self) -> bool {
         !self.catalog.stale && self.catalog.job.is_none()
     }

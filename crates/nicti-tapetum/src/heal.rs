@@ -359,7 +359,7 @@ impl HealKernel {
         frame: &FrameTexture,
         spots: &[Spot],
         removals: &RemovalSet,
-        jacobi_budget: u32,
+        mut jacobi_budget: u32,
     ) {
         enum Op<'a> {
             Classic(&'a Spot, SpotGeometry),
@@ -405,7 +405,6 @@ impl HealKernel {
             ),
         };
 
-        let mut jacobi_budget = jacobi_budget;
         for op in ops {
             match op {
                 Op::Classic(spot, g) => self.encode_classic(
