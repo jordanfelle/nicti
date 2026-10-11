@@ -68,7 +68,7 @@ jobs:
   # should just skip cleanly instead.
   check-release-key:
     name: check production minisign key
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       ready: ${{ steps.check.outputs.ready }}
     steps:
