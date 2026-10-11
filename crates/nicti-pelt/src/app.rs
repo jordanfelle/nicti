@@ -2800,8 +2800,8 @@ impl PeltApp {
                 // Develop stuck showing the stale pre-reingest decode (caught by CodeRabbit).
                 let current_asset = store.get_asset(asset_id).ok().flatten();
                 let current_identity = current_asset.as_ref().map(asset_cache_key);
-                let already_loaded = current_identity
-                    .is_some_and(|identity| self.loupe_loaded_asset == Some((asset_id, identity)));
+                let already_loaded =
+                    loaded_revision_matches(self.loupe_loaded_asset, asset_id, current_identity);
 
                 if !already_loaded {
                     // Adversarial review caught a real data-loss path here: `develop` is one
@@ -2852,8 +2852,32 @@ impl PeltApp {
                 }
                 self.paint_loupe_viewport(ui);
             }
-            None => self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id),
+            None => {
+                if self.develop_holds_current_revision(store.as_ref(), asset_id) {
+                    self.paint_loupe_viewport(ui);
+                } else {
+                    self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id);
+                }
+            }
         }
+    }
+
+    /// Whether `develop` already holds the full-res frame of `asset_id`'s *current* revision.
+    /// #295: the loupe's frame cache can evict a decode after `develop` loaded it (or a freshly
+    /// reopened session hasn't decoded yet); `current_frame` is then `None` again, but dropping
+    /// to the T0 preview would downgrade a photo whose correct full-res frame is on screen-ready
+    /// in `develop`. Keyed on (id, identity) like the load check, so a re-ingested file whose
+    /// loaded frame is now stale still falls back.
+    fn develop_holds_current_revision(&self, store: &dyn CatalogStore, asset_id: i64) -> bool {
+        if self.develop.is_none() || self.loupe_loaded_asset.map(|(id, _)| id) != Some(asset_id) {
+            return false;
+        }
+        let identity = store
+            .get_asset(asset_id)
+            .ok()
+            .flatten()
+            .map(|asset| asset_cache_key(&asset));
+        loaded_revision_matches(self.loupe_loaded_asset, asset_id, identity)
     }
 
     /// Renders `self.develop`'s currently-loaded frame and paints it at the current zoom mode's
@@ -3228,6 +3252,15 @@ fn check_is_dir(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether what `develop` has loaded (`loaded`) is exactly `asset_id` at `current_identity`.
+fn loaded_revision_matches(
+    loaded: Option<(i64, blake3::Hash)>,
+    asset_id: i64,
+    current_identity: Option<blake3::Hash>,
+) -> bool {
+    current_identity.is_some_and(|identity| loaded == Some((asset_id, identity)))
+}
+
 fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
     nicti_lair::scruff::register_root(store, path)
 }
@@ -3276,6 +3309,24 @@ mod cull_wiring_tests {
         ] {
             assert!(!cull_keys_active(view, true), "{view:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod loaded_revision_tests {
+    use super::loaded_revision_matches;
+
+    #[test]
+    fn only_the_same_asset_at_the_same_identity_counts_as_loaded() {
+        let a = blake3::hash(b"a");
+        let b = blake3::hash(b"b");
+        assert!(loaded_revision_matches(Some((7, a)), 7, Some(a)));
+        // Another photo, a re-ingested (new identity) revision, nothing loaded, or an
+        // asset the catalog can no longer read must all fall back (#295).
+        assert!(!loaded_revision_matches(Some((7, a)), 8, Some(a)));
+        assert!(!loaded_revision_matches(Some((7, a)), 7, Some(b)));
+        assert!(!loaded_revision_matches(None, 7, Some(a)));
+        assert!(!loaded_revision_matches(Some((7, a)), 7, None));
     }
 }
 
