@@ -10,10 +10,15 @@ impl<T: Send + 'static> Pending<T> {
     pub(crate) fn spawn(ctx: &egui::Context, work: impl FnOnce() -> T + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(work());
-            ctx.request_repaint();
-        });
+        // Named so a hung worker (e.g. a drive probe stuck on a dead mount) is identifiable in a
+        // thread dump.
+        std::thread::Builder::new()
+            .name("nicti-pending-worker".into())
+            .spawn(move || {
+                let _ = tx.send(work());
+                ctx.request_repaint();
+            })
+            .expect("failed to spawn pending worker");
         Self(rx)
     }
 
