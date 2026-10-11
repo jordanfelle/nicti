@@ -31,7 +31,7 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
   real file mtimes/hashes (not depended on from `spikes/pawprint` — spikes don't depend on other
   spikes in this repo, only on real `crates/*`).
 
-- **#60 (phase-1 coexistence, landed)**: sidecar sync for NEF/NRW, layer (a) only (+ `nicti:pick`).
+- **#60 (phase-1 coexistence, landed)**: sidecar sync for NEF/NRW (and DNG since #428 ingests it; #372 pins it with tests -- a DNG is never rewritten, ADR-0059), layer (a) only (+ `nicti:pick`).
   Sides compare by canonical `Markers`, not bytes. Read path = ADR-0021 newer-wins using
   `asset_sidecar.catalog_dirty_since_ms` as the catalog's "mtime" (`AMBIGUITY_WINDOW_MS` = 2000);
   write path is stricter: an un-ingested external sidecar edit is *held for review*, never
