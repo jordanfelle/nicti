@@ -74,6 +74,25 @@ Full reasoning/history: `docs/decisions/culling.md`.
   draw embedded previews only (T0, T2 for compare) -- never `DevelopView`. **Unverified**: real
   Windows Recycle Bin run, drawn pixels, real-hardware keypress latency.
 
+- **Culling at 1M photos (#335, measured 2026-10-11, release, Linux x86_64, 1M synthetic assets)**:
+  select-all then mark: `CullState::mark` ~90-115 ms on the UI thread (the 1M-entry `pending` map +
+  id vec; above the < 50 ms budget), the `Done` reply folded in `poll` ~370 ms in one frame (settling
+  1M `pending` entries -- *not* the cache insert/trim, skipping that changed nothing), the worker's
+  `get_meta` over 1M ids 6 s and `set_meta` over 1M rows ~80 s in ONE transaction holding the catalog
+  mutex (even a no-op rewrite costs ~23 us/row; a rating change ~70 us/row: the three rating indexes
+  and `trg_facet_asset_update`, not the statement). `Selection::remap` over a select-all ~190 ms per
+  snapshot change. **Fixed**: the worker reads/writes in 20k-row chunks (`worker.rs` `CHUNK`), so the
+  mutex is held ~3 s at a stretch instead of ~80 s for other catalog users (grid snapshot/thumbnail
+  reads; the marker reads queued on the same writer thread still wait for the whole run, and a
+  non-worker writer can now interleave between chunks) (a mid-way failure records the written part as an
+  undo entry); `remap` returns at once when the id snapshot is unchanged (190 ms -> 0.7 ms). **Not
+  fixed (follow-ups)**: the UI-thread `mark`/`poll` cost of the per-id `pending` map at 1M (needs a
+  range/bulk pending representation), `remap`'s `HashSet` on a real snapshot change, the marker
+  filters' 1.5-2 s sort-index scan, and the ~128 MB undo entry (deliberate, ADR-0032). Harnesses:
+  `nicti-lair/tests/scale.rs::select_all_mark_at_one_million_assets`,
+  `cull/tests.rs::mark_select_all_at_one_million`, `grid/selection.rs::scale::remap_at_one_million_photos`
+  (all `#[ignore]`, run with `--release --ignored --nocapture`).
+
 ## Package contents
 
 - **`spikes/litter`** (#33/ADR-0033's burst/duplicate-grouping research) — EXIF/Nikon-MakerNote

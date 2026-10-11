@@ -39,6 +39,30 @@ impl MetaStore for CatalogMeta {
     }
 }
 
+/// Rows per catalog call. One `set_meta` is one transaction holding the catalog mutex, and at 1M
+/// rows that is ~80 s (#335: the marker indexes and the facet trigger, not the statement) during
+/// which other catalog users (the grid's snapshot and thumbnail reads) stall. Chunking lets them
+/// interleave; the marker reads queued behind it on this same thread still wait for the whole run.
+pub(super) const CHUNK: usize = 20_000;
+
+/// `get_meta` over `ids` a chunk at a time, so the catalog mutex is released in between.
+fn read_chunked(store: &dyn MetaStore, ids: &[i64]) -> Result<HashMap<i64, AssetMeta>, String> {
+    let mut out = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(CHUNK) {
+        out.extend(store.get_meta(chunk)?);
+    }
+    Ok(out)
+}
+
+/// `set_meta` over `items` a chunk at a time. On failure returns how many leading items were
+/// already written (each chunk is its own transaction) alongside the error.
+fn write_chunked(store: &dyn MetaStore, items: &[(i64, AssetMeta)]) -> Result<(), (usize, String)> {
+    for (n, chunk) in items.chunks(CHUNK).enumerate() {
+        store.set_meta(chunk).map_err(|e| (n * CHUNK, e))?;
+    }
+    Ok(())
+}
+
 enum Cmd {
     Apply {
         ids: Vec<i64>,
@@ -198,51 +222,55 @@ fn handle(store: &dyn MetaStore, ring: &mut UndoRing, cmd: Cmd) -> Option<Reply>
 /// Reverses the latest action: writes each photo's *before* markers. `None` with nothing to undo.
 fn undo(store: &dyn MetaStore, ring: &mut UndoRing) -> Option<Reply> {
     let entry = ring.begin_undo()?;
-    Some(match store.set_meta(&entry.before) {
-        Ok(()) => {
-            let changed = entry.before.clone();
-            ring.commit_undo(entry);
-            Reply::Done {
-                ids: vec![],
-                changed,
-                counted: false,
+    Some(
+        match write_chunked(store, &entry.before).map_err(|(_, e)| e) {
+            Ok(()) => {
+                let changed = entry.before.clone();
+                ring.commit_undo(entry);
+                Reply::Done {
+                    ids: vec![],
+                    changed,
+                    counted: false,
+                }
             }
-        }
-        Err(message) => {
-            let ids = entry.before.iter().map(|(id, _)| *id).collect();
-            ring.abort_undo(entry);
-            Reply::Failed {
-                ids,
-                message,
-                counted: false,
+            Err(message) => {
+                let ids = entry.before.iter().map(|(id, _)| *id).collect();
+                ring.abort_undo(entry);
+                Reply::Failed {
+                    ids,
+                    message,
+                    counted: false,
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 /// Re-applies the latest undone action: writes each photo's *after* markers.
 fn redo(store: &dyn MetaStore, ring: &mut UndoRing) -> Option<Reply> {
     let entry = ring.begin_redo()?;
-    Some(match store.set_meta(&entry.after) {
-        Ok(()) => {
-            let changed = entry.after.clone();
-            ring.commit_redo(entry);
-            Reply::Done {
-                ids: vec![],
-                changed,
-                counted: false,
+    Some(
+        match write_chunked(store, &entry.after).map_err(|(_, e)| e) {
+            Ok(()) => {
+                let changed = entry.after.clone();
+                ring.commit_redo(entry);
+                Reply::Done {
+                    ids: vec![],
+                    changed,
+                    counted: false,
+                }
             }
-        }
-        Err(message) => {
-            let ids = entry.after.iter().map(|(id, _)| *id).collect();
-            ring.abort_redo(entry);
-            Reply::Failed {
-                ids,
-                message,
-                counted: false,
+            Err(message) => {
+                let ids = entry.after.iter().map(|(id, _)| *id).collect();
+                ring.abort_redo(entry);
+                Reply::Failed {
+                    ids,
+                    message,
+                    counted: false,
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 /// Reads the targets' current markers, computes the action's effect, writes the photos that
@@ -253,7 +281,7 @@ fn apply(
     ids: &[i64],
     action: CullAction,
 ) -> Result<Vec<(i64, AssetMeta)>, String> {
-    let current = store.get_meta(ids)?;
+    let current = read_chunked(store, ids)?;
     // Photos deleted since the key was pressed have no row; they are simply skipped.
     let before: Vec<(i64, AssetMeta)> = ids
         .iter()
@@ -275,7 +303,23 @@ fn apply(
     if entry.after.is_empty() {
         return Ok(Vec::new());
     }
-    store.set_meta(&entry.after)?;
+    if let Err((written, message)) = write_chunked(store, &entry.after) {
+        // The leading chunks are already on disk: record them so they can still be undone.
+        if written > 0 {
+            entry.before.truncate(written);
+            entry.after.truncate(written);
+            // `truncate` keeps the allocation, and the ring's budget counts only `len`.
+            entry.before.shrink_to_fit();
+            entry.after.shrink_to_fit();
+            ring.push(entry);
+        }
+        let message = if written > 0 {
+            format!("{message} (the first {written} photos were saved; Ctrl+Z reverts them)")
+        } else {
+            message
+        };
+        return Err(message);
+    }
     let changed = entry.after.clone();
     ring.push(entry);
     Ok(changed)

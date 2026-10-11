@@ -33,8 +33,12 @@ struct FakeStore {
     rows: Mutex<HashMap<i64, AssetMeta>>,
     gate: Gate,
     fail_writes: AtomicBool,
+    /// `set_meta` calls still allowed to succeed before every later one fails.
+    writes_left: AtomicUsize,
     fail_reads: AtomicBool,
     reads: AtomicUsize,
+    /// Successful `set_meta` calls.
+    write_calls: AtomicUsize,
     /// Every photo id `set_meta` was asked to write, in order.
     written: Mutex<Vec<i64>>,
 }
@@ -45,8 +49,10 @@ impl FakeStore {
             rows: Mutex::new(ids.into_iter().map(|i| (i, AssetMeta::default())).collect()),
             gate: Gate::open(),
             fail_writes: AtomicBool::new(false),
+            writes_left: AtomicUsize::new(usize::MAX),
             fail_reads: AtomicBool::new(false),
             reads: AtomicUsize::new(0),
+            write_calls: AtomicUsize::new(0),
             written: Mutex::new(Vec::new()),
         })
     }
@@ -76,6 +82,17 @@ impl MetaStore for FakeStore {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err("disk is on fire".into());
         }
+        if self
+            .writes_left
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .unwrap()
+            == 0
+        {
+            return Err("disk is on fire".into());
+        }
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
         let mut rows = self.rows.lock().unwrap();
         self.written
             .lock()
@@ -927,5 +944,95 @@ fn invalidate_forgets_cached_markers_so_a_reused_id_is_re_read() {
         cull.meta(1),
         Some(&stars(1)),
         "the new photo's own markers, not the old ghost"
+    );
+}
+
+#[test]
+fn a_big_mark_is_written_in_chunks() {
+    let n = super::worker::CHUNK as i64 * 2 + 10;
+    let store = FakeStore::with_ids(0..n);
+    let mut cull = state(&store);
+    cull.mark((0..n).collect(), CullAction::SetRating(Some(2)));
+    cull.settle_all();
+    assert_eq!(store.written.lock().unwrap().len(), n as usize);
+    assert_eq!(
+        store.write_calls.load(Ordering::SeqCst),
+        3,
+        "one write per chunk"
+    );
+    assert_eq!(store.reads.load(Ordering::SeqCst), 3, "one read per chunk");
+    assert_eq!(store.row(n - 1), stars(2));
+    cull.undo();
+    cull.barrier();
+    cull.settle_all();
+    assert_eq!(store.row(0), AssetMeta::default());
+    assert_eq!(store.row(n - 1), AssetMeta::default());
+}
+
+#[test]
+fn a_chunked_mark_that_fails_midway_keeps_the_written_part_undoable() {
+    let chunk = super::worker::CHUNK as i64;
+    let n = chunk * 2 + 10;
+    let store = FakeStore::with_ids(0..n);
+    store.writes_left.store(1, Ordering::SeqCst); // the first chunk lands, the second fails
+    let mut cull = state(&store);
+    cull.mark((0..n).collect(), CullAction::SetRating(Some(2)));
+    cull.settle_all();
+    let error = cull.last_error().unwrap();
+    assert!(
+        error.contains(&format!("first {chunk} photos were saved")),
+        "{error}"
+    );
+    assert_eq!(store.row(0), stars(2));
+    assert_eq!(store.row(chunk - 1), stars(2));
+    assert_eq!(store.row(chunk), AssetMeta::default());
+
+    store.writes_left.store(usize::MAX, Ordering::SeqCst);
+    cull.undo();
+    cull.barrier();
+    cull.settle_all();
+    assert_eq!(
+        store.row(0),
+        AssetMeta::default(),
+        "the written part undoes"
+    );
+    assert_eq!(store.row(chunk - 1), AssetMeta::default());
+}
+
+/// #335 scale check: the UI-thread cost of `CullState::mark` over a select-all of 1M photos (the
+/// `pending` map, the id vec handed to the worker) and of folding the 1M-row `Done` reply back in.
+/// Run by hand: `cargo test -p nicti-pelt --release mark_select_all_at_one_million -- --ignored --nocapture`.
+#[test]
+#[ignore = "1M-photo timing; run manually with --ignored --nocapture"]
+fn mark_select_all_at_one_million() {
+    const N: i64 = 1_000_000;
+    let store = FakeStore::with_ids(0..N);
+    let mut cull = CullState::new(store.clone(), || {});
+    let ids: Vec<i64> = (0..N).collect();
+
+    let start = Instant::now();
+    cull.mark(ids, CullAction::SetRating(Some(3)));
+    println!("mark() on the UI thread, 1M ids: {:.2?}", start.elapsed());
+
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(120);
+    loop {
+        let t = Instant::now();
+        cull.poll();
+        let took = t.elapsed();
+        if took > Duration::from_millis(1) {
+            println!("poll() frame cost: {took:.2?}");
+        }
+        if cull.pending.is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "worker never settled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    println!(
+        "mark -> settled: {:.2?}; cache {} entries (cap {})",
+        start.elapsed(),
+        cull.cache.len(),
+        super::CACHE_CAP
     );
 }

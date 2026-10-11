@@ -121,7 +121,7 @@ impl Selection {
     /// *photos* selected: an import adding assets, or a new sort, moves indices under it.
     /// Photos the new snapshot no longer contains drop out. O(old + new), only on a snapshot change.
     pub fn remap(&mut self, old_ids: &[i64], new_ids: &[i64]) {
-        if self.ranges.is_empty() && self.anchor.is_none() {
+        if (self.ranges.is_empty() && self.anchor.is_none()) || old_ids == new_ids {
             return;
         }
         let selected: HashSet<i64> = self
@@ -248,9 +248,50 @@ mod tests {
     }
 
     #[test]
+    fn remap_against_an_unchanged_snapshot_changes_nothing() {
+        let mut s = sel(&[0..2, 5..6]);
+        s.set_anchor(Some(5));
+        let before = s.clone();
+        s.remap(&[1, 2, 3, 4, 5, 6], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(s, before);
+    }
+
+    #[test]
     fn remap_with_nothing_selected_is_free_and_leaves_it_empty() {
         let mut s = Selection::default();
         s.remap(&[1, 2], &[3, 4]);
         assert!(s.is_empty() && s.anchor.is_none());
+    }
+}
+
+/// #335 scale check: `remap` over a select-all of 1M photos, as an import's live snapshot reload
+/// does. Run by hand: `cargo test -p nicti-pelt --release remap_at_one_million -- --ignored --nocapture`.
+#[cfg(test)]
+mod scale {
+    use super::*;
+
+    #[test]
+    #[ignore = "1M-photo timing; run manually with --ignored --nocapture"]
+    fn remap_at_one_million_photos() {
+        const N: usize = 1_000_000;
+        let old: Vec<i64> = (0..N as i64).collect();
+        // The new snapshot has 1% more photos interleaved, as a mid-import reload would.
+        let new: Vec<i64> = (0..N as i64 + N as i64 / 100)
+            .map(|i| {
+                if i % 100 == 99 {
+                    N as i64 + i / 100
+                } else {
+                    i - i / 100
+                }
+            })
+            .collect();
+        let mut s = Selection::default();
+        s.select_all(N);
+        let start = std::time::Instant::now();
+        s.remap(&old, &new);
+        println!("remap, select-all over 1M: {:.2?}", start.elapsed());
+        let start = std::time::Instant::now();
+        s.remap(&new, &new);
+        println!("remap, same snapshot: {:.2?}", start.elapsed());
     }
 }
