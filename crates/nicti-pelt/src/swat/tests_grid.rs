@@ -65,8 +65,14 @@ fn grid_harness(n: usize) -> egui_kittest::Harness<'static, Rig> {
     });
     // The snapshot only says which ids exist. Each cell's "no preview" comes from a thumbnail batch
     // job failing on a Pounce worker thread, which lands whenever that thread gets scheduled, so
-    // wait for the visible cells' failures (a few frames is not enough on a loaded machine).
-    let visible = h.state().session.ids().len().min(15);
+    // wait for the failures of the first thumbnail batch, which holds every visible cell (a few
+    // frames is not enough on a loaded machine).
+    let visible = h
+        .state()
+        .session
+        .ids()
+        .len()
+        .min(crate::grid::layout::BATCH);
     wait_until(
         &mut h,
         "the visible cells' thumbnails to fail",

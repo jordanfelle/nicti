@@ -116,6 +116,9 @@ pub fn build_tree(roots: &[Root], extra_drives: &[String]) -> Vec<DriveNode> {
     nodes
 }
 
+/// Lists the mounted drives; a field of [`Cache`] so tests can swap in a fake.
+type DriveProbe = fn() -> Vec<String>;
+
 /// Drives currently mounted, best effort -- only used so an empty drive can be a drop target.
 pub fn mounted_drives() -> Vec<String> {
     #[cfg(windows)]
@@ -209,7 +212,7 @@ pub struct Cache {
     was_busy: bool,
     catalog: Source<CatalogRead>,
     mounted: Source<Vec<String>>,
-    probe: fn() -> Vec<String>,
+    probe: DriveProbe,
     pub roots: Vec<Root>,
     pub drives: Vec<String>,
     pub open_moves: Vec<RootMove>,
@@ -222,7 +225,7 @@ impl Default for Cache {
 }
 
 impl Cache {
-    fn with_probe(probe: fn() -> Vec<String>) -> Self {
+    fn with_probe(probe: DriveProbe) -> Self {
         Self {
             was_busy: false,
             catalog: Source::default(),
