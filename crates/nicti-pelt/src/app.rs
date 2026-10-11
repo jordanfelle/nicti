@@ -1876,13 +1876,16 @@ impl PeltApp {
         // Re-read on a busy edge or the cache's own cadence -- never per frame.
         // Nothing else repaints an idle window, so wake up when the cache goes stale.
         ui.ctx().request_repaint_after(folder_panel::CACHE_TTL);
-        self.folder_cache.refresh(moving, || {
+        // Both reads run on workers (#332); the panel draws the last result meanwhile.
+        let read_store = store.clone();
+        self.folder_cache.refresh(ui.ctx(), moving, move || {
             (
-                store.list_roots().unwrap_or_default(),
-                store.open_root_moves().unwrap_or_default(),
+                read_store.list_roots().unwrap_or_default(),
+                read_store.open_root_moves().unwrap_or_default(),
             )
         });
         let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
+        let loaded = self.folder_cache.loaded();
         let attention = folder_panel::attention_items(&self.folder_cache.open_moves, move_running);
         let mut out = folder_panel::PanelOutput::default();
         let mut set_archive = None;
@@ -1892,17 +1895,22 @@ impl PeltApp {
             .show(ui, |ui| {
                 ui.heading("Folders");
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    out = folder_panel::show(
-                        ui,
-                        &tree,
-                        &attention,
-                        self.last_move_summary.as_deref(),
-                        moving,
-                        &self.archive_drives,
-                        &mut set_archive,
-                        selected_root,
-                        !moving,
-                    );
+                    if loaded {
+                        out = folder_panel::show(
+                            ui,
+                            &tree,
+                            &attention,
+                            self.last_move_summary.as_deref(),
+                            moving,
+                            &self.archive_drives,
+                            &mut set_archive,
+                            selected_root,
+                            !moving,
+                        );
+                    } else {
+                        // Not "No folders yet": nothing has been read, so nothing is known.
+                        ui.weak("Reading folders\u{2026}");
+                    }
                     let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
                     verify_ui::show(ui, &mut self.verify_ui, &dyn_store, &self.pounce, blocked);
                 });
@@ -1975,6 +1983,7 @@ impl PeltApp {
                 grid.refresh(&self.pounce);
             }
         }
+        let result_ok = result.is_ok();
         self.last_move_summary = Some(match result {
             Ok(_) => match how {
                 carry::Resolution::KeepSource => "Kept the original folder.".to_string(),
@@ -1985,6 +1994,9 @@ impl PeltApp {
             },
             Err(e) => format!("Couldn't settle the interrupted move: {e}"),
         });
+        if result_ok {
+            self.folder_cache.forget_move(move_id);
+        }
         self.folder_cache.invalidate();
     }
 
@@ -2003,6 +2015,13 @@ impl PeltApp {
         ]) {
             self.verify_ui
                 .refuse("Wait for the running import/sync/move/delete/verify to finish first.");
+            return;
+        }
+        if !self.folder_cache.settled() {
+            // A move may just have re-pointed this root; hashing its cached (old) path would
+            // report every file missing.
+            self.verify_ui
+                .refuse("The folder list is refreshing; try again in a moment.");
             return;
         }
         let Some(root) = self.folder_cache.roots.iter().find(|r| r.id == root_id) else {
