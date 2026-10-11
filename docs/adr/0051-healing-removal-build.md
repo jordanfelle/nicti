@@ -66,7 +66,8 @@ no difference; copies did), not confirmed in wgpu's source — but the behaviour
 `heal::` suite was run on the RTX 5080 under both backends. **CI's Windows job runs on `windows-latest`
 (WARP/Dx12), so this class of bug fails the required check rather than reaching users** — and the
 other crates' shaders that read `texture_storage_2d<.., read>` (`detail_blur`, `present_sample`, …)
-have not been audited for it.
+were audited in #355: `detail_blur` (#49) and `present_sample` are now `texture_2d` + `textureLoad`, and no
+read-mode storage texture remains.
 
 `impl_version` is a real value here, so a change to the algorithm invalidates cached bakes. A render
 applies at most `MAX_SPOTS` (256) spots and `MAX_JACOBI_PASSES` (12 000) Jacobi passes in total —

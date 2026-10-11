@@ -68,7 +68,7 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
     Mechanism inferred, not confirmed. **Always run new GPU kernels on the reference machine under
     BOTH backends** (`NICTI_WGPU_BACKEND=vulkan|dx12` with the cross-built `.exe`); `detail_blur`/`live_suffix`/`detail_combine` were converted in #49 (it found
     `stages::tests::full_pipeline_end_to_end...` already failing on the RTX 5080 under Dx12 **on `main`**; whole
-    tapetum suite now passes there on Vulkan and Dx12), but `present_sample` (crop) is still unaudited (#355).
+    tapetum suite now passes there on Vulkan and Dx12), and #355 audited the rest: `present_sample` (crop) was the only other read-mode storage texture, now `texture_2d` + `textureLoad`; no `texture_storage_2d<.., read>` remains in any shader (only `heal.wgsl`'s comment). Dx12 re-run of the crop pass on the RTX 5080 still owed.
   - **Gotcha (#51)**: **Jacobi must not start from the destination** — it needs ~side² sweeps to
     smooth a blemish and we run 50-400, so a blemish over ~half the spot survived (Heal was a
     near no-op). `boundary_mean`+`init_heal` start at source + mean ring offset. GPU-vs-CPU parity
