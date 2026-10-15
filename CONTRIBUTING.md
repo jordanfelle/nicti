@@ -62,7 +62,7 @@ push) mirror the same exclude list, so a clean local commit should mean clean CI
 
 ## Package layout
 
-- `crates/*` — real production crates. See `CLAUDE.md`'s Package map section for what each one is
+- `crates/*` — real production crates. See `.claude/docs/package-map/REFERENCE.md` (the Package map) for what each one is
   and which ticket owns it.
 - `spikes/*` and `bench/whisker` — throwaway research crates backing a specific ADR. **Don't build
   on top of a spike** — it's expected to be deleted once its own ticket promotes the working
