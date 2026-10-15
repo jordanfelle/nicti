@@ -36,7 +36,7 @@ into `requirements`/`research`/`build` children — `docs/adr/` is the design re
 - `spikes/*` — throwaway research spikes backing specific ADRs; not production code, not a base
   to build on. `bench/whisker` is benchmark tooling in the same category.
 
-See `CLAUDE.md`'s Package map section for the full breakdown and which ticket owns each crate.
+See `.claude/docs/package-map/REFERENCE.md` (the Package map) for the full breakdown and which ticket owns each crate.
 
 ## Building
 

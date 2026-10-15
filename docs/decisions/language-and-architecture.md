@@ -36,7 +36,7 @@ Covers the implementation-language decision, v1 platform/camera scope, the non-d
   third-party plugins are directionally WASM (`wasmtime`) for non-hot-path extension points only —
   measured, not assumed, in `crates/nicti-claw/tests/wasm_vs_native.rs` — never for a third-party
   render stage's per-pixel loop, which would need GPU shaders instead. **#20 landed the
-  `nicti-claw` + per-domain crate layout** — see CLAUDE.md's Package map section.
+  `nicti-claw` + per-domain crate layout** — see `.claude/docs/package-map/REFERENCE.md` (the Package map).
 - **AI modules are local-only by default** — `docs/adr/0218-local-only-ai.md`: any `ModelProvider`
   (`crates/nicti-stalk`) performing batch culling or edit-suggestion inference/training must not
   telemetry or call a hosted API by default. Fetching model weights over the network is allowed
