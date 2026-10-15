@@ -95,5 +95,14 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      # Path-scoped .claude/rules files load IN FULL into a Claude Code session on matching edits and
+      # are re-read every turn (jordanfelle/nicti#506). Keep them short indexes, detail in
+      # .claude/docs/<topic>/REFERENCE-full.md.
+      - id: check-reference-size
+        name: Check path-scoped .claude/rules files stay under 12KB
+        entry: scripts/check-reference-size.sh
+        language: system
+        files: ^\.claude/rules/[^/]+/[^/]+\.md$
+
 ci:
   autoupdate_schedule: monthly

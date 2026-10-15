@@ -1,0 +1,93 @@
+<!-- Full text of .claude/rules/develop/REFERENCE.md before it was split into an index. NOT auto-loaded. -->
+
+# Develop (Auto-Tone) — Quick Reference
+
+Full reasoning/history: `docs/decisions/develop.md`.
+
+- **Presets, copy/paste, sync (#52)** — `docs/adr/0052-presets-copy-paste-sync.md`: **Accepted**.
+  Per-stage + absolute: a checked stage replaces the target's entry, a checked stage the source
+  lacks is *removed*, unchecked untouched; crop/heal/masks/camera-profile start unchecked. AI masks re-bake lazily
+  when a photo opens, unless the background pre-bake (#353, `prebake.rs`) has already filed them on disk. No-op targets: no write, no undo entry. Undo is
+  session-local and skips photos edited since. Presets = `<catalog>.develop-presets.json`, no
+  built-ins, dup/empty name refused; an unusable file is copied to `<file>.bad` on first save. **Gotcha:** after a batch touching the loaded photo call
+  `DevelopView::replace_document`, or the per-frame autosave writes the stale doc back.
+  Code: `crates/nicti-pelt/src/knead/` (`mod.rs` pure core, `batch.rs`, `presets.rs`, `ui.rs`),
+  `PeltApp::run_knead_command`, `CatalogStore::get_master_edits`/`put_master_edits`.
+- **Classic auto-tone (#99)** — `docs/adr/0099-classic-auto-tone.md`: **Proposed**, pending #202
+  (reference-machine run — no LRC install and `spikes/retina` can't build in this sandbox).
+  Candidate A (percentile heuristic) vs. candidate B (ridge-regression fit); decision rule
+  (Exposure MAE ≤ 0.15 EV, other sliders MAE ≤ 8 / p95 ≤ 20) fixed before real data exists.
+- **Auto-op graceful degradation (#101)** — `docs/adr/0101-auto-op-graceful-degradation.md`:
+  **Accepted**. `AutoOutcome<T>` = Confident | LowConfidence | NoResult (3 states, no float score).
+  Straighten: low-confidence is skipped + hint. Tone: always applies, low-confidence gets a marker.
+  Never modal; batch = one summary. No-op/unchanged/skipped invocation → no history step, redo kept
+  (general `History` invariant; via `apply_batch`, `control: None`, never coalesces). Build: #311 (signal + UI), #312 (History guard).
+  **#311 landed**: `nicti-tapetum/src/auto.rs` (`AutoOutcome`/`AutoReason`), `autolevel::detect_level_angle`
+  and `perk::estimate` return it; `DevelopView::apply_auto_tone`/`apply_auto_straighten` (`render.rs`) return
+  `AutoApplied` (Unchanged/Skipped write nothing; also the `DecodeIncomplete` guard); hints + the `⚠` Auto marker are
+  `develop_panel::AutoHintUi`. Straighten's single-line fixture yields 1 Hough detection, so `MIN_SUPPORTING_LINES` = 1 and
+  line *disagreement* (> 3°) is the live low-confidence trigger until #273 tunes both. Tone is degenerate at ≥ 50% clipped or ≥ 90% in one bin.
+- **AI auto-tone (#53)** — `docs/adr/0053-ai-auto-tone.md`: **finding is "ridge is enough," not an
+  ML model.** Trained B0 (mean)/B1 (ridge)/M1 (MLP, histogram)/M2 (MLP, histogram+thumbnail) on
+  5,000 real picked/rated keepers from the user's own catalog (no reference-machine deferral — the
+  catalog backup and RAW drives were reachable from this sandbox). B1 beat both MLPs on both the
+  event and temporal splits; M2 (the model using the actual downsampled image tensor) underperformed
+  the trivial mean baseline, likely data-starved at this sample size (3085-dim input, ~3,400 fit
+  rows) rather than a hard ceiling. A v2 build should use the ridge fit, not a neural model.
+- **Primary metric: per-slider value error, not a golden image** — nothing can render PV2012
+  sliders to pixels yet (#46's job), so a rendered-image comparison would just add a second
+  approximation-error source. #46 owns that comparison once it exists.
+- **`spikes/pupil::render`** reuses `spikes/rods`' fixed "camera RGB → XYZ(D50) → linear sRGB →
+  sRGB OETF" color treatment (not ADR-0038's real DCP pipeline) plus as-shot white balance, to
+  reconstruct the default-render proxy LRC's own Auto Settings analyzes.
+- **`input`/`truth` are small independent copies**, not path dependencies on `calico`/`shed` —
+  this repo's spikes stay self-contained (same pattern `spikes/rods` already follows).
+- **The real LRC capture AND the sample-set selection are both deferred to #202** — `ref-10k`
+  isn't reachable from the sandbox this ADR was authored in, so `bench/lrc/auto-tone.ahk` takes
+  its source directory as a CLI arg rather than reading a frozen file list.
+- **#46 shipped Auto with candidate A, provisionally** — `crates/nicti-tapetum/src/perk.rs` ports
+  `pupil::heuristic::estimate` onto `crate::histogram::Histogram` (production code, not a spike),
+  wired to `nicti-pelt`'s Develop panel Auto button. This is a deliberate choice to unblock #46's
+  Auto button on a research ticket with no fixed completion date, not a claim that ADR-0099's
+  decision rule is resolved -- it isn't; #202 still owns picking the final candidate. If #202
+  picks B instead, only `perk::estimate`'s body changes (same `Histogram` in, same
+  `ExposureParams`/`ToneParams` out).
+
+## Package contents
+
+- **`crates/nicti-pelt/src/knead/`** (#52/ADR-0052) — `mod.rs` (`GROUPS` checklist, `StageSet`,
+  `Clipboard`, `plan`), `batch.rs` (`run_batch`, `LastBatch::undo`), `presets.rs` (`PresetStore`),
+  `ui.rs` (`KneadUi`: checklist modal, presets panel, Apply-preset menu, summary/Undo line). Wired
+  in `app.rs` (Ctrl+Shift+C/V/S, Library toolbar, Develop's left `presets_panel`).
+
+- **`spikes/pupil`** (#99/ADR-0099's classic auto-tone research) — `input` (retina dump-linear
+  reader), `render` (default-render color treatment), `histogram` (percentile/mean/clip-fraction
+  lookup), `sliders` (the six PV2012 targets + ranges), `heuristic` (candidate A), `fit`
+  (candidate B: hand-rolled ridge regression), `truth` (LRC ground truth from a `.lrcat`), `eval`
+  (per-slider MAE/p95/bias). See `docs/research/pupil-auto-tone.md` for the module breakdown and
+  the RapidRAW auto-adjust study.
+- **`spikes/purr`** (#53/ADR-0053's AI auto-tone research) — `catalog` (keeper-row query +
+  develop-settings parsing from a `.lrcat`, a small independent copy of `pupil::truth`'s
+  lock/WAL guard), `sample` (deterministic per-folder-capped sampling), `split` (event and
+  temporal train/holdout splits, generic over row type), `features` (embedded-JPEG extraction via
+  `nicti_cornea::embedded`, histogram feature vector, 32x32 thumbnail tensor), `dataset` (manifest/
+  feature-cache scratch-file formats + parallel extraction runner), `sliders` (the eight PV2012
+  targets, extending `pupil::sliders` with Saturation/Vibrance), `baseline` (B0: mean model), `fit`
+  (B1: ridge regression, an 8-slider generalization of `pupil::fit`), `mlp` (M1/M2: a CPU-only
+  `candle` MLP), `eval` (per-slider MAE/p95/bias + the aggregate normalized-MAE metric ADR-0053's
+  decision rule reads). See `docs/research/purr-ai-auto-tone.md` for the full module breakdown.
+- **Persistence (#57)**: Develop's `EditDocument` is now saved to the catalog's master edit row
+  (`DevelopView::is_dirty`/`mark_saved`, `load_real_frame(frame, identity, doc)`). `has_edits` is
+  test-only now. AI Remove spots' recipes persist but their patches don't, so after a reload
+  `heal_tool::rerun_missing_removals` re-runs them from the recipe (#324).
+- **Undo/redo (#324)**: `DevelopDoc` owns a `nicti_pawprint::History` (document + log, fresh per
+  loaded photo or `replace_document`, session-local; the catalog still stores only the document).
+  `set_stage_params`/`reset_stage` write through it: a value equal to the *effective* current one
+  is a no-op (panels write every frame), and writes to one stage within `GESTURE_WINDOW_MS` (600)
+  `compact` into one step (a drag). Multi-stage edits use `stage_edit` + `apply_stage_edits`
+  (`apply_group`, one step; Auto tone). `History::reset` removes a stage as a step. Ctrl+Z /
+  Ctrl+Shift+Z / Ctrl+Y in Develop and the panel's Undo/Redo buttons; `is_dirty` compares to the
+  last saved document, so undoing back to it is clean. Removal fills stay cached for the photo
+  (`prune_removals` only trims unreferenced fills past 32), so undoing a delete is instant; a failed
+  re-run keeps the spot and reports it. Not persisted: the log itself (`edit_history`), so Undo
+  doesn't survive reopening a photo.
