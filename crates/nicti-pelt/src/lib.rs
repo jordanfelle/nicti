@@ -27,6 +27,7 @@ mod folder_panel;
 mod fur;
 mod grid;
 mod heal_tool;
+mod keyword_tag;
 mod knead;
 mod loupe;
 mod lrc_import;

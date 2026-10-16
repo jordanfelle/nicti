@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nicti_lair::scent_sync::{self, SyncOutcome};
-use nicti_lair::{AssetMeta, CatalogStore};
+use nicti_lair::{AssetMeta, CatalogStore, Keyword};
 
 use crate::cull::worker::{CatalogMeta, MetaStore};
 
@@ -155,16 +155,71 @@ impl XmpWriter {
 /// The real `MetaStore`: the catalog, plus sidecar write-back after each successful write.
 pub struct XmpMeta {
     inner: Arc<dyn MetaStore>,
+    /// The catalog keyword writes (`tag_path`/`untag`) go to; the sidecar write-back is the same
+    /// `writer` the marker writes use.
+    store: Store,
     writer: XmpWriter,
 }
 
 impl XmpMeta {
     pub fn new(store: Store, writer: XmpWriter) -> Self {
-        Self::wrapping(Arc::new(CatalogMeta(store)), writer)
+        Self::wrapping(Arc::new(CatalogMeta(store.clone())), store, writer)
     }
 
-    fn wrapping(inner: Arc<dyn MetaStore>, writer: XmpWriter) -> Self {
-        XmpMeta { inner, writer }
+    fn wrapping(inner: Arc<dyn MetaStore>, store: Store, writer: XmpWriter) -> Self {
+        XmpMeta {
+            inner,
+            store,
+            writer,
+        }
+    }
+
+    /// Tags `ids` with the keyword named by `text` (#373), creating it -- and any missing
+    /// ancestors -- on the way. `text` is a `|`-separated path (`Events|Anthrocon`), the same
+    /// separator LRC's `lr:hierarchicalSubject` uses; segments are normalised exactly as the
+    /// sidecar round trip normalises them, so what's typed here compares equal to what's read
+    /// back. Returns the leaf keyword, or `Ok(None)` for blank input. The sidecar write-back is
+    /// queued only after the catalog write succeeded.
+    pub fn tag_path(&self, ids: &[i64], text: &str) -> Result<Option<Keyword>, String> {
+        let path: Vec<String> = text
+            .split('|')
+            .map(scent_sync::norm_segment)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if path.is_empty() || ids.is_empty() {
+            return Ok(None);
+        }
+        let e = |e: nicti_lair::CatalogError| e.to_string();
+        let mut leaf: Option<Keyword> = None;
+        for i in 0..path.len() {
+            let segs: Vec<&str> = path[..=i].iter().map(String::as_str).collect();
+            leaf = Some(match self.store.keyword_by_path(&segs).map_err(e)? {
+                Some(k) => k,
+                None => {
+                    let parent = leaf.as_ref().map(|k| k.id);
+                    let id = self.store.create_keyword(parent, &path[i]).map_err(e)?;
+                    Keyword {
+                        id,
+                        parent_id: parent,
+                        name: path[i].clone(),
+                        path: String::new(),
+                    }
+                }
+            });
+        }
+        let leaf = leaf.expect("path is non-empty");
+        self.store.tag(ids, leaf.id).map_err(e)?;
+        self.writer.queue(ids.to_vec());
+        Ok(Some(leaf))
+    }
+
+    /// Removes `keyword_id` from `ids` (#373) and queues the sidecar write-back.
+    pub fn untag(&self, ids: &[i64], keyword_id: i64) -> Result<(), String> {
+        self.store
+            .untag(ids, keyword_id)
+            .map_err(|e| e.to_string())?;
+        self.writer.queue(ids.to_vec());
+        Ok(())
     }
 }
 
@@ -349,6 +404,58 @@ mod tests {
     }
 
     #[test]
+    fn tagging_a_keyword_path_reaches_the_sidecar_and_untagging_removes_it() {
+        let (_dir, store, id, raw) = fixture();
+        let meta = XmpMeta::new(store.clone(), XmpWriter::spawn(store.clone(), true));
+        let leaf = meta
+            .tag_path(&[id], " Events | Anthrocon ")
+            .unwrap()
+            .expect("a keyword");
+        assert_eq!(leaf.name, "Anthrocon");
+        assert_eq!(
+            store
+                .keywords_for(id)
+                .unwrap()
+                .iter()
+                .map(|k| k.id)
+                .collect::<Vec<_>>(),
+            vec![leaf.id]
+        );
+
+        let xmp = raw.with_extension("xmp");
+        let has = |needle: &'static str| {
+            let xmp = xmp.clone();
+            move || {
+                std::fs::read_to_string(&xmp)
+                    .map(|t| t.contains(needle))
+                    .unwrap_or(false)
+            }
+        };
+        assert!(
+            eventually(has("Events|Anthrocon")),
+            "sidecar never got the hierarchical keyword"
+        );
+
+        meta.untag(&[id], leaf.id).unwrap();
+        assert!(store.keywords_for(id).unwrap().is_empty());
+        assert!(
+            eventually(|| !has("Events|Anthrocon")()),
+            "sidecar kept the removed keyword"
+        );
+        // Tagging again reuses the existing keyword rather than creating a duplicate.
+        let again = meta.tag_path(&[id], "Events|Anthrocon").unwrap().unwrap();
+        assert_eq!(again.id, leaf.id);
+    }
+
+    #[test]
+    fn blank_keyword_text_tags_nothing() {
+        let (_dir, store, id, _raw) = fixture();
+        let meta = XmpMeta::new(store.clone(), XmpWriter::spawn(store.clone(), false));
+        assert!(meta.tag_path(&[id], " | ").unwrap().is_none());
+        assert!(store.list_keywords().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_marker_change_is_written_to_the_sidecar() {
         let (_dir, store, id, raw) = fixture();
         let meta = XmpMeta::new(store.clone(), XmpWriter::spawn(store.clone(), true));
@@ -392,12 +499,20 @@ mod tests {
         }
         let (_dir, store, id, raw) = fixture();
         // Auto-write off so a (wrongly) queued id would leave a visible dirty record.
-        let meta = XmpMeta::wrapping(Arc::new(Failing), XmpWriter::spawn(store.clone(), false));
+        let meta = XmpMeta::wrapping(
+            Arc::new(Failing),
+            store.clone(),
+            XmpWriter::spawn(store.clone(), false),
+        );
         assert!(meta.set_meta(&[(id, rated(1))]).is_err());
         // The writer is asynchronous, so prove "nothing happened" by ordering: a follow-up
         // successful write on a second store goes through the same writer and is awaited; by the
         // time it lands, the failed one (queued first, had it been queued) would have too.
-        let ok = XmpMeta::wrapping(Arc::new(CatalogMeta(store.clone())), meta.writer.clone());
+        let ok = XmpMeta::wrapping(
+            Arc::new(CatalogMeta(store.clone())),
+            store.clone(),
+            meta.writer.clone(),
+        );
         ok.set_meta(&[(id, rated(2))]).unwrap();
         assert!(eventually(|| store.sidecar_state(id).unwrap().is_some()));
         assert!(!raw.with_extension("xmp").exists());
