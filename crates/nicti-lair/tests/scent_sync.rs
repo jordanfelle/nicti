@@ -167,9 +167,6 @@ fn missing_rating_stays_unrated_and_reject_maps_to_minus_one() {
     );
 
     fs::write(sidecar(&f.raw), xmp("xmp:Rating=\"-1\"", "")).unwrap();
-    // Two writes inside one filesystem-timestamp tick (coarse on Windows) share an mtime, and the
-    // import's stat-only precheck then skips the second -- a CI flake, not what this test covers.
-    bump_mtime(&sidecar(&f.raw));
     // Catalog now holds a label the file dropped: both sides changed since the last look, but
     // the catalog was never dirtied, so the file wins.
     import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
@@ -684,4 +681,73 @@ fn ingesting_a_dng_with_an_xmp_pair_imports_its_markers() {
     assert_eq!(m.rating, Some(3));
     assert_eq!(m.label.as_deref(), Some("Red"));
     assert_eq!(m.keywords.len(), 1);
+}
+
+/// #388: a rewrite landing in the same filesystem-timestamp tick as the last import keeps its mtime
+/// (coarse on Windows/FAT); the stat-only precheck must not trust a recently-recorded mtime.
+#[test]
+fn rewrite_in_same_mtime_tick_as_a_recent_import_is_still_picked_up() {
+    let f = fixture();
+    let path = sidecar(&f.raw);
+    fs::write(&path, xmp("xmp:Rating=\"2\"", "")).unwrap();
+    let tick = fs::metadata(&path).unwrap().modified().unwrap();
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+
+    fs::write(&path, xmp("xmp:Rating=\"4\"", "")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(tick)
+        .unwrap();
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    assert_eq!(
+        catalog_markers(&f.catalog, f.asset_id).unwrap().rating,
+        Some(4)
+    );
+}
+
+/// An mtime that has aged past the window is trusted again, so a rescan of an unchanged library
+/// stays a stat, not a read + hash. Times are passed explicitly so a slow CI box can't flip it.
+#[test]
+fn aged_unchanged_sidecar_regains_the_stat_only_path() {
+    let f = fixture();
+    let path = sidecar(&f.raw);
+    fs::write(&path, xmp("xmp:Rating=\"2\"", "")).unwrap();
+    let tick = fs::metadata(&path).unwrap().modified().unwrap();
+    let mtime_ms = i64::try_from(tick.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    let last_seen = |f: &Fixture| {
+        f.catalog
+            .sidecar_state(f.asset_id)
+            .unwrap()
+            .unwrap()
+            .last_seen_mtime_ms
+    };
+
+    // Imported in the same instant the file was written: the mtime is racy, so it isn't recorded.
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, mtime_ms).unwrap();
+    assert_eq!(last_seen(&f), None);
+
+    // A rescan once it has aged records it...
+    let later = mtime_ms + 60_000;
+    assert_eq!(
+        import_sidecar(&f.catalog, f.asset_id, &f.raw, later).unwrap(),
+        SyncOutcome::InSync
+    );
+    assert_eq!(last_seen(&f), Some(mtime_ms));
+
+    // ...and from then on an unchanged mtime short-circuits on the stat alone: different content
+    // under the same mtime is (by design) not looked at.
+    fs::write(&path, xmp("xmp:Rating=\"5\"", "")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(tick)
+        .unwrap();
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, later + 1).unwrap();
+    assert_eq!(
+        catalog_markers(&f.catalog, f.asset_id).unwrap().rating,
+        Some(2)
+    );
 }
