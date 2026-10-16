@@ -303,6 +303,8 @@ fn state_for(path: &Path, prior: Option<SidecarState>) -> SidecarState {
 /// may be rewritten again inside the same filesystem timestamp tick -- coarse on Windows/FAT -- and
 /// that rewrite would keep this exact mtime. Same "racily clean" rule git applies to its index:
 /// leave it unrecorded so the next import re-hashes, and records a trusted mtime once it has aged.
+/// Known limits: it compares the file's clock to nicti's, so a NAS clock more than the window behind
+/// ours can still be trusted too early; and rows recorded before this guard keep their old mtime.
 fn trusted_mtime(mtime_ms: u128, now_ms: i64) -> Option<i64> {
     let mtime = i64::try_from(mtime_ms).ok()?;
     let window = i64::try_from(AMBIGUITY_WINDOW_MS).unwrap_or(i64::MAX);

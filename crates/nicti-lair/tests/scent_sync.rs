@@ -708,32 +708,46 @@ fn rewrite_in_same_mtime_tick_as_a_recent_import_is_still_picked_up() {
 }
 
 /// An mtime that has aged past the window is trusted again, so a rescan of an unchanged library
-/// stays a stat, not a read + hash.
+/// stays a stat, not a read + hash. Times are passed explicitly so a slow CI box can't flip it.
 #[test]
 fn aged_unchanged_sidecar_regains_the_stat_only_path() {
     let f = fixture();
     let path = sidecar(&f.raw);
     fs::write(&path, xmp("xmp:Rating=\"2\"", "")).unwrap();
-    import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
-    assert_eq!(
+    let tick = fs::metadata(&path).unwrap().modified().unwrap();
+    let mtime_ms = i64::try_from(tick.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    let last_seen = |f: &Fixture| {
         f.catalog
             .sidecar_state(f.asset_id)
             .unwrap()
             .unwrap()
-            .last_seen_mtime_ms,
-        None
-    );
+            .last_seen_mtime_ms
+    };
 
-    let later = now_ms() + 60_000;
+    // Imported in the same instant the file was written: the mtime is racy, so it isn't recorded.
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, mtime_ms).unwrap();
+    assert_eq!(last_seen(&f), None);
+
+    // A rescan once it has aged records it...
+    let later = mtime_ms + 60_000;
     assert_eq!(
         import_sidecar(&f.catalog, f.asset_id, &f.raw, later).unwrap(),
         SyncOutcome::InSync
     );
-    assert!(f
-        .catalog
-        .sidecar_state(f.asset_id)
+    assert_eq!(last_seen(&f), Some(mtime_ms));
+
+    // ...and from then on an unchanged mtime short-circuits on the stat alone: different content
+    // under the same mtime is (by design) not looked at.
+    fs::write(&path, xmp("xmp:Rating=\"5\"", "")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
         .unwrap()
-        .unwrap()
-        .last_seen_mtime_ms
-        .is_some());
+        .set_modified(tick)
+        .unwrap();
+    import_sidecar(&f.catalog, f.asset_id, &f.raw, later + 1).unwrap();
+    assert_eq!(
+        catalog_markers(&f.catalog, f.asset_id).unwrap().rating,
+        Some(2)
+    );
 }
