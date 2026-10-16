@@ -44,6 +44,7 @@ use crate::eyeshine::{self, Badge, EyeshineService};
 use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
+use crate::keyword_tag::KeywordUi;
 use crate::knead::batch::run_batch;
 use crate::knead::ui::{Command as KneadCommand, KneadUi, PanelAction};
 use crate::knead::Clipboard;
@@ -218,6 +219,9 @@ pub struct PeltApp {
     /// the catalog failed to open.
     xmp: Option<XmpWriter>,
     xmp_ui: XmpUi,
+    /// Keyword tagging (#373); its writes go through this `XmpMeta` so they reach the sidecar.
+    keyword_meta: Option<XmpMeta>,
+    keyword_ui: KeywordUi,
     /// The Lightroom Classic catalog import panel (#62).
     lrc_ui: LrcImportUi,
     verify_ui: VerifyUi,
@@ -345,6 +349,13 @@ impl PeltApp {
                 ))
             }
             CatalogOpenState::Error(_) => None,
+        };
+        let keyword_meta = match (&catalog, &xmp) {
+            (CatalogOpenState::Open(store), Some(xmp)) => {
+                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                Some(XmpMeta::new(dyn_store, xmp.clone()))
+            }
+            _ => None,
         };
         let cull = match (&catalog, &xmp) {
             (CatalogOpenState::Open(store), Some(xmp)) => {
@@ -483,6 +494,8 @@ impl PeltApp {
             loupe_render_undecodable: None,
             purge_rendered_pending: false,
             purge_error_reported: false,
+            keyword_meta,
+            keyword_ui: KeywordUi::default(),
             xmp,
             xmp_ui: XmpUi::default(),
             lrc_ui: LrcImportUi::default(),
@@ -1792,6 +1805,21 @@ impl PeltApp {
         });
         if let Some(action) = knead_action {
             self.handle_knead_action(action);
+        }
+        if let Some(meta) = &self.keyword_meta {
+            let grid = self.grid.as_ref();
+            let cursor = grid.and_then(GridSession::cursor_id);
+            if self.keyword_ui.show(
+                ui,
+                meta,
+                dyn_store.as_ref(),
+                targets,
+                &|| grid.map(GridSession::target_ids).unwrap_or_default(),
+                cursor,
+            ) {
+                self.filter_bar.invalidate_options();
+                self.filter_bar.invalidate_facets();
+            }
         }
         if select_all {
             if let Some(grid) = self.grid.as_mut() {

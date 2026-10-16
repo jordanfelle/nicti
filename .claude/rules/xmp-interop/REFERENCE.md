@@ -37,6 +37,8 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
   write path is stricter: an un-ingested external sidecar edit is *held for review*, never
   clobbered. ADR-0059 stays Proposed until #187 (Reject/Pick/label mappings unverified).
 
+- **#373 (keyword tagging UI, landed)**: `nicti-pelt`'s `keyword_tag.rs` (Library toolbar row: text box + chips) writes only via `XmpMeta::tag_path`/`untag` (`xmp_sync.rs`), which tag the catalog then queue the sidecar write; `|` in the text is the hierarchy separator, segments go through `scent_sync::norm_segment`. Not verified by eye (no display here).
+
 ## Package contents
 
 - **`crates/nicti-scent`** (#60, promoted from `spikes/scent`) — the pieces below, minus the spike
