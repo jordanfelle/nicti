@@ -43,7 +43,7 @@ impl MetaStore for CatalogMeta {
 /// rows that is ~80 s (#335: the marker indexes and the facet trigger, not the statement) during
 /// which other catalog users (the grid's snapshot and thumbnail reads) stall. Chunking lets them
 /// interleave; the marker reads queued behind it on this same thread still wait for the whole run.
-pub(super) const CHUNK: usize = 20_000;
+pub(crate) const CHUNK: usize = 20_000;
 
 /// `get_meta` over `ids` a chunk at a time, so the catalog mutex is released in between.
 fn read_chunked(store: &dyn MetaStore, ids: &[i64]) -> Result<HashMap<i64, AssetMeta>, String> {

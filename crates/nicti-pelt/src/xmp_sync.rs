@@ -183,7 +183,7 @@ impl XmpMeta {
     pub fn tag_path(&self, ids: &[i64], text: &str) -> Result<Option<Keyword>, String> {
         let path: Vec<String> = text
             .split('|')
-            .map(scent_sync::norm_segment)
+            .map(|seg| scent_sync::norm_segment(&seg.replace(char::is_control, "")))
             .filter(|s| !s.is_empty())
             .collect();
         if path.is_empty() || ids.is_empty() {
@@ -208,7 +208,19 @@ impl XmpMeta {
             });
         }
         let leaf = leaf.expect("path is non-empty");
-        self.store.tag(ids, leaf.id).map_err(e)?;
+        // Chunked like the marker writes (`cull::worker::CHUNK`): one transaction holds the catalog
+        // mutex, which stalls the grid's reads on a huge selection. Queue what landed even if a
+        // later chunk fails, so those sidecars still follow the catalog.
+        let mut result = Ok(());
+        for (n, chunk) in ids.chunks(crate::cull::worker::CHUNK).enumerate() {
+            if let Err(err) = self.store.tag(chunk, leaf.id) {
+                self.writer
+                    .queue(ids[..n * crate::cull::worker::CHUNK].to_vec());
+                result = Err(err);
+                break;
+            }
+        }
+        result.map_err(e)?;
         self.writer.queue(ids.to_vec());
         Ok(Some(leaf))
     }
@@ -445,6 +457,14 @@ mod tests {
         // Tagging again reuses the existing keyword rather than creating a duplicate.
         let again = meta.tag_path(&[id], "Events|Anthrocon").unwrap().unwrap();
         assert_eq!(again.id, leaf.id);
+    }
+
+    #[test]
+    fn control_characters_are_stripped_from_keyword_names() {
+        let (_dir, store, id, _raw) = fixture();
+        let meta = XmpMeta::new(store.clone(), XmpWriter::spawn(store.clone(), false));
+        let kw = meta.tag_path(&[id], "Ev\u{1}ents\n").unwrap().unwrap();
+        assert_eq!(kw.name, "Events");
     }
 
     #[test]

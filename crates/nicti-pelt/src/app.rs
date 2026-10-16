@@ -1807,14 +1807,16 @@ impl PeltApp {
             self.handle_knead_action(action);
         }
         if let Some(meta) = &self.keyword_meta {
-            let (ids, cursor) = self
-                .grid
-                .as_ref()
-                .map_or((Vec::new(), None), |g| (g.target_ids(), g.cursor_id()));
-            if self
-                .keyword_ui
-                .show(ui, meta, dyn_store.as_ref(), &ids, cursor)
-            {
+            let grid = self.grid.as_ref();
+            let cursor = grid.and_then(GridSession::cursor_id);
+            if self.keyword_ui.show(
+                ui,
+                meta,
+                dyn_store.as_ref(),
+                targets,
+                &|| grid.map(GridSession::target_ids).unwrap_or_default(),
+                cursor,
+            ) {
                 self.filter_bar.invalidate_options();
                 self.filter_bar.invalidate_facets();
             }

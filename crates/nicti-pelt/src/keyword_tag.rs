@@ -1,6 +1,6 @@
 //! #373: keyword tagging in the Library toolbar. A text box tags the targeted photos (the grid's
 //! selection, else the cursor photo) with a keyword path (`Events|Anthrocon`, created on demand);
-//! chips list the cursor photo's keywords, each with an `x` that untags it from every target.
+//! chips list the cursor photo's keywords, each with an `x` that untags it from that photo only.
 //! Every write goes through `XmpMeta` so it reaches the sidecar the same way marker edits do.
 
 use nicti_lair::{CatalogStore, Keyword};
@@ -23,7 +23,8 @@ impl KeywordUi {
         ui: &mut egui::Ui,
         meta: &XmpMeta,
         store: &dyn CatalogStore,
-        targets: &[i64],
+        target_count: usize,
+        targets: &dyn Fn() -> Vec<i64>,
         cursor: Option<i64>,
     ) -> bool {
         let mut changed = false;
@@ -43,7 +44,7 @@ impl KeywordUi {
         ui.horizontal_wrapped(|ui| {
             ui.label("Keywords:");
             let edit = ui.add_enabled(
-                !targets.is_empty(),
+                target_count > 0,
                 egui::TextEdit::singleline(&mut self.input)
                     .hint_text("Name or Parent|Child")
                     .desired_width(180.0),
@@ -51,8 +52,8 @@ impl KeywordUi {
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let clicked = ui
                 .add_enabled(
-                    !targets.is_empty() && !self.input.trim().is_empty(),
-                    egui::Button::new(format!("Tag {}", targets.len())),
+                    target_count > 0 && !self.input.trim().is_empty(),
+                    egui::Button::new(format!("Tag {}", target_count)),
                 )
                 .on_hover_text("Add this keyword to the selected photos (or the cursor photo).")
                 .clicked();
@@ -61,7 +62,7 @@ impl KeywordUi {
                 for (kid, label) in kws {
                     if ui
                         .small_button(format!("{label} \u{2715}"))
-                        .on_hover_text("Remove this keyword from the selected photos.")
+                        .on_hover_text("Remove this keyword from the cursor photo.")
                         .clicked()
                     {
                         untag = Some(*kid);
@@ -69,19 +70,19 @@ impl KeywordUi {
                 }
             }
         });
-        if submit && !targets.is_empty() {
-            match meta.tag_path(targets, &self.input) {
-                Ok(_) => {
+        if submit && target_count > 0 {
+            match meta.tag_path(&targets(), &self.input) {
+                Ok(tagged) => {
                     self.input.clear();
                     self.error = None;
                     self.shown = None;
-                    changed = true;
+                    changed = tagged.is_some();
                 }
                 Err(e) => self.error = Some(e),
             }
         }
-        if let Some(id) = untag {
-            match meta.untag(targets, id) {
+        if let (Some(id), Some(photo)) = (untag, cursor) {
+            match meta.untag(&[photo], id) {
                 Ok(()) => {
                     self.error = None;
                     self.shown = None;
