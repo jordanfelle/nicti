@@ -298,9 +298,20 @@ fn state_for(path: &Path, prior: Option<SidecarState>) -> SidecarState {
     s
 }
 
-fn seen(s: &mut SidecarState, l: &Loaded) {
+/// The mtime worth remembering for `import_sidecar`'s stat-only precheck, or `None` when it can't
+/// be trusted. A file touched within `AMBIGUITY_WINDOW_MS` of `now_ms` (or stamped in the future)
+/// may be rewritten again inside the same filesystem timestamp tick -- coarse on Windows/FAT -- and
+/// that rewrite would keep this exact mtime. Same "racily clean" rule git applies to its index:
+/// leave it unrecorded so the next import re-hashes, and records a trusted mtime once it has aged.
+fn trusted_mtime(mtime_ms: u128, now_ms: i64) -> Option<i64> {
+    let mtime = i64::try_from(mtime_ms).ok()?;
+    let window = i64::try_from(AMBIGUITY_WINDOW_MS).unwrap_or(i64::MAX);
+    (now_ms.saturating_sub(mtime) >= window).then_some(mtime)
+}
+
+fn seen(s: &mut SidecarState, l: &Loaded, now_ms: i64) {
     s.last_seen_hash = Some(l.hash.as_bytes().to_vec());
-    s.last_seen_mtime_ms = i64::try_from(l.mtime_ms).ok();
+    s.last_seen_mtime_ms = trusted_mtime(l.mtime_ms, now_ms);
 }
 
 fn hash_is(stored: &Option<Vec<u8>>, h: &blake3::Hash) -> bool {
@@ -346,12 +357,20 @@ pub fn import_sidecar(
     {
         // Unchanged since nicti last looked, and nothing pending: nothing to do.
         if hash_is(&p.last_seen_hash, &loaded.hash) && !p.needs_review {
+            // Content unchanged: if the mtime has since aged out of the racy window, record it so
+            // the next rescan takes the stat-only path again.
+            let mtime = trusted_mtime(loaded.mtime_ms, now_ms);
+            if mtime.is_some() && mtime != p.last_seen_mtime_ms {
+                let mut state = state_for(&path, prior.clone());
+                seen(&mut state, &loaded, now_ms);
+                store.record_sidecar(asset_id, &state)?;
+            }
             return Ok(SyncOutcome::InSync);
         }
     }
     let catalog = catalog_markers(store, asset_id)?;
     let mut state = state_for(&path, prior.clone());
-    seen(&mut state, &loaded);
+    seen(&mut state, &loaded, now_ms);
 
     if catalog == loaded.markers {
         state.catalog_dirty_since_ms = None;
@@ -473,7 +492,7 @@ pub fn resolve_review(
     };
     apply_to_catalog(store, asset_id, &loaded.markers)?;
     let mut state = state_for(&path, store.sidecar_state(asset_id)?);
-    seen(&mut state, &loaded);
+    seen(&mut state, &loaded, now_ms);
     state.catalog_dirty_since_ms = None;
     state.needs_review = false;
     store.record_sidecar(asset_id, &state)?;
@@ -495,7 +514,7 @@ fn write_locked(
 
     if let Some(l) = &loaded {
         if l.markers == catalog {
-            seen(&mut state, l);
+            seen(&mut state, l, now_ms);
             state.catalog_dirty_since_ms = None;
             state.needs_review = false;
             store.record_sidecar(asset_id, &state)?;
@@ -510,7 +529,7 @@ fn write_locked(
             // Changed under us (or already held): never clobber an un-ingested edit.
             state.needs_review = true;
             state.catalog_dirty_since_ms.get_or_insert(now_ms);
-            seen(&mut state, l);
+            seen(&mut state, l, now_ms);
             store.record_sidecar(asset_id, &state)?;
             return Ok(SyncOutcome::NeedsReview);
         }
@@ -533,7 +552,7 @@ fn write_locked(
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|d| i64::try_from(d.as_millis()).ok());
+        .and_then(|d| trusted_mtime(d.as_millis(), now_ms));
     state.catalog_dirty_since_ms = None;
     state.needs_review = false;
     store.record_sidecar(asset_id, &state)?;
