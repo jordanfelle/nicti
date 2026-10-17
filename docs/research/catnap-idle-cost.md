@@ -21,12 +21,13 @@ No product code changed in this pass. Everything measured below used throwaway s
    runner (4 CPU workers, 2 permits) burned 0 ms of CPU in 10 s. The livelock needs a wide pool (#408
    measured 80 ticks/s with 16 workers). Any pool-level test must size the pool explicitly instead of
    inheriting the host's core count.
-3. **The real idle cost in the shipped app is the repaint rate, not Pounce.** Idle Nicti repaints about
-   4.5 times per second, from four independent timers that are out of phase. Attributed directly with
-   egui's `Context::repaint_causes()` (below).
-4. **Idle frame rate is a stable, deterministic signal; idle CPU% is not.** The frame counter read
-   identically across runs (9, 13, 18, 22, 27... frames at 1 s steps, every run). CPU% on the same
-   runs varied by 13 points.
+3. **The idle CPU in the shipped app tracks the repaint rate, not Pounce.** Idle Nicti repaints about
+   4.5 times per second. What triggers those frames is **not yet attributed**: `repaint_causes()`
+   lists request sites, not triggers (see below), so the first follow-up step is to find the real
+   triggers.
+4. **On this runner type, idle frame rate was a stable signal; idle CPU% was not.** The frame counter
+   read identically in the launches inspected (9, 13, 18, 22, 27... frames at 1 s steps), while CPU%
+   on the same runs varied by 13 points. Stability across other runner types or builds is not shown.
 
 ## Method
 
@@ -55,24 +56,41 @@ one launch is about 1 min.
 ## Where the idle CPU goes
 
 Pounce is cleared (rows 3 and 5 above): at idle it costs about 0 on Windows, both with the fix and, at
-4 workers, without it. The sampler is also near zero. The roughly 1.5 busy cores come from rendering
-frames, and the thread count fits: 4 vCPUs gives 5 busy threads of about 3.4 s each. Inference, not
-confirmed: those are WARP's software-rasterizer threads (thread descriptions were empty, so they could
-not be named). Cost per frame is about 0.35 core-seconds (1.6 cores / 4.5 fps) on WARP. On a real GPU
-the same frame rate is cheap in CPU terms but still wakes the GPU and the display path; that was
-**not measured** here (no reference-machine run in this pass).
+4 workers, without it. The sampler is also near zero: `idle_burn` used the real Windows sources
+(`default_vram_source()` = DXGI, `default_load_source()` = PDH), 16 ms / 10 s at the 500 ms tick.
 
-Why 4.5 fps: egui's `repaint_causes()` at idle, the same four on every sampled frame:
+The roughly 1.5 busy cores come from rendering frames, by inference only. The thread count fits (4
+vCPUs gives 5 busy threads of about 3.4 s each) and the likely culprit is WARP's software-rasterizer
+threads, but thread descriptions were empty so the threads could not be named, and no experiment
+changed the frame rate and watched CPU move. Cost per frame, if the inference holds, is about 0.35
+core-seconds (1.6 cores / 4.5 fps) on WARP. On a real GPU the same frame rate is cheap in CPU terms
+but still wakes the GPU and display path; that was **not measured** (no reference-machine run).
 
-| Call site | Period | Why it is there |
-|---|---|---|
-| `nicti-pelt/src/app.rs:411` (telemetry `on_sample` -> `request_repaint`) | 500 ms | live CPU/GPU/VRAM readout in the always-shown activity panel |
-| `nicti-pelt/src/cache_settings.rs:382` (`STATS_REFRESH`) | 1 s | cache stats; drawn inline in the Library side panel, so always live |
-| `nicti-pelt/src/xmp_sync.rs:318` (`REVIEW_REFRESH`) | 2 s | sidecar review count; same panel |
-| `nicti-pelt/src/app.rs:1922` (`folder_panel::CACHE_TTL`) | 2 s | folder cache re-read cadence |
+### What requests repaints at idle (request sites, not triggers)
 
-Each is a separate `request_repaint_after` re-armed every frame, so the frames land out of phase:
-the sum of the rates (2 + 1 + 0.5 + 0.5 = 4/s, plus jitter) is what we see, not the minimum.
+Run 39007820626 logged `ctx.repaint_causes()` once per second; the same four entries appeared on all
+111 sampled frames:
+
+| Call site | Delay requested |
+|---|---|
+| `nicti-pelt/src/app.rs:411` (telemetry `on_sample` -> `request_repaint`) | immediate, from the sampler thread every 500 ms |
+| `nicti-pelt/src/cache_settings.rs:382` (`STATS_REFRESH`) | 1 s |
+| `nicti-pelt/src/xmp_sync.rs:318` (`REVIEW_REFRESH`) | 2 s |
+| `nicti-pelt/src/app.rs:1906` (`folder_panel::CACHE_TTL`) | 2 s |
+
+**This table does not say what drove the 4.5 frames/s.** In egui 0.36 every `request_repaint*` call
+is logged as a cause for the next pass, whether or not it is what triggers it, and the pending delay
+is reset at the start of each pass (`context.rs`, `repaint_delay = Duration::MAX`). So the three timed
+requests re-arm on every frame; while 500 ms telemetry frames keep arriving they probably never fire
+themselves, and summing the periods (2 + 1 + 0.5 + 0.5 = 4/s) is **not** a valid model. The first
+draft of this doc made that error.
+
+Known immediate triggers that do exist: the telemetry callback (about 2/s), and every
+`Pending::spawn` worker finishing (`pending.rs:19`, `ctx.request_repaint()`), which includes the
+folder panel cache (one worker per `CACHE_TTL` expiry per source, `folder_panel.rs:205`) and the
+filter bar's option and facet reads. Together these plausibly account for about 3/s; the remaining
+~1.5/s is unexplained. Attributing it needs a trigger-side measurement (for example logging, per
+frame, which wake source fired), not `repaint_causes()` alone.
 
 Other idle wake sources audited (no spike needed):
 
@@ -88,11 +106,11 @@ Other idle wake sources audited (no spike needed):
 | Option | Verdict | Why |
 |---|---|---|
 | Whole-app idle CPU% gate on hosted Windows | **Reject** | Baseline is 34-47% on WARP and varies 13 points; #407 reverted was indistinguishable. Would need a threshold above the noise that a real regression can only cross on a much wider machine. |
-| Whole-app idle **frame-rate** gate on hosted Windows | **Adopt** | Deterministic (~4.5/s every launch). A repaint loop shows up as an order-of-magnitude jump regardless of runner CPU. Needs a tiny env-gated frame log in the product. Catches the repaint half of the class (not worker burn). |
-| Pool-level idle CPU test, **pool size explicit**, cross-platform | **Adopt** | `idle_cpu.rs` is Linux-only and reads `/proc`. `sysinfo`'s `accumulated_cpu_time()` worked on the Windows runner (`idle_burn`), so the same test can run in `cargo test (windows)`. It must construct 16 workers/8 permits (as #408 did), because the runner's own core count cannot trigger the bug. Mutation proof was done in #408 (80 ticks vs <20). |
-| Wake/iteration counter on `worker_loop`, asserted in a unit test | **Adopt** | No wall clock, no flake: count `worker_loop` iterations that found no job over a fixed idle window and assert a bound derived from `POLL_INTERVAL` x workers. Catches a wake storm on any machine, including a 2-core dev laptop. |
+| Whole-app idle **frame-rate** gate on hosted Windows | **Adopt, advisory first** | Reproducible on this runner type (~4.5/s in the launches inspected). Needs a tiny env-gated frame log in the product. Catches the repaint half of the class only: **it would not have caught #407**, which was a worker burn. Sensitivity is limited: at 0.35 core-s/frame on 4 vCPUs a true repaint loop saturates around 11 fps (about 2.5x baseline, not an order of magnitude), and one added 1 Hz timer is +22%. The budget needs headroom and must be re-derived after the repaint-rate fix. |
+| Pool-level idle CPU test, **pool size explicit**, cross-platform | **Adopt, with a Windows positive control first** | `idle_cpu.rs` is Linux-only and reads `/proc`. `sysinfo`'s `accumulated_cpu_time()` works on the Windows runner (`idle_burn`), so the measurement can be ported. It must construct 16 workers / 8 permits (as #408 did). **Unverified:** that #407 reproduces on Windows at all, at any pool size. This pass's only Windows mutation run used 4 workers / 2 permits and saw nothing, and the mechanism (`WakingPermit::drop` notifying when workers outnumber permits) predicts it should have, so the null is unexplained (a Windows condvar difference, or the revert not taking effect in that build, are both possible). #408's own mutation proof (80 ticks vs <20) is Linux-only. The follow-up must reproduce #407 on Windows at 16/8 before relying on the Windows port. |
+| Wake/iteration counter on `worker_loop`, asserted in a unit test | **Adopt (unproven)** | No wall-clock threshold: count `worker_loop` iterations that found no job over a fixed idle window and assert a bound derived from `POLL_INTERVAL` x workers. It must also build an explicit 16-worker / 8-permit pool, since a host-sized pool did not storm in the Windows run. Not prototyped; whether the counter separates a storm from the baseline at that size is untested. |
 | `Context::repaint_causes()` as an investigation tool and as a test hook | **Adopt (tool); evaluate (test)** | It named all four idle causes in one run, with file:line. Works in a release build with `debug-assertions` on. Whether the headless `swat`/`egui_kittest` harness can drive simulated idle time and read causes is **not verified** here. |
-| `loom` / `shuttle` on the Pounce condvar protocol | **Do not pursue now** | #407 was a liveness/cost bug, not a safety one: nothing deadlocked or raced, and the 200 ms `wait_timeout` means the pool can never hang. Model checkers target deadlocks and races. Also unverified (not prototyped): neither models real time, so a `wait_timeout` protocol is awkward to express. |
+| `loom` / `shuttle` on the Pounce condvar protocol | **Not pursued now (weakly reasoned)** | #407 was a cost bug, not a safety one: nothing deadlocked or raced, and the 200 ms `wait_timeout` means the pool can never hang. Model checkers are built for deadlocks and races. This is a judgment, not a result: not prototyped, and it has not been shown that a cost or liveness property cannot be modelled (the claim that neither tool models real time is from memory, unchecked). |
 | Review checklist / grep rule: `notify*` inside a `Drop` reachable on the no-work path | **Adopt (cheap)** | One CONTRIBUTING line. Would have caught #407 at review. Low value alone, nearly free. |
 | Per-thread CPU sampling (PowerShell) | **Keep as the investigation recipe** | What found #407. Recipe below. Thread names were not recoverable via `GetThreadDescription` on the runner, so name threads by their `std::thread::Builder` names only where a debugger or ETW is available. |
 | WPR/WPA | **Defer** | Heavy; use when per-thread CPU and `repaint_causes()` do not explain it. |
@@ -102,12 +120,16 @@ Other idle wake sources audited (no spike needed):
 
 1. **Per-PR, free, deterministic (do first):** the worker wake counter and the cross-platform,
    explicitly-sized idle CPU test, both in `nicti-pounce`. Add the `notify`-in-`Drop` checklist line.
-2. **Reduce the idle repaint rate (product fix), then gate it:** coalesce the four timers onto one
-   aligned UI heartbeat and repaint on telemetry only when a displayed value changed. Target about 1
-   frame/s idle. Then add the idle frame-rate probe to the **existing** `cargo build (windows, v1
-   target)` job: it already builds `nicti.exe` release, so the probe adds roughly 1 min (settle +
-   one 10 s window), against a ~10 min job. That is a per-PR cost with no new runner. A nightly or
-   scheduled job is not needed: the signal is deterministic.
+2. **Attribute, then reduce, the idle repaint rate (product work), then gate it:** first find what
+   actually triggers the ~4.5 frames/s (telemetry, `Pending` completions, other), then remove or
+   coalesce those wakes, for example repainting on telemetry only when a displayed value changed.
+   Then add the idle frame-rate probe, advisory at first (`continue-on-error`, hard timeout) for a few
+   weeks to learn its variance. It would live in the **existing** `cargo build (windows, v1 target)`
+   job, which already builds `nicti.exe` release: roughly +1 min (settle + one 10 s window). Cost and
+   risk to weigh: that job is a **required check** and has a 12 min entry in `.github/ci-budgets.json`
+   (raise it in the same PR); a GUI launch on WARP can hang or fail to create a window and would then
+   block merges, so it needs its own timeout and must not be promoted to blocking until proven stable.
+   A nightly job is not needed if the frame count proves stable.
 3. **Measure on the reference machine:** idle frame cost on a real GPU, before and after item 2. This
    pass could only measure WARP.
 
@@ -131,16 +153,19 @@ every `request_repaint*` call that drove the frame.
 
 - One runner type (`windows-latest`, 4 vCPU, WARP). No real-GPU or many-core number except the Linux
   dev-host cross-check.
-- Thread identities of the busy GUI threads are inferred, not observed.
+- Thread identities of the busy GUI threads are inferred, not observed, and CPU was never tied to
+  frame rate by experiment (per-thread sums also do not reconcile exactly with the process total).
+- The 4.5 frames/s is not attributed to triggers (see above).
+- #407 was never reproduced on Windows at any pool size; there is no Windows positive control.
 - The mutation proof for the pool-level test is #408's own (80 ticks/s at 16 workers); this pass only
   showed that 4 workers do not reproduce it.
-- Not prototyped: the wake counter, the cross-platform `idle_cpu` port, loom/shuttle, and kittest
-  access to `repaint_causes()`.
+- Not prototyped: the wake counter, the cross-platform `idle_cpu` port (including a Windows 16/8
+  positive control), loom/shuttle, and kittest access to `repaint_causes()`.
 
 ## Follow-ups
 
 Filed as separate issues, each `part of #409`:
 
 - #511: cross-platform, explicitly-sized Pounce idle CPU test, worker wake counter, review checklist line.
-- #512: cut the idle repaint rate (four out-of-phase timers, about 4.5 frames/s).
+- #512: cut the idle repaint rate (about 4.5 frames/s, triggers unattributed).
 - #513: CI idle frame-rate probe in the Windows build job (blocked by #512).
