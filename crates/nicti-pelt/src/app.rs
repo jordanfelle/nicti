@@ -1258,22 +1258,6 @@ impl eframe::App for PeltApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // #409 spike (not for merge): frames per second, to tell a repaint loop from a worker burn.
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static FRAMES: AtomicU64 = AtomicU64::new(0);
-            static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-            let n = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
-            let mut last = LAST.lock().unwrap();
-            let t = last.get_or_insert_with(std::time::Instant::now);
-            if t.elapsed().as_secs() >= 1 {
-                eprintln!(
-                    "SPIKE_FRAMES total={n} causes={:?}",
-                    ui.ctx().repaint_causes()
-                );
-                *last = Some(std::time::Instant::now());
-            }
-        }
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
