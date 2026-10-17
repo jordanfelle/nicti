@@ -643,8 +643,9 @@ mod tests {
         };
         let plain = neutral_key(&EditDocument::default(), id(1));
 
-        // The neutral render taps post-lens, so a lens or denoise change really does change the
-        // pixels a model would see: it must re-key the bake.
+        // The neutral render taps post-lens, so a lens change really does change the pixels a model
+        // sees and must re-key the bake. Denoise is a passthrough today (no typed params), so its
+        // entry here only pins the graph topology: anything upstream of NEUTRAL re-keys it.
         for (stage, params) in [
             (LENS, serde_json::json!({ "remove_ca": true })),
             (DENOISE, serde_json::json!({ "strength": 0.5 })),

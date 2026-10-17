@@ -25,9 +25,12 @@ use nicti_tapetum::mask::engine::AiAlpha;
 
 use crate::t2::{lock_larder_within, SharedLarder};
 
-/// How long a job waits for the Larder lock. Past this (twice, for a fetch) a fetch reports a miss
+/// How long a job waits for the Larder lock. Past this a store is dropped and a fetch (which waits `FETCH_WAIT`) reports a miss
 /// (the caller bakes) and a store is dropped (the next open re-bakes and tries again).
 const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a fetch waits in total: long enough to ride out a short Larder compaction.
+const FETCH_WAIT: Duration = Duration::from_secs(4);
 
 /// The Larder key of a baked alpha.
 pub(crate) fn keyed(asset_id: i64, bake_key: &[u8; 32]) -> LarderKeyed<'_> {
@@ -54,7 +57,7 @@ pub struct AlphaFetchJob {
     asset_id: i64,
     image_key: u64,
     bake_key: blake3::Hash,
-    /// Per-attempt Larder lock wait; a test shortens it.
+    /// Total Larder wait (lock for the read, plus the lock for a forget); a test shortens it.
     wait: Duration,
     done: bool,
     slot: Slot<FetchOutcome>,
@@ -73,7 +76,7 @@ impl AlphaFetchJob {
             asset_id,
             image_key,
             bake_key,
-            wait: LOCK_WAIT,
+            wait: FETCH_WAIT,
             done: false,
             slot: Arc::clone(&slot),
         };
@@ -94,69 +97,39 @@ impl AlphaFetchJob {
         }
     }
 
-    /// One retry when the Larder stayed locked: a compaction holds it for a whole rewrite, and
-    /// giving up after one wait would bake an alpha that is already stored.
+    /// A compaction holds the Larder for a whole rewrite, so a fetch waits longer than a store
+    /// (`FETCH_WAIT`); giving up early would bake an alpha that is already stored.
     fn run(&self) -> Option<Arc<AiAlpha>> {
-        for _ in 0..2 {
-            match fetch_once(&self.larder, self.asset_id, &self.bake_key, self.wait) {
-                Fetched::Busy => {}
-                Fetched::Miss => return None,
-                Fetched::Hit(alpha) => return Some(alpha),
-            }
-        }
-        None
+        fetch_alpha(&self.larder, self.asset_id, &self.bake_key, self.wait)
     }
 }
 
 /// Loads one stored alpha from the Larder, `None` on any miss (absent, unreadable, busy past
-/// `wait`). Shared by [`AlphaFetchJob`] and export (#354), which reads baked alphas on its decode
-/// step and never bakes.
+/// `wait` in total). Shared by [`AlphaFetchJob`] and export (#354), which reads baked alphas on
+/// its decode step and never bakes.
 pub(crate) fn fetch_alpha(
     larder: &SharedLarder,
     asset_id: i64,
     bake_key: &blake3::Hash,
     wait: Duration,
 ) -> Option<Arc<AiAlpha>> {
-    match fetch_once(larder, asset_id, bake_key, wait) {
-        Fetched::Hit(alpha) => Some(alpha),
-        Fetched::Miss | Fetched::Busy => None,
-    }
-}
-
-/// One fetch attempt. `Busy` (the Larder lock was not free within the wait) is told apart from a
-/// real `Miss` so [`AlphaFetchJob`] can retry only the former.
-enum Fetched {
-    Hit(Arc<AiAlpha>),
-    Miss,
-    Busy,
-}
-
-fn fetch_once(
-    larder: &SharedLarder,
-    asset_id: i64,
-    bake_key: &blake3::Hash,
-    wait: Duration,
-) -> Fetched {
+    let deadline = std::time::Instant::now() + wait;
     let key = keyed(asset_id, bake_key.as_bytes());
     let bytes = {
-        let Some(mut guard) = lock_larder_within(larder, wait) else {
-            return Fetched::Busy;
-        };
-        match guard.get_keyed(key).ok().flatten() {
-            Some(bytes) => bytes,
-            None => return Fetched::Miss,
-        }
+        let mut guard = lock_larder_within(larder, wait)?;
+        guard.get_keyed(key).ok().flatten()?
     };
     // Decoded outside the lock.
     let Some(alpha) = AiAlpha::decode(&bytes) else {
         // Intact but unreadable (another build's format): forget it, or it would also make the
-        // re-bake's store skip as "already there".
-        if let Some(mut guard) = lock_larder_within(larder, wait) {
+        // re-bake's store skip as "already there". Bounded by what is left of `wait`.
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if let Some(mut guard) = lock_larder_within(larder, left) {
             let _ = guard.forget_keyed(key);
         }
-        return Fetched::Miss;
+        return None;
     };
-    Fetched::Hit(Arc::new(alpha))
+    Some(Arc::new(alpha))
 }
 
 impl ChunkedJob for AlphaFetchJob {
@@ -381,40 +354,45 @@ mod tests {
     }
 
     #[test]
-    fn a_fetch_retries_once_when_a_compaction_holds_the_lock() {
+    fn a_fetch_waits_out_a_lock_held_past_one_short_wait() {
         let (_dir, l) = larder();
         let key = blake3::hash(b"bake");
         AlphaStoreJob::new(Arc::clone(&l), 3, key, alpha())
             .step()
             .unwrap();
-        let wait = Duration::from_millis(150);
         let (job, slot) = AlphaFetchJob::new(Arc::clone(&l), 3, 7, key);
-        let mut job = job.with_wait(wait);
-        // Held past the first wait, released inside the second.
+        let mut job = job.with_wait(Duration::from_millis(1500));
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let held = Arc::clone(&l);
         let holder = std::thread::spawn(move || {
             let guard = held.lock().unwrap();
-            std::thread::sleep(wait + wait / 2);
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(400));
             drop(guard);
         });
-        std::thread::sleep(Duration::from_millis(20)); // let the holder take the lock first
+        locked_rx.recv().unwrap(); // the lock is definitely held before the fetch starts
         job.step().unwrap();
         holder.join().unwrap();
         let out = slot.lock().unwrap().take().unwrap();
-        assert!(out.alpha.is_some(), "the retry found the stored alpha");
+        assert!(out.alpha.is_some(), "the fetch outlasted the hold");
     }
 
     #[test]
-    fn a_fetch_still_misses_when_the_lock_stays_held_through_the_retry() {
+    fn a_fetch_gives_up_after_its_total_wait_when_the_lock_stays_held() {
         let (_dir, l) = larder();
         let key = blake3::hash(b"bake");
         AlphaStoreJob::new(Arc::clone(&l), 3, key, alpha())
             .step()
             .unwrap();
         let (job, slot) = AlphaFetchJob::new(Arc::clone(&l), 3, 7, key);
-        let mut job = job.with_wait(Duration::from_millis(50));
+        let mut job = job.with_wait(Duration::from_millis(100));
         let _held = l.lock().unwrap();
+        let start = std::time::Instant::now();
         job.step().unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "bounded by the wait"
+        );
         assert!(slot.lock().unwrap().take().unwrap().alpha.is_none());
     }
 
