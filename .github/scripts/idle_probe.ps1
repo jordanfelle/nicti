@@ -21,7 +21,7 @@ $cat = Join-Path $env:RUNNER_TEMP 'idle.catalog.sqlite'
 $runs = 3
 for ($r = 1; $r -le $runs; $r++) {
   $cat = Join-Path $env:RUNNER_TEMP "idle$r.catalog.sqlite"
-  $p = Start-Process -FilePath $exe -ArgumentList "`"$cat`"" -PassThru
+  $p = Start-Process -FilePath $exe -ArgumentList "`"$cat`"" -PassThru -RedirectStandardError "$env:RUNNER_TEMP\err$r.txt"
   Start-Sleep -Seconds 15
   if ($p.HasExited) { Write-Host "run ${r}: EXITED early, code $($p.ExitCode)"; continue }
   for ($w = 1; $w -le 3; $w++) {
@@ -45,6 +45,9 @@ for ($r = 1; $r -le $runs; $r++) {
     $top | Sort-Object Ms -Descending | Select-Object -First 10 | Format-Table | Out-String | Write-Host
   }
   Stop-Process -Id $p.Id -Force
+  Start-Sleep -Seconds 1
+  Write-Host "--- stderr tail run $r"
+  Get-Content "$env:RUNNER_TEMP\err$r.txt" -Tail 45 | Write-Host
   Start-Sleep -Seconds 2
 }
 
