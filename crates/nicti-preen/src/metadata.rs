@@ -126,6 +126,10 @@ pub struct SourceMetadata {
     pub rating: Option<i32>,
     pub label: Option<String>,
     pub keywords: Vec<String>,
+    /// Each keyword as its name path from the root (`["Events", "Anthrocon"]`; a flat keyword is a
+    /// 1-segment path), already canonicalised like the sidecar's. Written as
+    /// `lr:hierarchicalSubject`, the same way `nicti-scent` does for a sidecar.
+    pub keyword_paths: Vec<Vec<String>>,
 }
 
 impl SourceMetadata {
@@ -324,18 +328,39 @@ pub fn build_xmp(spec: &MetadataSpec, source: &SourceMetadata, software: &str) -
             xml_escape(c)
         ));
     }
-    if spec.policy == MetadataPolicy::All && spec.include_keywords && !source.keywords.is_empty() {
+    let keywords_on = spec.policy == MetadataPolicy::All && spec.include_keywords;
+    if keywords_on && !source.keywords.is_empty() {
         body.push_str("   <dc:subject><rdf:Bag>\n");
         for k in &source.keywords {
             body.push_str(&format!("    <rdf:li>{}</rdf:li>\n", xml_escape(k)));
         }
         body.push_str("   </rdf:Bag></dc:subject>\n");
     }
+    let has_paths = keywords_on && source.keyword_paths.iter().any(|p| !p.is_empty());
+    if has_paths {
+        body.push_str("   <lr:hierarchicalSubject><rdf:Bag>\n");
+        for path in source.keyword_paths.iter().filter(|p| !p.is_empty()) {
+            // `|` is the separator and can't be escaped, so a segment's own `|` becomes `/`
+            // (what `scent_sync::norm_segment` already did to the path).
+            let joined = path
+                .iter()
+                .map(|s| s.replace('|', "/"))
+                .collect::<Vec<_>>()
+                .join("|");
+            body.push_str(&format!("    <rdf:li>{}</rdf:li>\n", xml_escape(&joined)));
+        }
+        body.push_str("   </rdf:Bag></lr:hierarchicalSubject>\n");
+    }
     if body.is_empty() {
         return None;
     }
+    let lr_ns = if has_paths {
+        "\n   xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\""
+    } else {
+        ""
+    };
     let xmp = format!(
-        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description rdf:about=\"\"\n   xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n   xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"\n   xmlns:xmpRights=\"http://ns.adobe.com/xap/1.0/rights/\">\n{body}  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>"
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description rdf:about=\"\"\n   xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n   xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"\n   xmlns:xmpRights=\"http://ns.adobe.com/xap/1.0/rights/\"{lr_ns}>\n{body}  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>"
     );
     Some(wrap_xpacket(&xmp))
 }
@@ -656,6 +681,62 @@ mod tests {
             SourceExif::from_path(Path::new("/definitely/not/here.nef")),
             SourceExif::default()
         );
+    }
+
+    #[test]
+    fn xmp_emits_hierarchical_subject_only_with_keywords_on_and_declares_lr() {
+        let all = MetadataSpec {
+            policy: MetadataPolicy::All,
+            include_keywords: true,
+            artist: None,
+            copyright: None,
+        };
+        let src = SourceMetadata {
+            keywords: vec!["Anthrocon 2025".into(), "Fox & Co".into()],
+            keyword_paths: vec![
+                vec!["Events".into(), "Anthrocon 2025".into()],
+                vec!["Fox & Co".into()],
+                vec!["a|b".into(), "c".into()],
+            ],
+            ..SourceMetadata::default()
+        };
+        let xmp = build_xmp(&all, &src, "Nicti").unwrap();
+        assert!(xmp.contains("xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\""));
+        assert!(xmp.contains("<rdf:li>Events|Anthrocon 2025</rdf:li>"));
+        // A flat keyword is a 1-segment path, as the sidecar writes it; `&` is escaped.
+        assert!(xmp.contains("<rdf:li>Fox &amp; Co</rdf:li>"));
+        // A `|` inside a segment can't be escaped, so it becomes `/` rather than a false split.
+        assert!(xmp.contains("<rdf:li>a/b|c</rdf:li>"));
+        assert!(xmp.contains("<lr:hierarchicalSubject>"));
+
+        let off = MetadataSpec {
+            include_keywords: false,
+            ..all.clone()
+        };
+        let no_kw = build_xmp(&off, &src, "Nicti").unwrap();
+        assert!(!no_kw.contains("hierarchicalSubject") && !no_kw.contains("xmlns:lr"));
+        let copyright_only = MetadataSpec {
+            policy: MetadataPolicy::CopyrightOnly,
+            ..all
+        };
+        let min = build_xmp(&copyright_only, &src, "Nicti");
+        assert!(min.is_none_or(|x| !x.contains("hierarchicalSubject")));
+        // No paths -> no empty container and no stray namespace.
+        let flat_only = SourceMetadata {
+            keywords: vec!["cat".into()],
+            ..SourceMetadata::default()
+        };
+        let x = build_xmp(&off_to_all(), &flat_only, "Nicti").unwrap();
+        assert!(!x.contains("hierarchicalSubject") && !x.contains("xmlns:lr"));
+    }
+
+    fn off_to_all() -> MetadataSpec {
+        MetadataSpec {
+            policy: MetadataPolicy::All,
+            include_keywords: true,
+            artist: None,
+            copyright: None,
+        }
     }
 
     #[test]

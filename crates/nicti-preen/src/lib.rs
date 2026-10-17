@@ -220,21 +220,37 @@ pub fn export_frame(
         dpi: spec.dpi,
         software: ctx.software,
     });
-    let xmp = metadata::build_xmp(&spec.metadata, ctx.source, ctx.software);
-    let bytes = exporter.encode(
-        &OutputImage {
-            width: tw,
-            height: th,
-            pixels: &quantized,
-        },
-        &spec.format,
-        &Embed {
-            icc: &icc,
-            dpi: spec.dpi,
-            exif: exif.as_ref(),
-            xmp: xmp.as_deref(),
-        },
-    )?;
+    let encode = |source: &SourceMetadata| {
+        let xmp = metadata::build_xmp(&spec.metadata, source, ctx.software);
+        exporter.encode(
+            &OutputImage {
+                width: tw,
+                height: th,
+                pixels: &quantized,
+            },
+            &spec.format,
+            &Embed {
+                icc: &icc,
+                dpi: spec.dpi,
+                exif: exif.as_ref(),
+                xmp: xmp.as_deref(),
+            },
+        )
+    };
+    let bytes = match encode(ctx.source) {
+        // The hierarchy repeats every keyword as a full path, so a heavily keyworded photo can
+        // now overflow a JPEG's single APP1 segment where the flat list alone fit. Drop the
+        // hierarchy rather than fail a photo that exported before.
+        Err(ExportError::Metadata(metadata::MetadataError::XmpTooLarge(_)))
+            if !ctx.source.keyword_paths.is_empty() =>
+        {
+            encode(&SourceMetadata {
+                keyword_paths: Vec::new(),
+                ..ctx.source.clone()
+            })?
+        }
+        r => r?,
+    };
     Ok(Exported {
         bytes,
         width: tw,
@@ -339,6 +355,38 @@ mod tests {
         let lo = img.get_pixel(0, 2)[0] as i32;
         assert!((hi - 231).abs() <= 3, "{hi}");
         assert!((lo - 63).abs() <= 3, "{lo}");
+    }
+
+    #[test]
+    fn jpeg_export_drops_the_keyword_hierarchy_instead_of_failing_when_it_overflows_app1() {
+        let reg = builtin_registry();
+        let paths: Vec<Vec<String>> = (0..1000)
+            .map(|i| {
+                vec![
+                    "Events".into(),
+                    format!("Keyword number {i:04} with a long name"),
+                ]
+            })
+            .collect();
+        let big = SourceMetadata {
+            keywords: vec!["Flat".into()],
+            keyword_paths: paths,
+            ..SourceMetadata::default()
+        };
+        let mut spec = ExportSpec::default();
+        spec.metadata.include_keywords = true;
+        // Guard against a vacuous pass: the packet really is too big to embed with the paths.
+        assert!(
+            metadata::build_xmp(&spec.metadata, &big, "t")
+                .unwrap()
+                .len()
+                > 65_000,
+            "fixture must overflow APP1"
+        );
+        let out = export_frame(split_frame(8, 8), &ctx(&spec, &big), &reg).unwrap();
+        let xmp = metadata::read_xmp_jpeg(&out.bytes).unwrap().unwrap();
+        assert!(!xmp.contains("hierarchicalSubject"));
+        assert!(xmp.contains("<rdf:li>Flat</rdf:li>"));
     }
 
     #[test]

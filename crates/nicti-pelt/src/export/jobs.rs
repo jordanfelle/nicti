@@ -181,6 +181,8 @@ impl ExportRun {
             meta: SourceMetadata,
         }
         let mut prepared: Vec<Prepared> = Vec::new();
+        // Id -> name for every keyword; read once, and only if a photo in the batch has keywords.
+        let mut keyword_names: Option<HashMap<i64, String>> = None;
         for &id in asset_ids {
             let Some(asset) = env.store.get_asset(id).map_err(catalog_err)? else {
                 warnings.push(format!("Photo {id} is no longer in the catalog."));
@@ -200,13 +202,33 @@ impl ExportRun {
             };
             let source_path = PathBuf::from(root_path).join(&asset.rel_path);
             let source_dir = source_path.parent().map(PathBuf::from).unwrap_or_default();
-            let keywords = env
-                .store
-                .keywords_for(id)
-                .map_err(catalog_err)?
-                .into_iter()
-                .map(|k| k.name)
+            let tagged = env.store.keywords_for(id).map_err(catalog_err)?;
+            let keyword_paths = if tagged.is_empty() {
+                Vec::new()
+            } else {
+                if keyword_names.is_none() {
+                    keyword_names = Some(
+                        env.store
+                            .list_keywords()
+                            .map_err(catalog_err)?
+                            .into_iter()
+                            .map(|k| (k.id, k.name))
+                            .collect(),
+                    );
+                }
+                let names = keyword_names.as_ref().expect("filled above");
+                nicti_lair::scent_sync::name_paths(&tagged, names)
+                    .into_iter()
+                    .collect()
+            };
+            // The flat list is the paths' leaves, as the sidecar writes it (normalised, deduped),
+            // so dc:subject and lr:hierarchicalSubject come from one snapshot and always agree.
+            let mut keywords: Vec<String> = keyword_paths
+                .iter()
+                .filter_map(|p: &Vec<String>| p.last().cloned())
                 .collect();
+            keywords.sort();
+            keywords.dedup();
             // A photo whose saved edits can't be read fails on its own (naming it) instead of
             // aborting the whole batch.
             let edit = match env.store.get_master_edit(id) {
@@ -230,6 +252,7 @@ impl ExportRun {
                     rating: asset.rating.map(|r| r as i32),
                     label: asset.label,
                     keywords,
+                    keyword_paths,
                 },
             });
         }

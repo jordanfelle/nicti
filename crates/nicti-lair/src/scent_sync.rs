@@ -167,6 +167,24 @@ const TEMPLATE: &str = "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc
 xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\"/>\
 </rdf:RDF></x:xmpmeta>\n<?xpacket end=\"w\"?>";
 
+/// The name path of each keyword in `tagged`, canonicalised like the sidecar side
+/// ([`norm_path`]), given `names` (`list_keywords` id -> name). Each keyword's materialised
+/// `path` is a `/`-joined chain of ancestor ids ending at itself.
+pub fn name_paths(tagged: &[Keyword], names: &HashMap<i64, String>) -> BTreeSet<Vec<String>> {
+    tagged
+        .iter()
+        .filter_map(|k| {
+            norm_path(
+                k.path
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .filter_map(|id| names.get(&id).cloned()),
+            )
+        })
+        .collect()
+}
+
 fn keyword_name_paths(
     store: &dyn CatalogStore,
     asset_id: i64,
@@ -180,18 +198,7 @@ fn keyword_name_paths(
         .into_iter()
         .map(|k| (k.id, k.name))
         .collect();
-    Ok(tagged
-        .iter()
-        .filter_map(|k| {
-            norm_path(
-                k.path
-                    .split('/')
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse::<i64>().ok())
-                    .filter_map(|id| names.get(&id).cloned()),
-            )
-        })
-        .collect())
+    Ok(name_paths(&tagged, &names))
 }
 
 /// The catalog's current markers for one asset.
@@ -559,4 +566,34 @@ fn write_locked(
     state.needs_review = false;
     store.record_sidecar(asset_id, &state)?;
     Ok(SyncOutcome::WroteSidecar)
+}
+
+#[cfg(test)]
+mod name_paths_tests {
+    use super::*;
+
+    fn kw(id: i64, path: &str) -> Keyword {
+        Keyword {
+            id,
+            parent_id: None,
+            name: String::new(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn resolves_ancestor_chains_normalises_and_drops_unknown_leaves() {
+        let names: HashMap<i64, String> =
+            [(1, "Events".into()), (2, " A|B ".into()), (3, "Fox".into())]
+                .into_iter()
+                .collect();
+        let got = name_paths(&[kw(2, "/1/2/"), kw(3, "/3/"), kw(9, "/9/")], &names);
+        let want: BTreeSet<Vec<String>> = [
+            vec!["Events".to_string(), "A/B".to_string()],
+            vec!["Fox".to_string()],
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
+    }
 }
