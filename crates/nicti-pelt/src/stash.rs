@@ -25,8 +25,8 @@ use nicti_tapetum::mask::engine::AiAlpha;
 
 use crate::t2::{lock_larder_within, SharedLarder};
 
-/// How long a job waits for the Larder lock. Past this a store is dropped and a fetch (which waits `FETCH_WAIT`) reports a miss
-/// (the caller bakes) and a store is dropped (the next open re-bakes and tries again).
+/// How long a store waits for the Larder lock. Past this it is dropped (the next open re-bakes and
+/// tries again). A fetch waits longer, see [`FETCH_WAIT`].
 const LOCK_WAIT: Duration = Duration::from_secs(2);
 
 /// How long a fetch waits in total: long enough to ride out a short Larder compaction.
