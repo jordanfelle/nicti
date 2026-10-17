@@ -590,7 +590,7 @@ impl RenderJob {
         let rect = inputs.crop_rect;
         let (out_w, out_h, base) = screen_geometry(rect.width, rect.height, inputs.crop_transform);
         // Effects are crop-relative: bound with the unscaled crop transform, not the screen-size one.
-        inputs.bind_effects(&ctx.crop_kernel);
+        inputs.bind_effects(&ctx.crop_kernel, 1.0);
         let sink = match AccumSink::try_new(out_w, out_h) {
             Ok(s) => s,
             Err(why) => {

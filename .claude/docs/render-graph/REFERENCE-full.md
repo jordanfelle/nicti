@@ -43,6 +43,9 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   `RenderInputs::bind_effects` with the UNTILED, UNSCALED transform) so previews/exports/tiles match; CPU reference =
   `effects.rs`, PCG hash pinned by reference vectors. Editing it re-runs only the geometry pass. Gotcha: bind it
   every render (the `CropKernel` is reused across photos; a noop clears the last one).
+  **#421**: grain is averaged over the pixel footprint (`effects::GrainFootprint`, computed in `CropKernel::encode`, 5 uniforms) when a
+  view is smaller than the export; `minify <= 1.001` (export, tiles, 1:1) stays a bit-identical point sample. Develop's canvas scale is
+  `DevelopView::set_canvas_width_px` -> `bind_effects(crop, view_scale)` + `effects::stamp_view_scale` (cache key, geometry-only rerun).
 - **Real RTX 5080 numbers** (GPU-timestamp only): live-suffix 0.375ms p50/0.392ms p95 (screen res),
   1.767ms p50/3.924ms p95 (full res, matches ADR-0016's own comparable figure within a few
   percent). Present/sample (crop): ≤1.611ms p95 even at full res.
@@ -325,4 +328,3 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   solution's `camera_to_working` into `working_space_matrix`); `set_params` re-uploads a table only
   when its fingerprint changed. The choice enters the cache key via `nicti.working_space`'s
   `CameraProfileParams.content_hash`. See the `color` topic.
-

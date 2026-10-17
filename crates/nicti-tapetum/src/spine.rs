@@ -265,12 +265,15 @@ impl RenderInputs {
     /// coordinates, so a screen-size preview or one export tile (whose own output -> source
     /// transform is scaled or offset) sees the same pattern as the whole frame. Call it every
     /// render -- the kernel is reused across photos and a noop `effects` clears the previous one.
-    pub fn bind_effects(&self, crop: &crate::stages::CropKernel) {
+    /// `view_scale` (#421) is how many rendered pixels one screen pixel covers (`1.0` for an export
+    /// or a render shown 1:1 or magnified); the grain is averaged over it.
+    pub fn bind_effects(&self, crop: &crate::stages::CropKernel, view_scale: f32) {
         crop.set_effects(
             &self.effects,
             self.crop_transform,
             self.crop_rect.width,
             self.crop_rect.height,
+            view_scale,
         );
     }
 }

@@ -832,7 +832,7 @@ impl RenderJob {
         let rect = inputs.crop_rect;
         // Once for the whole photo (not per tile): the effects are crop-relative, so every tile
         // samples the same continuous pattern.
-        inputs.bind_effects(&ctx.crop_kernel);
+        inputs.bind_effects(&ctx.crop_kernel, 1.0);
         let out_w = (rect.width.round() as u32).max(1);
         let out_h = (rect.height.round() as u32).max(1);
         let sink = match AccumSink::try_new(out_w, out_h) {
