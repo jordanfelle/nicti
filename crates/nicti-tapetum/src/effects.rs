@@ -25,6 +25,16 @@ pub const VIGNETTE_STOPS: f32 = 2.0;
 pub const GRAIN_GAIN: f32 = 0.3;
 /// The grain brightness ratio is clamped so one hostile value cannot blow a pixel out.
 pub const GRAIN_RATIO_RANGE: (f32, f32) = (0.25, 4.0);
+/// Preview-scale grain (#421): a pixel whose footprint is at most this many export pixels wide is
+/// point sampled, exactly as an export does, so a full-size render (or an export tile) is
+/// bit-identical to the pre-#421 pattern.
+pub const GRAIN_MINIFY_EPS: f32 = 1.001;
+/// Taps per axis for the footprint average (so at most `MAX_TAPS^2` lattice reads per octave).
+pub const GRAIN_MAX_TAPS: u32 = 4;
+/// `1 / integral(phi^2)` for the smoothstep value-noise basis `phi` (integral 0.7429): the ratio of
+/// a wide box average's std (`1/w`) to one point sample's, used to keep the capped tap average from
+/// staying noisier than the true filter.
+pub const GRAIN_BOX_K: f32 = 1.346;
 
 /// The affine mapping a *source* pixel coordinate (the unclamped, texel-centre-at-+0.5 position the
 /// geometry pass samples) to crop-normalized `(u, v)`: the inverse of the crop transform, divided by
@@ -137,36 +147,193 @@ pub fn value_noise(p: (f32, f32), seed: u32) -> f32 {
     let (tx, ty) = (p.0 - fx, p.1 - fy);
     let (wx, wy) = (tx * tx * (3.0 - 2.0 * tx), ty * ty * (3.0 - 2.0 * ty));
     let v00 = lattice(ix, iy, seed);
-    let v10 = lattice(ix + 1, iy, seed);
-    let v01 = lattice(ix, iy + 1, seed);
-    let v11 = lattice(ix + 1, iy + 1, seed);
+    // Wrapping, like the shader's i32: a hostile footprint can put a tap at +-i32::MAX.
+    let (ix1, iy1) = (ix.wrapping_add(1), iy.wrapping_add(1));
+    let v10 = lattice(ix1, iy, seed);
+    let v01 = lattice(ix, iy1, seed);
+    let v11 = lattice(ix1, iy1, seed);
     let top = v00 + (v10 - v00) * wx;
     let bottom = v01 + (v11 - v01) * wx;
     top + (bottom - top) * wy
 }
 
+/// How much lattice area one output pixel covers (#421), so a view smaller than the export (a
+/// screen-size preview, a zoomed-out Develop canvas) shows the export's grain *downsampled* rather
+/// than the same lattice point sampled far above its Nyquist rate (noisier at the same settings).
+///
+/// `cols` are the lattice-position derivatives of one output pixel step in x and y (octave 1);
+/// `minify` is how many export pixels one output pixel spans (1.0 for an export or any full-size
+/// render). At `minify <= GRAIN_MINIFY_EPS` the pattern is point sampled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GrainFootprint {
+    pub minify: f32,
+    pub cols: [(f32, f32); 2],
+}
+
+impl GrainFootprint {
+    /// One lattice sample per pixel: what an export does.
+    pub const fn point() -> Self {
+        Self {
+            minify: 1.0,
+            cols: [(0.0, 0.0); 2],
+        }
+    }
+
+    /// The footprint of an output pixel. `out_to_src` is the geometry pass's output -> source
+    /// transform for this render (scaled for a preview, offset for a tile), `norm` the untiled
+    /// `crop_norm`, and `view_scale` how many output pixels the display squeezes into one screen
+    /// pixel (`>= 1`; 1.0 when the output is shown 1:1 or larger).
+    pub fn new(
+        out_to_src: Affine2D,
+        norm: Affine2D,
+        dims: (f32, f32),
+        grain_size: f32,
+        view_scale: f32,
+    ) -> Self {
+        let m = if view_scale.is_finite() {
+            view_scale.max(1.0)
+        } else {
+            1.0
+        };
+        let minify = (out_to_src.a.hypot(out_to_src.c)).max(out_to_src.b.hypot(out_to_src.d)) * m;
+        if !minify.is_finite() {
+            return Self::point();
+        }
+        let long = dims.0.max(dims.1);
+        let cells = GRAIN_CELLS_FINE + (GRAIN_CELLS_COARSE - GRAIN_CELLS_FINE) * grain_size;
+        let (sx, sy) = (dims.0 / long * cells * m, dims.1 / long * cells * m);
+        // d(u, v) / d(output x, y) = norm_linear * out_to_src_linear.
+        let duv = [
+            (
+                norm.a * out_to_src.a + norm.b * out_to_src.c,
+                norm.c * out_to_src.a + norm.d * out_to_src.c,
+            ),
+            (
+                norm.a * out_to_src.b + norm.b * out_to_src.d,
+                norm.c * out_to_src.b + norm.d * out_to_src.d,
+            ),
+        ];
+        Self {
+            minify,
+            cols: [
+                (duv[0].0 * sx, duv[0].1 * sy),
+                (duv[1].0 * sx, duv[1].1 * sy),
+            ],
+        }
+    }
+
+    /// Taps per axis and the residual gain for an octave whose lattice runs `scale` times denser
+    /// than octave 1.
+    fn taps(&self, scale: f32) -> (u32, f32) {
+        if self.minify <= GRAIN_MINIFY_EPS {
+            return (1, 1.0);
+        }
+        let w = scale
+            * self.cols[0]
+                .0
+                .hypot(self.cols[0].1)
+                .max(self.cols[1].0.hypot(self.cols[1].1));
+        if !w.is_finite() || w <= 0.5 {
+            return (1, 1.0);
+        }
+        let n = ((2.0 * w).ceil() as u32).clamp(1, GRAIN_MAX_TAPS);
+        (n, (GRAIN_BOX_K * n as f32 / w).min(1.0))
+    }
+}
+
+/// The largest display minification the grain filter distinguishes (#421); beyond it the grain is
+/// already averaged to near nothing.
+pub const MAX_VIEW_SCALE: f32 = 64.0;
+
+/// Rounds a display minification to the nearest 0.25 step in `1..=MAX_VIEW_SCALE` (anything else,
+/// or a magnification, is `1.0`; nearest, not up, so the footprint is never overstated) so a window-resize drag re-runs the geometry pass a few times, not on
+/// every pixel of size change.
+pub fn quantize_view_scale(m: f32) -> f32 {
+    if !m.is_finite() || m <= 1.0 {
+        return 1.0;
+    }
+    ((m * 4.0).round() / 4.0).clamp(1.0, MAX_VIEW_SCALE)
+}
+
+/// Stamps the display minification into the *render's* copy of the document (never the stored one)
+/// so it enters the `nicti.effects` node's cache key: a canvas resize re-runs only the geometry
+/// pass, and the same photo at two sizes can't be served each other's grain. A no-op when there is
+/// no active grain or nothing to filter (the key then stays exactly the stored params').
+pub fn stamp_view_scale(doc: &mut nicti_pawprint::EditDocument, view_scale: f32) {
+    let view_scale = quantize_view_scale(view_scale);
+    if view_scale <= 1.0 {
+        return;
+    }
+    let Some(entry) = doc.stages.get_mut(crate::stages::EFFECTS) else {
+        return;
+    };
+    let grain: EffectsParams = crate::coat::parse(&entry.params);
+    if !grain.sanitized().grain_active() {
+        return;
+    }
+    if let serde_json::Value::Object(map) = &mut entry.params {
+        map.insert("view_scale".to_owned(), serde_json::json!(view_scale));
+    }
+}
+
+/// One octave of value noise averaged over the pixel footprint: `n x n` taps on a regular grid
+/// across it (`scale` multiplies the footprint for the denser fine octave).
+fn filtered_noise(p: (f32, f32), seed: u32, fp: &GrainFootprint, scale: f32) -> f32 {
+    let (n, gain) = fp.taps(scale);
+    if n == 1 {
+        return value_noise(p, seed);
+    }
+    let (c0, c1) = (fp.cols[0], fp.cols[1]);
+    let mut sum = 0.0;
+    for j in 0..n {
+        let oy = (j as f32 + 0.5) / n as f32 - 0.5;
+        for i in 0..n {
+            let ox = (i as f32 + 0.5) / n as f32 - 0.5;
+            let q = (
+                p.0 + scale * (c0.0 * ox + c1.0 * oy),
+                p.1 + scale * (c0.1 * ox + c1.1 * oy),
+            );
+            sum += value_noise(q, seed);
+        }
+    }
+    sum / (n * n) as f32 * gain
+}
+
 /// The grain pattern at crop position `uv`: a smooth octave at the chosen cell size mixed with a
-/// finer one by roughness. A function of position and seed only.
-pub fn grain_noise(uv: (f32, f32), dims: (f32, f32), e: &EffectsParams) -> f32 {
+/// finer one by roughness, averaged over `fp` (#421). A function of position, seed and footprint.
+pub fn grain_noise(
+    uv: (f32, f32),
+    dims: (f32, f32),
+    e: &EffectsParams,
+    fp: &GrainFootprint,
+) -> f32 {
     let long = dims.0.max(dims.1);
     let cells = GRAIN_CELLS_FINE + (GRAIN_CELLS_COARSE - GRAIN_CELLS_FINE) * e.grain_size;
     let p = (uv.0 * dims.0 / long * cells, uv.1 * dims.1 / long * cells);
-    let coarse = value_noise(p, e.grain_seed);
-    let fine = value_noise(
+    let coarse = filtered_noise(p, e.grain_seed, fp, 1.0);
+    let fine = filtered_noise(
         (p.0 * 2.1 + 17.3, p.1 * 2.1 + 17.3),
         e.grain_seed ^ 0x68E3_1DA4,
+        fp,
+        2.1,
     );
     coarse + (fine - coarse) * e.grain_roughness
 }
 
 /// Applies grain to one linear working-space pixel: perceptual-luma noise weighted toward
 /// midtones, applied as a brightness ratio so chroma is preserved.
-pub fn apply_grain(rgb: [f32; 3], uv: (f32, f32), dims: (f32, f32), e: &EffectsParams) -> [f32; 3] {
+pub fn apply_grain(
+    rgb: [f32; 3],
+    uv: (f32, f32),
+    dims: (f32, f32),
+    e: &EffectsParams,
+    fp: &GrainFootprint,
+) -> [f32; 3] {
     let g_now = luma(rgb).max(0.0).cbrt().clamp(0.0, 1.0);
     let weight = 4.0 * g_now * (1.0 - g_now) + 0.15;
     let amp = e.grain_amount * GRAIN_GAIN * weight;
     let g_base = g_now.max(1e-3);
-    let g_new = (g_base + amp * grain_noise(uv, dims, e)).max(0.0);
+    let g_new = (g_base + amp * grain_noise(uv, dims, e, fp)).max(0.0);
     let ratio = (g_new / g_base)
         .powf(3.0)
         .clamp(GRAIN_RATIO_RANGE.0, GRAIN_RATIO_RANGE.1);
@@ -179,13 +346,14 @@ pub fn apply_effects(
     uv: (f32, f32),
     dims: (f32, f32),
     e: &EffectsParams,
+    fp: &GrainFootprint,
 ) -> [f32; 3] {
     let mut out = rgb;
     if e.vignette_active() {
         out = apply_vignette(out, uv, dims, e);
     }
     if e.grain_active() {
-        out = apply_grain(out, uv, dims, e);
+        out = apply_grain(out, uv, dims, e, fp);
     }
     out
 }
@@ -206,19 +374,34 @@ mod tests {
     fn a_noop_changes_nothing_exactly() {
         let e = EffectsParams::default();
         let px = [0.2, 0.4, 0.1];
-        assert_eq!(apply_effects(px, (0.01, 0.99), (300.0, 200.0), &e), px);
+        assert_eq!(
+            apply_effects(
+                px,
+                (0.01, 0.99),
+                (300.0, 200.0),
+                &e,
+                &GrainFootprint::point()
+            ),
+            px
+        );
     }
 
     #[test]
     fn the_centre_is_untouched_and_the_corners_darken_for_a_negative_amount() {
         let e = vignette(-0.8);
         let px = [0.3, 0.3, 0.3];
-        let centre = apply_effects(px, (0.5, 0.5), (300.0, 200.0), &e);
+        let centre = apply_effects(px, (0.5, 0.5), (300.0, 200.0), &e, &GrainFootprint::point());
         assert_eq!(centre, px);
-        let corner = apply_effects(px, (0.0, 0.0), (300.0, 200.0), &e);
+        let corner = apply_effects(px, (0.0, 0.0), (300.0, 200.0), &e, &GrainFootprint::point());
         assert!(corner[0] < px[0] * 0.5, "{corner:?}");
         // Positive lightens.
-        let lighter = apply_effects(px, (0.0, 0.0), (300.0, 200.0), &vignette(0.8));
+        let lighter = apply_effects(
+            px,
+            (0.0, 0.0),
+            (300.0, 200.0),
+            &vignette(0.8),
+            &GrainFootprint::point(),
+        );
         assert!(lighter[0] > px[0] * 2.0, "{lighter:?}");
     }
 
@@ -285,18 +468,20 @@ mod tests {
             ..plain
         };
         let bright = [2.0, 2.0, 2.0];
-        let a = apply_effects(bright, corner, dims, &plain)[0] / bright[0];
-        let b = apply_effects(bright, corner, dims, &guarded)[0] / bright[0];
+        let a =
+            apply_effects(bright, corner, dims, &plain, &GrainFootprint::point())[0] / bright[0];
+        let b =
+            apply_effects(bright, corner, dims, &guarded, &GrainFootprint::point())[0] / bright[0];
         assert!(b > a * 1.5, "highlights resist the darkening: {b} vs {a}");
         // Shadows are not protected.
         let dark = [0.01, 0.01, 0.01];
-        let da = apply_effects(dark, corner, dims, &plain)[0] / dark[0];
-        let db = apply_effects(dark, corner, dims, &guarded)[0] / dark[0];
+        let da = apply_effects(dark, corner, dims, &plain, &GrainFootprint::point())[0] / dark[0];
+        let db = apply_effects(dark, corner, dims, &guarded, &GrainFootprint::point())[0] / dark[0];
         assert!((da - db).abs() < 1e-3);
 
         let colour = [0.4, 0.2, 0.1];
         let sat = |p: [f32; 3]| (p[0] - p[2]) / luma(p);
-        let hp = apply_effects(colour, corner, dims, &plain);
+        let hp = apply_effects(colour, corner, dims, &plain, &GrainFootprint::point());
         let cp = apply_effects(
             colour,
             corner,
@@ -305,6 +490,7 @@ mod tests {
                 vignette_style: VignetteStyle::ColorPriority,
                 ..plain
             },
+            &GrainFootprint::point(),
         );
         assert!(sat(cp) > sat(hp) * 1.2, "{} vs {}", sat(cp), sat(hp));
     }
@@ -317,8 +503,20 @@ mod tests {
             ..EffectsParams::default()
         };
         let px = [0.4, 0.4, 0.4];
-        let dark = apply_effects(px, (0.0, 0.0), (300.0, 200.0), &overlay(-1.0));
-        let light = apply_effects(px, (0.0, 0.0), (300.0, 200.0), &overlay(1.0));
+        let dark = apply_effects(
+            px,
+            (0.0, 0.0),
+            (300.0, 200.0),
+            &overlay(-1.0),
+            &GrainFootprint::point(),
+        );
+        let light = apply_effects(
+            px,
+            (0.0, 0.0),
+            (300.0, 200.0),
+            &overlay(1.0),
+            &GrainFootprint::point(),
+        );
         assert!(dark[0] < 0.05 && light[0] > 0.95, "{dark:?} {light:?}");
     }
 
@@ -329,7 +527,9 @@ mod tests {
             ..EffectsParams::default()
         };
         let dims = (600.0, 400.0);
-        let at = |u: f32, v: f32, e: &EffectsParams| grain_noise((u, v), dims, e);
+        let at = |u: f32, v: f32, e: &EffectsParams| {
+            grain_noise((u, v), dims, e, &GrainFootprint::point())
+        };
         assert_eq!(at(0.3, 0.7, &e), at(0.3, 0.7, &e));
         let reseeded = EffectsParams {
             grain_seed: 99,
@@ -366,8 +566,12 @@ mod tests {
             (0..200)
                 .map(|i| {
                     let u = i as f32 / 2000.0;
-                    (grain_noise((u + 0.0005, 0.5), (600.0, 400.0), &e)
-                        - grain_noise((u, 0.5), (600.0, 400.0), &e))
+                    (grain_noise(
+                        (u + 0.0005, 0.5),
+                        (600.0, 400.0),
+                        &e,
+                        &GrainFootprint::point(),
+                    ) - grain_noise((u, 0.5), (600.0, 400.0), &e, &GrainFootprint::point()))
                     .abs()
                 })
                 .sum::<f32>()
@@ -386,12 +590,21 @@ mod tests {
                 .map(|i| {
                     let u = (i % 20) as f32 / 20.0;
                     let v = (i / 20) as f32 / 20.0;
-                    (apply_grain(px, (u, v), (600.0, 400.0), &e)[0] / px[0] - 1.0).abs()
+                    (apply_grain(px, (u, v), (600.0, 400.0), &e, &GrainFootprint::point())[0]
+                        / px[0]
+                        - 1.0)
+                        .abs()
                 })
                 .sum::<f32>()
         };
         assert!(spread([0.18, 0.18, 0.18]) > spread([0.9, 0.9, 0.9]));
-        let tinted = apply_grain([0.4, 0.2, 0.1], (0.3, 0.3), (600.0, 400.0), &e);
+        let tinted = apply_grain(
+            [0.4, 0.2, 0.1],
+            (0.3, 0.3),
+            (600.0, 400.0),
+            &e,
+            &GrainFootprint::point(),
+        );
         let ratios = [tinted[0] / 0.4, tinted[1] / 0.2, tinted[2] / 0.1];
         assert!((ratios[0] - ratios[1]).abs() < 1e-4 && (ratios[1] - ratios[2]).abs() < 1e-4);
     }
@@ -440,5 +653,177 @@ mod tests {
         };
         assert!(crop_norm(singular, 100.0, 100.0).is_none());
         assert!(crop_norm(Affine2D::IDENTITY, 0.0, 100.0).is_none());
+    }
+
+    /// The grain of a `scale`-times-smaller render (output -> source transform scaled by `scale`)
+    /// over a `n x n` window of output pixels, filtered by `GrainFootprint`.
+    fn scaled_grain(e: &EffectsParams, scale: f32, n: usize, filtered: bool) -> Vec<f32> {
+        let (w, h) = (4096.0f32, 2730.0f32);
+        let a = Affine2D {
+            a: scale,
+            d: scale,
+            ..Affine2D::IDENTITY
+        };
+        let norm = crop_norm(Affine2D::IDENTITY, w, h).unwrap();
+        let fp = if filtered {
+            GrainFootprint::new(a, norm, (w, h), e.grain_size, 1.0)
+        } else {
+            GrainFootprint::point()
+        };
+        let mut out = Vec::with_capacity(n * n);
+        for oy in 0..n {
+            for ox in 0..n {
+                let s = a.apply((ox as f32 + 0.5, oy as f32 + 0.5));
+                out.push(grain_noise(norm.apply(s), (w, h), e, &fp));
+            }
+        }
+        out
+    }
+
+    fn std_dev(v: &[f32]) -> f32 {
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / v.len() as f32).sqrt()
+    }
+
+    /// #421: a render `scale` times smaller than the export must show what the export looks like
+    /// shrunk by `scale` -- the std of the export's grain box-averaged `scale x scale`.
+    #[test]
+    fn a_scaled_render_matches_the_downsampled_export() {
+        for (size, roughness) in [(0.0f32, 0.0f32), (0.0, 1.0), (0.5, 0.5), (1.0, 0.5)] {
+            let e = EffectsParams {
+                grain_amount: 1.0,
+                grain_size: size,
+                grain_roughness: roughness,
+                ..EffectsParams::default()
+            };
+            for scale in [2usize, 4, 8, 16] {
+                let n = 48;
+                let full = scaled_grain(&e, 1.0, n * scale, false);
+                let mut down = Vec::with_capacity(n * n);
+                for by in 0..n {
+                    for bx in 0..n {
+                        let mut sum = 0.0;
+                        for y in 0..scale {
+                            for x in 0..scale {
+                                sum += full[(by * scale + y) * n * scale + bx * scale + x];
+                            }
+                        }
+                        down.push(sum / (scale * scale) as f32);
+                    }
+                }
+                let want = std_dev(&down);
+                let got = std_dev(&scaled_grain(&e, scale as f32, n, true));
+                let point = std_dev(&scaled_grain(&e, scale as f32, n, false));
+                let ratio = got / want;
+                eprintln!(
+                    "size {size} rough {roughness} x{scale}: want {want:.4} got {got:.4} ({ratio:.2}) point {point:.4}"
+                );
+                assert!(
+                    (0.88..=1.12).contains(&ratio),
+                    "size {size} rough {roughness} x{scale}: filtered std {got} vs downsampled export {want}"
+                );
+            }
+        }
+    }
+
+    /// #421: at export scale (and for any full-size tile) the footprint changes nothing -- the
+    /// result is bit-identical to a point sample.
+    #[test]
+    fn export_scale_grain_is_a_point_sample() {
+        let e = EffectsParams {
+            grain_amount: 1.0,
+            grain_roughness: 0.6,
+            ..EffectsParams::default()
+        };
+        let dims = (300.0, 200.0);
+        // Dense lattice per pixel (a tiny crop), but 1:1 with the export: still unfiltered.
+        let norm = crop_norm(Affine2D::IDENTITY, dims.0, dims.1).unwrap();
+        let fp = GrainFootprint::new(Affine2D::IDENTITY, norm, dims, 0.0, 1.0);
+        for (u, v) in [(0.1, 0.2), (0.5, 0.5), (0.93, 0.31)] {
+            assert_eq!(
+                grain_noise((u, v), dims, &e, &fp),
+                grain_noise((u, v), dims, &e, &GrainFootprint::point())
+            );
+        }
+        // A view scale below 1 is not a magnification of the grain.
+        let zoomed = GrainFootprint::new(Affine2D::IDENTITY, norm, dims, 0.0, 0.25);
+        assert_eq!(zoomed, fp);
+    }
+
+    #[test]
+    fn a_hostile_footprint_cannot_blow_up_the_tap_count() {
+        let norm = crop_norm(Affine2D::IDENTITY, 100.0, 100.0).unwrap();
+        let wild = Affine2D {
+            a: 1e30,
+            d: 1e30,
+            ..Affine2D::IDENTITY
+        };
+        let fp = GrainFootprint::new(wild, norm, (100.0, 100.0), 0.0, 1.0);
+        let e = EffectsParams {
+            grain_amount: 1.0,
+            ..EffectsParams::default()
+        };
+        assert!(grain_noise((0.5, 0.5), (100.0, 100.0), &e, &fp).is_finite());
+        let nan = GrainFootprint::new(Affine2D::IDENTITY, norm, (100.0, 100.0), 0.0, f32::NAN);
+        assert_eq!(nan.minify, 1.0);
+    }
+
+    #[test]
+    fn the_view_scale_is_quantized_and_enters_the_stamped_document_only_for_active_grain() {
+        assert_eq!(quantize_view_scale(0.5), 1.0);
+        assert_eq!(quantize_view_scale(f32::NAN), 1.0);
+        assert_eq!(quantize_view_scale(1.01), 1.0);
+        assert_eq!(quantize_view_scale(1.13), 1.25);
+        assert_eq!(quantize_view_scale(3.1), 3.0);
+        assert_eq!(quantize_view_scale(1e9), MAX_VIEW_SCALE);
+
+        let mut doc = nicti_pawprint::EditDocument::default();
+        stamp_view_scale(&mut doc, 3.0);
+        assert!(!doc.stages.contains_key(crate::stages::EFFECTS));
+        let entry = |grain: f32| nicti_pawprint::StageEntry {
+            schema_version: 1,
+            params: serde_json::json!({ "grain_amount": grain }),
+        };
+        doc.stages
+            .insert(crate::stages::EFFECTS.to_owned(), entry(0.0));
+        stamp_view_scale(&mut doc, 3.0);
+        assert!(doc.stages[crate::stages::EFFECTS]
+            .params
+            .get("view_scale")
+            .is_none());
+        doc.stages
+            .insert(crate::stages::EFFECTS.to_owned(), entry(0.5));
+        stamp_view_scale(&mut doc, 1.0);
+        assert!(doc.stages[crate::stages::EFFECTS]
+            .params
+            .get("view_scale")
+            .is_none());
+        stamp_view_scale(&mut doc, 3.2);
+        assert_eq!(
+            doc.stages[crate::stages::EFFECTS].params["view_scale"],
+            serde_json::json!(3.25)
+        );
+        // Unknown to the typed params: it changes the cache key, not the parsed effects.
+        let parsed: EffectsParams = crate::coat::parse(&doc.stages[crate::stages::EFFECTS].params);
+        assert_eq!(parsed.grain_amount, 0.5);
+    }
+
+    /// Speculative review finding on #421: a rotated crop's transform columns are unit length only
+    /// up to f32 rounding, so the point-sample gate must sit above that noise.
+    #[test]
+    fn a_rotated_export_transform_stays_under_the_point_sample_gate() {
+        use crate::geometry::{affine_for_crop, CropRect};
+        let rect = CropRect {
+            x: 100.0,
+            y: 50.0,
+            width: 6000.0,
+            height: 4000.0,
+        };
+        for rotation in [0.0f32, 0.3, 7.5, -20.0, 45.0, 89.9, 133.0] {
+            let tf = affine_for_crop(rect, rotation);
+            let norm = crop_norm(tf, rect.width, rect.height).unwrap();
+            let fp = GrainFootprint::new(tf, norm, (rect.width, rect.height), 0.0, 1.0);
+            assert!(fp.minify <= GRAIN_MINIFY_EPS, "{rotation}: {}", fp.minify);
+        }
     }
 }

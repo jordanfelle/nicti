@@ -143,6 +143,10 @@ pub struct DevelopDoc {
     /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
     /// inverse crop transform in the way.
     pub uncropped_preview: bool,
+    /// How many rendered pixels one screen pixel covers when the canvas is painted smaller than the
+    /// render (#421), quantized (`effects::quantize_view_scale`); the grain is averaged over it so
+    /// the canvas looks like the export shrunk, not like the same lattice aliased.
+    view_scale: f32,
     /// When true, `render()` renders with every stage at its default instead of `document`'s own
     /// values -- the before/after toggle.
     pub show_before: bool,
@@ -221,6 +225,27 @@ impl DevelopView {
         self.doc.load_real_frame(frame, identity, doc);
     }
 
+    /// Tells the render how small the canvas is painted (#421): `canvas_px_width` screen pixels for
+    /// a render `frame.extent.width` wide. Returns whether the (quantized) scale changed, i.e.
+    /// whether a re-render is due.
+    pub fn set_canvas_width_px(&mut self, rendered_width: u32, canvas_px_width: f32) -> bool {
+        let m = if canvas_px_width > 0.0 {
+            rendered_width as f32 / canvas_px_width
+        } else {
+            1.0
+        };
+        let q = nicti_tapetum::effects::quantize_view_scale(m);
+        let changed = q != self.doc.view_scale;
+        self.doc.view_scale = q;
+        changed
+    }
+
+    /// The current quantized canvas minification (`1.0` unless the canvas is painted smaller).
+    #[cfg(test)]
+    pub fn view_scale(&self) -> f32 {
+        self.doc.view_scale
+    }
+
     /// Renders the current frame at its native extent, returning the final (post-crop) texture.
     /// See [`DevelopEngine::render`].
     pub fn render(&mut self) -> Arc<FrameTexture> {
@@ -269,6 +294,7 @@ impl DevelopDoc {
             identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
+            view_scale: 1.0,
             show_before: false,
             profile_choices: Vec::new(),
             profiles_for: None,
@@ -827,6 +853,14 @@ impl DevelopEngine {
             d
         };
         spine::stamp_source_identity(&mut doc, dv.identity);
+        // The canvas minification (#421): only meaningful for the cropped, edited view (Before and
+        // the uncropped tools have no effects entry to stamp).
+        let view_scale = if dv.show_before || dv.uncropped_preview {
+            1.0
+        } else {
+            dv.view_scale
+        };
+        nicti_tapetum::effects::stamp_view_scale(&mut doc, view_scale);
         dv.graph
             .apply_document(&doc, &dv.registry)
             .expect("build_registry covers every id build_graph adds");
@@ -857,7 +891,7 @@ impl DevelopEngine {
             1.0,
         );
         self.crop_kernel.set_transform(inputs.crop_transform);
-        inputs.bind_effects(&self.crop_kernel);
+        inputs.bind_effects(&self.crop_kernel, view_scale);
         self.live_kernel.set_params(&self.gpu, &inputs.live);
 
         let decode_exec = DecodeExec {
@@ -1529,6 +1563,80 @@ mod tests {
 
         view.reset_stage(EFFECTS);
         assert_eq!(read_frame(&gpu, &view.render()), base);
+    }
+
+    /// #421: painting the canvas smaller than the render re-runs only the geometry pass, averages the
+    /// grain (a shrunk canvas is calmer than a 1:1 one), and going back to 1:1 restores the exact
+    /// export-scale pixels.
+    #[test]
+    fn a_smaller_canvas_filters_the_grain_and_only_reruns_the_geometry_pass() {
+        use nicti_tapetum::coat::EffectsParams;
+        use nicti_tapetum::frame::read_frame;
+        use nicti_tapetum::stages::EFFECTS;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(
+            Arc::new(synthetic_linear_frame()),
+            blake3::hash(b"grain-scale"),
+            EditDocument::default(),
+        );
+        view.set_stage_params(
+            EFFECTS,
+            &EffectsParams {
+                grain_amount: 1.0,
+                grain_size: 0.0,
+                ..Default::default()
+            },
+        );
+        let w = view.extent.width;
+        let full = read_frame(&gpu, &view.render());
+        assert_eq!(view.view_scale(), 1.0);
+
+        // Painted at a quarter of its width: 4x minification.
+        assert!(view.set_canvas_width_px(w, w as f32 / 4.0));
+        assert_eq!(view.view_scale(), 4.0);
+        let small = read_frame(&gpu, &view.render());
+        let stats = view.engine.renderer.last_stats();
+        assert_eq!(stats.live_dispatches, 0, "{stats:?}");
+        assert_eq!(stats.geometry_dispatches, 1, "{stats:?}");
+        // Same value again: nothing to redo.
+        assert!(!view.set_canvas_width_px(w, w as f32 / 4.0));
+        // Leaving Develop (the Loupe shares this view) resets it: no canvas scale may leak.
+        assert!(view.set_canvas_width_px(1, 0.0));
+        assert_eq!(view.view_scale(), 1.0);
+        assert!(view.set_canvas_width_px(w, w as f32 / 4.0));
+
+        // The filtered grain moves pixels less than the point-sampled one: compare each against
+        // the grain-free render.
+        view.reset_stage(EFFECTS);
+        let plain = read_frame(&gpu, &view.render());
+        let spread = |a: &[[f32; 4]]| {
+            a.iter()
+                .zip(&plain)
+                .map(|(x, p)| (x[0] - p[0]).abs())
+                .sum::<f32>()
+        };
+        assert!(
+            spread(&small) < spread(&full) * 0.7,
+            "{} vs {}",
+            spread(&small),
+            spread(&full)
+        );
+
+        // 1:1 again (or magnified) is exactly the export-scale grain.
+        view.set_stage_params(
+            EFFECTS,
+            &EffectsParams {
+                grain_amount: 1.0,
+                grain_size: 0.0,
+                ..Default::default()
+            },
+        );
+        assert!(view.set_canvas_width_px(w, w as f32 * 2.0));
+        assert_eq!(view.view_scale(), 1.0);
+        assert_eq!(read_frame(&gpu, &view.render()), full);
     }
 
     // --- Local corrections (#49) through the real DevelopView -----------------------------------

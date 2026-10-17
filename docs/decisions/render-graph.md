@@ -218,6 +218,14 @@ every export tile show the same pattern and an Effects edit re-runs only the geo
 approximation of LRC's Effects panel (no LRC to compare against); the PCG hash is pinned by reference
 vectors so the WGSL copy cannot drift silently. `present_sample` is still unaudited on Dx12 (#355).
 
+Amendment (#421, preview-scale grain): the grain is averaged over each pixel's footprint
+(`effects::GrainFootprint`, up to 4x4 taps per octave plus a capped-tap gain) whenever a view is smaller
+than the export, so a screen-size preview or a shrunk Develop canvas looks like the export downsampled
+rather than the same lattice aliased; at export scale (`minify <= 1.001`) it is the unchanged point
+sample. The Develop canvas minification is `DevelopView::set_canvas_width_px` -> `bind_effects(.., view_scale)`
+and is stamped into the render's effects entry (`effects::stamp_view_scale`) so a resize re-runs only
+the geometry pass. See ADR-0380's Amendment.
+
 Full decision: `docs/adr/0432-develop-curves-grading-point-color.md`. Three new live stages (`nicti.point_curve`, `nicti.color_grade`, `nicti.point_color`), each fused into the one live dispatch and skipped when a no-op.
 
 ### 1. Three new live stages, each fused into the one live dispatch

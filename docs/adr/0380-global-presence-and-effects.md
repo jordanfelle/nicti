@@ -89,9 +89,55 @@ every image, so taking them would make every untouched photo import as edited. `
 - `present_sample.wgsl` is still unaudited on the real RTX 5080 under Dx12 (#355); the new code adds
   integer hashing there, so the reference-machine pass for #355 should include it
   (`NICTI_WGPU_BACKEND=vulkan|dx12`).
-- Grain cells are fixed per crop (300..1500 across the long edge), so a screen-size preview samples
-  them at ~1 px and looks noisier than the export's ~5 px cells. The pattern is the same, the look
-  at preview scale is not; a preview-scale grain filter is a follow-up.
+- Grain cells are fixed per crop (300..1500 across the long edge), so a screen-size preview sampled
+  them at ~1 px and looked noisier than the export's ~5 px cells. Fixed by #421, see the Amendment.
 - Not done: Look-profile vignettes (`OverrideLookVignette`), LRC-pixel comparison of the effects, the
   Develop canvas not resizing to the crop (#272: the effects follow the crop region the preview
   samples, so they cover the crop-sized area of an oversized canvas, not the whole canvas).
+
+## Amendment: preview-scale grain (#421)
+
+A view smaller than the export (a screen-size rendered preview, a Develop canvas painted below its
+render size) point-sampled the same lattice at far above its Nyquist rate: the same pattern with the
+export's amplitude, so it looked 2-9x noisier than the export shrunk to that size.
+
+**Decision.** The grain is averaged over each output pixel's footprint in lattice space, and a view is
+meant to show the export *box-downsampled to its size*.
+
+- `effects::GrainFootprint` carries `minify` (export pixels per output pixel: the out -> source
+  transform's larger column norm times the display `view_scale`) and the lattice-position
+  derivatives of one output step in x and y. It is computed on the CPU (`CropKernel::encode`, from
+  the render's own transform, so a tile and a whole frame agree) and uploaded as five uniforms; the
+  shader does no matrix work of its own.
+- **Export is unchanged, bit for bit.** At `minify <= 1.001` (an export, any full-size tile, a 1:1
+  view) the pattern is point sampled exactly as before; there is no filter to drift.
+- Otherwise each octave takes `n x n` taps on a regular grid across the footprint,
+  `n = clamp(ceil(2 * footprint_in_cells), 1, 4)`, weighted equally, so the result is deterministic
+  and tile-exact. Past the tap cap the taps are sparser than the cell size, so the average is scaled
+  by `min(1, 1.346 * n / w)` (`1.346 = 1 / integral(phi^2)` for the smoothstep value-noise basis,
+  `w` = footprint in cells) to track the true box average's std (`~ 1 / w`) instead of staying
+  noisy. The two octaves are filtered separately (the fine one with a 2.1x footprint) and mixed by
+  roughness as before.
+- **Display scale.** The Develop canvas renders at the crop's size and is only shrunk by the display
+  pass's bilinear sample, which the geometry pass cannot see. `DevelopView::set_canvas_width_px`
+  takes the painted width (screen px, last frame's layout; a repaint is requested when it changes),
+  quantizes the ratio to the nearest 0.25 step (`effects::quantize_view_scale`, max 64) and `bind_effects`
+  passes it. It also enters the `nicti.effects` node's cache key through `effects::stamp_view_scale`
+  (a `view_scale` key on the *render's* copy of the document, never the stored one, and only when
+  grain is active), so a resize re-runs only the geometry pass. Export, tiles and rendered previews
+  pass 1.0: rendered previews already carry their scale in the transform.
+- `value_noise` now wraps its lattice index (`wrapping_add`), as the shader's i32 does: a hostile
+  footprint can put a tap at +-i32::MAX.
+
+**Measured (CPU reference, `a_scaled_render_matches_the_downsampled_export`).** A 4096 x 2730 crop,
+grain std of a render shrunk 2/4/8/16x versus the export box-averaged by the same factor, for four
+size/roughness settings: filtered/export std ratio 0.94-1.08 (accepted band 0.88-1.12); the old
+point sampling was 1.1-4.6x too high. Disabling the filter makes the test fail (mutation-checked).
+GPU vs CPU parity is pinned at 2x, 4x (capped taps) and a 3x display scale, and a tiled scaled render
+matches the whole frame (`tile.rs`), both on lavapipe.
+
+**Not done / owed.** The cost is bounded (at most 16 taps x 2 octaves per pixel, only for grain at
+`minify > 1`) but not timed on the RTX 5080; the Dx12/Vulkan reference-machine pass for
+`present_sample.wgsl` (#355) should include the new loop and `bench/knead bench-present` with grain on
+a minified transform. A canvas painted *larger* than its render (zoom in) is a magnification and
+keeps the export's grain. The Loupe/Survey/Compare grids show the baked preview JPEGs, not this pass.

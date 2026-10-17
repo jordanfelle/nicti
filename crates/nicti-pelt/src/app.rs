@@ -121,6 +121,10 @@ pub struct PeltApp {
     auto_hint: crate::develop_panel::AutoHintUi,
     /// The Heal / Remove tool's UI state and its AI-removal service (#51).
     heal_ui: HealUi,
+    /// The Develop canvas's painted size in screen pixels as of last frame (#421): the render is
+    /// laid out after it is made, so the grain's display scale lags one frame (a repaint is
+    /// requested when it changes).
+    develop_canvas_px_width: f32,
     mask_ui: MaskUi,
     pounce: Pounce,
     telemetry: TelemetrySampler,
@@ -447,6 +451,7 @@ impl PeltApp {
             hsl_band_selected: 0,
             auto_hint: Default::default(),
             heal_ui: HealUi::new(),
+            develop_canvas_px_width: 0.0,
             mask_ui: {
                 // The disk tier for baked AI alphas (#353).
                 let mut mask_ui = MaskUi::new();
@@ -1483,7 +1488,14 @@ impl eframe::App for PeltApp {
                 crate::heal_tool::handle_tool_keys(ui, &mut self.heal_ui);
             }
             d.uncropped_preview = self.view == View::Develop && self.heal_ui.shows_uncropped();
+            if self.view != View::Develop {
+                // The Loupe renders this same view at its own scale: no Develop-canvas grain
+                // filtering may leak into it (#421).
+                d.set_canvas_width_px(1, 0.0);
+            }
             if self.view == View::Develop {
+                let (w, _) = d.doc.display_extent();
+                d.set_canvas_width_px(w as u32, self.develop_canvas_px_width);
                 crate::heal_tool::poll(ui, d, &mut self.heal_ui);
                 crate::heal_tool::rerun_missing_removals(d, &mut self.heal_ui, &self.pounce);
                 // Files this photo's baked alphas in the disk tier (#353).
@@ -1563,6 +1575,12 @@ impl eframe::App for PeltApp {
                         area,
                         (frame.extent.width as f32, frame.extent.height as f32),
                     );
+                    // The grain is averaged over how many rendered pixels one screen pixel covers.
+                    let px_width = rect.width() * ui.ctx().pixels_per_point();
+                    if (px_width - self.develop_canvas_px_width).abs() > 0.5 {
+                        self.develop_canvas_px_width = px_width;
+                        ui.ctx().request_repaint();
+                    }
                     let response = ui.interact(rect, ui.id().with("develop_viewport"), sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,

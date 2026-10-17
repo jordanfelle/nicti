@@ -679,6 +679,17 @@ mod tests {
     /// are bound once for the photo, exactly as the export job does.
     #[test]
     fn tiled_render_with_effects_matches_a_whole_frame_render() {
+        tiled_effects_match_whole(1.0);
+    }
+
+    /// #421: the same for a minified render, where the grain is averaged over each pixel's
+    /// footprint: the footprint depends only on the transform's linear part, so tiles still agree.
+    #[test]
+    fn tiled_scaled_render_with_grain_matches_a_whole_frame_render() {
+        tiled_effects_match_whole(2.0);
+    }
+
+    fn tiled_effects_match_whole(shrink: f32) {
         use crate::coat::EffectsParams;
         use crate::geometry::{affine_for_crop, CropRect};
         let Some(gpu) = test_gpu() else { return };
@@ -693,22 +704,31 @@ mod tests {
             width: 36.0,
             height: 28.0,
         };
-        let base = affine_for_crop(rect, 5.0);
+        let unscaled = affine_for_crop(rect, 5.0);
+        // A screen-size render: the output -> source transform grows, the output shrinks.
+        let base = crate::geometry::Affine2D {
+            a: unscaled.a * shrink,
+            b: unscaled.b * shrink,
+            c: unscaled.c * shrink,
+            d: unscaled.d * shrink,
+            ..unscaled
+        };
         let out = Extent {
-            width: 36,
-            height: 28,
+            width: (36.0 / shrink) as u32,
+            height: (28.0 / shrink) as u32,
         };
         let effects = EffectsParams {
             vignette_amount: -0.8,
             vignette_midpoint: 0.3,
             grain_amount: 1.0,
+            grain_size: 1.0,
             grain_seed: 7,
             ..EffectsParams::default()
         };
 
         let whole_kernel = CropKernel::new(&gpu);
         whole_kernel.set_transform(base);
-        whole_kernel.set_effects(&effects, base, rect.width, rect.height);
+        whole_kernel.set_effects(&effects, unscaled, rect.width, rect.height, 1.0);
         let whole_output = FrameTexture::new(&gpu, out);
         let mut encoder = gpu
             .device
@@ -734,7 +754,7 @@ mod tests {
         );
         assert!(tiles.len() > 4, "the test must exercise many tiles");
         let tile_kernel = CropKernel::new(&gpu);
-        tile_kernel.set_effects(&effects, base, rect.width, rect.height);
+        tile_kernel.set_effects(&effects, unscaled, rect.width, rect.height, 1.0);
         let mut renderer = TiledRender::new(
             std::sync::Arc::clone(&gpu),
             &source,
@@ -769,7 +789,7 @@ mod tests {
             .zip(&plain)
             .filter(|(a, b)| (a[0] - b[0]).abs() > 1e-3)
             .count();
-        assert!(moved > 300, "only {moved} pixels changed");
+        assert!(moved > 100, "only {moved} pixels changed");
     }
 
     // No "halo=0 produces visible seams" regression test exists here, unlike

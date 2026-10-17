@@ -1558,7 +1558,13 @@ struct PresentUniforms {
     g_rough: f32,
     g_seed: u32,
     flags: u32,
-    pad: u32,
+    // #421 grain footprint (effects.rs::GrainFootprint): export pixels per output pixel, then the
+    // lattice-position derivatives of one output step in x and y.
+    fp_minify: f32,
+    fp_c0x: f32,
+    fp_c0y: f32,
+    fp_c1x: f32,
+    fp_c1y: f32,
 }
 
 /// What the geometry pass needs to apply the post-crop effects (#380): the params plus the crop it
@@ -1571,6 +1577,8 @@ struct EffectsState {
     norm: Affine2D,
     crop_w: f32,
     crop_h: f32,
+    /// Output pixels the display squeezes into one screen pixel (#421), `>= 1`.
+    view_scale: f32,
 }
 
 pub struct CropKernel {
@@ -1605,12 +1613,16 @@ impl CropKernel {
     /// source transform [`Self::set_transform`] gets for an untiled render (a tiled one calls
     /// `set_transform` per tile but this once), and `crop_w`/`crop_h` the crop rect's size. A noop
     /// `params`, or a degenerate crop, clears the effects so the pass runs the exact pre-#380 path.
+    /// `view_scale` (#421) is how many of this render's pixels one screen pixel covers when the
+    /// output is shown smaller than it is rendered (`1.0` for an export, a tile, or a 1:1 view);
+    /// the grain is averaged over that footprint so it looks like the export shrunk.
     pub fn set_effects(
         &self,
         params: &EffectsParams,
         crop_transform: Affine2D,
         crop_w: f32,
         crop_h: f32,
+        view_scale: f32,
     ) {
         let params = params.sanitized();
         let state = if params.is_noop() {
@@ -1621,6 +1633,7 @@ impl CropKernel {
                 norm,
                 crop_w,
                 crop_h,
+                view_scale,
             })
         };
         *self.effects.lock().unwrap() = state;
@@ -1679,6 +1692,18 @@ impl GeometryExec for CropKernel {
             u.g_rough = e.grain_roughness;
             u.g_seed = e.grain_seed;
             u.flags = u32::from(e.vignette_active()) | (u32::from(e.grain_active()) << 1);
+            let fp = crate::effects::GrainFootprint::new(
+                transform,
+                fx.norm,
+                (fx.crop_w, fx.crop_h),
+                e.grain_size,
+                fx.view_scale,
+            );
+            u.fp_minify = fp.minify;
+            u.fp_c0x = fp.cols[0].0;
+            u.fp_c0y = fp.cols[0].1;
+            u.fp_c1x = fp.cols[1].0;
+            u.fp_c1y = fp.cols[1].1;
         }
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -2912,9 +2937,16 @@ mod tests {
                 grain_roughness: 0.7,
                 grain_seed: 4242,
             };
+            let fp = crate::effects::GrainFootprint::new(
+                transform,
+                norm,
+                (rect.width, rect.height),
+                effects.grain_size,
+                1.0,
+            );
             let kernel = CropKernel::new(&gpu);
             kernel.set_transform(transform);
-            kernel.set_effects(&effects, transform, rect.width, rect.height);
+            kernel.set_effects(&effects, transform, rect.width, rect.height, 1.0);
             let output = FrameTexture::new(&gpu, out_extent);
             let mut encoder = gpu
                 .device
@@ -2939,6 +2971,7 @@ mod tests {
                         norm.apply(s),
                         (rect.width, rect.height),
                         &effects,
+                        &fp,
                     );
                     let got = actual[(oy * out_extent.width + ox) as usize];
                     for c in 0..3 {
@@ -2979,7 +3012,7 @@ mod tests {
             let kernel = CropKernel::new(&gpu);
             kernel.set_transform(transform);
             // Always the unscaled crop (the whole 40x30 frame, identity).
-            kernel.set_effects(&effects, Affine2D::IDENTITY, 40.0, 30.0);
+            kernel.set_effects(&effects, Affine2D::IDENTITY, 40.0, 30.0, 1.0);
             let output = FrameTexture::new(&gpu, out);
             let mut encoder = gpu
                 .device
@@ -3019,6 +3052,92 @@ mod tests {
         assert!(half[0][0] < 0.5 * 0.6);
     }
 
+    /// #421: the grain's footprint filter (scaled transform and/or a display `view_scale`) matches
+    /// the CPU reference, including the capped-tap gain path.
+    #[test]
+    fn scaled_grain_gpu_matches_cpu_reference() {
+        use crate::coat::EffectsParams;
+        use crate::effects::GrainFootprint;
+        let Some(gpu) = test_gpu() else { return };
+        // (source width, source height, grain_size, output scale, view_scale). Octave-1 footprint
+        // `w` is cells-per-px * scale * view; the fine octave is 2.1x that. Covered tap counts:
+        //   960x640 size 1 x2: w 0.63 / 1.31  -> n = 2 / 3 (the uncapped `ceil(2w)` path)
+        //   960x640 size 1 x1.4: w 0.44 / 0.92 -> n = 1 / 2 (octave 1 below the `w > 0.5` cutoff)
+        //   240x160 size 1 x2: w 2.5 / 5.25 -> 4 / 4; size 0 x4 and a 3x display scale: capped taps
+        // (the last two have capped taps with the gain < 1).
+        for (src_w, src_h, size, scale, view) in [
+            (960u32, 640u32, 1.0f32, 2.0f32, 1.0f32),
+            (960, 640, 1.0, 1.4, 1.0),
+            (240, 160, 1.0, 2.0, 1.0),
+            (240, 160, 0.0, 4.0, 1.0),
+            (240, 160, 0.5, 1.0, 3.0),
+        ] {
+            let extent = crate::frame::Extent {
+                width: src_w,
+                height: src_h,
+            };
+            let flat: Vec<[f32; 4]> = vec![[0.3, 0.3, 0.3, 1.0]; (src_w * src_h) as usize];
+            let input = crate::test_util::upload_frame(&gpu, extent, &flat);
+            let (cw, ch) = (src_w as f32, src_h as f32);
+            let norm = crate::effects::crop_norm(Affine2D::IDENTITY, cw, ch).unwrap();
+            let effects = EffectsParams {
+                grain_amount: 0.9,
+                grain_size: size,
+                grain_roughness: 0.6,
+                grain_seed: 77,
+                ..EffectsParams::default()
+            };
+            let transform = Affine2D {
+                a: scale,
+                d: scale,
+                ..Affine2D::IDENTITY
+            };
+            let out_extent = crate::frame::Extent {
+                width: (cw / scale) as u32,
+                height: (ch / scale) as u32,
+            };
+            let kernel = CropKernel::new(&gpu);
+            kernel.set_transform(transform);
+            kernel.set_effects(&effects, Affine2D::IDENTITY, cw, ch, view);
+            let output = FrameTexture::new(&gpu, out_extent);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut encoder, &input, &output);
+            gpu.queue.submit(Some(encoder.finish()));
+            let actual = crate::test_util::read_frame(&gpu, &output);
+
+            let fp = GrainFootprint::new(transform, norm, (cw, ch), size, view);
+            assert!(fp.minify > 1.01, "the case must actually minify");
+            let mut worst = 0.0f32;
+            let mut moved = 0usize;
+            for oy in 0..out_extent.height {
+                for ox in 0..out_extent.width {
+                    let s = transform.apply((ox as f32 + 0.5, oy as f32 + 0.5));
+                    let want = crate::effects::apply_effects(
+                        [0.3, 0.3, 0.3],
+                        norm.apply(s),
+                        (cw, ch),
+                        &effects,
+                        &fp,
+                    );
+                    let got = actual[(oy * out_extent.width + ox) as usize];
+                    for c in 0..3 {
+                        worst = worst.max((got[c] - want[c]).abs());
+                    }
+                    if (want[0] - 0.3).abs() > 1e-3 {
+                        moved += 1;
+                    }
+                }
+            }
+            assert!(
+                worst < 0.01,
+                "size {size} x{scale} view {view}: GPU vs CPU differ by {worst}"
+            );
+            assert!(moved > 100, "size {size}: the grain must change pixels");
+        }
+    }
+
     /// #380: with the effects off the pass is exactly the pre-#380 sample.
     #[test]
     fn present_sample_with_noop_effects_is_the_plain_sample() {
@@ -3038,6 +3157,7 @@ mod tests {
                     Affine2D::crop(1.0, 1.0),
                     6.0,
                     6.0,
+                    1.0,
                 );
             }
             let output = FrameTexture::new(&gpu, extent);

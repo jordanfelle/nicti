@@ -41,7 +41,13 @@ struct Uniforms {
     g_rough: f32,
     g_seed: u32,
     flags: u32,     // bit 0 = vignette, bit 1 = grain; 0 runs the exact pre-#380 path
-    pad: u32,
+    // #421 grain footprint (effects.rs::GrainFootprint), computed on the CPU so both sides agree:
+    // export pixels per output pixel, then d(lattice position)/d(output x) and d(output y).
+    fp_minify: f32,
+    fp_c0x: f32,
+    fp_c0y: f32,
+    fp_c1x: f32,
+    fp_c1y: f32,
 }
 
 // Read through an ordinary sampled texture (`texture_2d` + `textureLoad`), never a read-mode storage
@@ -57,6 +63,9 @@ const GRAIN_CELLS_FINE: f32 = 1500.0;
 const GRAIN_CELLS_COARSE: f32 = 300.0;
 const VIGNETTE_STOPS: f32 = 2.0;
 const GRAIN_GAIN: f32 = 0.3;
+const GRAIN_MINIFY_EPS: f32 = 1.001;
+const GRAIN_MAX_TAPS: u32 = 4u;
+const GRAIN_BOX_K: f32 = 1.346;
 
 fn luma_of(rgb: vec3<f32>) -> f32 {
     return dot(rgb, LUMA);
@@ -126,12 +135,42 @@ fn value_noise(p: vec2<f32>, seed: u32) -> f32 {
     return top + (bottom - top) * w.y;
 }
 
+// One octave averaged over the output pixel's footprint (#421); `scale` multiplies the footprint for
+// the denser fine octave. Mirrors effects.rs::filtered_noise / GrainFootprint::taps.
+fn filtered_noise(p: vec2<f32>, seed: u32, scale: f32) -> f32 {
+    var n = 1u;
+    var gain = 1.0;
+    if (u.fp_minify > GRAIN_MINIFY_EPS) {
+        let c0 = vec2<f32>(u.fp_c0x, u.fp_c0y);
+        let c1 = vec2<f32>(u.fp_c1x, u.fp_c1y);
+        let w = scale * max(length(c0), length(c1));
+        if (w == w && w < 1.0e30 && w > 0.5) {
+            n = clamp(u32(ceil(2.0 * w)), 1u, GRAIN_MAX_TAPS);
+            gain = min(GRAIN_BOX_K * f32(n) / w, 1.0);
+        }
+    }
+    if (n == 1u) {
+        return value_noise(p, seed);
+    }
+    let c0 = vec2<f32>(u.fp_c0x, u.fp_c0y);
+    let c1 = vec2<f32>(u.fp_c1x, u.fp_c1y);
+    var sum = 0.0;
+    for (var j = 0u; j < n; j = j + 1u) {
+        let oy = (f32(j) + 0.5) / f32(n) - 0.5;
+        for (var i = 0u; i < n; i = i + 1u) {
+            let ox = (f32(i) + 0.5) / f32(n) - 0.5;
+            sum = sum + value_noise(p + scale * (c0 * ox + c1 * oy), seed);
+        }
+    }
+    return sum / f32(n * n) * gain;
+}
+
 fn apply_grain(rgb: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     let long_edge = max(dims.x, dims.y);
     let cells = GRAIN_CELLS_FINE + (GRAIN_CELLS_COARSE - GRAIN_CELLS_FINE) * u.g_size;
     let p = vec2<f32>(uv.x * dims.x / long_edge * cells, uv.y * dims.y / long_edge * cells);
-    let coarse = value_noise(p, u.g_seed);
-    let fine = value_noise(p * 2.1 + vec2<f32>(17.3), u.g_seed ^ 0x68E31DA4u);
+    let coarse = filtered_noise(p, u.g_seed, 1.0);
+    let fine = filtered_noise(p * 2.1 + vec2<f32>(17.3), u.g_seed ^ 0x68E31DA4u, 2.1);
     let noise = coarse + (fine - coarse) * u.g_rough;
     let g_now = clamp(pow(max(luma_of(rgb), 0.0), 1.0 / 3.0), 0.0, 1.0);
     let weight = 4.0 * g_now * (1.0 - g_now) + 0.15;
