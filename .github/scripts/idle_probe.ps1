@@ -47,3 +47,5 @@ for ($r = 1; $r -le $runs; $r++) {
   Stop-Process -Id $p.Id -Force
   Start-Sleep -Seconds 2
 }
+
+cargo run --release -p nicti-pounce --example idle_burn
