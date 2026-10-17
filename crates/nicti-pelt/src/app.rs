@@ -1268,8 +1268,8 @@ impl eframe::App for PeltApp {
             let t = last.get_or_insert_with(std::time::Instant::now);
             if t.elapsed().as_secs() >= 1 {
                 eprintln!(
-                    "SPIKE_FRAMES total={n} pass={}",
-                    ui.ctx().cumulative_pass_nr()
+                    "SPIKE_FRAMES total={n} causes={:?}",
+                    ui.ctx().repaint_causes()
                 );
                 *last = Some(std::time::Instant::now());
             }

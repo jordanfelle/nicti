@@ -26,6 +26,8 @@ jobs:
         with:
           save-if: false
       - run: cargo build --release -p nicti
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
       - name: Idle probe
         shell: pwsh
         run: ./.github/scripts/idle_probe.ps1
