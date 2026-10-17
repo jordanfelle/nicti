@@ -636,6 +636,39 @@ mod tests {
     }
 
     #[test]
+    fn the_neutral_key_follows_the_stages_upstream_of_it_but_not_the_camera_profile() {
+        let entry = |params| nicti_pawprint::StageEntry {
+            schema_version: 1,
+            params,
+        };
+        let plain = neutral_key(&EditDocument::default(), id(1));
+
+        // The neutral render taps post-lens, so a lens change really does change the pixels a model
+        // sees and must re-key the bake. Denoise is a passthrough today (no typed params), so its
+        // entry here only pins the graph topology: anything upstream of NEUTRAL re-keys it.
+        for (stage, params) in [
+            (LENS, serde_json::json!({ "remove_ca": true })),
+            (DENOISE, serde_json::json!({ "strength": 0.5 })),
+        ] {
+            let mut doc = EditDocument::default();
+            doc.stages.insert(stage.to_string(), entry(params));
+            assert_ne!(plain, neutral_key(&doc, id(1)), "{stage} is upstream");
+        }
+
+        // A camera profile is applied in the live suffix, downstream of the neutral node.
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            WORKING_SPACE.to_string(),
+            entry(serde_json::json!({
+                "name": "Camera Vivid",
+                "path": "p.dcp",
+                "content_hash": "abc",
+            })),
+        );
+        assert_eq!(plain, neutral_key(&doc, id(1)), "a profile is downstream");
+    }
+
+    #[test]
     fn the_registry_covers_every_graph_node() {
         let mut graph = build_graph();
         // `apply_document` errors on any node id the registry doesn't know.

@@ -829,6 +829,28 @@ mod tests {
             nicti_tapetum::stages::EXPOSURE,
             &nicti_tapetum::coat::ExposureParams { stops: 1.25 },
         );
+        // Stages upstream of the neutral node move its key, a camera profile (live) does not; the
+        // pixel-free key has to track both exactly.
+        develop.set_stage_params(
+            nicti_tapetum::stages::LENS,
+            &nicti_tapetum::coat::LensParams {
+                remove_ca: true,
+                ..Default::default()
+            },
+        );
+        develop.set_stage_params(
+            nicti_tapetum::stages::DENOISE,
+            &serde_json::json!({ "strength": 0.5 }),
+        );
+        develop.set_stage_params(
+            nicti_tapetum::stages::WORKING_SPACE,
+            &nicti_tapetum::coat::CameraProfileParams {
+                name: Some("Camera Vivid".into()),
+                path: Some("p.dcp".into()),
+                content_hash: Some("abc".into()),
+                ..Default::default()
+            },
+        );
         let _ = develop.render(); // applies the whole document to the graph
         let doc = develop.document().clone();
         assert_eq!(
