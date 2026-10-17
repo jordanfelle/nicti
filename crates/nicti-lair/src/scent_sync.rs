@@ -567,3 +567,33 @@ fn write_locked(
     store.record_sidecar(asset_id, &state)?;
     Ok(SyncOutcome::WroteSidecar)
 }
+
+#[cfg(test)]
+mod name_paths_tests {
+    use super::*;
+
+    fn kw(id: i64, path: &str) -> Keyword {
+        Keyword {
+            id,
+            parent_id: None,
+            name: String::new(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn resolves_ancestor_chains_normalises_and_drops_unknown_leaves() {
+        let names: HashMap<i64, String> =
+            [(1, "Events".into()), (2, " A|B ".into()), (3, "Fox".into())]
+                .into_iter()
+                .collect();
+        let got = name_paths(&[kw(2, "/1/2/"), kw(3, "/3/"), kw(9, "/9/")], &names);
+        let want: BTreeSet<Vec<String>> = [
+            vec!["Events".to_string(), "A/B".to_string()],
+            vec!["Fox".to_string()],
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
+    }
+}

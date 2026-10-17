@@ -221,7 +221,14 @@ impl ExportRun {
                     .into_iter()
                     .collect()
             };
-            let keywords = tagged.into_iter().map(|k| k.name).collect();
+            // The flat list is the paths' leaves, as the sidecar writes it (normalised, deduped),
+            // so dc:subject and lr:hierarchicalSubject come from one snapshot and always agree.
+            let mut keywords: Vec<String> = keyword_paths
+                .iter()
+                .filter_map(|p: &Vec<String>| p.last().cloned())
+                .collect();
+            keywords.sort();
+            keywords.dedup();
             // A photo whose saved edits can't be read fails on its own (naming it) instead of
             // aborting the whole batch.
             let edit = match env.store.get_master_edit(id) {
