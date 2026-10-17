@@ -167,6 +167,24 @@ const TEMPLATE: &str = "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc
 xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\"/>\
 </rdf:RDF></x:xmpmeta>\n<?xpacket end=\"w\"?>";
 
+/// The name path of each keyword in `tagged`, canonicalised like the sidecar side
+/// ([`norm_path`]), given `names` (`list_keywords` id -> name). Each keyword's materialised
+/// `path` is a `/`-joined chain of ancestor ids ending at itself.
+pub fn name_paths(tagged: &[Keyword], names: &HashMap<i64, String>) -> BTreeSet<Vec<String>> {
+    tagged
+        .iter()
+        .filter_map(|k| {
+            norm_path(
+                k.path
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .filter_map(|id| names.get(&id).cloned()),
+            )
+        })
+        .collect()
+}
+
 fn keyword_name_paths(
     store: &dyn CatalogStore,
     asset_id: i64,
@@ -180,18 +198,7 @@ fn keyword_name_paths(
         .into_iter()
         .map(|k| (k.id, k.name))
         .collect();
-    Ok(tagged
-        .iter()
-        .filter_map(|k| {
-            norm_path(
-                k.path
-                    .split('/')
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse::<i64>().ok())
-                    .filter_map(|id| names.get(&id).cloned()),
-            )
-        })
-        .collect())
+    Ok(name_paths(&tagged, &names))
 }
 
 /// The catalog's current markers for one asset.
