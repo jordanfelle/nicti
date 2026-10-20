@@ -127,7 +127,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # #117: only main's push (and scheduled/dispatch) runs save a cache; PRs restore
           # main's most recent entry (rust-cache's own prefix-matching fallback handles the
@@ -158,7 +158,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17: Windows is v1's actual target platform (see README's Scope section and
@@ -178,7 +178,7 @@ jobs:
       # #29: see the clippy job's own nasm comment above -- same requirement here.
       - run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # --workspace: see the clippy job's comment above -- without it, pawprint's and
@@ -196,7 +196,7 @@ jobs:
       # #29: see the Linux clippy job's own nasm comment above -- same requirement here.
       - run: choco install nasm -y
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17: runs the full workspace test suite on Windows, the actual v1 target -- this also
@@ -228,7 +228,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # Not a required check, and a full from-scratch LibRaw C++ compile (~95 source files)
           # would otherwise ride along on every main push regardless of whether
@@ -257,7 +257,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # #17/#37/#41: NOT a branch-protection-required check (verified against the real
@@ -308,7 +308,7 @@ jobs:
           # added this.
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }} # #117, see clippy job's comment above
       # -p nicti, not a bare workspace build: spikes/* are throwaway

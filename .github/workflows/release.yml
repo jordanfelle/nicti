@@ -136,7 +136,7 @@ jobs:
       # an attacker who could poison the cache in the first place would already need the same
       # access this workflow itself requires, so the restore isn't a real escalation path here,
       # unlike a `pull_request`-triggered workflow accepting a cache seeded by an untrusted fork.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: false # release builds are infrequent; not worth a dedicated cache entry
 
