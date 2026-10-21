@@ -14,6 +14,6 @@ nicti-pounce = { path = "../nicti-pounce" }
 nicti-stalk = { path = "../nicti-stalk" }
 nicti-tapetum = { path = "../nicti-tapetum" }
 nicti-claw = { path = "../nicti-claw" }
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic"] }
 serde_json = "1"
 thiserror = "2"
