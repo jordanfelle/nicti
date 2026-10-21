@@ -1581,7 +1581,7 @@ impl eframe::App for PeltApp {
                         self.develop_canvas_px_width = px_width;
                         ui.ctx().request_repaint();
                     }
-                    let response = ui.interact(rect, ui.id().with("develop_viewport"), sense);
+                    let response = ui.interact(rect, ui.scope_id().with("develop_viewport"), sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
                         ViewportCallback::identity(frame),

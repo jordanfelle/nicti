@@ -359,7 +359,7 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
             row.top() + 40.0,
         ),
     );
-    let id = ui.id().with(spec.id);
+    let id = ui.scope_id().with(spec.id);
     let resp = ui.interact(
         track_rect.expand2(vec2(8.0, 2.0)),
         id,
@@ -493,7 +493,7 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
             egui::TextEdit::singleline(&mut text)
                 .id(te_id)
                 .font(t.font(12.5))
-                .horizontal_align(egui::Align::Max)
+                .align(egui::Align2::RIGHT_CENTER)
                 .desired_width(value_rect.width()),
         );
         if start_edit {
@@ -960,7 +960,7 @@ mod tests {
                     ..Default::default()
                 };
                 let mut out = ctx.run_ui(input, |ui| {
-                    root.set(Some(ui.id()));
+                    root.set(Some(ui.scope_id()));
                     if draw {
                         slider(ui, &TEMP, v, enabled);
                     }

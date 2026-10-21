@@ -24,12 +24,12 @@ const THUMB_ID: &str = "catseye-thumb";
 
 /// Which sample the Point Color section is editing (clamped by the caller to the live count).
 pub fn selected(ctx: &egui::Context) -> usize {
-    ctx.data(|d| d.get_temp::<usize>(egui::Id::new(SELECTED_ID)))
+    ctx.data(|d| d.get_temp::<usize>(egui::Id::unique(SELECTED_ID)))
         .unwrap_or(0)
 }
 
 pub fn set_selected(ctx: &egui::Context, index: usize) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SELECTED_ID), index));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(SELECTED_ID), index));
 }
 
 /// A new sample of the colour `working` (linear ProPhoto RGB), every adjustment at its neutral.
@@ -71,16 +71,16 @@ const STATUS_ID: &str = "catseye-status";
 
 /// The last pick problem (shown under the Point Color section), if any.
 pub fn status(ctx: &egui::Context) -> Option<String> {
-    ctx.data(|d| d.get_temp::<Option<String>>(egui::Id::new(STATUS_ID)))
+    ctx.data(|d| d.get_temp::<Option<String>>(egui::Id::unique(STATUS_ID)))
         .flatten()
 }
 
 pub fn set_status(ctx: &egui::Context, message: Option<String>) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new(STATUS_ID), message));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STATUS_ID), message));
 }
 
 fn thumb_for(ctx: &egui::Context, develop: &DevelopDoc) -> Arc<Thumb> {
-    let id = egui::Id::new(THUMB_ID);
+    let id = egui::Id::unique(THUMB_ID);
     let key = develop.frame_key();
     if let Some((k, t)) = ctx.data(|d| d.get_temp::<(u64, Arc<Thumb>)>(id)) {
         if k == key {

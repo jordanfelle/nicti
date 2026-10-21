@@ -188,7 +188,7 @@ impl ExportUi {
             return;
         };
         let mut action = Action::None;
-        let modal = egui::Modal::new(egui::Id::new("nicti_export_dialog")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("nicti_export_dialog")).show(ctx, |ui| {
             ui.set_max_width(560.0);
             egui::ScrollArea::vertical()
                 .max_height(ctx.content_rect().height() * 0.8)

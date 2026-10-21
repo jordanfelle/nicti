@@ -363,7 +363,7 @@ pub fn show(
     });
 
     fur::section(ui, "tone_curve", "Tone Curve", false, |ui| {
-        let key = ui.id().with("curve-channel");
+        let key = ui.scope_id().with("curve-channel");
         let mut channel: usize = ui.data(|d| d.get_temp(key)).unwrap_or(0);
         if let Some(i) = fur::segmented(ui, &CURVE_CHANNELS, Some(channel), 5) {
             channel = i;
@@ -387,7 +387,7 @@ pub fn show(
             };
             let edit = fur::whisker_curve(
                 ui,
-                ui.id().with(("point-curve", channel)),
+                ui.scope_id().with(("point-curve", channel)),
                 CURVE_CHANNELS[channel],
                 CURVE_CHANNEL_COLORS[channel],
                 list,
@@ -423,7 +423,7 @@ pub fn show(
     });
 
     fur::section(ui, "color_grading", "Color Grading", false, |ui| {
-        let key = ui.id().with("grade-wheel");
+        let key = ui.scope_id().with("grade-wheel");
         let mut sel: usize = ui.data(|d| d.get_temp(key)).unwrap_or(1);
         if let Some(i) = fur::segmented(ui, &GRADE_WHEELS, Some(sel), 4) {
             sel = i;
@@ -712,7 +712,7 @@ pub fn handle_viewport_gesture(
     let crop: CropParams = develop.stage_params(CROP);
     let crop_rect = crop.effective_rect(source);
     let center = crop_rect.center_absolute();
-    let state_id = egui::Id::new(DRAG_STATE_ID);
+    let state_id = egui::Id::unique(DRAG_STATE_ID);
 
     if response.drag_started() {
         let ctrl = ui.input(|i| i.modifiers.ctrl);
@@ -1041,7 +1041,7 @@ fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut Heal
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
             resp.widget_info(|| {
                 egui::WidgetInfo::selected(
-                    egui::WidgetType::Button,
+                    egui::Role::Button,
                     true,
                     i == selected,
                     format!("Point color sample {}", i + 1),

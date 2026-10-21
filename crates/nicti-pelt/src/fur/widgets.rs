@@ -28,7 +28,7 @@ struct SectionMemory {
 }
 
 fn section_memory_id() -> egui::Id {
-    egui::Id::new("fur-section-states")
+    egui::Id::unique("fur-section-states")
 }
 
 /// Seeds the remembered open/closed state (call once at startup).
@@ -83,7 +83,7 @@ pub fn section_header(ui: &mut Ui, title: &str, open: bool) -> Response {
     let w = ui.available_width();
     let (r, resp) = ui.allocate_exact_size(vec2(w, t.section_h), Sense::click());
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open, title)
+        egui::WidgetInfo::selected(egui::Role::DisclosureTriangle, true, open, title)
     });
     let p = ui.painter();
     if resp.hovered() {
@@ -140,7 +140,7 @@ pub fn segmented(
                 let is_active = active == Some(i);
                 let (r, resp) = ui.allocate_exact_size(vec2(seg_w, 24.0), Sense::click());
                 resp.widget_info(|| {
-                    egui::WidgetInfo::selected(egui::WidgetType::Button, true, is_active, *label)
+                    egui::WidgetInfo::selected(egui::Role::Button, true, is_active, *label)
                 });
                 let fill = if is_active {
                     t.pressed
@@ -191,9 +191,7 @@ pub fn icon_button(
             Sense::hover()
         },
     );
-    resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tooltip)
-    });
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, active, tooltip));
     let p = ui.painter();
     let sq = Rect::from_center_size(r.center(), vec2(32.0f32.min(size.x), 32.0f32.min(size.y)));
     if active {
@@ -235,7 +233,7 @@ pub fn band_dots(ui: &mut Ui, names: &[&str; 8], active: usize) -> Option<usize>
         for (i, name) in names.iter().enumerate() {
             let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
             resp.widget_info(|| {
-                egui::WidgetInfo::selected(egui::WidgetType::Button, true, i == active, *name)
+                egui::WidgetInfo::selected(egui::Role::Button, true, i == active, *name)
             });
             let p = ui.painter();
             p.circle_filled(r.center(), 8.0, hex(BAND_COLORS[i]));

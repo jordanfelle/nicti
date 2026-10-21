@@ -221,7 +221,7 @@ pub fn show(
                     // Only evaluated while AccessKit is on.
                     response.widget_info(|| {
                         egui::WidgetInfo::selected(
-                            egui::WidgetType::SelectableLabel,
+                            egui::Role::Button,
                             true,
                             session.is_selected(index),
                             format!("Photo {id}"),
@@ -252,7 +252,7 @@ pub fn show(
             });
         }
     });
-    state.scroll_y = output.state.offset.y;
+    state.scroll_y = output.state.clamped_offset().y;
     state.viewport_h = output.inner_rect.height();
 
     let visible = layout.indices_for_rows(visible_rows, total);
