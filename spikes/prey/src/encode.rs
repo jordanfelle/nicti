@@ -205,7 +205,19 @@ pub mod native {
             .start_compress(Vec::new())
             .map_err(|e| anyhow::anyhow!("mozjpeg start_compress: {e}"))?;
         if let Some(icc) = icc {
-            compress.write_icc_profile(icc);
+            // Not `Compress::write_icc_profile`: mozjpeg 0.10.13 numbers the APP2 sequence from
+            // 0, but the ICC-in-JPEG spec (and libjpeg's own reader, and img-parts >= 0.4.1) is
+            // 1-based, so readers drop its profiles as "inconsistent".
+            const MAX_DATA: usize = 65533 - 14;
+            let chunks = icc.chunks(MAX_DATA);
+            let count = chunks.len() as u8;
+            for (i, chunk) in chunks.enumerate() {
+                let mut buf = Vec::with_capacity(chunk.len() + 14);
+                buf.extend_from_slice(b"ICC_PROFILE\0");
+                buf.extend([i as u8 + 1, count]);
+                buf.extend_from_slice(chunk);
+                compress.write_marker(mozjpeg::Marker::APP(2), &buf);
+            }
         }
         compress
             .write_scanlines(img.as_raw())
