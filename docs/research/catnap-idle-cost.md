@@ -78,7 +78,7 @@ Run 39007820626 logged `ctx.repaint_causes()` once per second; the same four ent
 | `nicti-pelt/src/xmp_sync.rs:318` (`REVIEW_REFRESH`) | 2 s |
 | `nicti-pelt/src/app.rs:1906` (`folder_panel::CACHE_TTL`) | 2 s |
 
-**This table does not say what drove the 4.5 frames/s.** In egui 0.36 every `request_repaint*` call
+**This table does not say what drove the 4.5 frames/s.** In egui 0.36 (measured then; not re-measured on 0.37) every `request_repaint*` call
 is logged as a cause for the next pass, whether or not it is what triggers it, and the pending delay
 is reset at the start of each pass (`context.rs`, `repaint_delay = Duration::MAX`). So the three timed
 requests re-arm on every frame; while 500 ms telemetry frames keep arriving they probably never fire

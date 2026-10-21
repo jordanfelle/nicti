@@ -221,6 +221,8 @@ pub fn show(
                     // Only evaluated while AccessKit is on.
                     response.widget_info(|| {
                         egui::WidgetInfo::selected(
+                            // Same role egui 0.37's own `selectable_label` reports, so the grid
+                            // speaks the same dialect as the app's other selectable lists.
                             egui::Role::Button,
                             true,
                             session.is_selected(index),

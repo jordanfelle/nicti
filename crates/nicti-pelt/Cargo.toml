@@ -8,7 +8,9 @@ description = "The production app shell (#241): one eframe/egui window sharing i
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
-# egui 0.37 split its emoji fonts behind this feature; the UI still uses emoji glyphs (e.g. the drive icon).
+# egui 0.37 split its emoji fonts behind this feature; the UI still uses emoji glyphs (the folder
+# panel's folder/drive icons). 0.36's bundled NotoEmoji was already the monochrome face, so this
+# keeps the same look.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 egui-wgpu = "0.37"
 wgpu = "30"
