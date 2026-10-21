@@ -84,7 +84,7 @@ impl DeleteFlow {
         let n = req.ids.len();
         // A real modal: its backdrop blocks the grid, filter dropdowns and toolbar behind it, so
         // the photos named here are the photos the user is looking at when they click.
-        let modal = egui::Modal::new(egui::Id::new("nicti_delete_prompt")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("nicti_delete_prompt")).show(ctx, |ui| {
             ui.heading(format!(
                 "Delete {n} photo{}?",
                 if n == 1 { "" } else { "s" }

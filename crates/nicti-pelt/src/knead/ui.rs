@@ -185,7 +185,7 @@ impl KneadUi {
         };
         let mut confirmed = false;
         let mut close = false;
-        let response = egui::Modal::new(egui::Id::new("nicti_knead_prompt")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("nicti_knead_prompt")).show(ctx, |ui| {
             ui.heading(&title);
             if wants_name {
                 ui.horizontal(|ui| {

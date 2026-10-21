@@ -161,7 +161,11 @@ pub fn show(
             cell,
         )
         .shrink(3.0);
-        let response = ui.interact(rect, ui.id().with(("survey-tile", *id)), Sense::click());
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("survey-tile", *id)),
+            Sense::click(),
+        );
         let texture = previews
             .get(ui.ctx(), store, pounce, *id, Want::Small)
             .cloned();

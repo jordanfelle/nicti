@@ -188,7 +188,7 @@ impl ExportUi {
             return;
         };
         let mut action = Action::None;
-        let modal = egui::Modal::new(egui::Id::new("nicti_export_dialog")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("nicti_export_dialog")).show(ctx, |ui| {
             ui.set_max_width(560.0);
             egui::ScrollArea::vertical()
                 .max_height(ctx.content_rect().height() * 0.8)
@@ -706,7 +706,9 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut Fo
             if ui
                 .add_enabled(
                     !picker.is_open(),
-                    egui::TextEdit::singleline(&mut text).hint_text("C:\\Exports"),
+                    egui::TextEdit::singleline(&mut text)
+                        .align(egui::Align2::LEFT_TOP)
+                        .hint_text("C:\\Exports"),
                 )
                 .changed()
             {
@@ -733,6 +735,7 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut Fo
         if ui
             .add(
                 egui::TextEdit::singleline(&mut sub)
+                    .align(egui::Align2::LEFT_TOP)
                     .hint_text("optional, e.g. {Date:YYYY}/{Folder}"),
             )
             .changed()

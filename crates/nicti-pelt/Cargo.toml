@@ -7,9 +7,12 @@ publish = false
 description = "The production app shell (#241): one eframe/egui window sharing its wgpu device with crates/nicti-tapetum (ADR-0016's 'one shared device'), a Tapetum-rendered frame painted via egui_wgpu::CallbackTrait (ADR-0068), placeholder library/loupe/develop view routing, and a real nicti-lair SqliteCatalog. Named after the visible coat over the tapetum lucidum, matching this repo's feline naming convention -- not the nicti-ui name #241 was filed under."
 
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
-egui = "0.36"
-egui-wgpu = "0.36"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+# egui 0.37 split its emoji fonts behind this feature; the UI still uses emoji glyphs (the folder
+# panel's folder/drive icons). 0.36's bundled NotoEmoji was already the monochrome face, so this
+# keeps the same look.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui-wgpu = "0.37"
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 blake3 = "1"
@@ -48,4 +51,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # Headless UI harness (#426, `swat/`): AccessKit queries + input injection without a GPU. `snapshot`
 # (dify/image/open/tempfile) only for the golden-image diff; rendering is our own CPU softpaint
 # (`swat/softpaint.rs`), so no `wgpu` feature and no adapter is ever needed.
-egui_kittest = { version = "0.36", default-features = false, features = ["snapshot"] }
+egui_kittest = { version = "0.37", default-features = false, features = ["snapshot"] }

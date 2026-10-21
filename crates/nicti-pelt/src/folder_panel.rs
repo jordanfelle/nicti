@@ -483,7 +483,7 @@ fn show_root(
     selected: bool,
     verify_enabled: bool,
 ) -> RowOutput {
-    let id = egui::Id::new(("folder_panel_root", root.id));
+    let id = egui::Id::unique(("folder_panel_root", root.id));
     let label = folder_name(&root.path);
     let icon = if root.archived {
         "\u{1F5C4}"

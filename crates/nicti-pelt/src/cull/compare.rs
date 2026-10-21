@@ -260,7 +260,7 @@ pub fn show(
             Rect::from_min_size(area.min + Vec2::new(n as f32 * half.x, 0.0), half).shrink(3.0);
         let response = ui.interact(
             rect,
-            ui.id().with(("compare-tile", n)),
+            ui.scope_id().with(("compare-tile", n)),
             Sense::click_and_drag(),
         );
         let texture = previews

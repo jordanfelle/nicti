@@ -66,7 +66,7 @@ pub fn show(ui: &mut Ui, label: &str, radius: f32, wheel: &mut GradeWheel) -> Wh
         Sense::click_and_drag(),
     );
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("{label} wheel"))
+        egui::WidgetInfo::labeled(egui::Role::Unknown, true, format!("{label} wheel"))
     });
     let center = rect.center();
     let mut edit = WheelEdit::default();

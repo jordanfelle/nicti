@@ -117,7 +117,7 @@ pub fn show(
     let side = ui.available_width().clamp(120.0, 260.0);
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("{label} curve"))
+        egui::WidgetInfo::labeled(egui::Role::Unknown, true, format!("{label} curve"))
     });
     let size = [rect.width(), rect.height()];
     let to_graph = |p: egui::Pos2| -> [f32; 2] {

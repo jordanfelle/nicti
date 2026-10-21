@@ -73,7 +73,7 @@ candidate's own dependency tree pulled in real new licenses beyond what `deny.to
 allowlist covered:
 
 - **egui/eframe** (`pelt-egui`): the crate tree itself (`egui`, `eframe`, `egui-wgpu`,
-  `egui-winit`, `epaint`, `emath`, `ecolor`) is MIT OR Apache-2.0, already covered. `eframe`'s
+  `egui-winit`, `epaint`, `emath`, `ecolor`) is MIT OR Apache-2.0, already covered. The egui 0.37 bump (2026-10-21, now `egui`/`eframe`/`egui-wgpu` 0.37.0, `wgpu` 30.0.1) swaps `smithay-clipboard` for `wl-clipboard-rs` and adds `accesskit` 0.25.1, `unicode-properties`, `tree_magic_mini`, `petgraph`, `os_pipe`, `send_wrapper`, `fixedbitset`, `hashbrown` 0.15.5 and `foldhash` 0.1.5; all are permissive and already on `deny.toml`'s allowlist (`cargo deny check licenses` passes), so no `deny.toml` change. `eframe`'s
   `default_fonts` feature bundles `epaint_default_fonts`, whose license expression is
   `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` — the `OFL-1.1`/`Ubuntu-font-1.0` arms
   cover the actual bundled font **data** (not code), both open font licenses explicitly designed
@@ -728,12 +728,12 @@ process: data files get a row here in the same PR):
 
 ## Update (2026-10-06, [#426](https://github.com/jordanfelle/nicti/issues/426)'s headless UI harness)
 
-One new **dev-dependency** of `crates/nicti-pelt`: `egui_kittest` 0.36 with only its `snapshot`
+One new **dev-dependency** of `crates/nicti-pelt`: `egui_kittest` 0.37 with only its `snapshot`
 feature (no `wgpu`, so no adapter is ever needed). It is test-only, never linked into the shipped
 `nicti` binary. Eleven crates enter the lock file with it, all clearing `deny.toml`'s allowlist
 (`cargo deny check licenses` passes):
 
-- **`egui_kittest`** 0.36.2, **`kittest`** 0.4.0, **`accesskit_consumer`** 0.35.0 — MIT OR Apache-2.0.[^kt1]
+- **`egui_kittest`** 0.37.0, **`kittest`** 0.5.0, **`accesskit_consumer`** 0.39.1 — MIT OR Apache-2.0.[^kt1]
 - **`dify`** 0.8.0 (the snapshot image diff), **`open`** 5.4.4 and its `is-docker`/`is-wsl` — MIT.
   `open` only launches a viewer for a failed-snapshot diff; no test here calls that path.
 - **`colored`** 2.2.0 (a `dify` dependency) — **MPL-2.0**, already on the allowlist (`deny.toml` records
@@ -869,4 +869,4 @@ Its one new transitive crate, `pollster` 0.4 (`Apache-2.0 OR MIT`), is allowlist
 [^tr2]: `urlencoding` `license = "MIT"` — https://crates.io/api/v1/crates/urlencoding — verified 2026-09-29 against the downloaded 2.1.3 `Cargo.toml`
 [^fur1]: LightCraft `LICENSE-MIT` and `LICENSE-APACHE` at https://github.com/storytold/lightcraft (commit 265248c), read directly; per-file ported-from provenance is recorded in each `crates/nicti-pelt/src/fur/*.rs` header — verified 2026-10-06
 [^fur2]: rsms/inter v4.1 release archive (https://github.com/rsms/inter/releases/tag/v4.1, `Inter-4.1.zip` SHA-256 `9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e`): `extras/ttf/Inter-Regular.ttf` SHA-256 `40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82`, `extras/ttf/Inter-SemiBold.ttf` SHA-256 `78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3`, licence text from the archive's own `LICENSE.txt` (SIL OFL 1.1, Copyright (c) 2016 The Inter Project Authors) — verified 2026-10-06
-[^kt1]: `egui_kittest`, `kittest`, `accesskit_consumer` `license = "MIT OR Apache-2.0"` and `dify`, `open`, `is-docker`, `is-wsl` `license = "MIT"`, `colored` `license = "MPL-2.0"`, read from the downloaded `Cargo.toml`s of egui_kittest 0.36.2 / kittest 0.4.0 / accesskit_consumer 0.35.0 / dify 0.8.0 / open 5.4.4 / colored 2.2.0 — verified 2026-10-06
+[^kt1]: `egui_kittest`, `kittest`, `accesskit_consumer` `license = "MIT OR Apache-2.0"` and `dify`, `open`, `is-docker`, `is-wsl` `license = "MIT"`, `colored` `license = "MPL-2.0"`, read from the downloaded `Cargo.toml`s of egui_kittest 0.36.2 / kittest 0.4.0 / accesskit_consumer 0.35.0 / dify 0.8.0 / open 5.4.4 / colored 2.2.0 — verified 2026-10-06; versions in the list above moved to egui_kittest 0.37.0 / kittest 0.5.0 / accesskit_consumer 0.39.1 with the egui 0.37 bump (2026-10-21, `cargo deny check licenses` green in CI, no license field re-read beyond that)

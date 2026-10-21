@@ -1581,7 +1581,7 @@ impl eframe::App for PeltApp {
                         self.develop_canvas_px_width = px_width;
                         ui.ctx().request_repaint();
                     }
-                    let response = ui.interact(rect, ui.id().with("develop_viewport"), sense);
+                    let response = ui.interact(rect, ui.scope_id().with("develop_viewport"), sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
                         ViewportCallback::identity(frame),
@@ -2093,7 +2093,8 @@ impl PeltApp {
                     if ui
                         .add_enabled(
                             !self.import_picker.is_open(),
-                            egui::TextEdit::singleline(&mut self.import_path_input),
+                            egui::TextEdit::singleline(&mut self.import_path_input)
+                                .align(egui::Align2::LEFT_TOP),
                         )
                         .changed()
                     {
@@ -2139,7 +2140,8 @@ impl PeltApp {
                     ui.label("Move into:");
                     ui.add_enabled(
                         !self.move_picker.is_open(),
-                        egui::TextEdit::singleline(&mut self.move_dest_input),
+                        egui::TextEdit::singleline(&mut self.move_dest_input)
+                            .align(egui::Align2::LEFT_TOP),
                     );
                     if ui
                         .add_enabled(!self.move_picker.is_open(), egui::Button::new("Browse..."))

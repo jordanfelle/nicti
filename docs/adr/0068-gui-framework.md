@@ -121,7 +121,7 @@ disproving nothing.
   needs a compute dispatch (this spike's `live_chain`) must create and submit its own encoder
   before `draw` runs — a real, iced-imposed shape, not a design choice made by this spike (see
   `spikes/pelt-iced/src/viewport.rs`'s doc comment).
-- **egui** (`egui_wgpu::CallbackTrait`, confirmed against `egui-wgpu` 0.36.2's own source[^e1]):
+- **egui** (`egui_wgpu::CallbackTrait`, confirmed against `egui-wgpu` 0.37.0's own source (originally verified on 0.36.2; re-checked 2026-10-21)[^e1]):
   the well-known `custom3d_wgpu` pattern — `prepare` gets eframe's shared device/queue *and* its
   own command encoder (so a compute dispatch can share one submission with egui's main pass),
   `paint` runs inside egui's own render pass.
@@ -139,7 +139,7 @@ disproving nothing.
 
 | Candidate | Its own resolved `wgpu` version | vs. ADR-0016's `wgpu` 30 |
 |---|---|---|
-| egui / eframe (`egui-wgpu` 0.36.2) | **30.0.0**[^e2] | Matches exactly |
+| egui / eframe (`egui-wgpu` 0.37.0) | **30.0.1**[^e2] | Matches exactly (30.0.0 on 0.36.2) |
 | Slint (`i-slint-renderer-femtovg`'s `wgpu-30` feature) | **30.0.1**, confirmed directly against this PR's own `Cargo.lock` (`i-slint-renderer-femtovg` 1.18.1's `wgpu` dependency entry) | Matches exactly |
 | Iced (`iced_wgpu` 0.14.0) | **27.0.1**[^i2] | **Does not match** |
 
@@ -336,9 +336,9 @@ Renovate rule that only existed for them.
 [^i2]: `iced_wgpu` v0.14.0's own published `Cargo.lock` (`wgpu` resolved to 27.0.1) — verified
     2026-09-23; independently reconfirmed by `spikes/pelt-iced` itself only compiling against
     `wgpu = "27"`, not `"30"`, in this repo
-[^e1]: `egui-wgpu` v0.36.2 `src/renderer.rs` (`CallbackTrait`, `Callback::new_paint_callback`) —
+[^e1]: `egui-wgpu` v0.36.2 `src/renderer.rs` (unchanged API in 0.37.0, re-verified 2026-10-21) (`CallbackTrait`, `Callback::new_paint_callback`) —
     downloaded directly from crates.io and inspected — verified 2026-09-23
-[^e2]: `egui-wgpu` v0.36.2's own published `Cargo.lock` (`wgpu` resolved to 30.0.0) — verified
+[^e2]: `egui-wgpu` v0.36.2's own published `Cargo.lock` (`wgpu` resolved to 30.0.0; this repo's lock resolves `wgpu` 30.0.1 next to `egui-wgpu` 0.37.0 as of 2026-10-21) — verified
     2026-09-23
 [^s1]: Slint's own doc-tested `wgpu_30` module example (`slint` v1.18.1 `lib.rs`,
     `BackendSelector::require_wgpu_30`/`set_rendering_notifier`/`Image::try_from`) — this is

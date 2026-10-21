@@ -150,7 +150,11 @@ fn date_from_exif(s: &str) -> String {
 
 /// A text box whose value only counts once committed (Enter / focus lost).
 fn commit_text(ui: &mut egui::Ui, draft: &mut String, committed: &mut String, width: f32) {
-    let resp = ui.add(egui::TextEdit::singleline(draft).desired_width(width));
+    let resp = ui.add(
+        egui::TextEdit::singleline(draft)
+            .align(egui::Align2::LEFT_TOP)
+            .desired_width(width),
+    );
     if resp.lost_focus() && *draft != *committed {
         committed.clone_from(draft);
     }
@@ -664,6 +668,7 @@ impl FilterBar {
             ui.separator();
             ui.add(
                 egui::TextEdit::singleline(&mut self.save_name)
+                    .align(egui::Align2::LEFT_TOP)
                     .hint_text("Smart collection name")
                     .desired_width(160.0),
             );
@@ -814,6 +819,7 @@ fn date_box(ui: &mut egui::Ui, draft: &mut String, committed: &mut String, hint:
     let bad = FilterBar::date_error(draft);
     let resp = ui.add(
         egui::TextEdit::singleline(draft)
+            .align(egui::Align2::LEFT_TOP)
             .hint_text(format!("{hint} YYYY-MM-DD"))
             .desired_width(110.0)
             .text_color_opt(bad.then(|| ui.visuals().error_fg_color)),

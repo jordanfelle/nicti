@@ -411,7 +411,11 @@ pub fn show(
     let mut apply = None;
     ui.horizontal(|ui| {
         ui.label("Cap (GiB):");
-        let response = ui.add(egui::TextEdit::singleline(cap_input).desired_width(60.0));
+        let response = ui.add(
+            egui::TextEdit::singleline(cap_input)
+                .align(egui::Align2::LEFT_TOP)
+                .desired_width(60.0),
+        );
         let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if ui.add_enabled(idle, egui::Button::new("Apply")).clicked() || (enter && idle) {
             apply = Some(parse_cap_gib(cap_input));
