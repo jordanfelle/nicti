@@ -68,7 +68,8 @@ impl TileLoad {
             return Err(OrtContendError::ModelNotFound(model_path.to_path_buf()));
         }
         ensure_ort_environment(ort_dylib_path)?;
-        let builder = Session::builder().map_err(ort_err)?;
+        let builder =
+            Session::builder(nicti_haw::environment().map_err(ort_err)?).map_err(ort_err)?;
         let mut builder = match ep {
             ExecutionProviderKind::Cpu => builder,
             ExecutionProviderKind::Cuda => builder

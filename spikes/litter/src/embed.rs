@@ -63,7 +63,7 @@ fn load_session(model_path: &Path, ort_dylib_path: &Path) -> Result<Session, Emb
         return Err(EmbedError::ModelNotFound(model_path.to_path_buf()));
     }
     ensure_ort_environment(ort_dylib_path)?;
-    Session::builder()
+    Session::builder(nicti_haw::environment().map_err(ort_err)?)
         .map_err(ort_err)?
         .commit_from_file(model_path)
         .map_err(ort_err)
