@@ -706,7 +706,9 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut Fo
             if ui
                 .add_enabled(
                     !picker.is_open(),
-                    egui::TextEdit::singleline(&mut text).hint_text("C:\\Exports"),
+                    egui::TextEdit::singleline(&mut text)
+                        .align(egui::Align2::LEFT_TOP)
+                        .hint_text("C:\\Exports"),
                 )
                 .changed()
             {
@@ -733,6 +735,7 @@ fn destination_section(ui: &mut egui::Ui, spec: &mut ExportSpec, picker: &mut Fo
         if ui
             .add(
                 egui::TextEdit::singleline(&mut sub)
+                    .align(egui::Align2::LEFT_TOP)
                     .hint_text("optional, e.g. {Date:YYYY}/{Folder}"),
             )
             .changed()

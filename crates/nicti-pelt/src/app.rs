@@ -2093,7 +2093,8 @@ impl PeltApp {
                     if ui
                         .add_enabled(
                             !self.import_picker.is_open(),
-                            egui::TextEdit::singleline(&mut self.import_path_input),
+                            egui::TextEdit::singleline(&mut self.import_path_input)
+                                .align(egui::Align2::LEFT_TOP),
                         )
                         .changed()
                     {
@@ -2139,7 +2140,8 @@ impl PeltApp {
                     ui.label("Move into:");
                     ui.add_enabled(
                         !self.move_picker.is_open(),
-                        egui::TextEdit::singleline(&mut self.move_dest_input),
+                        egui::TextEdit::singleline(&mut self.move_dest_input)
+                            .align(egui::Align2::LEFT_TOP),
                     );
                     if ui
                         .add_enabled(!self.move_picker.is_open(), egui::Button::new("Browse..."))

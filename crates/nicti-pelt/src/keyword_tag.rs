@@ -46,6 +46,7 @@ impl KeywordUi {
             let edit = ui.add_enabled(
                 target_count > 0,
                 egui::TextEdit::singleline(&mut self.input)
+                    .align(egui::Align2::LEFT_TOP)
                     .hint_text("Name or Parent|Child")
                     .desired_width(180.0),
             );

@@ -493,7 +493,7 @@ pub fn slider(ui: &mut Ui, spec: &SliderSpec, value: &mut f32, enabled: bool) ->
             egui::TextEdit::singleline(&mut text)
                 .id(te_id)
                 .font(t.font(12.5))
-                .align(egui::Align2::RIGHT_CENTER)
+                .align(egui::Align2::RIGHT_TOP)
                 .desired_width(value_rect.width()),
         );
         if start_edit {
