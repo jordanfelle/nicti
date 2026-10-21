@@ -12,7 +12,7 @@ GPL-3.0/AGPL-3.0 instead. Verdict: ✅ bundle OK · ⚠️ bundle with condition
 
 **Update this file in the same PR as any new dependency, crate, or ML model.**
 
-## Rust crate dependency tree (as of 2026-09-23)
+## Rust crate dependency tree (as of 2026-10-21)
 
 Checked via `cargo metadata` against the full workspace (`nicti`, `spikes/pawprint`,
 `crates/nicti-claw`, `crates/dewclaw`, `bench/whisker`). All resolved crates are permissive:
@@ -29,8 +29,8 @@ Apache-2.0 OR LGPL-2.1-or-later (`r-efi` — LGPL is only one arm of an OR, perm
 `sheath` spike, now a real dependency of the production `nicti-claw` crate landed in
 [#20](https://github.com/jordanfelle/nicti/issues/20); a short permissive license, OSI-approved
 and FSF Free/Libre, functionally MIT-equivalent — added to `deny.toml`'s allowlist in the same
-PR)[^s1], **Apache-2.0 WITH LLVM-exception** (`wasmtime` v49.0.0, and one arm of `wat`
-v1.259.0's own OR-list — both added for the same spike's WASM-vs-native timing test, still a
+PR)[^s1], **Apache-2.0 WITH LLVM-exception** (`wasmtime` v50.0.0, and one arm of `wat`
+v1.262.0's own OR-list — both added for the same spike's WASM-vs-native timing test, still a
 dev-dependency only after #20's promotion; already on `deny.toml`'s allowlist via `blake3`'s same
 license string)[^s2]. No GPL/AGPL crate is currently in the tree. **No action needed today beyond
 the `ISC` addition above** — this section exists so a future `cargo deny check licenses` failure
@@ -843,7 +843,7 @@ Its one new transitive crate, `pollster` 0.4 (`Apache-2.0 OR MIT`), is allowlist
 [^m11]: MI-GAN code MIT and `LICENSE-WEIGHTS` (itself MIT-style) — https://github.com/Picsart-AI-Research/MI-GAN and https://raw.githubusercontent.com/Picsart-AI-Research/MI-GAN/main/LICENSE-WEIGHTS — verified 2026-09-24. https://github.com/Picsart-AI-Research/MI-GAN/issues/25 is **closed** (closed 2026-09-14, before this pass): the maintainer (`AndranikSargsyan`) confirmed the weights are released under the same MIT license, and added the `LICENSE-WEIGHTS` file in direct response to this issue — but explicitly declined the harder question of whether that grant is legitimate given the Co-Mod-GAN teacher's NVIDIA Source Code License-NC, telling the asker "I am not qualified to answer that question... I recommend consulting a lawyer." So the license-grant question is answered; only the deeper legitimacy question was left open, by an explicit punt rather than silence. Places2+FFHQ training-data statement — the repository's own README — verified 2026-09-24, **best-available-secondary** for the exact NVIDIA license clause text (relayed via the GitHub issue's own summary, not independently re-fetched verbatim from NVIDIA's license text in this pass).
 [^m12]: U-2-Net Apache-2.0 — https://raw.githubusercontent.com/xuebinqin/U-2-Net/master/LICENSE — verified 2026-09-26 during [#48](https://github.com/jordanfelle/nicti/issues/48)'s masking spike. Trained on DUTS-TR per the repo's own README (a standard public SOD benchmark); the community `skyseg` fine-tune RapidRAW bundles (`docs/research/stalk-prior-art.md`) is a separate third party's checkpoint, not independently re-verified here.
 [^s1]: `libloading` v0.9.0 ISC license — `cargo metadata`'s resolved `license` field against this crate's own `Cargo.toml`, cross-checked against https://docs.rs/libloading/latest/libloading/ — verified 2026-09-23
-[^s2]: `wasmtime` v49.0.0 and `wat` v1.259.0 license fields — `cargo metadata`'s resolved `license` field, cross-checked against https://github.com/bytecodealliance/wasmtime (repo-wide Apache-2.0 WITH LLVM-exception, standard for Bytecode Alliance projects) — verified 2026-09-23
+[^s2]: `wasmtime` v50.0.0 and `wat` v1.262.0 license fields — `cargo metadata`'s resolved `license` field, cross-checked against https://github.com/bytecodealliance/wasmtime (repo-wide Apache-2.0 WITH LLVM-exception, standard for Bytecode Alliance projects) — verified 2026-10-21
 [^s3]: `slotmap` v1.1.1 and `foldhash` v0.2.0 Zlib licenses — `cargo metadata`'s resolved `license` field via `cargo deny --workspace --all-features check licenses` against each crate's own `Cargo.toml`, cross-checked against https://crates.io/crates/slotmap and https://crates.io/crates/foldhash — verified 2026-09-24
 [^m14]: `deepghs/image_restoration` HF model card MIT — https://huggingface.co/api/models/deepghs/image_restoration (`cardData.license`) — verified 2026-09-26. This is the re-exporter's own license on the ONNX repackaging, not a restatement of NAFNet's or SCUNet's upstream license (both cited separately above) — cite both when using a model sourced from this repo.
 [^m13]: SCUNet Apache-2.0 — https://github.com/cszn/SCUNet/blob/main/LICENSE, fetched directly (`raw.githubusercontent.com`, confirmed Apache License 2.0 header) — verified 2026-09-26
