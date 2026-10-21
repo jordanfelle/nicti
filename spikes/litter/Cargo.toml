@@ -26,7 +26,7 @@ fast_image_resize = "6"
 image = { version = "0.25", default-features = false }
 image_hasher = "3"
 sha2 = "0.11"
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic"] }
 # `nicti-prowl::golden::ssim`/`perf::Protocol` reused rather than duplicated -- same
 # spike-depends-on-crate direction `spikes/sniff` already took for the same reason.
 nicti-prowl = { path = "../../crates/nicti-prowl" }

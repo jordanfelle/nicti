@@ -205,7 +205,20 @@ pub mod native {
             .start_compress(Vec::new())
             .map_err(|e| anyhow::anyhow!("mozjpeg start_compress: {e}"))?;
         if let Some(icc) = icc {
-            compress.write_icc_profile(icc);
+            // Not `Compress::write_icc_profile`: mozjpeg 0.10.13 numbers the APP2 sequence from
+            // 0, but the ICC-in-JPEG spec (and libjpeg's own reader, and img-parts >= 0.4.1) is
+            // 1-based, so readers drop its profiles as "inconsistent".
+            const MAX_DATA: usize = 65533 - 14;
+            let chunks = icc.chunks(MAX_DATA);
+            let count = u8::try_from(chunks.len())
+                .map_err(|_| anyhow::anyhow!("ICC profile too large for JPEG APP2 segments"))?;
+            for (i, chunk) in chunks.enumerate() {
+                let mut buf = Vec::with_capacity(chunk.len() + 14);
+                buf.extend_from_slice(b"ICC_PROFILE\0");
+                buf.extend([i as u8 + 1, count]);
+                buf.extend_from_slice(chunk);
+                compress.write_marker(mozjpeg::Marker::APP(2), &buf);
+            }
         }
         compress
             .write_scanlines(img.as_raw())
@@ -388,6 +401,18 @@ mod tests {
         assert!(ssim(&src, &decoded) > 0.95);
         let read_back = crate::icc::read_icc_jpeg(&bytes).unwrap();
         assert_eq!(read_back.as_deref(), Some(icc.as_slice()));
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn mozjpeg_icc_roundtrips_across_segment_boundaries() {
+        let src = gradient(16, 16);
+        for len in [1usize, 65519, 65520, 140_000] {
+            let icc: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let bytes = native::encode_mozjpeg(&src, 90.0, Some(&icc)).unwrap();
+            let back = crate::icc::read_icc_jpeg(&bytes).unwrap();
+            assert_eq!(back.as_deref(), Some(icc.as_slice()), "len {len}");
+        }
     }
 
     #[cfg(feature = "native")]

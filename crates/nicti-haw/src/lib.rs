@@ -4,8 +4,9 @@
 //! `spikes/litter`, `spikes/rosette`) each used to carry their own crate-local copy of
 //! `ensure_ort_environment`, gated by their own crate-local `OnceLock`. That was enough to dedupe
 //! repeated calls *within* one crate, but `ort`'s own environment is a single process-global --
-//! see `ort::EnvironmentBuilder::commit`'s own doc comment (2.0.0-rc.13): returning `false` means
-//! "an environment has already been configured", not a failure. Before #179's fix, a crate-local
+//! `ort::EnvironmentBuilder::build` (2.0.0-rc.15; rc.13's `commit()` returned `false` instead):
+//! "only one environment is allowed per process" is an error for a second caller, not a failure
+//! of the first. Before #179's fix, a crate-local
 //! copy treated that `false` as a permanent cached error. #179 fixed that, but left a second gap
 //! (#229, this crate): if two of those six spikes ever run `ensure_ort_environment` with a
 //! *different* dylib path in the same process, whichever call loses the race silently proceeds
@@ -16,7 +17,7 @@
 //! This crate is the single process-wide caller every one of those six now goes through: it
 //! records the first successfully-*committed* dylib path in one process-global lock, and a later
 //! call requesting a genuinely different path gets a typed [`OrtInitError::PathMismatch`] before
-//! ever reaching `ort::Session::builder()`, rather than silently reusing the wrong environment.
+//! ever reaching `ort::Session::builder(env)`, rather than silently reusing the wrong environment.
 //!
 //! **Only a successful commit is recorded, not a failed attempt** -- deliberately not a plain
 //! `OnceLock<Result<PathBuf, String>>` (an earlier draft of this crate used exactly that, and an
@@ -36,7 +37,7 @@
 //! a real gap today: every `ort`/`load-dynamic` caller in this workspace goes through this crate.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OrtInitError {
@@ -123,6 +124,10 @@ fn prepend_to_path(dir: Option<&Path>) {
 #[cfg(not(windows))]
 fn prepend_to_path(_dir: Option<&Path>) {}
 
+/// The committed environment. rc.15's `Session::builder` takes it explicitly, so it is kept
+/// alive here for the process lifetime (dropping the last handle would tear the runtime down).
+static ENVIRONMENT: OnceLock<ort::environment::Environment> = OnceLock::new();
+
 /// Initializes the global `ort` environment exactly once per process, from whichever caller gets
 /// there first, and validates every later call (from this crate or a different one) requests that
 /// same `dylib_path`. `dylib_path` points at the ONNX Runtime shared library itself
@@ -134,8 +139,18 @@ pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), OrtInitError> {
         prepend_to_path(path.parent());
         let builder =
             ort::init_from(path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
-        builder.commit();
-        Ok(())
+        let env = builder.build().map_err(|e| e.to_string())?;
+        ENVIRONMENT
+            .set(env)
+            .map_err(|_| "ort environment was already stored".to_string())
+    })
+}
+
+/// The committed environment, for callers building a `Session` directly. Call
+/// [`ensure_ort_environment`] first.
+pub fn environment() -> Result<&'static ort::environment::Environment, OrtInitError> {
+    ENVIRONMENT.get().ok_or_else(|| {
+        OrtInitError::Ort("environment() called before ensure_ort_environment".into())
     })
 }
 
@@ -198,6 +213,7 @@ pub fn session_builder(requested: ExecutionProvider) -> Result<ConfiguredBuilder
     fn ort_err<R>(e: ort::Error<R>) -> OrtInitError {
         OrtInitError::Ort(e.to_string())
     }
+    let env = environment()?;
     let gpu: Option<ExecutionProviderDispatch> = match requested {
         ExecutionProvider::Cpu => None,
         ExecutionProvider::DirectMl => {
@@ -215,7 +231,7 @@ pub fn session_builder(requested: ExecutionProvider) -> Result<ConfiguredBuilder
         ),
     };
     if let Some(ep) = gpu {
-        let attempt = Session::builder().map_err(ort_err)?;
+        let attempt = Session::builder(env).map_err(ort_err)?;
         // DirectML requires sequential execution and no memory-pattern optimisation.
         let attempt = if requested == ExecutionProvider::DirectMl {
             let attempt = attempt.with_memory_pattern(false).map_err(ort_err)?;
@@ -236,7 +252,7 @@ pub fn session_builder(requested: ExecutionProvider) -> Result<ConfiguredBuilder
         }
     }
     Ok(ConfiguredBuilder {
-        builder: Session::builder().map_err(ort_err)?,
+        builder: Session::builder(env).map_err(ort_err)?,
         active: ExecutionProvider::Cpu,
     })
 }
