@@ -13,14 +13,18 @@ use std::path::Path;
 use crate::thumb_sidecar::{self as sidecar, SidecarCodec};
 use crate::{Asset, CatalogError, CatalogStore, Preview, PreviewTier};
 
-const CODEC: SidecarCodec = SidecarCodec::Jpeg;
+/// Preferred codec for reads; `read` falls back to the other, so a folder stays browsable
+/// whichever codec it was exported in (#393).
+const READ_PREF: SidecarCodec = SidecarCodec::Jpeg;
 
-/// Writes `asset`'s catalog T0 thumbnail as a sidecar next to its RAW. `Ok(false)` if the catalog
+/// Writes `asset`'s catalog T0 thumbnail as a sidecar next to its RAW in `codec` (AVIF falls back
+/// to JPEG for an ICC-tagged T0, see [`sidecar::export`]). `Ok(false)` if the catalog
 /// holds none (nothing to export).
 pub fn export_asset_sidecar(
     store: &dyn CatalogStore,
     root_path: &Path,
     asset: &Asset,
+    codec: SidecarCodec,
 ) -> Result<bool, String> {
     let Some(pv) = store
         .get_preview(asset.id, PreviewTier::T0)
@@ -33,7 +37,7 @@ pub fn export_asset_sidecar(
         // Gone from disk since the last sync: nothing to sit next to, and not this move's problem.
         return Ok(false);
     }
-    sidecar::export(&raw, &pv, CODEC).map_err(|e| format!("{}: {e}", raw.display()))?;
+    sidecar::export(&raw, &pv, codec).map_err(|e| format!("{}: {e}", raw.display()))?;
     Ok(true)
 }
 
@@ -77,27 +81,52 @@ pub fn settle_asset(
     report: &mut SettleReport,
 ) -> Result<(), CatalogError> {
     let raw = root_path.join(&asset.rel_path);
-    let side = sidecar::read(&raw, CODEC);
+    let side = sidecar::read_with_codec(&raw, READ_PREF);
     let blob = store.get_preview(asset.id, PreviewTier::T0)?;
     if archived {
         match (side, blob) {
-            // Only drop a blob its sidecar exactly reproduces; anything else is kept and the
-            // read path (catalog first) keeps serving it.
-            (Some(side), Some(blob)) if side.bytes == blob.bytes => {
+            // Only drop a blob its sidecar reproduces; anything else is kept and the read path
+            // (catalog first) keeps serving it. A JPEG sidecar must match byte for byte; an AVIF
+            // one is a re-encode, so it must be a whole, parseable file of the blob's pixel size.
+            (Some((codec, side)), Some(blob)) if sidecar_matches(codec, &side, &blob) => {
                 store.clear_preview(asset.id, PreviewTier::T0)?;
                 report.blobs_dropped += 1;
             }
             (_, Some(_)) => report.kept += 1,
             _ => {}
         }
-    } else if let Some(side) = side {
-        if blob.is_none() {
-            store.put_preview(asset.id, PreviewTier::T0, &side)?;
+    } else if let Some((codec, side)) = side {
+        // The catalog's T0 is always the RAW's own embedded JPEG (ADR-0029): an AVIF sidecar is
+        // never ingested, the original is re-extracted instead. If that fails the sidecar stays.
+        let restored = match (blob.is_some(), codec) {
+            (true, _) => true,
+            (false, SidecarCodec::Jpeg) => {
+                store.put_preview(asset.id, PreviewTier::T0, &side)?;
+                true
+            }
+            (false, SidecarCodec::Avif) => match crate::scruff::extract_t0_preview(&raw) {
+                Some(pv) => {
+                    store.put_preview(asset.id, PreviewTier::T0, &pv)?;
+                    true
+                }
+                None => false,
+            },
+        };
+        if restored {
+            sidecar::remove(&raw);
+            report.sidecars_ingested += 1;
+        } else {
+            report.kept += 1;
         }
-        sidecar::remove(&raw, CODEC);
-        report.sidecars_ingested += 1;
     }
     Ok(())
+}
+
+fn sidecar_matches(codec: SidecarCodec, side: &Preview, blob: &Preview) -> bool {
+    match codec {
+        SidecarCodec::Jpeg => side.bytes == blob.bytes,
+        SidecarCodec::Avif => sidecar::avif_matches_jpeg(&side.bytes, &blob.bytes),
+    }
 }
 
 /// The T0 thumbnail for `asset`, from whichever tier the folder is in: sidecar first on an
@@ -110,7 +139,7 @@ pub fn load_t0(
 ) -> Result<Option<Preview>, CatalogError> {
     let raw = root_path.join(&asset.rel_path);
     if archived {
-        if let Some(p) = sidecar::read(&raw, CODEC) {
+        if let Some(p) = sidecar::read(&raw, READ_PREF) {
             return Ok(Some(p));
         }
         return store.get_preview(asset.id, PreviewTier::T0);
@@ -118,7 +147,7 @@ pub fn load_t0(
     if let Some(p) = store.get_preview(asset.id, PreviewTier::T0)? {
         return Ok(Some(p));
     }
-    Ok(sidecar::read(&raw, CODEC))
+    Ok(sidecar::read(&raw, READ_PREF))
 }
 
 /// [`load_t0`] for a caller that only has an asset id (the grid, cull and loupe readers).
@@ -140,7 +169,7 @@ pub fn load_t0_by_id(
     };
     Ok(sidecar::read(
         &Path::new(&root).join(&asset.rel_path),
-        CODEC,
+        READ_PREF,
     ))
 }
 
@@ -160,5 +189,5 @@ pub fn raw_path_for(
 
 /// Reads the sidecar for `raw` (the disk half of [`load_t0_by_id`]).
 pub fn read_sidecar(raw: &Path) -> Option<Preview> {
-    sidecar::read(raw, CODEC)
+    sidecar::read(raw, READ_PREF)
 }

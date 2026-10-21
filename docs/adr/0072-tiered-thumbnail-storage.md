@@ -59,4 +59,29 @@ than AVIF at the same size, ~3x JPEG's decode p95, native C dependency).
   setting does not retro-actively archive existing folders (only a Move does).
 - Behaviour on a real removable drive (unmount/remount, exFAT timestamps) is untested here --
   tracked as a `needs-physical-testing` follow-up.
-- Follow-ups: user-selectable sidecar codec; role keyed on real volume identity.
+- Follow-ups: role keyed on real volume identity. (The user-selectable sidecar codec landed in #393, below.)
+
+## Amendment (#393): selectable sidecar codec
+
+`SidecarCodec` gains `Avif` (`.thumb.avif`); the choice is `sidecar_codec` in
+`<catalog>.archive-drives.json` (default JPEG, an old file loads as JPEG) and a combo in the Library
+view, applied to folders archived from then on. `ravif` quality 80, speed 9 (ADR-0143's archival
+candidate), single-threaded; lossy WebP stays rejected.
+
+- **Reads are codec-agnostic**: `thumb_sidecar::read` tries the preferred suffix, then the other, so
+  a folder stays browsable whichever codec it was exported in. `export` removes the other codec's
+  file so one RAW never has two.
+- **ICC-tagged T0 stays JPEG** in AVIF mode (ravif can't carry a profile, nicti-lair has no colour
+  management), as does a T0 that fails to decode; `export` returns the codec actually written.
+- **Settle**: a JPEG sidecar still has to equal the blob byte for byte. An AVIF one is a re-encode,
+  so it is accepted when it is a whole, parseable file whose pixel size equals the blob's (a
+  re-ingested blob of the same size but different content would keep the old thumbnail; acceptable
+  for a grid thumbnail, and the blob is not dropped on any mismatch).
+- **Unarchive never ingests AVIF**: the catalog's T0 stays the RAW's own JPEG (ADR-0029), so an AVIF
+  sidecar is replaced by re-extracting T0 from the RAW; if that fails the sidecar is kept.
+- `avif-parse` panics (asserts) on some truncated files instead of returning `Err`, so
+  `avif_dimensions` catches it: a bad file reads as absent.
+- `nicti-pelt::preview_color::decode` sniffs `ftypavif` and decodes via `avif-decode` (ravif's default
+  10-bit output comes back as 16-bit RGB).
+- Measured (one non-Nikon 115 KB JPEG, so not ADR-0143's corpus): 78 KB AVIF, ~250 ms encode. The
+  ~2.7x figure is ADR-0143's; re-measure on real T0s before making AVIF the default.

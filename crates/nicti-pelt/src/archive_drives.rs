@@ -8,17 +8,29 @@
 
 use std::path::{Path, PathBuf};
 
+use nicti_lair::thumb_sidecar::SidecarCodec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Saved {
     archive_locations: Vec<String>,
+    /// Thumbnail sidecar codec for folders archived from now on (#393). Absent in older files.
+    #[serde(default, deserialize_with = "lenient_codec")]
+    sidecar_codec: SidecarCodec,
+}
+
+/// An unknown or hand-edited codec value must not discard the archive-location list that shares
+/// its file: fall back to the default instead of failing the whole parse.
+fn lenient_codec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<SidecarCodec, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 #[derive(Debug, Default)]
 pub struct ArchiveDrives {
     file: Option<PathBuf>,
     locations: Vec<String>,
+    codec: SidecarCodec,
 }
 
 /// `<catalog>.archive-drives.json`, beside the catalog.
@@ -43,14 +55,14 @@ impl ArchiveDrives {
     /// Loads the saved list; a missing or corrupt file means "no archive locations".
     pub fn load(catalog_path: &Path) -> Self {
         let file = file_for(catalog_path);
-        let locations = std::fs::read_to_string(&file)
+        let saved = std::fs::read_to_string(&file)
             .ok()
             .and_then(|t| serde_json::from_str::<Saved>(&t).ok())
-            .map(|s| s.archive_locations)
             .unwrap_or_default();
         ArchiveDrives {
             file: Some(file),
-            locations,
+            locations: saved.archive_locations,
+            codec: saved.sidecar_codec,
         }
     }
 
@@ -59,6 +71,7 @@ impl ArchiveDrives {
         ArchiveDrives {
             file: None,
             locations: locations.iter().map(|s| s.to_string()).collect(),
+            codec: SidecarCodec::default(),
         }
     }
 
@@ -90,6 +103,21 @@ impl ArchiveDrives {
             self.locations.push(location.to_string());
         }
         self.locations.sort();
+        self.save()
+    }
+
+    /// Codec for the thumbnail sidecars written when a folder is archived.
+    pub fn sidecar_codec(&self) -> SidecarCodec {
+        self.codec
+    }
+
+    /// Sets the sidecar codec and saves. The in-memory change sticks even if the save fails.
+    pub fn set_sidecar_codec(&mut self, codec: SidecarCodec) -> std::io::Result<()> {
+        self.codec = codec;
+        self.save()
+    }
+
+    fn save(&self) -> std::io::Result<()> {
         let Some(file) = &self.file else {
             return Ok(());
         };
@@ -98,6 +126,7 @@ impl ArchiveDrives {
             &tmp,
             serde_json::to_string(&Saved {
                 archive_locations: self.locations.clone(),
+                sidecar_codec: self.codec,
             })?,
         )?;
         std::fs::rename(&tmp, file)
@@ -135,5 +164,27 @@ mod tests {
         assert!(ArchiveDrives::load(&cat).is_archive(Path::new("/mnt/a/x")));
         a.set("/mnt/a/", false).unwrap();
         assert!(!ArchiveDrives::load(&cat).is_archive(Path::new("/mnt/a/x")));
+    }
+
+    #[test]
+    fn codec_persists_and_an_old_file_loads_as_jpeg() {
+        let d = tempfile::tempdir().unwrap();
+        let cat = d.path().join("c.db");
+        std::fs::write(file_for(&cat), r#"{"archive_locations":["/a"]}"#).unwrap();
+        let mut a = ArchiveDrives::load(&cat);
+        assert_eq!(a.sidecar_codec(), SidecarCodec::Jpeg);
+        assert!(a.is_location("/a"));
+        a.set_sidecar_codec(SidecarCodec::Avif).unwrap();
+        let b = ArchiveDrives::load(&cat);
+        assert_eq!(b.sidecar_codec(), SidecarCodec::Avif);
+        assert!(b.is_location("/a"), "locations survive a codec save");
+        std::fs::write(
+            file_for(&cat),
+            r#"{"archive_locations":["/a"],"sidecar_codec":"jxl"}"#,
+        )
+        .unwrap();
+        let c = ArchiveDrives::load(&cat);
+        assert!(c.is_location("/a"), "an unknown codec keeps the locations");
+        assert_eq!(c.sidecar_codec(), SidecarCodec::Jpeg);
     }
 }

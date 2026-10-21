@@ -166,7 +166,7 @@ fn select_t0_candidate(jpegs: &[EmbeddedJpeg]) -> Option<&EmbeddedJpeg> {
         .or_else(|| jpegs.iter().filter(within_cap).max_by_key(|j| j.byte_len))
 }
 
-fn extract_t0_preview(path: &Path) -> Option<Preview> {
+pub(crate) fn extract_t0_preview(path: &Path) -> Option<Preview> {
     let source = FileSource::open(path).ok()?;
     let mut walker = Walker::new(source).ok()?;
     let jpegs = walker.find_embedded_jpegs().ok()?;

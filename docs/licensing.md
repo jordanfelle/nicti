@@ -282,6 +282,10 @@ Nicti's-own-AGPL-3.0-or-later reasoning as those entries, not a permissive-only 
 (MIT) and `imgref` v1.12.3 (CC0-1.0 OR Apache-2.0) are the pixel-buffer types `ravif`/`avif-decode`
 share — both already covered.
 
+**Now production dependencies (#393, AVIF thumbnail sidecars):** `ravif` and `avif-parse` in
+`nicti-lair`, `avif-decode` (and its `rav1d`) in `nicti-pelt`. No new licences: the set above, incl.
+`avif-parse`'s file-level MPL-2.0, ships in the binary rather than only in a spike.
+
 Building `ravif`/`rav1e`/`rav1d` requires `nasm` (their optimized SIMD asm paths) — installed via
 `brew install nasm` on this dev machine; **`.github/workflows/ci.yml`'s four general
 clippy/test jobs (Linux and Windows) now install it too** (`apt-get install -y nasm` /

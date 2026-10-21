@@ -107,3 +107,5 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   rendered thumbnails need a small rendered tier (follow-up).
 
 **Keyed Larder entries (#353, `docs/adr/0353-baked-alpha-disk-tier.md`):** the Larder's `(asset, tier)` key allows one entry per photo per tier, which cannot hold several AI mask alphas per photo, so a second index table `keyed_entry (kind, key)` was added that shares the pack file, byte cap, LRU order (one `seq` counter across both tables), compaction and purge-all. It is created with `IF NOT EXISTS`, so existing Larders need no migration. The cache-size setting and purge-all therefore cover baked alphas with no UI change.
+
+- **Sidecar codec (#393)**: AVIF sidecars (`.thumb.avif`, ravif q80 speed 9) selectable for archived folders, JPEG default; reads accept either codec, ICC-tagged T0 stays JPEG, unarchive re-extracts T0 from the RAW. Full rules: `docs/adr/0072-tiered-thumbnail-storage.md` (amendment).

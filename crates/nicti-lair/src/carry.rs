@@ -54,6 +54,8 @@ pub struct CarryOptions {
     /// catalog T0 thumbnail as a `.thumb.jpg` sidecar in the source folder, so it travels with the
     /// folder. A sidecar that can't be written fails the move before it starts.
     pub export_sidecars: bool,
+    /// Codec for those sidecars (#393); AVIF falls back to JPEG per asset for an ICC-tagged T0.
+    pub sidecar_codec: crate::thumb_sidecar::SidecarCodec,
     /// Set the root's `archived` flag in the commit transaction (`None` leaves it alone).
     pub set_archived: Option<bool>,
 }
@@ -313,11 +315,23 @@ impl Carry {
 
     fn export_step(&mut self, mut pending: VecDeque<crate::Asset>) -> Option<CarryOutcome> {
         let move_id = self.move_id.expect("journal is open before export");
-        for _ in 0..16 {
+        // An AVIF encode is ~250 ms, so one per step keeps cancel/progress latency low; JPEG is a
+        // byte copy.
+        let per_step = if self.opts.sidecar_codec == crate::thumb_sidecar::SidecarCodec::Avif {
+            1
+        } else {
+            16
+        };
+        for _ in 0..per_step {
             let Some(asset) = pending.pop_front() else {
                 return self.launch(move_id);
             };
-            if let Err(e) = crate::tier::export_asset_sidecar(&*self.store, &self.src, &asset) {
+            if let Err(e) = crate::tier::export_asset_sidecar(
+                &*self.store,
+                &self.src,
+                &asset,
+                self.opts.sidecar_codec,
+            ) {
                 // Nothing has been copied, so `dest` (possibly a pre-existing empty folder the
                 // user picked) is not ours to remove -- just close the journal.
                 if let Some(id) = self.move_id.take() {
@@ -1447,6 +1461,7 @@ mod tests {
                 CarryOptions {
                     force_copy,
                     export_sidecars: true,
+                    sidecar_codec: Default::default(),
                     set_archived: Some(true),
                 },
                 1,
@@ -1493,6 +1508,7 @@ mod tests {
                 CarryOptions {
                     force_copy,
                     export_sidecars: false,
+                    sidecar_codec: Default::default(),
                     set_archived: Some(false),
                 },
                 2,
@@ -1558,6 +1574,7 @@ mod tests {
             CarryOptions {
                 force_copy: true,
                 export_sidecars: true,
+                sidecar_codec: Default::default(),
                 set_archived: Some(true),
             },
             1,
@@ -1569,6 +1586,138 @@ mod tests {
             .get_preview(f.asset_id, crate::PreviewTier::T0)
             .unwrap()
             .is_some());
+    }
+
+    fn real_preview(w: u32, h: u32) -> crate::Preview {
+        use image::ImageEncoder;
+        let px: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, 90, 160])
+            .collect();
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+            .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        crate::Preview {
+            width: Some(w),
+            height: Some(h),
+            bytes,
+        }
+    }
+
+    /// #393: an AVIF archive move writes `.thumb.avif`, drops the blob, and the by-id reader
+    /// serves the sidecar.
+    #[test]
+    fn avif_archive_move_exports_an_avif_sidecar_and_drops_the_blob() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &real_preview(40, 30))
+            .unwrap();
+        let mut c = Carry::new(
+            f.cat.clone(),
+            f.root_id,
+            &f.dest_parent,
+            CarryOptions {
+                force_copy: true,
+                export_sidecars: true,
+                sidecar_codec: crate::thumb_sidecar::SidecarCodec::Avif,
+                set_archived: Some(true),
+            },
+            1,
+        );
+        assert!(matches!(run(&mut c), CarryOutcome::Moved { .. }));
+        let dest = f.dest_parent.join("event-2026");
+        assert!(dest.join("a.NEF.thumb.avif").is_file());
+        assert!(!dest.join("a.NEF.thumb.jpg").exists());
+        assert!(f
+            .cat
+            .get_preview(f.asset_id, crate::PreviewTier::T0)
+            .unwrap()
+            .is_none());
+        let got = crate::tier::load_t0_by_id(&*f.cat, f.asset_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((got.width, got.height), (Some(40), Some(30)));
+    }
+
+    /// An AVIF sidecar whose size disagrees with the blob is not proof of it: the blob stays.
+    #[test]
+    fn settle_keeps_a_blob_whose_avif_sidecar_has_another_size() {
+        let f = fixture();
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &real_preview(40, 30))
+            .unwrap();
+        f.cat.set_root_archived(f.root_id, true).unwrap();
+        crate::thumb_sidecar::export(
+            &f.src.join("a.NEF"),
+            &real_preview(64, 48),
+            crate::thumb_sidecar::SidecarCodec::Avif,
+        )
+        .unwrap();
+        let rep = crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert_eq!((rep.blobs_dropped, rep.kept), (0, 1));
+        // The matching size is accepted.
+        crate::thumb_sidecar::export(
+            &f.src.join("a.NEF"),
+            &real_preview(40, 30),
+            crate::thumb_sidecar::SidecarCodec::Avif,
+        )
+        .unwrap();
+        let rep = crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert_eq!(rep.blobs_dropped, 1);
+    }
+
+    /// C1 (#393 review): same pixel size is not identity. A different picture of the same size
+    /// must not let settle drop the blob.
+    #[test]
+    fn settle_keeps_a_blob_whose_avif_sidecar_shows_another_picture() {
+        use image::ImageEncoder;
+        let f = fixture();
+        let other = {
+            let (w, h) = (40u32, 30u32);
+            let px: Vec<u8> = (0..w * h).flat_map(|_| [10u8, 200, 30]).collect();
+            let mut bytes = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+                .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+                .unwrap();
+            crate::Preview {
+                width: Some(w),
+                height: Some(h),
+                bytes,
+            }
+        };
+        f.cat
+            .put_preview(f.asset_id, crate::PreviewTier::T0, &real_preview(40, 30))
+            .unwrap();
+        f.cat.set_root_archived(f.root_id, true).unwrap();
+        crate::thumb_sidecar::export(
+            &f.src.join("a.NEF"),
+            &other,
+            crate::thumb_sidecar::SidecarCodec::Avif,
+        )
+        .unwrap();
+        let rep = crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert_eq!((rep.blobs_dropped, rep.kept), (0, 1));
+    }
+
+    /// Unarchiving with an AVIF sidecar re-extracts T0 from the RAW; when that is impossible the
+    /// sidecar is kept rather than deleted.
+    #[test]
+    fn unarchive_keeps_an_avif_sidecar_when_the_raw_has_no_preview() {
+        let f = fixture();
+        crate::thumb_sidecar::export(
+            &f.src.join("a.NEF"),
+            &real_preview(40, 30),
+            crate::thumb_sidecar::SidecarCodec::Avif,
+        )
+        .unwrap();
+        let rep = crate::tier::settle_root(&*f.cat, f.root_id).unwrap();
+        assert_eq!((rep.sidecars_ingested, rep.kept), (0, 1));
+        assert!(f.src.join("a.NEF.thumb.avif").is_file());
+        assert!(f
+            .cat
+            .get_preview(f.asset_id, crate::PreviewTier::T0)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1584,6 +1733,7 @@ mod tests {
             CarryOptions {
                 force_copy: true,
                 export_sidecars: true,
+                sidecar_codec: Default::default(),
                 set_archived: Some(true),
             },
             1,
@@ -1626,6 +1776,7 @@ mod tests {
             CarryOptions {
                 force_copy: true,
                 export_sidecars: true,
+                sidecar_codec: Default::default(),
                 set_archived: Some(true),
             },
             1,
