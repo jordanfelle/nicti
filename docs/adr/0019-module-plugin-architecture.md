@@ -129,7 +129,7 @@ window on the WASM side with no equivalent cost charged to the native side — t
 post-fix): the WASM path's **total** time (host→guest copy + guest call + guest→host copy) was
 **11–19x slower than the native loop** (native: 1.9–5.1ms; WASM total: 26.0–56.3ms), and that gap
 is **almost entirely the buffer copy**, not the compute: the guest call itself took 2.0–6.4ms,
-close to native, while `copy_in`+`copy_out` alone accounted for 24.0–49.8ms of the total. This
+close to native, while `copy_in`+`copy_out` alone accounted for 24.0–49.8ms of the total. Re-measured 2026-10-21 on `wasmtime` v50.0.0 (one release run): native 3.2ms, WASM total 28.5ms (9.0x), guest call 4.1ms, `copy_in`+`copy_out` 24.4ms — inside the v49 ranges, so the conclusion is unchanged. This
 matches the research finding that no authoritative zero-copy path
 exists yet for a buffer this large crossing the WASM linear-memory boundary — the closest
 authoritative discussion (a 2026 wasmtime/WASI thread on `wasi:http` resource streaming) concludes
@@ -301,7 +301,7 @@ verification date where one exists, matching the citation discipline of ADR-0015
 
 ### WASM hosting
 
-[^w1]: `wasmtime` v49.0.0 (2026-09-21 release), Apache-2.0 WITH LLVM-exception —
+[^w1]: `wasmtime` v49.0.0 (2026-09-21 release; the test dependency has since moved to v50.0.0, see §6 re-measurement), Apache-2.0 WITH LLVM-exception —
     https://github.com/bytecodealliance/wasmtime/releases — **primary-source-verified** for
     version/license. WASI Preview 2/Component Model is production-usable (wasmCloud 2.5 ships
     WASI P3-by-default on wasmtime 46, per a secondary source) but still shows active feature
