@@ -88,3 +88,4 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   flips `root.archived` in the commit txn, then a chunked `Settle` phase (`nicti-lair/src/tier.rs`)
   drops blobs / re-ingests sidecars; blob-only-dropped-if-sidecar-readable keeps it crash-safe.
   Readers use `tier::load_t0_by_id` (catalog, then sidecar).
+- **Sidecar codec (#393)**: `SidecarCodec::{Jpeg,Avif}` in `nicti-lair/src/thumb_sidecar.rs` (ravif q80 speed 9; ICC-tagged T0 stays JPEG; reads try both suffixes), setting in `<catalog>.archive-drives.json` (`pelt/archive_drives.rs`), decode in `pelt/preview_color.rs`. ADR-0072 amendment.

@@ -19,6 +19,9 @@ pub struct DecodedJpeg {
 /// Decodes `bytes`, keeping the embedded ICC profile. EXIF orientation is deliberately not applied
 /// (previews never were: T0/T2 are stored upright).
 pub fn decode(bytes: &[u8]) -> Result<DecodedJpeg, String> {
+    if is_avif(bytes) {
+        return decode_avif(bytes);
+    }
     let mut decoder = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?
@@ -28,6 +31,22 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedJpeg, String> {
     let icc = decoder.icc_profile().ok().flatten();
     let image = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     Ok(DecodedJpeg { image, icc })
+}
+
+/// ISOBMFF `ftyp` box with an `avif` major brand: the `.thumb.avif` sidecars (#393).
+fn is_avif(b: &[u8]) -> bool {
+    b.len() > 12 && &b[4..12] == b"ftypavif"
+}
+
+/// Only untagged T0s are ever AVIF-encoded (`thumb_sidecar::export` keeps ICC-tagged ones JPEG),
+/// so the result carries no profile and is treated as sRGB like any untagged JPEG. The decode is
+/// panic-guarded in lair.
+fn decode_avif(bytes: &[u8]) -> Result<DecodedJpeg, String> {
+    let rgb = nicti_lair::thumb_sidecar::decode_avif_rgb8(bytes).ok_or("AVIF doesn't decode")?;
+    Ok(DecodedJpeg {
+        image: DynamicImage::ImageRgb8(rgb),
+        icc: None,
+    })
 }
 
 /// `decoded`'s pixels as 8-bit RGBA converted to the display `color` was built for.
@@ -72,6 +91,34 @@ mod tests {
 
     fn srgb_display() -> SourceTransforms {
         SourceTransforms::new(&DisplayProfile::Space(OutputSpace::Srgb))
+    }
+
+    /// The `.thumb.avif` sidecar a real archive move writes decodes back to about the same pixels.
+    #[test]
+    fn decodes_an_avif_sidecar_like_the_jpeg_it_came_from() {
+        let jpeg = tagged_jpeg(64, 48, [200, 40, 40], None);
+        let d = tempfile::tempdir().unwrap();
+        let raw = d.path().join("a.NEF");
+        let pv = nicti_lair::Preview {
+            width: Some(64),
+            height: Some(48),
+            bytes: jpeg.clone(),
+        };
+        nicti_lair::thumb_sidecar::export(&raw, &pv, nicti_lair::thumb_sidecar::SidecarCodec::Avif)
+            .unwrap();
+        let avif = std::fs::read(nicti_lair::thumb_sidecar::sidecar_path(
+            &raw,
+            nicti_lair::thumb_sidecar::SidecarCodec::Avif,
+        ))
+        .unwrap();
+        let got = decode_to_display(&avif, &srgb_display()).unwrap();
+        let want = decode_to_display(&jpeg, &srgb_display()).unwrap();
+        assert_eq!(got.dimensions(), want.dimensions());
+        let (g, w) = (got.get_pixel(32, 24), want.get_pixel(32, 24));
+        for i in 0..3 {
+            assert!((g[i] as i32 - w[i] as i32).abs() < 8, "{g:?} vs {w:?}");
+        }
+        assert!(decode(b"\0\0\0\x1cftypavif garbage").is_err());
     }
 
     #[test]

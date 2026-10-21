@@ -3810,13 +3810,17 @@ dependencies = [
 name = "nicti-lair"
 version = "0.0.0"
 dependencies = [
+ "avif-decode",
+ "avif-parse",
  "blake3",
+ "image",
  "kamadak-exif",
  "nicti-claw",
  "nicti-cornea",
  "nicti-pawprint",
  "nicti-pounce",
  "nicti-scent",
+ "ravif",
  "rusqlite",
  "serde",
  "serde_json",

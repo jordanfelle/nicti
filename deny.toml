@@ -71,8 +71,9 @@ allow = [
     # *sole* license is exactly "GPL-2.0-only" should still fail this check; if one is ever needed,
     # that's a real ADR-0018 conversation (dual-licensing, a permissive fork, etc.), not an
     # allowlist edit.
-    # MPL-2.0: `avif-parse` (AVIF-container demuxer, pulled in by `avif-decode`, #29's spike-only
-    # AVIF-vs-JPEG tier-payload comparison). File-level weak copyleft, OSI-approved, FSF Free/Libre
+    # MPL-2.0: `avif-parse` (AVIF-container demuxer: `nicti-lair` validates AVIF thumbnail sidecars
+    # with it and `nicti-pelt` decodes them via `avif-decode`, #393; first pulled in by #29's spike).
+    # File-level weak copyleft, OSI-approved, FSF Free/Libre
     # -- combines cleanly into a GPL-3.0-family work the same way the GPL/AGPL entries above do,
     # not a permissive-only case like ISC/Zlib/NCSA above it.
     "MPL-2.0",

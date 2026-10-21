@@ -18,6 +18,7 @@ use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{BackupJob, IngestJob, MoveJob, ReportSlot, ResumeMovesJob, SyncJob};
 use nicti_lair::shred;
+use nicti_lair::thumb_sidecar::SidecarCodec;
 use nicti_lair::{CatalogError, CatalogStore, Sort, SortDirection, SortField, SqliteCatalog};
 use nicti_pounce::hackles;
 use nicti_pounce::telemetry::{
@@ -741,6 +742,7 @@ impl PeltApp {
         let dest_archived = self.archive_drives.is_archive(&dest);
         let opts = CarryOptions {
             export_sidecars: dest_archived && src_archived != Some(true),
+            sidecar_codec: self.archive_drives.sidecar_codec(),
             set_archived: (src_archived != Some(dest_archived)).then_some(dest_archived),
             ..CarryOptions::default()
         };
@@ -1183,6 +1185,38 @@ fn reconcile_tier(
         return;
     }
     let _ = nicti_lair::tier::settle_root(store, root_id);
+}
+
+/// "Archive thumbnails: JPEG | AVIF" (#393). Returns the new choice when the user changed it.
+fn sidecar_codec_row(
+    ui: &mut egui::Ui,
+    current: SidecarCodec,
+    enabled: bool,
+) -> Option<SidecarCodec> {
+    let label = |c: SidecarCodec| match c {
+        SidecarCodec::Jpeg => "JPEG",
+        SidecarCodec::Avif => "AVIF (smaller, slower to open)",
+    };
+    let mut picked = None;
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Archive thumbnails:");
+            egui::ComboBox::from_id_salt("sidecar_codec")
+                .selected_text(label(current))
+                .show_ui(ui, |ui| {
+                    for c in [SidecarCodec::Jpeg, SidecarCodec::Avif] {
+                        if ui.selectable_label(c == current, label(c)).clicked() && c != current {
+                            picked = Some(c);
+                        }
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Applies to folders archived from now on; already-archived folders keep theirs.",
+        );
+    });
+    picked
 }
 
 /// One line for the Library view once a `MoveJob`'s report is ready (#26).
@@ -1935,6 +1969,7 @@ impl PeltApp {
         let attention = folder_panel::attention_items(&self.folder_cache.open_moves, move_running);
         let mut out = folder_panel::PanelOutput::default();
         let mut set_archive = None;
+        let mut set_codec = None;
         let selected_root = self.grid_root;
         egui::Panel::left("folder_panel")
             .resizable(true)
@@ -1957,12 +1992,19 @@ impl PeltApp {
                         // Not "No folders yet": nothing has been read, so nothing is known.
                         ui.weak("Reading folders\u{2026}");
                     }
+                    set_codec = sidecar_codec_row(ui, self.archive_drives.sidecar_codec(), !moving);
                     let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
                     verify_ui::show(ui, &mut self.verify_ui, &dyn_store, &self.pounce, blocked);
                 });
             });
         if let Some((drive, archive)) = set_archive {
             if let Err(e) = self.archive_drives.set(&drive, archive) {
+                self.last_move_summary =
+                    Some(format!("Couldn't save the archive-drive setting: {e}"));
+            }
+        }
+        if let Some(codec) = set_codec {
+            if let Err(e) = self.archive_drives.set_sidecar_codec(codec) {
                 self.last_move_summary =
                     Some(format!("Couldn't save the archive-drive setting: {e}"));
             }
