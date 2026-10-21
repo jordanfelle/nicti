@@ -140,10 +140,9 @@ pub fn ensure_ort_environment(dylib_path: &Path) -> Result<(), OrtInitError> {
         let builder =
             ort::init_from(path.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
         let env = builder.build().map_err(|e| e.to_string())?;
-        // `ensure_committed` serializes callers and only reaches here when nothing was committed
-        // yet, so this `set` cannot lose; ignoring its result is safe.
-        let _ = ENVIRONMENT.set(env);
-        Ok(())
+        ENVIRONMENT
+            .set(env)
+            .map_err(|_| "ort environment was already stored".to_string())
     })
 }
 

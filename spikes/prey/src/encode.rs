@@ -210,7 +210,8 @@ pub mod native {
             // 1-based, so readers drop its profiles as "inconsistent".
             const MAX_DATA: usize = 65533 - 14;
             let chunks = icc.chunks(MAX_DATA);
-            let count = chunks.len() as u8;
+            let count = u8::try_from(chunks.len())
+                .map_err(|_| anyhow::anyhow!("ICC profile too large for JPEG APP2 segments"))?;
             for (i, chunk) in chunks.enumerate() {
                 let mut buf = Vec::with_capacity(chunk.len() + 14);
                 buf.extend_from_slice(b"ICC_PROFILE\0");
@@ -400,6 +401,18 @@ mod tests {
         assert!(ssim(&src, &decoded) > 0.95);
         let read_back = crate::icc::read_icc_jpeg(&bytes).unwrap();
         assert_eq!(read_back.as_deref(), Some(icc.as_slice()));
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn mozjpeg_icc_roundtrips_across_segment_boundaries() {
+        let src = gradient(16, 16);
+        for len in [1usize, 65519, 65520, 140_000] {
+            let icc: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let bytes = native::encode_mozjpeg(&src, 90.0, Some(&icc)).unwrap();
+            let back = crate::icc::read_icc_jpeg(&bytes).unwrap();
+            assert_eq!(back.as_deref(), Some(icc.as_slice()), "len {len}");
+        }
     }
 
     #[cfg(feature = "native")]
