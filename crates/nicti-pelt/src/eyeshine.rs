@@ -255,6 +255,9 @@ pub struct Request {
     pub path: PathBuf,
     pub edit: EditDocument,
     pub image_index: usize,
+    /// The photo's already-decoded frame, when the app holds one for this exact `identity`
+    /// (Develop's or the loupe's); the decode stage uses it instead of decoding the file again.
+    pub frame: Option<Arc<LinearFrame>>,
 }
 
 /// What the render pipeline needs from the app, cloned into every job.
@@ -351,6 +354,10 @@ impl Drop for Settle {
 /// The per-photo state carried through the stages.
 struct Task {
     req: Request,
+    /// `req.frame`, moved here by [`submit`] so the decode stage can *take* it: the task outlives
+    /// the render's live-suffix step, and a frame left in `req` would stay pinned (~270 MB at
+    /// 45 MP) through the tiling and encode, defeating `RenderJob::begin`'s `drop(frame)`.
+    supplied: Mutex<Option<Arc<LinearFrame>>>,
     env: Env,
     /// Set by the service when a newer edit supersedes this render.
     cancelled: Arc<AtomicBool>,
@@ -384,8 +391,11 @@ pub fn submit(
     cancelled: Arc<AtomicBool>,
 ) -> (JobId, ReportSlot<T2Outcome>) {
     let slot: ReportSlot<T2Outcome> = Arc::new(Mutex::new(None));
+    let mut req = req;
+    let supplied = Mutex::new(req.frame.take());
     let task = Arc::new(Task {
         req,
+        supplied,
         env: env.clone(),
         cancelled,
         panicked: Arc::new(AtomicBool::new(false)),
@@ -505,11 +515,21 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
             return Err(T2Outcome::Stored);
         }
     }
-    let frame = task
-        .env
-        .decoder
-        .decode_linear(&task.req.path)
-        .map_err(|e| T2Outcome::Failed(format!("couldn't decode: {e}")))?;
+    // The app already holds this photo decoded (#398): don't read and demosaic-prep it twice.
+    let supplied = task
+        .supplied
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let frame = match supplied {
+        Some(frame) => frame,
+        None => Arc::new(
+            task.env
+                .decoder
+                .decode_linear(&task.req.path)
+                .map_err(|e| T2Outcome::Failed(format!("couldn't decode: {e}")))?,
+        ),
+    };
     let exif = SourceExif::from_path(&task.req.path);
     // A camera profile the edit names must reload and still match: rendering with a different
     // profile than the user edited with would show the wrong colours.
@@ -518,7 +538,7 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
     let look = camera_profiles::load_look_for_document(&task.req.edit)
         .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
     Ok(Decoded {
-        frame: Arc::new(frame),
+        frame,
         exif,
         profile,
         look,
@@ -957,6 +977,17 @@ pub struct Info {
     pub hash: Option<String>,
 }
 
+/// The offered decoded frame, if it is the photo's current file: a frame from before a re-ingest
+/// (different identity) must not be rendered under the new one's hash.
+fn frame_for(
+    offered: Option<(blake3::Hash, Arc<LinearFrame>)>,
+    identity: &blake3::Hash,
+) -> Option<Arc<LinearFrame>> {
+    offered
+        .filter(|(offered_identity, _)| offered_identity == identity)
+        .map(|(_, frame)| frame)
+}
+
 /// Renders in flight at once. Each decoded frame is ~270 MB at 45 MP and waits for the single GPU
 /// claim while holding it, so the bound is on frames, not just on the GPU.
 const MAX_INFLIGHT: usize = 2;
@@ -1128,7 +1159,30 @@ impl EyeshineService {
         image_index: usize,
         policy: RenderPolicy,
     ) -> Option<Info> {
-        self.request_as(pounce, store, asset_id, image_index, policy, false)
+        self.request_as(pounce, store, asset_id, image_index, policy, false, None)
+    }
+
+    /// [`Self::request`] for a photo the app already holds decoded (#398). `frame` is
+    /// `(identity, decoded frame)`; it is used only when the identity is the one the photo
+    /// resolves to now, so a frame from before a re-ingest can't be rendered under the new file.
+    pub fn request_with_frame(
+        &mut self,
+        pounce: &Pounce,
+        store: &dyn CatalogStore,
+        asset_id: i64,
+        image_index: usize,
+        policy: RenderPolicy,
+        frame: (blake3::Hash, Arc<LinearFrame>),
+    ) -> Option<Info> {
+        self.request_as(
+            pounce,
+            store,
+            asset_id,
+            image_index,
+            policy,
+            false,
+            Some(frame),
+        )
     }
 
     /// [`Self::request`] for a neighbour of the photo being looked at (#398). Never evicts a
@@ -1142,9 +1196,10 @@ impl EyeshineService {
         image_index: usize,
         policy: RenderPolicy,
     ) {
-        self.request_as(pounce, store, asset_id, image_index, policy, true);
+        self.request_as(pounce, store, asset_id, image_index, policy, true, None);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn request_as(
         &mut self,
         pounce: &Pounce,
@@ -1153,6 +1208,7 @@ impl EyeshineService {
         image_index: usize,
         policy: RenderPolicy,
         prefetch: bool,
+        frame: Option<(blake3::Hash, Arc<LinearFrame>)>,
     ) -> Option<Info> {
         self.deferred = false;
         let resolved = self.resolve(store, asset_id)?;
@@ -1245,6 +1301,7 @@ impl EyeshineService {
                 path: resolved.path,
                 edit: resolved.edit,
                 image_index,
+                frame: frame_for(frame, &resolved.identity),
             },
             cancelled.clone(),
         );
@@ -1475,6 +1532,16 @@ mod tests {
         assert_eq!(w, 960);
     }
 
+    #[test]
+    fn an_offered_frame_is_used_only_for_the_identity_it_was_decoded_for() {
+        let frame = Arc::new(crate::render::synthetic_linear_frame());
+        let (a, b) = (id(1), id(2));
+        let got = frame_for(Some((a, frame.clone())), &a).expect("same identity");
+        assert!(Arc::ptr_eq(&got, &frame), "shared, never copied");
+        assert!(frame_for(Some((a, frame)), &b).is_none());
+        assert!(frame_for(None, &a).is_none());
+    }
+
     // --- the job (needs a wgpu adapter; skipped without one) ---
 
     use nicti_claw::Module;
@@ -1555,6 +1622,15 @@ mod tests {
         }
 
         fn run(&self, name: &str, doc: EditDocument) -> (T2Outcome, String) {
+            self.run_with(name, doc, None)
+        }
+
+        fn run_with(
+            &self,
+            name: &str,
+            doc: EditDocument,
+            frame: Option<Arc<LinearFrame>>,
+        ) -> (T2Outcome, String) {
             let path = self.file(name);
             let identity = blake3::hash(name.as_bytes());
             let hash = rendered_hash(&identity, &doc).unwrap();
@@ -1568,6 +1644,7 @@ mod tests {
                     path,
                     edit: doc,
                     image_index: 0,
+                    frame,
                 },
                 Arc::new(AtomicBool::new(false)),
             );
@@ -1623,6 +1700,16 @@ mod tests {
         assert_eq!(&small.pixels[99 * 3..100 * 3], &[0.0, 0.0, 1.0]);
         let same = box_downscale(&frame, 1000).unwrap();
         assert_eq!((same.width, same.height), (w, h), "never upscales");
+    }
+
+    #[test]
+    fn a_supplied_frame_is_rendered_without_decoding_the_file() {
+        let Some(fx) = fx() else { return };
+        // FakeDecoder fails any path containing "bad": only a decode-free render can succeed.
+        let frame = Arc::new(crate::render::synthetic_linear_frame());
+        let (o, hash) = fx.run_with("bad.NEF", exposure(1.0), Some(frame));
+        assert_eq!(o, T2Outcome::Stored);
+        assert!(fx.stored(&hash).is_some());
     }
 
     #[test]
@@ -1730,6 +1817,7 @@ mod tests {
                 path: fx.dir.path().join("does-not-exist.NEF"),
                 edit: doc,
                 image_index: 0,
+                frame: None,
             },
             Arc::new(AtomicBool::new(false)),
         );
@@ -1762,6 +1850,7 @@ mod tests {
                 path,
                 edit: doc,
                 image_index: 0,
+                frame: None,
             },
             cancelled,
         );
@@ -2008,13 +2097,43 @@ mod tests {
                 path: PathBuf::from("x"),
                 edit: EditDocument::default(),
                 image_index: 7,
+                frame: None,
             },
+            supplied: Mutex::new(None),
             env: fx.env.clone(),
             cancelled: Arc::new(AtomicBool::new(false)),
             panicked: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(spec(Lane::Gpu, &task).image_index, None);
         assert_eq!(spec(Lane::Cpu, &task).image_index, Some(7));
+    }
+
+    #[test]
+    fn the_decode_stage_takes_the_supplied_frame_so_the_task_does_not_pin_it() {
+        let Some(fx) = fx() else { return };
+        let frame = Arc::new(crate::render::synthetic_linear_frame());
+        let task = Task {
+            req: Request {
+                asset_id: 1,
+                identity: blake3::hash(b"x"),
+                hash: "h".into(),
+                // The fake decoder rejects this name: only the supplied frame can succeed.
+                path: fx.file("bad.NEF"),
+                edit: EditDocument::default(),
+                image_index: 0,
+                frame: None,
+            },
+            supplied: Mutex::new(Some(frame.clone())),
+            env: fx.env.clone(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            panicked: Arc::new(AtomicBool::new(false)),
+        };
+        let decoded = decode_stage(&task).unwrap_or_else(|_| panic!("decode stage failed"));
+        assert!(Arc::ptr_eq(&decoded.frame, &frame));
+        assert!(
+            task.supplied.lock().unwrap().is_none(),
+            "moved out, not cloned"
+        );
     }
 
     #[test]

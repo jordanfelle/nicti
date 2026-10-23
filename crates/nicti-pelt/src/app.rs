@@ -3113,8 +3113,21 @@ impl PeltApp {
         let now = std::time::Instant::now();
         let policy = self.preview_settings.effective_policy();
         for asset_id in self.render_due.take_due(now) {
-            self.eyeshine
-                .request(&self.pounce, store.as_ref(), asset_id, 0, policy);
+            // Develop already holds the open photo decoded: hand it over rather than decode the
+            // RAW again. Offered for any photo; the service uses it only if the identity matches.
+            match self.develop.as_ref() {
+                Some(develop) => self.eyeshine.request_with_frame(
+                    &self.pounce,
+                    store.as_ref(),
+                    asset_id,
+                    0,
+                    policy,
+                    (develop.identity(), develop.frame_arc()),
+                ),
+                None => self
+                    .eyeshine
+                    .request(&self.pounce, store.as_ref(), asset_id, 0, policy),
+            };
             // Declined only because cancelled pipelines are still draining: try again shortly.
             if self.eyeshine.take_deferred() {
                 self.render_due.arm(asset_id, now + RENDER_RETRY);
