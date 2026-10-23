@@ -354,6 +354,10 @@ impl Drop for Settle {
 /// The per-photo state carried through the stages.
 struct Task {
     req: Request,
+    /// `req.frame`, moved here by [`submit`] so the decode stage can *take* it: the task outlives
+    /// the render's live-suffix step, and a frame left in `req` would stay pinned (~270 MB at
+    /// 45 MP) through the tiling and encode, defeating `RenderJob::begin`'s `drop(frame)`.
+    supplied: Mutex<Option<Arc<LinearFrame>>>,
     env: Env,
     /// Set by the service when a newer edit supersedes this render.
     cancelled: Arc<AtomicBool>,
@@ -387,8 +391,11 @@ pub fn submit(
     cancelled: Arc<AtomicBool>,
 ) -> (JobId, ReportSlot<T2Outcome>) {
     let slot: ReportSlot<T2Outcome> = Arc::new(Mutex::new(None));
+    let mut req = req;
+    let supplied = Mutex::new(req.frame.take());
     let task = Arc::new(Task {
         req,
+        supplied,
         env: env.clone(),
         cancelled,
         panicked: Arc::new(AtomicBool::new(false)),
@@ -509,8 +516,13 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
         }
     }
     // The app already holds this photo decoded (#398): don't read and demosaic-prep it twice.
-    let frame = match &task.req.frame {
-        Some(frame) => Arc::clone(frame),
+    let supplied = task
+        .supplied
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let frame = match supplied {
+        Some(frame) => frame,
         None => Arc::new(
             task.env
                 .decoder
@@ -2087,12 +2099,41 @@ mod tests {
                 image_index: 7,
                 frame: None,
             },
+            supplied: Mutex::new(None),
             env: fx.env.clone(),
             cancelled: Arc::new(AtomicBool::new(false)),
             panicked: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(spec(Lane::Gpu, &task).image_index, None);
         assert_eq!(spec(Lane::Cpu, &task).image_index, Some(7));
+    }
+
+    #[test]
+    fn the_decode_stage_takes_the_supplied_frame_so_the_task_does_not_pin_it() {
+        let Some(fx) = fx() else { return };
+        let frame = Arc::new(crate::render::synthetic_linear_frame());
+        let task = Task {
+            req: Request {
+                asset_id: 1,
+                identity: blake3::hash(b"x"),
+                hash: "h".into(),
+                // The fake decoder rejects this name: only the supplied frame can succeed.
+                path: fx.file("bad.NEF"),
+                edit: EditDocument::default(),
+                image_index: 0,
+                frame: None,
+            },
+            supplied: Mutex::new(Some(frame.clone())),
+            env: fx.env.clone(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            panicked: Arc::new(AtomicBool::new(false)),
+        };
+        let decoded = decode_stage(&task).unwrap_or_else(|_| panic!("decode stage failed"));
+        assert!(Arc::ptr_eq(&decoded.frame, &frame));
+        assert!(
+            task.supplied.lock().unwrap().is_none(),
+            "moved out, not cloned"
+        );
     }
 
     #[test]
