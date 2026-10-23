@@ -2240,7 +2240,12 @@ impl PeltApp {
         ui.separator();
         if let (CatalogOpenState::Open(store), Some(xmp)) = (&self.catalog, &self.xmp) {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-            xmp_sync::show(ui, &mut self.xmp_ui, &dyn_store, xmp, &self.catalog_path);
+            if xmp_sync::show(ui, &mut self.xmp_ui, &dyn_store, xmp, &self.catalog_path) {
+                // "Use file" rewrote markers in the catalog; the grid's cached ones are stale.
+                if let Some(cull) = self.cull.as_mut() {
+                    cull.invalidate();
+                }
+            }
             ui.separator();
         }
         if let CatalogOpenState::Open(store) = &self.catalog {

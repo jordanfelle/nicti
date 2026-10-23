@@ -1861,6 +1861,16 @@ impl CatalogStore for SqliteCatalog {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    fn sidecar_dirty_assets(&self) -> Result<Vec<i64>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT asset_id FROM asset_sidecar \
+             WHERE catalog_dirty_since_ms IS NOT NULL AND needs_review = 0 ORDER BY asset_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     fn create_keyword(&self, parent_id: Option<i64>, name: &str) -> Result<i64, CatalogError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
