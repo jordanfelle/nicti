@@ -217,6 +217,8 @@ impl GridSession {
     fn mark_redo(&mut self, id: i64) {
         self.redo_counter += 1;
         self.redo.insert(id, self.redo_counter);
+        // A fresh request isn't held back by an earlier failure's back-off.
+        self.transient_failed.remove(&id);
     }
 
     pub fn ids(&self) -> &[i64] {
@@ -537,6 +539,10 @@ impl GridSession {
             if thumb.retry {
                 self.mark_redo(id);
                 self.transient_failed.insert(id, Instant::now());
+            }
+            // A busy Larder gave only the camera pixels: don't replace a texture that has better.
+            if thumb.retry && self.textures.contains(&texture_key(id)) {
+                continue;
             }
             if thumb.render == ThumbRender::Current && !outdated {
                 self.render_current.insert(id);
