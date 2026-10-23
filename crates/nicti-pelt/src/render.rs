@@ -711,6 +711,11 @@ impl DevelopDoc {
         nicti_tapetum::slit::has_nikon_profile(&self.frame)
     }
 
+    /// The loaded photo's identity (`loupe::asset_cache_key`), as given to `load_real_frame`.
+    pub fn identity(&self) -> blake3::Hash {
+        self.identity
+    }
+
     /// Cache key for the loaded photo (see the `frame_key` field).
     pub fn frame_key(&self) -> u64 {
         self.frame_key
