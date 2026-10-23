@@ -152,6 +152,18 @@ impl LoupeSession {
         self.asset_ids.is_empty()
     }
 
+    /// The prefetch window's other photos (cursor +/- `PREFETCH_RADIUS`, cursor excluded) as
+    /// `(index, asset_id)`, nearest first.
+    pub fn neighbours(&self) -> Vec<(usize, i64)> {
+        let mut out: Vec<(usize, i64)> = (1..=PREFETCH_RADIUS)
+            .flat_map(|d| [self.cursor.checked_sub(d), self.cursor.checked_add(d)])
+            .flatten()
+            .filter_map(|i| self.asset_ids.get(i).map(|&id| (i, id)))
+            .collect();
+        out.sort_by_key(|(i, _)| i.abs_diff(self.cursor));
+        out
+    }
+
     pub fn current_asset_id(&self) -> Option<i64> {
         self.asset_ids.get(self.cursor).copied()
     }
@@ -602,6 +614,23 @@ mod tests {
         assert!(session.cache.contains(&asset_cache_key(&asset_at(3))));
         assert!(!session.cache.contains(&asset_cache_key(&asset_at(0))));
         assert!(!session.cache.contains(&asset_cache_key(&asset_at(4))));
+    }
+
+    #[test]
+    fn neighbours_are_the_window_minus_the_cursor_clamped_at_the_ends() {
+        let (_store, ids, _pounce) = setup(5);
+        let decoder = Arc::new(CountingDecoder {
+            calls: AtomicUsize::new(0),
+        });
+        let mut session = LoupeSession::new(ids.clone(), decoder, u64::MAX);
+        session.cursor = 2;
+        let mut got = session.neighbours();
+        got.sort();
+        assert_eq!(got, vec![(1, ids[1]), (3, ids[3])]);
+        session.cursor = 0;
+        assert_eq!(session.neighbours(), vec![(1, ids[1])]);
+        session.cursor = 4;
+        assert_eq!(session.neighbours(), vec![(3, ids[3])]);
     }
 
     #[test]

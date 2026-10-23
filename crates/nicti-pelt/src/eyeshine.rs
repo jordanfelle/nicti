@@ -1058,6 +1058,32 @@ impl EyeshineService {
         image_index: usize,
         policy: RenderPolicy,
     ) -> Option<Info> {
+        self.request_as(pounce, store, asset_id, image_index, policy, false)
+    }
+
+    /// [`Self::request`] for a neighbour of the photo being looked at (#398). Never evicts a
+    /// running render and always leaves one pipeline slot free, so a prefetch can't push out or
+    /// delay the current photo's own render.
+    pub fn prefetch(
+        &mut self,
+        pounce: &Pounce,
+        store: &dyn CatalogStore,
+        asset_id: i64,
+        image_index: usize,
+        policy: RenderPolicy,
+    ) {
+        self.request_as(pounce, store, asset_id, image_index, policy, true);
+    }
+
+    fn request_as(
+        &mut self,
+        pounce: &Pounce,
+        store: &dyn CatalogStore,
+        asset_id: i64,
+        image_index: usize,
+        policy: RenderPolicy,
+        prefetch: bool,
+    ) -> Option<Info> {
         let resolved = self.resolve(store, asset_id)?;
         let info = Info {
             edited: resolved.edited,
@@ -1099,6 +1125,9 @@ impl EyeshineService {
                 return Some(info);
             }
         }
+        if prefetch && self.inflight.len() + 1 >= MAX_INFLIGHT {
+            return Some(info);
+        }
         let resolved = self.resolved.get(&asset_id)?.clone();
         let env = self.env.as_ref()?;
         // Bound the decoded frames in flight: make room for the photo being looked at by evicting
@@ -1119,7 +1148,8 @@ impl EyeshineService {
         }
         // Evicted pipelines still hold a decoded frame until a worker reaches their cancelled job;
         // don't pile new ones on top. The loupe re-requests every frame, so this just waits.
-        if env.live.load(Ordering::SeqCst) >= MAX_LIVE {
+        let live_cap = if prefetch { MAX_LIVE - 1 } else { MAX_LIVE };
+        if env.live.load(Ordering::SeqCst) >= live_cap {
             return Some(info);
         }
         let seq = self.next_seq;
@@ -1992,6 +2022,32 @@ mod tests {
             "the oldest render was evicted for the newest"
         );
         assert!(t.svc.inflight.contains_key(&ids[2]));
+    }
+
+    #[test]
+    fn prefetch_never_evicts_and_leaves_a_slot_for_the_current_photo() {
+        let Some(mut t) = svc_fx() else { return };
+        let ids = [t.id, add_asset(&t, "b.NEF"), add_asset(&t, "c.NEF")];
+        for id in ids {
+            t.store.put_master_edit(id, &exposure(1.0)).unwrap();
+            t.svc
+                .prefetch(&t.fx.pounce, &t.store, id, 0, RenderPolicy::EditedOnly);
+        }
+        // One slot is always held back for the photo being looked at.
+        assert!(t.svc.inflight.len() < MAX_INFLIGHT);
+        assert!(t
+            .svc
+            .inflight
+            .values()
+            .all(|f| !f.cancelled.load(Ordering::SeqCst)));
+        // The current photo's own request still gets in without cancelling the prefetched one.
+        let first = t.svc.inflight.keys().next().copied();
+        t.svc
+            .request(&t.fx.pounce, &t.store, ids[2], 0, RenderPolicy::EditedOnly);
+        assert!(t.svc.inflight.contains_key(&ids[2]));
+        if let Some(first) = first.filter(|f| *f != ids[2]) {
+            assert!(!t.svc.inflight[&first].cancelled.load(Ordering::SeqCst));
+        }
     }
 
     #[test]

@@ -115,6 +115,9 @@ pub struct PeltApp {
     /// A save of Develop's edits that failed, and the document it failed for: the autosave doesn't
     /// retry the same document every frame, and the message shows in the top bar.
     edit_save_failed: Option<(nicti_pawprint::EditDocument, String)>,
+    /// #398: a saved edit's render waits for the edits to settle (autosave fires on every
+    /// pointer-up) so a burst of slider drags queues one decode + render, not one each.
+    render_due: Option<(i64, std::time::Instant)>,
     /// Which of the HSL panel's 8 bands is currently shown (#46) -- UI-only selection state, not
     /// part of any edit document.
     hsl_band_selected: usize,
@@ -486,6 +489,7 @@ impl PeltApp {
             knead,
             export_registry: Arc::new(builtin_registry()),
             edit_save_failed: None,
+            render_due: None,
             loupe_zoomed: false,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1123,6 +1127,8 @@ impl PeltApp {
 
 /// How long marking must be quiet before the filter bar's facet counts are recomputed.
 const FACET_REFRESH_AFTER: Duration = Duration::from_millis(1500);
+/// How long after the last autosave the edited photo's render is queued (#398).
+const RENDER_AFTER_SAVE: Duration = Duration::from_millis(1500);
 
 /// Whether stale facet counts are due for a refresh: marking happened, and has been quiet for
 /// [`FACET_REFRESH_AFTER`]. Pure, so the debounce is testable.
@@ -2783,9 +2789,8 @@ impl PeltApp {
                 }
                 // #145: the saved edits supersede any cached/queued render of this photo.
                 self.eyeshine.invalidate(asset_id);
-                let policy = self.preview_settings.effective_policy();
-                self.eyeshine
-                    .request(&self.pounce, store, asset_id, 0, policy);
+                // The render itself is debounced (#398); `poll_eyeshine` queues it.
+                self.render_due = Some((asset_id, std::time::Instant::now() + RENDER_AFTER_SAVE));
                 true
             }
             Err(e) => {
@@ -3088,10 +3093,41 @@ impl PeltApp {
         }
     }
 
+    /// #398: queues the debounced render of the last-saved photo once its deadline passes, and
+    /// prefetches renders for the loupe's neighbours (never evicting the current photo's).
+    fn queue_due_renders(&mut self, ctx: &egui::Context) {
+        let CatalogOpenState::Open(store) = &self.catalog else {
+            return;
+        };
+        let store = store.clone();
+        if let Some((asset_id, due)) = self.render_due {
+            let now = std::time::Instant::now();
+            if now >= due {
+                self.render_due = None;
+                let policy = self.preview_settings.effective_policy();
+                self.eyeshine
+                    .request(&self.pounce, store.as_ref(), asset_id, 0, policy);
+            } else {
+                ctx.request_repaint_after(due - now);
+            }
+        }
+        if !matches!(self.view, View::Loupe | View::Develop) {
+            return;
+        }
+        let policy = self.preview_settings.policy_for(Surface::Loupe);
+        if let Some(loupe) = self.loupe.as_ref() {
+            for (index, id) in loupe.neighbours() {
+                self.eyeshine
+                    .prefetch(&self.pounce, store.as_ref(), id, index, policy);
+            }
+        }
+    }
+
     /// Collects finished rendered previews (#145). A render landing needs a repaint to be picked
     /// up; while any is running, poll again shortly since nothing else wakes an idle window.
     fn poll_eyeshine(&mut self, ctx: &egui::Context) {
         self.try_purge_rendered();
+        self.queue_due_renders(ctx);
         let stored = self.eyeshine.poll();
         if !stored.is_empty() {
             if let Some(grid) = self.grid.as_mut() {
