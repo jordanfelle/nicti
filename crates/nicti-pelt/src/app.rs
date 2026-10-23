@@ -2245,6 +2245,8 @@ impl PeltApp {
                 if let Some(cull) = self.cull.as_mut() {
                     cull.invalidate();
                 }
+                self.filter_bar.invalidate_options();
+                self.filter_bar.invalidate_facets();
             }
             ui.separator();
         }

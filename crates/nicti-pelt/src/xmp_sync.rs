@@ -70,6 +70,14 @@ fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<(PathBuf, boo
     Some((raw, exists))
 }
 
+/// Ids for the writer thread. `flush` ids are the ones left dirty while auto-write was off (#375):
+/// they are written only if auto-write is still on when the writer reaches them, and are never
+/// re-marked dirty (they already are, or an edit has since written them).
+struct Batch {
+    ids: Vec<i64>,
+    flush: bool,
+}
+
 #[derive(Default)]
 struct Status {
     last_error: Option<String>,
@@ -79,7 +87,7 @@ struct Status {
 /// dropped.
 #[derive(Clone)]
 pub struct XmpWriter {
-    tx: Sender<Vec<i64>>,
+    tx: Sender<Batch>,
     store: Store,
     autowrite: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
@@ -87,7 +95,7 @@ pub struct XmpWriter {
 
 impl XmpWriter {
     pub fn spawn(store: Store, autowrite: bool) -> Self {
-        let (tx, rx) = channel::<Vec<i64>>();
+        let (tx, rx) = channel::<Batch>();
         let autowrite = Arc::new(AtomicBool::new(autowrite));
         let status = Arc::new(Mutex::new(Status::default()));
         let (flag, st) = (autowrite.clone(), status.clone());
@@ -98,11 +106,25 @@ impl XmpWriter {
                 while let Ok(first) = rx.recv() {
                     // Holding a key queues many commands; coalesce what's already waiting so each
                     // photo's sidecar is written once per burst, with its latest markers.
-                    let mut ids: BTreeSet<i64> = first.into_iter().collect();
+                    let mut ids: BTreeSet<i64> = BTreeSet::new();
+                    let mut flush_ids: BTreeSet<i64> = BTreeSet::new();
+                    let mut take = |b: Batch| {
+                        if b.flush { &mut flush_ids } else { &mut ids }.extend(b.ids);
+                    };
+                    take(first);
                     while let Ok(more) = rx.try_recv() {
-                        ids.extend(more);
+                        take(more);
                     }
-                    for id in ids {
+                    flush_ids.retain(|id| !ids.contains(id));
+                    let flushing = flag.load(Ordering::Relaxed);
+                    let work = ids
+                        .into_iter()
+                        .map(|id| (id, false))
+                        .chain(flush_ids.into_iter().map(|id| (id, true)));
+                    for (id, is_flush) in work {
+                        if is_flush && !flushing {
+                            continue;
+                        }
                         let Some((raw, exists)) = raw_path_for(&*writer_store, id) else {
                             continue;
                         };
@@ -136,7 +158,7 @@ impl XmpWriter {
 
     pub fn queue(&self, ids: Vec<i64>) {
         if !ids.is_empty() {
-            let _ = self.tx.send(ids);
+            let _ = self.tx.send(Batch { ids, flush: false });
         }
     }
 
@@ -150,12 +172,15 @@ impl XmpWriter {
     pub fn set_autowrite(&self, on: bool) {
         let was = self.autowrite.swap(on, Ordering::Relaxed);
         if on && !was {
-            let (store, tx) = (self.store.clone(), self.tx.clone());
-            std::thread::spawn(move || {
-                if let Ok(ids) = store.sidecar_dirty_assets() {
-                    if !ids.is_empty() {
-                        let _ = tx.send(ids);
-                    }
+            let (store, tx, status) = (self.store.clone(), self.tx.clone(), self.status.clone());
+            std::thread::spawn(move || match store.sidecar_dirty_assets() {
+                Ok(ids) if !ids.is_empty() => {
+                    let _ = tx.send(Batch { ids, flush: true });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    status.lock().unwrap().last_error =
+                        Some(format!("Couldn't list assets awaiting sidecar write: {e}"));
                 }
             });
         }
