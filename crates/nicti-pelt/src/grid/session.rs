@@ -58,6 +58,9 @@ struct PendingSnapshot {
 }
 
 struct InflightBatch {
+    /// `GridSession::redo_counter` when submitted: results older than a later redo request are
+    /// shown but don't satisfy it.
+    seq: u64,
     job_id: JobId,
     slot: ThumbSlot,
 }
@@ -117,7 +120,8 @@ pub struct GridSession {
     render_current: HashSet<i64>,
     /// Photos whose texture must be re-decoded although they have one (a render landed, or their
     /// edits changed); cleared as the new thumbnail is uploaded.
-    redo: HashSet<i64>,
+    redo: HashMap<i64, u64>,
+    redo_counter: u64,
 }
 
 /// The texture cache key for an asset. Keyed by id alone: a re-ingest can change an asset's
@@ -159,7 +163,8 @@ impl GridSession {
             color_generation: 0,
             rendered: None,
             render_current: HashSet::new(),
-            redo: HashSet::new(),
+            redo: HashMap::new(),
+            redo_counter: 0,
         }
     }
 
@@ -203,8 +208,15 @@ impl GridSession {
     /// New renders landed for these photos (#397): re-decode their cells from the rendered tier.
     pub fn rerender(&mut self, asset_ids: &[i64]) {
         if self.rendered.is_some() {
-            self.redo.extend(asset_ids);
+            for &id in asset_ids {
+                self.mark_redo(id);
+            }
         }
+    }
+
+    fn mark_redo(&mut self, id: i64) {
+        self.redo_counter += 1;
+        self.redo.insert(id, self.redo_counter);
     }
 
     pub fn ids(&self) -> &[i64] {
@@ -489,6 +501,8 @@ impl GridSession {
                 match outcome {
                     Ok(thumb) => {
                         self.pending_ids.insert(id);
+                        let mut thumb = thumb;
+                        thumb.seq = inflight.seq;
                         self.pending_uploads.push_back((id, thumb));
                     }
                     Err(ThumbError::Permanent(_)) => {
@@ -514,8 +528,17 @@ impl GridSession {
                 return;
             };
             self.pending_ids.remove(&id);
-            self.redo.remove(&id);
-            if thumb.render == ThumbRender::Current {
+            // A redo requested after this batch was submitted isn't satisfied by it (it may have
+            // read the Larder before the render landed): show it, keep asking.
+            let outdated = self.redo.get(&id).is_some_and(|&mark| mark > thumb.seq);
+            if !outdated {
+                self.redo.remove(&id);
+            }
+            if thumb.retry {
+                self.mark_redo(id);
+                self.transient_failed.insert(id, Instant::now());
+            }
+            if thumb.render == ThumbRender::Current && !outdated {
                 self.render_current.insert(id);
             } else {
                 self.render_current.remove(&id);
@@ -556,7 +579,9 @@ impl GridSession {
         self.edit_overrides.insert(asset_id);
         // Its texture shows the old edits (or a render of them): decode it again.
         self.render_current.remove(&asset_id);
-        self.redo.insert(asset_id);
+        if self.rendered.is_some() {
+            self.mark_redo(asset_id);
+        }
         if edited {
             self.edited.insert(asset_id);
         } else {
@@ -582,7 +607,7 @@ impl GridSession {
                 .transient_failed
                 .get(&id)
                 .is_some_and(|at| at.elapsed() < TRANSIENT_RETRY_AFTER)
-            && (self.redo.contains(&id) || !self.textures.contains(&texture_key(id)))
+            && (self.redo.contains_key(&id) || !self.textures.contains(&texture_key(id)))
     }
 
     /// Makes sure thumbnails are being produced for the ids in `visible` (an index range into the
@@ -634,7 +659,14 @@ impl GridSession {
                 ThumbBatchJob::new(self.store.clone(), missing, first_index, self.color.clone());
             let job = job.with_rendered(self.rendered.clone());
             let job_id = pounce.submit(Box::new(job));
-            self.inflight.insert(batch, InflightBatch { job_id, slot });
+            self.inflight.insert(
+                batch,
+                InflightBatch {
+                    seq: self.redo_counter,
+                    job_id,
+                    slot,
+                },
+            );
         }
 
         if self.last_window.as_ref() != Some(&visible) {
@@ -1208,7 +1240,14 @@ mod tests {
             ));
             out.done = true;
         }
-        session.inflight.insert(0, InflightBatch { job_id, slot });
+        session.inflight.insert(
+            0,
+            InflightBatch {
+                seq: 0,
+                job_id,
+                slot,
+            },
+        );
         session.poll_batches();
 
         assert!(session.has_failed(ids[0]), "permanent -> failed set");
@@ -1415,5 +1454,104 @@ mod tests {
         // So auto-advance steps from the photo that was actually marked.
         assert!(session.advance_after_mark());
         assert_eq!(session.cursor_id(), Some(ids[3]));
+    }
+
+    fn rendered_larder() -> (tempfile::TempDir, SharedLarder) {
+        let dir = tempfile::tempdir().unwrap();
+        let larder = nicti_lair::larder::Larder::open(
+            dir.path(),
+            nicti_lair::larder::LarderConfig {
+                cap_bytes: 1 << 20,
+                compact_min_dead_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        (dir, Arc::new(std::sync::Mutex::new(larder)))
+    }
+
+    fn thumb(render: ThumbRender, seq: u64) -> ThumbImage {
+        ThumbImage {
+            image: egui::ColorImage::example(),
+            edited: true,
+            render,
+            retry: false,
+            seq,
+        }
+    }
+
+    #[test]
+    fn a_render_result_older_than_a_redo_request_is_shown_but_does_not_satisfy_it() {
+        let (mut session, ids, ctx, pounce) = loaded_session(3, 1 << 20, |_| false);
+        let (_dir, larder) = rendered_larder();
+        session.set_rendered(Some(larder), &pounce);
+        let id = ids[0];
+
+        // The batch was submitted before the render landed.
+        session.rerender(&[id]);
+        assert!(session.needs_thumbnail(id), "a redo wants a fresh decode");
+        session.pending_ids.insert(id);
+        session
+            .pending_uploads
+            .push_back((id, thumb(ThumbRender::Current, 0)));
+        session.upload(&ctx);
+        assert!(
+            session.needs_thumbnail(id),
+            "the older result left the redo standing"
+        );
+        assert!(session.is_stale(id), "and it doesn't clear the stale flag");
+
+        // A batch submitted after the request does.
+        session.pending_ids.insert(id);
+        let seq = session.redo_counter;
+        session
+            .pending_uploads
+            .push_back((id, thumb(ThumbRender::Current, seq)));
+        session.upload(&ctx);
+        assert!(!session.needs_thumbnail(id));
+        assert!(!session.is_stale(id));
+    }
+
+    #[test]
+    fn saving_edits_drops_the_current_render_flag_and_asks_for_a_new_decode() {
+        let (mut session, ids, ctx, pounce) = loaded_session(3, 1 << 20, |_| false);
+        let (_dir, larder) = rendered_larder();
+        session.set_rendered(Some(larder), &pounce);
+        let id = ids[1];
+        session.pending_ids.insert(id);
+        session
+            .pending_uploads
+            .push_back((id, thumb(ThumbRender::Current, 0)));
+        session.upload(&ctx);
+        assert!(!session.is_stale(id) && !session.needs_thumbnail(id));
+
+        session.mark_edited(id, true);
+        assert!(session.is_stale(id));
+        assert!(
+            session.needs_thumbnail(id),
+            "the texture shows the old edits"
+        );
+    }
+
+    #[test]
+    fn a_busy_larder_result_is_asked_for_again_after_the_back_off() {
+        let (mut session, ids, ctx, pounce) = loaded_session(3, 1 << 20, |_| false);
+        let (_dir, larder) = rendered_larder();
+        session.set_rendered(Some(larder), &pounce);
+        let id = ids[2];
+        let mut busy = thumb(ThumbRender::Camera, 0);
+        busy.retry = true;
+        session.pending_ids.insert(id);
+        session.pending_uploads.push_back((id, busy));
+        session.upload(&ctx);
+        assert!(session.redo.contains_key(&id), "still wanted");
+        assert!(
+            !session.needs_thumbnail(id),
+            "but not hammered while it's busy"
+        );
+        session.transient_failed.insert(
+            id,
+            Instant::now() - TRANSIENT_RETRY_AFTER - Duration::from_millis(1),
+        );
+        assert!(session.needs_thumbnail(id));
     }
 }

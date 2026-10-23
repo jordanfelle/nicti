@@ -99,6 +99,11 @@ pub struct ThumbImage {
     pub edited: bool,
     /// Whether the pixels are a render of the edits (#397) rather than the camera's T0.
     pub render: ThumbRender,
+    /// The edited photo's rendered thumbnail couldn't be consulted (the Larder was busy), so this
+    /// is the camera thumbnail for now: the session asks again shortly.
+    pub retry: bool,
+    /// The session's redo counter when the batch was submitted; set by the session, 0 here.
+    pub seq: u64,
 }
 
 /// Where a thumbnail's pixels come from.
@@ -106,7 +111,8 @@ pub struct ThumbImage {
 pub enum ThumbRender {
     /// The camera-derived T0: it doesn't show develop edits.
     Camera,
-    /// A render of an earlier edit state of the same file; a newer one is on its way.
+    /// A render of an earlier edit state of the same file, or of the current edits without their
+    /// masks and AI removals (a `:partial` render): the cell still has edits it doesn't show.
     Updating,
     /// A render of the photo's current edits.
     Current,
@@ -301,8 +307,13 @@ impl ThumbBatchJob {
             return;
         }
         // Never wait on the Larder (a compaction holds it for minutes): the camera thumbnail is
-        // a fine answer, and the next render landing re-requests the cell.
+        // a fine answer for now, and `retry` has the session ask again after a back-off.
         let Some(mut larder) = crate::t2::try_lock_larder(larder) else {
+            for (id, outcome) in results.iter_mut() {
+                if let (Ok(thumb), true) = (outcome.as_mut(), edited.contains_key(id)) {
+                    thumb.retry = true;
+                }
+            }
             return;
         };
         for (id, outcome) in results.iter_mut() {
@@ -324,7 +335,7 @@ impl ThumbBatchJob {
             let Some(want) = crate::eyeshine::rendered_hash(&identity, doc) else {
                 continue;
             };
-            let render = if hash == want {
+            let render = if hash == want && !crate::eyeshine::hash_is_partial(&hash) {
                 ThumbRender::Current
             } else if crate::eyeshine::same_file(&hash, &want) {
                 ThumbRender::Updating
@@ -366,6 +377,8 @@ pub fn make_thumbnail(bytes: &[u8], color: &SourceTransforms) -> Result<ThumbIma
         image: egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
         edited: false,
         render: ThumbRender::Camera,
+        retry: false,
+        seq: 0,
     })
 }
 
@@ -551,6 +564,17 @@ mod tests {
 
         let without = run(None);
         assert!(without.iter().all(|t| t.render == ThumbRender::Camera));
+
+        // A busy Larder keeps the camera thumbnail but asks the session to try again.
+        let held = larder.lock().unwrap();
+        let busy = run(Some(larder.clone()));
+        drop(held);
+        assert!(busy.iter().all(|t| t.render == ThumbRender::Camera));
+        assert_eq!(
+            busy.iter().map(|t| t.retry).collect::<Vec<_>>(),
+            [true, true, true, false],
+            "only edited photos wait on the Larder"
+        );
     }
 
     #[test]
