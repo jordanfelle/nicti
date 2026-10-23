@@ -1565,6 +1565,9 @@ struct PresentUniforms {
     fp_c0y: f32,
     fp_c1x: f32,
     fp_c1y: f32,
+    // #427 Upright homography (row-major) and its on/off flag; mirrors `present_sample.wgsl`.
+    h: [f32; 9],
+    persp: u32,
 }
 
 /// What the geometry pass needs to apply the post-crop effects (#380): the params plus the crop it
@@ -1584,6 +1587,8 @@ struct EffectsState {
 pub struct CropKernel {
     pipeline: wgpu::ComputePipeline,
     transform: std::sync::Mutex<Affine2D>,
+    /// Upright (#427): applied after `transform`, to its output.
+    upright: std::sync::Mutex<Option<[f32; 9]>>,
     effects: std::sync::Mutex<Option<EffectsState>>,
     uniform_buf: wgpu::Buffer,
 }
@@ -1604,9 +1609,18 @@ impl CropKernel {
         Self {
             pipeline,
             transform: std::sync::Mutex::new(Affine2D::IDENTITY),
+            upright: std::sync::Mutex::new(None),
             effects: std::sync::Mutex::new(None),
             uniform_buf,
         }
+    }
+
+    /// Sets (or clears, with `None`) the Upright homography (#427), applied to the crop-frame
+    /// position `set_transform`'s affine produces -- so the crop rect and straighten angle live
+    /// in the corrected frame, and every export tile shares it unchanged. Like the effects, call
+    /// it every render: the kernel is reused across photos.
+    pub fn set_upright(&self, homography: Option<[f32; 9]>) {
+        *self.upright.lock().unwrap() = homography;
     }
 
     /// Records this render's post-crop effects (#380): `crop_transform` is the same output ->
@@ -1656,6 +1670,7 @@ impl GeometryExec for CropKernel {
     ) {
         let transform = *self.transform.lock().unwrap();
         let fx = *self.effects.lock().unwrap();
+        let upright = *self.upright.lock().unwrap();
         let mut u = PresentUniforms {
             a: transform.a,
             b: transform.b,
@@ -1667,6 +1682,10 @@ impl GeometryExec for CropKernel {
             out_height: output.extent.height,
             ..Zeroable::zeroed()
         };
+        if let Some(h) = upright {
+            u.h = h;
+            u.persp = 1;
+        }
         if let Some(fx) = fx {
             let e = fx.params;
             u.n_a = fx.norm.a;
@@ -2883,6 +2902,98 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #427: the geometry pass applies the Upright homography after the crop affine, matching
+    /// `geometry::sample_bilinear_upright` (a real keystone, a crop rect and a straighten angle).
+    #[test]
+    fn present_sample_upright_matches_the_cpu_reference() {
+        use crate::geometry::{affine_for_crop, sample_bilinear_upright, CropRect};
+        use crate::upright::homography_for_angles;
+        let Some(gpu) = test_gpu() else { return };
+        let extent = crate::frame::Extent {
+            width: 64,
+            height: 48,
+        };
+        let input_data: Vec<[f32; 4]> = (0..extent.width * extent.height)
+            .map(|i| {
+                let (x, y) = ((i % extent.width) as f32, (i / extent.width) as f32);
+                [0.05 + x / 80.0, 0.1 + y / 90.0, 0.6 - x / 200.0, 1.0]
+            })
+            .collect();
+        let input = crate::test_util::upload_frame(&gpu, extent, &input_data);
+        let rect = CropRect {
+            x: 8.0,
+            y: 6.0,
+            width: 40.0,
+            height: 30.0,
+        };
+        let transform = affine_for_crop(rect, 3.0);
+        let h = homography_for_angles(2.0, 9.0, -6.0, 64.0, 48.0, 70.0);
+        assert!(!h.is_identity());
+        let kernel = CropKernel::new(&gpu);
+        kernel.set_transform(transform);
+        kernel.set_upright(Some(h.to_f32()));
+        let out_extent = crate::frame::Extent {
+            width: 40,
+            height: 30,
+        };
+        let output = FrameTexture::new(&gpu, out_extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(&gpu, &mut encoder, &input, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let actual = crate::test_util::read_frame(&gpu, &output);
+        let mut moved = 0;
+        for oy in 0..out_extent.height {
+            for ox in 0..out_extent.width {
+                let expected = sample_bilinear_upright(
+                    &input_data,
+                    (extent.width, extent.height),
+                    &transform,
+                    &h,
+                    (ox, oy),
+                );
+                let plain = crate::geometry::sample_bilinear(
+                    &input_data,
+                    (extent.width, extent.height),
+                    &transform,
+                    (ox, oy),
+                );
+                let got = actual[(oy * out_extent.width + ox) as usize];
+                for c in 0..3 {
+                    assert!(
+                        (got[c] - expected[c]).abs() < 0.01,
+                        "({ox},{oy}) channel {c}: gpu={} cpu={}",
+                        got[c],
+                        expected[c]
+                    );
+                }
+                if (expected[0] - plain[0]).abs() > 0.02 {
+                    moved += 1;
+                }
+            }
+        }
+        // The homography must actually change the image, or this proves nothing.
+        assert!(moved > 100, "upright barely moved the image: {moved}");
+
+        // Clearing it restores the exact affine-only result.
+        kernel.set_upright(None);
+        let output = FrameTexture::new(&gpu, out_extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        kernel.encode(&gpu, &mut encoder, &input, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let actual = crate::test_util::read_frame(&gpu, &output);
+        let plain = crate::geometry::sample_bilinear(
+            &input_data,
+            (extent.width, extent.height),
+            &transform,
+            (5, 5),
+        );
+        assert!((actual[(5 * out_extent.width + 5) as usize][0] - plain[0]).abs() < 0.01);
     }
 
     /// #380: the geometry pass's vignette + grain match `effects::apply_effects` for every style,

@@ -182,7 +182,32 @@ pub fn sample_bilinear(
     transform: &Affine2D,
     out_xy: (u32, u32),
 ) -> [f32; 4] {
-    let (sx, sy) = transform.apply((out_xy.0 as f32 + 0.5, out_xy.1 as f32 + 0.5));
+    let at = transform.apply((out_xy.0 as f32 + 0.5, out_xy.1 as f32 + 0.5));
+    sample_bilinear_at(src, src_extent, at)
+}
+
+/// [`sample_bilinear`] with an Upright homography (#427) applied after the affine, as
+/// `present_sample.wgsl` does. A point at or behind the camera plane samples the clamped edge.
+pub fn sample_bilinear_upright(
+    src: &[[f32; 4]],
+    src_extent: (u32, u32),
+    transform: &Affine2D,
+    upright: &crate::upright::Homography,
+    out_xy: (u32, u32),
+) -> [f32; 4] {
+    let crop_xy = transform.apply((out_xy.0 as f32 + 0.5, out_xy.1 as f32 + 0.5));
+    let at = upright
+        .apply((f64::from(crop_xy.0), f64::from(crop_xy.1)))
+        .map_or((-1.0e6, -1.0e6), |(x, y)| (x as f32, y as f32));
+    sample_bilinear_at(src, src_extent, at)
+}
+
+/// Bilinear sample at a continuous source position `(sx, sy)` (texel centers at `n + 0.5`).
+pub fn sample_bilinear_at(
+    src: &[[f32; 4]],
+    src_extent: (u32, u32),
+    (sx, sy): (f32, f32),
+) -> [f32; 4] {
     // Texel-center convention: subtract 0.5 to convert from continuous sample position back to
     // an array index space where texel n's center is at n.0, matching `present_sample.wgsl`.
     let sx = (sx - 0.5).clamp(0.0, (src_extent.0 - 1) as f32);

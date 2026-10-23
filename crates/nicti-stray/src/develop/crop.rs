@@ -54,6 +54,7 @@ pub(super) fn apply(tx: &mut Tx) {
             width: (r - l) * w,
             height: (b - t) * h,
             rotation_degrees: 0.0,
+            upright: None,
         },
     );
     tx.stats.crops += 1;

@@ -255,6 +255,9 @@ pub struct RenderInputs {
     /// Rotation composed with the crop offset; for `CropKernel::set_transform` and, at export,
     /// `TiledRender::new`'s base transform.
     pub crop_transform: Affine2D,
+    /// Upright (#427): output -> source homography applied after `crop_transform`, `None` when
+    /// the photo has no perspective correction.
+    pub upright: Option<crate::upright::Homography>,
     /// Post-crop vignette and grain (#380), sanitized.
     pub effects: EffectsParams,
 }
@@ -268,6 +271,7 @@ impl RenderInputs {
     /// `view_scale` (#421) is how many rendered pixels one screen pixel covers (`1.0` for an export
     /// or a render shown 1:1 or magnified); the grain is averaged over it.
     pub fn bind_effects(&self, crop: &crate::stages::CropKernel, view_scale: f32) {
+        crop.set_upright(self.upright.map(|h| h.to_f32()));
         crop.set_effects(
             &self.effects,
             self.crop_transform,
@@ -297,6 +301,10 @@ pub fn resolve_inputs(
     let crop: CropParams = resolve(doc, CROP);
     let crop_rect = crop.effective_rect((extent.width as f32, extent.height as f32));
     let crop_transform = geometry::affine_for_crop(crop_rect, crop.rotation_degrees);
+    let upright = crop
+        .upright
+        .filter(|u| !u.is_noop())
+        .map(|u| u.homography(extent.width as f32, extent.height as f32));
 
     // A selected DCP profile (#42) replaces the plain LibRaw matrix with its own
     // illuminant-interpolated matrix (WB folded in per the DNG ForwardMatrix contract) and adds the
@@ -367,6 +375,7 @@ pub fn resolve_inputs(
         heal: resolve(doc, HEAL),
         crop_rect,
         crop_transform,
+        upright,
         effects: resolve::<EffectsParams>(doc, EFFECTS).sanitized(),
     }
 }

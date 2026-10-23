@@ -1534,6 +1534,7 @@ impl eframe::App for PeltApp {
                 crate::heal_tool::handle_tool_keys(ui, &mut self.heal_ui);
             }
             d.uncropped_preview = self.view == View::Develop && self.heal_ui.shows_uncropped();
+            d.uncropped_keeps_upright = self.heal_ui.crop_active() && !d.upright_guide_mode;
             if self.view != View::Develop {
                 // The Loupe renders this same view at its own scale: no Develop-canvas grain
                 // filtering may leak into it (#421).
@@ -1587,6 +1588,7 @@ impl eframe::App for PeltApp {
         // paint (and hit-test against) matches the tool that will handle it, not last frame's.
         if let Some(d) = self.develop.as_mut() {
             d.uncropped_preview = self.view == View::Develop && self.heal_ui.shows_uncropped();
+            d.uncropped_keeps_upright = self.heal_ui.crop_active() && !d.upright_guide_mode;
         }
         let viewport_frame = if self.view == View::Develop {
             self.develop.as_mut().map(|d| d.render())

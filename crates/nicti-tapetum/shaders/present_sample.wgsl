@@ -48,6 +48,18 @@ struct Uniforms {
     fp_c0y: f32,
     fp_c1x: f32,
     fp_c1y: f32,
+    // #427 Upright: a row-major 3x3 applied to the affine's output (the crop frame position),
+    // giving the source position to sample. `persp == 0` skips it (the exact pre-#427 path).
+    h00: f32,
+    h01: f32,
+    h02: f32,
+    h10: f32,
+    h11: f32,
+    h12: f32,
+    h20: f32,
+    h21: f32,
+    h22: f32,
+    persp: u32,
 }
 
 // Read through an ordinary sampled texture (`texture_2d` + `textureLoad`), never a read-mode storage
@@ -191,8 +203,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let oy = f32(gid.y) + 0.5;
     var sx = u.a * ox + u.b * oy + u.tx;
     var sy = u.c * ox + u.d * oy + u.ty;
-    // The unclamped source position, for the crop-normalized effects below.
+    // The unclamped crop-frame position, for the crop-normalized effects below (before Upright).
     let raw = vec2<f32>(sx, sy);
+    if (u.persp != 0u) {
+        let pw = u.h20 * raw.x + u.h21 * raw.y + u.h22;
+        // A point at or behind the camera plane has no source; park it outside so it edge-clamps.
+        if (pw > 1.0e-6) {
+            sx = (u.h00 * raw.x + u.h01 * raw.y + u.h02) / pw;
+            sy = (u.h10 * raw.x + u.h11 * raw.y + u.h12) / pw;
+        } else {
+            sx = -1.0e6;
+            sy = -1.0e6;
+        }
+    }
     sx = clamp(sx - 0.5, 0.0, in_dims.x - 1.0);
     sy = clamp(sy - 0.5, 0.0, in_dims.y - 1.0);
 

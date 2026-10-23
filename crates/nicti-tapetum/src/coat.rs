@@ -366,12 +366,84 @@ pub struct CropParams {
     pub width: f32,
     pub height: f32,
     pub rotation_degrees: f32,
+    /// Upright perspective correction (#427), applied to the source before the crop. Absent (and
+    /// omitted from the JSON, so existing documents keep their hash) when not used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upright: Option<UprightParams>,
+}
+
+/// A stored Upright correction (#427): the virtual camera rotation and the focal length it was
+/// solved at, as angles and a diagonal-relative focal length rather than a pixel homography, so
+/// one value drives a preview, a tile and a full-resolution export alike.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UprightParams {
+    pub roll_degrees: f32,
+    pub pitch_degrees: f32,
+    pub yaw_degrees: f32,
+    /// Focal length in units of the image diagonal (`focal_px / diagonal_px`).
+    pub focal_diag: f32,
+}
+
+impl UprightParams {
+    /// Records a solved correction for an image of `width` x `height`.
+    pub fn from_solution(sol: &crate::upright::UprightSolution, width: u32, height: u32) -> Self {
+        let diag = (f64::from(width).powi(2) + f64::from(height).powi(2)).sqrt();
+        Self {
+            roll_degrees: sol.roll_degrees as f32,
+            pitch_degrees: sol.pitch_degrees as f32,
+            yaw_degrees: sol.yaw_degrees as f32,
+            focal_diag: (sol.focal_px / diag) as f32,
+        }
+        .sanitized()
+    }
+
+    /// Documents are untrusted: non-finite values become a no-op, angles and focal length are
+    /// clamped to what the solver itself can produce.
+    pub fn sanitized(self) -> Self {
+        let max = crate::upright::MAX_CORRECTION_DEG as f32;
+        let fix = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-max, max)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            roll_degrees: fix(self.roll_degrees),
+            pitch_degrees: fix(self.pitch_degrees),
+            yaw_degrees: fix(self.yaw_degrees),
+            focal_diag: if self.focal_diag.is_finite() {
+                self.focal_diag.clamp(0.1, 20.0)
+            } else {
+                1.0
+            },
+        }
+    }
+
+    pub fn is_noop(&self) -> bool {
+        self.roll_degrees == 0.0 && self.pitch_degrees == 0.0 && self.yaw_degrees == 0.0
+    }
+
+    /// The output -> input homography at a render extent (pixels).
+    pub fn homography(&self, width: f32, height: f32) -> crate::upright::Homography {
+        let p = self.sanitized();
+        let (w, h) = (f64::from(width), f64::from(height));
+        crate::upright::homography_for_angles(
+            f64::from(p.roll_degrees),
+            f64::from(p.pitch_degrees),
+            f64::from(p.yaw_degrees),
+            w,
+            h,
+            f64::from(p.focal_diag) * (w * w + h * h).sqrt(),
+        )
+    }
 }
 
 impl CropParams {
     /// True when this is exactly the "no crop, no rotation" no-op state.
     pub fn is_noop(&self) -> bool {
-        self.x == 0.0
+        self.upright.is_none_or(|u| u.is_noop())
+            && self.x == 0.0
             && self.y == 0.0
             && self.width <= 0.0
             && self.height <= 0.0
@@ -1281,6 +1353,7 @@ mod tests {
             width: 20.0,
             height: 10.0,
             rotation_degrees: 0.0,
+            upright: None,
         };
         let rect = params.effective_rect((100.0, 50.0));
         assert_eq!(
@@ -1312,6 +1385,7 @@ mod tests {
             width: 30.0,
             height: 40.0,
             rotation_degrees: 3.5,
+            upright: None,
         };
         let value = serde_json::to_value(params).unwrap();
         let parsed: CropParams = parse(&value);
