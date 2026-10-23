@@ -36,8 +36,8 @@ use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
 use crate::camera_profiles;
 use crate::export::render_core::{
-    declared_render_vram, load_stored_alphas, render_live_frame, ExportRenderer, LiveRender,
-    LiveSource,
+    declared_render_vram, has_local_masks, load_stored_alphas, render_live_frame, ExportRenderer,
+    LiveRender, LiveSource,
 };
 use crate::export::sink::AccumSink;
 use crate::loupe::asset_cache_key;
@@ -469,7 +469,7 @@ impl ChunkedJob for DecodeJob {
         match outcome {
             Err(done) => settle.settle(done),
             Ok(ready) => {
-                let vram_bytes = declared_render_vram(
+                let mut vram_bytes = declared_render_vram(
                     Extent {
                         width: ready.frame.width,
                         height: ready.frame.height,
@@ -477,6 +477,12 @@ impl ChunkedJob for DecodeJob {
                     TILE_MAX_STAGING_BYTES,
                     &task.env.submitter,
                 );
+                // The mask atlas is built at the frame's full extent and isn't in the estimate
+                // (several GB at 45 MP): a photo with local masks takes the whole lane, so it runs
+                // alone like an oversized frame does.
+                if has_local_masks(&task.req.edit) {
+                    vram_bytes = task.env.submitter.gpu_vram_budget().unwrap_or(0);
+                }
                 let job = RenderJob {
                     label: format!("Render preview: {}", task.req.path.display()),
                     vram_bytes,
@@ -1860,10 +1866,64 @@ mod tests {
             half(&masked, false).abs_diff(half(&base, false)),
             half(&masked, true).abs_diff(half(&base, true)),
         );
+        // Full weight at the left edge, none at the right edge (a linear ramp, so the right half is
+        // not untouched): the left half must change clearly more.
         assert!(
-            dl.max(dr) > 0 && dl != dr,
-            "the gradient must change the two halves unequally: left {dl}, right {dr}"
+            dl > 0 && dl.saturating_mul(4) > dr.saturating_mul(5),
+            "the gradient must change the left half clearly more than the right: left {dl}, right {dr}"
         );
+    }
+
+    #[test]
+    fn missing_ai_alphas_are_counted_and_inert_or_geometric_masks_need_none() {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::params::{
+            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+        };
+        let doc = |source: MaskSource, exposure: f32| {
+            let params = MaskParams {
+                corrections: vec![LocalCorrection {
+                    id: "a".into(),
+                    mask: MaskGroup {
+                        components: vec![MaskComponent {
+                            source,
+                            ..MaskComponent::default()
+                        }],
+                    },
+                    adjust: LocalAdjust {
+                        exposure,
+                        ..LocalAdjust::default()
+                    },
+                    ..LocalCorrection::default()
+                }],
+            };
+            doc_with(MASKS, serde_json::to_value(&params).unwrap())
+        };
+        let ai = || {
+            MaskSource::Ai(MaskRecipe {
+                model_id: "nicti.mask.birefnet".into(),
+                model_version: "1".into(),
+                params: json!({"target": "subject"}),
+                seed: None,
+            })
+        };
+        let missing = |d: &EditDocument| load_stored_alphas(None, 1, d, id(1), || false).1;
+        assert_eq!(
+            missing(&doc(ai(), 1.0)),
+            1,
+            "an active AI mask with no Larder"
+        );
+        assert_eq!(
+            missing(&doc(ai(), 0.0)),
+            0,
+            "an inert AI mask needs no alpha"
+        );
+        let gradient = MaskSource::LinearGradient {
+            p0: [0.0, 0.0],
+            p1: [0.0, 1.0],
+        };
+        assert_eq!(missing(&doc(gradient, 1.0)), 0);
+        assert!(!is_partial(&doc(ai(), 0.0)));
     }
 
     #[test]
