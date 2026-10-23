@@ -349,6 +349,10 @@ pub trait CatalogStore: Module {
     /// Asset ids whose sidecar is flagged `needs_review`, in id order (#60).
     fn sidecar_review_assets(&self) -> Result<Vec<i64>, CatalogError>;
 
+    /// Asset ids whose catalog markers are newer than their sidecar (`catalog_dirty_since_ms` set)
+    /// and that aren't held for review, in id order (#375: what turning auto-write back on flushes).
+    fn sidecar_dirty_assets(&self) -> Result<Vec<i64>, CatalogError>;
+
     /// Every asset registered under this root, in `id` order. `patrol::sync_root` (#24) uses this
     /// to find rows whose file it needs to check for, since ingest only ever walks the disk and
     /// has no way to notice a path that used to be there and now isn't.

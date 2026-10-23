@@ -836,3 +836,24 @@ fn replace_asset_markers_errors_for_a_missing_asset() {
         .replace_asset_markers(987_654, &meta, &[])
         .is_err());
 }
+
+#[test]
+fn dirty_assets_lists_only_unflushed_assets_not_held_for_review() {
+    let f = fixture();
+    assert!(f.catalog.sidecar_dirty_assets().unwrap().is_empty());
+
+    set(&f, Some(2), None);
+    mark_catalog_dirty(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    assert_eq!(f.catalog.sidecar_dirty_assets().unwrap(), vec![f.asset_id]);
+
+    // Writing the sidecar clears the dirty mark.
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    assert!(f.catalog.sidecar_dirty_assets().unwrap().is_empty());
+
+    // A row held for review is the review list's, not the flush's.
+    let mut state = f.catalog.sidecar_state(f.asset_id).unwrap().unwrap();
+    state.catalog_dirty_since_ms = Some(now_ms());
+    state.needs_review = true;
+    f.catalog.record_sidecar(f.asset_id, &state).unwrap();
+    assert!(f.catalog.sidecar_dirty_assets().unwrap().is_empty());
+}

@@ -342,11 +342,13 @@ confirms or amends them; #60 builds against them as written.
     still rewrites the sidecar, and `packet::apply` only strips later Descriptions whose
     `rdf:about` matches the first.)
   - A rescan can write a sidecar with auto-write **off** when the catalog is dirty and newer
-    (ADR-0021 newer-wins); turning auto-write back on doesn't flush already-dirty assets until
-    their next marker change. A sync that lands between a marker write and the writer thread
-    picking it up sees the catalog as clean.
+    (ADR-0021 newer-wins). (Fixed in #375: turning auto-write back on queues every dirty,
+    not-held asset via `sidecar_dirty_assets`.) A sync that lands between a marker write and the
+    writer thread picking it up sees the catalog as clean.
   - The stat-based mtime precheck can miss a rewrite that preserves the recorded mtime
-    (`rsync -t`, FAT's 2 s granularity).
+    (`rsync -t`). FAT's coarse granularity is covered by the racy-mtime guard (#508); a same-mtime,
+    different-content rewrite is undetectable by stat alone and is left (#375).
+  - (Fixed in #375: after "Use file" in the review panel the grid's cached markers are dropped.)
   - (Fixed in #375: `keyword_name_paths` reads only the tagged keywords and their ancestors
     (`keyword_names_for`); `packet::apply` patches the first `rdf:Description` and strips the
     properties it owns from later ones.)

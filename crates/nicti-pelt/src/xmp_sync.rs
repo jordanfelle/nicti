@@ -70,6 +70,15 @@ fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<(PathBuf, boo
     Some((raw, exists))
 }
 
+/// Ids for the writer thread. `flush` ids are the ones left dirty while auto-write was off (#375):
+/// they are written only if auto-write is still on when the writer reaches them, and a flush alone
+/// never marks a clean asset dirty (a failed write or an offline RAW only refreshes the dirty time
+/// of an asset that already is).
+struct Batch {
+    ids: Vec<i64>,
+    flush: bool,
+}
+
 #[derive(Default)]
 struct Status {
     last_error: Option<String>,
@@ -79,43 +88,61 @@ struct Status {
 /// dropped.
 #[derive(Clone)]
 pub struct XmpWriter {
-    tx: Sender<Vec<i64>>,
+    tx: Sender<Batch>,
+    store: Store,
     autowrite: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
 }
 
 impl XmpWriter {
     pub fn spawn(store: Store, autowrite: bool) -> Self {
-        let (tx, rx) = channel::<Vec<i64>>();
+        let (tx, rx) = channel::<Batch>();
         let autowrite = Arc::new(AtomicBool::new(autowrite));
         let status = Arc::new(Mutex::new(Status::default()));
         let (flag, st) = (autowrite.clone(), status.clone());
+        let writer_store = store.clone();
         std::thread::Builder::new()
             .name("nicti-xmp-writer".into())
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
                     // Holding a key queues many commands; coalesce what's already waiting so each
                     // photo's sidecar is written once per burst, with its latest markers.
-                    let mut ids: BTreeSet<i64> = first.into_iter().collect();
+                    let mut ids: BTreeSet<i64> = BTreeSet::new();
+                    let mut flush_ids: BTreeSet<i64> = BTreeSet::new();
+                    let mut take = |b: Batch| {
+                        if b.flush { &mut flush_ids } else { &mut ids }.extend(b.ids);
+                    };
+                    take(first);
                     while let Ok(more) = rx.try_recv() {
-                        ids.extend(more);
+                        take(more);
                     }
-                    for id in ids {
-                        let Some((raw, exists)) = raw_path_for(&*store, id) else {
+                    flush_ids.retain(|id| !ids.contains(id));
+                    let flushing = flag.load(Ordering::Relaxed);
+                    let work = ids
+                        .into_iter()
+                        .map(|id| (id, false))
+                        .chain(flush_ids.into_iter().map(|id| (id, true)));
+                    for (id, is_flush) in work {
+                        if is_flush && !flushing {
+                            continue;
+                        }
+                        let Some((raw, exists)) = raw_path_for(&*writer_store, id) else {
                             continue;
                         };
                         // An offline RAW can't get a sidecar, but the edit must still be recorded
                         // as newer so a later rescan doesn't let a changed sidecar win over it.
                         let result = if flag.load(Ordering::Relaxed) && exists {
-                            scent_sync::write_sidecar(&*store, id, &raw, now_ms()).map(|_| ())
+                            scent_sync::write_sidecar(&*writer_store, id, &raw, now_ms())
+                                .map(|_| ())
                         } else {
-                            scent_sync::mark_catalog_dirty(&*store, id, &raw, now_ms())
+                            scent_sync::mark_catalog_dirty(&*writer_store, id, &raw, now_ms())
                         };
                         if let Err(e) = result {
                             // A failed write (sidecar locked by LRC, unparseable at that moment)
                             // must not look like "nothing changed": record that the catalog is
                             // now newer, so a later rescan doesn't let the file silently win.
-                            let _ = scent_sync::mark_catalog_dirty(&*store, id, &raw, now_ms());
+                            let _ =
+                                scent_sync::mark_catalog_dirty(&*writer_store, id, &raw, now_ms());
                             st.lock().unwrap().last_error = Some(e.to_string());
                         }
                     }
@@ -124,6 +151,7 @@ impl XmpWriter {
             .expect("spawn the XMP writer thread");
         XmpWriter {
             tx,
+            store,
             autowrite,
             status,
         }
@@ -131,7 +159,7 @@ impl XmpWriter {
 
     pub fn queue(&self, ids: Vec<i64>) {
         if !ids.is_empty() {
-            let _ = self.tx.send(ids);
+            let _ = self.tx.send(Batch { ids, flush: false });
         }
     }
 
@@ -139,8 +167,24 @@ impl XmpWriter {
         self.autowrite.load(Ordering::Relaxed)
     }
 
+    /// Turning auto-write back on also queues every asset left dirty while it was off (#375), so
+    /// those sidecars catch up now rather than at their next marker change. The catalog read runs
+    /// off the calling (UI) thread.
     pub fn set_autowrite(&self, on: bool) {
-        self.autowrite.store(on, Ordering::Relaxed);
+        let was = self.autowrite.swap(on, Ordering::Relaxed);
+        if on && !was {
+            let (store, tx, status) = (self.store.clone(), self.tx.clone(), self.status.clone());
+            std::thread::spawn(move || match store.sidecar_dirty_assets() {
+                Ok(ids) if !ids.is_empty() => {
+                    let _ = tx.send(Batch { ids, flush: true });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    status.lock().unwrap().last_error =
+                        Some(format!("Couldn't list assets awaiting sidecar write: {e}"));
+                }
+            });
+        }
     }
 
     fn last_error(&self) -> Option<String> {
@@ -283,14 +327,16 @@ impl XmpUi {
     }
 }
 
-/// Draws the "Lightroom XMP sync" section of the settings panel.
+/// Draws the "Lightroom XMP sync" section of the settings panel. Returns true when the catalog's
+/// markers changed under the grid ("Use file" applied a sidecar), so the caller drops its cached
+/// ratings/flags/labels (#375).
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut XmpUi,
     store: &Store,
     writer: &XmpWriter,
     catalog_path: &Path,
-) {
+) -> bool {
     ui.label("Lightroom XMP sync (ratings, flags, labels and keywords in .xmp sidecars):");
     let mut on = writer.autowrite();
     if ui
@@ -317,7 +363,7 @@ pub fn show(
     state.refresh(&**store);
     ui.ctx().request_repaint_after(REVIEW_REFRESH);
     if state.review_total == 0 {
-        return;
+        return false;
     }
     ui.colored_label(
         egui::Color32::from_rgb(0xe9, 0x5d, 0x00),
@@ -344,18 +390,23 @@ pub fn show(
             state.review_total - state.review.len()
         ));
     }
+    let mut catalog_changed = false;
     if let Some((id, use_catalog)) = resolve {
         state.message = match raw_path_for(&**store, id).filter(|(_, exists)| *exists) {
             Some((raw, _)) => scent_sync::resolve_review(&**store, id, &raw, use_catalog, now_ms())
-                .map(|out| match out {
-                    SyncOutcome::NeedsReview => Some("Still in conflict.".to_string()),
-                    _ => None,
+                .map(|out| {
+                    catalog_changed = out == SyncOutcome::AppliedSidecar;
+                    match out {
+                        SyncOutcome::NeedsReview => Some("Still in conflict.".to_string()),
+                        _ => None,
+                    }
                 })
                 .unwrap_or_else(|e| Some(format!("Couldn't resolve: {e}"))),
             None => Some("That photo's file isn't available right now.".to_string()),
         };
         state.last_refresh = None;
     }
+    catalog_changed
 }
 
 #[cfg(test)]
@@ -504,6 +555,35 @@ mod tests {
             "catalog was never marked dirty"
         );
         assert!(!raw.with_extension("xmp").exists());
+    }
+
+    #[test]
+    fn turning_autowrite_back_on_flushes_the_assets_left_dirty() {
+        let (_dir, store, id, raw) = fixture();
+        let writer = XmpWriter::spawn(store.clone(), false);
+        let meta = XmpMeta::new(store.clone(), writer.clone());
+        meta.set_meta(&[(id, rated(3))]).unwrap();
+        assert!(
+            eventually(|| store
+                .sidecar_state(id)
+                .unwrap()
+                .is_some_and(|s| s.catalog_dirty_since_ms.is_some())),
+            "catalog was never marked dirty"
+        );
+        let xmp = raw.with_extension("xmp");
+        assert!(!xmp.exists());
+
+        writer.set_autowrite(true);
+        assert!(
+            eventually(|| std::fs::read_to_string(&xmp)
+                .map(|t| t.contains("xmp:Rating=\"3\""))
+                .unwrap_or(false)),
+            "dirty asset was never flushed"
+        );
+        assert!(eventually(|| store
+            .sidecar_state(id)
+            .unwrap()
+            .is_some_and(|s| s.catalog_dirty_since_ms.is_none())));
     }
 
     #[test]
