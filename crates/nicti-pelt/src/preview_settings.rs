@@ -95,8 +95,8 @@ pub fn show(ui: &mut egui::Ui, settings: &mut PreviewSettings) -> bool {
         ui.label(
             "Edited photos are shown from a render of their edits instead of the camera's \
              preview. \"All photos\" also renders unedited photos, so the loupe's preview uses Nicti's \
-             own colour (costs a RAW decode per photo, in the background); grid thumbnails and \
-             survey/compare keep the camera's.",
+             own colour (costs a RAW decode per photo, in the background); edited photos' grid \
+             thumbnails use their render once it exists. Survey/compare keep the camera's.",
         );
         egui::ComboBox::from_label("Render previews for")
             .selected_text(policy_name(settings.policy))
@@ -113,7 +113,7 @@ pub fn show(ui: &mut egui::Ui, settings: &mut PreviewSettings) -> bool {
             ui.checkbox(&mut settings.loupe, "Use in the loupe");
             ui.checkbox(
                 &mut settings.grid,
-                "Flag stale previews in the library grid",
+                "Use in the library grid (rendered thumbnails, stale flag)",
             );
         });
     });

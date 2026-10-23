@@ -1687,6 +1687,18 @@ impl PeltApp {
             self.grid = Some(grid);
         }
 
+        // #397: edited photos' cells come from the rendered tier while the grid uses renders.
+        let grid_renders =
+            self.preview_settings.policy_for(Surface::Grid) != eyeshine::RenderPolicy::Off;
+        let rendered_larder = if grid_renders {
+            self.larder.clone()
+        } else {
+            None
+        };
+        if let Some(grid) = self.grid.as_mut() {
+            grid.set_rendered(rendered_larder, &self.pounce);
+        }
+
         self.show_folder_panel(ui, &store);
 
         ui.horizontal(|ui| {
@@ -3054,7 +3066,10 @@ impl PeltApp {
         }
         match self.larder.as_ref().map(crate::t2::try_lock_larder) {
             Some(Some(mut guard)) => {
-                match guard.purge_tier(nicti_lair::larder::LarderTier::Rendered) {
+                let purged = guard
+                    .purge_tier(nicti_lair::larder::LarderTier::Rendered)
+                    .and_then(|_| guard.purge_tier(nicti_lair::larder::LarderTier::RenderedThumb));
+                match purged {
                     Ok(_) => self.purge_rendered_pending = false,
                     // Stay pending (retried next frame) and say so.
                     Err(e) => {
@@ -3077,7 +3092,11 @@ impl PeltApp {
     /// up; while any is running, poll again shortly since nothing else wakes an idle window.
     fn poll_eyeshine(&mut self, ctx: &egui::Context) {
         self.try_purge_rendered();
-        if !self.eyeshine.poll().is_empty() {
+        let stored = self.eyeshine.poll();
+        if !stored.is_empty() {
+            if let Some(grid) = self.grid.as_mut() {
+                grid.rerender(&stored);
+            }
             ctx.request_repaint();
         }
         if self.eyeshine.busy() {

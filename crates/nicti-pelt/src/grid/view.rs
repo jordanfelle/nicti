@@ -233,7 +233,7 @@ pub fn show(
                         cursor: cursor == Some(index),
                         selected: session.is_selected(index),
                         meta: cull.meta(id),
-                        stale: flag_stale && session.is_edited(id),
+                        stale: flag_stale && session.is_stale(id),
                     };
                     paint_cell(ui, session, id, rect, &marks);
                     if response.clicked() {
