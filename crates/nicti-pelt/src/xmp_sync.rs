@@ -71,8 +71,9 @@ fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<(PathBuf, boo
 }
 
 /// Ids for the writer thread. `flush` ids are the ones left dirty while auto-write was off (#375):
-/// they are written only if auto-write is still on when the writer reaches them, and are never
-/// re-marked dirty (they already are, or an edit has since written them).
+/// they are written only if auto-write is still on when the writer reaches them, and a flush alone
+/// never marks a clean asset dirty (a failed write or an offline RAW only refreshes the dirty time
+/// of an asset that already is).
 struct Batch {
     ids: Vec<i64>,
     flush: bool,
