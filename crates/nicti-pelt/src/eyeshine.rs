@@ -971,6 +971,49 @@ struct Inflight {
     job: JobId,
     slot: ReportSlot<T2Outcome>,
     cancelled: Arc<AtomicBool>,
+    /// Queued for a neighbour (#398), not the photo being looked at: cancelled when the cursor
+    /// moves off its window, and promoted to a normal render if the user lands on it.
+    prefetch: bool,
+}
+
+/// Per-photo deadlines for the post-save render (#398): autosave fires on every pointer-up, so a
+/// burst of edits queues one render per photo once they settle, not one per save.
+#[derive(Default)]
+pub struct RenderDebounce {
+    due: HashMap<i64, std::time::Instant>,
+}
+
+impl RenderDebounce {
+    /// (Re)starts `asset_id`'s countdown; other photos' deadlines are untouched.
+    pub fn arm(&mut self, asset_id: i64, at: std::time::Instant) {
+        self.due.insert(asset_id, at);
+    }
+
+    /// Photos whose deadline has passed, removed from the set.
+    pub fn take_due(&mut self, now: std::time::Instant) -> Vec<i64> {
+        let ready: Vec<i64> = self
+            .due
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ready {
+            self.due.remove(id);
+        }
+        ready
+    }
+
+    /// Time until the next deadline, to schedule a repaint for.
+    pub fn next_wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.due
+            .values()
+            .map(|at| at.saturating_duration_since(now))
+            .min()
+    }
+
+    pub fn clear(&mut self) {
+        self.due.clear();
+    }
 }
 
 /// Decides which photos get a rendered preview, keeps at most one render per photo in flight (a
@@ -985,6 +1028,9 @@ pub struct EyeshineService {
     next_seq: u64,
     /// Per-asset resolution cache (a catalog read each); dropped by [`Self::invalidate`].
     resolved: HashMap<i64, Resolved>,
+    /// Set when the last `request` declined only because too many pipelines are still draining
+    /// (see [`Self::take_deferred`]).
+    deferred: bool,
 }
 
 impl EyeshineService {
@@ -996,6 +1042,30 @@ impl EyeshineService {
             blocked: HashMap::new(),
             next_seq: 0,
             resolved: HashMap::new(),
+            deferred: false,
+        }
+    }
+
+    /// True if the last `request` was declined only because cancelled pipelines are still
+    /// draining -- a transient refusal the caller should retry, unlike "cached" or "backing off".
+    pub fn take_deferred(&mut self) -> bool {
+        std::mem::take(&mut self.deferred)
+    }
+
+    /// Cancels queued prefetches whose photo is no longer in `keep` (the cursor moved on), so a
+    /// stale one can't hold the GPU claim while the current photo's render waits (#398).
+    pub fn retain_prefetch(&mut self, pounce: &Pounce, keep: &[i64]) {
+        let stale: Vec<i64> = self
+            .inflight
+            .iter()
+            .filter(|(id, f)| f.prefetch && !keep.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(old) = self.inflight.remove(&id) {
+                old.cancelled.store(true, Ordering::SeqCst);
+                pounce.cancel(old.job);
+            }
         }
     }
 
@@ -1084,6 +1154,7 @@ impl EyeshineService {
         policy: RenderPolicy,
         prefetch: bool,
     ) -> Option<Info> {
+        self.deferred = false;
         let resolved = self.resolve(store, asset_id)?;
         let info = Info {
             edited: resolved.edited,
@@ -1104,7 +1175,10 @@ impl EyeshineService {
         if !policy.wants_render(info.edited) {
             return Some(info);
         }
-        if self.inflight.contains_key(&asset_id) {
+        if let Some(running) = self.inflight.get_mut(&asset_id) {
+            if !prefetch {
+                running.prefetch = false;
+            }
             return Some(info);
         }
         let key = (asset_id, hash.clone());
@@ -1116,7 +1190,12 @@ impl EyeshineService {
             return Some(info);
         }
         // Already cached? `try_lock`: a busy Larder just means the job re-checks on its worker.
-        if let Some(larder) = try_lock_larder(&env.larder) {
+        // A prefetch can't tell, so it waits for a later pass instead of risking a wasted decode.
+        let locked = try_lock_larder(&env.larder);
+        if prefetch && locked.is_none() {
+            return Some(info);
+        }
+        if let Some(larder) = locked {
             let current = |tier| {
                 larder.stored_hash(asset_id, tier).ok().flatten().as_deref() == Some(hash.as_str())
             };
@@ -1150,6 +1229,7 @@ impl EyeshineService {
         // don't pile new ones on top. The loupe re-requests every frame, so this just waits.
         let live_cap = if prefetch { MAX_LIVE - 1 } else { MAX_LIVE };
         if env.live.load(Ordering::SeqCst) >= live_cap {
+            self.deferred = !prefetch;
             return Some(info);
         }
         let seq = self.next_seq;
@@ -1176,6 +1256,7 @@ impl EyeshineService {
                 job,
                 slot,
                 cancelled,
+                prefetch,
             },
         );
         Some(info)
@@ -2025,6 +2106,22 @@ mod tests {
     }
 
     #[test]
+    fn debounce_keeps_each_photos_deadline_and_fires_once() {
+        let t0 = Instant::now();
+        let mut d = RenderDebounce::default();
+        d.arm(1, t0 + Duration::from_millis(100));
+        d.arm(2, t0 + Duration::from_millis(300));
+        // A second save of photo 1 pushes only photo 1 back; photo 2's render isn't lost.
+        d.arm(1, t0 + Duration::from_millis(500));
+        assert_eq!(d.next_wait(t0), Some(Duration::from_millis(300)));
+        assert!(d.take_due(t0 + Duration::from_millis(200)).is_empty());
+        assert_eq!(d.take_due(t0 + Duration::from_millis(300)), vec![2]);
+        assert_eq!(d.take_due(t0 + Duration::from_millis(600)), vec![1]);
+        assert!(d.take_due(t0 + Duration::from_secs(9)).is_empty());
+        assert_eq!(d.next_wait(t0), None);
+    }
+
+    #[test]
     fn prefetch_never_evicts_and_leaves_a_slot_for_the_current_photo() {
         let Some(mut t) = svc_fx() else { return };
         let ids = [t.id, add_asset(&t, "b.NEF"), add_asset(&t, "c.NEF")];
@@ -2033,21 +2130,25 @@ mod tests {
             t.svc
                 .prefetch(&t.fx.pounce, &t.store, id, 0, RenderPolicy::EditedOnly);
         }
-        // One slot is always held back for the photo being looked at.
-        assert!(t.svc.inflight.len() < MAX_INFLIGHT);
+        // One slot is always held back for the photo being looked at -- and a prefetch did get in.
+        assert_eq!(t.svc.inflight.len(), MAX_INFLIGHT - 1);
+        assert!(t.svc.inflight.values().all(|f| f.prefetch));
         assert!(t
             .svc
             .inflight
             .values()
             .all(|f| !f.cancelled.load(Ordering::SeqCst)));
         // The current photo's own request still gets in without cancelling the prefetched one.
-        let first = t.svc.inflight.keys().next().copied();
+        let first = *t.svc.inflight.keys().next().unwrap();
+        let other = *ids.iter().find(|i| **i != first).unwrap();
         t.svc
-            .request(&t.fx.pounce, &t.store, ids[2], 0, RenderPolicy::EditedOnly);
-        assert!(t.svc.inflight.contains_key(&ids[2]));
-        if let Some(first) = first.filter(|f| *f != ids[2]) {
-            assert!(!t.svc.inflight[&first].cancelled.load(Ordering::SeqCst));
-        }
+            .request(&t.fx.pounce, &t.store, other, 0, RenderPolicy::EditedOnly);
+        assert!(t.svc.inflight.contains_key(&other));
+        assert!(!t.svc.inflight[&first].cancelled.load(Ordering::SeqCst));
+        // Moving the cursor off the prefetched photo cancels it; the current photo's render stays.
+        t.svc.retain_prefetch(&t.fx.pounce, &[]);
+        assert!(!t.svc.inflight.contains_key(&first));
+        assert!(t.svc.inflight.contains_key(&other));
     }
 
     #[test]
