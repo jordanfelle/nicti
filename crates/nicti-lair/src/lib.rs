@@ -421,6 +421,23 @@ pub trait CatalogStore: Module {
     /// subtree-inclusive matching is a query concern (#242), not this method's.
     fn keywords_for(&self, asset_id: i64) -> Result<Vec<Keyword>, CatalogError>;
 
+    /// Id -> name for every keyword tagged on this asset *and each of their ancestors*: exactly
+    /// what's needed to turn the asset's keyword `path`s into name paths, without reading the
+    /// whole keyword table per asset (#375).
+    fn keyword_names_for(
+        &self,
+        asset_id: i64,
+    ) -> Result<std::collections::HashMap<i64, String>, CatalogError>;
+
+    /// Sets one asset's rating/flag/label and its directly-tagged keyword set (`keyword_ids`, the
+    /// leaves) in a single transaction, so a failure partway leaves the asset untouched (#375).
+    fn replace_asset_markers(
+        &self,
+        asset_id: i64,
+        meta: &AssetMeta,
+        keyword_ids: &[i64],
+    ) -> Result<(), CatalogError>;
+
     /// Resolves a `/`-free path of plain names (e.g. `["Events", "Named", "birthday-2026"]`) to
     /// the keyword at that exact position in the tree, if one exists. Deliberately takes a
     /// caller-split `&[&str]` rather than committing to one separator style itself — XMP's

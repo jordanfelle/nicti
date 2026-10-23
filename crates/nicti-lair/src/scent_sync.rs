@@ -69,7 +69,7 @@ pub enum SyncOutcome {
 }
 
 /// The LRC-visible markers of one asset, canonicalised so the two sides compare by meaning.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Markers {
     /// `None` = unrated, `Some(-1)` = reject, `Some(0..=5)` = stars.
     pub rating: Option<i8>,
@@ -95,6 +95,30 @@ fn norm_path<I: IntoIterator<Item = String>>(segs: I) -> Option<Vec<String>> {
     (!p.is_empty()).then_some(p)
 }
 
+/// A keyword path as the catalog compares it (NFC + lowercase per segment, like `keyword.name_fold`),
+/// so a case-only difference between the sidecar and the catalog is not a conflict (#375).
+fn fold_path(p: &[String]) -> Vec<String> {
+    p.iter()
+        .map(|s| crate::sqlite::fold_keyword_name(s))
+        .collect()
+}
+
+impl Markers {
+    fn folded_keywords(&self) -> BTreeSet<Vec<String>> {
+        self.keywords.iter().map(|p| fold_path(p)).collect()
+    }
+}
+
+impl PartialEq for Markers {
+    fn eq(&self, o: &Self) -> bool {
+        self.rating == o.rating
+            && self.label == o.label
+            && self.pick == o.pick
+            && self.folded_keywords() == o.folded_keywords()
+    }
+}
+impl Eq for Markers {}
+
 impl Markers {
     fn is_empty(&self) -> bool {
         *self == Markers::default()
@@ -103,7 +127,7 @@ impl Markers {
     fn hash(&self) -> blake3::Hash {
         let mut h = blake3::Hasher::new();
         h.update(format!("{:?}|{:?}|{}", self.rating, self.label, self.pick).as_bytes());
-        for kw in &self.keywords {
+        for kw in &self.folded_keywords() {
             h.update(b"\x1f");
             h.update(kw.join("\x1e").as_bytes());
         }
@@ -193,11 +217,7 @@ fn keyword_name_paths(
     if tagged.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let names: HashMap<i64, String> = store
-        .list_keywords()?
-        .into_iter()
-        .map(|k| (k.id, k.name))
-        .collect();
+    let names = store.keyword_names_for(asset_id)?;
     Ok(name_paths(&tagged, &names))
 }
 
@@ -220,46 +240,33 @@ fn apply_to_catalog(
     asset_id: i64,
     m: &Markers,
 ) -> Result<(), ScentSyncError> {
-    store.set_meta(&[(
-        asset_id,
-        AssetMeta {
-            rating: m.rating.map(i64::from),
-            flag: m.pick.then_some(1),
-            label: m.label.clone(),
-        },
-    )])?;
-
-    // Resolve (creating as needed) each wanted path down to its leaf keyword id.
+    // Resolve (creating as needed) each wanted path down to its leaf keyword id. Creating a keyword
+    // that ends up unused is harmless; the asset itself changes in one transaction below.
     let mut wanted: BTreeSet<i64> = BTreeSet::new();
     for path in &m.keywords {
         let mut parent: Option<i64> = None;
         for i in 0..path.len() {
             let segs: Vec<&str> = path[..=i].iter().map(String::as_str).collect();
-            let kw: Keyword = match store.keyword_by_path(&segs)? {
-                Some(k) => k,
-                None => {
-                    let id = store.create_keyword(parent, &path[i])?;
-                    Keyword {
-                        id,
-                        parent_id: parent,
-                        name: path[i].clone(),
-                        path: String::new(),
-                    }
-                }
+            let id = match store.keyword_by_path(&segs)? {
+                Some(k) => k.id,
+                None => store.create_keyword(parent, &path[i])?,
             };
-            parent = Some(kw.id);
+            parent = Some(id);
         }
         if let Some(leaf) = parent {
             wanted.insert(leaf);
         }
     }
-    let current: BTreeSet<i64> = store.keywords_for(asset_id)?.iter().map(|k| k.id).collect();
-    for id in current.difference(&wanted) {
-        store.untag(&[asset_id], *id)?;
-    }
-    for id in wanted.difference(&current) {
-        store.tag(&[asset_id], *id)?;
-    }
+    let ids: Vec<i64> = wanted.into_iter().collect();
+    store.replace_asset_markers(
+        asset_id,
+        &AssetMeta {
+            rating: m.rating.map(i64::from),
+            flag: m.pick.then_some(1),
+            label: m.label.clone(),
+        },
+        &ids,
+    )?;
     Ok(())
 }
 

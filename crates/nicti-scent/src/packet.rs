@@ -9,7 +9,9 @@
 //! outside the fields this module owns is re-emitted completely unchanged.
 //! Only the first `rdf:Description`'s owned attributes are rewritten, and
 //! only its `dc:subject`/`lr:hierarchicalSubject` child blocks are replaced
-//! wholesale when a write touches keywords. This is what makes the
+//! wholesale when a write touches keywords. Any *later* `rdf:Description`
+//! has the properties this patch owns stripped (and nothing else touched), so
+//! a stale value there can't override the patched one on read (#375). This is what makes the
 //! byte-diff guard in `embedded::jpeg` meaningful: a patch that doesn't
 //! touch keywords leaves every other byte of the packet identical.
 //!
@@ -17,8 +19,8 @@
 //! carries the properties this module reads/writes -- true for every real
 //! LRC-written sidecar this spike measured (`docs/research/scent-xmp-interop.md`).
 //! XMP technically allows multiple `rdf:Description` elements for the same
-//! subject with properties split across them; this module only ever touches
-//! the first one found and leaves any others alone.
+//! subject with properties split across them; this module writes the owned
+//! properties into the first one found and only removes them from the others.
 //!
 //! The lossless `nicti:` recovery layer (ADR-0021 layer b) rides in this
 //! same packet as a single `nicti:editDocument` attribute, opaque
@@ -141,6 +143,26 @@ fn matching_end(events: &[Event<'static>], start_idx: usize) -> Result<usize, Pa
         }
     }
     Err(PatchError::Unbalanced)
+}
+
+/// Whether `patch` owns the attribute `key` (so a rewrite drops its old value).
+fn patch_owns_attr(key: QName, patch: &Patch) -> bool {
+    (key.as_ref() == "xmp:Rating" && patch.rating.is_some())
+        || (key.as_ref() == "xmp:Label" && patch.label.is_some())
+        || (is_local(key, "editDocument") && patch.nicti_edit_document.is_some())
+        || (key.as_ref() == "nicti:pick" && patch.nicti_pick.is_some())
+}
+
+/// Whether the child element at `ev` is a block `patch` owns.
+fn patch_owns_child(ev: &Event<'static>, patch: &Patch) -> bool {
+    let (Event::Start(s) | Event::Empty(s)) = ev else {
+        return false;
+    };
+    let name = s.name();
+    (is_local(name, "subject") && patch.keywords.is_some())
+        || (is_local(name, "hierarchicalSubject") && patch.hierarchical_keywords.is_some())
+        || (name.as_ref() == "xmp:Rating" && patch.rating.is_some())
+        || (name.as_ref() == "xmp:Label" && patch.label.is_some())
 }
 
 /// Applies `patch` to `xmp`, returning the full patched packet text.
@@ -283,6 +305,64 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         }
     }
 
+    // 2b. Later `rdf:Description` elements: strip what this patch owns so it can't win on read.
+    let mut replaced: std::collections::HashMap<usize, Event<'static>> =
+        std::collections::HashMap::new();
+    let mut j = desc_end_idx + 1;
+    while j < events.len() {
+        let (is_desc, was_start) = match &events[j] {
+            Event::Start(s) if is_local(s.name(), "Description") => (true, true),
+            Event::Empty(s) if is_local(s.name(), "Description") => (true, false),
+            _ => (false, false),
+        };
+        if !is_desc {
+            j += 1;
+            continue;
+        }
+        let end = matching_end(&events, j)?;
+        let (Event::Start(orig) | Event::Empty(orig)) = &events[j] else {
+            unreachable!()
+        };
+        let mut tag = BytesStart::new(orig.name().as_ref().to_owned());
+        let mut changed = false;
+        for attr in orig.attributes() {
+            let attr = attr?;
+            if patch_owns_attr(attr.key, patch) {
+                changed = true;
+                continue;
+            }
+            tag.push_attribute(quick_xml::events::attributes::Attribute {
+                key: attr.key,
+                value: attr.value.replace('"', "&quot;").into(),
+            });
+        }
+        if changed {
+            replaced.insert(
+                j,
+                if was_start {
+                    Event::Start(tag)
+                } else {
+                    Event::Empty(tag)
+                },
+            );
+        }
+        if was_start {
+            let mut i = j + 1;
+            while i < end {
+                if patch_owns_child(&events[i], patch) {
+                    let block_end = matching_end(&events, i)?;
+                    for s in skip.iter_mut().take(block_end + 1).skip(i) {
+                        *s = true;
+                    }
+                    i = block_end + 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        j = end + 1;
+    }
+
     // 3. Serialize: everything up to Description unchanged, patched
     //    Description tag, preserved (non-skipped) children, freshly built
     //    keyword blocks, Description close, everything after unchanged.
@@ -329,8 +409,11 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         writer.write_event(Event::Empty(new_desc_start.1))?;
     }
 
-    for ev in events.iter().skip(desc_end_idx + 1) {
-        writer.write_event(ev.clone())?;
+    for (i, ev) in events.iter().enumerate().skip(desc_end_idx + 1) {
+        if skip[i] {
+            continue;
+        }
+        writer.write_event(replaced.get(&i).unwrap_or(ev).clone())?;
     }
 
     Ok(String::from_utf8(writer.into_inner()).expect("xmp is always valid utf-8"))
@@ -683,5 +766,21 @@ mod tests {
         for decl in ["xmlns:xmp=", "xmlns:dc=", "xmlns:lr="] {
             assert_eq!(again.matches(decl).count(), 1, "{decl} in {again}");
         }
+    }
+
+    #[test]
+    fn later_descriptions_lose_the_properties_the_patch_owns() {
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><rdf:Description xmp:Rating="1"/><rdf:Description xmp:Rating="5" crs:Note="keep"><dc:subject><rdf:Bag><rdf:li>stale</rdf:li></rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let patch = Patch {
+            rating: Some(Some(3)),
+            keywords: Some(vec!["fox".into()]),
+            ..Default::default()
+        };
+        let out = apply(xmp, &patch).unwrap();
+        let meta = crate::lrc_fields::read(&out).unwrap();
+        assert_eq!(meta.rating, Some(3));
+        assert_eq!(meta.keywords, vec!["fox".to_string()]);
+        assert!(out.contains(r#"crs:Note="keep""#));
+        assert!(!out.contains("stale"));
     }
 }

@@ -336,17 +336,16 @@ confirms or amends them; #60 builds against them as written.
     top-level and a nested keyword sharing a leaf stay distinct; whether LRC writes top-level
     keywords there too is unverified (#187). A `|` in a keyword name (the separator can't be
     escaped) is replaced by `/` on both sides, so it compares stable but is renamed on import.
-  - `Markers` compares keyword names case-sensitively while the catalog folds case, so a
-    case-only difference converges on the next write rather than flagging forever.
-  - `apply_to_catalog` is not one transaction (rating/flag/label commit, then keywords); a
-    failure partway leaves a partial apply until the next sync. Bad ratings are rejected at parse
-    time so the known trigger is closed.
+  - (Fixed in #375: `Markers` compares keyword names NFC + case-folded like the catalog;
+    `apply_to_catalog` sets rating/flag/label and keywords in one transaction via
+    `replace_asset_markers`.)
   - A rescan can write a sidecar with auto-write **off** when the catalog is dirty and newer
     (ADR-0021 newer-wins); turning auto-write back on doesn't flush already-dirty assets until
     their next marker change. A sync that lands between a marker write and the writer thread
     picking it up sees the catalog as clean.
   - The stat-based mtime precheck can miss a rewrite that preserves the recorded mtime
     (`rsync -t`, FAT's 2 s granularity).
-  - `keyword_name_paths` reads the whole keyword table per tagged asset: O(tagged assets x
-    keywords) per rescan. Only the first `rdf:Description` is patched while the reader merges all
-    of them. The write-back only covers culling markers; there is no keyword-tagging UI yet.
+  - (Fixed in #375: `keyword_name_paths` reads only the tagged keywords and their ancestors
+    (`keyword_names_for`); `packet::apply` patches the first `rdf:Description` and strips the
+    properties it owns from later ones.)
+  - The write-back only covers culling markers; there is no keyword-tagging UI yet.
