@@ -41,7 +41,7 @@ const RATING_SORT_SENTINEL: i64 = -1000;
 /// Case/composition-folded form for `keyword.name_fold` -- same NFC-then-lowercase rule
 /// `scruff.rs::fold` uses for `rel_path_fold`, so two visually-identical names typed via different
 /// input methods (composed vs. decomposed Unicode) still collide as the same keyword.
-fn fold_keyword_name(name: &str) -> String {
+pub(crate) fn fold_keyword_name(name: &str) -> String {
     let composed: String = name.nfc().collect();
     composed.to_lowercase()
 }
@@ -2031,6 +2031,65 @@ impl CatalogStore for SqliteCatalog {
             .query_map([asset_id], row_to_keyword)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    fn keyword_names_for(
+        &self,
+        asset_id: i64,
+    ) -> Result<std::collections::HashMap<i64, String>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT a.id, a.name FROM keyword a \
+             JOIN keyword k ON k.path GLOB a.path || '*' \
+             JOIN asset_keyword ak ON ak.keyword_id = k.id \
+             WHERE ak.asset_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map([asset_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn replace_asset_markers(
+        &self,
+        asset_id: i64,
+        meta: &AssetMeta,
+        keyword_ids: &[i64],
+    ) -> Result<(), CatalogError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let n = tx.execute(
+            "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
+            params![meta.rating, meta.flag, meta.label, asset_id],
+        )?;
+        if n == 0 {
+            // A missing asset is a failure, not a silent no-op (the keyword insert would fail the
+            // foreign key anyway, but an empty keyword set would not).
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        let current: std::collections::BTreeSet<i64> = {
+            let mut stmt =
+                tx.prepare("SELECT keyword_id FROM asset_keyword WHERE asset_id = ?1")?;
+            let rows = stmt
+                .query_map([asset_id], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            rows
+        };
+        let wanted: std::collections::BTreeSet<i64> = keyword_ids.iter().copied().collect();
+        for id in current.difference(&wanted) {
+            tx.execute(
+                "DELETE FROM asset_keyword WHERE keyword_id = ?1 AND asset_id = ?2",
+                params![id, asset_id],
+            )?;
+        }
+        for id in wanted.difference(&current) {
+            tx.execute(
+                "INSERT INTO asset_keyword (keyword_id, asset_id) VALUES (?1, ?2)",
+                params![id, asset_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn list_keywords(&self) -> Result<Vec<Keyword>, CatalogError> {

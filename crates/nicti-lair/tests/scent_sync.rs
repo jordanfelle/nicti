@@ -751,3 +751,88 @@ fn aged_unchanged_sidecar_regains_the_stat_only_path() {
         Some(2)
     );
 }
+
+#[test]
+fn keyword_case_only_difference_is_in_sync_not_a_conflict() {
+    let f = fixture();
+    let k = f.catalog.create_keyword(None, "Fox").unwrap();
+    f.catalog.tag(&[f.asset_id], k).unwrap();
+    let children = format!(
+        "{}{}",
+        bag("dc:subject", &["fox"]),
+        bag("lr:hierarchicalSubject", &["fox"])
+    );
+    fs::write(sidecar(&f.raw), xmp("", &children)).unwrap();
+    assert_eq!(
+        import_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::InSync
+    );
+}
+
+#[test]
+fn keyword_names_for_resolves_ancestors_without_unrelated_keywords() {
+    let f = fixture();
+    let events = f.catalog.create_keyword(None, "Events").unwrap();
+    let con = f.catalog.create_keyword(Some(events), "Anthrocon").unwrap();
+    let other = f.catalog.create_keyword(None, "Unrelated").unwrap();
+    f.catalog.tag(&[f.asset_id], con).unwrap();
+    let names = f.catalog.keyword_names_for(f.asset_id).unwrap();
+    assert_eq!(names.get(&events).map(String::as_str), Some("Events"));
+    assert_eq!(names.get(&con).map(String::as_str), Some("Anthrocon"));
+    assert!(!names.contains_key(&other));
+    assert_eq!(
+        kw_paths(&f),
+        vec![vec!["Events".to_string(), "Anthrocon".to_string()]]
+    );
+}
+
+#[test]
+fn replace_asset_markers_is_atomic_when_a_keyword_id_is_bad() {
+    let f = fixture();
+    set(&f, Some(2), Some("Red"));
+    let k = f.catalog.create_keyword(None, "Fox").unwrap();
+    f.catalog.tag(&[f.asset_id], k).unwrap();
+    let err = f.catalog.replace_asset_markers(
+        f.asset_id,
+        &AssetMeta {
+            rating: Some(5),
+            flag: None,
+            label: None,
+        },
+        &[9999],
+    );
+    assert!(err.is_err());
+    let m = catalog_markers(&f.catalog, f.asset_id).unwrap();
+    assert_eq!(m.rating, Some(2));
+    assert_eq!(m.label.as_deref(), Some("Red"));
+    assert_eq!(m.keywords.len(), 1);
+}
+
+#[test]
+fn a_case_only_keyword_rename_is_written_to_the_sidecar() {
+    let f = fixture();
+    let k = f.catalog.create_keyword(None, "fox").unwrap();
+    f.catalog.tag(&[f.asset_id], k).unwrap();
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    f.catalog.rename_keyword(k, "Fox").unwrap();
+    assert_eq!(
+        write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::WroteSidecar
+    );
+    let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
+    assert!(text.contains("<rdf:li>Fox</rdf:li>"), "{text}");
+}
+
+#[test]
+fn replace_asset_markers_errors_for_a_missing_asset() {
+    let f = fixture();
+    let meta = AssetMeta {
+        rating: None,
+        flag: None,
+        label: None,
+    };
+    assert!(f
+        .catalog
+        .replace_asset_markers(987_654, &meta, &[])
+        .is_err());
+}
