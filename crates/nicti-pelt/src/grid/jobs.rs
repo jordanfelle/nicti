@@ -112,7 +112,7 @@ pub enum ThumbRender {
     /// The camera-derived T0: it doesn't show develop edits.
     Camera,
     /// A render of an earlier edit state of the same file, or of the current edits without their
-    /// masks and AI removals (a `:partial` render): the cell still has edits it doesn't show.
+    /// AI masks / AI removals (a `:partial` render): the cell still has edits it doesn't show.
     Updating,
     /// A render of the photo's current edits.
     Current,
