@@ -39,6 +39,7 @@ use nicti_tapetum::stages::{
     CropKernel, DecodeExec, DecodeKernel, LiveSuffixKernel, PassthroughExec, CROP, DECODE,
     DEMOSAIC, DENOISE, EXPOSURE, HEAL, LENS, MASKS, NEUTRAL, TONE, WORKING_SPACE,
 };
+use nicti_tapetum::upright::{self, Guide, UprightMode};
 use nicti_tapetum::StageRegistry;
 
 /// A synthetic 64x64 "RAW" gradient frame -- a real `LinearFrame`, real decode/normalize/live-
@@ -143,6 +144,17 @@ pub struct DevelopDoc {
     /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
     /// inverse crop transform in the way.
     pub uncropped_preview: bool,
+    /// With `uncropped_preview`: keep the Upright correction (#427) in the whole-frame view. The
+    /// Crop tool needs it (its rect lives in the corrected frame); heal and masks place things in
+    /// source coordinates and need the uncorrected frame.
+    pub uncropped_keeps_upright: bool,
+    /// Upright guided mode (#427): the viewport collects `upright_guides` instead of editing the
+    /// crop rect. Session-only, cleared when the photo changes.
+    pub upright_guide_mode: bool,
+    pub upright_guides: Vec<Guide>,
+    /// 35mm-equivalent focal length of the loaded photo, if known (Upright needs it; `None` falls
+    /// back to `upright::FALLBACK_FOCAL_35MM`).
+    pub focal_35mm: Option<f32>,
     /// How many rendered pixels one screen pixel covers when the canvas is painted smaller than the
     /// render (#421), quantized (`effects::quantize_view_scale`); the grain is averaged over it so
     /// the canvas looks like the export shrunk, not like the same lattice aliased.
@@ -294,6 +306,10 @@ impl DevelopDoc {
             identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
+            uncropped_keeps_upright: false,
+            upright_guide_mode: false,
+            upright_guides: Vec::new(),
+            focal_35mm: None,
             view_scale: 1.0,
             show_before: false,
             profile_choices: Vec::new(),
@@ -669,6 +685,8 @@ impl DevelopDoc {
         self.history = History::new(doc);
         self.removals.clear();
         self.ai_alphas.clear();
+        self.upright_guides.clear();
+        self.upright_guide_mode = false;
         self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
         self.show_before = false;
         self.reload_profiles();
@@ -793,9 +811,46 @@ impl DevelopDoc {
         let crop: CropParams = self.stage_params(CROP);
         let rect = crop.effective_rect((src_w, src_h));
         let (dw, dh) = self.display_extent();
-        let (x, y) =
+        let (mut x, mut y) =
             geometry::affine_for_crop(rect, crop.rotation_degrees).apply((n[0] * dw, n[1] * dh));
+        // Upright (#427) is applied after the crop affine, so the sampled source point moves too.
+        if let Some(u) = crop.upright.filter(|u| !u.is_noop()) {
+            if let Some((ux, uy)) = u
+                .homography(src_w, src_h)
+                .apply((f64::from(x), f64::from(y)))
+            {
+                (x, y) = (ux as f32, uy as f32);
+            }
+        }
         [x / src_w.max(1.0), y / src_h.max(1.0)]
+    }
+
+    /// Focal length in pixels for Upright: the photo's 35mm-equivalent when known, else a wide-angle
+    /// fallback.
+    pub fn upright_focal_px(&self) -> f64 {
+        let f35 = self
+            .focal_35mm
+            .map(f64::from)
+            .unwrap_or(upright::FALLBACK_FOCAL_35MM);
+        upright::focal_px_from_35mm(f35, self.extent.width, self.extent.height)
+            .or_else(|| {
+                upright::focal_px_from_35mm(
+                    upright::FALLBACK_FOCAL_35MM,
+                    self.extent.width,
+                    self.extent.height,
+                )
+            })
+            .unwrap_or(1.0)
+    }
+
+    /// Writes (or clears, with `None`) the crop's Upright correction (#427).
+    pub fn set_upright(&mut self, upright: Option<coat::UprightParams>) {
+        let mut crop: CropParams = self.stage_params(CROP);
+        if crop.upright == upright {
+            return;
+        }
+        crop.upright = upright;
+        self.set_stage_params(CROP, &crop);
     }
 
     /// The Ctrl-drag-a-reference-line gesture (#47): given a drag vector `(dx, dy)` in the *same*
@@ -849,8 +904,21 @@ impl DevelopEngine {
             heal::stamp_removal_state(&mut d, &dv.removals);
             if dv.uncropped_preview {
                 // Removing the entry (rather than only ignoring it below) also gives the crop node
-                // its default hash, so the cached cropped composite can't be served back.
-                d.stages.remove(CROP);
+                // its default hash, so the cached cropped composite can't be served back. The
+                // Crop tool keeps just the Upright part (#427).
+                let kept = d.stages.remove(CROP).and_then(|mut entry| {
+                    let crop: CropParams = nicti_tapetum::coat::parse(&entry.params);
+                    let upright = crop.upright.filter(|u| !u.is_noop())?;
+                    entry.params = serde_json::to_value(CropParams {
+                        upright: Some(upright),
+                        ..CropParams::default()
+                    })
+                    .expect("CropParams serializes");
+                    Some(entry)
+                });
+                if let (true, Some(entry)) = (dv.uncropped_keeps_upright, kept) {
+                    d.stages.insert(CROP.to_string(), entry);
+                }
                 // The vignette/grain are relative to the crop: over the whole frame they would
                 // only get in the way of seeing the spots being healed.
                 d.stages.remove(nicti_tapetum::stages::EFFECTS);
@@ -1112,6 +1180,86 @@ impl DevelopEngine {
         }
         dv.set_stage_params(CROP, &crop);
         AutoApplied::Applied
+    }
+}
+
+impl DevelopEngine {
+    /// Renders the whole frame with no crop, straighten or Upright applied (so detection isn't
+    /// biased by an existing correction) as display-encoded pixels.
+    fn render_for_upright_analysis(&mut self, dv: &mut DevelopDoc) -> (Vec<[f32; 4]>, u32, u32) {
+        let (was_before, was_uncropped, was_keep) = (
+            dv.show_before,
+            dv.uncropped_preview,
+            dv.uncropped_keeps_upright,
+        );
+        dv.show_before = false;
+        dv.uncropped_preview = true;
+        dv.uncropped_keeps_upright = false;
+        let uncropped = self.render(dv);
+        dv.show_before = was_before;
+        dv.uncropped_preview = was_uncropped;
+        dv.uncropped_keeps_upright = was_keep;
+        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, &uncropped);
+        let display = pixels
+            .iter()
+            .map(|p| {
+                let e = output_encode([p[0], p[1], p[2]]);
+                [e[0], e[1], e[2], p[3]]
+            })
+            .collect();
+        (display, uncropped.extent.width, uncropped.extent.height)
+    }
+
+    /// Auto Upright (#427): detects lines on the uncorrected frame and writes the perspective
+    /// correction for `mode` into the crop params. Same ADR-0101 contract as auto-level: a
+    /// low-confidence or empty result writes nothing (a wrong keystone is worse than none).
+    pub fn apply_auto_upright(&mut self, dv: &mut DevelopDoc, mode: UprightMode) -> AutoApplied {
+        if !dv.frame_is_complete() {
+            return AutoApplied::Skipped {
+                reason: AutoReason::DecodeIncomplete,
+                low_confidence: false,
+            };
+        }
+        let (display, w, h) = self.render_for_upright_analysis(dv);
+        let focal = dv.upright_focal_px();
+        dv.apply_upright_outcome(upright::analyze(&display, w, h, focal, mode), w, h)
+    }
+
+    /// Guided Upright (#427) from the guides drawn in `dv.upright_guides`.
+    pub fn apply_guided_upright(&mut self, dv: &mut DevelopDoc, mode: UprightMode) -> AutoApplied {
+        let (w, h) = (dv.extent.width, dv.extent.height);
+        let outcome =
+            upright::analyze_guides(&dv.upright_guides, w, h, dv.upright_focal_px(), mode);
+        dv.apply_upright_outcome(outcome, w, h)
+    }
+}
+
+impl DevelopDoc {
+    fn apply_upright_outcome(
+        &mut self,
+        outcome: AutoOutcome<upright::UprightSolution>,
+        width: u32,
+        height: u32,
+    ) -> AutoApplied {
+        match outcome {
+            AutoOutcome::Confident(sol) => {
+                let params = coat::UprightParams::from_solution(&sol, width, height);
+                let crop: CropParams = self.stage_params(CROP);
+                if crop.upright == Some(params) {
+                    return AutoApplied::Unchanged;
+                }
+                self.set_upright(Some(params));
+                AutoApplied::Applied
+            }
+            AutoOutcome::LowConfidence(_, reason) => AutoApplied::Skipped {
+                reason,
+                low_confidence: true,
+            },
+            AutoOutcome::NoResult(reason) => AutoApplied::Skipped {
+                reason,
+                low_confidence: false,
+            },
+        }
     }
 }
 
@@ -2211,6 +2359,123 @@ mod tests {
         for i in 0..3 {
             assert!((c[i] - f[i]).abs() < 1e-2, "{c:?} vs {f:?}");
         }
+    }
+
+    /// Two verticals converging toward the top, as a keystoned building's edges do.
+    fn converging_guides(w: f64, h: f64) -> Vec<Guide> {
+        use nicti_tapetum::upright::{GuideKind, Segment};
+        vec![
+            Guide {
+                kind: GuideKind::Vertical,
+                segment: Segment {
+                    a: (0.2 * w, 0.9 * h),
+                    b: (0.32 * w, 0.1 * h),
+                },
+            },
+            Guide {
+                kind: GuideKind::Vertical,
+                segment: Segment {
+                    a: (0.8 * w, 0.9 * h),
+                    b: (0.68 * w, 0.1 * h),
+                },
+            },
+        ]
+    }
+
+    /// #427: guided Upright writes a correction into the crop entry, a repeat is `Unchanged`, and
+    /// Off clears it back to a document with no upright.
+    #[test]
+    fn guided_upright_writes_the_crop_and_off_clears_it() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let (w, h) = view.doc.source_extent();
+        view.doc.upright_guides = converging_guides(f64::from(w), f64::from(h));
+        let DevelopView { doc, engine } = &mut view;
+        assert_eq!(
+            engine.apply_guided_upright(doc, UprightMode::Vertical),
+            AutoApplied::Applied
+        );
+        let crop: CropParams = doc.stage_params(CROP);
+        let up = crop.upright.expect("upright written");
+        assert!(up.pitch_degrees.abs() > 1.0, "{up:?}");
+        assert_eq!(up.yaw_degrees, 0.0);
+        assert_eq!(
+            engine.apply_guided_upright(doc, UprightMode::Vertical),
+            AutoApplied::Unchanged
+        );
+        doc.set_upright(None);
+        assert_eq!(doc.stage_params::<CropParams>(CROP).upright, None);
+    }
+
+    /// #427: auto Upright on a featureless frame writes nothing and says why.
+    #[test]
+    fn auto_upright_on_a_featureless_frame_is_skipped() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut flat = synthetic_linear_frame();
+        flat.pixels.fill(2000);
+        view.load_real_frame(
+            Arc::new(flat),
+            blake3::hash(b"flat-upright"),
+            EditDocument::default(),
+        );
+        let DevelopView { doc, engine } = &mut view;
+        assert_eq!(
+            engine.apply_auto_upright(doc, UprightMode::Auto),
+            AutoApplied::Skipped {
+                reason: AutoReason::NoFeatures,
+                low_confidence: false,
+            }
+        );
+        assert!(!doc.document().stages.contains_key(CROP));
+    }
+
+    /// #427: the rendered image really changes with Upright, the heal/mask whole-frame view drops
+    /// it (source coordinates), and the Crop tool's whole-frame view keeps it.
+    #[test]
+    fn upright_changes_the_render_and_the_uncropped_views_split_on_the_flag() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let (w, h) = view.doc.source_extent();
+        let params = coat::UprightParams {
+            roll_degrees: 0.0,
+            pitch_degrees: 12.0,
+            yaw_degrees: 0.0,
+            focal_diag: 0.7,
+        };
+        let read = |view: &mut DevelopView| {
+            let tex = view.render();
+            nicti_tapetum::frame::read_frame(&gpu, &tex)
+        };
+        let plain = read(&mut view);
+        view.doc.set_upright(Some(params));
+        let corrected = read(&mut view);
+        assert_ne!(plain, corrected, "upright must change the pixels");
+
+        view.doc.uncropped_preview = true;
+        view.doc.uncropped_keeps_upright = false;
+        let heal_view = read(&mut view);
+        assert_eq!(heal_view, plain, "heal/mask view must stay uncorrected");
+        view.doc.uncropped_keeps_upright = true;
+        let crop_tool_view = read(&mut view);
+        assert_eq!(crop_tool_view, corrected, "crop tool view keeps upright");
+
+        // The eyedropper maps through the same homography the kernel samples with.
+        view.doc.uncropped_preview = false;
+        let got = view.doc.display_to_source_norm([0.9, 0.2]);
+        let (dw, dh) = view.doc.display_extent();
+        let (ax, ay) = (0.9 * dw, 0.2 * dh);
+        let (ex, ey) = params
+            .homography(w, h)
+            .apply((f64::from(ax), f64::from(ay)))
+            .expect("in front of the camera");
+        assert!((got[0] - ex as f32 / w).abs() < 1e-4 && (got[1] - ey as f32 / h).abs() < 1e-4);
     }
 
     /// #272: `display_to_source_norm` is the inverse of what the crop kernel samples.

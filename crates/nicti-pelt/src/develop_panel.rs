@@ -65,6 +65,7 @@ const HINT_LIFETIME: Duration = Duration::from_secs(3);
 enum AutoOp {
     Tone,
     Straighten,
+    Upright,
 }
 
 /// The non-modal feedback for automatic develop operations (ADR-0101): a transient hint under the
@@ -102,6 +103,15 @@ fn hint_text(op: AutoOp, result: AutoApplied) -> Option<&'static str> {
         ) => Some("Uncertain angle, not applied"),
         (AutoOp::Straighten, AutoApplied::Skipped { .. }) => Some("No straight lines found"),
         (AutoOp::Straighten, AutoApplied::Unchanged) => Some("Already level"),
+        (
+            AutoOp::Upright,
+            AutoApplied::Skipped {
+                low_confidence: true,
+                ..
+            },
+        ) => Some("Uncertain perspective, not applied"),
+        (AutoOp::Upright, AutoApplied::Skipped { .. }) => Some("Not enough straight lines found"),
+        (AutoOp::Upright, AutoApplied::Unchanged) => Some("Already corrected"),
         (AutoOp::Tone, AutoApplied::Skipped { .. }) => Some("Auto could not analyse this photo"),
         (AutoOp::Tone, AutoApplied::Unchanged) => Some("Already at Auto settings"),
     }
@@ -498,6 +508,9 @@ pub fn show(
         if ui.button("Reset crop").clicked() {
             develop.reset_stage(CROP);
         }
+
+        ui.separator();
+        show_upright(ui, develop, &mut gpu, auto_hint, heal);
     });
 
     fur::section(ui, "detail", "Detail", false, |ui| {
@@ -709,6 +722,10 @@ pub fn handle_viewport_gesture(
     develop: &mut DevelopDoc,
 ) {
     let source = develop.source_extent();
+    if develop.upright_guide_mode {
+        handle_guide_gesture(ui, response, rect, develop, source);
+        return;
+    }
     let crop: CropParams = develop.stage_params(CROP);
     let crop_rect = crop.effective_rect(source);
     let center = crop_rect.center_absolute();
@@ -899,6 +916,71 @@ fn corner_hit(
     })
 }
 
+/// A guide shorter than this many source pixels is treated as an accidental click.
+const MIN_GUIDE_LENGTH_PX: f32 = 24.0;
+/// Upright takes at most this many guides; a fifth replaces the oldest.
+const MAX_GUIDES: usize = 4;
+
+/// Guided Upright (#427): each drag adds a guide, classified vertical or horizontal by which axis
+/// dominates the drag. The canvas shows the uncorrected frame, so guides are in source pixels.
+fn handle_guide_gesture(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    rect: egui::Rect,
+    develop: &mut DevelopDoc,
+    source: (f32, f32),
+) {
+    use nicti_tapetum::upright::{Guide, GuideKind, Segment};
+    let start_id = egui::Id::unique("nicti_pelt::develop_panel::guide_start");
+    if response.drag_started() {
+        if let Some(p) = response.interact_pointer_pos() {
+            ui.data_mut(|d| d.insert_temp(start_id, p));
+        }
+    }
+    let start: Option<egui::Pos2> = ui.data(|d| d.get_temp(start_id));
+    let painter = ui.painter_at(rect);
+    if response.dragged() {
+        if let (Some(a), Some(b)) = (start, response.interact_pointer_pos()) {
+            painter.line_segment([a, b], egui::Stroke::new(2.0, egui::Color32::WHITE));
+        }
+    }
+    if response.drag_stopped() {
+        if let (Some(a), Some(b)) = (start, response.interact_pointer_pos()) {
+            let a_img = screen_to_image(rect, source, a);
+            let b_img = screen_to_image(rect, source, b);
+            let (dx, dy) = (b_img.0 - a_img.0, b_img.1 - a_img.1);
+            if dx.hypot(dy) >= MIN_GUIDE_LENGTH_PX {
+                if develop.upright_guides.len() >= MAX_GUIDES {
+                    develop.upright_guides.remove(0);
+                }
+                develop.upright_guides.push(Guide {
+                    kind: if dy.abs() > dx.abs() {
+                        GuideKind::Vertical
+                    } else {
+                        GuideKind::Horizontal
+                    },
+                    segment: Segment {
+                        a: (f64::from(a_img.0), f64::from(a_img.1)),
+                        b: (f64::from(b_img.0), f64::from(b_img.1)),
+                    },
+                });
+            }
+        }
+        ui.data_mut(|d| d.remove::<egui::Pos2>(start_id));
+    }
+    for g in &develop.upright_guides {
+        let color = match g.kind {
+            GuideKind::Vertical => egui::Color32::from_rgb(0, 200, 255),
+            GuideKind::Horizontal => egui::Color32::from_rgb(255, 160, 0),
+        };
+        let p = |q: (f64, f64)| image_to_screen(rect, source, (q.0 as f32, q.1 as f32));
+        painter.line_segment(
+            [p(g.segment.a), p(g.segment.b)],
+            egui::Stroke::new(2.0, color),
+        );
+    }
+}
+
 /// Draws the crop rect outline (rotated per `crop.rotation_degrees`), its 4 corner handles, and
 /// the rotate handle above its top edge.
 fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), crop: &CropParams) {
@@ -953,6 +1035,69 @@ fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), cr
         HANDLE_RADIUS_PX,
         egui::Color32::from_rgb(0, 200, 255),
     );
+}
+
+/// Upright (#427): perspective correction. Auto/Level/Vertical/Full detect lines on the photo;
+/// with "Guided" on (and the Crop tool active) the same buttons solve from the guides the user
+/// drew instead. Off removes the correction.
+fn show_upright(
+    ui: &mut egui::Ui,
+    develop: &mut DevelopDoc,
+    gpu: &mut Option<(&mut DevelopEngine, &FrameTexture)>,
+    auto_hint: &mut AutoHintUi,
+    heal: &HealUi,
+) {
+    use nicti_tapetum::upright::UprightMode;
+    ui.label("Upright (perspective)");
+    let guided = develop.upright_guide_mode && !develop.upright_guides.is_empty();
+    ui.horizontal_wrapped(|ui| {
+        for (label, mode) in [
+            ("Auto", UprightMode::Auto),
+            ("Level", UprightMode::Level),
+            ("Vertical", UprightMode::Vertical),
+            ("Full", UprightMode::Full),
+        ] {
+            let button = ui.add_enabled(gpu.is_some() || guided, egui::Button::new(label));
+            if !button.clicked() {
+                continue;
+            }
+            let result = if guided {
+                match gpu.as_mut() {
+                    Some((engine, _)) => engine.apply_guided_upright(develop, mode),
+                    None => continue,
+                }
+            } else if let Some((engine, _)) = gpu.as_mut() {
+                engine.apply_auto_upright(develop, mode)
+            } else {
+                continue;
+            };
+            let tone_now = (develop.stage_params(EXPOSURE), develop.stage_params(TONE));
+            auto_hint.record(AutoOp::Upright, result, develop.frame_key(), tone_now);
+        }
+        let has_upright = develop.stage_params::<CropParams>(CROP).upright.is_some();
+        if ui
+            .add_enabled(has_upright, egui::Button::new("Off"))
+            .clicked()
+        {
+            develop.set_upright(None);
+        }
+    });
+    auto_hint.show_hint(ui, AutoOp::Upright, develop.frame_key());
+    ui.checkbox(
+        &mut develop.upright_guide_mode,
+        "Guided: drag along up to 4 lines that should be vertical or horizontal",
+    );
+    if develop.upright_guide_mode {
+        if !heal.crop_active() {
+            ui.weak("Select the Crop tool (R) to draw guides.");
+        }
+        ui.horizontal(|ui| {
+            ui.weak(format!("{}/4 guides", develop.upright_guides.len()));
+            if ui.button("Clear guides").clicked() {
+                develop.upright_guides.clear();
+            }
+        });
+    }
 }
 
 fn show_histogram(ui: &mut egui::Ui, gpu: Option<(&DevelopEngine, &FrameTexture)>) {
