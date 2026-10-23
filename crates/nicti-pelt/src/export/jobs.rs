@@ -1278,6 +1278,7 @@ mod tests {
                     width: 40.0,
                     height: 24.0,
                     rotation_degrees: 0.0,
+                    upright: None,
                 })
                 .unwrap(),
             },

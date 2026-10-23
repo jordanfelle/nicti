@@ -28,6 +28,7 @@ pub mod slit;
 pub mod spine;
 pub mod stages;
 pub mod tile;
+pub mod upright;
 
 #[cfg(test)]
 pub(crate) mod test_util;

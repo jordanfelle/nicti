@@ -1855,6 +1855,7 @@ mod tests {
                 width: 0.5,
                 height: 0.5,
                 rotation_degrees: 3.0,
+                upright: None,
             },
         );
         // ...a local edit...
@@ -2153,6 +2154,7 @@ mod tests {
                 width: cw,
                 height: ch,
                 rotation_degrees: 0.0,
+                upright: None,
             },
         );
         let out = view.render();
@@ -2196,6 +2198,7 @@ mod tests {
                 width: w / 2.0,
                 height: h / 2.0,
                 rotation_degrees: 0.0,
+                upright: None,
             },
         );
         let cropped = nicti_tapetum::frame::read_frame(&gpu, &view.render());
@@ -2227,6 +2230,7 @@ mod tests {
                 width: w / 2.0,
                 height: h / 2.0,
                 rotation_degrees: 0.0,
+                upright: None,
             },
         );
         let o = doc.display_to_source_norm([0.0, 0.0]);
