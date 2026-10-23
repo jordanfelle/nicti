@@ -33,6 +33,8 @@ use crate::{Embed, EmbedSupport, ExportError, Exporter, ExporterRegistry, Output
 pub const JPEG_ID: &str = "nicti.exporter.jpeg";
 pub const PNG_ID: &str = "nicti.exporter.png";
 pub const TIFF_ID: &str = "nicti.exporter.tiff";
+pub const AVIF_ID: &str = "nicti.exporter.avif";
+pub const WEBP_ID: &str = "nicti.exporter.webp";
 
 /// The registry id of the built-in exporter for `format`.
 pub fn builtin_id(format: ExportFormat) -> &'static str {
@@ -40,10 +42,12 @@ pub fn builtin_id(format: ExportFormat) -> &'static str {
         ExportFormat::Jpeg => JPEG_ID,
         ExportFormat::Png => PNG_ID,
         ExportFormat::Tiff => TIFF_ID,
+        ExportFormat::Avif => AVIF_ID,
+        ExportFormat::Webp => WEBP_ID,
     }
 }
 
-/// A registry holding the three built-in exporters.
+/// A registry holding the built-in exporters (AVIF only when the `avif` feature is on).
 pub fn builtin_registry() -> ExporterRegistry {
     fn jpeg() -> Arc<dyn Exporter> {
         Arc::new(JpegExporter)
@@ -54,11 +58,21 @@ pub fn builtin_registry() -> ExporterRegistry {
     fn tiff() -> Arc<dyn Exporter> {
         Arc::new(TiffExporter)
     }
+    fn webp() -> Arc<dyn Exporter> {
+        Arc::new(WebpExporter)
+    }
+    #[cfg(feature = "avif")]
+    fn avif() -> Arc<dyn Exporter> {
+        Arc::new(AvifExporter)
+    }
     let mut registry: Registry<dyn Exporter> = Registry::new();
     for (id, factory) in [
         (JPEG_ID, jpeg as fn() -> Arc<dyn Exporter>),
         (PNG_ID, png),
         (TIFF_ID, tiff),
+        (WEBP_ID, webp),
+        #[cfg(feature = "avif")]
+        (AVIF_ID, avif),
     ] {
         registry
             .register(
@@ -264,6 +278,180 @@ impl Exporter for PngExporter {
         let out = png.encoder().bytes().to_vec();
         Ok(out)
     }
+}
+
+// --- WebP -------------------------------------------------------------------------------------
+
+pub struct WebpExporter;
+module_impl!(WebpExporter, WEBP_ID);
+
+impl Exporter for WebpExporter {
+    fn format(&self) -> ExportFormat {
+        ExportFormat::Webp
+    }
+
+    fn extension(&self) -> &'static str {
+        "webp"
+    }
+
+    fn supports_depth(&self, depth: BitDepth) -> bool {
+        depth == BitDepth::Eight
+    }
+
+    /// WebP has no density field.
+    fn embeds(&self) -> EmbedSupport {
+        EmbedSupport {
+            exif: true,
+            xmp: true,
+            icc: true,
+            dpi: false,
+        }
+    }
+
+    fn encode(
+        &self,
+        img: &OutputImage<'_>,
+        fmt: &FormatSpec,
+        embed: &Embed<'_>,
+    ) -> Result<Vec<u8>, ExportError> {
+        if !matches!(fmt, FormatSpec::Webp) {
+            return Err(wrong_format("WebpExporter", fmt));
+        }
+        let OutputPixels::Rgb8(px) = img.pixels else {
+            return Err(ExportError::Encode(
+                "lossless WebP is 8-bit only; got 16-bit pixels".into(),
+            ));
+        };
+        let mut buf = Vec::new();
+        let mut enc = image_webp::WebPEncoder::new(&mut buf);
+        if !embed.icc.is_empty() {
+            enc.set_icc_profile(embed.icc.to_vec());
+        }
+        if let Some(exif) = embed.exif {
+            enc.set_exif_metadata(exif_tiff_bytes(exif)?);
+        }
+        if let Some(xmp) = embed.xmp {
+            enc.set_xmp_metadata(xmp.as_bytes().to_vec());
+        }
+        enc.encode(px, img.width, img.height, image_webp::ColorType::Rgb8)
+            .map_err(|e| encode_err("WebP encode", e))?;
+        Ok(buf)
+    }
+}
+
+// --- AVIF -------------------------------------------------------------------------------------
+
+/// AV1 stills via `ravif`/rav1e (feature `avif`). Planes are BT.601 full-range 4:4:4 YCbCr (what
+/// ravif's own RGB path does, and what Safari assumes without a `colr` box). The payload is
+/// implied BT.709 primaries + sRGB transfer (ravif writes no `colr` box for that default). ravif
+/// can't embed ICC or XMP, so those are dropped ([`Exporter::embeds`]), which is why any
+/// non-sRGB output space is rejected in [`crate::spec::ExportSpec::validate`]; wide-gamut AVIF
+/// needs a hand-written `colr`/ICC box.
+#[cfg(feature = "avif")]
+pub struct AvifExporter;
+#[cfg(feature = "avif")]
+module_impl!(AvifExporter, AVIF_ID);
+
+/// Speed 6 of rav1e's 1..=10: the encode-time/size trade ravif recommends for stills.
+#[cfg(feature = "avif")]
+const AVIF_SPEED: u8 = 6;
+#[cfg(feature = "avif")]
+impl Exporter for AvifExporter {
+    fn format(&self) -> ExportFormat {
+        ExportFormat::Avif
+    }
+
+    fn extension(&self) -> &'static str {
+        "avif"
+    }
+
+    fn supports_depth(&self, _depth: BitDepth) -> bool {
+        true
+    }
+
+    fn embeds(&self) -> EmbedSupport {
+        EmbedSupport {
+            exif: true,
+            xmp: false,
+            icc: false,
+            dpi: false,
+        }
+    }
+
+    fn encode(
+        &self,
+        img: &OutputImage<'_>,
+        fmt: &FormatSpec,
+        embed: &Embed<'_>,
+    ) -> Result<Vec<u8>, ExportError> {
+        use ravif::{BitDepth as AvifDepth, Encoder, MatrixCoefficients, PixelRange};
+
+        let FormatSpec::Avif { quality, .. } = fmt else {
+            return Err(wrong_format("AvifExporter", fmt));
+        };
+        let (w, h) = (img.width as usize, img.height as usize);
+        let mut enc = Encoder::new()
+            .with_quality(f32::from(*quality))
+            .with_speed(AVIF_SPEED)
+            // Exports run one per Pounce CPU chunk; a rayon pool here would bypass its throttle.
+            .with_num_threads(Some(1));
+        let exif = embed.exif.map(exif_tiff_bytes).transpose()?;
+        if let Some(exif) = exif {
+            enc = enc.with_exif(exif);
+        }
+        let encoded = match img.pixels {
+            OutputPixels::Rgb8(px) => enc
+                .with_bit_depth(AvifDepth::Eight)
+                .encode_raw_planes_8_bit(
+                    w,
+                    h,
+                    px.as_chunks::<3>().0.iter().map(|p| {
+                        let (y, cb, cr) = bt601(
+                            f32::from(p[0]),
+                            f32::from(p[1]),
+                            f32::from(p[2]),
+                            128.0,
+                            255.0,
+                        );
+                        [y as u8, cb as u8, cr as u8]
+                    }),
+                    None::<[u8; 0]>,
+                    PixelRange::Full,
+                    MatrixCoefficients::BT601,
+                ),
+            // 16-bit samples are rescaled to AVIF's 10 bits.
+            OutputPixels::Rgb16(px) => enc.with_bit_depth(AvifDepth::Ten).encode_raw_planes_10_bit(
+                w,
+                h,
+                px.as_chunks::<3>().0.iter().map(|p| {
+                    let s = 1023.0 / 65535.0;
+                    let (y, cb, cr) = bt601(
+                        f32::from(p[0]) * s,
+                        f32::from(p[1]) * s,
+                        f32::from(p[2]) * s,
+                        512.0,
+                        1023.0,
+                    );
+                    [y as u16, cb as u16, cr as u16]
+                }),
+                None::<[u16; 0]>,
+                PixelRange::Full,
+                MatrixCoefficients::BT601,
+            ),
+        }
+        .map_err(|e| encode_err("AVIF encode", e))?;
+        Ok(encoded.avif_file)
+    }
+}
+
+/// Full-range BT.601 RGB -> YCbCr, rounded and clamped to `0..=max`; `mid` is the chroma centre.
+#[cfg(feature = "avif")]
+fn bt601(r: f32, g: f32, b: f32, mid: f32, max: f32) -> (f32, f32, f32) {
+    let y = 0.299 * r + 0.587 * g + 0.114 * b;
+    let cb = (b - y) / 1.772 + mid;
+    let cr = (r - y) / 1.402 + mid;
+    let q = |v: f32| v.round().clamp(0.0, max);
+    (q(y), q(cb), q(cr))
 }
 
 // --- TIFF -------------------------------------------------------------------------------------
@@ -481,6 +669,7 @@ mod tests {
             (ExportFormat::Jpeg, "jpg"),
             (ExportFormat::Png, "png"),
             (ExportFormat::Tiff, "tif"),
+            (ExportFormat::Webp, "webp"),
         ] {
             let e = reg.get(builtin_id(fmt)).expect("registered");
             assert_eq!(e.format(), fmt);
@@ -489,6 +678,88 @@ mod tests {
         assert!(!reg.get(JPEG_ID).unwrap().supports_depth(BitDepth::Sixteen));
         assert!(reg.get(PNG_ID).unwrap().supports_depth(BitDepth::Sixteen));
         assert!(!reg.get(TIFF_ID).unwrap().embeds().exif);
+        assert_eq!(reg.get(AVIF_ID).is_some(), cfg!(feature = "avif"));
+    }
+
+    #[test]
+    fn webp_is_lossless_and_carries_icc_exif_xmp() {
+        let f = fixture(OutputSpace::Srgb, 32, 24);
+        let px = gradient8(32, 24);
+        let img = OutputImage {
+            width: 32,
+            height: 24,
+            pixels: &px,
+        };
+        let out = WebpExporter
+            .encode(&img, &FormatSpec::Webp, &embed(&f, 300))
+            .unwrap();
+        let OutputPixels::Rgb8(want) = &px else {
+            unreachable!()
+        };
+        assert_eq!(
+            image::load_from_memory(&out).unwrap().to_rgb8().as_raw(),
+            want
+        );
+        for chunk in [&b"ICCP"[..], b"EXIF", b"XMP "] {
+            assert!(out.windows(4).any(|w| w == chunk), "{chunk:?}");
+        }
+        let mut dec = image_webp::WebPDecoder::new(Cursor::new(&out)).unwrap();
+        assert_eq!(dec.icc_profile().unwrap().unwrap(), f.icc);
+        assert!(dec.exif_metadata().unwrap().is_some());
+    }
+
+    #[test]
+    fn webp_refuses_16_bit() {
+        let px = gradient16(8, 8);
+        let img = OutputImage {
+            width: 8,
+            height: 8,
+            pixels: &px,
+        };
+        let bare = Embed {
+            icc: &[],
+            dpi: 72,
+            exif: None,
+            xmp: None,
+        };
+        assert!(WebpExporter.encode(&img, &FormatSpec::Webp, &bare).is_err());
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn avif_8_and_10_bit_encode_with_exif() {
+        let f = fixture(OutputSpace::Srgb, 32, 24);
+        for (px, depth, bits) in [
+            (gradient8(32, 24), BitDepth::Eight, 8u8),
+            (gradient16(32, 24), BitDepth::Sixteen, 10),
+        ] {
+            let img = OutputImage {
+                width: 32,
+                height: 24,
+                pixels: &px,
+            };
+            let fmt = FormatSpec::Avif { quality: 60, depth };
+            let srgb = AvifExporter.encode(&img, &fmt, &embed(&f, 300)).unwrap();
+            assert_eq!(&srgb[4..12], b"ftypavif");
+            // av1C's byte 2 carries high_bitdepth (bit 6).
+            let av1c = srgb.windows(4).position(|w| w == b"av1C").unwrap();
+            assert_eq!(srgb[av1c + 6] >> 6 & 1, u8::from(bits == 10), "{bits}-bit");
+            assert!(srgb.windows(4).any(|w| w == b"Exif"));
+            // Implied BT.709/sRGB: no explicit nclx box.
+            assert!(!srgb.windows(4).any(|w| w == b"colr"));
+        }
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn avif_ycbcr_matches_known_colours() {
+        assert_eq!(
+            bt601(255.0, 255.0, 255.0, 128.0, 255.0),
+            (255.0, 128.0, 128.0)
+        );
+        assert_eq!(bt601(0.0, 0.0, 0.0, 128.0, 255.0), (0.0, 128.0, 128.0));
+        let (y, cb, cr) = bt601(255.0, 0.0, 0.0, 128.0, 255.0);
+        assert_eq!((y, cb, cr), (76.0, 85.0, 255.0));
     }
 
     #[test]

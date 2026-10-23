@@ -23,6 +23,10 @@ pub const MAX_DIMENSION_PX: u32 = 60_000;
 pub enum SpecError {
     #[error("JPEG quality must be 1..=100, got {0}")]
     JpegQuality(u8),
+    #[error("AVIF quality must be 1..=100, got {0}")]
+    AvifQuality(u8),
+    #[error("AVIF export supports the sRGB color space only")]
+    AvifColorSpace,
     #[error("DPI must be 1..=10000, got {0}")]
     Dpi(u32),
     #[error("resize dimension must be 1..={MAX_DIMENSION_PX} px, got {0}")]
@@ -105,6 +109,15 @@ impl ExportSpec {
                 return Err(SpecError::JpegQuality(quality));
             }
         }
+        if let FormatSpec::Avif { quality, .. } = self.format {
+            if !(1..=100).contains(&quality) {
+                return Err(SpecError::AvifQuality(quality));
+            }
+            // ravif can't embed ICC and only writes the implied BT.709/sRGB colour label.
+            if self.color_space != ExportSpace::Srgb {
+                return Err(SpecError::AvifColorSpace);
+            }
+        }
         if !(1..=10_000).contains(&self.dpi) {
             return Err(SpecError::Dpi(self.dpi));
         }
@@ -158,6 +171,8 @@ pub enum ExportFormat {
     Jpeg,
     Png,
     Tiff,
+    Avif,
+    Webp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,10 +220,23 @@ pub enum FormatSpec {
         #[serde(default)]
         compression: TiffCompression,
     },
+    /// AV1 still. `Sixteen` is encoded as 10-bit (AVIF's practical ceiling).
+    Avif {
+        #[serde(default = "default_avif_quality")]
+        quality: u8,
+        #[serde(default = "default_depth")]
+        depth: BitDepth,
+    },
+    /// Lossless WebP (8-bit); no quality knob until a lossy encoder exists (#361).
+    Webp,
 }
 
 fn default_quality() -> u8 {
     90
+}
+
+fn default_avif_quality() -> u8 {
+    80
 }
 
 fn default_depth() -> BitDepth {
@@ -230,13 +258,17 @@ impl FormatSpec {
             FormatSpec::Jpeg { .. } => ExportFormat::Jpeg,
             FormatSpec::Png { .. } => ExportFormat::Png,
             FormatSpec::Tiff { .. } => ExportFormat::Tiff,
+            FormatSpec::Avif { .. } => ExportFormat::Avif,
+            FormatSpec::Webp => ExportFormat::Webp,
         }
     }
 
     pub fn depth(&self) -> BitDepth {
         match self {
-            FormatSpec::Jpeg { .. } => BitDepth::Eight,
-            FormatSpec::Png { depth } | FormatSpec::Tiff { depth, .. } => *depth,
+            FormatSpec::Jpeg { .. } | FormatSpec::Webp => BitDepth::Eight,
+            FormatSpec::Png { depth }
+            | FormatSpec::Tiff { depth, .. }
+            | FormatSpec::Avif { depth, .. } => *depth,
         }
     }
 }
@@ -481,6 +513,19 @@ mod tests {
             subsampling: Subsampling::S420,
         };
         assert_eq!(s.validate(), Err(SpecError::JpegQuality(0)));
+        let mut s = good.clone();
+        s.format = FormatSpec::Avif {
+            quality: 101,
+            depth: BitDepth::Eight,
+        };
+        assert_eq!(s.validate(), Err(SpecError::AvifQuality(101)));
+        s.format = FormatSpec::Avif {
+            quality: 80,
+            depth: BitDepth::Eight,
+        };
+        assert_eq!(s.validate(), Ok(()));
+        s.color_space = ExportSpace::DisplayP3;
+        assert_eq!(s.validate(), Err(SpecError::AvifColorSpace));
         let mut s = good.clone();
         s.dpi = 0;
         assert_eq!(s.validate(), Err(SpecError::Dpi(0)));
