@@ -3105,6 +3105,8 @@ impl PeltApp {
     /// prefetches renders for the loupe's neighbours (never evicting the current photo's).
     fn queue_due_renders(&mut self, ctx: &egui::Context) {
         let CatalogOpenState::Open(store) = &self.catalog else {
+            // Pending ids belong to the catalog that was open when they were saved.
+            self.render_due.clear();
             return;
         };
         let store = store.clone();
@@ -3121,20 +3123,31 @@ impl PeltApp {
         if let Some(wait) = self.render_due.next_wait(now) {
             ctx.request_repaint_after(wait);
         }
-        if !matches!(self.view, View::Loupe | View::Develop) {
-            return;
-        }
-        let Some(loupe) = self.loupe.as_ref() else {
+        let loupe = self
+            .loupe
+            .as_ref()
+            .filter(|_| matches!(self.view, View::Loupe | View::Develop));
+        let Some(loupe) = loupe else {
+            // Left the loupe: nothing is a neighbour any more.
+            self.eyeshine.retain_prefetch(&self.pounce, &[]);
             return;
         };
         let neighbours = loupe.neighbours();
-        let keep: Vec<i64> = neighbours.iter().map(|(_, id)| *id).collect();
+        // The photo being looked at stays: a prefetch that became current is its real render.
+        let keep: Vec<i64> = neighbours
+            .iter()
+            .map(|(_, id)| *id)
+            .chain(loupe.current_asset_id())
+            .collect();
         // Cheap and always run: a stale prefetch must not hold the GPU claim.
         self.eyeshine.retain_prefetch(&self.pounce, &keep);
-        if self
+        if let Some(wait) = self
             .prefetch_at
-            .is_some_and(|at| now.duration_since(at) < PREFETCH_EVERY)
+            .map(|at| PREFETCH_EVERY.saturating_sub(now.duration_since(at)))
+            .filter(|w| !w.is_zero())
         {
+            // An idle window runs no frames: ask to be woken for the throttled pass.
+            ctx.request_repaint_after(wait);
             return;
         }
         self.prefetch_at = Some(now);
