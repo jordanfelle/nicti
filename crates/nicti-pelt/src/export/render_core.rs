@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::LinearFrame;
@@ -26,6 +27,9 @@ use nicti_tapetum::stages::{
     DENOISE, HEAL, LENS, MASKS, NEUTRAL,
 };
 use nicti_tapetum::StageRegistry;
+
+use crate::stash::fetch_alpha;
+use crate::t2::SharedLarder;
 
 /// The kernels/graph/renderer one batch reuses across photos. Built once, on the GPU lane.
 pub(crate) struct ExportRenderer {
@@ -265,6 +269,49 @@ pub(crate) fn render_live_frame(
     }
     let live = live.map_err(|e| format!("render failed: {e:?}"))?;
     Ok(LiveRender { live, inputs })
+}
+
+/// How long a render waits for the Larder in total, per photo, across all its alphas. Off the UI
+/// thread, and a miss would drop a mask from the file, so this waits longer than an interactive
+/// fetch does; a shared budget (not one per alpha) bounds a photo with many AI corrections when the
+/// Larder is held by something long like a compaction.
+const ALPHA_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// The baked AI-mask alphas stored for `edit` (#354), plus how many were missing. Neither export
+/// nor the rendered preview bakes: an alpha that isn't stored is left out (the engine skips that
+/// component, as Develop does while a bake is pending). `cancelled` stops the loop early.
+pub(crate) fn load_stored_alphas(
+    larder: Option<&SharedLarder>,
+    asset_id: i64,
+    edit: &EditDocument,
+    identity: blake3::Hash,
+    cancelled: impl Fn() -> bool,
+) -> (HashMap<blake3::Hash, Arc<AiAlpha>>, usize) {
+    let params: MaskParams = spine::resolve(edit, MASKS);
+    // Only corrections that change pixels: `bake_requests` also covers enabled-but-inert ones (a
+    // fresh Select Subject with no slider moved), which a render neither needs nor should wait on.
+    let active = MaskParams {
+        corrections: params.active().cloned().collect(),
+    };
+    let neutral_key = spine::neutral_key(edit, identity);
+    let wanted = mask_compose::bake_requests(&active, neutral_key);
+    let mut found = HashMap::new();
+    let mut missing = 0usize;
+    let deadline = Instant::now() + ALPHA_LOCK_WAIT;
+    for request in &wanted {
+        if cancelled() {
+            break;
+        }
+        // What is left of the photo's budget (zero still makes one non-waiting attempt).
+        let left = deadline.saturating_duration_since(Instant::now());
+        match larder.and_then(|l| fetch_alpha(l, asset_id, &request.key, left)) {
+            Some(a) => {
+                found.insert(request.key, a);
+            }
+            None => missing += 1,
+        }
+    }
+    (found, missing)
 }
 
 #[cfg(test)]

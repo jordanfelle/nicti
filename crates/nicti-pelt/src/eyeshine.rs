@@ -36,13 +36,16 @@ use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
 use crate::camera_profiles;
 use crate::export::render_core::{
-    declared_render_vram, render_live_frame, ExportRenderer, LiveRender, LiveSource,
+    declared_render_vram, load_stored_alphas, render_live_frame, ExportRenderer, LiveRender,
+    LiveSource,
 };
 use crate::export::sink::AccumSink;
 use crate::loupe::asset_cache_key;
 use crate::t2::{lock_larder_within, try_lock_larder, SharedLarder, T2Outcome};
 use nicti_pawprint::EditDocument;
 use nicti_tapetum::coat::{HealParams, SpotKind};
+use nicti_tapetum::mask::compose as mask_compose;
+use nicti_tapetum::mask::engine::AiAlpha;
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::spine;
 use nicti_tapetum::stages::{HEAL, MASKS};
@@ -50,10 +53,12 @@ use nicti_tapetum::stages::{HEAL, MASKS};
 /// Bump whenever the render pipeline's output changes for the same document, so every cached
 /// rendered preview reads as stale and is regenerated.
 /// v2 (#321): a selected DCP now applies its tone curve (or the ACR default).
-pub const EYESHINE_VERSION: u32 = 2;
+/// v3 (#399): local adjustments (masks) are rendered.
+pub const EYESHINE_VERSION: u32 = 3;
 
-/// Suffix on a render hash when the document holds adjustments the preview render cannot show yet:
-/// local masks (#354) and AI removal patches (#324).
+/// Suffix on a render hash when the document holds adjustments the preview render cannot be sure
+/// to show: AI removal patches (not persisted, #324) and AI-mask alphas (rendered only if already
+/// baked, which the hash can't know).
 pub const PARTIAL_SUFFIX: &str = ":partial";
 
 /// True when the document has any stage entry at all -- the same test as `DevelopView::has_edits`.
@@ -61,19 +66,22 @@ pub fn has_edits(doc: &EditDocument) -> bool {
     !doc.stages.is_empty()
 }
 
-/// True when the preview render would silently lack something the Develop view shows: active
-/// local adjustments (the export/preview path never builds a mask atlas, #354) or AI removal
-/// spots (their patches aren't persisted, #324).
+/// True when the preview render may silently lack something the Develop view shows: AI removal
+/// spots (their patches aren't persisted, #324) or an active AI-mask component (the preview renders
+/// the alphas Develop already baked and stored, but the hash can't tell whether they are there).
+/// Brush / gradient / range masks render fully (#399).
 pub fn is_partial(doc: &EditDocument) -> bool {
-    let masks = spine::resolve::<MaskParams>(doc, MASKS)
-        .active()
-        .next()
-        .is_some();
+    let params = spine::resolve::<MaskParams>(doc, MASKS);
+    let active = MaskParams {
+        corrections: params.active().cloned().collect(),
+    };
+    let ai_mask =
+        !mask_compose::bake_requests(&active, blake3::Hash::from_bytes([0; 32])).is_empty();
     let ai_removal = spine::resolve::<HealParams>(doc, HEAL)
         .spots
         .iter()
         .any(|s| s.kind == SpotKind::Remove);
-    masks || ai_removal
+    ai_mask || ai_removal
 }
 
 /// The Larder `render_hash` for the rendered tier: pipeline version + the photo's identity + the
@@ -157,7 +165,7 @@ pub enum Badge {
     Stale,
     /// Showing an older render while a newer one is made.
     Updating,
-    /// The render lacks local adjustments / AI removals (see [`is_partial`]).
+    /// The render may lack AI masks / AI removals (see [`is_partial`]).
     Partial,
     /// An unedited photo still showing the camera's own rendering (policy `All`, render pending).
     CameraRendering,
@@ -172,9 +180,7 @@ impl Badge {
                 Some("Edited: this preview is the camera's version until the render finishes")
             }
             Badge::Updating => Some("Updating preview with your latest edits..."),
-            Badge::Partial => {
-                Some("Preview omits local adjustments / AI removals (shown once decoded)")
-            }
+            Badge::Partial => Some("Preview may omit AI masks / AI removals (shown once decoded)"),
             Badge::CameraRendering => Some("Camera rendering shown while Nicti's render is made"),
         }
     }
@@ -492,6 +498,8 @@ struct Decoded {
     exif: SourceExif,
     profile: Option<Arc<DcpProfile>>,
     look: Option<Arc<nicti_calico::xmp_profile::LookProfile>>,
+    /// Baked AI-mask alphas already stored for this edit (#399); never baked here.
+    ai_alphas: HashMap<blake3::Hash, Arc<AiAlpha>>,
 }
 
 /// `Err` is a *final* outcome (nothing further to run); `Ok` is the decoded photo.
@@ -537,11 +545,19 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
         .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
     let look = camera_profiles::load_look_for_document(&task.req.edit)
         .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
+    let (ai_alphas, _missing) = load_stored_alphas(
+        Some(&task.env.larder),
+        task.req.asset_id,
+        &task.req.edit,
+        task.req.identity,
+        || task.is_cancelled(),
+    );
     Ok(Decoded {
         frame,
         exif,
         profile,
         look,
+        ai_alphas,
     })
 }
 
@@ -587,6 +603,7 @@ impl RenderJob {
             exif,
             profile,
             look,
+            ai_alphas,
         } = decoded;
         let mut ctx = task
             .env
@@ -604,8 +621,8 @@ impl RenderJob {
                 frame: &frame,
                 profile: profile.as_deref(),
                 look: look.as_deref(),
-                // Previews leave local adjustments out and are marked partial (`is_partial`).
-                masks: None,
+                // AI removals are left out and marked partial (`is_partial`).
+                masks: Some(&ai_alphas),
             },
         ) {
             Ok(r) => r,
@@ -1421,6 +1438,45 @@ mod tests {
     }
 
     #[test]
+    fn geometric_masks_render_fully_but_ai_masks_stay_partial() {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::params::{
+            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+        };
+        let masks = |source: MaskSource| {
+            let params = MaskParams {
+                corrections: vec![LocalCorrection {
+                    id: "a".into(),
+                    mask: MaskGroup {
+                        components: vec![MaskComponent {
+                            source,
+                            ..MaskComponent::default()
+                        }],
+                    },
+                    adjust: LocalAdjust {
+                        exposure: 1.0,
+                        ..LocalAdjust::default()
+                    },
+                    ..LocalCorrection::default()
+                }],
+            };
+            doc_with(MASKS, serde_json::to_value(&params).unwrap())
+        };
+        let linear = masks(MaskSource::LinearGradient {
+            p0: [0.0, 0.0],
+            p1: [0.0, 1.0],
+        });
+        assert!(!is_partial(&linear), "a gradient mask is rendered");
+        let ai = masks(MaskSource::Ai(MaskRecipe {
+            model_id: "nicti.mask.birefnet".into(),
+            model_version: "1".into(),
+            params: json!({"target": "subject"}),
+            seed: None,
+        }));
+        assert!(is_partial(&ai), "an AI mask depends on a stored bake");
+    }
+
+    #[test]
     fn the_policy_decides_which_photos_are_rendered() {
         assert!(!RenderPolicy::Off.wants_render(true));
         assert!(RenderPolicy::EditedOnly.wants_render(true));
@@ -1758,6 +1814,55 @@ mod tests {
         assert!(
             sum(&bright) > sum(&base),
             "+1.5 EV must brighten the preview"
+        );
+    }
+
+    #[test]
+    fn a_gradient_mask_changes_the_preview_unevenly_and_is_not_flagged_partial() {
+        use nicti_tapetum::mask::params::{
+            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+        };
+        let Some(fx) = fx() else { return };
+        let params = MaskParams {
+            corrections: vec![LocalCorrection {
+                id: "g".into(),
+                mask: MaskGroup {
+                    components: vec![MaskComponent {
+                        source: MaskSource::LinearGradient {
+                            p0: [0.0, 0.5],
+                            p1: [1.0, 0.5],
+                        },
+                        ..MaskComponent::default()
+                    }],
+                },
+                adjust: LocalAdjust {
+                    exposure: 2.0,
+                    ..LocalAdjust::default()
+                },
+                ..LocalCorrection::default()
+            }],
+        };
+        let doc = doc_with(MASKS, serde_json::to_value(&params).unwrap());
+        assert!(!is_partial(&doc));
+        let (_, h0) = fx.run("a.NEF", EditDocument::default());
+        let base = fx.stored(&h0).unwrap();
+        let (_, h1) = fx.run("a.NEF", doc);
+        assert!(!hash_is_partial(&h1));
+        let masked = fx.stored(&h1).unwrap();
+        let half = |i: &image::RgbImage, right: bool| {
+            let w = i.width();
+            i.enumerate_pixels()
+                .filter(|(x, _, _)| (*x >= w / 2) == right)
+                .map(|(_, _, p)| u64::from(p[0]))
+                .sum::<u64>()
+        };
+        let (dl, dr) = (
+            half(&masked, false).abs_diff(half(&base, false)),
+            half(&masked, true).abs_diff(half(&base, true)),
+        );
+        assert!(
+            dl.max(dr) > 0 && dl != dr,
+            "the gradient must change the two halves unequally: left {dl}, right {dr}"
         );
     }
 

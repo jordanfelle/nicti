@@ -28,7 +28,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use nicti_calico::dcp::DcpProfile;
 use nicti_cornea::{LinearFrame, RawDecoder};
@@ -49,20 +48,16 @@ use nicti_preen::{export_frame, ExportContext, ExporterRegistry, WorkingFrame};
 use nicti_tapetum::frame::{Extent, FrameTexture};
 use nicti_tapetum::geometry::Affine2D;
 use nicti_tapetum::gpu::GpuContext;
-use nicti_tapetum::mask::compose as mask_compose;
 use nicti_tapetum::mask::engine::AiAlpha;
-use nicti_tapetum::mask::params::MaskParams;
-use nicti_tapetum::spine;
-use nicti_tapetum::stages::MASKS;
 use nicti_tapetum::tile::{Rect, Tile, TileBudget, TilePlanner, TiledRender};
 
 use super::render_core::{
-    declared_render_vram, render_live_frame, ExportRenderer, LiveRender, LiveSource,
+    declared_render_vram, load_stored_alphas, render_live_frame, ExportRenderer, LiveRender,
+    LiveSource,
 };
 use super::sink::AccumSink;
 use crate::camera_profiles;
 use crate::loupe::asset_cache_key;
-use crate::stash::fetch_alpha;
 use crate::t2::SharedLarder;
 
 /// Decoded (or decoding) photos allowed ahead of the renderer.
@@ -688,44 +683,17 @@ fn decode_one(
     Ok((Arc::new(frame), exif, profile, look, ai_alphas))
 }
 
-/// How long export waits for the Larder in total, per photo, across all its alphas. Off the UI
-/// thread, and a miss would drop a mask from the file, so this waits longer than an interactive
-/// fetch does; a shared budget (not one per alpha) bounds a photo with many AI corrections when the
-/// Larder is held by something long like a compaction.
-const ALPHA_LOCK_WAIT: Duration = Duration::from_secs(30);
-
 /// The baked AI-mask alphas `item`'s edit uses, read from the Larder (#354). Export never bakes: an
-/// alpha that isn't stored is left out (the engine skips that component, as Develop does while a
-/// bake is pending) and the report says so, so the file is never silently missing a mask.
+/// alpha that isn't stored is left out and the report says so, so the file is never silently
+/// missing a mask.
 fn stored_ai_alphas(shared: &Shared, item: &Item) -> HashMap<blake3::Hash, Arc<AiAlpha>> {
-    let params: MaskParams = spine::resolve(&item.edit, MASKS);
-    // Only corrections that change pixels: `bake_requests` also covers enabled-but-inert ones (a
-    // fresh Select Subject with no slider moved), which export neither needs nor should wait on.
-    let active = MaskParams {
-        corrections: params.active().cloned().collect(),
-    };
-    let neutral_key = spine::neutral_key(&item.edit, item.identity);
-    let wanted = mask_compose::bake_requests(&active, neutral_key);
-    let mut found = HashMap::new();
-    let mut missing = 0usize;
-    let deadline = Instant::now() + ALPHA_LOCK_WAIT;
-    for request in &wanted {
-        if shared.is_cancelled() {
-            break;
-        }
-        // What is left of the photo's budget (zero still makes one non-waiting attempt).
-        let left = deadline.saturating_duration_since(Instant::now());
-        let alpha = shared
-            .larder
-            .as_ref()
-            .and_then(|l| fetch_alpha(l, item.asset_id, &request.key, left));
-        match alpha {
-            Some(a) => {
-                found.insert(request.key, a);
-            }
-            None => missing += 1,
-        }
-    }
+    let (found, missing) = load_stored_alphas(
+        shared.larder.as_ref(),
+        item.asset_id,
+        &item.edit,
+        item.identity,
+        || shared.is_cancelled(),
+    );
     if missing > 0 && !shared.is_cancelled() {
         shared.with_state(|st| {
             st.report.warnings.push(format!(
@@ -1103,7 +1071,9 @@ mod tests {
         ResizeMode, ResizeSpec, WatermarkSpec,
     };
     use nicti_tapetum::coat::{CameraProfileParams, CropParams};
-    use nicti_tapetum::stages::{CROP, WORKING_SPACE};
+    use nicti_tapetum::mask::params::MaskParams;
+    use nicti_tapetum::spine;
+    use nicti_tapetum::stages::{CROP, MASKS, WORKING_SPACE};
 
     /// Decodes every path to the synthetic 64x64 gradient, rolled by the file name so different
     /// photos have different pixels at the *same* size. A name containing "bad" fails to decode.
