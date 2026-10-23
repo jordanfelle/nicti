@@ -2369,14 +2369,14 @@ mod tests {
                 kind: GuideKind::Vertical,
                 segment: Segment {
                     a: (0.2 * w, 0.9 * h),
-                    b: (0.32 * w, 0.1 * h),
+                    b: (0.26 * w, 0.1 * h),
                 },
             },
             Guide {
                 kind: GuideKind::Vertical,
                 segment: Segment {
                     a: (0.8 * w, 0.9 * h),
-                    b: (0.68 * w, 0.1 * h),
+                    b: (0.74 * w, 0.1 * h),
                 },
             },
         ]

@@ -45,6 +45,9 @@ const MIN_INLIERS: usize = 3;
 const CONFIDENT_INLIER_FRACTION: f64 = 0.5;
 /// Horizontal VP must be this close (degrees) to orthogonal to the vertical VP.
 const ORTHOGONALITY_DEG: f64 = 10.0;
+/// A correction that needs more zoom than this (output window as a fraction of the source) would
+/// throw away most of the frame, or collapse it entirely, so it is refused.
+pub const MIN_ZOOM: f64 = 0.3;
 /// RANSAC hypotheses per group.
 const RANSAC_ITERATIONS: usize = 300;
 /// A correction needing more than this much of any rotation is refused as implausible.
@@ -621,7 +624,7 @@ fn yaw_for(h: Vec3) -> f64 {
 /// Builds the output -> input homography for the camera rotation `r` (old rays -> new rays) at
 /// focal length `focal` px, then zooms the output (about the center) just enough that no output
 /// pixel samples outside the source.
-fn homography_for_rotation(r: &Mat3, width: f64, height: f64, focal: f64) -> Homography {
+fn homography_for_rotation(r: &Mat3, width: f64, height: f64, focal: f64) -> Option<Homography> {
     let (cx, cy) = (width / 2.0, height / 2.0);
     // output (centered px) -> ray -> old ray (R^T) -> centered px.
     let rt = transpose(r);
@@ -662,12 +665,15 @@ fn homography_for_rotation(r: &Mat3, width: f64, height: f64, focal: f64) -> Hom
         }
         lo
     };
+    if s < MIN_ZOOM {
+        return None;
+    }
     let zoom = [
         [s, 0.0, cx * (1.0 - s)],
         [0.0, s, cy * (1.0 - s)],
         [0.0, 0.0, 1.0],
     ];
-    Homography(mat_mul(&base.0, &zoom))
+    Some(Homography(mat_mul(&base.0, &zoom)))
 }
 
 /// The output -> input homography for a stored correction (angles in degrees, as in
@@ -681,6 +687,30 @@ pub fn homography_for_angles(
     height: f64,
     focal_px: f64,
 ) -> Homography {
+    checked_homography(
+        roll_degrees,
+        pitch_degrees,
+        yaw_degrees,
+        width,
+        height,
+        focal_px,
+    )
+    .unwrap_or(Homography::IDENTITY)
+}
+
+/// [`homography_for_angles`], or `None` when the correction would need more zoom than
+/// [`MIN_ZOOM`] allows (a stored value that cannot be rendered sensibly falls back to identity).
+fn checked_homography(
+    roll_degrees: f64,
+    pitch_degrees: f64,
+    yaw_degrees: f64,
+    width: f64,
+    height: f64,
+    focal_px: f64,
+) -> Option<Homography> {
+    if !(width > 0.0 && height > 0.0 && focal_px.is_finite() && focal_px > 0.0) {
+        return None;
+    }
     let r = mat_mul(
         &rot_y(yaw_degrees.to_radians()),
         &mat_mul(
@@ -705,14 +735,14 @@ fn solution(
         return None;
     }
     Some(UprightSolution {
-        homography: homography_for_angles(
+        homography: checked_homography(
             roll.to_degrees(),
             pitch.to_degrees(),
             yaw.to_degrees(),
             width,
             height,
             focal,
-        ),
+        )?,
         mode,
         focal_px: focal,
         roll_degrees: roll.to_degrees(),
@@ -729,13 +759,11 @@ fn angles_for(
 ) -> Option<(UprightMode, f64, f64, f64)> {
     let v_dir = v.map(|v| orient_vertical(v.dir));
     let h_dir = h.map(|h| orient_horizontal(h.dir));
-    // Roll from whichever family carries more weight; vertical wins ties (it's the tighter cue).
-    let roll_only = || match (v, h) {
-        (Some(v), Some(h)) if h.support * h.inliers as f64 > v.support * v.inliers as f64 => {
-            h_dir.map(roll_for_horizontal)
-        }
-        (Some(_), _) => v_dir.map(roll_for_vertical),
-        (None, Some(_)) => h_dir.map(roll_for_horizontal),
+    // Roll comes from the vertical VP whenever there is one. A horizontal VP's image direction
+    // mixes pitch and yaw into the apparent roll, so it is only used when it is all there is.
+    let roll_only = || match (v_dir, h_dir) {
+        (Some(vd), _) => Some(roll_for_vertical(vd)),
+        (None, Some(hd)) => Some(roll_for_horizontal(hd)),
         (None, None) => None,
     };
     let vertical_angles = || {
@@ -920,7 +948,7 @@ pub fn analyze_guides(
     }
     // A lone guide can only drive roll, whatever mode was asked for.
     let effective = match mode {
-        UprightMode::Vertical if v.as_ref().is_some_and(|v| v.inliers < 2) => UprightMode::Level,
+        UprightMode::Vertical if v.as_ref().is_none_or(|v| v.inliers < 2) => UprightMode::Level,
         UprightMode::Full
             if v.as_ref().is_none_or(|v| v.inliers < 2)
                 || hv.as_ref().is_none_or(|h| h.inliers < 2) =>
@@ -1307,5 +1335,61 @@ mod tests {
     fn identity_homography_round_trips() {
         assert_eq!(Homography::IDENTITY.apply((3.0, 4.0)), Some((3.0, 4.0)));
         assert!(Homography::IDENTITY.is_identity());
+    }
+
+    #[test]
+    fn an_extreme_keystone_is_refused_not_collapsed_to_a_flat_image() {
+        // 6000x4000 at the 28mm fallback (f ~ 4666 px) with a 25 degree pitch: the output centre
+        // would map outside the source, leaving no usable zoom.
+        let (w, h) = (6000u32, 4000u32);
+        let f = focal_px_from_35mm(FALLBACK_FOCAL_35MM, w, h).unwrap();
+        let scale = f / F;
+        let r = camera(25.0, 0.0, 0.0);
+        let segs: Vec<Segment> = facade_segments(&r)
+            .iter()
+            .map(|s| Segment {
+                a: (s.a.0 * scale, s.a.1 * scale),
+                b: (s.b.0 * scale, s.b.1 * scale),
+            })
+            .collect();
+        let out = analyze_segments(&segs, w, h, f, UprightMode::Vertical);
+        assert!(
+            matches!(out, AutoOutcome::NoResult(_)),
+            "an unusable zoom must not be applied: {out:?}"
+        );
+        // A hostile stored value degrades to the identity instead of a degenerate matrix.
+        let hom = homography_for_angles(40.0, 40.0, 40.0, 6000.0, 4000.0, 700.0);
+        assert!(hom.is_identity());
+    }
+
+    #[test]
+    fn level_roll_is_not_contaminated_by_horizontal_keystone() {
+        // Horizontals outweigh verticals (the old weight comparison picked them), keystoned in
+        // pitch and yaw but with zero roll: Level must still read roll off the verticals.
+        let all = facade_segments(&camera(12.0, 15.0, 0.0));
+        let mut segs: Vec<Segment> = all[..7].to_vec();
+        for _ in 0..4 {
+            segs.extend_from_slice(&all[7..]);
+        }
+        let (AutoOutcome::Confident(sol) | AutoOutcome::LowConfidence(sol, _)) =
+            analyze_segments(&segs, W, H, F, UprightMode::Level)
+        else {
+            panic!("expected a result");
+        };
+        assert!(sol.roll_degrees.abs() < 0.5, "roll = {}", sol.roll_degrees);
+    }
+
+    #[test]
+    fn vertical_mode_with_only_horizontal_guides_falls_back_to_level() {
+        let segs = facade_segments(&camera(0.0, 0.0, 3.0));
+        let guides = [Guide {
+            kind: GuideKind::Horizontal,
+            segment: segs[9],
+        }];
+        let AutoOutcome::Confident(sol) = analyze_guides(&guides, W, H, F, UprightMode::Vertical)
+        else {
+            panic!("expected a level fallback");
+        };
+        assert_eq!(sol.mode, UprightMode::Level);
     }
 }

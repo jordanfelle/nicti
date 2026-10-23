@@ -28,9 +28,13 @@ original; nothing is ported and no `docs/licensing.md` entry is needed.
      whichever the evidence supports. A correction above 40 deg on any axis is refused.
   4. The result is `K R^T K^-1` as a `Homography` (output -> input, like `Affine2D`), zoomed about
      the centre by the largest factor that keeps every output corner inside the source (no empty
-     corners).
+     corners). A correction needing a zoom below `MIN_ZOOM` (0.3) is refused (`NoResult`), and a
+     stored value that would need it renders as the identity rather than a collapsed image.
+     Level takes its roll from the vertical VP when there is one (a horizontal VP's direction mixes
+     in pitch/yaw).
   5. **Guided** (`analyze_guides`, 1-4 guides, each tagged vertical or horizontal by drag axis): two
-     or more guides of a kind give that kind's VP; a lone guide only rolls.
+     or more guides of a kind give that kind's VP; a lone guide only rolls, and a mode the guides cannot
+     support downgrades (Full -> Vertical -> Level).
 - **Storage**: `CropParams.upright: Option<UprightParams>` (roll, pitch, yaw, focal as a fraction of
   the image diagonal). Angles, not a pixel matrix, so one value serves a preview, a tile and a full
   export; omitted from the JSON when absent so existing documents keep their hash. Documents are

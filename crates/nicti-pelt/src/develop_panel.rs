@@ -506,7 +506,10 @@ pub fn show(
         develop.set_stage_params(CROP, &crop);
 
         if ui.button("Reset crop").clicked() {
+            // Upright lives in the crop entry but is its own control (it has its own Off).
+            let upright = develop.stage_params::<CropParams>(CROP).upright;
             develop.reset_stage(CROP);
+            develop.set_upright(upright);
         }
 
         ui.separator();
@@ -1049,7 +1052,11 @@ fn show_upright(
 ) {
     use nicti_tapetum::upright::UprightMode;
     ui.label("Upright (perspective)");
-    let guided = develop.upright_guide_mode && !develop.upright_guides.is_empty();
+    // Guides only drive the buttons while they can be seen and drawn (Crop tool); with Guided on
+    // and nothing drawn yet the buttons wait for a guide rather than silently auto-detecting.
+    let guide_mode = develop.upright_guide_mode;
+    let guided = guide_mode && heal.crop_active() && !develop.upright_guides.is_empty();
+    let waiting_for_guides = guide_mode && !guided;
     ui.horizontal_wrapped(|ui| {
         for (label, mode) in [
             ("Auto", UprightMode::Auto),
@@ -1057,7 +1064,8 @@ fn show_upright(
             ("Vertical", UprightMode::Vertical),
             ("Full", UprightMode::Full),
         ] {
-            let button = ui.add_enabled(gpu.is_some() || guided, egui::Button::new(label));
+            let enabled = !waiting_for_guides && (gpu.is_some() || guided);
+            let button = ui.add_enabled(enabled, egui::Button::new(label));
             if !button.clicked() {
                 continue;
             }
