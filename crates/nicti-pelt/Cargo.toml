@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 description = "The production app shell (#241): one eframe/egui window sharing its wgpu device with crates/nicti-tapetum (ADR-0016's 'one shared device'), a Tapetum-rendered frame painted via egui_wgpu::CallbackTrait (ADR-0068), placeholder library/loupe/develop view routing, and a real nicti-lair SqliteCatalog. Named after the visible coat over the tapetum lucidum, matching this repo's feline naming convention -- not the nicti-ui name #241 was filed under."
 
+[features]
+# AVIF in the export dialog; pulls in rav1e, which dominates the build time (#286).
+avif-export = ["nicti-preen/avif"]
+
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
 # egui 0.37 split its emoji fonts behind this feature; the UI still uses emoji glyphs (the folder

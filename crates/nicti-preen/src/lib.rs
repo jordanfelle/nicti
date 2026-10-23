@@ -318,6 +318,7 @@ mod tests {
                 depth: BitDepth::Eight,
                 compression: TiffCompression::Deflate,
             },
+            FormatSpec::Webp,
         ] {
             let spec = ExportSpec {
                 format,

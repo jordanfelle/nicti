@@ -405,11 +405,16 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                 ExportFormat::Jpeg => "JPEG",
                 ExportFormat::Png => "PNG",
                 ExportFormat::Tiff => "TIFF",
+                ExportFormat::Webp => "WebP (lossless)",
+                ExportFormat::Avif => "AVIF",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut kind, ExportFormat::Jpeg, "JPEG");
                 ui.selectable_value(&mut kind, ExportFormat::Png, "PNG");
                 ui.selectable_value(&mut kind, ExportFormat::Tiff, "TIFF");
+                ui.selectable_value(&mut kind, ExportFormat::Webp, "WebP (lossless)");
+                #[cfg(feature = "avif-export")]
+                ui.selectable_value(&mut kind, ExportFormat::Avif, "AVIF");
             });
         if kind != spec.format.format() {
             spec.format = match kind {
@@ -421,6 +426,15 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                     depth: BitDepth::Sixteen,
                     compression: TiffCompression::Deflate,
                 },
+                ExportFormat::Webp => FormatSpec::Webp,
+                ExportFormat::Avif => {
+                    // The AVIF encoder labels sRGB only (`ExportSpec::validate`).
+                    spec.color_space = ExportSpace::Srgb;
+                    FormatSpec::Avif {
+                        quality: 80,
+                        depth: BitDepth::Eight,
+                    }
+                }
             };
         }
         match &mut spec.format {
@@ -440,6 +454,11 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                     });
             }
             FormatSpec::Png { depth } => depth_picker(ui, depth),
+            FormatSpec::Webp => {}
+            FormatSpec::Avif { depth, .. } => {
+                ui.selectable_value(depth, BitDepth::Eight, "8-bit");
+                ui.selectable_value(depth, BitDepth::Sixteen, "10-bit");
+            }
             FormatSpec::Tiff { depth, compression } => {
                 depth_picker(ui, depth);
                 egui::ComboBox::from_id_salt("export_tiff_compression")
@@ -465,23 +484,38 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             *quality = q.round() as u8;
         }
     }
-    ui.horizontal(|ui| {
-        ui.label("Color space");
-        egui::ComboBox::from_id_salt("export_space")
-            .selected_text(match spec.color_space {
-                ExportSpace::Srgb => "sRGB",
-                ExportSpace::DisplayP3 => "Display P3",
-                ExportSpace::AdobeRgb => "Adobe RGB (1998)",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut spec.color_space, ExportSpace::Srgb, "sRGB");
-                ui.selectable_value(&mut spec.color_space, ExportSpace::DisplayP3, "Display P3");
-                ui.selectable_value(
-                    &mut spec.color_space,
-                    ExportSpace::AdobeRgb,
-                    "Adobe RGB (1998)",
-                );
-            });
+    if let FormatSpec::Avif { quality, .. } = &mut spec.format {
+        const QUALITY: SliderSpec =
+            SliderSpec::new("export-avif-quality", "Quality", 1.0, 100.0, 80.0).step(1.0, 0);
+        let mut q = f32::from(*quality);
+        if fur::slider(ui, &QUALITY, &mut q, true).changed {
+            *quality = q.round() as u8;
+        }
+    }
+    let srgb_only = matches!(spec.format, FormatSpec::Avif { .. });
+    ui.add_enabled_ui(!srgb_only, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Color space");
+            egui::ComboBox::from_id_salt("export_space")
+                .selected_text(match spec.color_space {
+                    ExportSpace::Srgb => "sRGB",
+                    ExportSpace::DisplayP3 => "Display P3",
+                    ExportSpace::AdobeRgb => "Adobe RGB (1998)",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut spec.color_space, ExportSpace::Srgb, "sRGB");
+                    ui.selectable_value(
+                        &mut spec.color_space,
+                        ExportSpace::DisplayP3,
+                        "Display P3",
+                    );
+                    ui.selectable_value(
+                        &mut spec.color_space,
+                        ExportSpace::AdobeRgb,
+                        "Adobe RGB (1998)",
+                    );
+                });
+        });
     });
 }
 
@@ -674,6 +708,8 @@ fn preview_names(spec: &ExportSpec, samples: &[AssetFacts]) -> Result<Vec<String
         ExportFormat::Jpeg => "jpg",
         ExportFormat::Png => "png",
         ExportFormat::Tiff => "tif",
+        ExportFormat::Webp => "webp",
+        ExportFormat::Avif => "avif",
     };
     Ok(samples
         .iter()

@@ -66,6 +66,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   TIFF = `tiff` crate with resolution/ICC (UNDEFINED type)/XMP tags, no EXIF. EXIF `ColorSpace` is
   0xFFFF for non-sRGB. exiftool `-validate` clean, except two known TIFF quirks (Adobe-Deflate
   flag; odd IFD offsets after an odd compressed strip).
+- **WebP/AVIF (#429)**: lossless WebP = `image-webp` (ICC/EXIF/XMP chunks, 8-bit only; lossy #361 still open, no JXL encoder #359). AVIF = `ravif`/rav1e behind `nicti-preen` feature `avif` (pelt `avif-export`, off by default, #286); BT.601 full-range 4:4:4, 8 or 10-bit (`Sixteen`=10), EXIF only; **sRGB only** (no ICC/XMP in ravif, `colr` box omitted for the implied BT.709/sRGB; wide gamut needs a hand-written colr/ICC box). Encode-speed benchmark not yet run.
 - **Edits (#57)**: read from `CatalogStore::get_master_edit`; Develop autosaves. AI Remove spots
   are skipped at export (patches aren't persisted, #324); local adjustments (masks) are applied at the photo's own extent (#354, see `masking`); a missing/changed DCP profile fails that
   photo rather than exporting different colors. Export rotates by the file's EXIF Orientation.
