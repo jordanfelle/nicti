@@ -116,6 +116,9 @@ pub enum ExportError {
 /// on OOM and lose unsaved edits. 250 MP (~3 GB of f32) is far past any real print.
 pub const MAX_OUTPUT_PIXELS: u64 = 250_000_000;
 
+/// WebP's per-side limit (14-bit dimensions), checked before the expensive resize.
+pub const WEBP_MAX_DIMENSION: u32 = 16_384;
+
 /// A rendered frame in host memory: interleaved **linear ProPhoto (D50)** RGB f32, unclamped --
 /// what Tapetum's readback produces, alpha dropped.
 pub struct WorkingFrame {
@@ -181,6 +184,11 @@ pub fn export_frame(
             "the export would be {tw}x{th} ({} MP); the limit is {} MP -- lower the size setting",
             u64::from(tw) * u64::from(th) / 1_000_000,
             MAX_OUTPUT_PIXELS / 1_000_000
+        )));
+    }
+    if format == ExportFormat::Webp && tw.max(th) > WEBP_MAX_DIMENSION {
+        return Err(ExportError::Frame(format!(
+            "WebP is limited to {WEBP_MAX_DIMENSION} px per side; the export would be {tw}x{th} -- lower the size setting"
         )));
     }
     let (rw, rh) = orientation.oriented_size(tw, th); // swap back if the orientation swaps
@@ -300,6 +308,28 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> image::RgbImage {
         image::load_from_memory(bytes).unwrap().to_rgb8()
+    }
+
+    #[test]
+    fn webp_over_16384_px_is_rejected_before_resizing() {
+        let spec = ExportSpec {
+            format: FormatSpec::Webp,
+            resize: ResizeSpec {
+                mode: ResizeMode::LongEdge(17_000),
+                dont_enlarge: false,
+            },
+            ..ExportSpec::default()
+        };
+        let err = export_frame(
+            split_frame(80, 60),
+            &ctx(&spec, &SourceMetadata::default()),
+            &builtin_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ExportError::Frame(ref m) if m.contains("16384")),
+            "{err}"
+        );
     }
 
     #[test]

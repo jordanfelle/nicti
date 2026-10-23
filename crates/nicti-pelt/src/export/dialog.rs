@@ -493,6 +493,10 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
         }
     }
     let srgb_only = matches!(spec.format, FormatSpec::Avif { .. });
+    if srgb_only {
+        // A loaded preset can pair AVIF with a wider gamut; the combo below is locked, so heal it.
+        spec.color_space = ExportSpace::Srgb;
+    }
     ui.add_enabled_ui(!srgb_only, |ui| {
         ui.horizontal(|ui| {
             ui.label("Color space");
