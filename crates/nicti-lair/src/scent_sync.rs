@@ -109,6 +109,14 @@ impl Markers {
     }
 }
 
+impl Markers {
+    /// Equality without case folding: whether the sidecar would need rewriting to show exactly
+    /// these keyword spellings (a case-only rename is "equal" for conflict detection only).
+    fn exactly_eq(&self, o: &Self) -> bool {
+        self == o && self.keywords == o.keywords
+    }
+}
+
 impl PartialEq for Markers {
     fn eq(&self, o: &Self) -> bool {
         self.rating == o.rating
@@ -529,7 +537,7 @@ fn write_locked(
     let loaded = load(&path)?;
 
     if let Some(l) = &loaded {
-        if l.markers == catalog {
+        if l.markers.exactly_eq(&catalog) {
             seen(&mut state, l, now_ms);
             state.catalog_dirty_since_ms = None;
             state.needs_review = false;

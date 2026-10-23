@@ -338,7 +338,9 @@ confirms or amends them; #60 builds against them as written.
     escaped) is replaced by `/` on both sides, so it compares stable but is renamed on import.
   - (Fixed in #375: `Markers` compares keyword names NFC + case-folded like the catalog;
     `apply_to_catalog` sets rating/flag/label and keywords in one transaction via
-    `replace_asset_markers`.)
+    `replace_asset_markers`. Folding is for conflict detection only: a case-only keyword rename
+    still rewrites the sidecar, and `packet::apply` only strips later Descriptions whose
+    `rdf:about` matches the first.)
   - A rescan can write a sidecar with auto-write **off** when the catalog is dirty and newer
     (ADR-0021 newer-wins); turning auto-write back on doesn't flush already-dirty assets until
     their next marker change. A sync that lands between a marker write and the writer thread

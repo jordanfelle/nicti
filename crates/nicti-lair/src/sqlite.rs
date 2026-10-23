@@ -2058,10 +2058,15 @@ impl CatalogStore for SqliteCatalog {
     ) -> Result<(), CatalogError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute(
+        let n = tx.execute(
             "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
             params![meta.rating, meta.flag, meta.label, asset_id],
         )?;
+        if n == 0 {
+            // A missing asset is a failure, not a silent no-op (the keyword insert would fail the
+            // foreign key anyway, but an empty keyword set would not).
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
         let current: std::collections::BTreeSet<i64> = {
             let mut stmt =
                 tx.prepare("SELECT keyword_id FROM asset_keyword WHERE asset_id = ?1")?;

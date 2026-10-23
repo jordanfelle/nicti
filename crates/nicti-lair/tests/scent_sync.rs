@@ -807,3 +807,32 @@ fn replace_asset_markers_is_atomic_when_a_keyword_id_is_bad() {
     assert_eq!(m.label.as_deref(), Some("Red"));
     assert_eq!(m.keywords.len(), 1);
 }
+
+#[test]
+fn a_case_only_keyword_rename_is_written_to_the_sidecar() {
+    let f = fixture();
+    let k = f.catalog.create_keyword(None, "fox").unwrap();
+    f.catalog.tag(&[f.asset_id], k).unwrap();
+    write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap();
+    f.catalog.rename_keyword(k, "Fox").unwrap();
+    assert_eq!(
+        write_sidecar(&f.catalog, f.asset_id, &f.raw, now_ms()).unwrap(),
+        SyncOutcome::WroteSidecar
+    );
+    let text = fs::read_to_string(sidecar(&f.raw)).unwrap();
+    assert!(text.contains("<rdf:li>Fox</rdf:li>"), "{text}");
+}
+
+#[test]
+fn replace_asset_markers_errors_for_a_missing_asset() {
+    let f = fixture();
+    let meta = AssetMeta {
+        rating: None,
+        flag: None,
+        label: None,
+    };
+    assert!(f
+        .catalog
+        .replace_asset_markers(987_654, &meta, &[])
+        .is_err());
+}

@@ -145,6 +145,17 @@ fn matching_end(events: &[Event<'static>], start_idx: usize) -> Result<usize, Pa
     Err(PatchError::Unbalanced)
 }
 
+/// The `rdf:about` of a Description tag; absent counts as the empty string.
+fn about_of(tag: &BytesStart) -> Result<String, PatchError> {
+    for attr in tag.attributes() {
+        let attr = attr?;
+        if attr.key.as_ref() == "rdf:about" {
+            return Ok(attr.value.into_owned());
+        }
+    }
+    Ok(String::new())
+}
+
 /// Whether `patch` owns the attribute `key` (so a rewrite drops its old value).
 fn patch_owns_attr(key: QName, patch: &Patch) -> bool {
     (key.as_ref() == "xmp:Rating" && patch.rating.is_some())
@@ -306,6 +317,10 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
     }
 
     // 2b. Later `rdf:Description` elements: strip what this patch owns so it can't win on read.
+    let first_about = match &events[desc_idx] {
+        Event::Start(s) | Event::Empty(s) => about_of(s)?,
+        _ => unreachable!(),
+    };
     let mut replaced: std::collections::HashMap<usize, Event<'static>> =
         std::collections::HashMap::new();
     let mut j = desc_end_idx + 1;
@@ -323,6 +338,12 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         let (Event::Start(orig) | Event::Empty(orig)) = &events[j] else {
             unreachable!()
         };
+        // Only a Description about the same resource as the first is ours to strip; another
+        // resource's properties are none of this patch's business.
+        if about_of(orig)? != first_about {
+            j = end + 1;
+            continue;
+        }
         let mut tag = BytesStart::new(orig.name().as_ref().to_owned());
         let mut changed = false;
         for attr in orig.attributes() {
@@ -782,5 +803,16 @@ mod tests {
         assert_eq!(meta.keywords, vec!["fox".to_string()]);
         assert!(out.contains(r#"crs:Note="keep""#));
         assert!(!out.contains("stale"));
+    }
+
+    #[test]
+    fn descriptions_about_another_resource_are_left_alone() {
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><rdf:Description rdf:about="" xmp:Rating="1"/><rdf:Description rdf:about="uuid:other" xmp:Rating="5"/></rdf:RDF></x:xmpmeta>"#;
+        let patch = Patch {
+            rating: Some(Some(3)),
+            ..Default::default()
+        };
+        let out = apply(xmp, &patch).unwrap();
+        assert!(out.contains(r#"rdf:about="uuid:other" xmp:Rating="5""#));
     }
 }
