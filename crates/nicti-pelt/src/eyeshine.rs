@@ -240,6 +240,8 @@ pub fn choose_preview(policy: RenderPolicy, edited: bool, have: Available) -> (S
 pub const RENDER_LONG_EDGE: u32 = crate::t2::T2_LONG_EDGE;
 /// JPEG quality of the rendered tier (same as the camera T2, ADR-0143).
 const RENDER_JPEG_QUALITY: u8 = 85;
+/// Long edge of the rendered grid thumbnail stored beside the screen tier (#397).
+pub const RENDER_THUMB_LONG_EDGE: u32 = crate::grid::jobs::THUMB_LONG_EDGE;
 const TILE_MAX_DIM: u32 = 4096;
 const TILE_MAX_STAGING_BYTES: u64 = 64 * 1024 * 1024;
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -361,9 +363,13 @@ impl Task {
     }
 
     fn key(&self) -> LarderKey<'_> {
+        self.key_for(LarderTier::Rendered)
+    }
+
+    fn key_for(&self, tier: LarderTier) -> LarderKey<'_> {
         LarderKey {
             asset_id: self.req.asset_id,
-            tier: LarderTier::Rendered,
+            tier,
             render_hash: &self.req.hash,
         }
     }
@@ -491,7 +497,11 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
         let Some(larder) = lock_larder_within(&task.env.larder, LOCK_WAIT) else {
             return Err(T2Outcome::Retry("larder busy".into()));
         };
-        if larder.contains(task.key()).unwrap_or(false) {
+        if larder.contains(task.key()).unwrap_or(false)
+            && larder
+                .contains(task.key_for(LarderTier::RenderedThumb))
+                .unwrap_or(false)
+        {
             return Err(T2Outcome::Stored);
         }
     }
@@ -823,6 +833,13 @@ fn encode_and_store(task: &Task, frame: WorkingFrame, exif: SourceExif) -> T2Out
         watermark: None,
         software: "Nicti",
     };
+    // The grid thumbnail is cut from the same frame before the screen tier consumes it. Best
+    // effort: a photo without one just keeps its camera thumbnail in the grid.
+    let thumb = box_downscale(&frame, RENDER_THUMB_LONG_EDGE).and_then(|small| {
+        export_frame(small, &ctx, &builtin_registry())
+            .ok()
+            .map(|e| e.bytes)
+    });
     let exported = match export_frame(frame, &ctx, &builtin_registry()) {
         Ok(e) => e,
         Err(e) => return T2Outcome::Failed(format!("encoding failed: {e}")),
@@ -836,10 +853,73 @@ fn encode_and_store(task: &Task, frame: WorkingFrame, exif: SourceExif) -> T2Out
         return T2Outcome::Retry("superseded".into());
     }
     match larder.put(task.key(), &exported.bytes) {
-        Ok(true) => T2Outcome::Stored,
+        Ok(true) => {
+            match &thumb {
+                Some(bytes) => {
+                    // A failed thumbnail write must not fail the render, but a stale one must not
+                    // outlive it as if current: drop it so the grid falls back to the camera one.
+                    if !matches!(
+                        larder.put(task.key_for(LarderTier::RenderedThumb), bytes),
+                        Ok(true)
+                    ) {
+                        let _ = larder.forget_thumb(task.req.asset_id);
+                    }
+                }
+                None => {
+                    let _ = larder.forget_thumb(task.req.asset_id);
+                }
+            }
+            T2Outcome::Stored
+        }
         Ok(false) => T2Outcome::Failed("preview larger than the whole cache cap".into()),
         Err(e) => T2Outcome::Failed(e.to_string()),
     }
+}
+
+/// Area-averages `frame` (linear light) down to `long_edge` on its longer side. `None` when it is
+/// degenerate. A frame already within `long_edge` is copied unchanged (never upscaled), so every
+/// stored render has a thumbnail.
+fn box_downscale(frame: &WorkingFrame, long_edge: u32) -> Option<WorkingFrame> {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w == 0 || h == 0 || frame.pixels.len() != w * h * 3 || long_edge == 0 {
+        return None;
+    }
+    let scale = long_edge as f64 / w.max(h) as f64;
+    if scale >= 1.0 {
+        return Some(WorkingFrame {
+            width: frame.width,
+            height: frame.height,
+            pixels: frame.pixels.clone(),
+        });
+    }
+    let ow = ((w as f64 * scale).round() as usize).max(1);
+    let oh = ((h as f64 * scale).round() as usize).max(1);
+    let mut out = vec![0f32; ow * oh * 3];
+    for oy in 0..oh {
+        let (y0, y1) = (oy * h / oh, ((oy + 1) * h / oh).max(oy * h / oh + 1));
+        for ox in 0..ow {
+            let (x0, x1) = (ox * w / ow, ((ox + 1) * w / ow).max(ox * w / ow + 1));
+            let mut acc = [0f32; 3];
+            for y in y0..y1 {
+                let row = &frame.pixels[(y * w + x0) * 3..(y * w + x1) * 3];
+                for px in row.as_chunks::<3>().0 {
+                    acc[0] += px[0];
+                    acc[1] += px[1];
+                    acc[2] += px[2];
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as f32;
+            let o = (oy * ow + ox) * 3;
+            out[o] = acc[0] / n;
+            out[o + 1] = acc[1] / n;
+            out[o + 2] = acc[2] / n;
+        }
+    }
+    Some(WorkingFrame {
+        width: ow as u32,
+        height: oh as u32,
+        pixels: out,
+    })
 }
 
 // --- the service: who needs a render, dedupe, supersede -----------------------------------------
@@ -1011,13 +1091,11 @@ impl EyeshineService {
         }
         // Already cached? `try_lock`: a busy Larder just means the job re-checks on its worker.
         if let Some(larder) = try_lock_larder(&env.larder) {
-            if larder
-                .stored_hash(asset_id, LarderTier::Rendered)
-                .ok()
-                .flatten()
-                .as_deref()
-                == Some(hash.as_str())
-            {
+            let current = |tier| {
+                larder.stored_hash(asset_id, tier).ok().flatten().as_deref() == Some(hash.as_str())
+            };
+            // Renders stored before the grid thumbnail existed (#397) are redone to gain one.
+            if current(LarderTier::Rendered) && current(LarderTier::RenderedThumb) {
                 return Some(info);
             }
         }
@@ -1412,6 +1490,31 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_thumbnail_is_an_area_average_at_the_thumbnail_edge() {
+        let (w, h) = (1000u32, 500u32);
+        let pixels: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                if (i % w) < w / 2 {
+                    [1.0, 0.0, 0.0]
+                } else {
+                    [0.0, 0.0, 1.0]
+                }
+            })
+            .collect();
+        let frame = WorkingFrame {
+            width: w,
+            height: h,
+            pixels,
+        };
+        let small = box_downscale(&frame, 100).unwrap();
+        assert_eq!((small.width, small.height), (100, 50));
+        assert_eq!(&small.pixels[..3], &[1.0, 0.0, 0.0]);
+        assert_eq!(&small.pixels[99 * 3..100 * 3], &[0.0, 0.0, 1.0]);
+        let same = box_downscale(&frame, 1000).unwrap();
+        assert_eq!((same.width, same.height), (w, h), "never upscales");
+    }
+
+    #[test]
     fn an_edit_is_rendered_and_stored_and_changes_the_pixels() {
         let Some(fx) = fx() else { return };
         let (o, plain_hash) = fx.run("a.NEF", EditDocument::default());
@@ -1434,6 +1537,16 @@ mod tests {
             .stored(&edited_hash)
             .expect("the edited render is stored");
         assert_eq!(edited.dimensions(), (64, 64));
+        let thumb = fx
+            .larder
+            .lock()
+            .unwrap()
+            .stored_hash(1, LarderTier::RenderedThumb);
+        assert_eq!(
+            thumb.unwrap().as_deref(),
+            Some(edited_hash.as_str()),
+            "the grid thumbnail is stored under the same hash"
+        );
     }
 
     #[test]

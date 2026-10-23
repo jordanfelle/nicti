@@ -18,11 +18,15 @@ use nicti_lair::{CatalogStore, Filter, Sort, SortDirection, SortField};
 use nicti_pounce::{JobId, JobKind, Pounce};
 use nicti_tapetum::cache::Tier;
 
-use super::jobs::{SnapshotJob, SnapshotResult, ThumbBatchJob, ThumbError, ThumbImage, ThumbSlot};
+use super::jobs::{
+    SnapshotJob, SnapshotResult, ThumbBatchJob, ThumbError, ThumbImage, ThumbRender, ThumbSlot,
+};
 use super::layout::{batch_indices, batches_for};
 use super::selection::Selection;
 use nicti_calico::source_transform::SourceTransforms;
 use nicti_calico::space::OutputSpace;
+
+use crate::t2::SharedLarder;
 use nicti_calico::transform::DisplayProfile;
 
 /// How long a cell whose thumbnail hit a *transient* catalog error waits before being asked for
@@ -105,6 +109,15 @@ pub struct GridSession {
     /// built for; see [`Self::set_color`].
     color: Arc<SourceTransforms>,
     color_generation: u64,
+    /// Where rendered thumbnails are read from (#397); `None` while rendered previews are off for
+    /// the grid.
+    rendered: Option<SharedLarder>,
+    /// Which edited photos' textures are a render of their *current* edits; any other edited photo
+    /// is flagged stale.
+    render_current: HashSet<i64>,
+    /// Photos whose texture must be re-decoded although they have one (a render landed, or their
+    /// edits changed); cleared as the new thumbnail is uploaded.
+    redo: HashSet<i64>,
 }
 
 /// The texture cache key for an asset. Keyed by id alone: a re-ingest can change an asset's
@@ -144,6 +157,9 @@ impl GridSession {
                 OutputSpace::Srgb,
             ))),
             color_generation: 0,
+            rendered: None,
+            render_current: HashSet::new(),
+            redo: HashSet::new(),
         }
     }
 
@@ -158,13 +174,37 @@ impl GridSession {
         }
         self.color = color;
         self.color_generation = generation;
+        self.drop_textures(pounce);
+    }
+
+    fn drop_textures(&mut self, pounce: &Pounce) {
         self.textures = Tier::new(self.textures.stats().budget_bytes, |t: &TextureHandle| {
             let [w, h] = t.size();
             (w * h * 4) as u64
         });
         self.pending_uploads.clear();
         self.pending_ids.clear();
+        self.render_current.clear();
+        self.redo.clear();
         self.cancel_batches(pounce);
+    }
+
+    /// Turns rendered thumbnails (#397) on (`Some`) or off for edited photos. A no-op while the
+    /// on/off state is unchanged; otherwise every thumbnail is re-decoded from the right source.
+    pub fn set_rendered(&mut self, larder: Option<SharedLarder>, pounce: &Pounce) {
+        if larder.is_some() == self.rendered.is_some() {
+            self.rendered = larder;
+            return;
+        }
+        self.rendered = larder;
+        self.drop_textures(pounce);
+    }
+
+    /// New renders landed for these photos (#397): re-decode their cells from the rendered tier.
+    pub fn rerender(&mut self, asset_ids: &[i64]) {
+        if self.rendered.is_some() {
+            self.redo.extend(asset_ids);
+        }
     }
 
     pub fn ids(&self) -> &[i64] {
@@ -364,6 +404,8 @@ impl GridSession {
             (w * h * 4) as u64
         });
         self.failed.clear();
+        self.render_current.clear();
+        self.redo.clear();
         self.edit_overrides.clear();
         self.transient_failed.clear();
         self.pending_uploads.clear();
@@ -472,6 +514,12 @@ impl GridSession {
                 return;
             };
             self.pending_ids.remove(&id);
+            self.redo.remove(&id);
+            if thumb.render == ThumbRender::Current {
+                self.render_current.insert(id);
+            } else {
+                self.render_current.remove(&id);
+            }
             if !self.edit_overrides.contains(&id) {
                 if thumb.edited {
                     self.edited.insert(id);
@@ -496,10 +544,19 @@ impl GridSession {
         self.edited.contains(&asset_id)
     }
 
+    /// Whether `asset_id` has edits its thumbnail doesn't show: edited, and not (yet) drawn from a
+    /// render of those edits (#397).
+    pub fn is_stale(&self, asset_id: i64) -> bool {
+        self.is_edited(asset_id) && !self.render_current.contains(&asset_id)
+    }
+
     /// Updates one photo's edited flag right away (its edits were just saved), without waiting for
     /// its thumbnail to be re-read.
     pub fn mark_edited(&mut self, asset_id: i64, edited: bool) {
         self.edit_overrides.insert(asset_id);
+        // Its texture shows the old edits (or a render of them): decode it again.
+        self.render_current.remove(&asset_id);
+        self.redo.insert(asset_id);
         if edited {
             self.edited.insert(asset_id);
         } else {
@@ -525,7 +582,7 @@ impl GridSession {
                 .transient_failed
                 .get(&id)
                 .is_some_and(|at| at.elapsed() < TRANSIENT_RETRY_AFTER)
-            && !self.textures.contains(&texture_key(id))
+            && (self.redo.contains(&id) || !self.textures.contains(&texture_key(id)))
     }
 
     /// Makes sure thumbnails are being produced for the ids in `visible` (an index range into the
@@ -575,6 +632,7 @@ impl GridSession {
             }
             let (job, slot) =
                 ThumbBatchJob::new(self.store.clone(), missing, first_index, self.color.clone());
+            let job = job.with_rendered(self.rendered.clone());
             let job_id = pounce.submit(Box::new(job));
             self.inflight.insert(batch, InflightBatch { job_id, slot });
         }

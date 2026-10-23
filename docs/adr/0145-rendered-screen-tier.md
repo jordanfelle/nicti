@@ -57,9 +57,13 @@ Nothing rendered an edited photo to a screen-size image or cached one, and the L
 - **Loupe pre-decode fallback**: full behaviour (render queued, swapped in, never downgraded, badge
   text).
 - **Library grid**: a dot on every cell whose photo has edits, because its thumbnail is camera-derived
-  and never shows them (it does not go away when a render exists). Showing a
-  *rendered* thumbnail would need a small rendered tier -- decoding a 3840px JPEG per cell is far
-  too slow -- so it is a follow-up.
+  and never shows them. **#397** adds `LarderTier::RenderedThumb` (`"r0"`): the render job
+  area-averages the same frame to 256px and stores it under the same `render_hash` beside the 3840px
+  one (decoding a 3840px JPEG per cell is far too slow). The grid job prefers it for edited photos --
+  current render, or an older render of the same file ("updating") -- and the dot stays until the
+  cell shows the *current* render. A render landing re-decodes its cell; renders are still only
+  queued by saving edits and by the loupe, not for every visible grid cell. Renders stored before
+  #397 have no thumbnail and are redone the next time they are requested.
 - **Survey/compare**: unchanged by design (ADR-0032: culling runs on embedded previews and never
   touches the develop pipeline).
 

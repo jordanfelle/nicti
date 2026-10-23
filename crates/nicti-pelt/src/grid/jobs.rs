@@ -5,9 +5,13 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::t2::SharedLarder;
+
 use nicti_calico::source_transform::SourceTransforms;
+use nicti_lair::larder::LarderTier;
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_lair::{CatalogStore, Filter, PreviewTier, Sort};
+use nicti_pawprint::EditDocument;
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
 /// The catalog's ordered id list for one `Filter`/`Sort` (`CatalogStore::hunt_ids`), or the
@@ -93,6 +97,19 @@ pub struct ThumbImage {
     /// The photo has develop edits (#145): this camera-derived thumbnail doesn't show them, so
     /// the grid can flag it. Set by [`ThumbBatchJob`], `false` from [`make_thumbnail`] alone.
     pub edited: bool,
+    /// Whether the pixels are a render of the edits (#397) rather than the camera's T0.
+    pub render: ThumbRender,
+}
+
+/// Where a thumbnail's pixels come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbRender {
+    /// The camera-derived T0: it doesn't show develop edits.
+    Camera,
+    /// A render of an earlier edit state of the same file; a newer one is on its way.
+    Updating,
+    /// A render of the photo's current edits.
+    Current,
 }
 
 /// Why a cell has no thumbnail. The split decides whether the grid ever asks again: a missing or
@@ -128,6 +145,8 @@ pub struct ThumbBatchJob {
     out: ThumbSlot,
     /// Source -> monitor conversion applied to every decoded thumbnail (#319).
     color: Arc<SourceTransforms>,
+    /// Where rendered thumbnails live (#397); `None` shows the camera thumbnail for everything.
+    rendered: Option<SharedLarder>,
 }
 
 impl ThumbBatchJob {
@@ -147,8 +166,15 @@ impl ThumbBatchJob {
             label,
             out: out.clone(),
             color,
+            rendered: None,
         };
         (job, out)
+    }
+
+    /// Prefer the rendered thumbnail stored in `larder` for edited photos (#397).
+    pub fn with_rendered(mut self, larder: Option<SharedLarder>) -> Self {
+        self.rendered = larder;
+        self
     }
 
     fn finish(&self) {
@@ -227,29 +253,28 @@ impl ChunkedJob for ThumbBatchJob {
         // leaves them unflagged -- a missing badge, never a failed thumbnail.
         // One unparseable stored document fails the whole batch call, so on error fall back to
         // per-photo reads rather than dropping the badge for every photo in the chunk.
-        let edited: std::collections::HashSet<i64> = match self.store.get_master_edits(chunk) {
+        let edits: Vec<(i64, EditDocument)> = match self.store.get_master_edits(chunk) {
             Ok(docs) => docs
                 .into_iter()
-                .filter(|(_, doc)| doc.as_ref().is_some_and(|d| !d.stages.is_empty()))
-                .map(|(id, _)| id)
+                .filter_map(|(id, doc)| doc.map(|d| (id, d)))
+                .filter(|(_, d)| !d.stages.is_empty())
                 .collect(),
             Err(_) => chunk
                 .iter()
                 .copied()
-                .filter(|&id| {
-                    self.store
-                        .get_master_edit(id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|d| !d.stages.is_empty())
+                .filter_map(|id| {
+                    let doc = self.store.get_master_edit(id).ok().flatten()?;
+                    (!doc.stages.is_empty()).then_some((id, doc))
                 })
                 .collect(),
         };
+        let edited: std::collections::HashMap<i64, EditDocument> = edits.into_iter().collect();
         for (id, outcome) in &mut results {
             if let Ok(thumb) = outcome {
-                thumb.edited = edited.contains(id);
+                thumb.edited = edited.contains_key(id);
             }
         }
+        self.apply_rendered(&edited, &mut results);
 
         self.next = end;
         let finished = self.next >= self.ids.len();
@@ -259,6 +284,58 @@ impl ChunkedJob for ThumbBatchJob {
             out.done = finished;
         }
         Ok(if finished { Step::Done } else { Step::Yield })
+    }
+}
+
+impl ThumbBatchJob {
+    /// #397: swaps in the stored rendered thumbnail for every edited photo that has one. A render
+    /// of the same file but an older edit state still shows ("updating"); one of a replaced file,
+    /// an unreadable entry or a busy Larder leaves the camera thumbnail.
+    fn apply_rendered(
+        &self,
+        edited: &std::collections::HashMap<i64, EditDocument>,
+        results: &mut [(i64, Result<ThumbImage, ThumbError>)],
+    ) {
+        let Some(larder) = &self.rendered else { return };
+        if edited.is_empty() {
+            return;
+        }
+        // Never wait on the Larder (a compaction holds it for minutes): the camera thumbnail is
+        // a fine answer, and the next render landing re-requests the cell.
+        let Some(mut larder) = crate::t2::try_lock_larder(larder) else {
+            return;
+        };
+        for (id, outcome) in results.iter_mut() {
+            let (Ok(thumb), Some(doc)) = (outcome.as_mut(), edited.get(id)) else {
+                continue;
+            };
+            let Ok(Some((hash, bytes))) = larder.get_latest(*id, LarderTier::RenderedThumb) else {
+                continue;
+            };
+            let Some(identity) = self
+                .store
+                .get_asset(*id)
+                .ok()
+                .flatten()
+                .map(|a| crate::loupe::asset_cache_key(&a))
+            else {
+                continue;
+            };
+            let Some(want) = crate::eyeshine::rendered_hash(&identity, doc) else {
+                continue;
+            };
+            let render = if hash == want {
+                ThumbRender::Current
+            } else if crate::eyeshine::same_file(&hash, &want) {
+                ThumbRender::Updating
+            } else {
+                continue;
+            };
+            if let Ok(rendered) = make_thumbnail(&bytes, &self.color) {
+                thumb.image = rendered.image;
+                thumb.render = render;
+            }
+        }
     }
 }
 
@@ -288,6 +365,7 @@ pub fn make_thumbnail(bytes: &[u8], color: &SourceTransforms) -> Result<ThumbIma
     Ok(ThumbImage {
         image: egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
         edited: false,
+        render: ThumbRender::Camera,
     })
 }
 
@@ -373,6 +451,106 @@ mod tests {
         let small = make_thumbnail(&jpeg(100, 60, [10, 20, 30]), &srgb()).unwrap();
         assert_eq!(small.image.size, [100, 60]);
         assert!(make_thumbnail(b"not a jpeg", &srgb()).is_err());
+    }
+
+    #[test]
+    fn edited_photos_use_their_rendered_thumbnail_when_it_is_for_the_same_file() {
+        use nicti_lair::larder::{Larder, LarderConfig, LarderKey};
+        use nicti_pawprint::StageEntry;
+        let (store, ids) = seeded(4, |_| true);
+        let doc = |stops: f64| {
+            let mut d = EditDocument::default();
+            d.stages.insert(
+                "exposure".to_string(),
+                StageEntry {
+                    schema_version: 1,
+                    params: serde_json::json!({ "stops": stops }),
+                },
+            );
+            d
+        };
+        for &id in &ids[..3] {
+            store.put_master_edit(id, &doc(1.0)).unwrap();
+        }
+        let identity =
+            |id: i64| crate::loupe::asset_cache_key(&store.get_asset(id).unwrap().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let larder = Larder::open(
+            dir.path(),
+            LarderConfig {
+                cap_bytes: 1 << 20,
+                compact_min_dead_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let larder: SharedLarder = Arc::new(Mutex::new(larder));
+        let green = jpeg(64, 40, [20, 200, 20]);
+        let put = |id: i64, hash: &str| {
+            larder
+                .lock()
+                .unwrap()
+                .put(
+                    LarderKey {
+                        asset_id: id,
+                        tier: LarderTier::RenderedThumb,
+                        render_hash: hash,
+                    },
+                    &green,
+                )
+                .unwrap();
+        };
+        // 0: current render. 1: render of an earlier edit of the same file. 2: render of another
+        // file. 3: unedited, so any stored render is ignored.
+        put(
+            ids[0],
+            &crate::eyeshine::rendered_hash(&identity(ids[0]), &doc(1.0)).unwrap(),
+        );
+        put(
+            ids[1],
+            &crate::eyeshine::rendered_hash(&identity(ids[1]), &doc(0.5)).unwrap(),
+        );
+        put(
+            ids[2],
+            &crate::eyeshine::rendered_hash(&blake3::hash(b"other"), &doc(1.0)).unwrap(),
+        );
+        put(ids[3], "rendered:v1:x:y");
+
+        let run = |rendered: Option<SharedLarder>| {
+            let (job, out) = ThumbBatchJob::new(store.clone(), ids.clone(), 0, Arc::new(srgb()));
+            let mut job = job.with_rendered(rendered);
+            run_to_done(&mut job);
+            let mut ready = std::mem::take(&mut out.lock().unwrap().ready);
+            ready.sort_by_key(|(id, _)| *id);
+            ready
+                .into_iter()
+                .map(|(_, t)| t.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let with = run(Some(larder.clone()));
+        let kinds: Vec<_> = with.iter().map(|t| t.render).collect();
+        assert_eq!(
+            kinds,
+            [
+                ThumbRender::Current,
+                ThumbRender::Updating,
+                ThumbRender::Camera,
+                ThumbRender::Camera
+            ]
+        );
+        assert_eq!(
+            with[0].image.size,
+            [64, 40],
+            "the rendered pixels are shown"
+        );
+        assert_eq!(
+            with[2].image.size,
+            [256, 170],
+            "the camera thumbnail is kept"
+        );
+        assert!(with[..3].iter().all(|t| t.edited) && !with[3].edited);
+
+        let without = run(None);
+        assert!(without.iter().all(|t| t.render == ThumbRender::Camera));
     }
 
     #[test]

@@ -51,8 +51,9 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   (`:partial` suffix for masks/AI removals), `choose_preview`/`Badge` (pure display rule), 3-job chain (decode CPU →
   tiled render GPU → encode CPU; render shared with export via `export/render_core.rs`), `EyeshineService`
   (dedupe/supersede). Settings `preview_settings.rs` (`<catalog>.previews.json`: Off/Edited/All + loupe/grid).
-  Loupe fallback swaps the render in, never downgrades; grid only flags edited photos (`ThumbImage.edited`,
-  `cull::badges::paint_stale`); survey/compare unchanged (ADR-0032). Gotcha: `Larder::get` with a *different* hash
+  Loupe fallback swaps the render in, never downgrades; grid flags edited photos (`ThumbImage.edited`,
+  `cull::badges::paint_stale`) and (#397) shows `LarderTier::RenderedThumb` (256px, same hash, stored by the render job)
+  for them, dot stays until `ThumbRender::Current`; survey/compare unchanged (ADR-0032). Gotcha: `Larder::get` with a *different* hash
   deletes the entry -- use `get_latest`/`stored_hash` when comparing hashes.
 - **Keyed entries (#353, `docs/adr/0353`)**: a second Larder index table `keyed_entry (kind, key)` for content-addressed
   blobs that are many-per-photo -- today `LarderKind::AiAlpha` (baked AI mask alphas, key = bake key). Same pack

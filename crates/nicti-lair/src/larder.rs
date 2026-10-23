@@ -36,6 +36,10 @@ pub enum LarderTier {
     /// `T2` (the primary key is `(asset_id, tier)`) so a stale camera preview survives until the
     /// render lands.
     Rendered,
+    /// The small (grid-sized) companion of [`LarderTier::Rendered`], stored under the same
+    /// `render_hash` by the same job (#397). Decoding a 3840px render per grid cell is far too
+    /// slow, so the grid reads this one.
+    RenderedThumb,
 }
 
 impl LarderTier {
@@ -43,6 +47,7 @@ impl LarderTier {
         match self {
             LarderTier::T2 => "t2",
             LarderTier::Rendered => "r2",
+            LarderTier::RenderedThumb => "r0",
         }
     }
 }
@@ -613,6 +618,11 @@ impl Larder {
         Ok(freed)
     }
 
+    /// Drops the grid thumbnail stored beside an asset's rendered preview (#397), if any.
+    pub fn forget_thumb(&mut self, asset_id: i64) -> Result<(), CatalogError> {
+        self.remove_entry(asset_id, LarderTier::RenderedThumb.as_str())
+    }
+
     /// Manual purge: drops every payload of one tier. Returns the live bytes freed.
     pub fn purge_tier(&mut self, tier: LarderTier) -> Result<u64, CatalogError> {
         self.purge_where("tier = ?1", tier.as_str().to_string().into(), true)
@@ -1020,6 +1030,25 @@ mod tests {
         let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
         assert_eq!(l.get_latest(1, LarderTier::Rendered).unwrap(), None);
         assert_eq!(l.stats().unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn the_rendered_thumb_tier_is_independent_of_the_rendered_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Larder::open(dir.path(), cfg(100)).unwrap();
+        let thumb = |h| LarderKey {
+            asset_id: 1,
+            tier: LarderTier::RenderedThumb,
+            render_hash: h,
+        };
+        l.put(rendered(1, "r:a"), &[2; 10]).unwrap();
+        l.put(thumb("r:a"), &[3; 5]).unwrap();
+        assert_eq!(l.purge_tier(LarderTier::RenderedThumb).unwrap(), 5);
+        assert!(l.stored_hash(1, LarderTier::Rendered).unwrap().is_some());
+        l.put(thumb("r:a"), &[3; 5]).unwrap();
+        l.forget_thumb(1).unwrap();
+        assert_eq!(l.stored_hash(1, LarderTier::RenderedThumb).unwrap(), None);
+        assert!(l.stored_hash(1, LarderTier::Rendered).unwrap().is_some());
     }
 
     #[test]
