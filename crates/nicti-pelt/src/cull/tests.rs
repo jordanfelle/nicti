@@ -999,6 +999,75 @@ fn a_chunked_mark_that_fails_midway_keeps_the_written_part_undoable() {
     assert_eq!(store.row(chunk - 1), AssetMeta::default());
 }
 
+/// #497: a mark over `OPTIMISTIC_MAX` targets is tracked as a bulk entry, which must behave like
+/// per-id counts: pending while in flight (even for unsorted ids), settled by its reply, and
+/// independent of a small mark overlapping it.
+#[test]
+fn bulk_pending_tracks_ids_until_settled() {
+    use super::{Pending, OPTIMISTIC_MAX};
+    let n = OPTIMISTIC_MAX as i64 + 10;
+    let bulk: Vec<i64> = (0..n).rev().collect();
+    let mut p = Pending::default();
+    p.add(&bulk);
+    p.add(&[3]);
+    assert!(p.contains(0) && p.contains(n - 1) && !p.contains(n));
+    p.settle(&bulk);
+    assert!(p.contains(3), "the small mark is still in flight");
+    assert!(!p.contains(0) && !p.contains(n - 1));
+    p.settle(&[3]);
+    assert!(p.is_empty());
+}
+
+/// #497: bulk replies settle bulk entries oldest-first (the worker is strictly ordered), a failed
+/// bulk settles too, and `OPTIMISTIC_MAX` itself is still counted per id.
+#[test]
+fn bulk_pending_settles_oldest_first_and_at_the_threshold() {
+    use super::{Pending, OPTIMISTIC_MAX};
+    let m = OPTIMISTIC_MAX as i64;
+    let a: Vec<i64> = (0..m + 5).collect();
+    let b: Vec<i64> = (m + 5..2 * m + 10).collect();
+    let mut p = Pending::default();
+    p.add(&a);
+    p.add(&b);
+    p.settle(&a);
+    assert!(
+        !p.contains(0) && p.contains(m + 5),
+        "A settled, B still in flight"
+    );
+    p.settle(&b);
+    assert!(p.is_empty());
+
+    let edge: Vec<i64> = (0..m).collect();
+    p.add(&edge);
+    assert!(
+        p.bulk.is_empty() && p.contains(m - 1),
+        "exactly the cap is per-id"
+    );
+    p.settle(&edge);
+    assert!(p.is_empty());
+}
+
+/// #497: a select-all-sized reply refreshes the photos already cached and doesn't flood the cache
+/// with the rest.
+#[test]
+fn bulk_reply_updates_cached_photos_only() {
+    use super::OPTIMISTIC_MAX;
+    let n = OPTIMISTIC_MAX as i64 + 100;
+    let store = FakeStore::with_ids(0..n);
+    let mut cull = CullState::new(store.clone(), || {});
+    cull.ensure([1, 2]);
+    cull.settle_all();
+    assert!(cull.meta(1).is_some());
+    cull.mark((0..n).collect(), CullAction::SetRating(Some(4)));
+    cull.settle_all();
+    assert_eq!(cull.meta(1).and_then(|m| m.rating), Some(4));
+    assert!(
+        cull.meta(n - 1).is_none(),
+        "uncached photos are read lazily"
+    );
+    assert_eq!(store.row(n - 1).rating, Some(4));
+}
+
 /// #335 scale check: the UI-thread cost of `CullState::mark` over a select-all of 1M photos (the
 /// `pending` map, the id vec handed to the worker) and of folding the 1M-row `Done` reply back in.
 /// Run by hand: `cargo test -p nicti-pelt --release mark_select_all_at_one_million -- --ignored --nocapture`.

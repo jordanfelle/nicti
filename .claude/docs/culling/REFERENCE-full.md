@@ -73,7 +73,10 @@ Full reasoning/history: `docs/decisions/culling.md`.
   `get_meta` over 1M ids 6 s and `set_meta` over 1M rows ~80 s in ONE transaction holding the catalog
   mutex (even a no-op rewrite costs ~23 us/row; a rating change ~70 us/row: the three rating indexes
   and `trg_facet_asset_update`, not the statement). `Selection::remap` over a select-all ~190 ms per
-  snapshot change. **Fixed**: the worker reads/writes in 20k-row chunks (`worker.rs` `CHUNK`), so the
+  snapshot change. **Fixed (#497)**: a mark over `OPTIMISTIC_MAX` ids is tracked as one sorted id list
+  (`cull/mod.rs` `Pending`) instead of a per-id map, and a bulk `Done` reply only refreshes already-cached
+  photos: `mark` ~4.5 ms (sorted ids; unsorted adds a sort), worst `poll` frame ~20 ms for one bulk in flight
+  (each further bulk in flight adds one binary search per reply item). **Fixed**: the worker reads/writes in 20k-row chunks (`worker.rs` `CHUNK`), so the
   mutex is held ~3 s at a stretch instead of ~80 s for other catalog users (grid snapshot/thumbnail
   reads; the marker reads queued on the same writer thread still wait for the whole run, and a
   non-worker writer can now interleave between chunks) (a mid-way failure records the written part as an
