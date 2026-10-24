@@ -153,7 +153,7 @@ fn only_the_visible_rows_are_built_and_scrolling_reveals_the_rest() {
 }
 
 /// ADR-0437: a frame's work follows the viewport, not the library. 5000 photos at 900x600 is five
-/// columns by about four rows; the bound leaves room for show_rows' partial rows, not for a library-sized loop.
+/// columns by four or five rows (20-25 cells); 30 is five columns by six rows, room for partial rows and no more.
 #[test]
 fn a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size() {
     let mut h = grid_harness(5000);
@@ -167,7 +167,7 @@ fn a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size() {
     h.run_steps(5);
     let top = per_frame(&h, &before);
     assert!(
-        top > 0 && top < 60,
+        top > 0 && top < 30,
         "built {top} of 5000 cells per frame at the top"
     );
 
@@ -177,11 +177,21 @@ fn a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size() {
     click_at(&mut h, rect.center());
     h.key_press(egui::Key::End);
     h.run_steps(4);
+    let last = h.state().session.ids()[4999];
+    assert_eq!(
+        h.state().session.cursor(),
+        Some(4999),
+        "End moved the cursor to the last photo"
+    );
+    assert!(
+        h.query_by_label(&format!("Photo {last}")).is_some(),
+        "End scrolled the last photo into view"
+    );
     let before = h.state().view.stats().clone();
     h.run_steps(5);
     let end = per_frame(&h, &before);
     assert!(
-        end > 0 && end < 60,
+        end > 0 && end < 30,
         "built {end} of 5000 cells per frame at the end"
     );
 }

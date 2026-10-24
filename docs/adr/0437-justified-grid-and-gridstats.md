@@ -9,7 +9,7 @@
 
 The LightCraft audit (#424) pointed at `crates/ui-egui/src/panels/grid.rs` (pure `layout(aspects, groups, avail_w,
 target, square)`, `rows_between` binary search, a `GridCache` keyed by the visible-list generation) and at its
-`GridStats` counters, asserted in `tests_grid.rs` (an unchanged frame rebuilds no layout or index; fewer than 300 of
+`GridStats` counters, asserted in `crates/ui-egui/src/tests_grid.rs` (an unchanged frame rebuilds no layout or index; fewer than 300 of
 3000 cells are visited per frame). Read at `265248c`; nothing is copied, so there is no `docs/licensing.md` entry.
 
 Nicti's grid (`nicti-pelt/src/grid/`) is a fixed square grid: `GridLayout { cols, cell }` is O(1) arithmetic
@@ -23,7 +23,7 @@ Nicti already had a virtualisation test (`only_the_visible_rows_are_built...`, 2
 accessibility tree) but nothing that scales the library or counts work, so a regression to "build every cell" would
 pass at 200 photos and only show as jank at 1M. This PR adds `GridStats { frames, cells_built }` to `ViewState`
 (`view.rs`) and `a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size`, which seeds 5000 photos
-and asserts fewer than 60 cells built per frame both at the top and after End. **Proved by mutation:** replacing the
+and asserts fewer than 30 cells built per frame (five columns by about four or five rows are drawn) both at the top and after End. **Proved by mutation:** replacing the
 visible-row range with `0..rows` fails it with "built 5000 of 5000 cells per frame".
 
 LightCraft's other assertions (an unchanged frame does not rebuild its layout, view or stack index) have no
@@ -37,9 +37,10 @@ It is a product call; the engineering cost is the reason for deferring it, not a
 
 - **Layout is O(n) over aspects.** LightCraft's `layout` walks every aspect ratio to place cells, and rebuilds on any
   width change. At the 1M target (#335) that is a per-resize pass over a million floats plus a million `Rect`s
-  (16 MB); it cannot run on the UI thread.
-- **Nicti's index math assumes fixed columns.** `row_of`, `indices_for_rows`, `navigate` (arrow/page keys) and the
-  thumbnail batching (`batches_for` over index ranges) all derive from `cols`. Variable-length rows need a
+  (about 20 MB with the row list); it cannot run on the UI thread.
+- **Nicti's index math assumes fixed columns.** `row_of`, `indices_for_rows` and `navigate` (arrow/page keys) derive
+  from `cols`; the thumbnail batches (`batches_for`) are fixed id blocks, but they are fed the visible index range
+  that `indices_for_rows` produces. Variable-length rows need a
   row-offset table, and every one of those must move to it. `show_rows` itself needs a uniform row height, so
   justified rows would need a custom `show_viewport` loop.
 - **Aspect data.** The catalog stores `width`/`height`. Whether those are orientation-corrected (a portrait NEF stored
