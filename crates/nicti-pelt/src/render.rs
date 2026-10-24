@@ -144,6 +144,10 @@ pub struct DevelopDoc {
     /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
     /// inverse crop transform in the way.
     pub uncropped_preview: bool,
+    /// Point Color "Visualize range" (#454): the live sample whose weight the render shows as a
+    /// grey overlay. A view setting, never saved -- the Develop panel sets it every frame it
+    /// draws the section, and `render` stamps it into the render's copy of the document.
+    pub point_color_visualize: Option<usize>,
     /// With `uncropped_preview`: keep the Upright correction (#427) in the whole-frame view. The
     /// Crop tool needs it (its rect lives in the corrected frame); heal and masks place things in
     /// source coordinates and need the uncorrected frame.
@@ -306,6 +310,7 @@ impl DevelopDoc {
             identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
+            point_color_visualize: None,
             uncropped_keeps_upright: false,
             upright_guide_mode: false,
             upright_guides: Vec::new(),
@@ -902,6 +907,9 @@ impl DevelopEngine {
             // changing) rebakes the heal stage through the normal cache-key path.
             let mut d = dv.history.document().clone();
             heal::stamp_removal_state(&mut d, &dv.removals);
+            if let Some(i) = dv.point_color_visualize {
+                nicti_tapetum::coat::stamp_point_color_visualize(&mut d, i);
+            }
             if dv.uncropped_preview {
                 // Removing the entry (rather than only ignoring it below) also gives the crop node
                 // its default hash, so the cached cropped composite can't be served back. The

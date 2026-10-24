@@ -285,6 +285,9 @@ pub fn show(
     pounce: &nicti_pounce::Pounce,
 ) {
     let mut gpu = gpu;
+    // "Visualize range" lasts only while the Point Color section is on screen (#454): the section
+    // sets it again below each frame it is drawn.
+    develop.point_color_visualize = None;
     ui.heading("Develop");
     heal_tool::tool_switch(ui, heal);
 
@@ -1226,6 +1229,15 @@ fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut Heal
         ui.small("Use the eyedropper to pick a colour, then shift or widen it.");
         return;
     }
+    let mut visualize = crate::catseye::visualize(ui.ctx());
+    if ui
+        .checkbox(&mut visualize, "Visualize range")
+        .on_hover_text("Show how strongly the selected sample selects each part of the photo")
+        .changed()
+    {
+        crate::catseye::set_visualize(ui.ctx(), visualize);
+    }
+    develop.point_color_visualize = visualize.then_some(selected);
     {
         let sample = &mut pc.samples[selected];
         slider(ui, &PC_HUE_SHIFT, &mut sample.hue_shift);

@@ -1632,7 +1632,7 @@ impl eframe::App for PeltApp {
                     let response = ui.interact(rect, ui.scope_id().with("develop_viewport"), sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
-                        ViewportCallback::identity(frame),
+                        ViewportCallback::identity(Arc::clone(&frame)),
                     ));
                     if let Some(develop) = self.develop.as_mut() {
                         if self.heal_ui.heal_active() {
@@ -1659,6 +1659,8 @@ impl eframe::App for PeltApp {
                                 rect,
                                 develop,
                                 &mut self.heal_ui,
+                                &self.gpu,
+                                &frame,
                             );
                         } else if self.heal_ui.targeted_active() {
                             crate::targeted::handle_viewport(

@@ -236,6 +236,9 @@ pub struct OkLabOps {
     pub from_lms: Mat3,
     pub grade: Option<GradeK>,
     pub points: [Option<PointK>; MAX_POINT_COLORS],
+    /// "Visualize range" (#454): the one sample being shown, held in `points[0]` with everything
+    /// else off. [`Self::apply`] then returns the sample's weight as a grey, not the photo.
+    pub visualize: bool,
 }
 
 impl OkLabOps {
@@ -246,6 +249,21 @@ impl OkLabOps {
         let to_lms = prophoto_to_lms();
         let mut slots = [None; MAX_POINT_COLORS];
         let sanitized = points.sanitized();
+        // The overlay shows the sample's weight even for a sample that changes nothing yet (a
+        // fresh pick is neutral), and nothing else: no grading, no other samples.
+        let shown = usize::from(sanitized.visualize)
+            .checked_sub(1)
+            .and_then(|i| sanitized.live().nth(i));
+        if let Some(s) = shown {
+            slots[0] = Some(PointK::new(s));
+            return Self {
+                to_lms,
+                from_lms: mat3_invert(&to_lms),
+                grade: None,
+                points: slots,
+                visualize: true,
+            };
+        }
         for (slot, s) in slots.iter_mut().zip(sanitized.live()) {
             if !s.is_noop() {
                 *slot = Some(PointK::new(s));
@@ -256,12 +274,13 @@ impl OkLabOps {
             from_lms: mat3_invert(&to_lms),
             grade: (!grade.is_noop()).then(|| GradeK::new(&grade)),
             points: slots,
+            visualize: false,
         }
     }
 
     /// True when there is nothing to do, so the shader skips the OkLab round trip entirely.
     pub fn is_noop(&self) -> bool {
-        self.grade.is_none() && self.points.iter().all(Option::is_none)
+        self.grade.is_none() && self.points.iter().all(Option::is_none) && !self.visualize
     }
 
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
@@ -272,6 +291,12 @@ impl OkLabOps {
         let mut lab = mat3_apply(M2, lms);
         if let Some(g) = &self.grade {
             lab = g.apply(lab);
+        }
+        if self.visualize {
+            let w = self.points[0].map_or(0.0, |p| {
+                p.weight(lab[0], lab[1].hypot(lab[2]), lab[2].atan2(lab[1]))
+            });
+            return [w; 3];
         }
         if self.points.iter().any(Option::is_some) {
             let mut l = lab[0];
@@ -305,6 +330,43 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3], eps: f32) -> bool {
         a.iter().zip(&b).all(|(x, y)| (x - y).abs() < eps)
+    }
+
+    #[test]
+    fn visualize_range_shows_one_samples_weight_even_when_it_changes_nothing() {
+        let colour = [0.4, 0.1, 0.1];
+        let lab = lab_from_prophoto(colour);
+        let from_colour = |hue_shift: f32, hue_offset: f32| PointColorSample {
+            lum: lab[0],
+            chroma: lab[1].hypot(lab[2]),
+            hue: (lab[2].atan2(lab[1]).to_degrees() + hue_offset).rem_euclid(360.0),
+            hue_shift,
+            ..Default::default()
+        };
+        let mut points = PointColorParams {
+            count: 2,
+            ..Default::default()
+        };
+        points.samples[0] = from_colour(0.0, 0.0);
+        points.samples[1] = from_colour(1.0, 180.0);
+        let grade = ColorGradeParams::default();
+        // Neither a fresh sample nor a far-away one changes the photo.
+        points.samples[1].hue_shift = 0.0;
+        assert!(OkLabOps::new(&grade, &points).is_noop());
+        points.visualize = 1;
+        let shown = OkLabOps::new(&grade, &points);
+        assert!(!shown.is_noop());
+        let w = shown.apply(colour);
+        assert!(w[0] > 0.99 && w[0] == w[1] && w[1] == w[2], "{w:?}");
+        // The opposite hue is not selected by sample 1, and sample 2 selects only that hue.
+        let opposite = [0.1, 0.1, 0.4];
+        assert!(shown.apply(opposite)[0] < 0.01);
+        points.visualize = 2;
+        let other = OkLabOps::new(&grade, &points);
+        assert!(other.apply(colour)[0] < 0.01);
+        // Past the live count: falls back to the real render.
+        points.visualize = 3;
+        assert!(!OkLabOps::new(&grade, &points).visualize);
     }
 
     #[test]
