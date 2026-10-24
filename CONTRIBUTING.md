@@ -97,6 +97,13 @@ outbound license (see `docs/adr/0018-third-party-license-policy.md`). `cargo den
 runs in CI against `deny.toml`'s allowlist, but that only covers Cargo dependencies, not native
 libraries or data files — those need `docs/licensing.md` updated by hand.
 
+Every tracked font, icon, image or model file also needs a row in
+[`assets/ATTRIBUTION.md`](assets/ATTRIBUTION.md) (source, license, license text path).
+`python3 scripts/check-repo-policy.py` (the `repo-policy` CI job, #537) enforces that, plus the crate
+layering: a new `crates/*` member must be added to the `LAYERS` table in that script, crates may only
+depend on the same or a lower layer, and GUI crates (`egui`/`eframe`/`winit`/`rfd`, ...) stay inside
+`nicti-pelt`.
+
 ## Issue conventions
 
 - A bare `#N` in a commit/PR/ADR/issue body means a GitHub issue or PR in this repo.

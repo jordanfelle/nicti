@@ -77,7 +77,7 @@ moved into the catalog).
 
 ## Package map
 
-`crates/*` (workspace member glob) is the production crate layout from ADR-0019 §8; `spikes/*` are throwaway research spikes not yet promoted (do not build on one; each is deleted once its ticket promotes it). The root `src/main.rs` is only a placeholder so CI/lint have something to run. Per-crate/per-spike module breakdowns live in each topic's `.claude/rules/<topic>/REFERENCE.md` ("Package contents"); the full crate/topic index is `.claude/docs/package-map/REFERENCE.md` (~22KB, NOT auto-loaded: `grep -n "<crate or topic>" .claude/docs/package-map/REFERENCE.md`).
+`crates/*` (workspace member glob) is the production crate layout from ADR-0019 §8; `spikes/*` are throwaway research spikes not yet promoted (do not build on one; each is deleted once its ticket promotes it). The root `src/main.rs` is only a placeholder so CI/lint have something to run. New `crates/*` members must be added to the `LAYERS` table in `scripts/check-repo-policy.py` (CI `repo-policy` job; also enforces GUI-crate containment and `assets/ATTRIBUTION.md` rows for fonts/images/models). Per-crate/per-spike module breakdowns live in each topic's `.claude/rules/<topic>/REFERENCE.md` ("Package contents"); the full crate/topic index is `.claude/docs/package-map/REFERENCE.md` (~22KB, NOT auto-loaded: `grep -n "<crate or topic>" .claude/docs/package-map/REFERENCE.md`).
 
 ## Development workflow
 
