@@ -105,3 +105,14 @@ Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX bui
   `nicti-lair/tests/scale.rs::select_all_mark_at_one_million_assets`,
   `cull/tests.rs::mark_select_all_at_one_million`, `grid/selection.rs::scale::remap_at_one_million_photos`
   (all `#[ignore]`, run with `--release --ignored --nocapture`).
+
+## #439: LightCraft cull heuristics and red-eye / pet-eye (ADR-0439)
+
+Research outcome from the LightCraft audit (#424); nothing lifted. `squint` and `litter` already measure more than
+`cull.rs` (Laplacian, Tenengrad, FFT ratio, structure-tensor motion/defocus, AF-region misfocus; dHash/pHash/SSIM/DINOv2
+with sequence constraints). The one new idea is a block-Laplacian p90 sharpness aggregator, to be added as a candidate
+in the #238 real-card sweep (judged per degradation class like the rest; LightCraft's calibration constant is not
+taken). Its 8x8 signature is the dHash/pHash family; clipped fraction has no ground truth (no exposure tag in the
+label set). Red-eye and pet-eye are no-go with no build ticket: Nicti's work is convention and fursuit photography,
+masks and heal cover the rare case, and the feature is a detector, a GPU kernel and an equivalence test. Start from
+LightCraft's ellipse + normalised-grid design if it is ever asked for.
