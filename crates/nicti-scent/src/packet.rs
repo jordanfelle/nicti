@@ -73,36 +73,56 @@ pub struct Patch {
     pub gps: Option<Option<Gps>>,
 }
 
-/// Prefixes under which `tag` (or an ancestor) can spell the exif namespace: every prefix it binds
-/// to [`EXIF_NS`], plus `exif` when the tag doesn't bind that prefix itself (an ancestor may).
-fn exif_prefixes(tag: &BytesStart) -> Result<Vec<String>, PatchError> {
-    let mut v = Vec::new();
-    let mut exif_bound = false;
-    for attr in tag.attributes() {
-        let attr = attr?;
-        let Some(p) = attr.key.as_ref().strip_prefix("xmlns:") else {
-            continue;
-        };
-        if p == "exif" {
-            exif_bound = true;
-            if attr.value != EXIF_NS {
-                return Err(PatchError::ExifPrefixConflict);
+/// The exif-namespace spellings in scope at `events[idx]` (a Description): every prefix bound to
+/// [`EXIF_NS`] there or on an ancestor (`""` = the default namespace), plus `exif` when nothing
+/// binds that prefix. The bool is true when `exif` is bound to some *other* namespace.
+fn exif_scope(events: &[Event<'static>], idx: usize) -> Result<(Vec<String>, bool), PatchError> {
+    let mut frames: Vec<Vec<(String, String)>> = Vec::new();
+    for (i, ev) in events.iter().enumerate().take(idx + 1) {
+        match ev {
+            Event::Start(t) | Event::Empty(t) => {
+                let mut frame = Vec::new();
+                for attr in t.attributes() {
+                    let attr = attr?;
+                    let key = attr.key.as_ref();
+                    let uri = String::from_utf8_lossy(attr.value.as_bytes()).into_owned();
+                    if key == "xmlns" {
+                        frame.push((String::new(), uri));
+                    } else if let Some(p) = key.strip_prefix("xmlns:") {
+                        frame.push((p.to_owned(), uri));
+                    }
+                }
+                frames.push(frame);
+                if matches!(ev, Event::Empty(_)) && i != idx {
+                    frames.pop();
+                }
             }
-        }
-        if attr.value == EXIF_NS {
-            v.push(p.to_owned());
+            Event::End(_) => {
+                frames.pop();
+            }
+            _ => {}
         }
     }
-    if !exif_bound {
+    let mut latest: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for (p, u) in frames.iter().flatten() {
+        latest.insert(p, u);
+    }
+    let mut v: Vec<String> = latest
+        .iter()
+        .filter(|(_, u)| **u == EXIF_NS)
+        .map(|(p, _)| (*p).to_owned())
+        .collect();
+    let conflict = latest.get("exif").is_some_and(|u| *u != EXIF_NS);
+    if !latest.contains_key("exif") {
         v.push("exif".to_owned());
     }
-    Ok(v)
+    Ok((v, conflict))
 }
 
 /// Whether `name` is any `GPS*` property of the exif namespace under one of `prefixes`.
 fn is_gps_name(name: &str, prefixes: &[String]) -> bool {
-    name.split_once(':')
-        .is_some_and(|(p, l)| l.starts_with("GPS") && prefixes.iter().any(|x| x == p))
+    let (p, l) = name.split_once(':').unwrap_or(("", name));
+    l.starts_with("GPS") && prefixes.iter().any(|x| x == p)
 }
 
 /// XMP GPS coordinate: `DDD,MM.mmmmmmK` (degrees, decimal minutes, hemisphere letter).
@@ -277,9 +297,14 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
     let desc_end_idx = matching_end(&events, desc_idx)?;
 
     // 1. Rewrite the Description tag's own attributes (Rating/Label/nicti:editDocument).
-    let gps_pfx = match &events[desc_idx] {
-        Event::Start(s) | Event::Empty(s) if patch.gps.is_some() => exif_prefixes(s)?,
-        _ => Vec::new(),
+    let gps_pfx = if patch.gps.is_some() {
+        let (v, conflict) = exif_scope(&events, desc_idx)?;
+        if conflict && matches!(&patch.gps, Some(Some(_))) {
+            return Err(PatchError::ExifPrefixConflict);
+        }
+        v
+    } else {
+        Vec::new()
     };
     let new_desc_start = {
         let (was_start, orig) = match &events[desc_idx] {
@@ -448,12 +473,11 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         }
         let mut tag = BytesStart::new(orig.name().as_ref().to_owned());
         let mut changed = false;
-        let mut later_pfx = gps_pfx.clone();
-        if patch.gps.is_some() {
-            if let Ok(own) = exif_prefixes(orig) {
-                later_pfx.extend(own);
-            }
-        }
+        let later_pfx = if patch.gps.is_some() {
+            exif_scope(&events, j)?.0
+        } else {
+            Vec::new()
+        };
         for attr in orig.attributes() {
             let attr = attr?;
             if patch_owns_attr(attr.key, patch, &later_pfx) {
@@ -1161,5 +1185,53 @@ mod tests {
             "nested resource's GPS must survive: {p}"
         );
         assert!(!p.contains("5,0N"), "{p}");
+    }
+
+    #[test]
+    fn gps_clear_sees_ancestor_and_default_namespace_bindings() {
+        let clear = Patch {
+            gps: Some(None),
+            ..Default::default()
+        };
+        let anc = format!(
+            r#"<rdf:RDF xmlns:rdf="{RDF}" xmlns:e="{EXIF}"><rdf:Description rdf:about="" e:GPSLatitude="10,0N" e:Keep="1"/></rdf:RDF>"#
+        );
+        let p = apply(&anc, &clear).unwrap();
+        assert!(!p.contains("GPS") && p.contains("e:Keep"), "{p}");
+        let g = Gps {
+            latitude: 1.0,
+            longitude: 2.0,
+            altitude: None,
+        };
+        let p = apply(
+            &anc,
+            &Patch {
+                gps: Some(Some(g)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(p.matches("GPSLatitude").count(), 1, "{p}");
+        let dflt = format!(
+            r#"<rdf:RDF xmlns:rdf="{RDF}"><rdf:Description xmlns="{EXIF}"><GPSLatitude>10,0N</GPSLatitude><Other>1</Other></rdf:Description></rdf:RDF>"#
+        );
+        let p = apply(&dflt, &clear).unwrap();
+        assert!(!p.contains("GPS") && p.contains("<Other>"), "{p}");
+    }
+
+    #[test]
+    fn gps_prefix_rebound_in_a_later_description_is_not_stripped() {
+        let xmp = format!(
+            r#"<rdf:RDF xmlns:rdf="{RDF}"><rdf:Description rdf:about="" xmlns:exif="{EXIF}"/><rdf:Description rdf:about="" xmlns:exif="urn:o" exif:GPSLatitude="9"/></rdf:RDF>"#
+        );
+        let p = apply(
+            &xmp,
+            &Patch {
+                gps: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(p.contains("exif:GPSLatitude=\"9\""), "{p}");
     }
 }
