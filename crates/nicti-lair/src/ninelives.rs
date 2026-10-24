@@ -542,6 +542,30 @@ mod tests {
         BackupPolicy::new(dir.to_path_buf(), "cat".to_string())
     }
 
+    /// A file-backed snapshot must not need the catalog's shared connection, or every
+    /// `ensure_root`-style call stalls for the whole `VACUUM INTO`. Checked structurally -- hold
+    /// the mutex and require the snapshot to finish anyway -- rather than by timing a concurrent
+    /// writer, which flaked on loaded Windows runners (#563) because an I/O stall and a lock hold
+    /// look the same on a clock. Passing never waits on the timeout; it only bounds a regression.
+    #[test]
+    fn snapshot_into_does_not_need_the_shared_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = SqliteCatalog::open(&dir.path().join("live.sqlite")).unwrap();
+        let policy = policy(&dir.path().join("backups"));
+
+        let held = catalog.lock_conn_for_test();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| tx.send(snapshot_into(&catalog, &policy, 1_000)).unwrap());
+            let finished = rx.recv_timeout(Duration::from_secs(30));
+            // Release before asserting so a regressed (blocked) snapshot can finish and the scope
+            // can join instead of hanging the test run.
+            drop(held);
+            let snapshot = finished.expect("snapshot_into blocked on the shared connection");
+            assert!(snapshot.unwrap().exists());
+        });
+    }
+
     #[test]
     fn list_verified_ignores_partials_and_unrelated_files() {
         let dir = tempfile::tempdir().unwrap();
