@@ -99,6 +99,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0437](0437-justified-grid-and-gridstats.md) | — | Justified grid layout and cheap-frame assertions (GridStats) | Proposed |
 | [0438](0438-lightcraft-raw-pieces.md) | — | LightCraft DNG opcodes, LJPEG, highlight reconstruction and binned preview | Proposed |
 | [0439](0439-lightcraft-cull-and-redeye.md) | — | LightCraft cull heuristics and red-eye / pet-eye as baselines | Proposed |
+| [0440](0440-controlspec-model.md) | — | Data-driven ControlSpec for develop sliders (LightCraft audit) | Proposed |
 | [0410](0410-nef-embedded-lens-corrections.md) | — | Nikon's embedded lens-correction data as the NEF lens source (opt-in until verified) | Accepted |
 | [0380](0380-global-presence-and-effects.md) | — | Global Presence (texture/clarity/dehaze/saturation) and post-crop Effects (vignette/grain) | Accepted |
 

@@ -36,6 +36,8 @@ Full reasoning/history: `docs/decisions/develop.md`.
   isn't reachable from the sandbox this ADR was authored in, so `bench/lrc/auto-tone.ahk` takes
   its source directory as a CLI arg rather than reading a frozen file list.
 - **#46 shipped Auto with candidate A, ...
+- **ControlSpec model (#440, ADR-0440)** — no-go on a panel/preset/LRC table; conditional small typed-accessor registry with ADR-0434's `develop.get/set`. Full: `grep -nF '#440' .claude/docs/develop/REFERENCE-full.md`.
+
 ## Package contents
 
 - **`crates/nicti-pelt/src/knead/`** (#52/ADR-0052) — `mod.rs` (`GROUPS` checklist, `StageSet`,

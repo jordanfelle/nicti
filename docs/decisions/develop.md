@@ -98,3 +98,15 @@ Covers #101 (ADR-0101): what an automatic, non-interactive develop op (auto-stra
 
 - **Auto-op graceful degradation (#101)**: `docs/adr/0101-auto-op-graceful-degradation.md` — **Accepted**. Shared `AutoOutcome<T>` (`Confident`/`LowConfidence`/`NoResult` + `AutoReason`), a discrete signal rather than a float score since thresholds are untuned (#273) and calibration does not carry across degradation types (ADR-0034). Straighten skips on low confidence (a wrong rotation is worse than none) and shows a non-modal hint; tone always applies, marking low confidence. Never a modal dialog; batch/sync (#52) shows a single summary with a jump-to-skipped filter. An unchanged, `NoResult`, or skipped invocation creates no history step and keeps redo (a general `History` invariant, #312); an applied result is one entry via `apply_batch`. Partial decode → `NoResult(DecodeIncomplete)`. Implementation: #311, #312 (no-op compares effective params, absent == stage default; `compact` drops net-zero runs; `apply_batch` uses `control: None`, so it never coalesces).
   - **#311 landed**: `nicti-tapetum/src/auto.rs` (`AutoOutcome`/`AutoReason`); `autolevel::detect_level_angle` and `perk::estimate` return it. `DevelopView::apply_auto_tone`/`apply_auto_straighten` (`nicti-pelt/src/render.rs`) return `AutoApplied`: `Unchanged` (result equals the effective current params) and `Skipped` write nothing, and both refuse an incomplete frame (`DecodeIncomplete`). The hints and the `⚠` marker beside Auto are `develop_panel::AutoHintUi` (non-modal, transient). Thresholds are untuned starting points: the single-line synthetic fixture yields exactly one Hough detection, so `MIN_SUPPORTING_LINES` is 1 and line disagreement (> 3°) is the live straighten low-confidence trigger; auto-tone is degenerate at ≥ 50% clipped or ≥ 90% of pixels in one luma bin. #273 and #202 own tuning.
+
+## #440: data-driven ControlSpec (ADR-0440)
+
+Research outcome from the LightCraft audit (#424); nothing lifted. LightCraft's `controls.rs` macro table exists
+because its settings are typed fields with no path-addressable form. Nicti already has `fur::SliderSpec` (range,
+default, step, decimals, track; 61 in `develop_panel.rs`: 58 consts plus 3 inline HSL), typed stage params stored as
+JSON, generic whole-stage preset/copy machinery in knead, and a catalog-driven LRC mapping that is nonlinear and process-version
+dependent. So a table that generates panels, presets or LRC mapping is a no-go. The one real use is agent/MCP
+control: when ADR-0434's `develop.get/set` is built, add a typed-accessor registry `Control { id, spec: &SliderSpec,
+section, get, set }` whose set goes through the typed `stage_params`/`set_stage_params` round-trip (a JSON-pointer write
+is rejected: `Option` temp_k, nested wheels/bands/masks, `unwrap_or_default` resets, f32/int hash drift), with a test
+that a registry set equals a panel edit byte for byte. Spec ids are neither unique nor field addresses.
