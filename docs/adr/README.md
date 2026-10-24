@@ -95,6 +95,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0428](0428-lens-stage-ca-dng-defringe.md) | — | The lens stage (DNG-embedded profile, automatic lateral CA) and global Defringe | Accepted |
 | [0434](0434-agent-control-channel.md) | — | Agent-drivable command table, loopback control channel and MCP shim for nicti-pelt | Proposed |
 | [0435](0435-preset-import.md) | — | Preset import: .lrtemplate, .xmp and zip bundles via `agprefs` + `translate`; Luminar declined | Proposed |
+| [0436](0436-import-rename-and-devices.md) | — | Import-time rename, date folders and DCIM device detection (LightCraft audit) | Proposed |
 | [0410](0410-nef-embedded-lens-corrections.md) | — | Nikon's embedded lens-correction data as the NEF lens source (opt-in until verified) | Accepted |
 | [0380](0380-global-presence-and-effects.md) | — | Global Presence (texture/clarity/dehaze/saturation) and post-crop Effects (vignette/grain) | Accepted |
 
