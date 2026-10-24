@@ -103,9 +103,10 @@ Covers #101 (ADR-0101): what an automatic, non-interactive develop op (auto-stra
 
 Research outcome from the LightCraft audit (#424); nothing lifted. LightCraft's `controls.rs` macro table exists
 because its settings are typed fields with no path-addressable form. Nicti already has `fur::SliderSpec` (range,
-default, step, decimals, track; 61 constants in `develop_panel.rs`), stage params that are serde JSON, generic
-whole-stage preset/copy machinery in knead, and a catalog-driven LRC mapping that is nonlinear and process-version
+default, step, decimals, track; 61 in `develop_panel.rs`: 58 consts plus 3 inline HSL), typed stage params stored as
+JSON, generic whole-stage preset/copy machinery in knead, and a catalog-driven LRC mapping that is nonlinear and process-version
 dependent. So a table that generates panels, presets or LRC mapping is a no-go. The one real use is agent/MCP
-control: when ADR-0434's `develop.set` is built, add a registry `Control { spec: &SliderSpec, section, stage, path }`
-(JSON pointer, `{i}` for indexed wheels/point-colour, since spec ids like `grade.hue` are shared) plus an anti-drift
-test, instead of a compile-time macro.
+control: when ADR-0434's `develop.get/set` is built, add a typed-accessor registry `Control { id, spec: &SliderSpec,
+section, get, set }` whose set goes through the typed `stage_params`/`set_stage_params` round-trip (a JSON-pointer write
+is rejected: `Option` temp_k, nested wheels/bands/masks, `unwrap_or_default` resets, f32/int hash drift), with a test
+that a registry set equals a panel edit byte for byte. Spec ids are neither unique nor field addresses.

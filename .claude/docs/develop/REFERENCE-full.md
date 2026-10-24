@@ -55,7 +55,7 @@ Full reasoning/history: `docs/decisions/develop.md`.
 
 ## #440: data-driven ControlSpec (ADR-0440)
 
-- Research outcome, nothing lifted. No-go: a macro table that generates panels, presets or LRC mapping (`SliderSpec` already holds the range/default/step half; 61 panel sliders bind typed `&mut field`; stage params are JSON so presets/copy are already generic; LRC mapping is nonlinear/PV-dependent). Conditional go: a small registry (`Control { spec: &SliderSpec, section, stage, path (JSON pointer, `{i}` indexed) }`) added only with ADR-0434's `develop.set`, with an anti-drift test (path resolves in default params, set round-trips, every panel spec registered or listed absent). Spec ids are not field addresses (`grade.hue` is shared by all wheels). Detail: `docs/decisions/develop.md`.
+- Research outcome, nothing lifted. No-go: a macro table that generates panels, presets or LRC mapping (`SliderSpec` already holds the range/default/step half; 61 panel sliders bind typed `&mut field`; presets/copy already work on whole `StageEntry` values; LRC mapping is nonlinear/PV-dependent). Conditional go: a small typed-accessor registry (`Control { id, spec: &SliderSpec, section, get, set }`, every set through the typed `stage_params`/`set_stage_params` round-trip, with a hash-identity test) added only with ADR-0434's `develop.get/set`; a JSON-pointer registry is rejected (Option/nested fields, `unwrap_or_default` reset, f32/int hash drift). Spec ids are neither unique nor field addresses (`grade.hue` shared by all wheels, mask ids are labels). 61 specs = 58 consts + 3 inline HSL. Detail: `docs/decisions/develop.md`.
 
 ## Package contents
 

@@ -1,6 +1,6 @@
 # ADR-0440: A data-driven ControlSpec for develop sliders
 
-**Status:** Proposed (no-go on a table that generates panels or LRC mapping; conditional go on a small control registry, built with ADR-0434's `develop.set` command)
+**Status:** Proposed (no-go on a table that generates panels, presets or LRC mapping; conditional go on a small typed-accessor registry, built with ADR-0434's `develop.get/set`)
 **Ticket:** #440
 **Part of:** #424
 **Related:** #425, #434, #52, ADR-0434, ADR-0435
@@ -19,15 +19,17 @@ LightCraft's `DevelopSettings` field paths), so nothing is copied and there is n
 
 - **A slider spec.** `fur::SliderSpec` (`nicti-pelt/src/fur/slider.rs`, from #425) already carries `id`, `label`, `min`,
   `max`, `default`, `step`, `decimals`, `track`, `signed`, `unit`, `scale` and `log`. `develop_panel.rs` declares 61 of them
-  as constants (8 more in `mask_panel.rs`) and binds each at the call site: `slider(ui, &GRADE_HUE, &mut wheel.hue)`.
+  (58 `const`s plus three built inline in the HSL band loop; `mask_panel.rs` has 8 inline specs, two of them helpers that use the
+  label as the id) and binds each at the call site: `slider(ui, &GRADE_HUE, &mut wheel.hue)`.
   So LightCraft's spec half exists. What it lacks is the **address** (which stage, which field) and a **section**.
-- **Stage params are serde JSON.** An `EditDocument` is a `BTreeMap<String, StageEntry>` with `params: serde_json::Value`
-  (`nicti-pawprint`), and the panel reads and writes typed structs through `stage_params::<T>` / `set_stage_params`.
-  LightCraft needs a macro because its settings are plain typed fields with no path-addressable form; Nicti's stages
-  are already path-addressable as JSON.
+- **Stage params are typed structs stored as JSON.** An `EditDocument` is a `BTreeMap<String, StageEntry>` with
+  `params: serde_json::Value` (`nicti-pawprint`); the param structs live in `nicti-tapetum/src/coat.rs` and the panel
+  reads and writes them through the generic `stage_params::<T>` / `set_stage_params::<T>` (`render.rs`), which also
+  drops an entry equal to `T::default()` and scrubs NaN. Stage ids are in `nicti-tapetum/src/stages.rs`
+  (`nicti.exposure`, `nicti.tone`, `nicti.color_grade`, `nicti.hsl`, `nicti.wb`, ...).
 - **Generic preset and copy machinery.** knead's `Clipboard`, `StageSet`, `DevelopPreset` and `plan` work on whole
-  stage entries, and the relative-paste helper in `nicti-pawprint` adds numeric JSON fields generically. Presets
-  need no slider table.
+  `StageEntry` values, so presets and copy-paste need no slider table. (Relative paste, `apply_relative`, is deferred
+  in knead and only adds top-level numeric fields; nested wheels and bands are overwritten.)
 - **A catalog-driven LRC mapping.** `nicti-stray/src/develop/` (2018 lines, mapped on 380k real rows) translates LRC
   keys to stage params with process-version-dependent and nonlinear rules (ADR-0381, ADR-0435).
 
@@ -38,55 +40,80 @@ LightCraft's `DevelopSettings` field paths), so nothing is copied and there is n
    "write only on a real change" guard that stops opening a section from marking a photo edited. A table could
    generate the plain slider runs (Light, Detail, Effects) but not those, and it trades the compile-time binding
    `&mut field` for a string path that a typo breaks only at run time.
-2. **Spec ids are not field addresses.** `SliderSpec::id` is "unique within a panel: it salts the widget id", and
-   `grade.hue` is shared by all the grading wheels. A table keyed by address needs LightCraft's indexed templates
-   (`grade.<wheel>.hue`) from day one.
+2. **Spec ids are not field addresses, and not unique.** `SliderSpec::id` is "unique within a panel: it salts the
+   widget id". `grade.hue/sat/lum` are one const each, bound to the shadows, midtones, highlights or global wheel by a
+   selector; `hsl.hue/saturation/luminance` are rebuilt per band (8 times); mask sliders use the *label* as the id
+   ("Hue", "Temp", ...). Ids also differ from fields: `basic.temp` is `WbParams.temp_k`, `basic.exposure` is
+   `ExposureParams.stops`, `lens.defringe_purple` lives in stage `nicti.defringe`. So the existing ids can never be
+   registry keys; addresses must be new, with indexed templates for wheels and bands from day one.
 3. **Presets and copy-paste: no gain** (above).
 4. **LRC mapping: no-go.** Only the linear one-to-one keys would fit a table; the rest (process versions, curves,
    masks, profile resolution) cannot, so two mapping mechanisms would coexist. The existing `Translation.untranslated`
    report is the contract and it works.
-5. **Agent / MCP work is the one real use.** ADR-0434 slice 1 gives a pelt-local command table whose `params` are
-   described by a string. A `develop.set <control> <value>` command wants exactly the spec table's job: list
-   controls with range and default, clamp, and write by id. That is the moment to add addresses, not before.
+5. **Agent / MCP work is the one real use, and a small one at first.** ADR-0434 slice 1 lists
+   `develop.get/set` "for a few params" (and calls `develop.set` a `Mutate` command); its `Command.params` is a doc
+   string, and the ADR says nothing about ranges, schemas or clamping. A `develop.set <control> <value>` that lists
+   controls with range and default, clamps and writes by id is my inference of what it will want, not something 0434
+   states. With "a few params" the registry starts with a handful of entries, which argues against building the whole
+   table up front.
+6. **A JSON-pointer write is the risky design.** (a) `set_stage_params` is typed (`T: Serialize + DeserializeOwned +
+   Default`), so a registry that patches a raw `Value` has no `T` and would bypass the default-equals-remove rule and
+   the NaN scrub. (b) `WbParams.temp_k` is `Option<f32>` and absent from default params, and the `basic.temp` slider is
+   gated by a Manual checkbox, so "set temp" is not a bare field write. (c) Mask sliders sit in a nested list of
+   corrections (a mask index plus a field), HSL in `bands[i]`, grading in named `shadows/midtones/highlights/global`
+   fields (not a `wheels` array). (d) `coat::parse` is `from_value(...).unwrap_or_default()`, so a misspelled or
+   mistyped write silently resets the whole stage on the next read. (e) Typed `f32` fields serialise as widened `f64`
+   and `nicti-pawprint` documents that int `5500` and float `5500.0` hash differently, so a hand-written number can
+   change the edit hash and Tapetum cache keys until a typed rewrite normalises it (this is read off the code, not run
+   as a test).
 
 ## Decision
 
 ### 1. No-go: a macro table that generates panels, presets or LRC mapping
 
-### 2. Conditional go: a small control registry, built with ADR-0434's `develop.set`
+### 2. Conditional go: a small typed-accessor registry, built with ADR-0434's `develop.get/set`
 
-Do nothing until a command needs it. Then add, in `nicti-pelt`, a registry next to the existing specs:
+Do nothing until that command is built. Then add, in `nicti-pelt`, a registry that keeps the compile-time binding:
 
 ```rust
 pub struct Control {
+    pub id: &'static str,            // new, globally unique: "light.exposure", "grade.shadows.hue"
     pub spec: &'static SliderSpec,   // range, default, step, decimals, label: reused, not duplicated
-    pub section: Section,            // panel grouping, for the schema and a future search box
-    pub stage: &'static str,         // "nicti.light", "nicti.grade", ...
-    pub path: &'static str,          // JSON pointer into that stage's params: "/exposure", "/wheels/{i}/hue"
+    pub section: &'static str,       // the panel's existing fur::section key, for the schema
+    pub get: fn(&DevelopDoc) -> f32,
+    pub set: fn(&mut DevelopDoc, f32), // typed: stage_params::<T> -> mutate the field -> set_stage_params
 }
 ```
 
-- `get(doc, id)` and `set(doc, id, v)` resolve `stage` + `path` over the stage's JSON `Value`, clamp to `spec`, and
-  write back through the same `set_stage_params` route the panel uses, so the cache keys and "no write unless changed"
-  behaviour are unchanged. `{i}` is the indexed form.
-- The panel keeps its typed `&mut field` bindings. The registry **cites the same `SliderSpec` consts**, so a range
-  lives in one place.
-- **Anti-drift test:** for every `Control`, the path must resolve in the stage's default params, a `set` followed by
-  a typed read must round-trip, and every `SliderSpec` const used by a panel must be registered or listed as
-  deliberately absent. This replaces the compile-time guarantee the macro gives LightCraft.
+- Every `set` goes through the typed round-trip (`stage_params::<T>`, change one field, `set_stage_params`), so the
+  default-equals-remove rule, the NaN scrub and canonical hashing behave exactly as for a panel edit. **Invariant, with a
+  test:** a registry `set` of a value produces byte-identical stage params (and the same content hash) as the panel
+  writing that value.
+- Wheels, bands and masks are separate closures per entry (or a small generator over the four wheels and eight
+  bands), not a JSON path; `Option` fields (`temp_k`) get an explicit entry that also sets the Manual state.
+- The panel keeps its `&mut field` bindings and the registry cites the same `SliderSpec` consts, so a range lives in
+  one place. A test checks every registered `get` returns the spec default on a default document, a `set` then `get`
+  round-trips within the spec range, and (as a list, not a guarantee) which panel specs are deliberately unregistered.
+- `fur::Track` is a plain `Clone, Copy, Debug, PartialEq` enum with no egui types (the file imports egui but the enum
+  does not), so exporting it needs only `Serialize` or a numeric-only schema.
 
-`Track` variants in pelt are egui-bound (`fur::Track`); the schema exports only the numeric part (range, default,
-step, decimals, label, section).
+### 3. Cheaper wins that need no registry
+
+- Add a `section` to `SliderSpec`, or a `&[&SliderSpec]` list per panel, to get a panel search box or a schema listing
+  of ranges and labels without any address.
+- Start `develop.set` with the handful of params 0434 names and grow the registry only when a ticket needs more.
 
 ## Alternatives rejected
 
-- **Port the `controls!` macro.** It needs typed field paths Nicti's JSON-backed stages do not have, and it would
-  duplicate `SliderSpec`.
+- **Port the `controls!` macro.** It would duplicate `SliderSpec`, and Nicti's params are spread over typed stage
+  structs in another crate.
+- **A JSON-pointer registry.** See finding 6.
 - **Generate `develop_panel.rs` from a table.** See finding 1.
 - **A data-driven LRC mapping.** See finding 4.
 
 ## Consequences
 
-- No work now. The registry is a **S/M** slice inside ADR-0434's `develop.set` command, with the anti-drift test.
+- No work now. The registry is built with ADR-0434's `develop.get/set` command; starting with the few params that command
+  names it is **S**, growing it is incremental.
 - Nothing in the shipped code changes in this PR.
 - If the registry is later extended to search or a command palette, `section` is already in place.
