@@ -260,10 +260,14 @@ mod tests {
         }
     }
 
-    fn temp_store(name: &str) -> ModelStore {
-        let dir = std::env::temp_dir().join(format!("nicti-groom-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        ModelStore::new(dir)
+    /// A store in a fresh temp dir; keep the guard alive for the test, it deletes the dir on drop.
+    fn temp_store(name: &str) -> (tempfile::TempDir, ModelStore) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("nicti-groom-{name}-"))
+            .tempdir()
+            .unwrap();
+        let store = ModelStore::new(dir.path().to_path_buf());
+        (dir, store)
     }
 
     fn resolved(h: &InstallHandle) -> Option<Result<(), String>> {
@@ -274,7 +278,7 @@ mod tests {
     fn installs_every_artifact_one_chunk_each_and_tracks_bytes() {
         let (a_body, b_body) = (b"first model bytes".to_vec(), b"second".to_vec());
         let (a, b) = (artifact("a", &a_body), artifact("b", &b_body));
-        let store = temp_store("multi");
+        let (_dir, store) = temp_store("multi");
         let dl = Arc::new(Fake(vec![("a", a_body.clone()), ("b", b_body.clone())]));
         let (mut job, handle) = InstallModelsJob::new(store.clone(), dl, &[a, b]);
         assert_eq!(
@@ -304,7 +308,7 @@ mod tests {
     fn already_installed_artifacts_are_skipped_and_excluded_from_the_total() {
         let (a_body, b_body) = (b"aaaa".to_vec(), b"bbbbbbbb".to_vec());
         let (a, b) = (artifact("a2", &a_body), artifact("b2", &b_body));
-        let store = temp_store("skip");
+        let (_dir, store) = temp_store("skip");
         let dl = Arc::new(Fake(vec![("a2", a_body), ("b2", b_body.clone())]));
         let (mut first, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a]);
         assert_eq!(first.step().unwrap(), Step::Done);
@@ -319,7 +323,7 @@ mod tests {
 
     #[test]
     fn nothing_pending_finishes_immediately() {
-        let store = temp_store("empty");
+        let (_dir, store) = temp_store("empty");
         let (mut job, handle) = InstallModelsJob::new(store, Arc::new(Fake(vec![])), &[]);
         assert_eq!(handle.total.load(Ordering::Relaxed), 0);
         assert_eq!(job.step().unwrap(), Step::Done);
@@ -330,7 +334,7 @@ mod tests {
     fn a_download_failure_resolves_the_slot_and_ends_the_job_cleanly() {
         let body = b"never served".to_vec();
         let a = artifact("missing", &body);
-        let store = temp_store("fail");
+        let (_dir, store) = temp_store("fail");
         let (mut job, handle) = InstallModelsJob::new(store.clone(), Arc::new(Fake(vec![])), &[a]);
         // step() must not return Err: the scheduler would drop the job without resolving the slot.
         assert_eq!(job.step().unwrap(), Step::Done);
@@ -343,7 +347,7 @@ mod tests {
     fn cancelling_stops_the_install_and_reports_it() {
         let body = b"a body long enough to be cut off".to_vec();
         let a = artifact("cancel", &body);
-        let store = temp_store("cancel");
+        let (_dir, store) = temp_store("cancel");
         let (mut job, handle) =
             InstallModelsJob::new(store.clone(), Arc::new(Fake(vec![("cancel", body)])), &[a]);
         handle.cancel.store(true, Ordering::Relaxed);
@@ -361,7 +365,7 @@ mod tests {
         let a = artifact("corrupt", &good);
         let mut bad = good.clone();
         bad[0] ^= 0xff;
-        let store = temp_store("corrupt");
+        let (_dir, store) = temp_store("corrupt");
         let (mut job, handle) =
             InstallModelsJob::new(store.clone(), Arc::new(Fake(vec![("corrupt", bad)])), &[a]);
         assert_eq!(job.step().unwrap(), Step::Done);
@@ -373,7 +377,7 @@ mod tests {
     fn repair_replaces_a_corrupt_file_of_the_right_size_that_a_plain_install_would_skip() {
         let good = b"the real model bytes".to_vec();
         let a = artifact("repair", &good);
-        let store = temp_store("repair");
+        let (_dir, store) = temp_store("repair");
         let dl = Arc::new(Fake(vec![("repair", good.clone())]));
         let (mut first, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a]);
         assert_eq!(first.step().unwrap(), Step::Done);
@@ -401,7 +405,7 @@ mod tests {
     fn repair_leaves_intact_files_alone_and_downloads_nothing() {
         let (a_body, b_body) = (b"aaaaaa".to_vec(), b"bbbbbbbbbb".to_vec());
         let (a, b) = (artifact("ra", &a_body), artifact("rb", &b_body));
-        let store = temp_store("repair-intact");
+        let (_dir, store) = temp_store("repair-intact");
         let dl = Arc::new(Fake(vec![("ra", a_body), ("rb", b_body)]));
         let (mut install, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a, b]);
         while install.step().unwrap() == Step::Yield {}
@@ -422,7 +426,7 @@ mod tests {
     fn repair_fetches_only_the_bad_one_of_two() {
         let (a_body, b_body) = (b"aaaaaa".to_vec(), b"bbbbbbbbbb".to_vec());
         let (a, b) = (artifact("pa", &a_body), artifact("pb", &b_body));
-        let store = temp_store("repair-one");
+        let (_dir, store) = temp_store("repair-one");
         let dl = Arc::new(Fake(vec![("pa", a_body.clone()), ("pb", b_body.clone())]));
         let (mut install, _) = InstallModelsJob::new(store.clone(), dl.clone(), &[a, b]);
         while install.step().unwrap() == Step::Yield {}
@@ -439,7 +443,7 @@ mod tests {
 
     #[test]
     fn spec_is_a_foreground_cpu_download() {
-        let (job, _) = InstallModelsJob::new(temp_store("spec"), Arc::new(Fake(vec![])), &[]);
+        let (job, _) = InstallModelsJob::new(temp_store("spec").1, Arc::new(Fake(vec![])), &[]);
         let spec = job.spec();
         assert_eq!(spec.kind, JobKind::Download);
         assert_eq!(spec.lane, Lane::Cpu);
@@ -448,7 +452,8 @@ mod tests {
 
     #[test]
     fn a_job_can_be_relabelled_for_another_feature() {
-        let (job, _) = InstallModelsJob::new(temp_store("label"), Arc::new(Fake(Vec::new())), &[]);
+        let (job, _) =
+            InstallModelsJob::new(temp_store("label").1, Arc::new(Fake(Vec::new())), &[]);
         assert_eq!(job.label(), "Download AI removal models");
         assert_eq!(
             job.labelled("Download AI mask model").label(),

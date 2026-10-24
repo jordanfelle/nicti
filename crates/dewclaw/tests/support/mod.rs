@@ -11,14 +11,23 @@ use std::sync::OnceLock;
 /// process), so builds across different test files never race on the same output path,
 /// without needing a cross-process lock. Within one binary, [`build_dewclaw`] adds a
 /// subdirectory per feature set (see there).
+///
+/// It lives under cargo's `CARGO_TARGET_TMPDIR` (inside `target/`, removed by `cargo clean`) and
+/// is named after the test binary, so a rerun reuses the previous build. It used to be a fresh
+/// `/tmp/nicti-dewclaw-<pid>-<nanos>` per process that nothing ever deleted (~160MB each, 17GB
+/// after a few hundred runs, which filled a tmpfs `/tmp` and failed unrelated tests).
 fn base_target_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("nicti-dewclaw-{}-{nanos}", std::process::id()))
+        // `abi_handshake-1a2b3c4d5e6f7a8b`: the stem minus cargo's per-build hash, so the dir is
+        // stable across rebuilds of the test but still distinct per test file.
+        let exe = std::env::current_exe().expect("test binary path");
+        let stem = exe
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("test binary name");
+        let name = stem.rsplit_once('-').map_or(stem, |(name, _hash)| name);
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("dewclaw-{name}"))
     })
 }
 

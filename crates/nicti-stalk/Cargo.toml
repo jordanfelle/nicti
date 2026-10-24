@@ -15,10 +15,12 @@ thiserror = "2"
 # keeps this off the C/zstd/bzip2 defaults, none of which a release zip needs.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 # ureq's native-tls feature rides the OS trust store (Windows SChannel) rather than bundling
 # webpki-roots, whose CDLA-Permissive-2.0 license isn't on deny.toml's allowlist -- same choice,
 # same reason as nicti-shed (see its Cargo.toml). windows-only since that's the only platform
 # this download path runs on (ADR-0015's v1 scope).
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
-
