@@ -657,6 +657,15 @@ fn rgb_hue_degrees(rgb: [f32; 3], max: f32, delta: f32) -> f32 {
     (raw * 60.0).rem_euclid(360.0)
 }
 
+/// The hue [`apply_hsl`] sorts `rgb` into bands by (degrees, `0.0..360.0`), or `None` for a pixel
+/// with no hue (achromatic, or not above black) that `apply_hsl` passes through untouched.
+pub fn hsl_hue_degrees(rgb: [f32; 3]) -> Option<f32> {
+    let max = rgb[0].max(rgb[1]).max(rgb[2]);
+    let min = rgb[0].min(rgb[1]).min(rgb[2]);
+    let delta = max - min;
+    (delta > 1e-6 && max > 0.0).then(|| rgb_hue_degrees(rgb, max, delta))
+}
+
 /// Smallest signed angular distance from `hue` to `center`, in `-180.0..=180.0` degrees.
 fn hue_delta_degrees(hue: f32, center: f32) -> f32 {
     let raw = (hue - center).rem_euclid(360.0);

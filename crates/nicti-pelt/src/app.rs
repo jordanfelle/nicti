@@ -1660,6 +1660,14 @@ impl eframe::App for PeltApp {
                                 develop,
                                 &mut self.heal_ui,
                             );
+                        } else if self.heal_ui.targeted_active() {
+                            crate::targeted::handle_viewport(
+                                ui,
+                                &response,
+                                rect,
+                                develop,
+                                &mut self.heal_ui,
+                            );
                         } else if self.heal_ui.crop_active() {
                             crate::develop_panel::handle_viewport_gesture(
                                 ui, &response, rect, develop,
