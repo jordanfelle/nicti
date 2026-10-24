@@ -25,12 +25,25 @@ pub struct ViewState {
     /// Set when the cursor moved by keyboard (or from the loupe): the next frame scrolls just far
     /// enough to bring its row into view.
     reveal_cursor: bool,
+    /// Cumulative per-frame work counters (ADR-0437), read by the swat tests.
+    pub(crate) stats: GridStats,
 }
 
 impl ViewState {
     pub fn reveal_cursor(&mut self) {
         self.reveal_cursor = true;
     }
+}
+
+/// Cumulative work counters of the grid (ADR-0437): tests assert that a frame's cost follows the
+/// viewport, not the library size, so a regression to "build every cell" fails a number instead of
+/// only showing up as jank at 1M photos.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GridStats {
+    /// Frames drawn with a loaded, non-empty grid.
+    pub frames: u64,
+    /// Cells built (allocated and painted), across all frames.
+    pub cells_built: u64,
 }
 
 /// What the user asked for this frame.
@@ -203,6 +216,8 @@ pub fn show(
     }
 
     let cursor = session.cursor();
+    state.stats.frames += 1;
+    let mut cells_built = 0u64;
     let mut visible_rows = 0..0;
     let output = scroll.show_rows(ui, CELL, layout.rows(total), |ui, rows| {
         visible_rows = rows.clone();
@@ -213,6 +228,7 @@ pub fn show(
                     if index >= total {
                         break;
                     }
+                    cells_built += 1; // ADR-0437: swat test asserts this stays <30/frame
                     let id = session.ids()[index];
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::splat(CELL), Sense::click());
@@ -254,6 +270,7 @@ pub fn show(
             });
         }
     });
+    state.stats.cells_built += cells_built; // ADR-0437: asserted <30/frame in swat/tests_grid.rs
     state.scroll_y = output.state.clamped_offset().y;
     state.viewport_h = output.inner_rect.height();
 
