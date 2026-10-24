@@ -40,7 +40,7 @@ property test (result fits, 1% larger does not), which is what LightCraft's own 
 covers centred crops; the off-centre clamp is a separate piece of work in the same ticket. #379 (LRC `CropAngle` on
 import) may need the same helper, and the ticket says to check that first. The ticket also has to decide what happens to saved or imported
 `CropParams` that already poke out of the rotated frame (clamp on load, or only on the next edit); the develop panel
-already guards against stale persisted crops (`develop_panel.rs`, around the `start_rect` comment).
+only guards against stale persisted crops during an edge drag (`develop_panel.rs`, the `start_rect` comment; it clamps each edge to the unrotated source rect). That is not a rotated-frame constraint, so it does not answer the question.
 
 ### 3. Container walkers (`container.rs`, `iptc.rs`): no build
 
@@ -78,12 +78,14 @@ rechecks after 15 s. It was written for per-frame grid and Info-panel queries.
 The tickets it was meant to inform are closed, each solved its own way: #332 (drive probe off the UI thread) with a
 stepped background probe in `folder_panel.rs` and a test (`a_hung_drive_probe_does_not_hold_back_the_catalog`); #327
 (cache-cap shrink / purge) by running the work as a Pounce `CacheOpJob` instead of on the UI thread
-(`cache_settings.rs`). Neither used an existence cache. A grep
-of `nicti-pelt/src` for `exists()` / `metadata(` finds no per-frame filesystem call in the grid; the non-test hits are
+(`cache_settings.rs`). Neither was an existence problem (a blocked probe, and a long
+lock hold), so neither needed an existence cache. The grid
+module (`nicti-pelt/src/grid/`) makes no filesystem calls at all (grepped for `exists`, `metadata`, `is_file`, `is_dir`,
+`try_exists`; non-test hits elsewhere in `nicti-pelt/src` are listed here); the non-test hits are
 `check_is_dir` (user-triggered, one `metadata` call, deliberately reports real errors), `xmp_sync::raw_path_for` (on the
 writer thread), and `t2.rs` / `camera_profiles.rs` / `eyeshine.rs` (off the UI thread). Other hits were not traced:
 `folder_panel.rs` (`mounted_drives`, behind the stepped probe), `lrc_import.rs`, `folder_dialog.rs`,
-`knead/presets.rs`. That was a grep, not a trace of every frame path. If a future view (a Missing Photos list) does need per-row existence on the UI thread, this file is the
+`knead/presets.rs`. The Info panel and other views were not traced frame by frame. If a future view (a Missing Photos list) does need per-row existence on the UI thread, this file is the
 design to start from, and ADR-0071's offline semantics already say what "offline" means.
 
 ### 6. XMP merge (`xmp_merge.rs`, `xmp.rs`): no build
@@ -101,8 +103,11 @@ Per-vendor maker-note IFD header and offset-base handling for Nikon, Sony, Fuji,
 ExifTool's tag documentation. Nicti already walks the Nikon MakerNote (`walk_nikon_maker_note` in
 `nicti-cornea/src/embedded/ifd.rs`) and reads Nikon AF areas in the culling spike (`spikes/squint/src/af.rs`, Z8
 `AFInfo2` only, unverified against more bodies per #239); `nicti-iris/src/nikon.rs` is the separate lens-correction blob
-decoder (#410), not a maker-note parser. Other vendors come from LibRaw. The target is #239 (AF points): the Nikon path
-exists but is narrow, and a multi-vendor locator is not a goal. It would also need a `licensing.md` row. Not worth it.
+decoder (#410), not a maker-note parser. Other vendors come from LibRaw. The target is #239 (AF points). Narrow is the right size
+for now: the reference library and benchmark sets are Nikon Z8 (`docs/benchmarks.md`), the other vendors' layouts could
+not be checked against any real file Nicti has, and a locator built from ExifTool's tag docs would add a
+`licensing.md` row for no verifiable result. If Nicti gains a second body, widening the Nikon path comes first and
+this decision is revisited. It would also need a `licensing.md` row. Not worth it.
 
 ## Alternatives rejected
 
