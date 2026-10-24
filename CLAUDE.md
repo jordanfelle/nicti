@@ -20,7 +20,7 @@ file under the line-count gate. Each topic has:
   of reasoning. Not auto-loaded by Claude Code, but a normal repo doc any contributor can read.
 
 Topics: `language-and-architecture` (0015/0021/0019/0218 v1 target, 0214 v2-only), `licensing` (0018/0066, 0069),
-`gpu-gui-and-healing` (0016/0068/0050/0051, 0434, 0437), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026, 0436),
+`gpu-gui-and-healing` (0016/0068/0050/0051, 0434, 0437), `catalog-engine` (0067/0102/0106/0103/0107, 0113/0115/0116, 0025, 0026, 0436, 0441),
 `preview-tiers` (0029, 0143, 0072, 0145), `raw-decoder` (0037, 0438), `volume-identity` (0071, 0024), `color` (0038, 0042, 0381),
 `lrc-migration` (0061, 0062, 0156, 0158, 0380, 0381, 0432, 0435), `masking` (0048, 0049, 0353), `culling` (0032, 0033, 0034, 0035, 0108, 0439), `denoise` (0040),
 `xmp-interop` (0059), `render-graph` (0044, 0047, 0380, 0381, 0410, 0427, 0428, 0432), `develop` (0099, 0053, 0101, 0052, 0440), `jobs` (0054), `export` (0056, 0057),
