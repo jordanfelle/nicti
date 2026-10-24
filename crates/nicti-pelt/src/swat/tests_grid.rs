@@ -158,12 +158,12 @@ fn only_the_visible_rows_are_built_and_scrolling_reveals_the_rest() {
 fn a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size() {
     let mut h = grid_harness(5000);
     let per_frame = |h: &egui_kittest::Harness<'static, Rig>, before: &view::GridStats| {
-        let s = h.state().view.stats();
+        let s = &h.state().view.stats;
         let frames = s.frames - before.frames;
         assert!(frames > 0, "no frames ran");
         (s.cells_built - before.cells_built) / frames
     };
-    let before = h.state().view.stats().clone();
+    let before = h.state().view.stats.clone();
     h.run_steps(5);
     let top = per_frame(&h, &before);
     assert!(
@@ -187,7 +187,7 @@ fn a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size() {
         h.query_by_label(&format!("Photo {last}")).is_some(),
         "End scrolled the last photo into view"
     );
-    let before = h.state().view.stats().clone();
+    let before = h.state().view.stats.clone();
     h.run_steps(5);
     let end = per_frame(&h, &before);
     assert!(

@@ -25,17 +25,13 @@ pub struct ViewState {
     /// Set when the cursor moved by keyboard (or from the loupe): the next frame scrolls just far
     /// enough to bring its row into view.
     reveal_cursor: bool,
-    stats: GridStats,
+    /// Cumulative per-frame work counters (ADR-0437), read by the swat tests.
+    pub(crate) stats: GridStats,
 }
 
 impl ViewState {
     pub fn reveal_cursor(&mut self) {
         self.reveal_cursor = true;
-    }
-
-    #[cfg(test)]
-    pub fn stats(&self) -> &GridStats {
-        &self.stats
     }
 }
 
@@ -232,7 +228,7 @@ pub fn show(
                     if index >= total {
                         break;
                     }
-                    cells_built += 1;
+                    cells_built += 1; // ADR-0437: swat test asserts this stays <30/frame
                     let id = session.ids()[index];
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::splat(CELL), Sense::click());
@@ -274,7 +270,7 @@ pub fn show(
             });
         }
     });
-    state.stats.cells_built += cells_built;
+    state.stats.cells_built += cells_built; // ADR-0437: asserted <30/frame in swat/tests_grid.rs
     state.scroll_y = output.state.clamped_offset().y;
     state.viewport_h = output.inner_rect.height();
 
