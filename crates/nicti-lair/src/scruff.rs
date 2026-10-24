@@ -166,6 +166,52 @@ fn select_t0_candidate(jpegs: &[EmbeddedJpeg]) -> Option<&EmbeddedJpeg> {
         .or_else(|| jpegs.iter().filter(within_cap).max_by_key(|j| j.byte_len))
 }
 
+/// `jpeg` with an EXIF APP1 segment carrying `orientation` (1-8) inserted after SOI/JFIF, so the
+/// thumbnail decode (`nicti-pelt`'s `preview_color::decode`) can rotate it upright (#476). Returns
+/// `jpeg` unchanged for orientation 1, a JPEG that already carries its own EXIF Orientation (it
+/// wins, as for T2), or bytes that aren't a JPEG. The pixel data is never touched.
+pub(crate) fn tag_orientation(jpeg: Vec<u8>, orientation: u8) -> Vec<u8> {
+    if !(2..=8).contains(&orientation) || jpeg.get(..2) != Some(&[0xFF, 0xD8]) {
+        return jpeg;
+    }
+    let has_own = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(&jpeg))
+        .ok()
+        .is_some_and(|e| {
+            e.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .is_some()
+        });
+    if has_own {
+        return jpeg;
+    }
+    // APP1 "Exif\0\0" + little-endian TIFF with a single IFD0 entry: Orientation (SHORT, 1).
+    let mut seg: Vec<u8> = vec![0xFF, 0xE1, 0x00, 0x22];
+    seg.extend_from_slice(b"Exif\0\0");
+    seg.extend_from_slice(&[b'I', b'I', 42, 0, 8, 0, 0, 0]);
+    seg.extend_from_slice(&1u16.to_le_bytes());
+    seg.extend_from_slice(&0x0112u16.to_le_bytes());
+    seg.extend_from_slice(&3u16.to_le_bytes());
+    seg.extend_from_slice(&1u32.to_le_bytes());
+    seg.extend_from_slice(&u32::from(orientation).to_le_bytes());
+    seg.extend_from_slice(&0u32.to_le_bytes());
+    // Keep a leading JFIF APP0 first, as readers expect.
+    let mut at = 2;
+    if jpeg.get(2..4) == Some(&[0xFF, 0xE0]) {
+        if let Some(len) = jpeg.get(4..6) {
+            let end = 2 + 2 + usize::from(u16::from_be_bytes([len[0], len[1]]));
+            // A bogus APP0 length (under 2, or running off the end) means insert right after SOI.
+            if end >= 6 && end <= jpeg.len() {
+                at = end;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(jpeg.len() + seg.len());
+    out.extend_from_slice(&jpeg[..at]);
+    out.extend_from_slice(&seg);
+    out.extend_from_slice(&jpeg[at..]);
+    out
+}
+
 pub(crate) fn extract_t0_preview(path: &Path) -> Option<Preview> {
     let source = FileSource::open(path).ok()?;
     let mut walker = Walker::new(source).ok()?;
@@ -174,6 +220,13 @@ pub(crate) fn extract_t0_preview(path: &Path) -> Option<Preview> {
     let bytes = walker
         .read_range(chosen.file_offset, chosen.byte_len as usize)
         .ok()?;
+    // A RAW's rotation lives in IFD0, not in the preview JPEG (#476); a missing/odd tag just
+    // means no rotation, it must not fail the extraction.
+    let orientation = walker.ifd0_orientation().ok().flatten();
+    let bytes = match orientation {
+        Some(o) => tag_orientation(bytes, o),
+        None => bytes,
+    };
     Some(Preview {
         width: chosen.declared_width,
         height: chosen.declared_height,
@@ -456,6 +509,55 @@ fn catalog_io_error(e: std::io::Error) -> CatalogError {
 
 #[cfg(test)]
 mod tests {
+    use super::tag_orientation;
+
+    fn tiny_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let px = vec![128u8; (w * h * 3) as usize];
+        image::codecs::jpeg::JpegEncoder::new(&mut out)
+            .encode(&px, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    fn orientation_of(jpeg: &[u8]) -> Option<u32> {
+        let e = exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(jpeg))
+            .ok()?;
+        e.get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+            .value
+            .get_uint(0)
+    }
+
+    #[test]
+    fn tag_orientation_adds_a_readable_exif_orientation_and_keeps_the_pixels() {
+        let src = tiny_jpeg(16, 8);
+        let tagged = tag_orientation(src.clone(), 6);
+        assert_eq!(orientation_of(&tagged), Some(6));
+        assert_eq!(tagged.len(), src.len() + 36);
+        // Removing the inserted segment gives back the original bytes exactly.
+        let at = tagged.windows(2).position(|w| w == [0xFF, 0xE1]).unwrap();
+        assert_eq!([&tagged[..at], &tagged[at + 36..]].concat(), src);
+        assert_eq!(image::load_from_memory(&tagged).unwrap().width(), 16);
+    }
+
+    #[test]
+    fn tag_orientation_leaves_normal_foreign_and_already_tagged_jpegs_alone() {
+        let src = tiny_jpeg(16, 8);
+        assert_eq!(tag_orientation(src.clone(), 1), src);
+        assert_eq!(tag_orientation(src.clone(), 9), src);
+        assert_eq!(tag_orientation(b"not a jpeg".to_vec(), 6), b"not a jpeg");
+        let once = tag_orientation(src.clone(), 8);
+        assert_eq!(tag_orientation(once.clone(), 6), once);
+        // An explicit Orientation=1 is "absent": the container's rotation still applies.
+        let one = tag_orientation(src.clone(), 1);
+        assert_eq!(orientation_of(&one), None);
+        // A bogus APP0 length must not split a segment.
+        let mut bad = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00];
+        bad.extend_from_slice(&src[2..]);
+        let t = tag_orientation(bad, 6);
+        assert_eq!(&t[2..4], &[0xFF, 0xE1]);
+    }
     use super::*;
 
     #[test]
