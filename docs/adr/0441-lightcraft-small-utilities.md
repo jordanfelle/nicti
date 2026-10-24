@@ -38,7 +38,9 @@ rotated crop that pokes out shows smeared edge pixels. The corner test in `max_i
 (`|x|cos a + |y|sin a <= w/2`, `|x|sin a + |y|cos a <= h/2`) and is not worth porting line for line: re-derive it with a
 property test (result fits, 1% larger does not), which is what LightCraft's own test does. Only `max_inscribed_scale`
 covers centred crops; the off-centre clamp is a separate piece of work in the same ticket. #379 (LRC `CropAngle` on
-import) may need the same helper, and the ticket says to check that first.
+import) may need the same helper, and the ticket says to check that first. The ticket also has to decide what happens to saved or imported
+`CropParams` that already poke out of the rotated frame (clamp on load, or only on the next edit); the develop panel
+already guards against stale persisted crops (`develop_panel.rs`, around the `start_rect` comment).
 
 ### 3. Container walkers (`container.rs`, `iptc.rs`): no build
 
@@ -73,12 +75,15 @@ and the "in the last N" and "between" date editors; the code is not.
 LightCraft's cache answers "is this file there" from a worker-filled map, returns "assume present" for unknown paths and
 rechecks after 15 s. It was written for per-frame grid and Info-panel queries.
 
-The tickets it was meant to inform are closed: #332 (drive probe off the UI thread) is solved with a stepped background
-probe in `folder_panel.rs`, with a test (`a_hung_drive_probe_does_not_hold_back_the_catalog`), and #327 likewise. A grep
+The tickets it was meant to inform are closed, each solved its own way: #332 (drive probe off the UI thread) with a
+stepped background probe in `folder_panel.rs` and a test (`a_hung_drive_probe_does_not_hold_back_the_catalog`); #327
+(cache-cap shrink / purge) by running the work as a Pounce `CacheOpJob` instead of on the UI thread
+(`cache_settings.rs`). Neither used an existence cache. A grep
 of `nicti-pelt/src` for `exists()` / `metadata(` finds no per-frame filesystem call in the grid; the non-test hits are
 `check_is_dir` (user-triggered, one `metadata` call, deliberately reports real errors), `xmp_sync::raw_path_for` (on the
-writer thread), and `t2.rs` / `camera_profiles.rs` / `eyeshine.rs` (off the UI thread). That was a grep, not a trace of
-every frame path. If a future view (a Missing Photos list) does need per-row existence on the UI thread, this file is the
+writer thread), and `t2.rs` / `camera_profiles.rs` / `eyeshine.rs` (off the UI thread). Other hits were not traced:
+`folder_panel.rs` (`mounted_drives`, behind the stepped probe), `lrc_import.rs`, `folder_dialog.rs`,
+`knead/presets.rs`. That was a grep, not a trace of every frame path. If a future view (a Missing Photos list) does need per-row existence on the UI thread, this file is the
 design to start from, and ADR-0071's offline semantics already say what "offline" means.
 
 ### 6. XMP merge (`xmp_merge.rs`, `xmp.rs`): no build
@@ -93,9 +98,11 @@ runtime check on the write path. That is a hardening idea, not a ticket.
 ### 7. Maker-note locator (`makernote.rs`): no build
 
 Per-vendor maker-note IFD header and offset-base handling for Nikon, Sony, Fuji, Olympus and Panasonic, written from
-ExifTool's tag documentation. Nicti reads Nikon maker notes in `nicti-iris/src/nikon.rs` for the cull work and takes
-everything else from LibRaw. The target is #239 (AF points), whose Nikon case is covered by the existing parser and
-other vendors are not a goal. It would also need a `licensing.md` row. Not worth it.
+ExifTool's tag documentation. Nicti already walks the Nikon MakerNote (`walk_nikon_maker_note` in
+`nicti-cornea/src/embedded/ifd.rs`) and reads Nikon AF areas in the culling spike (`spikes/squint/src/af.rs`, Z8
+`AFInfo2` only, unverified against more bodies per #239); `nicti-iris/src/nikon.rs` is the separate lens-correction blob
+decoder (#410), not a maker-note parser. Other vendors come from LibRaw. The target is #239 (AF points): the Nikon path
+exists but is narrow, and a multi-vendor locator is not a goal. It would also need a `licensing.md` row. Not worth it.
 
 ## Alternatives rejected
 

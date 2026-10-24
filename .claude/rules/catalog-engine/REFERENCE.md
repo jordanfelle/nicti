@@ -60,7 +60,7 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 ## #441: LightCraft small utilities (ADR-0441)
 
-- Research outcome, nothing lifted. Build: #558 catalog-open failure window (Try Again / Choose Another / Quit; no "Continue Without Saving", Nicti has no in-memory catalog) and #557 crop constrained to the rotated image (max inscribed rect; sampling currently edge-clamps). Declined: container walkers (`nicti-scent` already walks JPEG APP1; IPTC is read from the LRC catalog, file IPTC waits on JPEG ingestion #371), smart-album rule editor (Nicti smart collections are a typed `hunt::Filter`; OR/NOT nesting waits on real data in #155), availability cache (#332/#327 solved differently and closed), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator. Detail: `docs/decisions/catalog-engine.md`.
+- Research outcome, nothing lifted. Build: #558 catalog-open failure window (Try Again / Choose Another / Quit; no "Continue Without Saving", Nicti has no in-memory catalog) and #557 crop constrained to the rotated image (max inscribed rect; sampling currently edge-clamps). Declined: container walkers (`nicti-scent` already walks JPEG APP1; IPTC is read from the LRC catalog, file IPTC waits on JPEG ingestion #371), smart-album rule editor (Nicti smart collections are a typed `hunt::Filter`; OR/NOT nesting waits on real data in #155), availability cache (#332 stepped probe, #327 a Pounce job; both closed, neither needed it), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (Nikon MakerNote walk is `nicti-cornea`, AF in `spikes/squint`; `nicti-iris/nikon.rs` is the lens blob). Detail: `docs/decisions/catalog-engine.md`.
 
 ## Package contents
 
