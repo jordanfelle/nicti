@@ -14,27 +14,32 @@ predicate, `run`). The UI, shortcuts, CLI, a `127.0.0.1` JSON-lines socket
 (`crates/mcp`, ~1140 lines, no async runtime) all dispatch through it. An agent can list commands,
 run them, read UI state, click a widget by name, press keys, and take a screenshot of the real app.
 
-Why Nicti would want that: the open verification tickets that need a real GPU and a real window
-(#233, #364, #365, #390, #409) are exactly the ones an agent could drive and screenshot instead of a
-human clicking. This dev host has no GPU, so an agent would drive a *remote* GPU machine the
-operator starts with the flag.
+Why Nicti would want that: GPU/UI verification today needs a human at a real window (#233 is the open
+example: validating egui against ADR-0068's measured targets in an interactive session; #364, #365, #390
+and #409 were GPU/UI test failures and a wake-loop regression found the same way). An agent that can
+drive and screenshot the real app can run those checks. This dev host has no GPU, so it would drive a
+*remote* GPU machine the operator started with the flag (see section 3 for how the token gets across).
 
 This is design only: no LightCraft code is ported, so there is no `docs/licensing.md` entry. The
 LightCraft sources below are the reference read for the questions, at the pinned commit.
 
 ### What nicti-pelt looks like today (verified in the tree)
 
-- **No command table, no menu bar.** The only `menu_button` is the Color menu (`color_mgmt.rs`).
+- **No command table, no menu bar.** There is no `MenuBar`; the only `menu_button`s are the Color menu (`color_mgmt.rs`) and the
+  Apply-preset menu (`knead/ui.rs`).
   Actions are methods on `PeltApp` (`request_export`, `handle_knead_action(PanelAction)`,
   `save_develop_edits`, ...) called from widgets.
-- **Shortcuts are inline.** About 40 `consume_shortcut` / `key_pressed` / `consume_key` sites in 14
+- **Shortcuts are inline.** About 40 `consume_shortcut` / `key_pressed` / `consume_key` sites in 13
   files (`app.rs`, `grid/view.rs`, `cull/*`, `mask_panel.rs`, `heal_tool.rs`, ...). So the issue's
   "menus generated from one table (`menus.rs`, `shortcuts.rs`)" has no pelt equivalent to replace:
   those files do not exist here.
 - **All state is on `PeltApp`** (`view`, grid selection, `develop`, `cull`, ...), driven from
   `eframe::App::ui` once per frame. There is no `Session`-style engine object a command could take.
-- **#426 landed `swat/`**: egui_kittest + a CPU softpaint rasteriser, finding widgets by AccessKit
-  label. It cannot draw the wgpu photo viewport (paint callbacks), by design.
+- **#426 landed `swat/`** (`#[cfg(test)]` only): egui_kittest + a CPU softpaint rasteriser, finding
+  widgets by AccessKit label. It cannot draw the wgpu photo viewport (paint callbacks), by design, and
+  it did **not** deliver the named-widget registry its title mentions; section 4 adds one.
+- `PeltApp` implements only `eframe::App::ui`, not `logic`. eframe 0.37 runs **no egui pass** while the
+  window is hidden or minimised (it calls only `logic`), and throttles invisible windows to 100 ms.
 - The layering check (`scripts/check-repo-policy.py`) allows egui/eframe/accesskit only in
   `nicti-pelt` and the root `nicti` binary. Anything GUI-aware has to live in pelt.
 
@@ -63,7 +68,7 @@ Entries wrap the existing `PeltApp` methods; they do not move logic. `Risk` is t
 LightCraft: it gates what the channel may do (section 3). `enabled` returning the *reason* (as
 LightCraft does) is kept, because "why is Export greyed out" is the question an agent keeps hitting.
 
-Shortcut and menu metadata are **not** in the table in slice 1. They are a later migration (section 5).
+Shortcut and menu metadata are **not** in the table in slice 1. They are a later migration (section 6).
 
 ### 2. Execution model: the UI thread, between frames
 
@@ -72,8 +77,17 @@ and calls `ctx.request_repaint()`. `PeltApp::ui` drains the channel at the top o
 command on the UI thread (so it sees and mutates `PeltApp` with no locking), and sends the reply.
 LightCraft does the same and caps a request at 60 s.
 
-Latency: an idle window is woken by `request_repaint`, so the cost is one frame (~16 ms) plus the
-command. A command that must wait for a frame to *play out* (injected clicks, a render finishing)
+**Drain in `logic` as well as `ui`.** eframe runs no egui pass for a hidden or minimised window, so a
+drain only in `ui` would leave every request to time out. `PeltApp` therefore implements
+`eframe::App::logic` to drain the queue and run `Read`/`Mutate` *commands* (which touch `PeltApp`, not
+egui input), and the app sends `ViewportCommand::RequestPaintWhileHidden` while the channel is on so
+frame-dependent work still happens. Injected pointer/key input and screenshots need a painted frame;
+they reply with an explicit "window not visible" error rather than waiting out the timeout.
+
+Latency: a visible idle window is woken by `request_repaint`, so the cost is one frame (~16 ms) plus
+the command. A long catalog or delete job running inside `ui` stalls every reply until the 30 s cap.
+Replies for frame-dependent requests are sent after the frame that shows their effect, not from the
+top of it. A command that must wait for a frame to *play out* (injected clicks, a render finishing)
 replies after that, which is why `ui.settle` exists in LightCraft. We copy that, with a deadline loop
 (poll until idle or timeout), never a fixed sleep.
 
@@ -83,18 +97,34 @@ LightCraft's channel has no auth; it relies on loopback plus a line cap and "fir
 object with a `method`", which stops a web page's cross-origin `fetch` from smuggling a command in an
 HTTP body. We keep all of that and add:
 
-- **Opt-in.** Off unless `--control[=PORT]` or `NICTI_CONTROL_PORT` is set. Bind `127.0.0.1` only
-  (never `0.0.0.0`; remote use goes through SSH forwarding).
-- **Random token.** 128 bits from the OS RNG, written to a `0600` file under `$XDG_RUNTIME_DIR`
-  (falls back to the app data dir). The first line on a connection must be `{"auth":"<token>"}`; a
-  wrong token or any non-object first line closes the connection. This closes the case LightCraft's
-  framing check does not: another local user or process on a shared host connecting to the port.
-- **Caps.** Line length 1 MiB (LightCraft: 4 MiB; we have no 4 MiB request), 4 concurrent connections
-  (LightCraft: 16; one agent is the use case), per-request timeout 30 s.
-- **Risk gate.** `Read` and `Mutate` commands always run. `Destructive` ones (delete from disk,
-  anything that writes outside the catalog or an operator-given export dir) need
-  `--control-allow-destructive`. Path parameters from the channel are resolved and checked like any
-  other external input before use; a command never takes a raw shell string.
+- **Opt-in.** Off unless `--control[=PORT]` or `NICTI_CONTROL_PORT` is set (parsed in the root
+  `nicti` binary's `main.rs` and passed into `nicti_pelt::run`). Bind `127.0.0.1` only (never
+  `0.0.0.0`). `PORT` defaults to 0 (OS-assigned); the **actual bound port is written into the token
+  file**, so a predictable port cannot be pre-bound by another local user to harvest the token.
+- **Random token.** 128 bits from the OS RNG, compared in constant time, in a file created atomically
+  (`O_EXCL`, mode `0600` at creation, not chmod afterwards) under `$XDG_RUNTIME_DIR` (Windows: the
+  per-user local app data dir, relying on its default ACL; Unix `0600` has no Windows meaning), removed
+  on exit; a stale file from a crashed run is replaced, and a second instance gets its own file named by
+  PID. The first line on a connection must be `{"auth":"<token>"}`, received within 5 s; a wrong token,
+  a timeout or any non-object first line closes the connection. This closes the case LightCraft's
+  framing check does not: another local user or process connecting to the port.
+- **Remote use.** The token file lives on the machine running the app. Over `ssh -L` the operator
+  copies the file (`scp`, or `ssh host cat ...`) next to the shim, or passes it with
+  `--token-file`/`NICTI_CONTROL_TOKEN`; the shim does not read the remote filesystem by itself.
+- **Caps.** Line length 1 MiB (LightCraft: 4 MiB; we have no 4 MiB request), 4 concurrent
+  *authenticated* connections, plus at most 4 unauthenticated ones each held for no more than the 5 s
+  auth deadline (so idle sockets cannot lock the agent out), per-request timeout 30 s.
+- **Risk gate.** `Read` always runs. `Mutate` is limited to the catalog and develop state; it never takes
+  a filesystem path from the channel. `Destructive` needs `--control-allow-destructive`: deleting or
+  shredding files, writing anything to a channel-supplied path (export destination, screenshot `path`),
+  and confirming any delete dialog. `export.run` is `Destructive` unless it targets a destination the
+  operator passed on the command line (`--control-export-dir`). `develop.set` writes XMP sidecars via
+  the normal autosave path; that is the app's existing, undoable edit path (Ctrl+Z), and is `Mutate`.
+  **Raw input injection (click, key, drag) is gated like `Destructive` commands for any widget on a
+  delete/confirm dialog**: those dialogs do not register their buttons while the flag is off, so an agent
+  cannot click through them. Channel-supplied paths, where allowed, are canonicalised and opened with
+  no-follow semantics where the OS supports it; a command never takes a raw shell string. Screenshots
+  return the image bytes (base64) by default and write to a path only under the flag.
 
 A threat we do not mitigate: anything running as the same user can read the token file and drive the
 app. That is the same trust boundary as the user's own session and catalog, and is why the channel is
@@ -108,7 +138,7 @@ off by default.
   lines, as in LightCraft's `widgets.rs`) called from the widgets worth driving, populated only while
   the channel is on. Clicks and drags are synthesised as real egui `Event`s at the rect. We do not
   turn on eframe's `accesskit` feature in the shipped binary just for this: it is off here
-  (`default-features = false`), costs runtime and a platform dependency, and the registry covers the
+  (`default-features = false`), costs the `egui-winit` AccessKit adapter at runtime, and the registry covers the
   custom-painted widgets (grid cells, sliders) AccessKit would need extra annotation for anyway.
   `swat` keeps using AccessKit in tests; the two do not need to agree.
 - **Screenshot**: `egui::ViewportCommand::Screenshot` (delivers a `ColorImage` on a later frame; works
@@ -117,9 +147,13 @@ off by default.
 
 ### 5. The MCP shim
 
-A separate binary target, not part of the GUI process: stdio JSON-RPC in, the control socket out, no
+A **new non-GUI crate with its own `[[bin]]`** (a `[[bin]]` inside `nicti-pelt` would link egui), not
+part of the GUI process. It needs a `LAYERS` entry in `scripts/check-repo-policy.py`; the shared wire
+types (request/response structs, token-file format) live in that crate and are depended on *by*
+`nicti-pelt` (layer 6), so the crate sits below it. Name per the feline convention, e.g. `nicti-whisker`
+is taken by `bench/whisker`, so pick another at implementation time. stdio JSON-RPC in, the control socket out, no
 async runtime. `tools/list` is generated from the app's own `commands` reply (id, `params` doc,
-`risk`), plus fixed `inspect`, `widgets`, `click`, `key`, `screenshot`. It reads the token file and
+`risk`), plus fixed `inspect`, `widgets`, `click`, `key`, `screenshot`. It reads the token file (or `--token-file`) and
 reconnects if the app restarts (LightCraft's connect mode). It needs only `serde_json`, so it can sit
 in a non-GUI layer; it must not depend on egui.
 
@@ -145,9 +179,10 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
 - **Slices (estimates are relative effort, not calendar):**
   1. Command table + `inspect` + a first set of commands (`view.set`, `grid.select`, `photo.rate`,
      `develop.get/set` for a few params, `export.run`), exercised in-process through `swat`. **M**
-  2. Loopback listener, token, caps, risk gate, widget registry, click/key/drag injection, `settle`. **M**
-  3. Screenshot via `ViewportCommand::Screenshot`, and the MCP shim binary + `docs/` page + a
-     `.mcp.json` example. **M**
+  2a. Loopback listener, token file, caps, auth deadline, `logic`-drain, risk gate. **M**
+  2b. Widget registry, click/key/drag injection, `settle`, confirm-dialog gating. **M**
+  3a. Screenshot via `ViewportCommand::Screenshot` (needs a visible frame). **S**
+  3b. The MCP shim crate + `docs/` page + a `.mcp.json` example. **M**
   4. Command palette over the table. **S** after slice 1. Shortcut migration: **L**, optional.
   Slice 1 alone is shippable and useful (it is the test seam for the headless harness).
 - **Cost of keeping the registry honest:** a widget not registered is invisible to an agent; there is no
