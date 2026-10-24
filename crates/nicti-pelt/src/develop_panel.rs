@@ -1237,7 +1237,8 @@ fn show_point_color(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut Heal
     {
         crate::catseye::set_visualize(ui.ctx(), visualize);
     }
-    develop.point_color_visualize = visualize.then_some(selected);
+    // Not while the eyedropper is armed: it samples the rendered frame, which must be the photo.
+    develop.point_color_visualize = (visualize && !heal.point_color_active()).then_some(selected);
     {
         let sample = &mut pc.samples[selected];
         slider(ui, &PC_HUE_SHIFT, &mut sample.hue_shift);
