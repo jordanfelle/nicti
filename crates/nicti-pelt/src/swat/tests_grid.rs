@@ -152,6 +152,40 @@ fn only_the_visible_rows_are_built_and_scrolling_reveals_the_rest() {
     );
 }
 
+/// ADR-0437: a frame's work follows the viewport, not the library. 5000 photos at 900x600 is five
+/// columns by about four rows; the bound leaves room for show_rows' partial rows, not for a library-sized loop.
+#[test]
+fn a_frame_builds_only_the_cells_near_the_viewport_whatever_the_library_size() {
+    let mut h = grid_harness(5000);
+    let per_frame = |h: &egui_kittest::Harness<'static, Rig>, before: &view::GridStats| {
+        let s = h.state().view.stats();
+        let frames = s.frames - before.frames;
+        assert!(frames > 0, "no frames ran");
+        (s.cells_built - before.cells_built) / frames
+    };
+    let before = h.state().view.stats().clone();
+    h.run_steps(5);
+    let top = per_frame(&h, &before);
+    assert!(
+        top > 0 && top < 60,
+        "built {top} of 5000 cells per frame at the top"
+    );
+
+    // The far end of the library costs the same as the top.
+    let first = h.state().session.ids()[0];
+    let rect = h.get_by_label(&format!("Photo {first}")).rect();
+    click_at(&mut h, rect.center());
+    h.key_press(egui::Key::End);
+    h.run_steps(4);
+    let before = h.state().view.stats().clone();
+    h.run_steps(5);
+    let end = per_frame(&h, &before);
+    assert!(
+        end > 0 && end < 60,
+        "built {end} of 5000 cells per frame at the end"
+    );
+}
+
 #[test]
 fn clicking_moves_the_cursor_and_ctrl_click_builds_a_selection() {
     let mut h = grid_harness(200);

@@ -107,3 +107,14 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
   1 MiB line cap, 4 connections and a `Destructive` risk gate; a widget-rect registry (not AccessKit) for clicks; screenshots
   via `ViewportCommand::Screenshot`; a separate stdio MCP shim. Rebindable shortcuts need a separate migration of ~40 inline
   key sites and are out of scope.
+
+## #437: justified grid layout and GridStats (ADR-0437)
+
+Research outcome from the LightCraft audit (#424). The assertion pattern was adopted: `GridStats { frames,
+cells_built }` on `ViewState`, and a swat test that seeds 5000 photos and asserts fewer than 60 cells built per frame
+at the top and the end (failing with "built 5000 of 5000" when the visible-row range is replaced by every row).
+Justified rows and date headers are deferred: LightCraft's layout is O(n) over all aspects (a per-resize pass over 1M
+photos, #335), Nicti's `row_of`/`indices_for_rows`/`navigate`/`batches_for` and `show_rows` all assume fixed columns,
+and whether catalog `width`/`height` are orientation-corrected is unverified. If wanted: a chunked, Pounce-built
+row-offset index keyed on (generation, width bucket, target height), `partition_point` for the visible rows, and a
+`layout_builds` counter asserted flat across unchanged frames.
