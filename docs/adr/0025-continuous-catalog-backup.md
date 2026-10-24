@@ -29,16 +29,14 @@ is a spare one for the catalog):
 1. **Snapshot from a second, independent read-only connection**
    (`SqliteCatalog::open_snapshot_reader`), never the shared `Mutex<Connection>`. WAL mode lets a
    reader run alongside the writer, so the ~2s `VACUUM INTO` never blocks a real catalog query.
-   Exercised, not just asserted from WAL's documented semantics:
-   `tests/ninelives.rs::snapshot_completes_without_waiting_for_a_slower_concurrent_writer` runs a
-   deliberately-paced background writer thread and confirms the snapshot returns well before the
-   writer's own bounded wall-clock pace finishes, with neither side erroring or deadlocking. That
-   test's own doc comment is explicit about its limit: at this small a row count, a snapshot
-   completes quickly regardless of which connection performs it, so this specific timing
-   comparison doesn't distinguish "correct" from "accidentally reverted to the shared connection"
-   the way it would at the 2M-row scale ADR-0067 actually measured (2.0s/2.5s p50/p95) — it's real
-   evidence, not a tautology, but not a substitute for a reference-hardware pass at that scale
-   either. An in-memory catalog (tests only, `SqliteCatalog::path()` is `None`) has no file to
+   Exercised, not just asserted from WAL's documented semantics, by two deterministic unit tests
+   in `ninelives.rs`: `snapshot_into_does_not_need_the_shared_connection` (holds the mutex, the
+   snapshot must still finish) and `snapshot_into_runs_while_another_connection_holds_a_write_transaction`
+   (an open `BEGIN IMMEDIATE` on a second connection, the snapshot must still finish). An earlier
+   timing-based test (a paced writer thread, asserting on its longest gap) was replaced in #563:
+   it flaked on a loaded Windows runner because an I/O stall and a lock hold look identical on a
+   clock. Neither test is a substitute for a reference-hardware pass at the 2M-row scale ADR-0067
+   measured (2.0s/2.5s p50/p95). An in-memory catalog (tests only, `SqliteCatalog::path()` is `None`) has no file to
    reopen, so it falls back to `SqliteCatalog::vacuum_into_locked`, which does briefly hold the
    lock — acceptable there since nothing else contends for an in-memory test catalog's connection.
 2. **Write-then-verify-then-rename.** A snapshot lands at `<stem>.<epoch>.sqlite.partial` first.
@@ -208,9 +206,6 @@ guard against.
 Not reference-hardware-measured this pass (unlike several other ADRs in this repo) — ADR-0067
 already measured `VACUUM INTO`'s own timing (2.0/2.5s p50/p95 at 2M rows) as part of its engine
 comparison; this ticket's own tests instead exercise the *concurrency* property that measurement
-didn't cover (a real writer thread still making progress, and the snapshot itself returning
-without waiting for it,
-`tests/ninelives.rs::snapshot_completes_without_waiting_for_a_slower_concurrent_writer` — see its
-own doc comment for the honest limit of what a small-scale timing test like this can and can't
-distinguish), plus correctness of verification, rotation, and scheduling — all fast, deterministic,
-no hardware dependency.
+didn't cover (the snapshot returning without needing the shared connection or waiting on an open
+write transaction, the two `snapshot_into_*` unit tests in `ninelives.rs`), plus correctness of verification, rotation, and scheduling — all fast,
+deterministic, no hardware dependency.

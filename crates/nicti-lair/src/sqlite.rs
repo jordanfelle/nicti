@@ -623,6 +623,13 @@ impl SqliteCatalog {
         )?)
     }
 
+    /// Test hook: holds the shared connection mutex, standing in for a long-running writer, so a
+    /// test can assert that a code path does *not* need it (`ninelives::snapshot_into`).
+    #[cfg(test)]
+    pub(crate) fn lock_conn_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
     /// Runs `VACUUM INTO ?1` (bound, never interpolated) on the *locked* main connection --
     /// `ninelives::snapshot_into`'s only path for an in-memory catalog, since there's no file to
     /// open a second, independent read-only connection onto. Never used for a file-backed catalog

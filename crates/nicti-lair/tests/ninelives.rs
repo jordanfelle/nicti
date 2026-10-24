@@ -1,12 +1,11 @@
 //! Integration tests for #25's Nine Lives backup (`nicti_lair::ninelives`) against a real,
 //! file-backed SQLite catalog -- unit tests in `ninelives.rs` itself already cover the pure
-//! filename/scheduling logic; these exercise the parts that need a real file on disk: a
-//! concurrent writer during the snapshot, a corrupted live catalog, stale `.partial` cleanup
-//! across two separate runs, and `BackupJob` driven through a real `nicti_pounce::Pounce` the way
+//! filename/scheduling logic (and that a snapshot doesn't hold the shared connection, #563); these
+//! exercise the parts that need a real file on disk: a corrupted live catalog, stale `.partial`
+//! cleanup across two separate runs, and `BackupJob` driven through a real `nicti_pounce::Pounce` the way
 //! the activity panel actually would.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,160 +25,10 @@ fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     cond()
 }
 
-/// Stops and joins a background writer thread when dropped, so a panic in the test body can't
-/// leave it detached and still inserting rows while other tests run.
-struct WriterGuard {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl WriterGuard {
-    /// Signals the writer to stop and waits for it (propagating a panic inside the writer).
-    fn finish(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
-            handle.join().unwrap();
-        }
-    }
-}
-
-impl Drop for WriterGuard {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
-            // Already unwinding (or `finish` already ran): don't turn a second panic into an abort.
-            let _ = handle.join();
-        }
-    }
-}
-
 fn open_catalog(dir: &Path) -> (SqliteCatalog, std::path::PathBuf) {
     let path = dir.join("test.catalog.sqlite");
     let catalog = SqliteCatalog::open(&path).unwrap();
     (catalog, path)
-}
-
-#[test]
-fn snapshot_completes_without_waiting_for_a_slower_concurrent_writer() {
-    let dir = tempfile::tempdir().unwrap();
-    let (catalog, catalog_path) = open_catalog(dir.path());
-    let catalog = Arc::new(catalog);
-    let volume_id = catalog.upsert_volume("vol", None, None, 1000).unwrap();
-
-    let policy = BackupPolicy::for_catalog(&catalog_path);
-
-    // A writer thread that keeps writing, paced by a small sleep, until told to stop. It runs for
-    // exactly as long as the backup does, whatever the hardware: an earlier version raced a fixed
-    // ~600 ms of paced writes against `run_backup`'s own duration and flaked (#314) whenever a
-    // loaded CI runner made the backup slower than the writer's budget.
-    const WRITER_DELAY: Duration = Duration::from_millis(3);
-
-    // Give the backup real work: a few dozen MB of filler pages in the same database file (a
-    // second connection is fine alongside `catalog`'s own under WAL), so `VACUUM INTO` takes
-    // long enough that a writer *blocked* behind the snapshot is unmistakable. Without this the
-    // catalog is a few KB, the backup takes ~3 ms, and the assertion below would pass whether or
-    // not the snapshot held the shared connection (verified by mutation).
-    {
-        let filler = rusqlite::Connection::open(&catalog_path).unwrap();
-        filler
-            .execute("CREATE TABLE filler (b BLOB NOT NULL)", [])
-            .unwrap();
-        filler.execute("BEGIN", []).unwrap();
-        for _ in 0..96 {
-            filler
-                .execute("INSERT INTO filler VALUES (zeroblob(1048576))", [])
-                .unwrap();
-        }
-        filler.execute("COMMIT", []).unwrap();
-    }
-    let progress = Arc::new(AtomicUsize::new(0));
-    // When each write *completed*. A writer blocked behind the snapshot only completes its write
-    // once the backup releases the connection, so its timestamp lands after the backup's end;
-    // counting bare progress instead would credit that write to the backup window, because the
-    // unblocked writer can win the race to the counter (verified by mutation).
-    let stamps = Arc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    let writer_catalog = catalog.clone();
-    let writer_progress = progress.clone();
-    let writer_stamps = stamps.clone();
-    let writer_stop = stop.clone();
-    let writer = std::thread::spawn(move || {
-        let mut i = 0usize;
-        while !writer_stop.load(Ordering::SeqCst) {
-            std::thread::sleep(WRITER_DELAY);
-            writer_catalog
-                .ensure_root(volume_id, &format!("root-{i}"))
-                .unwrap();
-            writer_stamps.lock().unwrap().push(Instant::now());
-            writer_progress.fetch_add(1, Ordering::SeqCst);
-            i += 1;
-        }
-    });
-    let mut writer = WriterGuard {
-        stop: stop.clone(),
-        handle: Some(writer),
-    };
-
-    // Wait until the writer has genuinely started (and is now mid-pace) before snapshotting, so
-    // the assertion below can't pass merely because the writer thread hadn't been scheduled yet.
-    assert!(
-        wait_until(
-            || progress.load(Ordering::SeqCst) > 0,
-            Duration::from_secs(30)
-        ),
-        "writer thread never made any progress"
-    );
-
-    let started = Instant::now();
-    let report = run_backup(&catalog, &policy, 1_000).unwrap();
-    let ended = Instant::now();
-    let backup_took = ended - started;
-
-    writer.finish();
-    // The longest stretch inside the backup window in which the writer completed nothing. The
-    // snapshot only holds the shared connection for the `VACUUM INTO` step (not the verification
-    // that follows), so a *count* of writes during the backup can't tell the cases apart -- a
-    // blocked writer still lands writes before and after the lock. A stall does show up as one
-    // long gap between consecutive writes, of about the `VACUUM INTO`'s duration, while a paced
-    // 3 ms writer that is never blocked has only scheduler-noise gaps.
-    let max_gap = {
-        let stamps = stamps.lock().unwrap();
-        let mut points = vec![started];
-        points.extend(
-            stamps
-                .iter()
-                .copied()
-                .filter(|t| *t > started && *t < ended),
-        );
-        points.push(ended);
-        points
-            .windows(2)
-            .map(|w| w[1] - w[0])
-            .max()
-            .unwrap_or_default()
-    };
-    // The property: `run_backup` (specifically its `snapshot_into` step, which opens its own
-    // independent read-only connection for a file-backed catalog rather than reusing the shared
-    // `Mutex<Connection>` -- see that function's own doc comment) must not hold the connection
-    // every `ensure_root` call goes through. If it did, the writer would make *no* progress for
-    // for the duration of the `VACUUM INTO` -- one long gap between its paced 3 ms writes.
-    assert!(
-        backup_took >= Duration::from_millis(50),
-        "the backup took only {backup_took:?}: too fast for this test to mean anything -- grow \
-         the filler"
-    );
-    // Measured (mutating `snapshot_into` to use the shared connection): the longest writer stall
-    // is ~80% of the backup when the snapshot blocks it, ~15% when it doesn't -- so "under half"
-    // separates them with margin on both sides, and scales with the machine instead of racing a
-    // fixed budget (#314).
-    assert!(
-        max_gap * 2 < backup_took,
-        "the writer stalled for {max_gap:?} of a {backup_took:?} backup -- something now blocks \
-         writers behind the snapshot"
-    );
-
-    assert!(matches!(report.outcome, BackupOutcome::Verified(_)));
 }
 
 #[test]
