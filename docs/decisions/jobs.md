@@ -246,6 +246,30 @@ bound: [#466](https://github.com/jordanfelle/nicti/issues/466). Not modeled: RAM
 decoded-ahead frames, the shared `EditingGate`. Full table and commands in `docs/adr/0054`'s
 "Follow-up measurement (#206)" section.
 
+## #466: the unchunked mask bake is the accepted foreground-preemption bound (for now)
+
+Decision: **(c) accept and document the bound**; chunking and the lane move are deferred to a
+measured follow-up ([#574](https://github.com/jordanfelle/nicti/issues/574)).
+
+- **The bound.** `MaskBakeJob` (`Lane::Gpu`) runs one `backend.bake` per `step()`, and neither
+  `ort::Session::run` nor a CPU inference can be interrupted mid-call, so a *different* foreground
+  job queued behind an in-flight bake waits up to one whole bake: ~1.0s CUDA (ADR-0048's
+  hypothesis, **not yet measured**) or ~9s on the CPU provider (ADR-0048's build update, the
+  no-GPU-pack default). A user-requested bake is itself foreground; the bound bites a foreground
+  request behind an earlier bake or a Background pre-bake (#353).
+- **Why not (b), moving CPU-provider bakes to `Lane::Cpu`.** `job.rs` relies on the GPU lane's one
+  serial worker to keep the shared backend and its ONNX Runtime environment from being entered
+  twice, and to serialize bakes against `RemoveJob` and `UnloadIdleJob` (tearing down a session
+  touches the ORT environment). A bake on `Lane::Cpu` would break that, and a 9s bake would hold
+  the CPU lane's decode slots, moving the stall onto foreground decode instead of removing it.
+  Doing it safely needs a separate ORT-environment story, not a one-line lane change.
+- **Why not (a), chunking, now.** It means tiled/strip inference or a cancel-aware runner in
+  `birefnet.rs`, which can't be validated without the model on the reference machine, and the
+  issue itself says to measure the real bake time first. No measurement was possible this pass
+  (no GPU or model on the dev host), so no figure here is new.
+- **Pending the follow-up:** measure the bake on the RTX 5080, re-run
+  `crouch sim --lanes two --mask-bake-ms <measured>`, then decide chunking vs. lane split.
+
 ## #57: `Pounce::submitter()` for chained jobs
 
 The export pipeline chains decode → render → encode jobs, so a running job has to submit its

@@ -209,7 +209,7 @@ the real worst-case foreground-preemption bound — was resolved for decode by #
 sim modeled one serial worker timeline across all three stage types for simplicity, but #55's real
 runtime runs CPU-only decode on its own lane, and re-running the sim that way (`--lanes two`) takes
 decode out of the bound entirely. The unchunked mask bake (~1s on CUDA, ~9s on CPU) is the
-remaining gap: #466.
+remaining gap: #466, accepted and documented for now (see `docs/decisions/jobs.md`); measuring and chunking it is #574.
 
 ## Cross-compile / reference-machine notes
 
