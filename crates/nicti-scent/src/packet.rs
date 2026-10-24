@@ -33,6 +33,7 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use thiserror::Error;
 
+use crate::gpx::Gps;
 use crate::lrc_fields::Rating;
 
 #[derive(Debug, Error)]
@@ -64,11 +65,58 @@ pub struct Patch {
     pub nicti_edit_document: Option<Option<String>>,
     /// `Some(true)` writes `nicti:pick="1"`; `Some(false)` removes it.
     pub nicti_pick: Option<bool>,
+    /// `Some(Some(g))` writes the `exif:GPS*` properties; `Some(None)` removes them (#431).
+    pub gps: Option<Option<Gps>>,
+}
+
+const GPS_KEYS: [&str; 6] = [
+    "exif:GPSVersionID",
+    "exif:GPSLatitude",
+    "exif:GPSLongitude",
+    "exif:GPSAltitude",
+    "exif:GPSAltitudeRef",
+    "exif:GPSMapDatum",
+];
+
+/// XMP GPS coordinate: `DDD,MM.mmmmmmK` (degrees, decimal minutes, hemisphere letter).
+fn xmp_coord(v: f64, pos: char, neg: char) -> String {
+    let hemi = if v < 0.0 { neg } else { pos };
+    let a = v.abs();
+    let mut deg = a.floor();
+    let mut min = ((a - deg) * 60.0 * 1e6).round() / 1e6;
+    if min >= 60.0 {
+        deg += 1.0;
+        min = 0.0;
+    }
+    format!("{},{:.6}{}", deg as u32, min, hemi)
+}
+
+/// The `exif:GPS*` attribute pairs for `g`.
+fn gps_attrs(g: &Gps) -> Vec<(&'static str, String)> {
+    let mut v = vec![
+        ("exif:GPSVersionID", "2.2.0.0".to_owned()),
+        ("exif:GPSLatitude", xmp_coord(g.latitude, 'N', 'S')),
+        ("exif:GPSLongitude", xmp_coord(g.longitude, 'E', 'W')),
+        ("exif:GPSMapDatum", "WGS-84".to_owned()),
+    ];
+    if let Some(alt) = g.altitude.filter(|a| a.is_finite()) {
+        // rational with centimetre precision; Ref 1 = below sea level
+        v.push((
+            "exif:GPSAltitude",
+            format!("{}/100", (alt.abs() * 100.0).round() as u64),
+        ));
+        v.push((
+            "exif:GPSAltitudeRef",
+            if alt < 0.0 { "1" } else { "0" }.to_owned(),
+        ));
+    }
+    v
 }
 
 const NICTI_NS: &str = "https://nicti.dev/xmp/1.0/";
 const XMP_NS: &str = "http://ns.adobe.com/xap/1.0/";
 const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
+const EXIF_NS: &str = "http://ns.adobe.com/exif/1.0/";
 const LR_NS: &str = "http://ns.adobe.com/lightroom/1.0/";
 
 fn local_name(qname: QName) -> String {
@@ -162,6 +210,7 @@ fn patch_owns_attr(key: QName, patch: &Patch) -> bool {
         || (key.as_ref() == "xmp:Label" && patch.label.is_some())
         || (is_local(key, "editDocument") && patch.nicti_edit_document.is_some())
         || (key.as_ref() == "nicti:pick" && patch.nicti_pick.is_some())
+        || (patch.gps.is_some() && GPS_KEYS.contains(&key.as_ref()))
 }
 
 /// Whether the child element at `ev` is a block `patch` owns.
@@ -174,6 +223,7 @@ fn patch_owns_child(ev: &Event<'static>, patch: &Patch) -> bool {
         || (is_local(name, "hierarchicalSubject") && patch.hierarchical_keywords.is_some())
         || (name.as_ref() == "xmp:Rating" && patch.rating.is_some())
         || (name.as_ref() == "xmp:Label" && patch.label.is_some())
+        || (patch.gps.is_some() && GPS_KEYS.contains(&name.as_ref()))
 }
 
 /// Applies `patch` to `xmp`, returning the full patched packet text.
@@ -207,8 +257,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             _ => unreachable!(),
         };
         let mut new_tag = BytesStart::new(orig.name().as_ref().to_owned());
-        let (mut saw_nicti_ns, mut saw_xmp_ns, mut saw_dc_ns, mut saw_lr_ns) =
-            (false, false, false, false);
+        let (mut saw_nicti_ns, mut saw_xmp_ns, mut saw_dc_ns, mut saw_lr_ns, mut saw_exif_ns) =
+            (false, false, false, false, false);
         for attr in orig.attributes() {
             let attr = attr?;
             let key = attr.key;
@@ -224,10 +274,14 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             if key.as_ref() == "nicti:pick" && patch.nicti_pick.is_some() {
                 continue;
             }
+            if patch.gps.is_some() && GPS_KEYS.contains(&key.as_ref()) {
+                continue;
+            }
             match key.as_ref() {
                 "xmlns:xmp" => saw_xmp_ns = true,
                 "xmlns:dc" => saw_dc_ns = true,
                 "xmlns:lr" => saw_lr_ns = true,
+                "xmlns:exif" => saw_exif_ns = true,
                 _ => {}
             }
             if key.as_ref() == "xmlns:nicti" {
@@ -259,6 +313,14 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 new_tag.push_attribute(("xmlns:nicti", NICTI_NS));
             }
             new_tag.push_attribute(("nicti:pick", "1"));
+        }
+        if let Some(Some(g)) = &patch.gps {
+            if !saw_exif_ns {
+                new_tag.push_attribute(("xmlns:exif", EXIF_NS));
+            }
+            for (k, v) in gps_attrs(g) {
+                new_tag.push_attribute((k, v.as_str()));
+            }
         }
         // Every prefix this write emits must be bound. A rating-only packet (the shape LRC and the
         // in-repo SAMPLE use) may declare `xmp` but not `dc`/`lr`; redeclaring the standard URI on
@@ -292,7 +354,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
     //    the Description's own attributes.
     let mut skip: Vec<bool> = vec![false; events.len()];
     let touches_keywords = patch.keywords.is_some() || patch.hierarchical_keywords.is_some();
-    let touches_children = touches_keywords || patch.rating.is_some() || patch.label.is_some();
+    let touches_children =
+        touches_keywords || patch.rating.is_some() || patch.label.is_some() || patch.gps.is_some();
     if touches_children && new_desc_start.0 {
         let mut i = desc_idx + 1;
         while i < desc_end_idx {
@@ -304,6 +367,7 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 || (is_hier && patch.hierarchical_keywords.is_some())
                 || (is_rating && patch.rating.is_some())
                 || (is_label && patch.label.is_some())
+                || patch_owns_child(&events[i], patch)
             {
                 let block_end = matching_end(&events, i)?;
                 for s in skip.iter_mut().take(block_end + 1).skip(i) {
@@ -463,6 +527,100 @@ mod tests {
     use crate::lrc_fields;
 
     const SAMPLE: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmp:Rating="3" crs:WhiteBalance="Custom"/></rdf:RDF></x:xmpmeta>"#;
+
+    #[test]
+    fn gps_coordinates_format_as_xmp_degrees_decimal_minutes() {
+        assert_eq!(xmp_coord(46.0005, 'N', 'S'), "46,0.030000N");
+        assert_eq!(xmp_coord(-33.9, 'N', 'S'), "33,54.000000S");
+        assert_eq!(xmp_coord(-0.5, 'E', 'W'), "0,30.000000W");
+        // minutes that round up to 60 carry into the degrees
+        assert_eq!(xmp_coord(10.99999999999, 'N', 'S'), "11,0.000000N");
+    }
+
+    #[test]
+    fn patching_gps_writes_replaces_and_clears() {
+        let g = Gps {
+            latitude: 46.0005,
+            longitude: -7.001,
+            altitude: Some(-12.345),
+        };
+        let p = apply(
+            SAMPLE,
+            &Patch {
+                gps: Some(Some(g)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            p.contains("xmlns:exif=\"http://ns.adobe.com/exif/1.0/\""),
+            "{p}"
+        );
+        assert!(p.contains("exif:GPSLatitude=\"46,0.030000N\""), "{p}");
+        assert!(p.contains("exif:GPSLongitude=\"7,0.060000W\""), "{p}");
+        assert!(
+            p.contains("exif:GPSAltitude=\"1235/100\"") && p.contains("exif:GPSAltitudeRef=\"1\""),
+            "{p}"
+        );
+        assert!(
+            p.contains("crs:WhiteBalance=\"Custom\"") && p.contains("xmp:Rating=\"3\""),
+            "{p}"
+        );
+        // re-patching replaces rather than duplicating, and keeps the one namespace binding
+        let g2 = Gps {
+            latitude: 1.0,
+            longitude: 2.0,
+            altitude: None,
+        };
+        let p2 = apply(
+            &p,
+            &Patch {
+                gps: Some(Some(g2)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(p2.matches("exif:GPSLatitude=").count(), 1, "{p2}");
+        assert_eq!(p2.matches("xmlns:exif=").count(), 1, "{p2}");
+        assert!(
+            !p2.contains("GPSAltitude"),
+            "stale altitude must not survive: {p2}"
+        );
+        let p3 = apply(
+            &p2,
+            &Patch {
+                gps: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!p3.contains("GPS"), "{p3}");
+        assert!(p3.contains("xmp:Rating=\"3\""), "{p3}");
+    }
+
+    #[test]
+    fn patching_gps_replaces_element_form_properties() {
+        let xmp = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:exif="http://ns.adobe.com/exif/1.0/"><exif:GPSLatitude>10,0.000000N</exif:GPSLatitude><exif:DateTimeOriginal>2026-05-01T10:00:00</exif:DateTimeOriginal></rdf:Description></rdf:RDF>"#;
+        let g = Gps {
+            latitude: 20.0,
+            longitude: 30.0,
+            altitude: None,
+        };
+        let p = apply(
+            xmp,
+            &Patch {
+                gps: Some(Some(g)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!p.contains("10,0.000000N"), "{p}");
+        assert!(p.contains("exif:GPSLatitude=\"20,0.000000N\""), "{p}");
+        assert!(
+            p.contains("DateTimeOriginal"),
+            "other exif: properties are preserved: {p}"
+        );
+    }
 
     #[test]
     fn patching_rating_preserves_unrelated_namespaces() {

@@ -16,6 +16,7 @@
 
 pub mod conflict;
 pub mod embedded;
+pub mod gpx;
 pub mod lrc_fields;
 pub mod packet;
 pub mod sidecar;
