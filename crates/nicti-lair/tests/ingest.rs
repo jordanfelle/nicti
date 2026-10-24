@@ -540,3 +540,104 @@ fn a_corrupt_jpeg_is_still_catalogued_without_a_preview() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn our_own_thumb_sidecars_are_not_ingested_as_assets() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_nef(dir.path(), "DSC_1.NEF");
+    std::fs::write(dir.path().join("DSC_1.NEF.thumb.jpg"), encode_jpeg(64, 48)).unwrap();
+    let root_id = fresh_root(&store);
+
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.added, 1);
+    assert!(store
+        .find_asset_by_path(root_id, "DSC_1.NEF.thumb.jpg")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_jpeg_asset_never_reads_or_writes_the_raws_xmp_sidecar() {
+    use nicti_lair::scent_sync::{import_sidecar, write_sidecar, SyncOutcome};
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_nef(dir.path(), "DSC_1.NEF");
+    let jpg = dir.path().join("DSC_1.JPG");
+    std::fs::write(&jpg, encode_jpeg(64, 48)).unwrap();
+    let xmp = dir.path().join("DSC_1.xmp");
+    std::fs::write(&xmp, b"raw's sidecar").unwrap();
+    let root_id = fresh_root(&store);
+    ingest_root(&store, root_id, dir.path()).unwrap();
+    let asset = store
+        .find_asset_by_path(root_id, "DSC_1.JPG")
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        write_sidecar(&store, asset.id, &jpg, 1).unwrap(),
+        SyncOutcome::NoSidecar
+    ));
+    assert!(matches!(
+        import_sidecar(&store, asset.id, &jpg, 1).unwrap(),
+        SyncOutcome::NoSidecar
+    ));
+    assert_eq!(std::fs::read(&xmp).unwrap(), b"raw's sidecar");
+    assert!(store.sidecar_state(asset.id).unwrap().is_none());
+}
+
+#[test]
+fn a_downscaled_t0_keeps_the_sources_icc_profile() {
+    use image::ImageEncoder;
+    let (w, h) = (1024u32, 512u32);
+    let px = vec![90u8; (w * h * 3) as usize];
+    let mut src = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new(&mut src);
+    enc.set_icc_profile(vec![7u8; 300]).unwrap();
+    enc.write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("wide.jpg"), &src).unwrap();
+    let root_id = fresh_root(&store);
+    ingest_root(&store, root_id, dir.path()).unwrap();
+    let asset = store
+        .find_asset_by_path(root_id, "wide.jpg")
+        .unwrap()
+        .unwrap();
+    let t0 = store
+        .get_preview(asset.id, PreviewTier::T0)
+        .unwrap()
+        .unwrap();
+    assert!(t0.bytes.windows(11).any(|w| w == b"ICC_PROFILE"));
+}
+
+#[test]
+fn a_grid_sized_jpeg_over_the_byte_cap_is_reencoded_not_stored_verbatim() {
+    let mut jpeg = encode_jpeg(64, 48);
+    // A 9 MB comment segment (COM, 0xFFFE) split into <=64 KB pieces after SOI.
+    let mut padded = jpeg[..2].to_vec();
+    for _ in 0..150 {
+        padded.extend_from_slice(&[0xFF, 0xFE, 0xFF, 0xFF]);
+        padded.extend(std::iter::repeat_n(b'x', 0xFFFD));
+    }
+    padded.extend_from_slice(&jpeg.split_off(2));
+    assert!(padded.len() > 8 * 1024 * 1024);
+
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("fat.jpg"), &padded).unwrap();
+    let root_id = fresh_root(&store);
+    ingest_root(&store, root_id, dir.path()).unwrap();
+    let asset = store
+        .find_asset_by_path(root_id, "fat.jpg")
+        .unwrap()
+        .unwrap();
+    let t0 = store
+        .get_preview(asset.id, PreviewTier::T0)
+        .unwrap()
+        .unwrap();
+    assert!(t0.bytes.len() < 1024 * 1024);
+    assert_eq!((t0.width, t0.height), (Some(64), Some(48)));
+}

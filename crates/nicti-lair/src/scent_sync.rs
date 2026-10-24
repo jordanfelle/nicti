@@ -350,6 +350,9 @@ pub fn import_sidecar(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
+    if !owns_sidecar(raw_path) {
+        return Ok(SyncOutcome::NoSidecar);
+    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = sidecar_path(raw_path);
     let prior = store.sidecar_state(asset_id)?;
@@ -453,6 +456,13 @@ pub fn import_sidecar(
     }
 }
 
+/// `false` for a JPEG asset (#489). `IMG.xmp` belongs to the RAW of a RAW+JPEG pair, and a JPEG's
+/// XMP is embedded (#371), so every sidecar entry point below treats a JPEG as having no sidecar
+/// rather than reading or overwriting the RAW's.
+fn owns_sidecar(raw_path: &Path) -> bool {
+    !crate::scruff::is_jpeg(raw_path)
+}
+
 /// catalog -> sidecar. Call after every marker change when auto-write is on.
 pub fn write_sidecar(
     store: &dyn CatalogStore,
@@ -460,6 +470,9 @@ pub fn write_sidecar(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
+    if !owns_sidecar(raw_path) {
+        return Ok(SyncOutcome::NoSidecar);
+    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     write_locked(store, asset_id, raw_path, now_ms, false)
 }
@@ -472,6 +485,9 @@ pub fn mark_catalog_dirty(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<(), ScentSyncError> {
+    if !owns_sidecar(raw_path) {
+        return Ok(());
+    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = sidecar_path(raw_path);
     let mut state = state_for(&path, store.sidecar_state(asset_id)?);
@@ -489,6 +505,9 @@ pub fn mark_catalog_dirty_many(
 ) -> Result<(), ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     for (asset_id, raw_path) in items {
+        if !owns_sidecar(raw_path) {
+            continue;
+        }
         let path = sidecar_path(raw_path);
         let mut state = state_for(&path, store.sidecar_state(*asset_id)?);
         state.catalog_dirty_since_ms = Some(now_ms);
@@ -506,6 +525,9 @@ pub fn resolve_review(
     use_catalog: bool,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
+    if !owns_sidecar(raw_path) {
+        return Ok(SyncOutcome::NoSidecar);
+    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if use_catalog {
         return write_locked(store, asset_id, raw_path, now_ms, true);

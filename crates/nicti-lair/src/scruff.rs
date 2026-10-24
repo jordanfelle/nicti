@@ -38,9 +38,11 @@ const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg"];
 /// preview).
 const T0_LONG_EDGE: u32 = 512;
 
-/// Largest JPEG ingest will decode for a T0 downscale. A file over this is still catalogued, just
-/// without a preview, so a hostile or absurd file can't pin a worker on a decode.
+/// Largest JPEG (file bytes, and declared pixels) ingest will read for a T0. A file over either
+/// is still catalogued, just without a preview, so a hostile or absurd file can't pin a worker or
+/// balloon memory in one `step()`. 200 MP is ~600 MB of RGB8, above any real camera JPEG.
 const MAX_JPEG_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_JPEG_PIXELS: u64 = 200_000_000;
 
 fn has_extension(path: &Path, list: &[&str]) -> bool {
     path.extension()
@@ -48,7 +50,7 @@ fn has_extension(path: &Path, list: &[&str]) -> bool {
         .is_some_and(|ext| list.contains(&ext.to_lowercase().as_str()))
 }
 
-fn is_jpeg(path: &Path) -> bool {
+pub(crate) fn is_jpeg(path: &Path) -> bool {
     has_extension(path, JPEG_EXTENSIONS)
 }
 
@@ -251,7 +253,12 @@ fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
         .ok()?
         .into_dimensions()
         .ok()?;
-    if w.max(h) <= T0_LONG_EDGE {
+    if u64::from(w) * u64::from(h) > MAX_JPEG_PIXELS {
+        return None;
+    }
+    // Verbatim only while the file itself stays within the RAW T0 byte cap (an APPn/ICC blob can
+    // make a tiny image huge); otherwise it is re-encoded below like a large one.
+    if w.max(h) <= T0_LONG_EDGE && bytes.len() as u64 <= MAX_T0_PREVIEW_BYTES {
         return Some((
             Preview {
                 width: Some(w),
@@ -262,17 +269,33 @@ fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
             h,
         ));
     }
-    let img = image::load_from_memory(&bytes).ok()?;
-    let thumb = img
-        .resize(
+    use image::{ImageDecoder, ImageEncoder};
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let icc = decoder.icc_profile().ok().flatten();
+    let img = image::DynamicImage::from_decoder(decoder).ok()?;
+    // Never upscale: a small file only lands here for its byte size.
+    let thumb = if w.max(h) <= T0_LONG_EDGE {
+        img.to_rgb8()
+    } else {
+        img.resize(
             T0_LONG_EDGE,
             T0_LONG_EDGE,
             image::imageops::FilterType::Triangle,
         )
-        .to_rgb8();
+        .to_rgb8()
+    };
     let (tw, th) = thumb.dimensions();
     let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+    // Carry the source profile so a wide-gamut JPEG's T0 isn't read as sRGB.
+    if let Some(icc) = icc {
+        let _ = encoder.set_icc_profile(icc);
+    }
+    encoder
         .encode(thumb.as_raw(), tw, th, image::ExtendedColorType::Rgb8)
         .ok()?;
     let orientation = exif::Reader::new()
@@ -337,7 +360,13 @@ fn candidate_files(root_path: &Path) -> impl Iterator<Item = Result<PathBuf, wal
         if !entry.file_type().is_file() {
             return None;
         }
-        let wanted = has_extension(entry.path(), RAW_EXTENSIONS) || is_jpeg(entry.path());
+        // Our own `X.NEF.thumb.jpg` sidecars (#72) end in .jpg but are never assets.
+        let is_sidecar = entry
+            .file_name()
+            .to_str()
+            .is_some_and(crate::thumb_sidecar::is_sidecar_name);
+        let wanted =
+            !is_sidecar && (has_extension(entry.path(), RAW_EXTENSIONS) || is_jpeg(entry.path()));
         wanted.then(|| Ok(entry.into_path()))
     })
 }
@@ -463,11 +492,6 @@ fn sync_sidecar(
     raw_path: &Path,
     report: &mut IngestReport,
 ) {
-    // `IMG.xmp` belongs to the RAW of a RAW+JPEG pair, so a JPEG asset must not claim it. JPEG
-    // XMP is read and written embedded, which is #371's scope.
-    if is_jpeg(raw_path) {
-        return;
-    }
     match crate::scent_sync::import_sidecar(store, asset_id, raw_path, now_unix() * 1000) {
         Ok(crate::scent_sync::SyncOutcome::NeedsReview) => report.sidecar_review += 1,
         Ok(_) => {}
