@@ -22,6 +22,15 @@ pub struct Gps {
     pub altitude: Option<f64>,
 }
 
+impl Gps {
+    /// Finite, in range, and an altitude that fits the XMP rational (|alt| <= 100 km).
+    pub fn is_valid(&self) -> bool {
+        self.latitude.abs() <= 90.0
+            && self.longitude.abs() <= 180.0
+            && self.altitude.is_none_or(|a| a.abs() <= 100_000.0)
+    }
+}
+
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -42,6 +51,9 @@ fn num(s: &str) -> Option<i64> {
 /// in minutes if the text carried one). `sep` is `-` (ISO) or `:` (EXIF).
 fn parse_civil(s: &str) -> Option<(f64, Option<i64>)> {
     let s = s.trim();
+    if !s.is_ascii() {
+        return None;
+    }
     let b = s.as_bytes();
     if b.len() < 19 || !(b[4] == b'-' || b[4] == b':') || b[7] != b[4] {
         return None;
@@ -51,7 +63,15 @@ fn parse_civil(s: &str) -> Option<(f64, Option<i64>)> {
     }
     let (y, mo, d) = (num(&s[0..4])?, num(&s[5..7])?, num(&s[8..10])?);
     let (h, mi, sec) = (num(&s[11..13])?, num(&s[14..16])?, num(&s[17..19])?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = match mo {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    // second 60 (a leap second) would collide with the next minute's :00, so it is rejected
+    if !(1..=12).contains(&mo) || !(1..=dim).contains(&d) || h > 23 || mi > 59 || sec > 59 {
         return None;
     }
     let mut rest = &s[19..];
@@ -71,7 +91,11 @@ fn parse_civil(s: &str) -> Option<(f64, Option<i64>)> {
             && (z.starts_with('+') || z.starts_with('-'))
             && z.as_bytes()[3] == b':' =>
         {
-            let m = num(&z[1..3])? * 60 + num(&z[4..6])?;
+            let (zh, zm) = (num(&z[1..3])?, num(&z[4..6])?);
+            if zh > 14 || zm > 59 {
+                return None;
+            }
+            let m = zh * 60 + zm;
             Some(if z.starts_with('-') { -m } else { m })
         }
         _ => return None,
@@ -220,7 +244,7 @@ pub fn parse_gpx(s: &str) -> Result<Tracklog, GpxError> {
                         return Err(GpxError::TooComplex);
                     }
                     path.push(name);
-                } else if name == "trkpt" {
+                } else if name == "trkpt" && parent == Some("trkseg") {
                     finish_point(&mut log, pt.take(), segment)?;
                 }
             }
@@ -232,7 +256,7 @@ pub fn parse_gpx(s: &str) -> Result<Tracklog, GpxError> {
                 match name.as_str() {
                     "ele" if parent == Some("trkpt") => {
                         if let Some(p) = pt.as_mut() {
-                            p.ele = text.trim().parse().ok();
+                            p.ele = text.trim().parse().ok().filter(|e: &f64| e.is_finite());
                         }
                     }
                     "time" if parent == Some("trkpt") => {
@@ -244,6 +268,24 @@ pub fn parse_gpx(s: &str) -> Result<Tracklog, GpxError> {
                     _ => {}
                 }
                 text.clear();
+            }
+            Event::GeneralRef(r) => {
+                // numeric and predefined entities (`&#43;`, `&amp;`); anything else is dropped
+                let c = match r
+                    .resolve_char_ref()
+                    .map_err(|e| GpxError::Xml(e.to_string()))?
+                {
+                    Some(c) => Some(c),
+                    None => match r.as_ref() {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        _ => None,
+                    },
+                };
+                text.extend(c);
             }
             Event::Eof => break,
             _ => {}
@@ -599,5 +641,32 @@ mod tests {
             geotag(xmp, &log, "nope", &opts),
             Err(GeotagError::NoCaptureTime)
         ));
+    }
+
+    #[test]
+    fn non_ascii_and_invalid_calendar_times_never_panic_or_roll_over() {
+        assert!(parse_time("2026-05-01T10:00:0\u{e9}Z").is_none());
+        assert!(camera_time_to_unix("2026:05:01 10:00:0\u{e9}+01:00", 0, 0.0).is_none());
+        assert!(parse_time("2026-02-31T10:00:00Z").is_none());
+        assert!(parse_time("2026-04-31T10:00:00Z").is_none());
+        assert!(parse_time("2024-02-29T10:00:00Z").is_some());
+        assert!(parse_time("2026-02-29T10:00:00Z").is_none());
+        assert!(parse_time("2026-05-01T23:59:60Z").is_none());
+        assert!(parse_time("2026-05-01T10:00:00+99:99").is_none());
+    }
+
+    #[test]
+    fn entities_and_stray_points_in_gpx() {
+        let s = r#"<gpx><trk><trkseg><trkpt lat="1" lon="2"><ele>1&#x30;</ele><time>2026-05-01T10:00:00&#43;02:00</time></trkpt></trkseg></trk></gpx>"#;
+        let log = parse_gpx(s).unwrap();
+        assert_eq!(log.points[0].elevation, Some(10.0));
+        assert_eq!(log.points[0].time, t("2026-05-01T08:00:00Z"));
+        // an empty <trkpt/> nested somewhere odd must not steal the pending point
+        let s = r#"<gpx><trk><trkseg><trkpt lat="1" lon="1"><extensions><trkpt lat="2" lon="2"/></extensions><time>2026-05-01T10:00:00Z</time></trkpt></trkseg></trk></gpx>"#;
+        let log = parse_gpx(s).unwrap();
+        assert_eq!((log.points.len(), log.untimed), (1, 0));
+        // non-finite elevation is dropped, not stored
+        let s = r#"<gpx><trk><trkseg><trkpt lat="1" lon="1"><ele>inf</ele><time>2026-05-01T10:00:00Z</time></trkpt></trkseg></trk></gpx>"#;
+        assert_eq!(parse_gpx(s).unwrap().points[0].elevation, None);
     }
 }

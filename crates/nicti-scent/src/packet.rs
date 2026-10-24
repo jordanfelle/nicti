@@ -50,6 +50,10 @@ pub enum PatchError {
         "malformed or truncated xmp: no matching closing tag found (e.g. a half-written sidecar)"
     )]
     Unbalanced,
+    #[error("the `exif` prefix is bound to a namespace other than the exif one; refusing to write GPS under it")]
+    ExifPrefixConflict,
+    #[error("GPS position out of range or not finite")]
+    InvalidGps,
 }
 
 /// What to change on the next write. Each field is "leave untouched" (`None`)
@@ -69,14 +73,37 @@ pub struct Patch {
     pub gps: Option<Option<Gps>>,
 }
 
-const GPS_KEYS: [&str; 6] = [
-    "exif:GPSVersionID",
-    "exif:GPSLatitude",
-    "exif:GPSLongitude",
-    "exif:GPSAltitude",
-    "exif:GPSAltitudeRef",
-    "exif:GPSMapDatum",
-];
+/// Prefixes under which `tag` (or an ancestor) can spell the exif namespace: every prefix it binds
+/// to [`EXIF_NS`], plus `exif` when the tag doesn't bind that prefix itself (an ancestor may).
+fn exif_prefixes(tag: &BytesStart) -> Result<Vec<String>, PatchError> {
+    let mut v = Vec::new();
+    let mut exif_bound = false;
+    for attr in tag.attributes() {
+        let attr = attr?;
+        let Some(p) = attr.key.as_ref().strip_prefix("xmlns:") else {
+            continue;
+        };
+        if p == "exif" {
+            exif_bound = true;
+            if attr.value != EXIF_NS {
+                return Err(PatchError::ExifPrefixConflict);
+            }
+        }
+        if attr.value == EXIF_NS {
+            v.push(p.to_owned());
+        }
+    }
+    if !exif_bound {
+        v.push("exif".to_owned());
+    }
+    Ok(v)
+}
+
+/// Whether `name` is any `GPS*` property of the exif namespace under one of `prefixes`.
+fn is_gps_name(name: &str, prefixes: &[String]) -> bool {
+    name.split_once(':')
+        .is_some_and(|(p, l)| l.starts_with("GPS") && prefixes.iter().any(|x| x == p))
+}
 
 /// XMP GPS coordinate: `DDD,MM.mmmmmmK` (degrees, decimal minutes, hemisphere letter).
 fn xmp_coord(v: f64, pos: char, neg: char) -> String {
@@ -99,15 +126,12 @@ fn gps_attrs(g: &Gps) -> Vec<(&'static str, String)> {
         ("exif:GPSLongitude", xmp_coord(g.longitude, 'E', 'W')),
         ("exif:GPSMapDatum", "WGS-84".to_owned()),
     ];
-    if let Some(alt) = g.altitude.filter(|a| a.is_finite()) {
+    if let Some(cm) = g.altitude.map(|a| (a * 100.0).round() as i64) {
         // rational with centimetre precision; Ref 1 = below sea level
-        v.push((
-            "exif:GPSAltitude",
-            format!("{}/100", (alt.abs() * 100.0).round() as u64),
-        ));
+        v.push(("exif:GPSAltitude", format!("{}/100", cm.abs())));
         v.push((
             "exif:GPSAltitudeRef",
-            if alt < 0.0 { "1" } else { "0" }.to_owned(),
+            if cm < 0 { "1" } else { "0" }.to_owned(),
         ));
     }
     v
@@ -205,16 +229,16 @@ fn about_of(tag: &BytesStart) -> Result<String, PatchError> {
 }
 
 /// Whether `patch` owns the attribute `key` (so a rewrite drops its old value).
-fn patch_owns_attr(key: QName, patch: &Patch) -> bool {
+fn patch_owns_attr(key: QName, patch: &Patch, gps_pfx: &[String]) -> bool {
     (key.as_ref() == "xmp:Rating" && patch.rating.is_some())
         || (key.as_ref() == "xmp:Label" && patch.label.is_some())
         || (is_local(key, "editDocument") && patch.nicti_edit_document.is_some())
         || (key.as_ref() == "nicti:pick" && patch.nicti_pick.is_some())
-        || (patch.gps.is_some() && GPS_KEYS.contains(&key.as_ref()))
+        || (patch.gps.is_some() && is_gps_name(key.as_ref(), gps_pfx))
 }
 
 /// Whether the child element at `ev` is a block `patch` owns.
-fn patch_owns_child(ev: &Event<'static>, patch: &Patch) -> bool {
+fn patch_owns_child(ev: &Event<'static>, patch: &Patch, gps_pfx: &[String], direct: bool) -> bool {
     let (Event::Start(s) | Event::Empty(s)) = ev else {
         return false;
     };
@@ -223,11 +247,14 @@ fn patch_owns_child(ev: &Event<'static>, patch: &Patch) -> bool {
         || (is_local(name, "hierarchicalSubject") && patch.hierarchical_keywords.is_some())
         || (name.as_ref() == "xmp:Rating" && patch.rating.is_some())
         || (name.as_ref() == "xmp:Label" && patch.label.is_some())
-        || (patch.gps.is_some() && GPS_KEYS.contains(&name.as_ref()))
+        || (direct && patch.gps.is_some() && is_gps_name(name.as_ref(), gps_pfx))
 }
 
 /// Applies `patch` to `xmp`, returning the full patched packet text.
 pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
+    if matches!(&patch.gps, Some(Some(g)) if !g.is_valid()) {
+        return Err(PatchError::InvalidGps);
+    }
     let mut reader = Reader::from_str(xmp);
     reader.config_mut().trim_text(false);
 
@@ -250,6 +277,10 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
     let desc_end_idx = matching_end(&events, desc_idx)?;
 
     // 1. Rewrite the Description tag's own attributes (Rating/Label/nicti:editDocument).
+    let gps_pfx = match &events[desc_idx] {
+        Event::Start(s) | Event::Empty(s) if patch.gps.is_some() => exif_prefixes(s)?,
+        _ => Vec::new(),
+    };
     let new_desc_start = {
         let (was_start, orig) = match &events[desc_idx] {
             Event::Start(s) => (true, s.clone()),
@@ -274,7 +305,7 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
             if key.as_ref() == "nicti:pick" && patch.nicti_pick.is_some() {
                 continue;
             }
-            if patch.gps.is_some() && GPS_KEYS.contains(&key.as_ref()) {
+            if patch.gps.is_some() && is_gps_name(key.as_ref(), &gps_pfx) {
                 continue;
             }
             match key.as_ref() {
@@ -358,7 +389,11 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         touches_keywords || patch.rating.is_some() || patch.label.is_some() || patch.gps.is_some();
     if touches_children && new_desc_start.0 {
         let mut i = desc_idx + 1;
+        let mut depth = 0usize;
         while i < desc_end_idx {
+            if matches!(events[i], Event::End(_)) {
+                depth = depth.saturating_sub(1);
+            }
             let is_subject = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "subject"));
             let is_hier = matches!(&events[i], Event::Start(s) | Event::Empty(s) if is_local(s.name(), "hierarchicalSubject"));
             let is_rating = matches!(&events[i], Event::Start(s) | Event::Empty(s) if s.name().as_ref() == "xmp:Rating");
@@ -367,7 +402,7 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 || (is_hier && patch.hierarchical_keywords.is_some())
                 || (is_rating && patch.rating.is_some())
                 || (is_label && patch.label.is_some())
-                || patch_owns_child(&events[i], patch)
+                || patch_owns_child(&events[i], patch, &gps_pfx, depth == 0)
             {
                 let block_end = matching_end(&events, i)?;
                 for s in skip.iter_mut().take(block_end + 1).skip(i) {
@@ -375,6 +410,9 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
                 }
                 i = block_end + 1;
             } else {
+                if matches!(events[i], Event::Start(_)) {
+                    depth += 1;
+                }
                 i += 1;
             }
         }
@@ -410,9 +448,15 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         }
         let mut tag = BytesStart::new(orig.name().as_ref().to_owned());
         let mut changed = false;
+        let mut later_pfx = gps_pfx.clone();
+        if patch.gps.is_some() {
+            if let Ok(own) = exif_prefixes(orig) {
+                later_pfx.extend(own);
+            }
+        }
         for attr in orig.attributes() {
             let attr = attr?;
-            if patch_owns_attr(attr.key, patch) {
+            if patch_owns_attr(attr.key, patch, &later_pfx) {
                 changed = true;
                 continue;
             }
@@ -433,14 +477,21 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         }
         if was_start {
             let mut i = j + 1;
+            let mut depth = 0usize;
             while i < end {
-                if patch_owns_child(&events[i], patch) {
+                if matches!(events[i], Event::End(_)) {
+                    depth = depth.saturating_sub(1);
+                }
+                if patch_owns_child(&events[i], patch, &later_pfx, depth == 0) {
                     let block_end = matching_end(&events, i)?;
                     for s in skip.iter_mut().take(block_end + 1).skip(i) {
                         *s = true;
                     }
                     i = block_end + 1;
                 } else {
+                    if matches!(events[i], Event::Start(_)) {
+                        depth += 1;
+                    }
                     i += 1;
                 }
             }
@@ -972,5 +1023,143 @@ mod tests {
         };
         let out = apply(xmp, &patch).unwrap();
         assert!(out.contains(r#"rdf:about="uuid:other" xmp:Rating="5""#));
+    }
+
+    const EXIF: &str = "http://ns.adobe.com/exif/1.0/";
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+    #[test]
+    fn gps_clear_removes_every_gps_property_under_any_prefix() {
+        let xmp = format!(
+            r#"<rdf:RDF xmlns:rdf="{RDF}"><rdf:Description xmlns:e="{EXIF}" e:GPSLatitude="10,0N" e:GPSAreaInformation="Home Street" e:GPSTimeStamp="x" e:DateTimeOriginal="2026"><e:GPSLongitude>1,0E</e:GPSLongitude></rdf:Description></rdf:RDF>"#
+        );
+        let p = apply(
+            &xmp,
+            &Patch {
+                gps: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!p.contains("GPS"), "{p}");
+        assert!(p.contains("e:DateTimeOriginal"), "{p}");
+        // replace under an aliased prefix leaves no stale or duplicate GPS attribute
+        let g = Gps {
+            latitude: 1.0,
+            longitude: 2.0,
+            altitude: None,
+        };
+        let p = apply(
+            &xmp,
+            &Patch {
+                gps: Some(Some(g)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!p.contains("e:GPS") && !p.contains("Home Street"), "{p}");
+        assert_eq!(p.matches("GPSLatitude").count(), 1, "{p}");
+    }
+
+    #[test]
+    fn gps_refuses_a_foreign_exif_prefix_and_invalid_positions() {
+        let xmp = format!(
+            r#"<rdf:RDF xmlns:rdf="{RDF}"><rdf:Description xmlns:exif="urn:other"/></rdf:RDF>"#
+        );
+        let g = Gps {
+            latitude: 1.0,
+            longitude: 2.0,
+            altitude: None,
+        };
+        assert!(matches!(
+            apply(
+                &xmp,
+                &Patch {
+                    gps: Some(Some(g)),
+                    ..Default::default()
+                }
+            ),
+            Err(PatchError::ExifPrefixConflict)
+        ));
+        for bad in [
+            Gps {
+                latitude: f64::NAN,
+                longitude: 0.0,
+                altitude: None,
+            },
+            Gps {
+                latitude: 0.0,
+                longitude: f64::INFINITY,
+                altitude: None,
+            },
+            Gps {
+                latitude: 200.0,
+                longitude: 0.0,
+                altitude: None,
+            },
+            Gps {
+                latitude: 0.0,
+                longitude: -400.0,
+                altitude: None,
+            },
+            Gps {
+                latitude: 0.0,
+                longitude: 0.0,
+                altitude: Some(1e300),
+            },
+        ] {
+            assert!(matches!(
+                apply(
+                    SAMPLE,
+                    &Patch {
+                        gps: Some(Some(bad)),
+                        ..Default::default()
+                    }
+                ),
+                Err(PatchError::InvalidGps)
+            ));
+        }
+        let tiny = Gps {
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude: Some(-0.001),
+        };
+        let p = apply(
+            SAMPLE,
+            &Patch {
+                gps: Some(Some(tiny)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            p.contains("GPSAltitudeRef=\"0\"") && p.contains("GPSAltitude=\"0/100\""),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn gps_patch_leaves_nested_and_other_resource_gps_alone() {
+        let xmp = format!(
+            r#"<rdf:RDF xmlns:rdf="{RDF}" xmlns:exif="{EXIF}"><rdf:Description rdf:about="a"><exif:GPSLatitude>5,0N</exif:GPSLatitude><x:Ingredients xmlns:x="urn:x"><rdf:Description rdf:about="b"><exif:GPSLatitude>77,0N</exif:GPSLatitude></rdf:Description></x:Ingredients></rdf:Description></rdf:RDF>"#
+        );
+        let g = Gps {
+            latitude: 1.0,
+            longitude: 2.0,
+            altitude: None,
+        };
+        let p = apply(
+            &xmp,
+            &Patch {
+                gps: Some(Some(g)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            p.contains("77,0N"),
+            "nested resource's GPS must survive: {p}"
+        );
+        assert!(!p.contains("5,0N"), "{p}");
     }
 }
