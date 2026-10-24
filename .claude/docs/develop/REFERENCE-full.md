@@ -53,6 +53,10 @@ Full reasoning/history: `docs/decisions/develop.md`.
   picks B instead, only `perk::estimate`'s body changes (same `Histogram` in, same
   `ExposureParams`/`ToneParams` out).
 
+## #440: data-driven ControlSpec (ADR-0440)
+
+- Research outcome, nothing lifted. No-go: a macro table that generates panels, presets or LRC mapping (`SliderSpec` already holds the range/default/step half; 61 panel sliders bind typed `&mut field`; stage params are JSON so presets/copy are already generic; LRC mapping is nonlinear/PV-dependent). Conditional go: a small registry (`Control { spec: &SliderSpec, section, stage, path (JSON pointer, `{i}` indexed) }`) added only with ADR-0434's `develop.set`, with an anti-drift test (path resolves in default params, set round-trips, every panel spec registered or listed absent). Spec ids are not field addresses (`grade.hue` is shared by all wheels). Detail: `docs/decisions/develop.md`.
+
 ## Package contents
 
 - **`crates/nicti-pelt/src/knead/`** (#52/ADR-0052) — `mod.rs` (`GROUPS` checklist, `StageSet`,
