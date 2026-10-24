@@ -3,7 +3,7 @@
 **Status:** Proposed (go: highlight reconstruction; conditional go: GainMap; no-go: OpcodeList1, LJPEG codec, binned preview; one test pattern for #137)
 **Ticket:** #438
 **Part of:** #424
-**Related:** #137, #410, #428, ADR-0037, ADR-0040, ADR-0428, ADR-0029
+**Related:** #137, #410, #428, ADR-0037, ADR-0428, ADR-0029
 
 ## Context
 
@@ -39,22 +39,24 @@ Adobe-converted DNGs) or on bad-pixel lists renders without them.
 
 ### 2. LJPEG codec and DNG writer: no-go until DNG export is a product goal
 
-Decoding is already covered: LibRaw decodes lossless JPEG in DNG, CR2 and ARW. LightCraft's value is the
-**encoder** (bit-exact round-trip tests, DNG export). No issue asks for DNG export (#337 is EXIF into TIFF, which is a
-different writer), and the agent-written 790-line codec would need its own fuzzing before it ever touched user files.
+Decoding of *lossless* JPEG is already covered by LibRaw (DNG, CR2, ARW). Caveat found while checking: `build.rs` defines no `USE_JPEG`, so `internal/defines.h` sets `NO_JPEG` and `lossy_dng_load_raw()` is an empty stub; lossy and JPEG-compressed DNGs (Smart Previews, some phone DNGs) do not decode at all, and LibRaw's own opcode-8 handling inside that function is not compiled either. That is a separate decoder question, not an LJPEG-codec one. LightCraft's value is the
+**encoder** (bit-exact round-trip tests, DNG export). A title search of the tracker for "DNG" finds no issue asking for DNG export beyond #438 itself (#337 is EXIF into TIFF, a
+different writer; the search was not exhaustive), and the agent-written 790-line codec would need its own fuzzing before it ever touched user files.
 If DNG export is wanted, file it as a product ticket first; ADR-0428's test fixture builder already writes a tiny
 uncompressed DNG without it.
 
 ### 3. Highlight reconstruction: go, it is a real gap
 
 `shim.cpp` sets `p.highlight = 0` with the comment "highlight reconstruction is a develop-stage concern", but no
-such stage exists: a repo search finds no clip-aware handling in the decode or render path (the matches for "clip" are
-gamut clipping and lateral CA). So on a blown-highlight frame the channels clip at different levels after white
+such stage exists: a repo search finds no highlight recovery in the decode or render path. The "clip" matches are
+gamut clipping, lateral CA, the auto-tone clipped-fraction histogram (`perk.rs`) and a vignette style; none rebuilds
+clipped channels, and LRC's Highlights/Whites map to plain tone sliders (`nicti-stray/src/develop/basic.rs`). So on a blown-highlight frame the channels clip at different levels after white
 balance and render magenta or cyan at the edge of the highlight, which Lightroom hides by reconstructing.
 
-LightCraft's `highlight.rs` input contract matches what Nicti produces: demosaiced **camera RGB, before white
-balance, white level 1.0**. Nicti's linear decode is exactly that (`output_color = 0`, `user_mul = 1`, WB applied
-downstream by calico). Two pieces, both worth taking as **ideas to re-derive**, not code to copy:
+LightCraft's `highlight.rs` input contract is demosaiced **camera RGB, before white
+balance, white level 1.0**. Nicti's linear decode is the same kind of image (`output_color = 0`, `user_mul = 1`, WB applied
+downstream by calico), though whether a clipped sample lands at exactly 1.0 after `(px - black - cblack)/(maximum - black)`
+depends on LibRaw's scaling and was not traced. Two pieces, both worth taking as **ideas to re-derive**, not code to copy:
 
 1. `clip_neutral`: limit each white-balanced channel at the smallest white-balanced clip level, then divide the
    multipliers back out. Cheap, per pixel, no neighbourhood. This alone removes the colour cast on clipped areas.
@@ -72,8 +74,9 @@ tone sliders, not reconstruction); and validation on real Z8 frames with blown s
 
 `binned.rs` skips demosaic for a reduced-size image. Nicti's tiers already use the embedded JPEG for grid and first-pass
 cull (ADR-0029, T0/T1), and LibRaw's own `half_size` exists (the shim sets it to 0). A binned path only helps where a
-full decode is needed for a small result, and for HE/HE* NEFs the decode itself (about 1-2.4 s per file on the PR-fork
-reference, #137) probably dominates the demosaic. **Measure the demosaic share of T2 latency on ref-10k first**; only
+full decode is needed for a small result. For HE/HE* NEFs the wavelet unpack probably dominates the demosaic, but the
+only figure on record (1-2.4 s per file on the PR-fork reference, ADR-0037) is end-to-end `retina peek` time, not a
+split, so this is a hypothesis. **Measure the demosaic share of T2 latency on ref-10k first**; only
 if it exceeds roughly a third is a binned T2 worth a ticket. Note it cannot feed the AI mask or heal paths, which want
 full resolution.
 
@@ -83,8 +86,10 @@ LightCraft's `corpus_nef_compressed_matches_uncompressed` checks a lossless NEF 
 scene by block correlation (its own comment concedes the pair is two separate exposures). The pattern carries to #137:
 when LibRaw's official HE/HE* snapshot replaces the PR fork, compare its output with the lossless decode of the *same
 frame*. HE/HE* is lossy, so the oracle is a **PSNR/block-correlation bound**, not bit equality, and it is only as
-good as the pair. The Z8 can write one frame to both cards in different RAW qualities; whether the operator's library
-contains such pairs is **unverified** and must be checked before relying on this. Add as a note on #137.
+good as the pair. **Where same-frame pairs come from is unverified:** I could not confirm that the Z8 can record one
+frame in two RAW qualities (its second-slot modes may only duplicate the same file), so do not assume it. Safer oracles
+for #137, in order: the same HE/HE* frame decoded by the PR fork and by LibRaw's official snapshot (bit-exact or tight
+bound), then a same-scene pair if the operator has one. Add as a note on #137.
 
 ## Do not take (confirmed)
 

@@ -44,6 +44,7 @@ no-go (it needs the mosaic before LibRaw's demosaic). The LJPEG encoder and DNG 
 no issue states. Highlight reconstruction is the real gap: `shim.cpp` sets `highlight = 0` deferring to a develop stage
 that does not exist, and LightCraft's input contract (camera RGB before WB) is what Nicti's linear decode produces;
 take `clip_neutral` first, `reconstruct` only after validation on real Z8 frames. Binned preview: measure the demosaic
-share of T2 latency first (HE/HE* decode likely dominates). For #137, compare LibRaw's official HE/HE* output with the
-lossless decode of the same frame by a PSNR bound (lossy, so never bit-exact); whether same-frame dual-format pairs
-exist in the library is unverified.
+share of T2 latency first (the 1-2.4 s HE/HE* figure is end-to-end, not a decode/demosaic split). For #137, first compare
+the PR fork's and LibRaw's official snapshot output on the same frames; a lossless-vs-HE pair would need a PSNR bound
+(lossy), and that a Z8 can record such same-frame pairs is unverified. Also found: no `USE_JPEG`, so lossy/JPEG-compressed
+DNGs do not decode.
