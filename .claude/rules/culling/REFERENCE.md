@@ -48,9 +48,7 @@ Full reasoning/history: `docs/decisions/culling.md`.
 
 - **Culling UX (#32, built)** — ...
 - **Culling at 1M photos (#335, measured ...
-## #439: LightCraft cull heuristics, red-eye (ADR-0439)
-
-- Research outcome, nothing lifted. Cull: baselines only, no feature. Block-Laplacian p90 is the one new idea (an aggregator between global and `max_over_tiles`, which cannot see a soft subject on a crisp background): add as a candidate to the #238 sweep, uncalibrated constants not taken; the 8x8 signature is the dHash/pHash family (optional null baseline for #180); clipped fraction needs an exposure label that does not exist. Red-eye / pet-eye: no-go, no build ticket (not the work Nicti serves; masks/heal cover the rare case); design noted if asked. Detail: `docs/decisions/culling.md`.
+- **LightCraft cull/red-eye (#439, ADR-0439)** — baselines only (block-Laplacian p90 = one row in the #238 sweep; does not fix localised misfocus); red-eye/pet-eye no-go. Full: `grep -nF '#439' .claude/docs/culling/REFERENCE-full.md`.
 
 ## Package contents
 

@@ -110,7 +110,8 @@ Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX bui
 
 Research outcome from the LightCraft audit (#424); nothing lifted. `squint` and `litter` already measure more than
 `cull.rs` (Laplacian, Tenengrad, FFT ratio, structure-tensor motion/defocus, AF-region misfocus; dHash/pHash/SSIM/DINOv2
-with sequence constraints). The one new idea is a block-Laplacian p90 sharpness aggregator, to be added as a candidate
+with sequence constraints). The one new aggregator is a block-Laplacian p90 (a hot-pixel-robust cousin of `max_over_tiles`; it does not
+solve localised misfocus, which only the AF-region ratio does), to be added as a candidate
 in the #238 real-card sweep (judged per degradation class like the rest; LightCraft's calibration constant is not
 taken). Its 8x8 signature is the dHash/pHash family; clipped fraction has no ground truth (no exposure tag in the
 label set). Red-eye and pet-eye are no-go with no build ticket: Nicti's work is convention and fursuit photography,
