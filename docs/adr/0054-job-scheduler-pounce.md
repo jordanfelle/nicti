@@ -367,6 +367,51 @@ assumption about where it will run, not a description of #55. Filed as
 onto `Lane::Cpu`, or accept and document the bound). #37 still has no streaming decode interface, so
 decode stays an atomic unit, but on the CPU lane it no longer delays anything foreground.
 
+### Amendment (#490): job-lifetime VRAM reservations
+
+Decision rule #5 as built in #55 reserved a background job's `vram_bytes` for one `step()`
+(`admit`/`release` bracketed each chunk). The GPU lane has one worker, so reservations never
+overlapped: admission refused nothing it could have refused, and two jobs could interleave across a
+`Yield`, each holding its full-extent frame. Eyeshine compensated with `RenderClaim`, a busy flag
+that made a waiting render `Yield` in a loop, and had to drop `image_index` from its GPU stage so
+that spin could not starve the claim holder.
+
+**Now:** a background job's reservation is taken at the pick that first admits it and held until it
+leaves the scheduler (Done, `Err`, or cancelled), across every `Yield`.
+
+- `take_next` picks the first job in order that is already admitted, or the first *unstarted* one
+  if it fits the remaining budget. A started job always passes (its bytes are counted), so it is
+  runnable whenever it is next in order; the reserved amount is fixed at first admission. If the
+  first unstarted job does not fit, no unstarted job behind it is admitted either (no backfill):
+  otherwise a stream of small jobs overlapping each other could keep a whole-lane job (a photo with
+  local masks, or an oversized frame) from ever seeing the full budget free.
+- `finish` releases only when the job is not re-enqueued. The cancelled-while-queued sweep in
+  `take_next` releases too, and runs before the `EditingGate` check so a cancelled started job does
+  not pin VRAM for a whole editing session. An admitted job is never dropped by the
+  over-total-budget rule. A zero-byte job reserves nothing and is not tracked (the CPU lane runs
+  with an unbounded budget and would otherwise track every started import job).
+- **Liveness:** once the budget is full only holders run, until one finishes and frees its bytes, so
+  admitted jobs cannot spin or deadlock on each other and a nearer-index job that does not fit is
+  skipped rather than starving the holder. This holds because no GPU-lane job waits on another one:
+  Eyeshine chains CPU decode then GPU render, the export run serializes itself, and `RemoveJob` is
+  foreground (never admitted).
+- **Cost:** while `EditingGate` is set a started background job keeps its bytes idle. Foreground is
+  never refused on VRAM grounds, so the live render is unaffected.
+- **Fairness change:** preview GPU jobs now sort by cursor distance, while export render jobs
+  declare no index and sort last. While the user scrubs, previews that fit beside a started export
+  render run ahead of it, and it keeps its reservation meanwhile. That is the intended "preview
+  first" priority; it resolves once the cursor stops and the (bounded) preview window drains.
+- `RenderClaim` is removed and the Eyeshine GPU stage carries `image_index` again. Two renders that
+  fit the budget together may interleave; the second builds its own kernels (`render_ctx` is a pool
+  of one), which the declared footprint already accounts for.
+- Tests: `queue.rs` (serialize/interleave/starvation/release-on-every-exit-path/over-total after
+  admission) and `runtime.rs` (two 60-byte jobs on a 100-byte lane run strictly one after another),
+  both mutation-checked against release-on-every-`finish`.
+
+Still unmeasured, and tracked on the follow-up hardware issue: `GPU_LANE_BUDGET_PERCENT` (50%), the
+2 GiB no-telemetry fallback, the `cfg(windows)` DXGI adapter matching, and the mask-engine gap in
+the render estimate.
+
 ## Options considered
 
 | Option | Chosen? | Why |

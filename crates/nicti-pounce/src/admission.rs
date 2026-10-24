@@ -16,10 +16,11 @@ pub enum AdmissionError {
     OverBudget { requested: u64, remaining: u64 },
 }
 
-/// Tracks how many bytes are currently reserved against a fixed budget. Reservations are held
-/// only while a job's chunk is actually running (`admit`/`release` bracket each chunk, not the
-/// whole job's lifetime) -- ADR-0044's own tiers already do LRU eviction for *resident* cache
-/// data; this is a separate, narrower guard against transient in-flight overcommit.
+/// Tracks how many bytes are currently reserved against a fixed budget. A background job's
+/// reservation is held for its whole lifetime (#490, ADR-0054 amendment): from the first chunk
+/// the scheduler admits until the job is done, failed or cancelled, across every `Yield` in
+/// between. ADR-0044's own tiers already do LRU eviction for *resident* cache data; this is a
+/// separate guard against two jobs' in-flight GPU allocations overcommitting VRAM together.
 #[derive(Debug)]
 pub struct Admission {
     budget_bytes: u64,
@@ -74,6 +75,13 @@ impl Admission {
             self.reserved_bytes = self.reserved_bytes.saturating_sub(bytes);
         }
     }
+
+    /// Whether `job` currently holds a reservation. A started job that yielded is still admitted,
+    /// so the scheduler can resume it without re-checking the remaining budget (its bytes are
+    /// already counted against it).
+    pub fn is_admitted(&self, job: JobId) -> bool {
+        self.admitted.iter().any(|(id, _)| *id == job)
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +127,18 @@ mod tests {
             .unwrap();
         admission.release(JobId(1));
         assert_eq!(admission.remaining(), 1000);
+    }
+
+    #[test]
+    fn is_admitted_tracks_the_reservation() {
+        let mut admission = Admission::new(1000);
+        assert!(!admission.is_admitted(JobId(1)));
+        admission
+            .admit(JobId(1), Priority::Background, 500)
+            .unwrap();
+        assert!(admission.is_admitted(JobId(1)));
+        admission.release(JobId(1));
+        assert!(!admission.is_admitted(JobId(1)));
     }
 
     #[test]

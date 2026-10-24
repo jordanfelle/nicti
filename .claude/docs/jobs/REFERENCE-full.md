@@ -42,10 +42,12 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   background work (Scruff's import scan is the first real client) — `governor` evaluated and
   rejected, it's rate-per-time shaped, not concurrency-limit shaped.
 - **VRAM admission** (`admission.rs`): a background job over the *total* budget (`Admission::
-  budget()`) is dropped outright — it could never become admittable, since `admit`/`release`
-  bracket one synchronous `step()` call, so `remaining()` is always the full budget when checked.
-  A job over only the currently-*remaining* budget is skipped for the current pick and stays
-  queued. Foreground is never refused on VRAM grounds. Wired into `queue::Scheduler::run_next`
+  budget()`) is dropped outright — it could never become admittable. Reservations are
+  job-lifetime (#490): taken at the pick that first admits a background job, kept across every
+  `Yield`, released on Done/Err/cancel (`Scheduler::finish`, and the cancelled-while-queued sweep
+  in `take_next`). A started job is always runnable (its bytes are counted); a not-yet-started job
+  over the currently-*remaining* budget stays queued and blocks unstarted jobs behind it (no backfill, so a whole-lane job can't be starved). Foreground is
+  never refused on VRAM grounds. Wired into `queue::Scheduler::run_next`
   itself (an adversarial review caught this only being enforced in `admission.rs`'s own isolated
   tests; a follow-up CodeRabbit review then caught the wired-in version itself leaking an
   over-total-budget job forever — both fixed, see `docs/adr/0054`'s Review findings).
@@ -132,5 +134,6 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   scheduler's lock, so it must never submit (take other locks only); the export run chains from
   `step()` and backstops from the UI thread. `JobKind::Export` jobs are folded into one line in
   `activity.rs`. A GPU-lane job over the *total* VRAM budget is dropped, so a job whose estimate
-  exceeds the lane declares the whole lane instead (it runs alone). Reservations are still
-  per-chunk, so they don't serialize jobs across a `Yield` — eyeshine's `RenderClaim` still does that.
+  exceeds the lane declares the whole lane instead (it runs alone). Reservations are
+  job-lifetime (#490), so two renders that don't fit the budget together run one after another;
+  eyeshine's `RenderClaim` is retired and its GPU stage carries `image_index` again.
