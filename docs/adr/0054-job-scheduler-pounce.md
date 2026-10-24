@@ -364,7 +364,9 @@ mask bake is itself `Priority::Foreground` by default (`MaskBakeJob`); the bound
 framing does. Denoise isn't a real Pounce job yet either, so "tiles on `Lane::Gpu`" is the sim's
 assumption about where it will run, not a description of #55. Filed as
 [#466](https://github.com/jordanfelle/nicti/issues/466) (chunk the bake, move CPU-provider bakes
-onto `Lane::Cpu`, or accept and document the bound). #37 still has no streaming decode interface, so
+onto `Lane::Cpu`, or accept and document the bound). **Resolved:** the bound is accepted and
+documented (`docs/decisions/jobs.md`, "#466"); measuring and chunking it is
+[#574](https://github.com/jordanfelle/nicti/issues/574). #37 still has no streaming decode interface, so
 decode stays an atomic unit, but on the CPU lane it no longer delays anything foreground.
 
 ### Amendment (#490): job-lifetime VRAM reservations
