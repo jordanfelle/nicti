@@ -85,6 +85,10 @@ Full reasoning/history: `docs/decisions/culling.md`.
   `cull/tests.rs::mark_select_all_at_one_million`, `grid/selection.rs::scale::remap_at_one_million_photos`
   (all `#[ignore]`, run with `--release --ignored --nocapture`).
 
+## #439: LightCraft cull heuristics, red-eye (ADR-0439)
+
+- Research outcome, nothing lifted. Cull: baselines only, no feature. Block-Laplacian p90 is the one new aggregator (hot-pixel-robust cousin of `max_over_tiles`; does NOT fix localised misfocus, only `af_region_misfocus_ratio` does): one row in the #238 sweep, uncalibrated constants not taken; the 8x8 signature is the dHash/pHash family (optional null baseline for #180); clipped fraction needs an exposure label that does not exist. Red-eye / pet-eye: no-go, no build ticket (not the work Nicti serves; masks/heal cover the rare case); design noted if asked. Detail: `docs/decisions/culling.md`.
+
 ## Package contents
 
 - **`spikes/litter`** (#33/ADR-0033's burst/duplicate-grouping research) — EXIF/Nikon-MakerNote

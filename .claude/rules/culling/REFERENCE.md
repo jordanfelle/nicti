@@ -48,6 +48,8 @@ Full reasoning/history: `docs/decisions/culling.md`.
 
 - **Culling UX (#32, built)** — ...
 - **Culling at 1M photos (#335, measured ...
+- **LightCraft cull/red-eye (#439, ADR-0439)** — baselines only (block-Laplacian p90 = one row in the #238 sweep; does not fix localised misfocus); red-eye/pet-eye no-go. Full: `grep -nF '#439' .claude/docs/culling/REFERENCE-full.md`.
+
 ## Package contents
 
 - **`spikes/litter`** (#33/ADR-0033's burst/duplicate-grouping research) — EXIF/Nikon-MakerNote
