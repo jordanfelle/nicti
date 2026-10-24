@@ -556,12 +556,46 @@ mod tests {
         let held = catalog.lock_conn_for_test();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            scope.spawn(|| tx.send(snapshot_into(&catalog, &policy, 1_000)).unwrap());
+            let (catalog, policy) = (&catalog, &policy);
+            scope.spawn(move || tx.send(snapshot_into(catalog, policy, 1_000)).unwrap());
             let finished = rx.recv_timeout(Duration::from_secs(30));
             // Release before asserting so a regressed (blocked) snapshot can finish and the scope
             // can join instead of hanging the test run.
             drop(held);
             let snapshot = finished.expect("snapshot_into blocked on the shared connection");
+            assert!(snapshot.unwrap().exists());
+        });
+    }
+
+    /// The engine-level half: with another connection holding an open write transaction, WAL must
+    /// still let the snapshot's own read-only connection run `VACUUM INTO` (a reader never waits on
+    /// a writer, and the snapshot must not itself try to take the write lock). Deterministic for
+    /// the same reason as the test above.
+    #[test]
+    fn snapshot_into_runs_while_another_connection_holds_a_write_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sqlite");
+        let catalog = SqliteCatalog::open(&path).unwrap();
+        let policy = policy(&dir.path().join("backups"));
+
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute(
+                "INSERT INTO volume (identity_key, last_seen_at) VALUES ('w', 0)",
+                [],
+            )
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let (catalog, policy) = (&catalog, &policy);
+            scope.spawn(move || tx.send(snapshot_into(catalog, policy, 1_000)).unwrap());
+            let finished = rx.recv_timeout(Duration::from_secs(30));
+            // Same ordering as above: release the write lock so a regressed run can still join.
+            writer.execute_batch("ROLLBACK").unwrap();
+            let snapshot =
+                finished.expect("snapshot_into blocked behind an open write transaction");
             assert!(snapshot.unwrap().exists());
         });
     }
