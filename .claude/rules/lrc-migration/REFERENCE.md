@@ -44,7 +44,7 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
 
 - Go: `.lrtemplate` (via `agprefs` + `nicti_stray::develop::translate`, no new Lua parser), `.xmp` presets
   (one `crs:` adapter in `nicti-scent` into the same translator), zip bundles (`zip` crate, 256 MiB/entry,
-  1 GiB total, names never used as paths). No-go: Luminar. Nothing lifted from LightCraft. Detail: `docs/decisions/lrc-migration.md`.
+  1 GiB total unpacked, entry-count cap, names never used as paths). DNG-embedded XMP is a later optional slice. Presets replace whole stages; profile has no preset slot yet. No-go: Luminar. Nothing lifted from LightCraft. Detail: `docs/decisions/lrc-migration.md`.
 
 ## Package contents
 
