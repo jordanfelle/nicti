@@ -136,14 +136,16 @@ impl Scheduler {
     /// (decision rule #4) -- an already-admitted in-flight chunk isn't affected, since this
     /// method is only ever called between chunks.
     ///
-    /// A background job whose declared VRAM exceeds the *total* budget is dropped outright (it
-    /// could never become admittable -- `admit`/`release` bracket one chunk's runtime, so no
-    /// reservation ever actually outlives a single in-flight chunk for another job to contend
-    /// with; found by CodeRabbit review against the original `spikes/crouch` version, which would
-    /// otherwise leak such a job in `background` forever). A job whose VRAM exceeds only the
-    /// currently-*remaining* budget (i.e. fits the total budget but not alongside whatever this
-    /// same call already skipped) is instead skipped for this pick and stays queued, per
-    /// `admission::Admission`'s own decision rule #5.
+    /// A background job's VRAM reservation lasts from the pick that first admits it until it is
+    /// done or cancelled (#490), across every `Yield`. A started job always passes the budget
+    /// check (its bytes are already counted), so it is runnable whenever it is next in order; a
+    /// job not yet started is picked only if it fits the *remaining* budget, otherwise it is
+    /// skipped for this pick and stays queued, per `admission::Admission`'s decision rule #5.
+    /// Once the budget is full only the holders run, until one finishes and frees its bytes, so
+    /// admitted jobs can neither spin nor deadlock on each other. A job whose declared VRAM
+    /// exceeds the *total* budget is dropped outright (it could never become admittable; found by
+    /// CodeRabbit review against the original `spikes/crouch` version, which would otherwise leak
+    /// such a job in `background` forever).
     ///
     /// The caller must eventually pass the returned [`Taken`] to [`Scheduler::finish`] -- this
     /// method already reserved this job's VRAM (if background) and removed it from the queue, so
@@ -174,33 +176,42 @@ impl Scheduler {
             return None;
         }
 
-        let budget = self.admission.budget();
+        let admission = &mut self.admission;
+        let budget = admission.budget();
         let cancelled_while_queued = &mut self.cancelled_while_queued;
         self.background.retain(|entry| {
             if entry.cancel.is_cancelled() {
+                // A started job cancelled between its chunks still holds its reservation.
+                admission.release(entry.id);
                 cancelled_while_queued.push((entry.id, entry.job.progress()));
                 return false;
             }
-            // An over-budget (but not cancelled) background job is also dropped here, unchanged
-            // from the original spike behavior -- see this method's own doc comment above. It is
-            // *not* reported through `cancelled_while_queued` (a distinct outcome from
-            // cancellation), so it never reaches a terminal status -- the gap this field fixes for
-            // cancellation. Callers must therefore clamp a declaration to the lane total
-            // (`Pounce::gpu_vram_budget`), as the render jobs do (#255), or declare 0.
-            entry.job.spec().vram_bytes <= budget
+            // An already-admitted job is never dropped here: its bytes are counted, and dropping
+            // it would leak the reservation. Otherwise an over-budget (but not cancelled)
+            // background job is dropped, unchanged from the original spike behavior -- see this
+            // method's own doc comment above. It is *not* reported through
+            // `cancelled_while_queued` (a distinct outcome from cancellation), so it never reaches
+            // a terminal status -- the gap this field fixes for cancellation. Callers must
+            // therefore clamp a declaration to the lane total (`Pounce::gpu_vram_budget`), as the
+            // render jobs do (#255), or declare 0.
+            admission.is_admitted(entry.id) || entry.job.spec().vram_bytes <= budget
         });
 
-        let remaining = self.admission.remaining();
-        let pick = self
-            .background
-            .iter()
-            .position(|entry| entry.job.spec().vram_bytes <= remaining)?;
+        let remaining = admission.remaining();
+        let pick = self.background.iter().position(|entry| {
+            admission.is_admitted(entry.id) || entry.job.spec().vram_bytes <= remaining
+        })?;
         let entry = self.background.remove(pick);
-        let vram_bytes = entry.job.spec().vram_bytes;
 
-        self.admission
-            .admit(entry.id, Priority::Background, vram_bytes)
-            .expect("checked against admission.remaining() above, must not be refused");
+        // A started job (yielded earlier) already holds its reservation; only a first pick admits.
+        // The amount is fixed at that first admission, so a later change to the job's declared
+        // `vram_bytes` is ignored.
+        if !admission.is_admitted(entry.id) {
+            let vram_bytes = entry.job.spec().vram_bytes;
+            admission
+                .admit(entry.id, Priority::Background, vram_bytes)
+                .expect("checked against admission.remaining() above, must not be refused");
+        }
 
         Some(Taken {
             id: entry.id,
@@ -218,9 +229,10 @@ impl Scheduler {
         std::mem::take(&mut self.cancelled_while_queued)
     }
 
-    /// Reports the outcome of running `taken`'s chunk. Releases its VRAM reservation (if
-    /// background) regardless of outcome, then either re-enqueues it (`Outcome::Yielded`, unless
-    /// it was cancelled while its chunk was running) in its correct sorted background slot --
+    /// Reports the outcome of running `taken`'s chunk. A background job's VRAM reservation is kept
+    /// while it is re-enqueued (`Outcome::Yielded` and not cancelled) and released once the job
+    /// leaves the scheduler (`Outcome::Done`, or cancelled). It is re-enqueued in its correct
+    /// sorted background slot --
     /// found by CodeRabbit review against the original `spikes/crouch` version, which appended to
     /// the end of the vec instead, silently degrading nearest-to-cursor-first into round-robin --
     /// or drops it (`Outcome::Done`, or a cancelled `Yielded` job).
@@ -231,11 +243,12 @@ impl Scheduler {
     /// ever will (it is no longer queued, so `take_cancelled_while_queued` never sees it).
     #[must_use = "a dropped cancelled job must be recorded as Cancelled by the caller"]
     pub fn finish(&mut self, taken: Taken, outcome: Outcome) -> bool {
-        if taken.priority == Priority::Background {
+        let cancelled = taken.cancel.is_cancelled();
+        let requeue = outcome == Outcome::Yielded && !cancelled;
+        if taken.priority == Priority::Background && !requeue {
             self.admission.release(taken.id);
         }
-        let cancelled = taken.cancel.is_cancelled();
-        if outcome == Outcome::Yielded && !cancelled {
+        if requeue {
             let entry = Entry {
                 id: taken.id,
                 job: taken.job,
@@ -506,6 +519,110 @@ mod tests {
         );
         assert!(run_one(&mut scheduler).is_some());
         assert_eq!(*ticks.lock().unwrap(), vec!["whole-lane"]);
+    }
+
+    type Ticks = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+    fn submit_sized(
+        scheduler: &mut Scheduler,
+        id: u64,
+        (image_index, vram_bytes): (usize, u64),
+        chunks: u32,
+        label: &'static str,
+        ticks: &Ticks,
+    ) -> CancelToken {
+        scheduler.submit(
+            JobId(id),
+            Box::new(CountingJob {
+                spec: spec_with_vram(Priority::Background, image_index, vram_bytes),
+                remaining: chunks,
+                ticks: ticks.clone(),
+                label,
+            }),
+        )
+    }
+
+    fn run_to_idle(scheduler: &mut Scheduler) {
+        while run_one(scheduler).is_some() {}
+    }
+
+    #[test]
+    fn reservation_spans_yields_so_jobs_that_do_not_fit_together_run_one_at_a_time() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let ticks = Ticks::default();
+        submit_sized(&mut scheduler, 0, (0, 60), 3, "a", &ticks);
+        submit_sized(&mut scheduler, 1, (1, 60), 3, "b", &ticks);
+        run_to_idle(&mut scheduler);
+        assert_eq!(*ticks.lock().unwrap(), vec!["a", "a", "a", "b", "b", "b"]);
+        assert_eq!(scheduler.admission.remaining(), 100);
+    }
+
+    #[test]
+    fn jobs_that_fit_together_still_interleave() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let ticks = Ticks::default();
+        submit_sized(&mut scheduler, 0, (0, 40), 2, "a", &ticks);
+        submit_sized(&mut scheduler, 1, (1, 40), 2, "b", &ticks);
+        run_to_idle(&mut scheduler);
+        assert_eq!(*ticks.lock().unwrap(), vec!["a", "b", "a", "b"]);
+    }
+
+    #[test]
+    fn a_started_far_job_is_resumed_ahead_of_a_nearer_one_that_does_not_fit() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        scheduler.reprioritize_background(|spec| spec.image_index.unwrap_or(0));
+        let ticks = Ticks::default();
+        submit_sized(&mut scheduler, 0, (10, 60), 3, "far", &ticks);
+        assert_eq!(run_one(&mut scheduler), Some((JobId(0), Step::Yield)));
+        submit_sized(&mut scheduler, 1, (0, 60), 1, "near", &ticks);
+        run_to_idle(&mut scheduler);
+        assert_eq!(*ticks.lock().unwrap(), vec!["far", "far", "far", "near"]);
+    }
+
+    #[test]
+    fn reservation_is_released_when_a_started_job_is_cancelled_while_queued() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let cancel = submit_sized(&mut scheduler, 0, (0, 60), 3, "a", &Ticks::default());
+        assert_eq!(run_one(&mut scheduler), Some((JobId(0), Step::Yield)));
+        assert_eq!(scheduler.admission.remaining(), 40);
+        cancel.cancel();
+        assert!(scheduler.take_next().is_none());
+        assert_eq!(scheduler.take_cancelled_while_queued().len(), 1);
+        assert_eq!(scheduler.admission.remaining(), 100);
+    }
+
+    #[test]
+    fn reservation_is_released_when_a_yielded_chunk_is_cancelled_in_flight() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let cancel = submit_sized(&mut scheduler, 0, (0, 60), 3, "a", &Ticks::default());
+        let mut taken = scheduler.take_next().expect("admitted");
+        assert_eq!(scheduler.admission.remaining(), 40);
+        assert_eq!(taken.job.step().unwrap(), Step::Yield);
+        cancel.cancel();
+        assert!(scheduler.finish(taken, Outcome::Yielded));
+        assert_eq!(scheduler.admission.remaining(), 100);
+    }
+
+    #[test]
+    fn a_job_that_grows_its_declared_vram_after_admission_is_not_dropped_or_leaked() {
+        // The reserved amount is fixed at first admission; `retain` must not treat a started job
+        // whose *current* declaration exceeds the total as undeliverable and drop it unreleased.
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        let ticks = Ticks::default();
+        submit_sized(&mut scheduler, 0, (0, 60), 2, "a", &ticks);
+        assert_eq!(run_one(&mut scheduler), Some((JobId(0), Step::Yield)));
+        // Re-enqueue a different job object under the same id, declaring over the total.
+        let mut taken = scheduler.take_next().expect("resumed");
+        taken.job = Box::new(CountingJob {
+            spec: spec_with_vram(Priority::Background, 0, 1000),
+            remaining: 1,
+            ticks: ticks.clone(),
+            label: "grown",
+        });
+        let _ = scheduler.finish(taken, Outcome::Yielded);
+        run_to_idle(&mut scheduler);
+        assert_eq!(*ticks.lock().unwrap(), vec!["a", "grown"]);
+        assert_eq!(scheduler.admission.remaining(), 100);
     }
 
     #[test]

@@ -273,34 +273,14 @@ pub struct Env {
     pub gpu: Arc<GpuContext>,
     pub larder: SharedLarder,
     pub submitter: Submitter,
-    /// The batch's kernels, reused across photos (one GPU worker, so one at a time).
+    /// The batch's kernels, reused across photos. A render takes them for its lifetime; Pounce's
+    /// job-lifetime VRAM reservation (#490) is what bounds how many renders are resident at once,
+    /// and one that starts while another holds them builds its own set.
     pub render_ctx: Arc<Mutex<Option<ExportRenderer>>>,
-    /// Held by the one photo whose render is in progress. Pounce may interleave two GPU jobs
-    /// between tiles; without this a second photo would build its own kernels and hold a second
-    /// full-extent frame texture (~350 MB at 45 MP). Admission reservations are per-chunk, so they
-    /// don't stop two renders interleaving across a `Yield`; this claim does.
-    render_busy: Arc<AtomicBool>,
     /// Pipelines submitted and not yet settled -- including ones the service evicted from its own
     /// table whose queued job hasn't been reached by a worker (and so still holds a decoded
     /// frame). New work is admitted against this, not just against the service's table.
     live: Arc<AtomicUsize>,
-}
-
-/// RAII claim on [`Env::render_busy`].
-struct RenderClaim(Arc<AtomicBool>);
-
-impl RenderClaim {
-    fn try_acquire(busy: &Arc<AtomicBool>) -> Option<RenderClaim> {
-        busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .ok()
-            .map(|_| RenderClaim(busy.clone()))
-    }
-}
-
-impl Drop for RenderClaim {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
 }
 
 impl Env {
@@ -316,7 +296,6 @@ impl Env {
             larder,
             submitter,
             render_ctx: Arc::new(Mutex::new(None)),
-            render_busy: Arc::new(AtomicBool::new(false)),
             live: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -425,15 +404,12 @@ fn spec(lane: Lane, task: &Task) -> JobSpec {
         priority: Priority::Background,
         kind: JobKind::Preview,
         lane,
-        // The GPU stage deliberately has no cursor index: Pounce re-queues a yielded job ahead of
-        // anything with a larger key, so a render *waiting* for the claim at a nearer index would
-        // be picked forever and starve the claim holder at a farther one (the claim never
-        // released, the worker spinning). With no index every render sorts equal and equal keys
-        // are FIFO, so the holder and the waiters take turns. The CPU decode keeps the index.
         // 0 here: the GPU stage overrides it with the render's real footprint
         // (`declared_render_vram`); the decode stage holds no VRAM.
         vram_bytes: 0,
-        image_index: (lane == Lane::Cpu).then_some(task.req.image_index),
+        // Both stages sort by cursor distance. A started render keeps its VRAM reservation across
+        // yields (#490), so a nearer render that does not fit beside it is skipped, not spun on.
+        image_index: Some(task.req.image_index),
     }
 }
 
@@ -570,7 +546,6 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
 // stage 2: render ---------------------------------------------------------------------------------
 
 struct RenderPhase {
-    _claim: RenderClaim,
     exif: SourceExif,
     ctx: ExportRenderer,
     live: Arc<FrameTexture>,
@@ -602,7 +577,7 @@ impl RenderJob {
     }
 
     /// First step: the whole-frame live suffix, then a screen-size tile grid over the crop.
-    fn begin(&mut self, decoded: Decoded, settle: Settle, claim: RenderClaim) {
+    fn begin(&mut self, decoded: Decoded, settle: Settle) {
         let task = self.task.clone();
         let Decoded {
             frame,
@@ -676,7 +651,6 @@ impl RenderJob {
         );
         self.tiles_total = tiles.len() as u64;
         self.phase = Some(RenderPhase {
-            _claim: claim,
             exif,
             ctx,
             live,
@@ -735,8 +709,8 @@ impl ChunkedJob for RenderJob {
             Ok(r) => r,
             Err(_) => {
                 self.task.panicked.store(true, Ordering::SeqCst);
-                // Dropping these settles the slot (`Failed`) and releases the render claim; the
-                // kernels were taken out of the pool, so the next photo builds fresh ones.
+                // Dropping these settles the slot (`Failed`); the kernels were taken out of the
+                // pool, so the next photo builds fresh ones.
                 self.ready = None;
                 self.phase = None;
                 Ok(Step::Done)
@@ -752,12 +726,7 @@ impl RenderJob {
                 settle.settle(T2Outcome::Retry("superseded".into()));
                 return Ok(Step::Done);
             }
-            let Some(claim) = RenderClaim::try_acquire(&self.task.env.render_busy) else {
-                // Another photo is mid-render: wait our turn, holding only the decoded frame.
-                self.ready = Some((decoded, settle));
-                return Ok(Step::Yield);
-            };
-            self.begin(decoded, settle, claim);
+            self.begin(decoded, settle);
             return Ok(if self.phase.is_some() {
                 Step::Yield
             } else {
@@ -1011,8 +980,8 @@ fn frame_for(
         .map(|(_, frame)| frame)
 }
 
-/// Renders in flight at once. Each decoded frame is ~270 MB at 45 MP and waits for the single GPU
-/// claim while holding it, so the bound is on frames, not just on the GPU.
+/// Renders in flight at once. Each decoded frame is ~270 MB at 45 MP and waits for its VRAM reservation
+/// while holding it, so the bound is on frames, not just on the GPU.
 const MAX_INFLIGHT: usize = 2;
 /// Pipelines alive (including evicted ones still draining out of Pounce's queues) before new work
 /// waits for them to settle.
@@ -1107,7 +1076,7 @@ impl EyeshineService {
     }
 
     /// Cancels queued prefetches whose photo is no longer in `keep` (the cursor moved on), so a
-    /// stale one can't hold the GPU claim while the current photo's render waits (#398).
+    /// stale one can't hold the GPU lane's VRAM while the current photo's render waits (#398).
     pub fn retain_prefetch(&mut self, pounce: &Pounce, keep: &[i64]) {
         let stale: Vec<i64> = self
             .inflight
@@ -2253,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gpu_stage_has_no_cursor_index_so_waiters_cannot_starve_the_holder() {
+    fn both_stages_sort_by_cursor_distance() {
         let Some(fx) = fx() else { return };
         let task = Task {
             req: Request {
@@ -2270,7 +2239,7 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             panicked: Arc::new(AtomicBool::new(false)),
         };
-        assert_eq!(spec(Lane::Gpu, &task).image_index, None);
+        assert_eq!(spec(Lane::Gpu, &task).image_index, Some(7));
         assert_eq!(spec(Lane::Cpu, &task).image_index, Some(7));
     }
 

@@ -274,8 +274,8 @@ and Pounce drops a background job over the *total* budget. Now:
   counted, so a masked photo's figure is a lower bound.
   `declared_render_vram` clamps it to the lane total so an oversized frame runs alone instead of
   being dropped.
-- **Unchanged, deliberately**: reservations stay per-chunk (`admit`/`release` bracket one `step()`),
-  so with one GPU worker admission never overlaps two jobs, and it does not serialize jobs across a
-  `Yield`. Eyeshine's `RenderClaim` (and thus its GPU stage's `image_index: None`) therefore stays.
-  Job-lifetime reservations would change that, and are a separate decision.
+- **Changed in #490**: reservations were per-chunk here (`admit`/`release` bracketed one `step()`), so
+  with one GPU worker admission never overlapped two jobs and did not serialize them across a
+  `Yield`; Eyeshine's `RenderClaim` (and its GPU stage's `image_index: None`) papered over that. They
+  are now job-lifetime -- see ADR-0054's "Amendment (#490)".
 - Develop's interactive render is not a Pounce job: it is the foreground path admission protects.

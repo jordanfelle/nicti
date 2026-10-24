@@ -723,6 +723,43 @@ mod tests {
     }
 
     #[test]
+    fn gpu_lane_vram_reservation_serializes_jobs_that_do_not_fit_together_across_yields() {
+        // Two 60-byte jobs against a 100-byte lane budget cannot both be resident (#490), so the
+        // second must not take a chunk until the first is Done, even though the single worker
+        // would otherwise round-robin them between yields.
+        let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let pounce = Pounce::new(100, 1, 1, || {});
+        let mut spec = gpu_spec(crate::job::Priority::Background);
+        spec.vram_bytes = 60;
+        let ids: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|label| {
+                let log = log.clone();
+                pounce.submit(Box::new(StepJob {
+                    spec,
+                    label: label.into(),
+                    remaining: 3,
+                    on_step: Some(Box::new(move || log.lock().unwrap().push(label))),
+                }))
+            })
+            .collect();
+
+        assert!(wait_until(
+            || {
+                let snapshot = pounce.snapshot();
+                ids.iter().all(|id| {
+                    snapshot
+                        .iter()
+                        .any(|s| s.id == *id && matches!(s.state, JobState::Done))
+                })
+            },
+            Duration::from_secs(5)
+        ));
+        assert_eq!(*log.lock().unwrap(), vec!["a", "a", "a", "b", "b", "b"]);
+        pounce.shutdown();
+    }
+
+    #[test]
     fn editing_gate_set_then_released_wakes_workers_without_hanging() {
         let pounce = Pounce::new(u64::MAX, 1, 1, || {});
         pounce.set_editing(true);
