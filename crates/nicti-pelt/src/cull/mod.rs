@@ -17,7 +17,7 @@ pub mod tile;
 pub mod undo;
 pub mod worker;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use nicti_lair::AssetMeta;
@@ -43,6 +43,69 @@ pub fn should_advance(auto_advance: bool, invert_advance: bool, targets: usize) 
     targets == 1 && (auto_advance != invert_advance)
 }
 
+/// Writes in flight per photo. Small marks are counted per id; a mark over [`OPTIMISTIC_MAX`]
+/// targets (a select-all over a big library) is kept as one sorted id list instead, because
+/// building and settling a million-entry map cost ~100 ms in `mark` and ~370 ms in one `poll`
+/// frame (#497). The worker handles marks in order and answers each one once, so a reply of
+/// bulk size settles the oldest bulk entry.
+#[derive(Default)]
+struct Pending {
+    counts: HashMap<i64, u32>,
+    bulk: VecDeque<Vec<i64>>,
+}
+
+impl Pending {
+    fn add(&mut self, ids: &[i64]) {
+        if ids.len() > OPTIMISTIC_MAX {
+            let mut sorted = ids.to_vec();
+            if !sorted.is_sorted() {
+                sorted.sort_unstable();
+            }
+            self.bulk.push_back(sorted);
+        } else {
+            for id in ids {
+                *self.counts.entry(*id).or_default() += 1;
+            }
+        }
+    }
+
+    fn contains(&self, id: i64) -> bool {
+        self.counts.contains_key(&id) || self.bulk.iter().any(|b| b.binary_search(&id).is_ok())
+    }
+
+    /// Settles the write that targeted `ids` (as given to [`Self::add`]).
+    fn settle(&mut self, ids: &[i64]) {
+        if ids.len() > OPTIMISTIC_MAX {
+            self.bulk.pop_front();
+            return;
+        }
+        for id in ids {
+            if let Some(n) = self.counts.get_mut(id) {
+                *n -= 1;
+                if *n == 0 {
+                    self.counts.remove(id);
+                }
+            }
+        }
+    }
+
+    /// A deleted photo has no write left to wait for. Only per-id counts are dropped: a bulk
+    /// entry stays until its reply, which is harmless for an id that no longer exists.
+    fn remove(&mut self, id: i64) {
+        self.counts.remove(&id);
+    }
+
+    fn clear(&mut self) {
+        self.counts.clear();
+        self.bulk.clear();
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.counts.is_empty() && self.bulk.is_empty()
+    }
+}
+
 /// What the views need from culling: the markers to draw, and the entry points that mark/undo.
 pub struct CullState {
     worker: MetaWorker,
@@ -53,7 +116,7 @@ pub struct CullState {
     requested: HashSet<i64>,
     /// Writes in flight per photo. While non-zero the cache holds the user's latest intent, so
     /// an older read or write reply must not overwrite it.
-    pending: HashMap<i64, u32>,
+    pending: Pending,
     /// Advance to the next photo after a single-photo mark. On by default; Shift inverts it for
     /// one keypress.
     pub auto_advance: bool,
@@ -72,7 +135,7 @@ impl CullState {
             worker: MetaWorker::spawn(store, wake),
             cache: HashMap::new(),
             requested: HashSet::new(),
-            pending: HashMap::new(),
+            pending: Pending::default(),
             auto_advance: true,
             last_error: None,
             read_backoff_until: None,
@@ -124,9 +187,7 @@ impl CullState {
                 self.cache.insert(*id, now);
             }
         }
-        for id in &ids {
-            *self.pending.entry(*id).or_default() += 1;
-        }
+        self.pending.add(&ids);
         self.worker.apply(ids, action);
     }
 
@@ -142,7 +203,7 @@ impl CullState {
     /// new rows can reuse the ids of photos deleted earlier, a stale entry must not be inherited.
     pub fn invalidate(&mut self) {
         let pending = &self.pending;
-        self.cache.retain(|id, _| pending.contains_key(id));
+        self.cache.retain(|id, _| pending.contains(*id));
         self.requested.clear();
     }
 
@@ -151,7 +212,7 @@ impl CullState {
         for id in ids {
             self.cache.remove(id);
             self.requested.remove(id);
-            self.pending.remove(id);
+            self.pending.remove(*id);
         }
         self.worker.forget(ids.to_vec());
     }
@@ -164,7 +225,7 @@ impl CullState {
                 Reply::Loaded(map) => {
                     for (id, meta) in map {
                         self.requested.remove(&id);
-                        if !self.is_pending(id) {
+                        if !self.pending.contains(id) {
                             self.cache.insert(id, meta);
                         }
                     }
@@ -175,14 +236,26 @@ impl CullState {
                     counted,
                 } => {
                     if counted {
-                        self.settle(&ids);
+                        self.pending.settle(&ids);
                     }
+                    // A reply too big to have been applied optimistically (a select-all) only
+                    // refreshes photos already cached: inserting a million entries just to trim
+                    // them again costs hundreds of ms in one frame, and an uncached photo is
+                    // read when it scrolls into view.
+                    let existing_only = changed.len() > OPTIMISTIC_MAX;
                     for (id, meta) in changed {
                         // Only the last outstanding write for a photo is authoritative; an
                         // earlier reply (including an undo's) would flicker the badge back
                         // before the newer one lands, and that newer write's own reply sets
                         // the final value.
-                        if !self.is_pending(id) {
+                        if self.pending.contains(id) {
+                            continue;
+                        }
+                        if existing_only {
+                            if let Some(slot) = self.cache.get_mut(&id) {
+                                *slot = meta;
+                            }
+                        } else {
                             self.cache.insert(id, meta);
                         }
                     }
@@ -193,11 +266,11 @@ impl CullState {
                     counted,
                 } => {
                     if counted {
-                        self.settle(&ids);
+                        self.pending.settle(&ids);
                     }
                     // The optimistic values may now be wrong: forget them so they are re-read.
                     for id in &ids {
-                        if !self.is_pending(*id) {
+                        if !self.pending.contains(*id) {
                             self.cache.remove(id);
                             self.requested.remove(id);
                         }
@@ -226,23 +299,8 @@ impl CullState {
         }
         if self.cache.len() > CACHE_CAP {
             let pending = &self.pending;
-            self.cache.retain(|id, _| pending.contains_key(id));
+            self.cache.retain(|id, _| pending.contains(*id));
             self.requested.clear();
-        }
-    }
-
-    fn is_pending(&self, id: i64) -> bool {
-        self.pending.get(&id).is_some_and(|n| *n > 0)
-    }
-
-    fn settle(&mut self, ids: &[i64]) {
-        for id in ids {
-            if let Some(n) = self.pending.get_mut(id) {
-                *n -= 1;
-                if *n == 0 {
-                    self.pending.remove(id);
-                }
-            }
         }
     }
 
