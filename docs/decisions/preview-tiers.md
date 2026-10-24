@@ -114,4 +114,4 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   (`scruff::tag_orientation`) inserts a 36-byte EXIF APP1 carrying it; pixel data is untouched.
   `preview_color::decode` applies a JPEG's EXIF orientation, so grid/cull/loupe stand-ins show a
   portrait NEF upright before T2 lands. A rotated T0 stays JPEG in AVIF sidecar mode (the tag would
-  be lost). T0s already in a catalog are not rewritten: they pick this up on re-ingest of the asset.
+  be lost). T0s already in a catalog are not rewritten (ingest skips unchanged files), so they stay sideways until a backfill (follow-up). A re-extracted T0 no longer byte-equals an old `.thumb.jpg`, so settle keeps the blob rather than dropping it.

@@ -198,7 +198,11 @@ pub(crate) fn tag_orientation(jpeg: Vec<u8>, orientation: u8) -> Vec<u8> {
     let mut at = 2;
     if jpeg.get(2..4) == Some(&[0xFF, 0xE0]) {
         if let Some(len) = jpeg.get(4..6) {
-            at = (2 + 2 + usize::from(u16::from_be_bytes([len[0], len[1]]))).min(jpeg.len());
+            let end = 2 + 2 + usize::from(u16::from_be_bytes([len[0], len[1]]));
+            // A bogus APP0 length (under 2, or running off the end) means insert right after SOI.
+            if end >= 6 && end <= jpeg.len() {
+                at = end;
+            }
         }
     }
     let mut out = Vec::with_capacity(jpeg.len() + seg.len());
@@ -543,8 +547,16 @@ mod tests {
         assert_eq!(tag_orientation(src.clone(), 1), src);
         assert_eq!(tag_orientation(src.clone(), 9), src);
         assert_eq!(tag_orientation(b"not a jpeg".to_vec(), 6), b"not a jpeg");
-        let once = tag_orientation(src, 8);
+        let once = tag_orientation(src.clone(), 8);
         assert_eq!(tag_orientation(once.clone(), 6), once);
+        // An explicit Orientation=1 is "absent": the container's rotation still applies.
+        let one = tag_orientation(src.clone(), 1);
+        assert_eq!(orientation_of(&one), None);
+        // A bogus APP0 length must not split a segment.
+        let mut bad = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00];
+        bad.extend_from_slice(&src[2..]);
+        let t = tag_orientation(bad, 6);
+        assert_eq!(&t[2..4], &[0xFF, 0xE1]);
     }
     use super::*;
 
