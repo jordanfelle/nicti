@@ -59,8 +59,8 @@ pub fn sidecar_path(raw: &Path, codec: SidecarCodec) -> PathBuf {
 }
 
 /// AVIF bytes for a T0 JPEG, or `None` when it must stay JPEG: a tagged ICC profile (ravif can't
-/// carry one and this crate does no colour management, so AVIF would silently shift colour) or
-/// bytes that don't decode.
+/// carry one and this crate does no colour management, so AVIF would silently shift colour), an
+/// EXIF rotation (the tag would be lost, #476) or bytes that don't decode.
 fn encode_avif(jpeg: &[u8]) -> Option<Vec<u8>> {
     use image::{DynamicImage, ImageDecoder};
     let mut decoder = image::ImageReader::new(io::Cursor::new(jpeg))
@@ -69,6 +69,12 @@ fn encode_avif(jpeg: &[u8]) -> Option<Vec<u8>> {
         .into_decoder()
         .ok()?;
     if decoder.icc_profile().ok().flatten().is_some() {
+        return None;
+    }
+    if decoder
+        .orientation()
+        .is_ok_and(|o| o != image::metadata::Orientation::NoTransforms)
+    {
         return None;
     }
     let img = DynamicImage::from_decoder(decoder).ok()?.to_rgb8();
@@ -410,6 +416,19 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let raw = d.path().join("a.NEF");
         let pv = real_preview(32, 32, Some(b"not-a-real-profile"));
+        assert_eq!(
+            export(&raw, &pv, SidecarCodec::Avif).unwrap(),
+            SidecarCodec::Jpeg
+        );
+        assert_eq!(read(&raw, SidecarCodec::Avif).unwrap().bytes, pv.bytes);
+    }
+
+    #[test]
+    fn exif_rotated_t0_stays_jpeg_in_avif_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let raw = d.path().join("a.NEF");
+        let mut pv = real_preview(32, 16, None);
+        pv.bytes = crate::scruff::tag_orientation(pv.bytes, 6);
         assert_eq!(
             export(&raw, &pv, SidecarCodec::Avif).unwrap(),
             SidecarCodec::Jpeg

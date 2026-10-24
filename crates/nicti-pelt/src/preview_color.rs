@@ -7,6 +7,7 @@
 
 use std::io::Cursor;
 
+use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};
 use nicti_calico::source_transform::SourceTransforms;
 
@@ -16,8 +17,8 @@ pub struct DecodedJpeg {
     pub icc: Option<Vec<u8>>,
 }
 
-/// Decodes `bytes`, keeping the embedded ICC profile. EXIF orientation is deliberately not applied
-/// (previews never were: T0/T2 are stored upright).
+/// Decodes `bytes`, keeping the embedded ICC profile. A JPEG's EXIF orientation is applied: T2 is
+/// stored upright (no tag), and ingest tags a T0 with its RAW container's IFD0 rotation (#476).
 pub fn decode(bytes: &[u8]) -> Result<DecodedJpeg, String> {
     if is_avif(bytes) {
         return decode_avif(bytes);
@@ -29,7 +30,9 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedJpeg, String> {
         .map_err(|e| e.to_string())?;
     // A profile that can't be read is the same as none: sRGB, the pre-#319 behaviour.
     let icc = decoder.icc_profile().ok().flatten();
-    let image = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    image.apply_orientation(orientation);
     Ok(DecodedJpeg { image, icc })
 }
 
@@ -91,6 +94,28 @@ mod tests {
 
     fn srgb_display() -> SourceTransforms {
         SourceTransforms::new(&DisplayProfile::Space(OutputSpace::Srgb))
+    }
+
+    #[test]
+    fn a_jpegs_exif_orientation_is_applied_on_decode() {
+        let jpeg = tagged_jpeg(64, 32, [9, 9, 9], None);
+        let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&6u32.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        let mut seg = b"Exif\0\0".to_vec();
+        seg.extend_from_slice(&tiff);
+        let mut tagged = jpeg[..2].to_vec();
+        tagged.extend_from_slice(&[0xFF, 0xE1]);
+        tagged.extend_from_slice(&((seg.len() + 2) as u16).to_be_bytes());
+        tagged.extend_from_slice(&seg);
+        tagged.extend_from_slice(&jpeg[2..]);
+        let plain = decode(&jpeg).unwrap().image;
+        assert_eq!((plain.width(), plain.height()), (64, 32));
+        let rotated = decode(&tagged).unwrap().image;
+        assert_eq!((rotated.width(), rotated.height()), (32, 64));
     }
 
     /// The `.thumb.avif` sidecar a real archive move writes decodes back to about the same pixels.

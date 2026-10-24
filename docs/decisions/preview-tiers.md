@@ -109,3 +109,9 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
 **Keyed Larder entries (#353, `docs/adr/0353-baked-alpha-disk-tier.md`):** the Larder's `(asset, tier)` key allows one entry per photo per tier, which cannot hold several AI mask alphas per photo, so a second index table `keyed_entry (kind, key)` was added that shares the pack file, byte cap, LRU order (one `seq` counter across both tables), compaction and purge-all. It is created with `IF NOT EXISTS`, so existing Larders need no migration. The cache-size setting and purge-all therefore cover baked alphas with no UI change.
 
 - **Sidecar codec (#393)**: AVIF sidecars (`.thumb.avif`, ravif q80 speed 9) selectable for archived folders, JPEG default; reads accept either codec, ICC-tagged T0 stays JPEG, unarchive re-extracts T0 from the RAW. Full rules: `docs/adr/0072-tiered-thumbnail-storage.md` (amendment).
+- **T0 orientation (#476)**: ADR-0029's "verbatim" T0 gains one change: when the RAW's IFD0
+  Orientation is 2-8 and the preview JPEG has no EXIF Orientation of its own, ingest
+  (`scruff::tag_orientation`) inserts a 36-byte EXIF APP1 carrying it; pixel data is untouched.
+  `preview_color::decode` applies a JPEG's EXIF orientation, so grid/cull/loupe stand-ins show a
+  portrait NEF upright before T2 lands. A rotated T0 stays JPEG in AVIF sidecar mode (the tag would
+  be lost). T0s already in a catalog are not rewritten: they pick this up on re-ingest of the asset.
