@@ -12,8 +12,8 @@ clipped-pixel fraction, a 64-float luminance signature with a cosine similarity 
 plus a GPU kernel and a CPU/GPU equivalence test: automatic pupil detection inside a user ellipse, neutralise or darken,
 optional catchlight, including pet-eye). Read at `265248c`. Nothing is copied, so there is no `docs/licensing.md` entry.
 
-The ticket asks two questions: are the cull heuristics useful as a baseline against ADR-0034 / ADR-0033 (the ticket's "ADR-0025" is ADR-0033's pre-renumbering number)
-approaches (ADR-0034, ADR-0033), and is either piece worth a build ticket.
+The ticket asks two questions: are the cull heuristics useful as a baseline against the ADR-0034 and ADR-0033 approaches
+(the ticket's "ADR-0025" is ADR-0033's pre-renumbering number), and is either piece worth a build ticket?
 
 ## What Nicti already has
 
