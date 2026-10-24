@@ -444,3 +444,15 @@ fn the_eyedropper_arms_the_point_color_tool_and_reset_all_clears_the_new_stages(
         .stage_params::<PointCurveParams>(POINT_CURVE)
         .is_noop());
 }
+
+#[test]
+fn showing_the_basic_section_does_not_dirty_the_document() {
+    let mut h = panel_harness();
+    open_basic(&mut h);
+    h.run_steps(3);
+    assert!(
+        !h.state().doc.is_dirty(),
+        "showing the panel with no input must not write default entries (#447)"
+    );
+    assert!(!h.state().doc.has_edits());
+}
