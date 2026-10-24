@@ -3,7 +3,7 @@
 **Status:** Proposed (cull heuristics: baselines for the existing labelling passes, no feature; red-eye / pet-eye: no-go, no build ticket)
 **Ticket:** #439
 **Part of:** #424
-**Related:** #238, #180, ADR-0034, ADR-0033, ADR-0025, ADR-0049
+**Related:** #238, #180, ADR-0034, ADR-0033, ADR-0049
 
 ## Context
 
@@ -12,7 +12,7 @@ clipped-pixel fraction, a 64-float luminance signature with a cosine similarity 
 plus a GPU kernel and a CPU/GPU equivalence test: automatic pupil detection inside a user ellipse, neutralise or darken,
 optional catchlight, including pet-eye). Read at `265248c`. Nothing is copied, so there is no `docs/licensing.md` entry.
 
-The ticket asks two questions: are the cull heuristics useful as a baseline against ADR-0034 / ADR-0033 / ADR-0025
+The ticket asks two questions: are the cull heuristics useful as a baseline against ADR-0034 / ADR-0033 (the ticket's "ADR-0025" is ADR-0033's pre-renumbering number)
 approaches (ADR-0034, ADR-0033), and is either piece worth a build ticket.
 
 ## What Nicti already has
