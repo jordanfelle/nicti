@@ -31,14 +31,27 @@ LAYERS = {
 # Existing production -> spikes/ edges (nicti-groom builds on the promoted-in-place spike crates).
 # Grandfathered so the check can land; remove entries as the spikes graduate into crates/.
 KNOWN_SPIKE_DEPS = {("nicti-groom", d) for d in ("crouch", "litter", "rods", "rosette")}
-GUI_PREFIXES = ("egui", "eframe", "winit")
+GUI_PREFIXES = ("egui", "eframe", "winit", "epaint", "emath", "accesskit", "iced", "slint")
+GUI_EXACT = {"rfd", "raw-window-handle"}
 GUI_ALLOWED = {"nicti-pelt", "nicti"}
-ASSET_EXT = re.compile(r"\.(ttf|otf|woff2?|png|jpe?g|gif|svg|ico|icns|webp|onnx|ort)$", re.I)
-ASSET_SKIP = re.compile(r"^spikes/|/tests/snapshots/")
+ASSET_EXT = re.compile(
+    r"\.(ttf|otf|ttc|eot|woff2?|png|jpe?g|gif|svg|ico|icns|webp|avif|bmp|tiff?"
+    r"|onnx|ort|pt|pth|safetensors|gguf|bin)$",
+    re.I,
+)
+# Only per-crate egui_kittest snapshots and the spikes/ research tree are exempt.
+ASSET_SKIP = re.compile(r"^spikes/|^crates/[^/]+/tests/snapshots/")
+
+
+def is_gui(dep):
+    return dep.startswith(GUI_PREFIXES) or dep in GUI_EXACT
 
 
 def sh(*cmd):
-    return subprocess.run(cmd, cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"error: {' '.join(cmd)} failed:\n{r.stderr}")
+    return r.stdout
 
 
 def check_layers():
@@ -51,24 +64,39 @@ def check_layers():
             errs.append(f"{name}: crates/* member missing from LAYERS in scripts/check-repo-policy.py")
         for dep in pkg["dependencies"]:
             d = dep["name"]
-            if d.startswith(GUI_PREFIXES) and name not in GUI_ALLOWED:
+            if is_gui(d) and name not in GUI_ALLOWED:
                 errs.append(f"{name} depends on GUI crate {d}; only {sorted(GUI_ALLOWED)} may")
             if name in LAYERS and d in LAYERS and LAYERS[d] > LAYERS[name]:
                 errs.append(
                     f"{name} (layer {LAYERS[name]}) depends on {d} (layer {LAYERS[d]}): upward dependency"
                 )
+            if d in GUI_ALLOWED and name not in GUI_ALLOWED and name != "nicti":
+                errs.append(f"{name} depends on app crate {d}; only the shell may")
             if name in LAYERS and d in members and d not in LAYERS \
-                    and (name, d) not in KNOWN_SPIKE_DEPS and not d.startswith(GUI_PREFIXES):
+                    and (name, d) not in KNOWN_SPIKE_DEPS and not is_gui(d):
                 errs.append(f"{name} depends on unlayered workspace crate {d}")
     return errs
 
 
 def check_assets():
-    tracked = set(sh("git", "ls-files").splitlines())
+    tracked = set(sh("git", "ls-files", "-z").split("\0")) - {""}
     assets = {f for f in tracked if ASSET_EXT.search(f) and not ASSET_SKIP.search(f)}
-    with open(os.path.join(ROOT, "assets", "ATTRIBUTION.md"), encoding="utf-8") as fh:
-        rows = {m for line in fh if line.startswith("|") for m in re.findall(r"^\|\s*`([^`]+)`", line)}
-    errs = [f"{a}: no row in assets/ATTRIBUTION.md" for a in sorted(assets - rows)]
+    path = os.path.join(ROOT, "assets", "ATTRIBUTION.md")
+    if not os.path.exists(path):
+        return ["assets/ATTRIBUTION.md is missing"]
+    errs, rows = [], set()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            m = re.match(r"^\|\s*`([^`]+)`\s*\|(.*)$", line.rstrip("\r\n"))
+            if not m:
+                continue
+            cells = [c.strip() for c in m.group(2).strip().rstrip("|").split("|")]
+            if m.group(1) in rows:
+                errs.append(f"assets/ATTRIBUTION.md: duplicate row for {m.group(1)}")
+            if len(cells) < 3 or not all(cells[:3]):
+                errs.append(f"assets/ATTRIBUTION.md: {m.group(1)} needs source, license and license text")
+            rows.add(m.group(1))
+    errs += [f"{a}: no row in assets/ATTRIBUTION.md" for a in sorted(assets - rows)]
     errs += [f"assets/ATTRIBUTION.md lists {r}, which is not a tracked asset" for r in sorted(rows - assets)]
     return errs
 
