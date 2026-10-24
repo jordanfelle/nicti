@@ -443,7 +443,8 @@ mod tests {
 
     #[test]
     fn spec_is_a_foreground_cpu_download() {
-        let (job, _) = InstallModelsJob::new(temp_store("spec").1, Arc::new(Fake(vec![])), &[]);
+        let (_dir, store) = temp_store("spec");
+        let (job, _) = InstallModelsJob::new(store, Arc::new(Fake(vec![])), &[]);
         let spec = job.spec();
         assert_eq!(spec.kind, JobKind::Download);
         assert_eq!(spec.lane, Lane::Cpu);
@@ -452,8 +453,8 @@ mod tests {
 
     #[test]
     fn a_job_can_be_relabelled_for_another_feature() {
-        let (job, _) =
-            InstallModelsJob::new(temp_store("label").1, Arc::new(Fake(Vec::new())), &[]);
+        let (_dir, store) = temp_store("label");
+        let (job, _) = InstallModelsJob::new(store, Arc::new(Fake(Vec::new())), &[]);
         assert_eq!(job.label(), "Download AI removal models");
         assert_eq!(
             job.labelled("Download AI mask model").label(),
