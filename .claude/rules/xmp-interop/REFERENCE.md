@@ -54,3 +54,7 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
   in this sandbox, same constraint `homing` already documents), not path-gated, pending the
   follow-up hands-on LRC session the ADR describes before it can move to Accepted. See
   `docs/research/scent-xmp-interop.md`.
+- #431 GPX geotagging (`nicti-scent::gpx`): `parse_gpx` (GPX 1.0/1.1 tracks only, interpolation within a
+  segment never across one, depth/point limits), `camera_time_to_unix` (EXIF time has no zone: caller
+  supplies camera UTC offset + drift), `geotag` writes `exif:GPS*` via `Patch.gps` (replaces attr- and
+  element-form, `Some(None)` clears). Not yet built: lair columns, apply-GPX UI, Info display.
