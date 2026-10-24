@@ -234,3 +234,13 @@ empty document for an asset that exists but has no master row, `None` for an unk
 parse failure is an error, never silently an empty document (`nicti-pelt` falls back to an empty
 document so a corrupt one can't stop a photo from opening, and the next save replaces it). Append-
 only history and named snapshots (`edit_history`) are not touched — that is #324.
+
+## #436: import rename / date folders / devices (ADR-0436)
+
+Research outcome from the LightCraft audit (#424): nothing lifted. `naming.rs` already renders subfolder templates, so
+date folders exist; its collision handling (case-folded batch de-dupe plus `create_new` at write) is safe for export,
+and `Carry` is a stronger verified copy than LightCraft's `import_move`. Gaps: `{Num}` (derivable from `stem`, go),
+`{Lens}`/`{ISO}` (the catalog has no such columns, so scruff must extract them and backfill existing rows first, since ingest skips unchanged files; go), import-by-copy from a
+card with DCIM device detection and in-place batch rename (deferred: Nicti ingests in place, so adopting them is a
+product decision; recommended shape is copy-only import reusing `Carry`'s stream-hash-reread, and a rename-in-place
+that decides collisions by file identity, since the file itself is the "collision").

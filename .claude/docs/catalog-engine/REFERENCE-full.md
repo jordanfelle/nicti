@@ -96,6 +96,10 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   saves Develop's edits (`PeltApp::save_develop_edits`) on pointer release, before switching photos or
   exporting, and on exit.
 
+## #436: import rename / date folders / devices (ADR-0436)
+
+- Research outcome, no code lifted. Date folders already work (`{Date:YYYY}/{Date:MM}` subfolder template, `naming.rs`). Go: `{Num}` token (from `stem`), then `{Lens}`/`{ISO}` which need scruff extraction + catalog columns first. Import-by-copy from a card (+ DCIM device list) and in-place rename are deferred pending a product call (Nicti ingests in place); if built, copy-only reusing `Carry`'s stream-hash-reread, and rename must use file identity not case-folded names. Detail: `docs/decisions/catalog-engine.md`.
+
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 landed; #25 landed) — the real production catalog

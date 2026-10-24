@@ -53,6 +53,11 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   Runs as `pounce_jobs::DeleteJob` (`JobKind::Delete`).
 
 - **Master edit document (#57, landed)**: ...
+
+## #436: import rename / date folders / devices (ADR-0436)
+
+- Research outcome, no code lifted. Date folders already work (`{Date:YYYY}/{Date:MM}` subfolder template, `naming.rs`). Go: `{Num}` (from `stem`), then `{Lens}`/`{ISO}` (need scruff EXIF extraction, columns and an explicit backfill: ingest skips unchanged files). Import-by-copy from a card (+ DCIM device list) and in-place rename are deferred pending a product call (Nicti ingests in place); if built, copy-only reusing `Carry`'s stream-hash-reread, and rename must use file identity not case-folded names. Detail: `docs/decisions/catalog-engine.md`.
+
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 ...
