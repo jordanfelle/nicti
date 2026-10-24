@@ -79,7 +79,7 @@ pub fn set_status(ctx: &egui::Context, message: Option<String>) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STATUS_ID), message));
 }
 
-fn thumb_for(ctx: &egui::Context, develop: &DevelopDoc) -> Arc<Thumb> {
+pub(crate) fn thumb_for(ctx: &egui::Context, develop: &DevelopDoc) -> Arc<Thumb> {
     let id = egui::Id::unique(THUMB_ID);
     let key = develop.frame_key();
     if let Some((k, t)) = ctx.data(|d| d.get_temp::<(u64, Arc<Thumb>)>(id)) {

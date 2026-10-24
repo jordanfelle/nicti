@@ -48,6 +48,8 @@ pub enum Tool {
     Mask,
     /// The Point Color eyedropper (#432): the next click on the photo adds a sample.
     PointColor,
+    /// Targeted adjustment (#453): a vertical drag on the photo edits the curve point / HSL band under it.
+    Targeted,
 }
 
 const MIN_RADIUS: f32 = 4.0;
@@ -579,6 +581,11 @@ impl HealUi {
     pub fn point_color_active(&self) -> bool {
         self.tool == Tool::PointColor
     }
+
+    /// True while the targeted-adjustment tool owns the viewport (#453).
+    pub fn targeted_active(&self) -> bool {
+        self.tool == Tool::Targeted
+    }
 }
 
 /// Removes the spot at `index` and prunes patches that no longer belong to any spot.
@@ -987,12 +994,16 @@ pub fn tool_switch(ui: &mut egui::Ui, heal: &mut HealUi) {
             (Tool::Heal, "Heal / Remove"),
             (Tool::Mask, "Masks"),
             (Tool::PointColor, "Pick Color"),
+            (Tool::Targeted, "Targeted"),
         ] {
             if ui.selectable_label(heal.tool == tool, label).clicked() {
                 heal.tool = if heal.tool == tool { Tool::Idle } else { tool };
             }
         }
     });
+    if heal.targeted_active() {
+        crate::targeted::mode_picker(ui);
+    }
 }
 
 /// Develop-view keys for the crop tool (#272): **R** toggles it, **Esc**/**Enter** commit it.

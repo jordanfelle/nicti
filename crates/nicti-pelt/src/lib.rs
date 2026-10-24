@@ -45,6 +45,7 @@ mod stash;
 mod swat;
 mod t0_fetch;
 mod t2;
+mod targeted;
 #[cfg(test)]
 mod test_gpu;
 #[cfg(test)]
