@@ -5,6 +5,11 @@
     ":enableVulnerabilityAlerts",
     "helpers:pinGitHubActionDigests"
   ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "description": "Refresh Cargo.lock to the latest compatible versions as soon as they publish. Transitive-only deps (e.g. tokio) have no manifest entry, so without this Renovate never sees a lock-only patch -- a security fix like tokio 1.54.1 was only picked up by Dependabot's alert PR (#535)."
+  },
   "packageRules": [
     {
       "matchManagers": ["cargo"],
