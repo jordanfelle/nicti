@@ -100,3 +100,10 @@ Covers the GPU compute API choice, the GUI framework decision, and the healing/r
   **Gotcha**: kittest runs one frame inside `build`, before any context setup, and fonts/styles apply a frame
   later -- `swat::harness` therefore installs the theme on a discarded first frame (the app's panels panic on
   the missing `semibold` family otherwise).
+
+- **Agent control channel (#434)**: `docs/adr/0434-agent-control-channel.md` (Proposed; go, phased, nothing built). A
+  pelt-local command table (`id`, `params` doc, `risk`, `enabled` reason, `run`) wrapping existing `PeltApp` methods; a
+  loopback JSON-lines channel run on the UI thread between frames, opt-in (`--control`), with a random 0600 token file, a
+  1 MiB line cap, 4 connections and a `Destructive` risk gate; a widget-rect registry (not AccessKit) for clicks; screenshots
+  via `ViewportCommand::Screenshot`; a separate stdio MCP shim. Rebindable shortcuts need a separate migration of ~40 inline
+  key sites and are out of scope.

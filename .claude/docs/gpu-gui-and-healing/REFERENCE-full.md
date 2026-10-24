@@ -224,3 +224,4 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   **Gotcha**: kittest runs one frame inside `build`, before any context setup, and fonts/styles apply a frame
   later -- `swat::harness` therefore installs the theme on a discarded first frame (the app's panels panic on
   the missing `semibold` family otherwise).
+- **Agent control channel (#434, ADR-0434, Proposed)** -- pelt-local command table + tokened 127.0.0.1 JSON-lines socket + MCP shim; 4 slices, nothing built.

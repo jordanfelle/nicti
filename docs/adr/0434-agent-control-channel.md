@@ -1,0 +1,159 @@
+# ADR-0434: Agent-drivable command table, loopback control channel and MCP shim for nicti-pelt
+
+**Status:** Proposed (go, phased; nothing built yet)
+**Ticket:** #434
+**Part of:** #424
+**Related:** #426 (headless harness, landed), #233, #368, #294, #295, #272
+
+## Context
+
+LightCraft (`storytold/lightcraft` at `265248c`, MIT OR Apache-2.0) routes every action through one
+command table (`crates/engine/src/cmd/mod.rs`: id, label, menu path, shortcut, params doc, `enabled`
+predicate, `run`). The UI, shortcuts, CLI, a `127.0.0.1` JSON-lines socket
+(`crates/ui-egui/src/control.rs`, `docs/control-protocol.md`) and a hand-written stdio MCP server
+(`crates/mcp`, ~1140 lines, no async runtime) all dispatch through it. An agent can list commands,
+run them, read UI state, click a widget by name, press keys, and take a screenshot of the real app.
+
+Why Nicti would want that: the open verification tickets that need a real GPU and a real window
+(#233, #364, #365, #390, #409) are exactly the ones an agent could drive and screenshot instead of a
+human clicking. This dev host has no GPU, so an agent would drive a *remote* GPU machine the
+operator starts with the flag.
+
+This is design only: no LightCraft code is ported, so there is no `docs/licensing.md` entry. The
+LightCraft sources below are the reference read for the questions, at the pinned commit.
+
+### What nicti-pelt looks like today (verified in the tree)
+
+- **No command table, no menu bar.** The only `menu_button` is the Color menu (`color_mgmt.rs`).
+  Actions are methods on `PeltApp` (`request_export`, `handle_knead_action(PanelAction)`,
+  `save_develop_edits`, ...) called from widgets.
+- **Shortcuts are inline.** About 40 `consume_shortcut` / `key_pressed` / `consume_key` sites in 14
+  files (`app.rs`, `grid/view.rs`, `cull/*`, `mask_panel.rs`, `heal_tool.rs`, ...). So the issue's
+  "menus generated from one table (`menus.rs`, `shortcuts.rs`)" has no pelt equivalent to replace:
+  those files do not exist here.
+- **All state is on `PeltApp`** (`view`, grid selection, `develop`, `cull`, ...), driven from
+  `eframe::App::ui` once per frame. There is no `Session`-style engine object a command could take.
+- **#426 landed `swat/`**: egui_kittest + a CPU softpaint rasteriser, finding widgets by AccessKit
+  label. It cannot draw the wgpu photo viewport (paint callbacks), by design.
+- The layering check (`scripts/check-repo-policy.py`) allows egui/eframe/accesskit only in
+  `nicti-pelt` and the root `nicti` binary. Anything GUI-aware has to live in pelt.
+
+## Decision
+
+**Go, in the lightweight form, built in four independently shippable slices.** Not the 90-command
+Session-centric surface: pelt's table starts with the handful of commands that unblock verification
+and grows only when a ticket needs one.
+
+### 1. A pelt-local command table
+
+`crates/nicti-pelt/src/cmd.rs` (module name to taste):
+
+```rust
+pub struct Command {
+    pub id: &'static str,                       // "view.set", "grid.select", "photo.rate", "export.run"
+    pub label: &'static str,
+    pub params: &'static str,                   // human/agent-readable, rendered into MCP tool schemas
+    pub risk: Risk,                             // Read | Mutate | Destructive
+    pub enabled: fn(&PeltApp) -> Result<(), String>,
+    pub run: fn(&mut PeltApp, &serde_json::Value) -> Result<serde_json::Value, String>,
+}
+```
+
+Entries wrap the existing `PeltApp` methods; they do not move logic. `Risk` is the one addition over
+LightCraft: it gates what the channel may do (section 3). `enabled` returning the *reason* (as
+LightCraft does) is kept, because "why is Export greyed out" is the question an agent keeps hitting.
+
+Shortcut and menu metadata are **not** in the table in slice 1. They are a later migration (section 5).
+
+### 2. Execution model: the UI thread, between frames
+
+A control connection thread parses a line and pushes `(request, reply_tx)` onto an `mpsc` channel
+and calls `ctx.request_repaint()`. `PeltApp::ui` drains the channel at the top of the frame, runs the
+command on the UI thread (so it sees and mutates `PeltApp` with no locking), and sends the reply.
+LightCraft does the same and caps a request at 60 s.
+
+Latency: an idle window is woken by `request_repaint`, so the cost is one frame (~16 ms) plus the
+command. A command that must wait for a frame to *play out* (injected clicks, a render finishing)
+replies after that, which is why `ui.settle` exists in LightCraft. We copy that, with a deadline loop
+(poll until idle or timeout), never a fixed sleep.
+
+### 3. Transport and security: loopback, opt-in, tokened
+
+LightCraft's channel has no auth; it relies on loopback plus a line cap and "first line must be a JSON
+object with a `method`", which stops a web page's cross-origin `fetch` from smuggling a command in an
+HTTP body. We keep all of that and add:
+
+- **Opt-in.** Off unless `--control[=PORT]` or `NICTI_CONTROL_PORT` is set. Bind `127.0.0.1` only
+  (never `0.0.0.0`; remote use goes through SSH forwarding).
+- **Random token.** 128 bits from the OS RNG, written to a `0600` file under `$XDG_RUNTIME_DIR`
+  (falls back to the app data dir). The first line on a connection must be `{"auth":"<token>"}`; a
+  wrong token or any non-object first line closes the connection. This closes the case LightCraft's
+  framing check does not: another local user or process on a shared host connecting to the port.
+- **Caps.** Line length 1 MiB (LightCraft: 4 MiB; we have no 4 MiB request), 4 concurrent connections
+  (LightCraft: 16; one agent is the use case), per-request timeout 30 s.
+- **Risk gate.** `Read` and `Mutate` commands always run. `Destructive` ones (delete from disk,
+  anything that writes outside the catalog or an operator-given export dir) need
+  `--control-allow-destructive`. Path parameters from the channel are resolved and checked like any
+  other external input before use; a command never takes a raw shell string.
+
+A threat we do not mitigate: anything running as the same user can read the token file and drive the
+app. That is the same trust boundary as the user's own session and catalog, and is why the channel is
+off by default.
+
+### 4. Seeing and poking the real UI
+
+- **`ui.inspect`**: view, selection, active asset, window size, frame time, in-flight jobs. Cheap and
+  the first thing an agent needs.
+- **Widgets by name: a registry, not AccessKit.** `register(ctx, "button:export", rect)` (about 20
+  lines, as in LightCraft's `widgets.rs`) called from the widgets worth driving, populated only while
+  the channel is on. Clicks and drags are synthesised as real egui `Event`s at the rect. We do not
+  turn on eframe's `accesskit` feature in the shipped binary just for this: it is off here
+  (`default-features = false`), costs runtime and a platform dependency, and the registry covers the
+  custom-painted widgets (grid cells, sliders) AccessKit would need extra annotation for anyway.
+  `swat` keeps using AccessKit in tests; the two do not need to agree.
+- **Screenshot**: `egui::ViewportCommand::Screenshot` (delivers a `ColorImage` on a later frame; works
+  on eframe's wgpu backend) so the captured image includes the wgpu photo viewport. `swat`'s softpaint
+  stays the no-GPU, no-photo path and is out of scope for the channel.
+
+### 5. The MCP shim
+
+A separate binary target, not part of the GUI process: stdio JSON-RPC in, the control socket out, no
+async runtime. `tools/list` is generated from the app's own `commands` reply (id, `params` doc,
+`risk`), plus fixed `inspect`, `widgets`, `click`, `key`, `screenshot`. It reads the token file and
+reconnects if the app restarts (LightCraft's connect mode). It needs only `serde_json`, so it can sit
+in a non-GUI layer; it must not depend on egui.
+
+### 6. Does this unlock rebindable shortcuts and a command palette?
+
+A command palette: **yes, cheaply**, once the table exists (fuzzy-match `label`, call `run`, show the
+`enabled` reason). Rebindable shortcuts: **only after a separate migration** of the ~40 inline key
+sites to table-declared shortcuts dispatched in one place. That is a refactor with its own regression
+risk (the cull keys have careful key-repeat handling, `cull/input.rs`) and is **not** part of this
+decision; it gets its own ticket if wanted. The control channel does not depend on it.
+
+## Alternatives rejected
+
+- **Port LightCraft's engine-level `Session` command surface.** Pelt has no Session; this would be a
+  large new abstraction for ~90 commands nobody has asked for.
+- **AccessKit as the widget addressing scheme.** Covered above.
+- **Unix socket instead of TCP.** Better access control, but not portable to the Windows installer
+  (#249) and not forwardable the way `ssh -L` handles a TCP port. Revisit if Windows is dropped.
+- **Authenticated-by-obscurity port number.** Not a control.
+
+## Consequences
+
+- **Slices (estimates are relative effort, not calendar):**
+  1. Command table + `inspect` + a first set of commands (`view.set`, `grid.select`, `photo.rate`,
+     `develop.get/set` for a few params, `export.run`), exercised in-process through `swat`. **M**
+  2. Loopback listener, token, caps, risk gate, widget registry, click/key/drag injection, `settle`. **M**
+  3. Screenshot via `ViewportCommand::Screenshot`, and the MCP shim binary + `docs/` page + a
+     `.mcp.json` example. **M**
+  4. Command palette over the table. **S** after slice 1. Shortcut migration: **L**, optional.
+  Slice 1 alone is shippable and useful (it is the test seam for the headless harness).
+- **Cost of keeping the registry honest:** a widget not registered is invisible to an agent; there is no
+  completeness check. Acceptable; register on demand when a verification ticket needs one.
+- **New attack surface,** off by default and gated as in section 3. The follow-up implementation PRs
+  need the adversarial review and a manual security pass (external input, file paths, auth).
+- **Caveat on the benefit:** this speeds up GPU/UI verification only where an agent can reach a GPU
+  display. On this headless host that means driving a remote instance over `ssh -L`.
+- **Deferred:** shortcut/menu unification, rebinding, remote (non-loopback) control, a UI test recorder.

@@ -57,3 +57,4 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 - ~~**`spikes/groom`**~~ (#50/ADR-0050) — deleted in #51; see `docs/research/groom-healing-removal.md`
   for the LaMa/MI-GAN licensing findings it produced.
 - **Headless UI harness (#426)** -- ...
+- **Agent control channel (#434, ADR-0434, Proposed)** -- pelt-local command table + tokened 127.0.0.1 JSON-lines socket + MCP shim; 4 slices, nothing built.
