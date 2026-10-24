@@ -138,11 +138,12 @@ impl Scheduler {
     ///
     /// A background job's VRAM reservation lasts from the pick that first admits it until it is
     /// done or cancelled (#490), across every `Yield`. A started job always passes the budget
-    /// check (its bytes are already counted), so it is runnable whenever it is next in order; a
-    /// job not yet started is picked only if it fits the *remaining* budget, otherwise it is
-    /// skipped for this pick and stays queued, per `admission::Admission`'s decision rule #5.
-    /// Once the budget is full only the holders run, until one finishes and frees its bytes, so
-    /// admitted jobs can neither spin nor deadlock on each other. A job whose declared VRAM
+    /// check (its bytes are already counted), so it is runnable whenever it is next in order. Of
+    /// the jobs not yet started only the first in order may start, and only if it fits the
+    /// *remaining* budget (decision rule #5); if it does not, nothing behind it is admitted
+    /// either, so a stream of small jobs cannot starve a big one. It stays queued while the
+    /// holders run, until one finishes and frees its bytes, so admitted jobs can neither spin
+    /// nor deadlock on each other. A job whose declared VRAM
     /// exceeds the *total* budget is dropped outright (it could never become admittable; found by
     /// CodeRabbit review against the original `spikes/crouch` version, which would otherwise leak
     /// such a job in `background` forever).
@@ -172,42 +173,58 @@ impl Scheduler {
             });
         }
 
-        if self.editing_gate.is_editing() {
-            return None;
-        }
-
+        // Cancelled jobs are swept even while editing: a started one still holds its reservation,
+        // and cancellation has nothing to do with the gate.
         let admission = &mut self.admission;
-        let budget = admission.budget();
         let cancelled_while_queued = &mut self.cancelled_while_queued;
         self.background.retain(|entry| {
             if entry.cancel.is_cancelled() {
-                // A started job cancelled between its chunks still holds its reservation.
                 admission.release(entry.id);
                 cancelled_while_queued.push((entry.id, entry.job.progress()));
                 return false;
             }
-            // An already-admitted job is never dropped here: its bytes are counted, and dropping
-            // it would leak the reservation. Otherwise an over-budget (but not cancelled)
-            // background job is dropped, unchanged from the original spike behavior -- see this
-            // method's own doc comment above. It is *not* reported through
-            // `cancelled_while_queued` (a distinct outcome from cancellation), so it never reaches
-            // a terminal status -- the gap this field fixes for cancellation. Callers must
-            // therefore clamp a declaration to the lane total (`Pounce::gpu_vram_budget`), as the
-            // render jobs do (#255), or declare 0.
+            true
+        });
+
+        if self.editing_gate.is_editing() {
+            return None;
+        }
+
+        let budget = admission.budget();
+        // An already-admitted job is never dropped here: its bytes are counted, and dropping it
+        // would leak the reservation. Otherwise an over-budget background job is dropped,
+        // unchanged from the original spike behavior -- see this method's own doc comment above.
+        // It is *not* reported through `cancelled_while_queued` (a distinct outcome from
+        // cancellation), so it never reaches a terminal status. Callers must therefore clamp a
+        // declaration to the lane total (`Pounce::gpu_vram_budget`), as the render jobs do (#255),
+        // or declare 0.
+        self.background.retain(|entry| {
             admission.is_admitted(entry.id) || entry.job.spec().vram_bytes <= budget
         });
 
+        // Started jobs always run. Of the unstarted ones only the first in order may start, and
+        // only if it fits: when it does not, nothing behind it is admitted ("no backfill"), or a
+        // stream of small jobs could keep a big one from ever seeing the whole budget free.
         let remaining = admission.remaining();
+        let mut head_blocked = false;
         let pick = self.background.iter().position(|entry| {
-            admission.is_admitted(entry.id) || entry.job.spec().vram_bytes <= remaining
+            if admission.is_admitted(entry.id) {
+                return true;
+            }
+            if !head_blocked && entry.job.spec().vram_bytes <= remaining {
+                return true;
+            }
+            head_blocked = true;
+            false
         })?;
         let entry = self.background.remove(pick);
 
         // A started job (yielded earlier) already holds its reservation; only a first pick admits.
         // The amount is fixed at that first admission, so a later change to the job's declared
-        // `vram_bytes` is ignored.
-        if !admission.is_admitted(entry.id) {
-            let vram_bytes = entry.job.spec().vram_bytes;
+        // `vram_bytes` is ignored. A zero-byte job reserves nothing and is not tracked (it always
+        // fits, and the CPU lane would otherwise grow the list with every started import job).
+        let vram_bytes = entry.job.spec().vram_bytes;
+        if vram_bytes > 0 && !admission.is_admitted(entry.id) {
             admission
                 .admit(entry.id, Priority::Background, vram_bytes)
                 .expect("checked against admission.remaining() above, must not be refused");
@@ -623,6 +640,47 @@ mod tests {
         run_to_idle(&mut scheduler);
         assert_eq!(*ticks.lock().unwrap(), vec!["a", "grown"]);
         assert_eq!(scheduler.admission.remaining(), 100);
+    }
+
+    #[test]
+    fn a_big_job_at_the_head_is_not_starved_by_small_jobs_behind_it() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), 100);
+        scheduler.reprioritize_background(|spec| spec.image_index.unwrap_or(0));
+        let ticks = Ticks::default();
+        submit_sized(&mut scheduler, 0, (9, 40), 2, "holder", &ticks);
+        assert_eq!(run_one(&mut scheduler), Some((JobId(0), Step::Yield)));
+        submit_sized(&mut scheduler, 1, (1, 100), 1, "whole-lane", &ticks);
+        // Fits beside the holder (40 + 30 <= 100) and sorts ahead of it, but behind the big job.
+        submit_sized(&mut scheduler, 2, (5, 30), 1, "small", &ticks);
+        run_to_idle(&mut scheduler);
+        assert_eq!(
+            *ticks.lock().unwrap(),
+            vec!["holder", "holder", "whole-lane", "small"],
+            "the small job must not be admitted ahead of the blocked big one"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_started_job_releases_its_reservation_even_while_editing() {
+        let gate = EditingGate::new();
+        let mut scheduler = Scheduler::new(gate.clone(), 100);
+        let cancel = submit_sized(&mut scheduler, 0, (0, 60), 3, "a", &Ticks::default());
+        assert_eq!(run_one(&mut scheduler), Some((JobId(0), Step::Yield)));
+        gate.set_editing(true);
+        cancel.cancel();
+        assert!(scheduler.take_next().is_none());
+        assert_eq!(scheduler.take_cancelled_while_queued().len(), 1);
+        assert_eq!(scheduler.admission.remaining(), 100);
+    }
+
+    #[test]
+    fn zero_byte_jobs_are_not_tracked_by_admission() {
+        let mut scheduler = Scheduler::new(EditingGate::new(), u64::MAX);
+        let ticks = Ticks::default();
+        submit_sized(&mut scheduler, 0, (0, 0), 3, "cpu", &ticks);
+        let taken = scheduler.take_next().expect("runs");
+        assert!(!scheduler.admission.is_admitted(taken.id));
+        let _ = scheduler.finish(taken, Outcome::Done);
     }
 
     #[test]

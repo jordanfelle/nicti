@@ -46,7 +46,7 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   job-lifetime (#490): taken at the pick that first admits a background job, kept across every
   `Yield`, released on Done/Err/cancel (`Scheduler::finish`, and the cancelled-while-queued sweep
   in `take_next`). A started job is always runnable (its bytes are counted); a not-yet-started job
-  over the currently-*remaining* budget is skipped for the pick and stays queued. Foreground is
+  over the currently-*remaining* budget stays queued and blocks unstarted jobs behind it (no backfill, so a whole-lane job can't be starved). Foreground is
   never refused on VRAM grounds. Wired into `queue::Scheduler::run_next`
   itself (an adversarial review caught this only being enforced in `admission.rs`'s own isolated
   tests; a follow-up CodeRabbit review then caught the wired-in version itself leaking an

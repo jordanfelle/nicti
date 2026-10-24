@@ -729,6 +729,9 @@ mod tests {
         // would otherwise round-robin them between yields.
         let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
         let pounce = Pounce::new(100, 1, 1, || {});
+        // Hold background work back until both jobs are queued, so the worker cannot finish "a"
+        // before "b" exists (which would pass even without job-lifetime reservations).
+        pounce.set_editing(true);
         let mut spec = gpu_spec(crate::job::Priority::Background);
         spec.vram_bytes = 60;
         let ids: Vec<_> = ["a", "b"]
@@ -743,6 +746,7 @@ mod tests {
                 }))
             })
             .collect();
+        pounce.set_editing(false);
 
         assert!(wait_until(
             || {
