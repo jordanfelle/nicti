@@ -37,6 +37,10 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
   separately (#136), not solved by #37. `retina scan` (no manifest CSV needed) runs directly
   against the live library or any ad hoc subset instead.
 
+## #438: LightCraft raw pieces (ADR-0438)
+
+- Research outcome, nothing lifted. Go: highlight reconstruction (real gap: shim sets `highlight=0` and no stage exists; LightCraft's input contract = Nicti's camera RGB pre-WB; `clip_neutral` first, `reconstruct` after validation on real Z8 frames). Conditional: DNG GainMap after demosaic, only with a real fixture (LibRaw applies no opcodes, DNG SDK glue not enabled). No-go: OpcodeList1, LJPEG encoder/DNG writer (no DNG-export goal), binned preview (measure demosaic share of T2 first). HE-vs-lossless same-frame PSNR oracle goes on #137. Detail: `docs/decisions/raw-decoder.md`.
+
 ## Package contents
 
 - **`crates/nicti-cornea`** (#41, landed) — the real `RawDecoder` implementation: LibRaw's FFI

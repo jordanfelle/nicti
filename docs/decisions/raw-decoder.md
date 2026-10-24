@@ -34,3 +34,16 @@ reference set.
   dataset needs multi-person/multi-machine access going forward, tracked as a separate follow-up
   (#136), not solved by #37. `retina scan` (no manifest required) is the tool for running against
   the live library or any ad hoc subset now.
+
+## #438: LightCraft DNG opcodes, LJPEG, highlight reconstruction, binned preview (ADR-0438)
+
+Research outcome from the LightCraft audit (#424); nothing lifted. The lens opcodes (1, 3) already shipped in #428.
+LibRaw as built here applies no DNG opcode (it only reads the lists; the DNG SDK glue is not enabled), so list 2
+`GainMap` is a conditional go (apply after demosaic next to the vignette gain, only with a real fixture) and list 1 is a
+no-go (it needs the mosaic before LibRaw's demosaic). The LJPEG encoder and DNG writer wait for a DNG-export goal that
+no issue states. Highlight reconstruction is the real gap: `shim.cpp` sets `highlight = 0` deferring to a develop stage
+that does not exist, and LightCraft's input contract (camera RGB before WB) is what Nicti's linear decode produces;
+take `clip_neutral` first, `reconstruct` only after validation on real Z8 frames. Binned preview: measure the demosaic
+share of T2 latency first (HE/HE* decode likely dominates). For #137, compare LibRaw's official HE/HE* output with the
+lossless decode of the same frame by a PSNR bound (lossy, so never bit-exact); whether same-frame dual-format pairs
+exist in the library is unverified.
