@@ -248,14 +248,15 @@ impl CullState {
                         // earlier reply (including an undo's) would flicker the badge back
                         // before the newer one lands, and that newer write's own reply sets
                         // the final value.
-                        if self.pending.contains(id) {
-                            continue;
-                        }
                         if existing_only {
+                            // Cache first: most of a select-all reply is uncached, and
+                            // `contains` scans every bulk entry in flight.
                             if let Some(slot) = self.cache.get_mut(&id) {
-                                *slot = meta;
+                                if !self.pending.contains(id) {
+                                    *slot = meta;
+                                }
                             }
-                        } else {
+                        } else if !self.pending.contains(id) {
                             self.cache.insert(id, meta);
                         }
                     }

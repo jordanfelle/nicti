@@ -75,7 +75,8 @@ Full reasoning/history: `docs/decisions/culling.md`.
   and `trg_facet_asset_update`, not the statement). `Selection::remap` over a select-all ~190 ms per
   snapshot change. **Fixed (#497)**: a mark over `OPTIMISTIC_MAX` ids is tracked as one sorted id list
   (`cull/mod.rs` `Pending`) instead of a per-id map, and a bulk `Done` reply only refreshes already-cached
-  photos: `mark` ~4.5 ms, worst `poll` frame ~20 ms. **Fixed**: the worker reads/writes in 20k-row chunks (`worker.rs` `CHUNK`), so the
+  photos: `mark` ~4.5 ms (sorted ids; unsorted adds a sort), worst `poll` frame ~20 ms for one bulk in flight
+  (each further bulk in flight adds one binary search per reply item). **Fixed**: the worker reads/writes in 20k-row chunks (`worker.rs` `CHUNK`), so the
   mutex is held ~3 s at a stretch instead of ~80 s for other catalog users (grid snapshot/thumbnail
   reads; the marker reads queued on the same writer thread still wait for the whole run, and a
   non-worker writer can now interleave between chunks) (a mid-way failure records the written part as an

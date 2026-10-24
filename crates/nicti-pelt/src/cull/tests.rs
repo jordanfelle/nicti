@@ -1018,6 +1018,35 @@ fn bulk_pending_tracks_ids_until_settled() {
     assert!(p.is_empty());
 }
 
+/// #497: bulk replies settle bulk entries oldest-first (the worker is strictly ordered), a failed
+/// bulk settles too, and `OPTIMISTIC_MAX` itself is still counted per id.
+#[test]
+fn bulk_pending_settles_oldest_first_and_at_the_threshold() {
+    use super::{Pending, OPTIMISTIC_MAX};
+    let m = OPTIMISTIC_MAX as i64;
+    let a: Vec<i64> = (0..m + 5).collect();
+    let b: Vec<i64> = (m + 5..2 * m + 10).collect();
+    let mut p = Pending::default();
+    p.add(&a);
+    p.add(&b);
+    p.settle(&a);
+    assert!(
+        !p.contains(0) && p.contains(m + 5),
+        "A settled, B still in flight"
+    );
+    p.settle(&b);
+    assert!(p.is_empty());
+
+    let edge: Vec<i64> = (0..m).collect();
+    p.add(&edge);
+    assert!(
+        p.bulk.is_empty() && p.contains(m - 1),
+        "exactly the cap is per-id"
+    );
+    p.settle(&edge);
+    assert!(p.is_empty());
+}
+
 /// #497: a select-all-sized reply refreshes the photos already cached and doesn't flood the cache
 /// with the rest.
 #[test]
