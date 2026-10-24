@@ -106,6 +106,17 @@ jobs:
           persist-credentials: false
       - run: python3 .github/scripts/adr_refs_check.py
 
+  repo-policy:
+    name: layering and asset attribution
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # #433: crate layering table + GUI-dep containment + asset attribution rows.
+      - run: python3 scripts/check-repo-policy.py
+
   clippy:
     name: cargo clippy (linux)
     runs-on: ubuntu-26.04
