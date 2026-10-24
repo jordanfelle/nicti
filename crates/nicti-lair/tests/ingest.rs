@@ -439,3 +439,104 @@ fn two_volumes_with_conflicting_markers_are_not_merged() {
         .unwrap();
     assert_eq!(id1, id_again);
 }
+
+fn encode_jpeg(w: u32, h: u32) -> Vec<u8> {
+    let px = vec![128u8; (w * h * 3) as usize];
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut out)
+        .encode(&px, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
+fn fresh_root(store: &SqliteCatalog) -> i64 {
+    let volume_id = store
+        .upsert_volume("test-volume", None, None, 1000)
+        .unwrap();
+    store.ensure_root(volume_id, "").unwrap()
+}
+
+#[test]
+fn a_large_jpeg_is_catalogued_with_its_own_size_and_a_downscaled_t0() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("big.JPG"), encode_jpeg(2000, 1000)).unwrap();
+    let root_id = fresh_root(&store);
+
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.added, 1);
+    assert!(report.failed.is_empty(), "failed: {:?}", report.failed);
+
+    let asset = store
+        .find_asset_by_path(root_id, "big.JPG")
+        .unwrap()
+        .unwrap();
+    assert_eq!((asset.width, asset.height), (Some(2000), Some(1000)));
+    let t0 = store
+        .get_preview(asset.id, PreviewTier::T0)
+        .unwrap()
+        .unwrap();
+    assert_eq!((t0.width, t0.height), (Some(512), Some(256)));
+    assert_eq!(&t0.bytes[..2], &[0xFF, 0xD8]);
+}
+
+#[test]
+fn a_grid_sized_jpeg_is_stored_verbatim_as_its_own_t0() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let jpeg = encode_jpeg(64, 48);
+    std::fs::write(dir.path().join("small.jpeg"), &jpeg).unwrap();
+    let root_id = fresh_root(&store);
+
+    ingest_root(&store, root_id, dir.path()).unwrap();
+    let asset = store
+        .find_asset_by_path(root_id, "small.jpeg")
+        .unwrap()
+        .unwrap();
+    let t0 = store
+        .get_preview(asset.id, PreviewTier::T0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(t0.bytes, jpeg);
+    assert_eq!((asset.width, asset.height), (Some(64), Some(48)));
+}
+
+#[test]
+fn a_raw_jpeg_pair_is_two_independent_assets() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_nef(dir.path(), "DSC_1.NEF");
+    std::fs::write(dir.path().join("DSC_1.JPG"), encode_jpeg(64, 48)).unwrap();
+    let root_id = fresh_root(&store);
+
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.added, 2);
+    let nef = store
+        .find_asset_by_path(root_id, "DSC_1.NEF")
+        .unwrap()
+        .unwrap();
+    let jpg = store
+        .find_asset_by_path(root_id, "DSC_1.JPG")
+        .unwrap()
+        .unwrap();
+    assert_ne!(nef.id, jpg.id);
+}
+
+#[test]
+fn a_corrupt_jpeg_is_still_catalogued_without_a_preview() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bad.jpg"), b"\xFF\xD8not really a jpeg").unwrap();
+    let root_id = fresh_root(&store);
+
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.added, 1);
+    let asset = store
+        .find_asset_by_path(root_id, "bad.jpg")
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .get_preview(asset.id, PreviewTier::T0)
+        .unwrap()
+        .is_none());
+}

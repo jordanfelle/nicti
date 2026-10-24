@@ -52,6 +52,8 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
   *before* files move to the Recycle Bin; `shred::resume_open_deletes` settles it at startup.
   Runs as `pounce_jobs::DeleteJob` (`JobKind::Delete`).
 
+- **JPEG ingest (#489, landed)**: Scruff catalogues `.jpg`/`.jpeg` as their own assets (a RAW+JPEG pair is two assets, no stacking); T0 is the file itself if <=512px else a 512px-long-edge re-encode, width/height are the file's own; JPEG assets skip the `.xmp` sidecar (it belongs to the RAW; embedded XMP is #371). Decode for loupe/develop/export is not built (LibRaw only): follow-up.
+
 - **Master edit document (#57, landed)**: ...
 
 ## #436: import rename / date folders / devices (ADR-0436)
