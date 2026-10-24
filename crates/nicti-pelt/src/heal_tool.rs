@@ -1461,10 +1461,8 @@ mod tests {
             return;
         }
         let p = pounce();
-        let dir =
-            std::env::temp_dir().join(format!("nicti-heal-tool-install-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut svc = RemovalService::with_store(Some(ModelStore::new(dir)));
+        let dir = tempfile::tempdir().unwrap();
+        let mut svc = RemovalService::with_store(Some(ModelStore::new(dir.path().to_path_buf())));
         assert!(svc.download_bytes() > 0);
         svc.start_install(&p).unwrap();
         assert!(svc.is_installing());

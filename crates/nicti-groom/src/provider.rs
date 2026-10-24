@@ -103,10 +103,9 @@ mod tests {
         if std::env::var_os("NICTI_ORT_EP").is_some() {
             return;
         }
-        let dir = std::env::temp_dir().join("nicti-groom-provider-cpu");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            requested_for(&dir.join("libonnxruntime.so")),
+            requested_for(&dir.path().join("libonnxruntime.so")),
             ExecutionProvider::Cpu
         );
     }

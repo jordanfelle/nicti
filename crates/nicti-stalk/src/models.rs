@@ -1166,14 +1166,15 @@ mod tests {
         }
     }
 
-    fn temp_store(name: &str) -> ModelStore {
-        let dir = std::env::temp_dir().join(format!(
-            "nicti-stalk-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        ModelStore::new(dir)
+    /// A store in a fresh temp dir; keep the guard alive for the test, it deletes the dir on drop
+    /// (these used to be left in `/tmp`, one set per test process).
+    fn temp_store(name: &str) -> (tempfile::TempDir, ModelStore) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("nicti-stalk-{name}-"))
+            .tempdir()
+            .unwrap();
+        let store = ModelStore::new(dir.path().to_path_buf());
+        (dir, store)
     }
 
     fn no_cancel() -> AtomicBool {
@@ -1184,7 +1185,7 @@ mod tests {
     fn installs_a_verified_file_and_reports_progress() {
         let body = b"the quick brown fox jumps over the lazy dog".to_vec();
         let a = file_artifact(&body);
-        let store = temp_store("ok");
+        let (_dir, store) = temp_store("ok");
         assert_eq!(store.status(&a), Status::NotInstalled);
         let mut last = None;
         let path = store
@@ -1217,7 +1218,7 @@ mod tests {
     fn installing_an_installed_artifact_never_touches_the_network() {
         let body = b"abc".to_vec();
         let a = file_artifact(&body);
-        let store = temp_store("noop");
+        let (_dir, store) = temp_store("noop");
         let dl = Fake::new(body);
         store.install(&a, &dl, &mut |_| {}, &no_cancel()).unwrap();
         store.install(&a, &dl, &mut |_| {}, &no_cancel()).unwrap();
@@ -1228,7 +1229,7 @@ mod tests {
     fn a_tampered_download_is_rejected_and_nothing_is_installed() {
         let good = b"0123456789".to_vec();
         let a = file_artifact(&good);
-        let store = temp_store("tamper");
+        let (_dir, store) = temp_store("tamper");
         let mut bad = good.clone();
         bad[3] ^= 0xff; // same length, different content
         let err = store
@@ -1243,7 +1244,7 @@ mod tests {
     fn a_short_download_is_rejected() {
         let good = b"0123456789".to_vec();
         let a = file_artifact(&good);
-        let store = temp_store("short");
+        let (_dir, store) = temp_store("short");
         let err = store
             .install(
                 &a,
@@ -1263,7 +1264,7 @@ mod tests {
     fn a_download_longer_than_pinned_is_cut_off_and_rejected() {
         let good = b"0123456789".to_vec();
         let a = file_artifact(&good);
-        let store = temp_store("long");
+        let (_dir, store) = temp_store("long");
         let mut long = good.clone();
         long.extend_from_slice(&[0u8; 1000]);
         let err = store
@@ -1277,7 +1278,7 @@ mod tests {
     fn cancelling_stops_the_download_and_installs_nothing() {
         let body = vec![7u8; 1000];
         let a = file_artifact(&body);
-        let store = temp_store("cancel");
+        let (_dir, store) = temp_store("cancel");
         let cancel = AtomicBool::new(true);
         let err = store
             .install(&a, &Fake::new(body), &mut |_| {}, &cancel)
@@ -1303,7 +1304,7 @@ mod tests {
             }
         }
         let a = file_artifact(b"xyz");
-        let store = temp_store("net");
+        let (_dir, store) = temp_store("net");
         let err = store
             .install(&a, &Down, &mut |_| {}, &no_cancel())
             .unwrap_err();
@@ -1315,7 +1316,7 @@ mod tests {
     fn remove_deletes_an_installed_file_and_tolerates_a_missing_one() {
         let body = b"0123456789".to_vec();
         let a = file_artifact(&body);
-        let store = temp_store("remove");
+        let (_dir, store) = temp_store("remove");
         store.remove(&a).unwrap(); // nothing there: fine
         store
             .install(&a, &Fake::new(body), &mut |_| {}, &no_cancel())
@@ -1331,7 +1332,7 @@ mod tests {
         let zip_bytes = zip_with("pkg/lib/lib.dll", &content);
         let mut a = zip_artifact(&zip_bytes, &content);
         a.installed_sha256 = sha(b"not the content"); // extraction succeeds, verification fails
-        let store = temp_store("no-partial");
+        let (_dir, store) = temp_store("no-partial");
         assert!(store
             .install(&a, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .is_err());
@@ -1341,7 +1342,7 @@ mod tests {
     #[test]
     fn a_wrong_size_file_at_the_install_path_is_not_installed() {
         let a = file_artifact(b"expected content");
-        let store = temp_store("foreign");
+        let (_dir, store) = temp_store("foreign");
         fs::create_dir_all(store.path(&a).parent().unwrap()).unwrap();
         fs::write(store.path(&a), b"short").unwrap();
         assert_eq!(store.status(&a), Status::NotInstalled);
@@ -1352,7 +1353,7 @@ mod tests {
     fn verify_catches_a_corrupted_install_of_the_right_size() {
         let body = b"0123456789".to_vec();
         let a = file_artifact(&body);
-        let store = temp_store("corrupt");
+        let (_dir, store) = temp_store("corrupt");
         store
             .install(&a, &Fake::new(body.clone()), &mut |_| {}, &no_cancel())
             .unwrap();
@@ -1402,7 +1403,7 @@ mod tests {
         let content = vec![0xABu8; 5000];
         let zip_bytes = zip_with("pkg/lib/lib.dll", &content);
         let a = zip_artifact(&zip_bytes, &content);
-        let store = temp_store("zip");
+        let (_dir, store) = temp_store("zip");
         let path = store
             .install(&a, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap();
@@ -1416,7 +1417,7 @@ mod tests {
         let content = vec![1u8; 100];
         let zip_bytes = zip_with("pkg/other.dll", &content);
         let a = zip_artifact(&zip_bytes, &content);
-        let store = temp_store("zip-missing");
+        let (_dir, store) = temp_store("zip-missing");
         let err = store
             .install(&a, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap_err();
@@ -1430,7 +1431,7 @@ mod tests {
         let zip_bytes = zip_with("pkg/lib/lib.dll", &content);
         let mut a = zip_artifact(&zip_bytes, &content);
         a.installed_sha256 = sha(b"something else entirely");
-        let store = temp_store("zip-hash");
+        let (_dir, store) = temp_store("zip-hash");
         let err = store
             .install(&a, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap_err();
@@ -1502,7 +1503,7 @@ mod tests {
                 member("pkg/bin/b.dll", "b.dll", &b),
             ],
         );
-        let store = temp_store("multi");
+        let (_dir, store) = temp_store("multi");
         let path = store
             .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap();
@@ -1537,7 +1538,7 @@ mod tests {
             &zip_bytes,
             vec![member("pkg/a.dll", "a.dll", &a), wrong],
         );
-        let store = temp_store("multi-bad");
+        let (_dir, store) = temp_store("multi-bad");
         let err = store
             .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap_err();
@@ -1563,7 +1564,7 @@ mod tests {
                 member("pkg/gone.dll", "gone.dll", b"x"),
             ],
         );
-        let store = temp_store("multi-missing");
+        let (_dir, store) = temp_store("multi-missing");
         let err = store
             .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap_err();
@@ -1580,7 +1581,7 @@ mod tests {
         );
         let first = members_artifact("first", "pack", &za, vec![member("a.dll", "a.dll", &a)]);
         let second = members_artifact("second", "pack", &zb, vec![member("b.dll", "b.dll", &b)]);
-        let store = temp_store("shared");
+        let (_dir, store) = temp_store("shared");
         store
             .install(&first, &Fake::new(za), &mut |_| {}, &no_cancel())
             .unwrap();
@@ -1692,7 +1693,7 @@ mod tests {
         let mut pinned = member("pkg/a.dll", "a.dll", &real);
         pinned.size = 100;
         let art = members_artifact("multi-big", "multi-big", &zip_bytes, vec![pinned]);
-        let store = temp_store("multi-big");
+        let (_dir, store) = temp_store("multi-big");
         let err = store
             .install(&art, &Fake::new(zip_bytes), &mut |_| {}, &no_cancel())
             .unwrap_err();
@@ -1710,7 +1711,7 @@ mod tests {
             &zip_bytes,
             vec![member("a.dll", "a.dll", &a)],
         );
-        let store = temp_store("multi-stale");
+        let (_dir, store) = temp_store("multi-stale");
         fs::create_dir_all(store.dir(&art)).unwrap();
         fs::write(store.dir(&art).join("a.dll.partial"), vec![0u8; 999]).unwrap();
         store
@@ -1721,7 +1722,7 @@ mod tests {
 
     #[test]
     fn without_the_pack_the_for_store_lists_are_the_default_lists() {
-        let store = temp_store("for-store");
+        let (_dir, store) = temp_store("for-store");
         let ids = |v: Vec<&'static Artifact>| v.iter().map(|a| a.id).collect::<Vec<_>>();
         assert_eq!(ids(mask_artifacts_for(&store)), ids(mask_artifacts()));
         assert_eq!(ids(removal_artifacts_for(&store)), ids(removal_artifacts()));
@@ -1743,13 +1744,13 @@ mod tests {
         for a in gpu_pack_artifacts() {
             assert!(!default_ids.contains(&a.id), "{} must be opt-in", a.id);
         }
-        let store = temp_store("gpu-size");
+        let (_dir, store) = temp_store("gpu-size");
         assert!(gpu_pack_download_bytes(&store) >= BIREFNET_FP16.download_size);
     }
 
     #[test]
     fn the_gpu_runtime_needs_all_three_pieces_and_is_ignored_off_windows() {
-        let store = temp_store("gpu-runtime");
+        let (_dir, store) = temp_store("gpu-runtime");
         assert_eq!(store.gpu_runtime_path(), None);
         // Nothing installed: masks fall back to whatever the CPU path offers.
         assert_eq!(store.ort_runtime_path(), None);
@@ -1848,14 +1849,14 @@ mod tests {
 
     #[test]
     fn mask_verify_names_birefnet_when_it_is_missing() {
-        let store = temp_store("verify-mask");
+        let (_dir, store) = temp_store("verify-mask");
         let err = verify_artifacts(&store, &mask_artifacts(), false).unwrap_err();
         assert!(err.contains("BiRefNet"), "{err}");
     }
 
     #[test]
     fn mask_download_size_counts_only_what_is_not_installed_yet() {
-        let store = temp_store("mask-size");
+        let (_dir, store) = temp_store("mask-size");
         let total = mask_download_bytes(&store);
         assert!(total >= BIREFNET.download_size);
         assert!(
@@ -1866,7 +1867,7 @@ mod tests {
 
     #[test]
     fn mask_locate_needs_birefnet_and_a_runtime() {
-        let store = temp_store("mask-locate");
+        let (_dir, store) = temp_store("mask-locate");
         assert!(MaskModels::locate(&store).is_none());
     }
 
@@ -1874,7 +1875,7 @@ mod tests {
     fn verify_removal_install_rejects_a_right_sized_file_with_the_wrong_content() {
         // Sparse zero files at exactly the pinned sizes pass `status` but must fail the hash --
         // the size check alone would happily hand a tampered library to dlopen.
-        let store = temp_store("verify-removal");
+        let (_dir, store) = temp_store("verify-removal");
         let a = &MOBILE_SAM_DECODER; // 16 MB, hashes quickly even in a debug build
         fs::create_dir_all(store.path(a).parent().unwrap()).unwrap();
         fs::File::create(store.path(a))
@@ -1892,7 +1893,7 @@ mod tests {
 
     #[test]
     fn verify_removal_install_names_the_runtime_first_when_it_comes_from_the_store() {
-        let store = temp_store("verify-runtime");
+        let (_dir, store) = temp_store("verify-runtime");
         let err = verify_removal_install(&store, true).unwrap_err();
         // The runtime is only a pinned artifact where Nicti ships one (Windows); elsewhere the
         // first thing checked is the first model.
@@ -1906,7 +1907,7 @@ mod tests {
 
     #[test]
     fn locate_needs_every_model_and_a_runtime() {
-        let store = temp_store("locate");
+        let (_dir, store) = temp_store("locate");
         assert!(RemovalModels::locate(&store).is_none());
     }
 }
