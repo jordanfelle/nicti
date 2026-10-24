@@ -1,6 +1,6 @@
 //! Scruff: the import/ingest pipeline (#22). Named the way a mother cat carries a kitten by the
 //! scruff of its neck -- this is what actually moves a file into the catalog. Scans a folder for
-//! RAW files, fingerprints and upserts each one, and extracts its T0 grid preview (ADR-0029) via
+//! RAW and JPEG files, fingerprints and upserts each one, and extracts its T0 grid preview (ADR-0029) via
 //! `nicti_cornea::embedded`'s IFD walker -- no RAW decode needed for that.
 //!
 //! Runs serially per call, but steppably: [`Ingest`] processes one candidate file per `step()`
@@ -27,6 +27,32 @@ use crate::{CatalogError, CatalogStore, NewAsset, Preview};
 /// sync only ever writes `.xmp` sidecars, never into the RAW itself. Widening this list further is
 /// a future-camera-support concern.
 const RAW_EXTENSIONS: &[&str] = &["nef", "nrw", "dng"];
+
+/// JPEG files are catalogued as assets in their own right (#489). A RAW+JPEG pair (same stem, e.g.
+/// `DSC_1.NEF` + `DSC_1.JPG`) is two independent assets: they have distinct `rel_path`s and
+/// fingerprints, and stacking them is a grouping feature layered on later, not an ingest concern.
+const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg"];
+
+/// A JPEG asset's T0 is the file itself when it is already grid-sized, else a downscale to this
+/// long edge (ADR-0029's "resize master to 512px long edge" rule for assets with no embedded
+/// preview).
+const T0_LONG_EDGE: u32 = 512;
+
+/// Largest JPEG (file bytes, and declared pixels) ingest will read for a T0. A file over either
+/// is still catalogued, just without a preview, so a hostile or absurd file can't pin a worker or
+/// balloon memory in one `step()`. 200 MP is ~600 MB of RGB8, above any real camera JPEG.
+const MAX_JPEG_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_JPEG_PIXELS: u64 = 200_000_000;
+
+fn has_extension(path: &Path, list: &[&str]) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| list.contains(&ext.to_lowercase().as_str()))
+}
+
+pub(crate) fn is_jpeg(path: &Path) -> bool {
+    has_extension(path, JPEG_EXTENSIONS)
+}
 
 const PARTIAL_HASH_WINDOW: u64 = 64 * 1024;
 
@@ -212,7 +238,93 @@ pub(crate) fn tag_orientation(jpeg: Vec<u8>, orientation: u8) -> Vec<u8> {
     out
 }
 
+/// A JPEG asset's T0 (#489) plus its full-resolution pixel size. Already grid-sized files are
+/// stored verbatim (their own EXIF Orientation travels with them); larger ones are decoded and
+/// downscaled to [`T0_LONG_EDGE`], with the source's Orientation re-tagged onto the result so the
+/// thumbnail decode still rotates it upright (#476). `None` for a file that won't decode.
+fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if len > MAX_JPEG_DECODE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if u64::from(w) * u64::from(h) > MAX_JPEG_PIXELS {
+        return None;
+    }
+    // Verbatim only while the file itself stays within the RAW T0 byte cap (an APPn/ICC blob can
+    // make a tiny image huge); otherwise it is re-encoded below like a large one.
+    if w.max(h) <= T0_LONG_EDGE && bytes.len() as u64 <= MAX_T0_PREVIEW_BYTES {
+        return Some((
+            Preview {
+                width: Some(w),
+                height: Some(h),
+                bytes,
+            },
+            w,
+            h,
+        ));
+    }
+    use image::{ImageDecoder, ImageEncoder};
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let icc = decoder.icc_profile().ok().flatten();
+    let img = image::DynamicImage::from_decoder(decoder).ok()?;
+    // Never upscale: a small file only lands here for its byte size.
+    let thumb = if w.max(h) <= T0_LONG_EDGE {
+        img.to_rgb8()
+    } else {
+        img.resize(
+            T0_LONG_EDGE,
+            T0_LONG_EDGE,
+            image::imageops::FilterType::Triangle,
+        )
+        .to_rgb8()
+    };
+    let (tw, th) = thumb.dimensions();
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+    // Carry the source profile so a wide-gamut JPEG's T0 isn't read as sRGB.
+    if let Some(icc) = icc {
+        let _ = encoder.set_icc_profile(icc);
+    }
+    encoder
+        .encode(thumb.as_raw(), tw, th, image::ExtendedColorType::Rgb8)
+        .ok()?;
+    let orientation = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(&bytes))
+        .ok()
+        .and_then(|e| {
+            e.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|f| f.value.get_uint(0))
+        })
+        .and_then(|o| u8::try_from(o).ok());
+    let out = match orientation {
+        Some(o) => tag_orientation(out, o),
+        None => out,
+    };
+    Some((
+        Preview {
+            width: Some(tw),
+            height: Some(th),
+            bytes: out,
+        },
+        w,
+        h,
+    ))
+}
+
 pub(crate) fn extract_t0_preview(path: &Path) -> Option<Preview> {
+    if is_jpeg(path) {
+        return jpeg_preview(path).map(|(p, _, _)| p);
+    }
     let source = FileSource::open(path).ok()?;
     let mut walker = Walker::new(source).ok()?;
     let jpegs = walker.find_embedded_jpegs().ok()?;
@@ -234,7 +346,7 @@ pub(crate) fn extract_t0_preview(path: &Path) -> Option<Preview> {
     })
 }
 
-/// RAW-extension files under `root_path`, recursively, in walk order. A directory `WalkDir`
+/// RAW- and JPEG-extension files under `root_path`, recursively, in walk order. A directory `WalkDir`
 /// can't read (permission denied, a broken symlink) surfaces as `Err` rather than being silently
 /// dropped -- found by CodeRabbit's review: `entry.ok()` used to discard that error outright, so
 /// every file under an unreadable subdirectory went unvisited *and* unreported, and a caller could
@@ -248,12 +360,14 @@ fn candidate_files(root_path: &Path) -> impl Iterator<Item = Result<PathBuf, wal
         if !entry.file_type().is_file() {
             return None;
         }
-        let is_raw = entry
-            .path()
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| RAW_EXTENSIONS.contains(&ext.to_lowercase().as_str()));
-        is_raw.then(|| Ok(entry.into_path()))
+        // Our own `X.NEF.thumb.jpg` sidecars (#72) end in .jpg but are never assets.
+        let is_sidecar = entry
+            .file_name()
+            .to_str()
+            .is_some_and(crate::thumb_sidecar::is_sidecar_name);
+        let wanted =
+            !is_sidecar && (has_extension(entry.path(), RAW_EXTENSIONS) || is_jpeg(entry.path()));
+        wanted.then(|| Ok(entry.into_path()))
     })
 }
 
@@ -455,7 +569,15 @@ fn ingest_one(
     }
 
     let exif = read_exif_fields(path);
-    let preview = extract_t0_preview(path);
+    // A JPEG asset's dimensions are the file's own, not its (downscaled) T0's.
+    let (preview, source_dims) = if is_jpeg(path) {
+        match jpeg_preview(path) {
+            Some((p, w, h)) => (Some(p), Some((w, h))),
+            None => (None, None),
+        }
+    } else {
+        (extract_t0_preview(path), None)
+    };
 
     let imported_at = existing
         .as_ref()
@@ -472,8 +594,8 @@ fn ingest_one(
         make: exif.make,
         model: exif.model,
         captured_at: exif.captured_at,
-        width: preview.as_ref().and_then(|p| p.width),
-        height: preview.as_ref().and_then(|p| p.height),
+        width: source_dims.map_or_else(|| preview.as_ref().and_then(|p| p.width), |d| Some(d.0)),
+        height: source_dims.map_or_else(|| preview.as_ref().and_then(|p| p.height), |d| Some(d.1)),
         imported_at,
     };
 
@@ -639,8 +761,11 @@ mod tests {
         std::fs::write(dir.path().join("b.nrw"), b"x").unwrap();
         std::fs::write(dir.path().join("d.DNG"), b"x").unwrap();
         std::fs::write(dir.path().join("c.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("e.JPEG"), b"x").unwrap();
+        std::fs::write(dir.path().join("f.png"), b"x").unwrap();
+        std::fs::write(dir.path().join("g.xmp"), b"x").unwrap();
         let found: Vec<_> = candidate_files(dir.path()).collect();
-        assert_eq!(found.len(), 3);
+        assert_eq!(found.len(), 5);
     }
 
     #[test]
