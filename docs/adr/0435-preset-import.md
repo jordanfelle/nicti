@@ -32,7 +32,7 @@ LightCraft needs its own Lua parser and its own `crs:` -> settings mapping becau
   `ToneCurvePV2012`, `HueAdjustmentRed`, `MaskGroupBasedCorrections`, ...) in the same Lua syntax.
 - **Report.** `Translation.untranslated` + `Stats` already tell the user what could not be mapped. This is
   the `Imported.unmapped` UX pattern the issue singles out; Nicti has it, built on 380k real rows.
-- **Masks, curves, profile refs.** `develop/masks.rs`, `grade.rs`, `profile.rs` (ADR-0381) exist for the Lua form.
+- **Masks, curves, profile names.** `develop/masks.rs`, `grade.rs`, `profile.rs` (ADR-0381) exist for the Lua form. The camera profile / Look name comes back as `Translation.camera_profile`, *outside* the `EditDocument`, and is resolved by the import job, so a preset has nowhere to keep it today (see section 6).
 - **Zip.** `nicti-stalk` already depends on `zip = "9"` (deflate via `flate2` zlib-rs, ADR-0018-checked).
 
 So LightCraft's reusable value reduces to ideas, not code.
@@ -43,11 +43,15 @@ So LightCraft's reusable value reduces to ideas, not code.
 
 Read the file with `agprefs`, take `value.settings`, run it through `translate` (re-serialising the sub-table
 or adding a `translate_value(&Value)` entry point; whichever is smaller is a slice-1 detail). Title comes from
-`title` / `internalName`. The result is converted `EditDocument` -> `DevelopPreset.stages`.
+`title` / `internalName`, with Adobe's `$$$/Key=Default text` localisation form reduced to its default text
+(LightCraft's `delocalize`; the idea is worth re-deriving). The result is converted `EditDocument` -> `DevelopPreset.stages`.
 LightCraft's 350-line Lua parser is not needed and is not lifted.
 
-Check in slice 1: that `agprefs` accepts the `.lrtemplate` outer form (`s = { id = ..., value = {...} }`) as it
-does the catalog's `s = { ... }`; if it does not, strip the wrapper, still no new parser.
+`agprefs` accepts the `s = { ... }` outer form and `Agpref.values` is a struct, so `.value.settings` is reachable;
+`Tx.root` is a `&Value`, so a `translate_value` entry point is small. **The process version must be passed:**
+`translate` decides PV2003/2010 only from `Context.process_version`, so the importer fills it from the
+template's `ProcessVersion`. With a default `Context` a legacy preset would map `Saturation` etc. through the PV2012
+keys and import *wrong*, not empty.
 
 ### 2. `.xmp` presets and photos-with-XMP: go, with one new adapter
 
@@ -59,14 +63,21 @@ Preset-specific rules, taken from LightCraft (the idea, not the code): when the 
 rather than a preset, drop crop/geometry and absolute white balance (they belong to the photo, not a look);
 ignore the packet-bookkeeping keys (`crs:Version`, `crs:UUID`, `crs:PresetType`, `crs:Supports*`, ...);
 use `crs:Name` / `crs:Group`; id from `crs:UUID` lower-cased, else a slug of group+name.
-Lightroom mobile "DNG presets" are an embedded-XMP read (`nicti-scent/embedded.rs`), cheap once this lands.
+Lightroom mobile "DNG presets" are **not** cheap: `nicti-scent/embedded.rs` is JPEG APP1 only (DNG/TIFF tag 700 is
+explicitly out of scope there; a read would reuse `spikes/sniff`'s TIFF walker). They are split out as a separate,
+later slice. The `crs:` property reading lives in `nicti-scent/packet.rs`, not `lrc_fields.rs` (rating/label/keywords only).
+LightCraft strips crop/geometry and custom/as-shot white balance only for XMP embedded in a *photo*
+(dng/jpg/tif); a sidecar `.xmp` is imported whole. Nicti follows that split: there is no way to tell a preset `.xmp` from a
+sidecar by content, so the rule is by source (embedded vs file), not guessed.
 
 ### 3. Zip bundles: go, use the `zip` crate, keep LightCraft's limits
 
 Preset packs ship as zips. Use `zip` (already a dependency; no hand-rolled reader: LightCraft's is ~70 lines
-of manual offset arithmetic, no zip64, and its only safety is that it was written carefully). Keep the
-*limits* as policy: reject an entry that unpacks past 256 MiB and an archive past 1 GiB, enforced while
-streaming (not trusting the stated size), skip directories, `__MACOSX` and dot-files. Entry names are only
+of manual offset arithmetic, no zip64; it does use checked arithmetic, bounded inflate and has a bomb test, so the
+objection is maintenance and zip64, not safety). Keep the
+*limits* as policy: reject an entry that unpacks past 256 MiB and an archive past 1 GiB *unpacked* in total, enforced while
+streaming (not trusting the stated size), plus an entry-count cap (LightCraft has none; a 1 GiB archive can hold ~65k
+tiny files); skip directories, `__MACOSX` and dot-prefixed names (not a leading `./`). Entry names are only
 used to pick an extension and a group name and are **never** used as a filesystem path (no extraction to
 disk; read into memory), so there is no zip-slip surface. Nested zips are not followed. Group name = innermost
 folder that is not a generic container (`Lightroom`, `XMP`, `Presets`, ...): LightCraft's filler-word list is a
@@ -85,9 +96,29 @@ Revisit only if a user asks (file a ticket then). The plist-parser idea needs no
 
 ### 5. Where it lives
 
-Parsing of `.lrtemplate` and the zip walk belong with the importers (`nicti-stray`, which owns `translate`);
-the `crs:` XMP reader belongs in `nicti-scent`. The pelt "Import presets..." action is a thin caller. Check
-`scripts/check-repo-policy.py`'s layering table before adding any edge; no GUI dependency is needed.
+`LAYERS` (`scripts/check-repo-policy.py`) puts `nicti-scent` at 0, `nicti-stalk` at 1, `nicti-stray` at 5 and
+`nicti-pelt` at 6. `DevelopPreset` lives in pelt, above stray, so:
+- `nicti-stray` owns `.lrtemplate` -> `EditDocument` (via `translate_value`) and the zip walk; it must add `zip`
+  itself with `nicti-stalk`'s feature set (`default-features = false`, deflate only), since stalk exports no zip API.
+- The `crs:` XMP reader needs a crate home: `nicti-scent` has `quick-xml` and `packet.rs`, but no `agprefs`, and stray
+  has no scent dependency. Slice 3 picks one edge (stray -> scent is allowed by `LAYERS`) or a plain key/value
+  tree type that scent returns and stray converts; no new GUI dependency either way.
+- `EditDocument` -> `DevelopPreset.stages` and the "Import presets..." action live in pelt.
+
+### 6. Preset semantics the importer must decide (not yet solved)
+
+- **Presets replace whole stages.** `Tx::put` emits a stage only when it differs from default, and
+  `Clipboard::apply` (`knead/mod.rs`) inserts a stage wholesale. A preset containing only `Highlights2012 = -50`
+  becomes a full `TONE` stage and applying it resets the target's contrast/shadows/whites/blacks; a preset with masks
+  replaces all of the target's masks. Slice 1 must either merge at slider level or restrict stage emission to the
+  keys the template actually names, and document the choice.
+- **Strength.** `crs:Amount` / `SupportsAmount` (preset strength) has no Nicti counterpart; it is ignored and
+  reported, not silently applied at 100%.
+- **Looks / camera profile.** `Translation.camera_profile` has no slot in `DevelopPreset`. Adobe "Look" presets are
+  mostly a profile reference, so slice 1 adds an optional profile name to the preset and resolves it at apply time via
+  `ProfileResolver`, or reports it as unmapped; it must not drop it silently.
+- **Crop / heal / WB in `.lrtemplate`.** With no frame size in `Context`, crops and heal spots are counted as skipped
+  (good); absolute white balance would import as a stage and is stripped for presets, as LightCraft does for photos.
 
 ## Provenance and safety checks (done)
 
@@ -112,9 +143,11 @@ the `crs:` XMP reader belongs in `nicti-scent`. The pelt "Import presets..." act
 ## Consequences
 
 - **Slices:**
-  1. `.lrtemplate` -> `DevelopPreset` through `translate`, with fixtures and the unmapped report. **S**
+  1. `.lrtemplate` -> `DevelopPreset` through `translate_value`, process version passed, section 6 decisions,
+     fixtures and the unmapped report. **M**
   2. Zip bundles with limits (including a bomb test). **S**
-  3. `crs:` XMP preset reader + adapter, photo-XMP stripping rules, DNG-embedded XMP. **M**
+  3. `crs:` XMP preset reader + adapter, photo-XMP stripping rules. **M**
+  3b. DNG-embedded XMP (TIFF tag 700 reader). **M**, optional
   4. Pelt "Import presets..." action and result summary. **S**
 - **Unmapped is part of the contract.** Presets with masks, AI tools or profiles Nicti lacks import partially,
   and the user is told what was dropped (reuse `Translation.untranslated`).
