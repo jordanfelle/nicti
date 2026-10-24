@@ -3,11 +3,14 @@
 //! under the pointer belongs to -- LRC's TAT. Dragging up raises the value, down lowers it.
 //!
 //! Like Point Color (`catseye`), the pixel is read from the small as-shot thumbnail, so the band
-//! or curve position is picked from the photo as shot, not the rendered frame: close enough to
-//! land in the right hue band / tonal region, which is all the gesture needs.
+//! or curve position is picked from the photo as shot, not the rendered frame. The hue and the
+//! curve x use the same maths the renderer does (HSV hue of the working RGB; cube-root of the
+//! pixel), but they ignore edits already applied: with a large exposure or tone edit the grabbed
+//! tonal region is approximate.
 
+use nicti_calico::tonecurve::ToneCurve;
 use nicti_tapetum::coat::{HslParams, PointCurveParams, MAX_CURVE_POINTS};
-use nicti_tapetum::oklab;
+use nicti_tapetum::color::hsl_hue_degrees;
 use nicti_tapetum::stages::{HSL, POINT_CURVE};
 
 use crate::catseye::thumb_for;
@@ -35,10 +38,9 @@ impl Mode {
 
 const MODE_ID: &str = "targeted-mode";
 const GRAB_ID: &str = "targeted-grab";
-/// Hue bands are centred 45 degrees apart starting at red (see `HslParams`).
+/// Hue bands are centred 45 degrees apart starting at red (see `HslParams`); the hue is the
+/// renderer's own (`hsl_hue_degrees`), not Oklch hue.
 const BAND_SPAN_DEG: f32 = 45.0;
-/// Below this Oklch chroma a pixel has no meaningful hue (grey): HSL drags do nothing.
-const MIN_CHROMA: f32 = 0.01;
 /// A press within this x distance of an existing curve point grabs it instead of adding one.
 const GRAB_RADIUS: f32 = 0.04;
 /// One pixel of vertical drag is half a step (LRC's `-dy * 0.5`); a step is 1/100 of an HSL
@@ -74,13 +76,21 @@ pub fn band_for_hue(hue_deg: f32) -> usize {
     ((hue_deg.rem_euclid(360.0) / BAND_SPAN_DEG).round() as usize) % 8
 }
 
+/// Where a pixel sits on the point curve's x axis: the renderer indexes the curve by the
+/// cube-root of each channel, so the channel mean's cube-root is the master curve's position.
+fn curve_x(working: [f32; 3]) -> f32 {
+    let mean = (working[0] + working[1] + working[2]) / 3.0;
+    mean.max(0.0).cbrt().clamp(0.0, 1.0)
+}
+
 /// A vertical drag of `dy` screen pixels (down positive) as a signed number of steps.
 fn steps(dy: f32) -> f32 {
     -dy * STEPS_PER_PX
 }
 
-/// Moves the master-curve point nearest `x` by `delta_y`, adding one at `(x, x)` when none is
-/// within [`GRAB_RADIUS`]. Returns the grabbed point's x, so a drag keeps hold of it.
+/// Moves the master-curve point nearest `x` by `delta_y`, adding one on the curve at `x` when none
+/// is within [`GRAB_RADIUS`]. `points` must be sorted and strictly increasing (sanitized).
+/// Returns the grabbed point's x, so a drag keeps hold of it.
 pub fn nudge_curve(points: &mut Vec<[f32; 2]>, x: f32, delta_y: f32) -> f32 {
     if points.len() < 2 {
         *points = vec![[0.0, 0.0], [1.0, 1.0]];
@@ -95,27 +105,26 @@ pub fn nudge_curve(points: &mut Vec<[f32; 2]>, x: f32, delta_y: f32) -> f32 {
         _ => {
             // Insert on the existing curve's height at x, so the new point starts as a no-op.
             let at = points.partition_point(|p| p[0] < x);
-            let y = interpolate(points, x);
+            let y = evaluate(points, x);
             points.insert(at, [x, y]);
             at
         }
     };
     points[i][1] = (points[i][1] + delta_y).clamp(0.0, 1.0);
     let x = points[i][0];
-    if points.len() == 2 && points.iter().all(|p| (p[0] - p[1]).abs() < 1e-6) {
+    if points.iter().all(|p| (p[0] - p[1]).abs() < 1e-6) {
         points.clear();
     }
     x
 }
 
-fn interpolate(points: &[[f32; 2]], x: f32) -> f32 {
-    for w in points.windows(2) {
-        if x >= w[0][0] && x <= w[1][0] {
-            let span = (w[1][0] - w[0][0]).max(1e-6);
-            return w[0][1] + (w[1][1] - w[0][1]) * (x - w[0][0]) / span;
-        }
-    }
-    x
+/// The curve's height at `x`, as the renderer's monotone spline draws it.
+fn evaluate(points: &[[f32; 2]], x: f32) -> f32 {
+    let pts: Vec<(f64, f64)> = points
+        .iter()
+        .map(|p| (f64::from(p[0]), f64::from(p[1])))
+        .collect();
+    ToneCurve::new(&pts).eval(f64::from(x)) as f32
 }
 
 /// Adds `delta` (normalized, so 0.01 is one slider step) to `band`'s hue/sat/lum value.
@@ -163,13 +172,16 @@ pub fn handle_viewport(
             return;
         };
         let n = develop.display_to_source_norm(to_norm(rect, develop.display_extent(), p));
-        let lab = oklab::lab_from_prophoto(thumb_for(ui.ctx(), develop).sample_working(n[0], n[1]));
+        let working = thumb_for(ui.ctx(), develop).sample_working(n[0], n[1]);
         let grab = match mode {
-            Mode::Curve => Grab::Curve {
-                x: lab[0].clamp(0.0, 1.0),
-            },
-            _ if lab[1].hypot(lab[2]) < MIN_CHROMA => Grab::None,
-            _ => Grab::Band(band_for_hue(lab[2].atan2(lab[1]).to_degrees())),
+            Mode::Curve => {
+                let x = curve_x(working);
+                if !x.is_finite() {
+                    return;
+                }
+                Grab::Curve { x }
+            }
+            _ => hsl_hue_degrees(working).map_or(Grab::None, |h| Grab::Band(band_for_hue(h))),
         };
         ui.ctx().data_mut(|d| d.insert_temp(grab_id, grab));
     }
@@ -186,6 +198,8 @@ pub fn handle_viewport(
     match grab {
         Grab::Curve { x } => {
             let mut curves: PointCurveParams = develop.stage_params(POINT_CURVE);
+            // The stored document is untrusted: edit the cleaned master list.
+            curves.master = curves.sanitized().master;
             let held = nudge_curve(&mut curves.master, x, steps(dy) * CURVE_STEP);
             develop.set_stage_params(POINT_CURVE, &curves);
             // Keep hold of the same point as it moves.
@@ -213,6 +227,45 @@ mod tests {
         assert_eq!(band_for_hue(120.0), 3);
         assert_eq!(band_for_hue(320.0), 7);
         assert_eq!(band_for_hue(-10.0), 0);
+    }
+
+    #[test]
+    fn primaries_pick_the_band_the_renderer_weights_highest() {
+        let band = |rgb| band_for_hue(hsl_hue_degrees(rgb).unwrap());
+        assert_eq!(band([0.8, 0.02, 0.02]), 0, "red");
+        assert_eq!(
+            band([0.8, 0.8, 0.02]),
+            1,
+            "HSV 60 deg is nearer Orange (45) than Yellow (90)"
+        );
+        assert_eq!(band([0.8, 0.5, 0.02]), 1, "orange");
+        assert_eq!(band([0.02, 0.8, 0.02]), 3, "green");
+        assert_eq!(band([0.02, 0.02, 0.8]), 5, "blue");
+        assert_eq!(hsl_hue_degrees([0.4, 0.4, 0.4]), None, "grey has no band");
+    }
+
+    #[test]
+    fn inserting_on_a_three_point_curve_does_not_reshape_it() {
+        let mut pts = vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]];
+        let before = evaluate(&pts, 0.25);
+        nudge_curve(&mut pts, 0.25, 0.0);
+        assert_eq!(pts.len(), 4);
+        assert!((evaluate(&pts, 0.25) - before).abs() < 1e-5);
+        assert!((pts[1][1] - before).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_multi_point_curve_dragged_back_onto_the_diagonal_clears() {
+        let mut pts = vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]];
+        nudge_curve(&mut pts, 0.5, -0.1);
+        assert!(pts.is_empty());
+    }
+
+    #[test]
+    fn curve_x_is_the_cube_root_of_the_pixel() {
+        assert!((curve_x([0.125; 3]) - 0.5).abs() < 1e-6);
+        assert_eq!(curve_x([-1.0, 0.0, 0.0]), 0.0);
+        assert_eq!(curve_x([8.0; 3]), 1.0);
     }
 
     #[test]
