@@ -4,6 +4,11 @@ members = [".", "crates/*", "spikes/*", "bench/whisker", "bench/knead"]
 [workspace.package]
 license = "AGPL-3.0-or-later"
 
+# rusqlite links the native `sqlite3` library, so every member must resolve to one version; declared
+# once here so a Renovate bump is a single-line edit that cannot leave a crate or spike behind.
+[workspace.dependencies]
+rusqlite = { version = "0.41", features = ["bundled"] }
+
 [package]
 name = "nicti"
 # #249: this is the shipped binary's real version -- every other crate in the workspace stays

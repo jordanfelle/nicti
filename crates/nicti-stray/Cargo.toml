@@ -14,7 +14,7 @@ nicti-siamese = { path = "../nicti-siamese" }
 nicti-stalk = { path = "../nicti-stalk" }
 nicti-tapetum = { path = "../nicti-tapetum" }
 agprefs = "0.3"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
