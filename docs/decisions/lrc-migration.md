@@ -118,3 +118,18 @@ provenance snapshot so a re-run never overwrites a later nicti edit. `nicti-pelt
 that camera's Adobe Standard, else nothing; an unresolved name is counted by name in
 `LrcImportReport::profiles_missing` and listed on the image's untranslated keys, never substituted.
 Values map numerically only; calibration strengths are untuned against LRC.
+
+## #435: preset import (ADR-0435)
+
+Research outcome: go for `.lrtemplate`, `.xmp` presets and zip bundles; DNG-embedded XMP is a separate optional
+slice (`embedded.rs` is JPEG-only, so it needs a TIFF tag-700 reader); no-go for
+Luminar `.lmp` / `.mplumpack`. An `.lrtemplate`'s `value.settings` is the same Lua key set as a catalog's
+develop text, so it goes through `agprefs` + `nicti_stray::develop::translate` and the existing
+`Translation.untranslated` report; LightCraft's Lua parser and `crs:` mapping are not lifted. XMP gets one
+adapter in `nicti-scent` that feeds the same translator. Zip uses the `zip` crate already in `nicti-stalk`,
+with 256 MiB per entry / 1 GiB total *unpacked* limits plus an entry-count cap, enforced while streaming, and entry
+names never used as paths. Presets replace whole stages (`Tx::put` + `Clipboard::apply`), and the camera profile
+lives outside `EditDocument`; slice 1 must decide both.
+Luminar's mapping is unverifiable black-box guesswork and mostly AI/LUT features, so it is declined until
+someone asks. Photo-sourced XMP drops crop, geometry and absolute white balance. PV2003/2010 presets are
+reported, not guessed. Fixtures must be hand-written; no third-party preset packs are committed.
