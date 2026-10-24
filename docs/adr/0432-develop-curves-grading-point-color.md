@@ -17,7 +17,7 @@ and its colour maths is "tuned by eye", so every constant below is a starting po
 Out of scope, on purpose: a *measured* match against LRC renders. That needs the reference machine and
 the #149 harness, so it is #452 (`needs-physical-testing`), not a merge gate. Also out: targeted
 adjustment (dragging on the photo to move a curve/mixer value, #453), Point Color's "visualize range"
-overlay and LRC `PointColors` import (#454), and the camera Calibration panel (done in #381, ADR-0381).
+overlay (done, #454) and LRC `PointColors` import (needs a real catalog, #572), and the camera Calibration panel (done in #381, ADR-0381).
 
 ## Decision
 
@@ -65,10 +65,17 @@ Ottosson's M2, edits it, and returns. The existing HSL stage is deliberately **n
 - The CPU reference is `oklab::OkLabOps::apply`; `live_suffix.wgsl`'s `apply_oklab_ops` is its twin, with a
   GPU-vs-CPU parity test (`stages::tests::oklab_ops_in_the_live_pass_match_the_cpu_twin_...`).
 
-The sample colour comes from the same small as-shot thumbnail the mask colour eyedropper uses
-(`catseye.rs`), so it ignores edits already applied. It is close, not exact, on a heavily tone-edited
-photo; the ranges are wide enough that it lands in the right colour family. Sampling the rendered frame
-is #454.
+The sample colour is read from the **rendered frame** under the click (#454, `catseye::sample_rendered`: a 5x5
+mean through `frame::read_frame_region`, so only the window is read back), so a pick lands on the colour the
+preview shows however heavily the photo is edited. It is the frame's final colour, not the colour Point Color's
+own input sees: grain, a vignette and samples already set also act on it. The ranges are wide enough that this
+stays in the colour family.
+
+**Visualize range** (#454) shows one sample's weight (`oklab::PointK::weight`) as a grey in place of the photo.
+The checkbox state is a view setting: `DevelopDoc::point_color_visualize` is stamped into the render's copy of
+the document (`coat::stamp_point_color_visualize` -> `PointColorParams::visualize`, 1-based, never serialized),
+so the saved document and exports never carry it. The CPU twin packs the shown sample into slot 0 and the shader
+returns `vec3(weight)` and skips every later stage (`ok_flags.w`).
 
 ### 4. The UI
 
@@ -97,11 +104,11 @@ legacy Split Toning panel on pre-grading process versions.
   reference-machine parity pass fits them; the import maps values numerically only.
 - The new kernels have lavapipe/Vulkan parity tests only. Per the `gpu-gui-and-healing` rule they must be
   run on the reference machine under both Vulkan and Dx12 before they are trusted there.
-- Point Color's sample is as-shot, not as-rendered (above).
+- Point Color's sample is the rendered frame's final colour, not its own input colour (above).
 - Edits made through these controls have no undo yet: Develop has no history (#324), which `SliderOut`
   already reserves the drag signals for.
 
 ## Not verified
 
 Visual quality on real photos; LRC parity; the Dx12 backend; the eyedropper against a real decoded frame
-(its pure parts are unit-tested, the click path needs a live viewport).
+(its pure parts are unit-tested, the click path needs a live viewport), nor the Visualize range overlay by eye.

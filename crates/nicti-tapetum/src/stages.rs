@@ -536,7 +536,7 @@ struct LiveUniforms {
     /// #432: x = point curves enabled (the LUT texture at binding 13 is only read when 1), yzw unused.
     point_curve: [f32; 4],
     /// #432 OkLab ops (`oklab::OkLabOps`): x = any active, y = grading active, z = point colour
-    /// active, w unused.
+    /// active, w = "Visualize range" (#454: slot 0's weight replaces the photo).
     ok_flags: [f32; 4],
     /// ProPhoto -> LMS rows, then LMS -> ProPhoto rows (w unused).
     ok_to: [[f32; 4]; 3],
@@ -583,7 +583,7 @@ fn write_oklab(u: &mut LiveUniforms, ops: &crate::oklab::OkLabOps) {
         f32::from(!ops.is_noop()),
         f32::from(ops.grade.is_some()),
         f32::from(ops.points.iter().any(Option::is_some)),
-        0.0,
+        f32::from(ops.visualize),
     ];
 }
 
@@ -2491,6 +2491,24 @@ mod tests {
                     "pixel {i} channel {c}: gpu={} cpu={}",
                     actual[i][c],
                     rgb[c]
+                );
+            }
+        }
+        // "Visualize range" (#454): a grey of the sample's weight, the grade left out.
+        points.visualize = 1;
+        let shown = run(grade, points);
+        let ops = crate::oklab::OkLabOps::new(&grade, &points);
+        assert!(shown[1][0] > 0.9, "the sampled pixel is fully inside");
+        for (i, px) in input_data.iter().enumerate() {
+            let mut rgb = [px[0], px[1], px[2]];
+            rgb = color::apply_tone(rgb, &ToneParams::default());
+            rgb = color::apply_tone_curve(rgb, &lut);
+            rgb = color::apply_hsl(rgb, &HslParams::default());
+            let w = ops.apply(rgb)[0];
+            for (c, got) in shown[i].iter().take(3).enumerate() {
+                assert!(
+                    (got - w).abs() < 0.01,
+                    "pixel {i} channel {c}: gpu={got} cpu={w}"
                 );
             }
         }

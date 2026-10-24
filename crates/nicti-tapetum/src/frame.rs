@@ -76,12 +76,36 @@ pub(crate) fn padded_bytes_per_row(width: u32) -> u32 {
 /// pixels on the CPU (a golden-image comparison, an export encoder, `tile::TiledRender`'s own
 /// per-tile readback).
 pub fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
+    read_frame_region(gpu, frame, 0, 0, frame.extent.width, frame.extent.height)
+}
+
+/// [`read_frame`] for the `width x height` window at `(x, y)` only -- the copy and staging buffer
+/// are window-sized, so sampling a colour under a click does not read a whole photo back. The
+/// window must lie inside the frame.
+pub fn read_frame_region(
+    gpu: &GpuContext,
+    frame: &FrameTexture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Vec<[f32; 4]> {
     use half::f16;
 
-    let extent = frame.extent;
-    let unpadded_bpr = extent.width * BYTES_PER_PIXEL;
-    let padded_bpr = padded_bytes_per_row(extent.width);
-    let buffer_size = u64::from(padded_bpr) * u64::from(extent.height);
+    assert!(
+        width > 0
+            && height > 0
+            && x.checked_add(width)
+                .is_some_and(|r| r <= frame.extent.width)
+            && y.checked_add(height)
+                .is_some_and(|b| b <= frame.extent.height),
+        "readback window {width}x{height} at ({x}, {y}) outside the {}x{} frame",
+        frame.extent.width,
+        frame.extent.height
+    );
+    let unpadded_bpr = width * BYTES_PER_PIXEL;
+    let padded_bpr = padded_bytes_per_row(width);
+    let buffer_size = u64::from(padded_bpr) * u64::from(height);
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("frame readback"),
         size: buffer_size,
@@ -98,7 +122,7 @@ pub fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
         wgpu::TexelCopyTextureInfo {
             texture: &frame.texture,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin: wgpu::Origin3d { x, y, z: 0 },
             aspect: wgpu::TextureAspect::All,
         },
         wgpu::TexelCopyBufferInfo {
@@ -106,12 +130,12 @@ pub fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded_bpr),
-                rows_per_image: Some(extent.height),
+                rows_per_image: Some(height),
             },
         },
         wgpu::Extent3d {
-            width: extent.width,
-            height: extent.height,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
     );
@@ -124,9 +148,9 @@ pub fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
         .expect("device poll failed");
     let raw = slice.get_mapped_range().expect("output buffer not mapped");
 
-    let mut out = Vec::with_capacity((extent.width * extent.height) as usize);
-    for y in 0..extent.height {
-        let row_start = (y * padded_bpr) as usize;
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for row_index in 0..height {
+        let row_start = (row_index * padded_bpr) as usize;
         let row = &raw[row_start..row_start + unpadded_bpr as usize];
         let u16s: &[u16] = bytemuck::cast_slice(row);
         for px in u16s.as_chunks::<4>().0 {
@@ -197,6 +221,26 @@ mod tests {
             (340.0..360.0).contains(&full_res_mb),
             "full-res frame should be ~349MB, got {full_res_mb:.1}MB"
         );
+    }
+
+    #[test]
+    fn a_region_readback_is_the_matching_crop_of_the_full_readback() {
+        let Some(gpu) = test_gpu() else { return };
+        let extent = Extent {
+            width: 70,
+            height: 9,
+        };
+        let data: Vec<[f32; 4]> = (0..extent.width * extent.height)
+            .map(|i| [i as f32 / 1000.0, 0.5, 0.25, 1.0])
+            .collect();
+        let frame = crate::test_util::upload_frame(&gpu, extent, &data);
+        let full = read_frame(&gpu, &frame);
+        let region = read_frame_region(&gpu, &frame, 63, 4, 5, 3);
+        let expected: Vec<[f32; 4]> = (4..7)
+            .flat_map(|y| (63..68).map(move |x| (x, y)))
+            .map(|(x, y)| full[(y * 70 + x) as usize])
+            .collect();
+        assert_eq!(region, expected);
     }
 
     #[test]

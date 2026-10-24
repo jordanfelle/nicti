@@ -1,16 +1,17 @@
 //! The Point Color eyedropper (#432): while `Tool::PointColor` owns the viewport, a click on the
 //! photo adds a Point Color sample of the colour under the pointer and hands the viewport back to
-//! the crop tool. The sample's colour is read from the same small as-shot thumbnail the mask
-//! colour eyedropper uses (`mask_edit::Thumb`), so it ignores edits already applied -- a heavily
-//! tone-edited photo samples close to, not exactly at, what the preview shows. The soft-box ranges
-//! are wide enough that this lands the sample on the right colour family; sampling the rendered
-//! frame is a follow-up if it proves too coarse.
+//! the crop tool. The sample's colour is read from the rendered frame under the pointer (#454), so
+//! a click lands on the colour the preview shows however heavily the photo is edited. It is the
+//! frame's final colour: grain, a vignette and Point Color samples already set also act on it, but
+//! the soft-box ranges are wide enough that none of that moves the pick out of its colour family.
 //!
 //! Named for the cat's-eye reflector: it picks the colour the light lands on.
 
 use std::sync::Arc;
 
 use nicti_tapetum::coat::{PointColorParams, PointColorSample, MAX_POINT_COLORS};
+use nicti_tapetum::frame::{read_frame_region, FrameTexture};
+use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::oklab;
 use nicti_tapetum::stages::POINT_COLOR;
 
@@ -21,6 +22,55 @@ use crate::render::DevelopDoc;
 
 const SELECTED_ID: &str = "catseye-selected";
 const THUMB_ID: &str = "catseye-thumb";
+const VISUALIZE_ID: &str = "catseye-visualize";
+
+/// Whether "Visualize range" is ticked.
+pub fn visualize(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(VISUALIZE_ID)))
+        .unwrap_or(false)
+}
+
+pub fn set_visualize(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(VISUALIZE_ID), on));
+}
+
+/// Half the side of the square window the pick averages, in rendered pixels (a click on grain or
+/// noise should not pick the noise up): a 5x5 window.
+const SAMPLE_RADIUS: i64 = 2;
+
+/// The window `(x, y, width, height)` around normalized `(nx, ny)` on a `width x height` frame,
+/// clipped to the frame.
+fn sample_window(width: u32, height: u32, nx: f32, ny: f32) -> (u32, u32, u32, u32) {
+    let at = |n: f32, len: u32| -> (u32, u32) {
+        let c = (n * len as f32)
+            .floor()
+            .clamp(0.0, len.saturating_sub(1) as f32) as i64;
+        let lo = (c - SAMPLE_RADIUS).max(0);
+        let hi = (c + SAMPLE_RADIUS).min(i64::from(len) - 1);
+        (lo as u32, (hi - lo + 1) as u32)
+    };
+    let (x, w) = at(nx, width);
+    let (y, h) = at(ny, height);
+    (x, y, w, h)
+}
+
+/// The mean RGB of `pixels`, the readback of a [`sample_window`].
+fn mean_rgb(pixels: &[[f32; 4]]) -> [f32; 3] {
+    let n = pixels.len().max(1) as f32;
+    let mut acc = [0.0f32; 3];
+    for p in pixels {
+        for (a, v) in acc.iter_mut().zip(p) {
+            *a += v;
+        }
+    }
+    acc.map(|v| v / n)
+}
+
+/// The rendered frame at normalized `(nx, ny)`, as linear working-space (ProPhoto) RGB.
+pub fn sample_rendered(gpu: &GpuContext, frame: &FrameTexture, nx: f32, ny: f32) -> [f32; 3] {
+    let (x, y, w, h) = sample_window(frame.extent.width, frame.extent.height, nx, ny);
+    mean_rgb(&read_frame_region(gpu, frame, x, y, w, h))
+}
 
 /// Which sample the Point Color section is editing (clamped by the caller to the live count).
 pub fn selected(ctx: &egui::Context) -> usize {
@@ -79,6 +129,8 @@ pub fn set_status(ctx: &egui::Context, message: Option<String>) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STATUS_ID), message));
 }
 
+/// The small as-shot thumbnail of the open photo, rebuilt when the photo changes. The Point Color
+/// pick no longer reads it (it samples the rendered frame); the targeted-adjustment tool does.
 pub(crate) fn thumb_for(ctx: &egui::Context, develop: &DevelopDoc) -> Arc<Thumb> {
     let id = egui::Id::unique(THUMB_ID);
     let key = develop.frame_key();
@@ -99,6 +151,8 @@ pub fn handle_viewport(
     rect: egui::Rect,
     develop: &mut DevelopDoc,
     heal: &mut HealUi,
+    gpu: &GpuContext,
+    frame: &FrameTexture,
 ) {
     if response.hovered() {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
@@ -113,9 +167,9 @@ pub fn handle_viewport(
     let Some(p) = response.interact_pointer_pos() else {
         return;
     };
-    // The photo area shows the cropped canvas while idle (#272): map the click through the crop.
-    let n = develop.display_to_source_norm(to_norm(rect, develop.display_extent(), p));
-    let working = thumb_for(ui.ctx(), develop).sample_working(n[0], n[1]);
+    // The frame on screen is the one sampled, so the click's position on it is the position in it.
+    let n = to_norm(rect, develop.display_extent(), p);
+    let working = sample_rendered(gpu, frame, n[0], n[1]);
     let mut params: PointColorParams = develop.stage_params(POINT_COLOR);
     match add_sample(&mut params, sample_from_working(working)) {
         Some(i) => {
@@ -135,6 +189,25 @@ pub fn handle_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sample_window_is_five_square_and_clipped_to_the_frame() {
+        assert_eq!(sample_window(100, 50, 0.5, 0.5), (48, 23, 5, 5));
+        assert_eq!(sample_window(100, 50, 0.0, 0.0), (0, 0, 3, 3));
+        assert_eq!(sample_window(100, 50, 1.0, 1.0), (97, 47, 3, 3));
+        assert_eq!(sample_window(1, 1, 0.7, 0.2), (0, 0, 1, 1));
+        let w = sample_window(100, 50, f32::NAN, 2.0);
+        assert!(
+            w.0 + w.2 <= 100 && w.1 + w.3 <= 50 && w.2 > 0 && w.3 > 0,
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn the_pick_is_the_mean_of_the_window() {
+        let px = [[0.2, 0.4, 0.0, 1.0], [0.4, 0.0, 0.2, 1.0]];
+        assert_eq!(mean_rgb(&px), [0.3, 0.2, 0.1]);
+    }
 
     #[test]
     fn a_picked_colour_becomes_a_neutral_sample_of_that_colour() {

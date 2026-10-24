@@ -925,6 +925,32 @@ impl PointColorSample {
 pub struct PointColorParams {
     pub count: u8,
     pub samples: [PointColorSample; MAX_POINT_COLORS],
+    /// "Visualize range" (#454): 1-based index of the live sample whose weight the render shows
+    /// as a grey overlay instead of the photo, `0` for the normal render. A view setting, never
+    /// saved: the Develop view stamps it into the render's copy of the document
+    /// ([`stamp_point_color_visualize`]).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub visualize: u8,
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
+}
+
+/// Stamps "Visualize range" for live sample `index` (0-based) into a render's copy of the
+/// document. Does nothing without a Point Color entry or when `index` is not a live sample, so a
+/// stale selection can never blank the preview.
+pub fn stamp_point_color_visualize(doc: &mut nicti_pawprint::EditDocument, index: usize) {
+    let Some(entry) = doc.stages.get_mut(crate::stages::POINT_COLOR) else {
+        return;
+    };
+    let params: PointColorParams = parse(&entry.params);
+    if index >= usize::from(params.count).min(MAX_POINT_COLORS) {
+        return;
+    }
+    if let serde_json::Value::Object(map) = &mut entry.params {
+        map.insert("visualize".to_owned(), serde_json::json!(index + 1));
+    }
 }
 
 impl PointColorParams {
@@ -949,7 +975,17 @@ impl PointColorParams {
         {
             *dst = src.sanitized();
         }
-        Self { count, samples }
+        // Only a live sample can be visualized.
+        let visualize = if self.visualize <= count {
+            self.visualize
+        } else {
+            0
+        };
+        Self {
+            count,
+            samples,
+            visualize,
+        }
     }
 }
 
@@ -1034,6 +1070,49 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn visualize_is_stamped_only_for_a_live_sample_and_never_serialized() {
+        let mut doc = nicti_pawprint::EditDocument::default();
+        stamp_point_color_visualize(&mut doc, 0);
+        assert!(
+            doc.stages.is_empty(),
+            "no Point Color entry, nothing to stamp"
+        );
+        let params = PointColorParams {
+            count: 2,
+            ..Default::default()
+        };
+        doc.stages.insert(
+            crate::stages::POINT_COLOR.to_owned(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(params).unwrap(),
+            },
+        );
+        assert!(
+            doc.stages[crate::stages::POINT_COLOR]
+                .params
+                .get("visualize")
+                .is_none(),
+            "the default is not written"
+        );
+        stamp_point_color_visualize(&mut doc, 2);
+        let seen = |doc: &nicti_pawprint::EditDocument| {
+            parse::<PointColorParams>(&doc.stages[crate::stages::POINT_COLOR].params).visualize
+        };
+        assert_eq!(seen(&doc), 0, "index 2 is not live");
+        stamp_point_color_visualize(&mut doc, 1);
+        assert_eq!(seen(&doc), 2, "1-based in the params");
+        let cleaned = parse::<PointColorParams>(&doc.stages[crate::stages::POINT_COLOR].params);
+        assert_eq!(cleaned.sanitized().visualize, 2);
+        let stale = PointColorParams {
+            count: 1,
+            visualize: 2,
+            ..Default::default()
+        };
+        assert_eq!(stale.sanitized().visualize, 0);
+    }
+
     use super::*;
 
     #[test]

@@ -44,7 +44,7 @@ struct Uniforms {
     // #432 point curves: x = enabled (point_curve_lut is only read when 1), yzw unused.
     point_curve: vec4<f32>,
     // #432 OkLab ops (oklab.rs is the CPU twin). ok_flags: x = any active, y = grading, z = point
-    // colour. ok_to / ok_from: ProPhoto <-> LMS matrix rows. grade_k: (split, width). grade_w:
+    // colour, w = Visualize range (#454). ok_to / ok_from: ProPhoto <-> LMS matrix rows. grade_k: (split, width). grade_w:
     // shadows / midtones / highlights / global offsets (dL, da, db). points: three vec4s per slot,
     // see stages.rs::pack_oklab.
     ok_flags: vec4<f32>,
@@ -333,6 +333,17 @@ fn apply_oklab_ops(rgb: vec3<f32>) -> vec3<f32> {
         var h0 = 0.0;
         if (c0 > 1e-6) {
             h0 = atan2(lab.z, lab.y);
+        }
+        // "Visualize range" (#454): the weight of slot 0 (the only slot packed) as a grey.
+        if (u.ok_flags.w > 0.5) {
+            let p0 = u.points[0];
+            let p1 = u.points[1];
+            var hue_w = 1.0;
+            if (p1.w > 0.5) {
+                hue_w = ok_soft(p1.x, ok_wrap_pi(h0 - p0.z)) * ok_smoothstep(0.005, 0.025, c0);
+            }
+            let w = hue_w * ok_soft(p1.y, c0 - p0.y) * ok_soft(p1.z, l0 - p0.x);
+            return vec3<f32>(w);
         }
         var l = l0;
         var c = c0;
@@ -799,6 +810,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_hsl(rgb);
     if (u.ok_flags.x > 0.5) {
         rgb = apply_oklab_ops(rgb);
+        if (u.ok_flags.w > 0.5) {
+            // The range overlay is the final image: nothing downstream may tint it.
+            textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(rgb, px.a));
+            return;
+        }
     }
     // Skipped when the stacked delta is exactly zero, so a mask that selects nothing (or has no
     // such adjustment) leaves the pixel bit-identical, not merely close.

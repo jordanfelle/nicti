@@ -144,6 +144,10 @@ pub struct DevelopDoc {
     /// turns this on so on-image spot positions map to source pixels by a plain stretch, with no
     /// inverse crop transform in the way.
     pub uncropped_preview: bool,
+    /// Point Color "Visualize range" (#454): the live sample whose weight the render shows as a
+    /// grey overlay. A view setting, never saved -- the Develop panel sets it every frame it
+    /// draws the section, and `render` stamps it into the render's copy of the document.
+    pub point_color_visualize: Option<usize>,
     /// With `uncropped_preview`: keep the Upright correction (#427) in the whole-frame view. The
     /// Crop tool needs it (its rect lives in the corrected frame); heal and masks place things in
     /// source coordinates and need the uncorrected frame.
@@ -306,6 +310,7 @@ impl DevelopDoc {
             identity: blake3::hash(b"synthetic"),
             frame_key: 0,
             uncropped_preview: false,
+            point_color_visualize: None,
             uncropped_keeps_upright: false,
             upright_guide_mode: false,
             upright_guides: Vec::new(),
@@ -902,6 +907,11 @@ impl DevelopEngine {
             // changing) rebakes the heal stage through the normal cache-key path.
             let mut d = dv.history.document().clone();
             heal::stamp_removal_state(&mut d, &dv.removals);
+            // Only the on-screen render shows the overlay: the analysis renders (auto-straighten,
+            // Upright) and the tool views are whole-frame (`uncropped_preview`) and must see the photo.
+            if let (Some(i), false) = (dv.point_color_visualize, dv.uncropped_preview) {
+                nicti_tapetum::coat::stamp_point_color_visualize(&mut d, i);
+            }
             if dv.uncropped_preview {
                 // Removing the entry (rather than only ignoring it below) also gives the crop node
                 // its default hash, so the cached cropped composite can't be served back. The
@@ -2286,6 +2296,43 @@ mod tests {
 
     /// #272: the idle preview is sized to the crop rect; the crop/heal/mask tools and Before show
     /// the whole frame.
+    #[test]
+    fn visualize_range_replaces_only_the_on_screen_render() {
+        use nicti_tapetum::coat::{PointColorParams, PointColorSample};
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut pc = PointColorParams {
+            count: 1,
+            ..Default::default()
+        };
+        pc.samples[0] = PointColorSample {
+            lum: 0.5,
+            chroma: 0.1,
+            hue: 40.0,
+            ..Default::default()
+        };
+        view.set_stage_params(nicti_tapetum::stages::POINT_COLOR, &pc);
+        let read = |view: &mut DevelopView| {
+            let out = view.render();
+            nicti_tapetum::frame::read_frame(&gpu, &out)
+        };
+        let normal = read(&mut view);
+        view.doc.point_color_visualize = Some(0);
+        let shown = read(&mut view);
+        assert_ne!(normal, shown, "the overlay replaces the photo");
+        assert!(
+            shown.iter().all(|p| p[0] == p[1] && p[1] == p[2]),
+            "the overlay is grey"
+        );
+        // A whole-frame render (a tool view, auto-straighten, Upright analysis) is the photo.
+        view.uncropped_preview = true;
+        let whole = read(&mut view);
+        view.doc.point_color_visualize = None;
+        assert_eq!(whole, read(&mut view));
+    }
+
     #[test]
     fn the_idle_preview_is_the_crop_rect_and_a_tool_shows_the_whole_frame() {
         let Some(gpu) = crate::test_gpu::shared() else {
