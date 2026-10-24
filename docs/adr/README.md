@@ -93,6 +93,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0432](0432-develop-curves-grading-point-color.md) | — | Develop UI: point curves, colour mixer, Color Grading and Point Color (OkLab) | Accepted |
 | [0427](0427-upright-perspective-correction.md) | — | Upright: automatic and guided perspective correction | Accepted |
 | [0428](0428-lens-stage-ca-dng-defringe.md) | — | The lens stage (DNG-embedded profile, automatic lateral CA) and global Defringe | Accepted |
+| [0434](0434-agent-control-channel.md) | — | Agent-drivable command table, loopback control channel and MCP shim for nicti-pelt | Proposed |
 | [0410](0410-nef-embedded-lens-corrections.md) | — | Nikon's embedded lens-correction data as the NEF lens source (opt-in until verified) | Accepted |
 | [0380](0380-global-presence-and-effects.md) | — | Global Presence (texture/clarity/dehaze/saturation) and post-crop Effects (vignette/grain) | Accepted |
 
