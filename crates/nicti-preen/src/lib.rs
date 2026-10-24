@@ -554,13 +554,14 @@ mod tests {
             .unwrap();
             let png =
                 img_parts::png::Png::from_bytes(bytes::Bytes::from(out.bytes.clone())).unwrap();
-            let want = nicti_calico::icc::profile_bytes(space.into()).unwrap();
+            let mut want = nicti_calico::icc::profile_bytes(space.into()).unwrap();
             use img_parts::ImageICC;
-            assert_eq!(
-                png.icc_profile().unwrap().as_ref(),
-                want.as_slice(),
-                "{space:?}"
-            );
+            let mut got = png.icc_profile().unwrap().to_vec();
+            // The ICC header's creation date (bytes 24..36) is the encode time, so two encodes a
+            // second apart differ there; everything else must match exactly.
+            got[24..36].fill(0);
+            want[24..36].fill(0);
+            assert_eq!(got, want, "{space:?}");
             let px = *decode(&out.bytes).get_pixel(7, 2);
             assert!(
                 px[0].abs_diff(px[1]) <= 2 && px[1].abs_diff(px[2]) <= 2,
