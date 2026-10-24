@@ -40,6 +40,12 @@ Full reasoning/history: `docs/decisions/lrc-migration.md`.
   but its derivation is unconfirmed, so #62 keeps it provenance-only, not a relink/dedupe input.
 - **`.lrcat-data` is RocksDB + BlobDB, keys ...
 - **The import build (#62, ADR-0062)**: ...
+## #435: preset import (ADR-0435)
+
+- Go: `.lrtemplate` (via `agprefs` + `nicti_stray::develop::translate`, no new Lua parser), `.xmp` presets
+  (one `crs:` adapter in `nicti-scent` into the same translator), zip bundles (`zip` crate, 256 MiB/entry,
+  1 GiB total, names never used as paths). No-go: Luminar. Nothing lifted from LightCraft. Detail: `docs/decisions/lrc-migration.md`.
+
 ## Package contents
 
 - **`spikes/shed`** (#61/ADR-0061's `.lrcat` ...
