@@ -58,6 +58,10 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 - Research outcome, no code lifted. Date folders already work (`{Date:YYYY}/{Date:MM}` subfolder template, `naming.rs`). Go: `{Num}` (from `stem`), then `{Lens}`/`{ISO}` (need scruff EXIF extraction, columns and an explicit backfill: ingest skips unchanged files). Import-by-copy from a card (+ DCIM device list) and in-place rename are deferred pending a product call (Nicti ingests in place); if built, copy-only reusing `Carry`'s stream-hash-reread, and rename must use file identity not case-folded names. Detail: `docs/decisions/catalog-engine.md`.
 
+## #441: LightCraft small utilities (ADR-0441)
+
+- Research outcome, nothing lifted. Build: #558 catalog-open failure window (Try Again / Choose Another / Quit; no "Continue Without Saving", Nicti has no in-memory catalog) and #557 crop constrained to the rotated image (max inscribed rect; sampling currently edge-clamps). Declined: container walkers (`nicti-scent` already walks JPEG APP1; IPTC is read from the LRC catalog, file IPTC waits on JPEG ingestion #371), smart-album rule editor (Nicti smart collections are a typed `hunt::Filter`; OR/NOT nesting waits on real data in #155), availability cache (#332/#327 solved differently and closed), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator. Detail: `docs/decisions/catalog-engine.md`.
+
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 ...

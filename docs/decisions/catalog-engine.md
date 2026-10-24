@@ -244,3 +244,7 @@ and `Carry` is a stronger verified copy than LightCraft's `import_move`. Gaps: `
 card with DCIM device detection and in-place batch rename (deferred: Nicti ingests in place, so adopting them is a
 product decision; recommended shape is copy-only import reusing `Carry`'s stream-hash-reread, and a rename-in-place
 that decides collisions by file identity, since the file itself is the "collision").
+
+## #441: LightCraft small utilities (ADR-0441)
+
+Research outcome from the LightCraft audit (#424), read at `23f5480`; nothing lifted. Two build slices: #558 (a blocking catalog-open failure window replacing the single red label, `CatalogOpenState::Error` in `app.rs`; the in-memory "Continue Without Saving" exit is dropped because Nicti has no in-memory catalog) and #557 (keep the crop inside the rotated image; `nicti_tapetum::geometry` clamps the angle only and sampling clamps to the edge). Declined: container walkers (JPEG APP1 is already in `nicti-scent`; IPTC comes from `AgLibraryIPTC` on LRC import), smart-album rule editor (smart collections are a saved typed `hunt::Filter`; nesting waits on a real LRC example in #155), availability cache (#332/#327 closed with a stepped probe and a hung-probe test; a grep found no per-frame filesystem call in the grid), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (Nicti reads Nikon in `nicti-iris`; LibRaw for the rest).

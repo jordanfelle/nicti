@@ -98,6 +98,7 @@ text — the original reasoning stays intact even if its framing has since been 
 | [0436](0436-import-rename-and-devices.md) | — | Import-time rename, date folders and DCIM device detection (LightCraft audit) | Proposed |
 | [0437](0437-justified-grid-and-gridstats.md) | — | Justified grid layout and cheap-frame assertions (GridStats) | Proposed |
 | [0438](0438-lightcraft-raw-pieces.md) | — | LightCraft DNG opcodes, LJPEG, highlight reconstruction and binned preview | Proposed |
+| [0441](0441-lightcraft-small-utilities.md) | — | LightCraft small utilities: failure UX and crop constraint built, five declined | Proposed |
 | [0439](0439-lightcraft-cull-and-redeye.md) | — | LightCraft cull heuristics and red-eye / pet-eye as baselines | Proposed |
 | [0440](0440-controlspec-model.md) | — | Data-driven ControlSpec for develop sliders (LightCraft audit) | Proposed |
 | [0410](0410-nef-embedded-lens-corrections.md) | — | Nikon's embedded lens-correction data as the NEF lens source (opt-in until verified) | Accepted |
