@@ -141,8 +141,10 @@ quiet real machine should save more, and idle frame cost on a real GPU (the issu
 ## #513: idle frame-rate probe in CI
 
 `scripts/idle-probe.ps1` runs in `cargo build (windows, v1 target)` after the release build: it launches `nicti.exe`
-on a fresh empty catalog with `NICTI_REPAINT_TRACE=1`, waits for 15 one-second frame-log lines (settle), sums the next
-10, and fails above 6 frames/s (baseline 2.17; a true repaint loop saturates near 11 on 4 vCPUs). On failure it prints
-the trace lines, whose `cause:` entries name the `repaint_causes()` call sites. It catches repaint loops only, not a
-worker burn (#407). The step is advisory (`continue-on-error`, 3 min timeout) until its variance on WARP is known; the
-job's `ci-budgets.json` entry went 12 -> 13 min for it.
+on a fresh empty catalog with `NICTI_REPAINT_TRACE=1` and computes sum(frames) / sum(`elapsed_ms`) over the trace lines
+past a 15 s settle (about 10 s of window), failing above 6 frames/s (baseline 2.17; a true repaint loop saturates near
+11 on 4 vCPUs). The trace line gained `elapsed_ms` for this: lines print from the UI pass, so an idle app prints less
+often than once a second and a line count is not a clock. On failure it prints the tail of the trace, whose `cause:`
+entries name the `repaint_causes()` call sites. It catches repaint loops only, not a worker burn (#407). The step is
+advisory (`continue-on-error`, 3 min timeout) until its variance on WARP is known; the job's `ci-budgets.json` entry
+went 12 -> 13 min for it.
