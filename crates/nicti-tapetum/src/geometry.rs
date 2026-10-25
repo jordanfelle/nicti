@@ -561,6 +561,10 @@ mod tests {
         let fit = fit_crop_to_rotated(r, 20.0, source);
         assert!(corners_fit(fit, 20.0, source, 0.01), "{fit:?}");
         assert!(fit.width <= r.width + 1e-3);
+        // Only the minimal shrink: same size as the centred fit, and it actually moved.
+        let centred = max_inscribed_scale(r.width, r.height, 20.0, source);
+        assert!((fit.width - r.width * centred).abs() < 1e-2);
+        assert!(fit.x < r.x && fit.y < r.y, "slid back toward the centre");
     }
 
     #[test]

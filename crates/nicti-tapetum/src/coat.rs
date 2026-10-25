@@ -1097,6 +1097,13 @@ mod tests {
         crop.set_rotation(5.0);
         crop.fit_to_rotated((600.0, 400.0));
         assert!(crop.width > 0.0 && crop.width < 600.0 && crop.x > 0.0);
+        let r = crop.effective_rect((600.0, 400.0));
+        let (ex, ey) = (
+            r.width / 2.0 * 5f32.to_radians().cos() + r.height / 2.0 * 5f32.to_radians().sin(),
+            r.width / 2.0 * 5f32.to_radians().sin() + r.height / 2.0 * 5f32.to_radians().cos(),
+        );
+        let (cx, cy) = r.center_absolute();
+        assert!(cx - ex >= -0.01 && cx + ex <= 600.01 && cy - ey >= -0.01 && cy + ey <= 400.01);
         let again = crop;
         crop.fit_to_rotated((600.0, 400.0));
         assert_eq!(crop, again, "idempotent");
