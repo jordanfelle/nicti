@@ -47,7 +47,11 @@ history at `codeql.yml`.
 
 **A duration watcher (#160) files a `ci-slow` GitHub issue when a `CI` job
 runs over its budget in `.github/ci-budgets.json` on two consecutive main-branch runs** (one slow
-run alone is treated as noise, e.g. a cold cache right after a `Cargo.lock` bump) — see
+run alone is treated as noise) — a run whose head commit changed `Cargo.lock` is **excused** (#522): the rust-cache
+key includes the lockfile hash, so it partial-restores and rebuilds (10-15m on `build-windows`, 3-5m warm), and two
+lockfile commits in a row (a dependency change then a Renovate bump) used to look like a real streak. The confirming
+run is the nearest earlier main run that did *not* change the lockfile (10 back at most), and a commit lookup that
+fails or is cut off is not an excuse; its tests run in `script-tests.yml` — see
 `.github/scripts/ci_duration_watch.py` and `.github/workflows/ci-duration-watch.yml`. A PR that
 legitimately makes a job slower raises that job's budget in `ci-budgets.json` in the same PR,
 rather than leaving the watcher to keep re-filing against a budget everyone's already accepted

@@ -4,9 +4,16 @@
 Runs after every main-branch completion of the `CI` workflow (see
 .github/workflows/ci-duration-watch.yml). Compares each successful job's wall-clock duration
 against the per-job budget in .github/ci-budgets.json, and -- only once a job is over budget on
-two consecutive main runs of the same workflow, to avoid a single cold-cache run (e.g. right
-after a Cargo.lock bump) raising a false alarm -- files or updates a GitHub issue labelled
-`ci-slow`.
+two consecutive main runs of the same workflow, to avoid a single cold-cache run raising a false
+alarm -- files or updates a GitHub issue labelled `ci-slow`.
+
+A run whose head commit changed Cargo.lock is excused (#522): the rust-cache key includes the
+lockfile hash, so that run restores only by a partial restore-key and rebuilds what changed (10-15m
+on the Windows release build, against 3-5m warm). Two lockfile commits landing back to back (a
+Renovate bump right after a dependency change) used to look like a real two-run streak. An excused
+run neither counts as the slow run nor as the confirming previous run: the confirming run is the
+nearest earlier main run that did NOT change Cargo.lock, so frequent lockfile bumps can delay a real
+streak by a run or two but never hide one.
 
 Requires `gh` on PATH, authenticated (GH_TOKEN) with `actions:read`/`issues:write` against the
 repo named by GH_REPO or --repo.
@@ -60,8 +67,8 @@ def fetch_jobs(repo: str, run_id: int) -> list[dict]:
     return data.get("jobs", [])
 
 
-def previous_main_run(repo: str, workflow_id: int, before_run_id: int) -> dict | None:
-    """Most recent successful main-branch run of the same workflow, strictly before before_run_id."""
+def previous_main_runs(repo: str, workflow_id: int, before_run_id: int) -> list[dict]:
+    """Successful main-branch runs of the same workflow strictly before before_run_id, newest first."""
     # No `event=push` filter: both watched workflows also run on `schedule` (see ci.yml's own
     # weekly Monday cron, added for #117/#127) -- pelt/decode's own jobs mostly only execute on
     # that schedule run except on a directly-touching PR, so filtering to push-only here would
@@ -74,10 +81,52 @@ def previous_main_run(repo: str, workflow_id: int, before_run_id: int) -> dict |
         f"?branch=main&status=success&per_page=30",
         repo,
     )
-    for run in data.get("workflow_runs", []):
-        if run["id"] < before_run_id:
+    runs = [r for r in data.get("workflow_runs", []) if r["id"] < before_run_id]
+    return sorted(runs, key=lambda r: -r["id"])
+
+
+# `GET /commits/{sha}` lists at most this many files; past it we can't see the whole change set.
+COMMIT_FILES_CAP = 300
+# How many earlier main runs to look back through for a run that did not change Cargo.lock.
+MAX_LOOKBACK = 10
+
+
+def lock_changed(repo: str, sha: str) -> bool:
+    """Did the commit change Cargo.lock? Anything we can't tell (the API call failing, a file list
+    cut off at the cap) counts as no: excusing a run on a guess could hide a real regression, while
+    not excusing one costs at worst the false alarm this exists to avoid."""
+    try:
+        out = gh_api(f"commits/{sha}", repo, jq='[(.files // [])[].filename] | join("\n")')
+    except subprocess.CalledProcessError as e:
+        print(f"warning: could not read commit {sha[:7]} ({e}); not excusing it.", file=sys.stderr)
+        return False
+    files = [f for f in out.splitlines() if f]
+    return len(files) < COMMIT_FILES_CAP and "Cargo.lock" in files
+
+
+def pick_previous(runs: list[dict], changed_lock) -> dict | None:
+    """The nearest of `runs` (newest first, all earlier than the current one) whose commit did not
+    change Cargo.lock, looking back at most MAX_LOOKBACK runs. Lockfile runs are skipped, not
+    trusted: their duration says nothing about the warm-cache cost of the job."""
+    for run in runs[:MAX_LOOKBACK]:
+        if not changed_lock(run["head_sha"]):
             return run
     return None
+
+
+def decide(minutes: float, budget: float, prev_minutes: float | None, cur_lock_changed: bool) -> str:
+    """What to do about one job: 'ok', 'excused-current', 'no-prev', 'no-streak' or 'alert'.
+    `prev_minutes` is the same job's time on the nearest earlier run that did not change
+    Cargo.lock (see `pick_previous`)."""
+    if minutes <= budget:
+        return "ok"
+    if cur_lock_changed:
+        return "excused-current"
+    if prev_minutes is None:
+        return "no-prev"
+    if prev_minutes <= budget:
+        return "no-streak"
+    return "alert"
 
 
 def slowest_steps(job: dict, n: int = 3) -> list[tuple[str, float]]:
@@ -212,6 +261,8 @@ def main() -> int:
 
     prev_run = None
     prev_jobs_by_name: dict[str, dict] = {}
+    cur_lock: bool | None = None
+    prev_looked_up = False
 
     for job in jobs:
         if job.get("conclusion") != "success":
@@ -229,21 +280,32 @@ def main() -> int:
         if minutes <= budget:
             continue
 
-        if prev_run is None:
-            prev_run = previous_main_run(repo, workflow_id, args.run_id)
+        if cur_lock is None:
+            cur_lock = lock_changed(repo, run["head_sha"])
+        if cur_lock:
+            print(f"{name}: over budget ({minutes:.1f}m > {budget}m) on a Cargo.lock-changing "
+                  f"commit -- cold-cache rebuild expected, excused.")
+            continue
+
+        if not prev_looked_up:
+            prev_looked_up = True
+            prev_run = pick_previous(
+                previous_main_runs(repo, workflow_id, args.run_id),
+                lambda sha: lock_changed(repo, sha),
+            )
             if prev_run is not None:
                 prev_jobs_by_name = {j["name"]: j for j in fetch_jobs(repo, prev_run["id"])}
 
         if prev_run is None:
-            print(f"{name}: over budget ({minutes:.1f}m > {budget}m) but no prior main run to "
-                  f"confirm a 2-run streak -- skipping for now.")
+            print(f"{name}: over budget ({minutes:.1f}m > {budget}m) but no earlier main run "
+                  f"without a Cargo.lock change to confirm a 2-run streak -- skipping for now.")
             continue
 
         prev_job = prev_jobs_by_name.get(name)
         prev_minutes = job_minutes(prev_job) if prev_job else None
-        if prev_minutes is None or prev_minutes <= budget:
-            print(f"{name}: over budget this run ({minutes:.1f}m > {budget}m) but not last run "
-                  f"({prev_minutes}m) -- not yet a 2-run streak, skipping.")
+        if decide(minutes, budget, prev_minutes, False) != "alert":
+            print(f"{name}: over budget this run ({minutes:.1f}m > {budget}m) but not the last "
+                  f"lockfile-unchanged run ({prev_minutes}m) -- not yet a 2-run streak, skipping.")
             continue
 
         file_or_comment(
