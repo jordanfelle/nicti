@@ -1,5 +1,7 @@
 //! THROWAWAY positive control for #511 (never merged): does #407 reproduce on windows-latest with
 //! the #408 fix reverted, 16 CPU workers / 8 permits? Always fails so CI prints the numbers.
+#![cfg(windows)]
+
 use std::time::{Duration, Instant};
 
 use nicti_pounce::Pounce;
