@@ -16,7 +16,7 @@ impl<T: Send + 'static> Pending<T> {
             .name("nicti-pending-worker".into())
             .spawn(move || {
                 let _ = tx.send(work());
-                ctx.request_repaint();
+                crate::repaint_trace::request(&ctx, crate::repaint_trace::Wake::Pending);
             })
             .expect("failed to spawn pending worker");
         Self(rx)

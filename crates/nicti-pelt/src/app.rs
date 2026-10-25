@@ -373,7 +373,7 @@ impl PeltApp {
                 let ctx = egui_ctx.clone();
                 Some(CullState::new(
                     Arc::new(XmpMeta::new(dyn_store, xmp.clone())),
-                    move || ctx.request_repaint(),
+                    move || crate::repaint_trace::request(&ctx, crate::repaint_trace::Wake::Cull),
                 ))
             }
             _ => None,
@@ -392,7 +392,7 @@ impl PeltApp {
             vram_budget,
             cpu_threads,
             (cpu_threads / 2).max(1),
-            move || egui_ctx.request_repaint(),
+            move || crate::repaint_trace::request(&egui_ctx, crate::repaint_trace::Wake::Pounce),
         );
         // #307: recovery runs under `JobKind::Move`, so every "a move is running" guard (import,
         // sync, move, delete, loupe open) holds until it's done; `poll_recovery` folds in the
@@ -418,7 +418,9 @@ impl PeltApp {
             default_vram_source(),
             default_load_source(),
             TELEMETRY_MIN_INTERVAL,
-            move || telemetry_ctx.request_repaint(),
+            move || {
+                crate::repaint_trace::request(&telemetry_ctx, crate::repaint_trace::Wake::Telemetry)
+            },
         );
 
         let mut update = UpdateChecker::new();
@@ -1309,6 +1311,7 @@ impl eframe::App for PeltApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        crate::repaint_trace::frame();
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
