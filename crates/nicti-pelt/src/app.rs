@@ -1311,7 +1311,7 @@ impl eframe::App for PeltApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        crate::repaint_trace::frame();
+        crate::repaint_trace::frame(ui.ctx());
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
