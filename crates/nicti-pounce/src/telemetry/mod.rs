@@ -27,7 +27,7 @@ pub mod pdh;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sysinfo::System;
 
@@ -348,12 +348,26 @@ impl Sample {
     }
 }
 
-/// Whether the sampler thread calls back for `sample`, given the last one it reported.
-fn should_report(only_on_change: bool, reported: Option<&Sample>, sample: &Sample) -> bool {
-    let report = !only_on_change || reported.is_none_or(|r| sample.differs_visibly(r));
+/// The fastest a visible change may wake the UI from [`TelemetrySampler::spawn_on_change`]
+/// (#512): a status readout that lags by a second is fine, and real work already repaints through
+/// Pounce's own callback. A held-back change is reported as soon as the interval is up.
+pub const MIN_CHANGE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether the sampler thread calls back for `sample`, given the last sample it reported and when.
+fn should_report(
+    only_on_change: bool,
+    reported: Option<(&Sample, Instant)>,
+    sample: &Sample,
+    now: Instant,
+) -> bool {
+    let report = !only_on_change
+        || reported.is_none_or(|(r, at)| {
+            now.saturating_duration_since(at) >= MIN_CHANGE_REPORT_INTERVAL
+                && sample.differs_visibly(r)
+        });
     if only_on_change && report && std::env::var_os("NICTI_REPAINT_TRACE").is_some() {
         // Diagnostic for #512: which readout made this sample worth a frame.
-        if let Some(r) = reported {
+        if let Some((r, _)) = reported {
             eprintln!("telemetry-gate: changed {:?}", sample.changed_fields(r));
         }
     }
@@ -383,8 +397,9 @@ impl TelemetrySampler {
     }
 
     /// Like [`Self::spawn`], but `on_change` fires only for the first sample and for samples that
-    /// [`Sample::differs_visibly`] from the last one reported. An idle window then isn't woken
-    /// twice a second to redraw identical text (#512); `sample()` still always returns the newest.
+    /// [`Sample::differs_visibly`] from the last one reported, and at most once per
+    /// [`MIN_CHANGE_REPORT_INTERVAL`]. An idle window then isn't woken twice a second to redraw
+    /// identical (or jittering) text (#512); `sample()` still always returns the newest.
     pub fn spawn_on_change(
         vram: Box<dyn VramSource>,
         load: Box<dyn LoadSource>,
@@ -409,7 +424,7 @@ impl TelemetrySampler {
         let handle = thread::spawn(move || {
             let mut host = HostTelemetrySource::new();
             let mut load = load;
-            let mut reported: Option<Sample> = None;
+            let mut reported: Option<(Sample, Instant)> = None;
 
             while !stop_thread.load(Ordering::Relaxed) {
                 let sample = Sample {
@@ -425,8 +440,14 @@ impl TelemetrySampler {
                 *latest_thread
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sample);
-                if should_report(only_on_change, reported.as_ref(), &sample) {
-                    reported = Some(sample);
+                let now = Instant::now();
+                if should_report(
+                    only_on_change,
+                    reported.as_ref().map(|(r, at)| (r, *at)),
+                    &sample,
+                    now,
+                ) {
+                    reported = Some((sample, now));
                     on_sample();
                 }
 
@@ -572,16 +593,21 @@ mod tests {
     }
 
     #[test]
-    fn the_change_gate_reports_the_first_sample_then_only_visible_changes() {
+    fn the_change_gate_reports_the_first_sample_then_only_visible_changes_at_most_once_a_second() {
         let a = sample_of(12.2, 8.0, None);
         let same_looking = sample_of(12.3, 8.0, None);
         let different = sample_of(40.0, 8.0, None);
+        let t0 = Instant::now();
+        let later = t0 + MIN_CHANGE_REPORT_INTERVAL;
+        let soon = t0 + MIN_CHANGE_REPORT_INTERVAL / 2;
         // Not gated: every sample reports, as `spawn` always did.
-        assert!(should_report(false, Some(&a), &same_looking));
-        // Gated: first sample yes, an identical-looking one no, a changed one yes.
-        assert!(should_report(true, None, &a));
-        assert!(!should_report(true, Some(&a), &same_looking));
-        assert!(should_report(true, Some(&a), &different));
+        assert!(should_report(false, Some((&a, t0)), &same_looking, soon));
+        // Gated: the first sample reports whatever the time.
+        assert!(should_report(true, None, &a, t0));
+        // An identical-looking one never does; a changed one waits out the interval, then does.
+        assert!(!should_report(true, Some((&a, t0)), &same_looking, later));
+        assert!(!should_report(true, Some((&a, t0)), &different, soon));
+        assert!(should_report(true, Some((&a, t0)), &different, later));
     }
 
     #[test]
