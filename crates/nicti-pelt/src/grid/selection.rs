@@ -13,6 +13,13 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
+/// How far [`Selection::remap`]'s merge-walk first looks ahead to resync after an insertion or
+/// removal: scattered single changes resolve here, cheaply, on whichever side has the photo.
+const WALK_NEAR: usize = 64;
+/// The wider second look, tried only when both near looks missed (a bulk import is one long run of
+/// inserts). Total scanning is budgeted, see `remap_walk`.
+const WALK_WINDOW: usize = 1 << 16;
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Selection {
     /// Sorted by start, non-empty, non-overlapping, and not adjacent (adjacent ranges merge).
@@ -120,10 +127,142 @@ impl Selection {
     /// Re-expresses the selection (and anchor) against a new id snapshot, keeping the same
     /// *photos* selected: an import adding assets, or a new sort, moves indices under it.
     /// Photos the new snapshot no longer contains drop out. O(old + new), only on a snapshot change.
+    ///
+    /// When the new snapshot is the old one with photos inserted and removed (an import, a filter
+    /// tweak) a merge-walk answers in one pass with hash sets sized by the *difference*, not the
+    /// library (#498: the 1M-entry set was ~190 ms). A real reorder (new sort) falls back to the set.
+    /// Photo ids are unique within a snapshot (they are catalog row ids); both paths assume it.
     pub fn remap(&mut self, old_ids: &[i64], new_ids: &[i64]) {
         if (self.ranges.is_empty() && self.anchor.is_none()) || old_ids == new_ids {
             return;
         }
+        if let Some((ranges, anchor)) = self.remap_walk(old_ids, new_ids) {
+            self.ranges = ranges;
+            self.anchor = anchor;
+            return;
+        }
+        self.remap_by_set(old_ids, new_ids);
+    }
+
+    /// Merge-walk remap. `None` when the snapshots aren't "same order, plus/minus some photos"
+    /// (too many differences, or a photo that moved), so the caller
+    /// takes the set path. Exact: every new photo not matched in the walk is declared inserted
+    /// and every unmatched old one deleted; the two sets being disjoint proves none of the
+    /// "inserted" photos was really an old (possibly selected) photo that moved.
+    fn remap_walk(
+        &self,
+        old_ids: &[i64],
+        new_ids: &[i64],
+    ) -> Option<(Vec<Range<usize>>, Option<usize>)> {
+        fn emit(out: &mut Vec<Range<usize>>, run: &mut Option<usize>, j: usize, hit: bool) {
+            match (hit, *run) {
+                (true, None) => *run = Some(j),
+                (false, Some(s)) => {
+                    out.push(s..j);
+                    *run = None;
+                }
+                _ => {}
+            }
+        }
+        enum Skip {
+            New(usize),
+            Old(usize),
+        }
+        /// Position of `id` within the first `window` of `hay`; `None` (via `?`) once the scan
+        /// budget is spent.
+        fn scan(hay: &[i64], id: i64, window: usize, budget: &mut usize) -> Option<Option<usize>> {
+            let hay = &hay[..hay.len().min(window)];
+            let found = hay.iter().position(|x| *x == id);
+            let cost = found.map_or(hay.len(), |d| d + 1);
+            *budget = budget.checked_sub(cost)?;
+            Some(found)
+        }
+        /// At a mismatch, how many new photos to skip as inserted or old ones as deleted to line
+        /// up again. Near look on both sides first, so a scattered removal never pays for a wide
+        /// failed scan; the wide look is for bulk runs. Outer `None`: budget spent.
+        fn resync(old: &[i64], new: &[i64], budget: &mut usize) -> Option<Option<Skip>> {
+            for window in [WALK_NEAR, WALK_WINDOW] {
+                let ins = scan(new, old[0], window, budget)?;
+                let del = scan(old, new[0], window, budget)?;
+                match (ins, del) {
+                    (Some(n), Some(o)) if o < n => return Some(Some(Skip::Old(o))),
+                    (Some(n), _) => return Some(Some(Skip::New(n))),
+                    (None, Some(o)) => return Some(Some(Skip::Old(o))),
+                    (None, None) => {}
+                }
+            }
+            Some(None)
+        }
+        let anchor_old = self.anchor.filter(|&a| a < old_ids.len());
+        let mut out = Vec::new();
+        let mut run = None;
+        let mut anchor = None;
+        let mut ri = 0; // first range that could still contain index `i`
+        let mut deleted = HashSet::new();
+        let mut inserted = HashSet::new();
+        // A reorder declares nearly everything deleted+inserted; stop early and use the set path.
+        let diff_cap = (old_ids.len() / 8).max(1024);
+        // Lookahead scans are charged here so a reorder can't cost O(n * window).
+        let mut budget = 16 * (old_ids.len() + new_ids.len()) + 4 * WALK_WINDOW;
+        let (mut i, mut j) = (0, 0);
+        while j < new_ids.len() {
+            if i >= old_ids.len() {
+                inserted.insert(new_ids[j]);
+                emit(&mut out, &mut run, j, false);
+                j += 1;
+            } else if old_ids[i] == new_ids[j] {
+                while ri < self.ranges.len() && self.ranges[ri].end <= i {
+                    ri += 1;
+                }
+                let hit = ri < self.ranges.len() && self.ranges[ri].start <= i;
+                if Some(i) == anchor_old {
+                    anchor = Some(j);
+                }
+                emit(&mut out, &mut run, j, hit);
+                i += 1;
+                j += 1;
+            } else if let Some(skip) = resync(&old_ids[i..], &new_ids[j..], &mut budget)? {
+                match skip {
+                    Skip::New(d) => {
+                        inserted.extend(&new_ids[j..j + d]);
+                        for k in j..j + d {
+                            emit(&mut out, &mut run, k, false);
+                        }
+                        j += d;
+                    }
+                    Skip::Old(d) => {
+                        deleted.extend(&old_ids[i..i + d]);
+                        i += d;
+                    }
+                }
+            } else {
+                // Neither side resyncs: call both a removal and an insertion. The disjointness
+                // check below keeps that exact if it was really a move.
+                deleted.insert(old_ids[i]);
+                inserted.insert(new_ids[j]);
+                emit(&mut out, &mut run, j, false);
+                i += 1;
+                j += 1;
+            }
+            if deleted.len() + inserted.len() > diff_cap {
+                return None;
+            }
+        }
+        let tail = &old_ids[i.min(old_ids.len())..];
+        if deleted.len() + inserted.len() + tail.len() > diff_cap {
+            return None;
+        }
+        deleted.extend(tail);
+        if !deleted.is_disjoint(&inserted) {
+            return None;
+        }
+        if let Some(s) = run {
+            out.push(s..new_ids.len());
+        }
+        Some((out, anchor))
+    }
+
+    fn remap_by_set(&mut self, old_ids: &[i64], new_ids: &[i64]) {
         let selected: HashSet<i64> = self
             .indices()
             .filter_map(|i| old_ids.get(i).copied())
@@ -254,6 +393,139 @@ mod tests {
         let before = s.clone();
         s.remap(&[1, 2, 3, 4, 5, 6], &[1, 2, 3, 4, 5, 6]);
         assert_eq!(s, before);
+    }
+
+    /// The merge-walk must agree with the set path on every shape of change, including the ones
+    /// it has to refuse (moved photos) -- compared over pseudo-random snapshots.
+    #[test]
+    fn remap_walk_matches_the_set_path_on_random_snapshots() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut walked = 0;
+        for _ in 0..2000 {
+            let old: Vec<i64> = (0..40).collect();
+            let mut new: Vec<i64> = old.iter().copied().filter(|_| next(5) != 0).collect();
+            for k in 0..next(8) {
+                let at = next(new.len() as u64 + 1) as usize;
+                new.insert(at, 100 + k as i64);
+            }
+            if next(4) == 0 && new.len() > 3 {
+                let (a, b) = (
+                    next(new.len() as u64) as usize,
+                    next(new.len() as u64) as usize,
+                );
+                new.swap(a, b); // a moved photo: the walk must notice
+            }
+            let mut s = Selection::default();
+            for _ in 0..next(6) {
+                let a = next(40) as usize;
+                let b = a + next(8) as usize;
+                for i in a..=b.min(39) {
+                    s.insert(i);
+                }
+            }
+            s.anchor = Some(next(40) as usize);
+            let mut by_set = s.clone();
+            by_set.remap_by_set(&old, &new);
+            let mut by_walk = s.clone();
+            by_walk.remap(&old, &new);
+            assert_eq!(by_walk, by_set, "old={old:?} new={new:?} sel={s:?}");
+            walked += s.remap_walk(&old, &new).is_some() as u32;
+        }
+        assert!(
+            walked > 500,
+            "the fast path should handle plain inserts/removals ({walked})"
+        );
+    }
+
+    #[test]
+    fn remap_walk_handles_long_contiguous_runs_at_and_past_the_old_window() {
+        for run in [63usize, 64, 65, 100, 5000, 70_000] {
+            let old: Vec<i64> = (0..200_000).collect();
+            // A bulk import lands before index 10; then a bulk removal of the same size.
+            let mut grown = old.clone();
+            grown.splice(10..10, (0..run as i64).map(|k| 1_000_000 + k));
+            let mut shrunk = old.clone();
+            shrunk.drain(10..10 + run);
+            for new in [&grown, &shrunk] {
+                let mut s = sel(&[5..20, 150_000..150_010]);
+                s.anchor = Some(7);
+                // Past the lookahead the walk may refuse; the result must still match.
+                assert!(
+                    run >= WALK_WINDOW || s.remap_walk(&old, new).is_some(),
+                    "run {run} fell back"
+                );
+                let mut by_set = s.clone();
+                by_set.remap_by_set(&old, new);
+                s.remap(&old, new);
+                assert_eq!(s, by_set, "run {run}");
+            }
+        }
+    }
+
+    #[test]
+    fn remap_walk_stays_fast_for_scattered_removals_and_bounds_its_work() {
+        let old: Vec<i64> = (0..200_000).collect();
+        let sparse: Vec<i64> = old.iter().copied().filter(|i| i % 1000 != 7).collect();
+        let mut s = sel(&[0..200_000]);
+        assert!(
+            s.remap_walk(&old, &sparse).is_some(),
+            "200 scattered removals"
+        );
+
+        // Dropping the tail of a big library is a big diff: refuse, don't build a huge set.
+        assert!(s.remap_walk(&old, &old[..10]).is_none());
+
+        // Scattered substitutions resync on neither side; each costs two wide failed scans, so
+        // the work budget (not the diff cap, which 200 entries never reach) ends the walk.
+        let mut subst = old.clone();
+        for k in 0..100 {
+            subst[k * 1900 + 5] = 1_000_000 + k as i64;
+        }
+        assert!(s.remap_walk(&old, &subst).is_none(), "budget exhausted");
+        let mut by_set = s.clone();
+        by_set.remap_by_set(&old, &subst);
+        s.remap(&old, &subst);
+        assert_eq!(s, by_set);
+    }
+
+    #[test]
+    fn remap_walk_refuses_a_reversed_snapshot_and_copes_with_odd_anchors() {
+        let old: Vec<i64> = (0..5000).collect();
+        let rev: Vec<i64> = old.iter().rev().copied().collect();
+        let mut s = sel(&[0..2500]);
+        assert!(s.remap_walk(&old, &rev).is_none());
+        let mut by_set = s.clone();
+        by_set.remap_by_set(&old, &rev);
+        s.remap(&old, &rev);
+        assert_eq!(s, by_set);
+
+        // Anchor with no ranges, an anchor and ranges past the old snapshot, and empty ends.
+        for (ranges, anchor) in [
+            (vec![], Some(2)),
+            (vec![8..12], Some(99)),
+            (vec![0..3], None),
+        ] {
+            for (o, n) in [
+                (vec![1, 2, 3], vec![]),
+                (vec![], vec![4, 5]),
+                (vec![1, 2, 3], vec![3, 9]),
+            ] {
+                let mut a = Selection {
+                    ranges: ranges.clone(),
+                    anchor,
+                };
+                let mut b = a.clone();
+                a.remap(&o, &n);
+                b.remap_by_set(&o, &n);
+                assert_eq!(a, b, "{ranges:?} {anchor:?} {o:?} -> {n:?}");
+            }
+        }
     }
 
     #[test]
