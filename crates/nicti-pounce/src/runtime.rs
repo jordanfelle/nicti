@@ -35,7 +35,9 @@ use crate::job::{ChunkedJob, JobId, JobKind, JobSpec, Lane, Progress, Step};
 use crate::queue::{Outcome, Scheduler};
 use crate::throttle::Throttle;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How long an idle worker parks before re-checking its lane (the backstop for a missed notify).
+/// Public so the idle-cost test can derive its bound from it instead of a wall-clock threshold.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// How many finished jobs the activity panel can still show after they complete.
 const FINISHED_RING_CAPACITY: usize = 50;
 
@@ -96,6 +98,11 @@ struct Inner {
     statuses: Mutex<HashMap<JobId, JobStatus>>,
     finished_order: Mutex<std::collections::VecDeque<JobId>>,
     shutdown: AtomicBool,
+    /// Worker-loop iterations that ended without running a job (#511), across both lanes: no job
+    /// found, or no CPU permit to take one. Every such iteration parks for a full
+    /// [`POLL_INTERVAL`] unless notified, so a healthy idle pool adds at most one per worker per
+    /// interval; a wake storm (#407's) or a spin in either branch adds thousands.
+    idle_wakes: AtomicU64,
     on_change: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -231,6 +238,7 @@ impl Pounce {
             statuses: Mutex::new(HashMap::new()),
             finished_order: Mutex::new(std::collections::VecDeque::new()),
             shutdown: AtomicBool::new(false),
+            idle_wakes: AtomicU64::new(0),
             on_change: Box::new(on_change),
         });
 
@@ -259,6 +267,12 @@ impl Pounce {
 
     pub fn submit(&self, job: Box<dyn ChunkedJob>) -> JobId {
         self.inner.submit(job)
+    }
+
+    /// Worker iterations so far that woke, found nothing to run, and went back to sleep. A
+    /// diagnostic for the idle-cost regression test (#511); not a progress signal.
+    pub fn idle_wakes(&self) -> u64 {
+        self.inner.idle_wakes.load(Ordering::Relaxed)
     }
 
     /// Cancels a job regardless of whether it's currently queued or being stepped by a worker
@@ -446,6 +460,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                     quiet: false,
                 }),
                 None => {
+                    inner.idle_wakes.fetch_add(1, Ordering::Relaxed);
                     let guard = lane_state.scheduler.lock().unwrap();
                     let _ = lane_state.condvar.wait_timeout(guard, POLL_INTERVAL);
                     continue;
@@ -470,6 +485,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                 }
                 None => {
                     inner.report_cancelled(cancelled_while_queued);
+                    inner.idle_wakes.fetch_add(1, Ordering::Relaxed);
                     if let Some(p) = permit.as_mut() {
                         p.quiet = true;
                     }
