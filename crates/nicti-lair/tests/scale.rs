@@ -291,6 +291,16 @@ fn select_all_mark_at_one_million_assets() {
         longest < Duration::from_secs(10),
         "chunk held the mutex {longest:?}"
     );
+    // #499: re-applying the same values (a repeated mark) must not pay for index/trigger work.
+    let (_, noop) = time("set_meta no-op rewrite (1M rows)", || {
+        for chunk in items.chunks(20_000) {
+            store.set_meta(chunk).unwrap();
+        }
+    });
+    assert!(
+        noop < took,
+        "no-op rewrite {noop:?} vs real change {took:?}"
+    );
     // How long a concurrent reader (the UI's thumbnail/marker reads) would wait behind it.
     let (_, _) = time("get_meta (64 ids) after the write", || {
         store.get_meta(&all[..64]).unwrap()

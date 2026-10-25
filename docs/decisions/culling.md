@@ -101,9 +101,14 @@ Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX bui
   mutex is held ~3 s at a stretch instead of ~80 s for other catalog users (grid snapshot/thumbnail
   reads; the marker reads queued on the same writer thread still wait for the whole run, and a
   non-worker writer can now interleave between chunks) (a mid-way failure records the written part as an
-  undo entry); `remap` returns at once when the id snapshot is unchanged (190 ms -> 0.7 ms). **Not
-  fixed (follow-ups)**: the UI-thread `mark`/`poll` cost of the per-id `pending` map at 1M (needs a
-  range/bulk pending representation), `remap`'s `HashSet` on a real snapshot change, the marker
+  undo entry); `remap` returns at once when the id snapshot is unchanged (190 ms -> 0.7 ms). **Fixed (#498)**: `Selection::remap` merge-walks old/new ids when the new snapshot is the old one plus/minus
+  photos (sets sized by the difference; reorder or a large diff falls back to the `HashSet`): select-all at 1M
+  ~200 ms -> ~2 ms. **Fixed (#499)**: `set_meta` guards each column (`... AND col IS NOT ?`) so a no-op rewrite
+  skips the index/trigger work (23 -> ~2.5 us/row) and borrows a 256 MB page cache for batches of 1000+ rows
+  (the default ~2 MB thrashed on the five rating-keyed indexes): a select-all rating change at 1M 50 s -> 32 s
+  (the facet trigger is ~9 s of that, the rest is index maintenance). Still open (own ticket): batching
+  `trg_facet_asset_update` / fewer rating-keyed indexes (a schema change, tracked as a follow-up).
+  **Not fixed (follow-ups)**: the marker
   filters' 1.5-2 s sort-index scan, and the ~128 MB undo entry (deliberate, ADR-0032). Harnesses:
   `nicti-lair/tests/scale.rs::select_all_mark_at_one_million_assets`,
   `cull/tests.rs::mark_select_all_at_one_million`, `grid/selection.rs::scale::remap_at_one_million_photos`

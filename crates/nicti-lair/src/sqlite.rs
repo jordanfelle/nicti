@@ -313,6 +313,11 @@ pub struct SqliteCatalog {
     path: Option<PathBuf>,
 }
 
+/// `set_meta` batches at least this long get the larger page cache (#499).
+const BULK_META_ROWS: usize = 1000;
+/// KiB of page cache for a bulk `set_meta` (negative `cache_size` = KiB).
+const BULK_META_CACHE_KIB: i64 = 256 * 1024;
+
 impl SqliteCatalog {
     /// Runs a long read-only scan on its own snapshot connection when the catalog is file-backed
     /// (WAL: consistent, never blocks a writer), else on the shared one. Holding the shared mutex
@@ -1748,17 +1753,45 @@ impl CatalogStore for SqliteCatalog {
             return Ok(());
         }
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
-            )?;
-            for (id, meta) in items {
-                stmt.execute(params![meta.rating, meta.flag, meta.label, id])?;
+        // A bulk mark rewrites entries across ~5 rating-keyed indexes; at library scale the
+        // default ~2 MB page cache thrashes on them (#499). Borrow a bigger cache for the call.
+        let prior_cache: Option<i64> = if items.len() >= BULK_META_ROWS {
+            let prior = conn.pragma_query_value(None, "cache_size", |r| r.get(0))?;
+            conn.pragma_update(None, "cache_size", -BULK_META_CACHE_KIB)?;
+            Some(prior)
+        } else {
+            None
+        };
+        let result = (|| -> Result<(), CatalogError> {
+            let tx = conn.transaction()?;
+            {
+                // One guarded statement per column (#499): SQLite rewrites every index containing a
+                // column in the SET list whether or not the value changed, and fires the facet
+                // trigger's row machinery on `rating`. Guarding with `IS NOT` makes an unchanged
+                // column (or a whole no-op rewrite) cost one PK lookup instead of index churn.
+                let mut rating = tx.prepare_cached(
+                    "UPDATE asset SET rating = ?1 WHERE id = ?2 AND rating IS NOT ?1",
+                )?;
+                let mut flag = tx.prepare_cached(
+                    "UPDATE asset SET flag = ?1 WHERE id = ?2 AND flag IS NOT ?1",
+                )?;
+                let mut label = tx.prepare_cached(
+                    "UPDATE asset SET label = ?1 WHERE id = ?2 AND label IS NOT ?1",
+                )?;
+                for (id, meta) in items {
+                    rating.execute(params![meta.rating, id])?;
+                    flag.execute(params![meta.flag, id])?;
+                    label.execute(params![meta.label, id])?;
+                }
             }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Some(prior) = prior_cache {
+            // Give the memory back; best effort, so a failure here can't mask a committed batch.
+            let _ = conn.pragma_update(None, "cache_size", prior);
         }
-        tx.commit()?;
-        Ok(())
+        result
     }
 
     fn begin_delete_items(&self, items: &[(i64, String)]) -> Result<(), CatalogError> {
@@ -4176,6 +4209,99 @@ mod tests {
         assert_eq!(meta[&ids[1]].label.as_deref(), Some("Red"));
         assert_eq!(meta[&ids[2]], AssetMeta::default());
         store.set_meta(&[]).unwrap();
+    }
+
+    /// #499: a bulk `set_meta` (guarded per-column updates, borrowed page cache) must leave the
+    /// trigger-maintained facet counts exact, treat a repeat as a no-op, and give the cache back.
+    #[test]
+    fn bulk_set_meta_keeps_facets_exact_repeats_as_a_no_op_and_restores_the_cache() {
+        let (store, _, ids) = store_with_assets(BULK_META_ROWS + 20);
+        let before_unrated = store.facet_count(Some("Z8"), None).unwrap();
+        assert_eq!(before_unrated as usize, ids.len());
+        let items: Vec<(i64, AssetMeta)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    AssetMeta {
+                        rating: Some(3),
+                        flag: None,
+                        label: Some("Red".into()),
+                    },
+                )
+            })
+            .collect();
+        store.set_meta(&items).unwrap();
+        assert_eq!(
+            store.facet_count(Some("Z8"), Some(3)).unwrap() as usize,
+            ids.len()
+        );
+        assert_eq!(store.facet_count(Some("Z8"), None).unwrap(), 0);
+
+        // Identical values: no row may be written at all (the guard, not just the trigger's WHEN).
+        let writes = |store: &SqliteCatalog| store.conn.lock().unwrap().total_changes();
+        let changes_before = writes(&store);
+        store.set_meta(&items).unwrap();
+        assert_eq!(
+            writes(&store),
+            changes_before,
+            "a repeat must write nothing"
+        );
+        assert_eq!(
+            store.facet_count(Some("Z8"), Some(3)).unwrap() as usize,
+            ids.len()
+        );
+
+        // Change only the label of one row: its rating (and so the facets) must stay put.
+        let mut one = items[7].1.clone();
+        one.label = Some("Blue".into());
+        store.set_meta(&[(items[7].0, one)]).unwrap();
+        let meta = store.get_meta(&ids).unwrap();
+        assert_eq!(meta[&items[7].0].label.as_deref(), Some("Blue"));
+        assert_eq!(meta[&items[7].0].rating, Some(3));
+        assert_eq!(
+            store.facet_count(Some("Z8"), Some(3)).unwrap() as usize,
+            ids.len()
+        );
+
+        let cache: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "cache_size", |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache, -2000, "the bulk cache must not stay resident");
+    }
+
+    #[test]
+    fn bulk_set_meta_rolls_back_on_a_check_violation_and_still_restores_the_cache() {
+        let (store, _, ids) = store_with_assets(BULK_META_ROWS + 5);
+        let mut items: Vec<(i64, AssetMeta)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    AssetMeta {
+                        rating: Some(2),
+                        ..AssetMeta::default()
+                    },
+                )
+            })
+            .collect();
+        items.last_mut().unwrap().1.rating = Some(99); // violates the rating CHECK
+        assert!(store.set_meta(&items).is_err());
+        assert_eq!(
+            store.facet_count(Some("Z8"), None).unwrap() as usize,
+            ids.len()
+        );
+        assert_eq!(store.get_meta(&ids[..1]).unwrap()[&ids[0]].rating, None);
+        let cache: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "cache_size", |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache, -2000);
     }
 
     #[test]
