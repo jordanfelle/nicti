@@ -480,6 +480,7 @@ pub fn show(
         let mut rotation = crop.rotation_degrees;
         if slider(ui, &ROTATION, &mut rotation).changed {
             crop.set_rotation(rotation);
+            crop.fit_to_rotated(develop.source_extent());
         }
         let auto_level = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto-level"));
         if let (true, Some((engine, _))) = (auto_level.clicked(), gpu.as_mut()) {
@@ -796,11 +797,15 @@ pub fn handle_viewport_gesture(
                 // the same as the image-space content rotation it's meant to drive.
                 let start_img = screen_to_image(rect, source, state.start_pointer);
                 let cur_img = screen_to_image(rect, source, pointer);
+                // Pivot on the rect as it was when the drag began: the live rect is re-fitted
+                // (and so may slide) every frame, which would feed back into the angle.
+                let center = state.start_crop.effective_rect(source).center_absolute();
                 let start_angle = (start_img.1 - center.1).atan2(start_img.0 - center.0);
                 let cur_angle = (cur_img.1 - center.1).atan2(cur_img.0 - center.0);
                 let delta_deg = (cur_angle - start_angle).to_degrees();
                 let mut new_crop = state.start_crop;
                 new_crop.set_rotation(state.start_crop.rotation_degrees + delta_deg);
+                new_crop.fit_to_rotated(source);
                 develop.set_stage_params(CROP, &new_crop);
             }
             DragTarget::Corner(idx) => {
@@ -858,6 +863,7 @@ pub fn handle_viewport_gesture(
                 new_crop.y = y;
                 new_crop.width = width;
                 new_crop.height = height;
+                new_crop.fit_to_rotated(source);
                 develop.set_stage_params(CROP, &new_crop);
             }
             DragTarget::Pan => {
@@ -871,6 +877,7 @@ pub fn handle_viewport_gesture(
                 new_crop.y = new_rect.y;
                 new_crop.width = new_rect.width;
                 new_crop.height = new_rect.height;
+                new_crop.fit_to_rotated(source);
                 develop.set_stage_params(CROP, &new_crop);
             }
         }

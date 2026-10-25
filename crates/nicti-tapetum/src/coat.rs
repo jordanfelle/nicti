@@ -471,6 +471,25 @@ impl CropParams {
         }
     }
 
+    /// Keeps the crop inside the straightened image (#557): resolves the effective rect against
+    /// `source_extent`, shrinks/slides it with `geometry::fit_crop_to_rotated`, and stores it.
+    /// Call after every angle change. A no-op at zero rotation (so an untouched default stays the
+    /// "no crop" sentinel) and when the rect already fits; it only runs on edits, never on load,
+    /// so an old document that pokes out is left as saved until its next angle edit.
+    pub fn fit_to_rotated(&mut self, source_extent: (f32, f32)) {
+        if self.rotation_degrees == 0.0 {
+            return;
+        }
+        let rect = self.effective_rect(source_extent);
+        let fit = crate::geometry::fit_crop_to_rotated(rect, self.rotation_degrees, source_extent);
+        if fit != rect {
+            self.x = fit.x;
+            self.y = fit.y;
+            self.width = fit.width;
+            self.height = fit.height;
+        }
+    }
+
     /// Sets `rotation_degrees`, clamped to `geometry::MAX_STRAIGHTEN_DEGREES` -- the single
     /// writer both the straighten gesture and the auto-level button should call, so neither entry
     /// point can bypass the clamp by writing the field directly.
@@ -1070,6 +1089,26 @@ pub fn default_value<T: Serialize + Default>() -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fit_to_rotated_keeps_noop_default_and_shrinks_a_rotated_full_frame() {
+        let mut crop = CropParams::default();
+        crop.fit_to_rotated((600.0, 400.0));
+        assert!(crop.is_noop());
+        crop.set_rotation(5.0);
+        crop.fit_to_rotated((600.0, 400.0));
+        assert!(crop.width > 0.0 && crop.width < 600.0 && crop.x > 0.0);
+        let r = crop.effective_rect((600.0, 400.0));
+        let (ex, ey) = (
+            r.width / 2.0 * 5f32.to_radians().cos() + r.height / 2.0 * 5f32.to_radians().sin(),
+            r.width / 2.0 * 5f32.to_radians().sin() + r.height / 2.0 * 5f32.to_radians().cos(),
+        );
+        let (cx, cy) = r.center_absolute();
+        assert!(cx - ex >= -0.01 && cx + ex <= 600.01 && cy - ey >= -0.01 && cy + ey <= 400.01);
+        let again = crop;
+        crop.fit_to_rotated((600.0, 400.0));
+        assert_eq!(crop, again, "idempotent");
+    }
+
     #[test]
     fn visualize_is_stamped_only_for_a_live_sample_and_never_serialized() {
         let mut doc = nicti_pawprint::EditDocument::default();

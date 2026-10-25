@@ -137,6 +137,75 @@ pub fn clamp_rotation_degrees(degrees: f32) -> f32 {
     degrees.clamp(-MAX_STRAIGHTEN_DEGREES, MAX_STRAIGHTEN_DEGREES)
 }
 
+/// Half-extents of `rect` once straightened by `rotation_degrees` about its own centre (the
+/// axis-aligned bounds of the rotated rect, relative to its centre).
+fn rotated_half_extents(width: f32, height: f32, rotation_degrees: f32) -> (f32, f32) {
+    let (sin, cos) = rotation_degrees.to_radians().sin_cos();
+    let (hw, hh) = (width / 2.0, height / 2.0);
+    (
+        hw * cos.abs() + hh * sin.abs(),
+        hw * sin.abs() + hh * cos.abs(),
+    )
+}
+
+/// The largest scale `s <= 1` such that a `width x height` rect, scaled by `s` about its centre and
+/// straightened by `rotation_degrees`, fits a `bounds` extent *centred on it* (the corner test
+/// `|x|cos a + |y|sin a <= w/2`, `|x|sin a + |y|cos a <= h/2`). For a centred rect of a given
+/// aspect this is exactly the max inscribed rect of that aspect in the rotated image (#557).
+pub fn max_inscribed_scale(
+    width: f32,
+    height: f32,
+    rotation_degrees: f32,
+    bounds: (f32, f32),
+) -> f32 {
+    let (ex, ey) = rotated_half_extents(width, height, rotation_degrees);
+    let fit = |avail: f32, need: f32| {
+        if need > 0.0 {
+            avail / need
+        } else {
+            f32::INFINITY
+        }
+    };
+    fit(bounds.0 / 2.0, ex)
+        .min(fit(bounds.1 / 2.0, ey))
+        .clamp(0.0, 1.0)
+}
+
+/// Constrains `rect`, straightened by `rotation_degrees` about its own centre, to lie inside a
+/// `source` image so no corner samples past the frame (#557). The rect keeps its aspect: it is
+/// shrunk about its centre only as far as needed ([`max_inscribed_scale`]), then slid back inside
+/// if it was off-centre. A rect that already fits is returned unchanged; a non-finite angle or
+/// degenerate rect/source is returned as-is rather than producing NaNs.
+pub fn fit_crop_to_rotated(rect: CropRect, rotation_degrees: f32, source: (f32, f32)) -> CropRect {
+    let finite = [rect.x, rect.y, rect.width, rect.height, rotation_degrees]
+        .iter()
+        .all(|v| v.is_finite());
+    if !finite || rect.width <= 0.0 || rect.height <= 0.0 || source.0 <= 0.0 || source.1 <= 0.0 {
+        return rect;
+    }
+    // Already inside (to a sub-pixel tolerance, so re-fitting a fitted rect is stable rather than
+    // drifting by float noise on every angle edit).
+    let (ex, ey) = rotated_half_extents(rect.width, rect.height, rotation_degrees);
+    let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+    const EPS: f32 = 1e-2;
+    if cx - ex >= -EPS && cx + ex <= source.0 + EPS && cy - ey >= -EPS && cy + ey <= source.1 + EPS
+    {
+        return rect;
+    }
+    let scale = max_inscribed_scale(rect.width, rect.height, rotation_degrees, source);
+    let (width, height) = (rect.width * scale, rect.height * scale);
+    let (ex, ey) = rotated_half_extents(width, height, rotation_degrees);
+    // `ex <= source.0 / 2` by construction, so the range is never inverted.
+    let cx = cx.clamp(ex, (source.0 - ex).max(ex));
+    let cy = cy.clamp(ey, (source.1 - ey).max(ey));
+    CropRect {
+        x: cx - width / 2.0,
+        y: cy - height / 2.0,
+        width,
+        height,
+    }
+}
+
 /// The rotation delta (in degrees) that levels a dragged reference line -- the Ctrl-drag-a-
 /// reference-line gesture (#47): the user holds Ctrl and drags along something in the image that
 /// should be horizontal or vertical; on release, this computes how much to rotate so that line
@@ -424,5 +493,92 @@ mod tests {
         assert_eq!(clamp_rotation_degrees(1000.0), MAX_STRAIGHTEN_DEGREES);
         assert_eq!(clamp_rotation_degrees(-1000.0), -MAX_STRAIGHTEN_DEGREES);
         assert_eq!(clamp_rotation_degrees(3.0), 3.0);
+    }
+
+    fn corners_fit(rect: CropRect, deg: f32, source: (f32, f32), eps: f32) -> bool {
+        let (ex, ey) = rotated_half_extents(rect.width, rect.height, deg);
+        let (cx, cy) = rect.center_absolute();
+        cx - ex >= -eps && cx + ex <= source.0 + eps && cy - ey >= -eps && cy + ey <= source.1 + eps
+    }
+
+    #[test]
+    fn fit_crop_result_fits_and_one_percent_larger_does_not() {
+        for &(w, h) in &[(6000.0, 4000.0), (4000.0, 6000.0), (3000.0, 3000.0)] {
+            for deg in [-45.0, -17.3, -2.0, 0.5, 1.0, 10.0, 33.0, 45.0] {
+                let full = CropRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: w,
+                    height: h,
+                };
+                let fit = fit_crop_to_rotated(full, deg, (w, h));
+                assert!(
+                    corners_fit(fit, deg, (w, h), 0.01),
+                    "{w}x{h} @ {deg}: {fit:?}"
+                );
+                let grown = CropRect {
+                    x: fit.x - fit.width * 0.005,
+                    y: fit.y - fit.height * 0.005,
+                    width: fit.width * 1.01,
+                    height: fit.height * 1.01,
+                };
+                assert!(
+                    !corners_fit(grown, deg, (w, h), 0.01),
+                    "{w}x{h} @ {deg} not maximal"
+                );
+                assert!((fit.width / fit.height - w / h).abs() < 1e-3, "aspect kept");
+            }
+        }
+    }
+
+    #[test]
+    fn fit_crop_is_identity_when_unrotated_or_already_inside() {
+        let r = CropRect {
+            x: 100.0,
+            y: 50.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        assert_eq!(fit_crop_to_rotated(r, 0.0, (1000.0, 800.0)), r);
+        let small = CropRect {
+            x: 450.0,
+            y: 350.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        assert_eq!(fit_crop_to_rotated(small, 5.0, (1000.0, 800.0)), small);
+    }
+
+    #[test]
+    fn fit_crop_slides_off_centre_rect_back_inside() {
+        let source = (1000.0, 800.0);
+        let r = CropRect {
+            x: 700.0,
+            y: 500.0,
+            width: 300.0,
+            height: 300.0,
+        };
+        let fit = fit_crop_to_rotated(r, 20.0, source);
+        assert!(corners_fit(fit, 20.0, source, 0.01), "{fit:?}");
+        assert!(fit.width <= r.width + 1e-3);
+        // Only the minimal shrink: same size as the centred fit, and it actually moved.
+        let centred = max_inscribed_scale(r.width, r.height, 20.0, source);
+        assert!((fit.width - r.width * centred).abs() < 1e-2);
+        assert!(fit.x < r.x && fit.y < r.y, "slid back toward the centre");
+    }
+
+    #[test]
+    fn fit_crop_tolerates_corrupt_input() {
+        let r = CropRect {
+            x: -500.0,
+            y: 9e9,
+            width: 5000.0,
+            height: 5000.0,
+        };
+        let fit = fit_crop_to_rotated(r, 30.0, (1000.0, 800.0));
+        assert!(corners_fit(fit, 30.0, (1000.0, 800.0), 0.01), "{fit:?}");
+        let nan = CropRect { x: f32::NAN, ..r };
+        assert!(fit_crop_to_rotated(nan, 30.0, (1000.0, 800.0)).x.is_nan());
+        assert_eq!(fit_crop_to_rotated(r, f32::NAN, (1000.0, 800.0)), r);
     }
 }
