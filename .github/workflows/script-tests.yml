@@ -1,0 +1,29 @@
+---
+name: Script tests
+
+# #522: the CI duration watcher's streak rule is plain Python with its own
+# unit tests. Cheap, and only relevant when those scripts change.
+'on':
+  pull_request:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/script-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/script-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: python script tests
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
