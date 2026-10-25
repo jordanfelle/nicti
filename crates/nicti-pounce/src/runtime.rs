@@ -98,9 +98,10 @@ struct Inner {
     statuses: Mutex<HashMap<JobId, JobStatus>>,
     finished_order: Mutex<std::collections::VecDeque<JobId>>,
     shutdown: AtomicBool,
-    /// Worker-loop iterations that found no job to run (#511), across both lanes. A healthy idle
-    /// pool adds at most one per worker per [`POLL_INTERVAL`]; a wake storm like #407's adds
-    /// thousands, on any OS and whatever the host core count.
+    /// Worker-loop iterations that ended without running a job (#511), across both lanes: no job
+    /// found, or no CPU permit to take one. Every such iteration parks for a full
+    /// [`POLL_INTERVAL`] unless notified, so a healthy idle pool adds at most one per worker per
+    /// interval; a wake storm (#407's) or a spin in either branch adds thousands.
     idle_wakes: AtomicU64,
     on_change: Box<dyn Fn() + Send + Sync>,
 }
@@ -459,6 +460,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                     quiet: false,
                 }),
                 None => {
+                    inner.idle_wakes.fetch_add(1, Ordering::Relaxed);
                     let guard = lane_state.scheduler.lock().unwrap();
                     let _ = lane_state.condvar.wait_timeout(guard, POLL_INTERVAL);
                     continue;

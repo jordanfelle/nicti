@@ -29,8 +29,9 @@ fn an_idle_sized_pool_wakes_only_on_the_poll_backstop() {
     let wakes = pounce.idle_wakes() - wakes_before;
     let window = start.elapsed();
 
-    // Each worker may wake once per POLL_INTERVAL; +2 each for the edges of the window. A wake
-    // storm is orders of magnitude over this (#407 re-introduced measures thousands per second).
+    // Every worker, permit holder or not, parks a full POLL_INTERVAL between counted passes, so it
+    // adds at most one per interval; +2 each for the edges of the window. A wake storm or a spin
+    // in either branch is orders of magnitude over this (#407 re-introduced: thousands a second).
     let bound = WORKERS * (window.as_millis() as u64 / POLL_INTERVAL.as_millis() as u64 + 2);
     assert!(
         wakes <= bound,
