@@ -480,6 +480,7 @@ pub fn show(
         let mut rotation = crop.rotation_degrees;
         if slider(ui, &ROTATION, &mut rotation).changed {
             crop.set_rotation(rotation);
+            crop.fit_to_rotated(develop.source_extent());
         }
         let auto_level = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto-level"));
         if let (true, Some((engine, _))) = (auto_level.clicked(), gpu.as_mut()) {
@@ -801,6 +802,7 @@ pub fn handle_viewport_gesture(
                 let delta_deg = (cur_angle - start_angle).to_degrees();
                 let mut new_crop = state.start_crop;
                 new_crop.set_rotation(state.start_crop.rotation_degrees + delta_deg);
+                new_crop.fit_to_rotated(source);
                 develop.set_stage_params(CROP, &new_crop);
             }
             DragTarget::Corner(idx) => {

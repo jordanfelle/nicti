@@ -869,6 +869,7 @@ impl DevelopDoc {
         let delta = geometry::straighten_delta_degrees(dx, dy);
         let mut crop: CropParams = self.stage_params(CROP);
         crop.set_rotation(crop.rotation_degrees + delta);
+        crop.fit_to_rotated(self.source_extent());
         self.set_stage_params(CROP, &crop);
     }
 }
@@ -1185,6 +1186,7 @@ impl DevelopEngine {
         let mut crop: CropParams = dv.stage_params(CROP);
         let before = crop.rotation_degrees;
         crop.set_rotation(delta);
+        crop.fit_to_rotated(dv.source_extent());
         if (crop.rotation_degrees - before).abs() < UNCHANGED_ROTATION_EPSILON_DEGREES {
             return AutoApplied::Unchanged;
         }

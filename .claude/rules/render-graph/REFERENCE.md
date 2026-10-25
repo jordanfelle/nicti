@@ -82,6 +82,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
 - **#46 completion (remaining slices, all in ...
 - **Upright (#427, `docs/adr/0427`)** — `nicti_tapetum::upright` (segments -> RANSAC VPs -> `K R^T K^-1` `Homography`); `CropParams.upright` stores angles + focal/diagonal; `present_sample.wgsl` applies it after the crop affine (`CropKernel::set_upright`, parity-tested vs `sample_bilinear_upright`). Focal is a 28mm fallback until EXIF is plumbed; thresholds untuned.
 - **Crop/straighten/auto-level (#47)** — ...
+- **Crop stays inside the straightened image (#557)** — `geometry::{max_inscribed_scale, fit_crop_to_rotated}` + `CropParams::fit_to_rotated(source)`, called on every angle edit (slider, rotate drag, Ctrl-drag, auto-level); shrinks about the centre keeping aspect, slides back if off-centre. Not applied on load (old docs fixed at next angle edit). #379 (LRC `CropAngle` import) can call the same helper.
 - **`spine.rs` + `render_live` (#57)**: the production graph (`build_graph`), registry
   (`build_registry`), `LIVE_IDS`/`BAKED_IDS` and `resolve_inputs(doc, frame, extent, profile,
   pixel_scale) -> RenderInputs` (live params, heal params, crop rect, crop transform) — shared by
