@@ -18,7 +18,8 @@ param(
     [int]$SettleSeconds = 15,
     [int]$WindowSeconds = 10,
     [double]$BudgetFps = 6.0,
-    [int]$GraceSeconds = 30
+    [int]$GraceSeconds = 30,
+    [int]$MinMeasuredSeconds = 5
 )
 $ErrorActionPreference = "Stop"
 
@@ -37,6 +38,17 @@ function Read-Samples {
     })
 }
 
+# Frames and span (ms) of the samples fully past the settle time. The sample that straddles the
+# settle boundary is dropped so startup activity cannot leak into the measurement.
+function Measure-PostSettle($samples) {
+    $cum = 0; $frames = 0; $ms = 0
+    foreach ($s in @($samples)) {
+        if ($cum -ge $SettleSeconds * 1000) { $frames += $s.Frames; $ms += $s.Ms }
+        $cum += $s.Ms
+    }
+    [pscustomobject]@{ Frames = $frames; Ms = $ms }
+}
+
 # The release binary is a GUI-subsystem exe; redirected handles still reach eprintln!.
 # The catalog path is quoted so a temp dir with spaces stays one argument.
 $proc = Start-Process -FilePath $Exe -ArgumentList ('"' + (Join-Path $dir "probe.nicti") + '"') `
@@ -46,13 +58,12 @@ $samples = @()
 try {
     # Deadline loop, not a fixed sleep: stop once the samples cover settle + window, or when the
     # wall-clock deadline passes (an idle app legitimately prints fewer lines).
-    $needMs = ($SettleSeconds + $WindowSeconds) * 1000
     $deadline = $started.AddSeconds($SettleSeconds + $WindowSeconds + $GraceSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
         if ($proc.HasExited) { break }
         $samples = Read-Samples
-        if (($samples | Measure-Object -Property Ms -Sum).Sum -ge $needMs) { break }
+        if ((Measure-PostSettle $samples).Ms -ge $WindowSeconds * 1000) { break }
     }
     $exitedEarly = $proc.HasExited
 } finally {
@@ -67,19 +78,15 @@ if ($samples.Count -eq 0 -or $exitedEarly) {
     exit 1
 }
 
-# Skip samples until their cumulative span passes the settle time, then take the rest (the loop
-# stops once the window is covered; the deadline may end it sooner for a very quiet app).
-$cum = 0; $frames = 0; $ms = 0
-foreach ($s in $samples) {
-    $cum += $s.Ms
-    if ($cum -gt $SettleSeconds * 1000) { $frames += $s.Frames; $ms += $s.Ms }
+$m = Measure-PostSettle $samples
+if ($m.Ms -lt $MinMeasuredSeconds * 1000) {
+    # No data is not a pass: a hang, a stalled window or a very late first frame must be visible.
+    Write-Host ("::error::idle probe measured only {0:N1} s after the {1} s settle ({2} lines, {3:N0} s wall); need {4} s" -f ($m.Ms / 1000.0), $SettleSeconds, $samples.Count, $wallSeconds, $MinMeasuredSeconds)
+    Get-Content $err | Select-Object -Last 40
+    exit 1
 }
-if ($ms -le 0) {
-    Write-Host "idle frame rate: no frames logged after the $SettleSeconds s settle ($($samples.Count) lines); well under budget"
-    exit 0
-}
-$fps = $frames / ($ms / 1000.0)
-Write-Host ("idle frame rate: {0:N2} frames/s ({1} frames over {2:N1} s measured after >= {3} s settle; budget {4})" -f $fps, $frames, ($ms / 1000.0), $SettleSeconds, $BudgetFps)
+$fps = $m.Frames / ($m.Ms / 1000.0)
+Write-Host ("idle frame rate: {0:N2} frames/s ({1} frames over {2:N1} s measured after a {3} s settle; budget {4})" -f $fps, $m.Frames, ($m.Ms / 1000.0), $SettleSeconds, $BudgetFps)
 if ($fps -gt $BudgetFps) {
     Write-Host "::error::idle frame rate $fps/s exceeds budget $BudgetFps/s; frame log and repaint causes follow"
     Get-Content $err | Select-Object -Last 80
