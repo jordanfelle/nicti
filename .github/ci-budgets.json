@@ -9,7 +9,7 @@
     "cargo test (linux)": 10,
     "cargo clippy (windows)": 16,
     "cargo test (windows)": 17,
-    "cargo build (windows, v1 target)": 12,
+    "cargo build (windows, v1 target)": 13,
     "decode (linux)": 6,
     "decode (windows)": 10
   }
