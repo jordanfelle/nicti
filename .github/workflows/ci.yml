@@ -327,6 +327,14 @@ jobs:
       # the shipping v1 target, and shouldn't ride along in the release
       # build that validates it.
       - run: cargo build --release -p nicti
+      # #513: idle frame-rate probe. Advisory (continue-on-error + a hard timeout) until its
+      # variance on WARP is known; a GUI launch on a hosted runner can hang. Make it blocking by
+      # dropping continue-on-error once a few main runs show a stable rate.
+      - name: idle frame-rate probe
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: ./scripts/idle-probe.ps1
       # #17: nicti-claw's/dewclaw's dylib-loading tests (DLL_PREFIX/DLL_SUFFIX, LoadLibrary
       # semantics) now run as part of test-windows's full `--workspace` run above, so this job's
       # own narrow `-p nicti-claw -p dewclaw` step was removed as redundant.

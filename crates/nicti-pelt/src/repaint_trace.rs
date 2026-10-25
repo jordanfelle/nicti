@@ -10,7 +10,9 @@
 //! counted separately as `relayout`, not as frames, since only the last one is painted.
 //!
 //! Off unless `NICTI_REPAINT_TRACE` is set (any value); then one summary line per second goes to
-//! stderr: `repaint-trace: frames=3 relayout=2 telemetry=2 pending=1 pounce=0 cull=0 unattributed=0`.
+//! stderr: `repaint-trace: frames=3 relayout=2 elapsed_ms=1004 telemetry=2 pending=1 pounce=0 cull=0 unattributed=0`.
+//! Lines are printed from the UI pass, so an idle window prints no faster than it paints: the
+//! spacing between lines is at least a second, and `elapsed_ms` is the span the counts cover.
 //! A source can count in a frame another source also asked in, so the parts may sum above `frames`.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -113,9 +115,10 @@ pub(crate) fn frame(ctx: &egui::Context) {
     let mut start = t.window_start.lock().unwrap();
     if start.elapsed() >= Duration::from_secs(1) {
         let mut line = format!(
-            "repaint-trace: frames={} relayout={}",
+            "repaint-trace: frames={} relayout={} elapsed_ms={}",
             t.frames.swap(0, Ordering::Relaxed),
-            t.relayout.swap(0, Ordering::Relaxed)
+            t.relayout.swap(0, Ordering::Relaxed),
+            start.elapsed().as_millis()
         );
         for (i, (_, name)) in WAKES.iter().enumerate() {
             line += &format!(" {name}={}", t.per_source[i].swap(0, Ordering::Relaxed));
