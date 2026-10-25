@@ -44,6 +44,10 @@ struct Trace {
     /// a fixed gap after a known wake points at a `request_repaint_after` delay.
     last_frame: Mutex<Instant>,
     gaps_ms: Mutex<Vec<u64>>,
+    /// Distinct `ctx.repaint_causes()` (requests made during the pass before) seen on this
+    /// second's unattributed frames: for a follow-up frame right after a wake, these are the
+    /// in-pass requests that asked for it.
+    causes: Mutex<Vec<String>>,
 }
 
 fn trace() -> Option<&'static Trace> {
@@ -59,6 +63,7 @@ fn trace() -> Option<&'static Trace> {
                 window_start: Mutex::new(Instant::now()),
                 last_frame: Mutex::new(Instant::now()),
                 gaps_ms: Mutex::new(Vec::new()),
+                causes: Mutex::new(Vec::new()),
             })
         })
         .as_ref()
@@ -92,6 +97,13 @@ pub(crate) fn frame(ctx: &egui::Context) {
         if gaps.len() < 8 {
             gaps.push(gap.as_millis() as u64);
         }
+        let mut causes = t.causes.lock().unwrap();
+        for cause in ctx.repaint_causes() {
+            let text = cause.to_string();
+            if causes.len() < 12 && !causes.contains(&text) {
+                causes.push(text);
+            }
+        }
     }
     for (i, (wake, _)) in WAKES.iter().enumerate() {
         if asked & bit(*wake) != 0 {
@@ -116,6 +128,9 @@ pub(crate) fn frame(ctx: &egui::Context) {
             " unattributed_gaps_ms={:?}",
             std::mem::take(&mut *t.gaps_ms.lock().unwrap())
         );
+        for cause in std::mem::take(&mut *t.causes.lock().unwrap()) {
+            line += &format!("\n  cause: {cause}");
+        }
         eprintln!("{line}");
         *start = Instant::now();
     }
