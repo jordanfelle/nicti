@@ -485,7 +485,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                     inner.report_cancelled(cancelled_while_queued);
                     inner.idle_wakes.fetch_add(1, Ordering::Relaxed);
                     if let Some(p) = permit.as_mut() {
-                        p.quiet = true;
+                        let _ = p;
                     }
                     let _ = lane_state.condvar.wait_timeout(scheduler, POLL_INTERVAL);
                     continue;
