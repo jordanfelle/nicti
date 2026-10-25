@@ -259,6 +259,90 @@ pub struct Sample {
     pub load: LoadReading,
 }
 
+impl Sample {
+    // The readout strings the activity panel draws, kept here so the repaint gate
+    // ([`Self::differs_visibly`]) can never drift from what is on screen.
+
+    pub fn cpu_text(&self) -> String {
+        format!("CPU {:.0}%", self.host.cpu_usage_percent)
+    }
+
+    pub fn ram_text(&self) -> String {
+        format!(
+            "RAM {:.1}/{:.1} GB",
+            self.host.used_memory_bytes as f64 / 1e9,
+            self.host.total_memory_bytes as f64 / 1e9
+        )
+    }
+
+    pub fn vram_text(&self) -> String {
+        match self.vram {
+            Some(v) => format!(
+                "VRAM {:.2}/{:.2} GB",
+                v.used_bytes as f64 / 1e9,
+                v.budget_bytes as f64 / 1e9
+            ),
+            None => "VRAM: n/a".to_string(),
+        }
+    }
+
+    pub fn gpu_text(&self) -> String {
+        match self.load.gpu_busy_percent {
+            Some(pct) => format!("GPU {pct:.0}%"),
+            None => "GPU: n/a".to_string(),
+        }
+    }
+
+    pub fn disk_text(&self) -> String {
+        match self.load.disk_busy_percent {
+            Some(pct) => format!("Disk {pct:.0}%"),
+            None => "Disk: n/a".to_string(),
+        }
+    }
+
+    /// Would drawing `self` instead of `previous` change a pixel (#512)? True when any readout
+    /// text differs, or when a CPU/GPU/Disk reading is at or above the busy threshold and has
+    /// moved at all: the bottleneck verdict compares the raw percentages there (hysteresis,
+    /// picking the busiest), so two samples with identical text can still classify differently.
+    /// While everything is calm the verdict is `Idle` whatever the exact values.
+    pub fn differs_visibly(&self, previous: &Sample) -> bool {
+        let texts = |s: &Sample| {
+            [
+                s.cpu_text(),
+                s.ram_text(),
+                s.vram_text(),
+                s.gpu_text(),
+                s.disk_text(),
+            ]
+        };
+        if texts(self) != texts(previous) {
+            return true;
+        }
+        let raw = |s: &Sample| {
+            [
+                Some(s.host.cpu_usage_percent),
+                s.load.gpu_busy_percent,
+                s.load.disk_busy_percent,
+            ]
+        };
+        raw(self)
+            .into_iter()
+            .zip(raw(previous))
+            .any(|(now, before)| {
+                now != before
+                    && [now, before]
+                        .into_iter()
+                        .flatten()
+                        .any(|p| !crate::hackles::is_calm(p))
+            })
+    }
+}
+
+/// Whether the sampler thread calls back for `sample`, given the last one it reported.
+fn should_report(only_on_change: bool, reported: Option<&Sample>, sample: &Sample) -> bool {
+    !only_on_change || reported.is_none_or(|r| sample.differs_visibly(r))
+}
+
 /// Owns a background thread that samples host/VRAM/load telemetry at most once per
 /// `min_interval` and calls `on_sample` after each real sample, so a caller (the activity panel)
 /// can request a UI repaint -- the app otherwise only repaints on input or a Pounce job change,
@@ -278,6 +362,28 @@ impl TelemetrySampler {
         min_interval: Duration,
         on_sample: impl Fn() + Send + 'static,
     ) -> Self {
+        Self::spawn_inner(vram, load, min_interval, false, on_sample)
+    }
+
+    /// Like [`Self::spawn`], but `on_change` fires only for the first sample and for samples that
+    /// [`Sample::differs_visibly`] from the last one reported. An idle window then isn't woken
+    /// twice a second to redraw identical text (#512); `sample()` still always returns the newest.
+    pub fn spawn_on_change(
+        vram: Box<dyn VramSource>,
+        load: Box<dyn LoadSource>,
+        min_interval: Duration,
+        on_change: impl Fn() + Send + 'static,
+    ) -> Self {
+        Self::spawn_inner(vram, load, min_interval, true, on_change)
+    }
+
+    fn spawn_inner(
+        vram: Box<dyn VramSource>,
+        load: Box<dyn LoadSource>,
+        min_interval: Duration,
+        only_on_change: bool,
+        on_sample: impl Fn() + Send + 'static,
+    ) -> Self {
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let latest_thread = Arc::clone(&latest);
@@ -286,6 +392,7 @@ impl TelemetrySampler {
         let handle = thread::spawn(move || {
             let mut host = HostTelemetrySource::new();
             let mut load = load;
+            let mut reported: Option<Sample> = None;
 
             while !stop_thread.load(Ordering::Relaxed) {
                 let sample = Sample {
@@ -301,7 +408,10 @@ impl TelemetrySampler {
                 *latest_thread
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sample);
-                on_sample();
+                if should_report(only_on_change, reported.as_ref(), &sample) {
+                    reported = Some(sample);
+                    on_sample();
+                }
 
                 // Sleep in small chunks rather than one `thread::sleep(min_interval)` so
                 // dropping the sampler (which sets `stop`) doesn't have to wait out a whole
@@ -404,6 +514,77 @@ mod tests {
         let reading = UnavailableLoadSource.query();
         assert_eq!(reading.gpu_busy_percent, None);
         assert_eq!(reading.disk_busy_percent, None);
+    }
+
+    fn sample_of(cpu: f32, used_gb: f64, gpu: Option<f32>) -> Sample {
+        Sample {
+            host: HostTelemetry {
+                cpu_usage_percent: cpu,
+                used_memory_bytes: (used_gb * 1e9) as u64,
+                total_memory_bytes: 32_000_000_000,
+            },
+            vram: None,
+            load: LoadReading {
+                gpu_busy_percent: gpu,
+                disk_busy_percent: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_change_below_the_displayed_precision_is_not_visible_while_calm() {
+        let base = sample_of(12.2, 8.00, Some(3.1));
+        assert!(!base.differs_visibly(&base));
+        // Same "CPU 12%", same "RAM 8.0", same "GPU 3%": nothing to redraw.
+        assert!(!sample_of(12.4, 8.02, Some(3.3)).differs_visibly(&base));
+        // Each readout flipping its rounded text is.
+        assert!(sample_of(12.6, 8.00, Some(3.1)).differs_visibly(&base));
+        assert!(sample_of(12.2, 8.20, Some(3.1)).differs_visibly(&base));
+        assert!(sample_of(12.2, 8.00, Some(3.6)).differs_visibly(&base));
+        assert!(sample_of(12.2, 8.00, None).differs_visibly(&base));
+    }
+
+    #[test]
+    fn a_busy_reading_repaints_on_any_movement_because_the_verdict_uses_raw_values() {
+        // "CPU 60%" both times, but 59.6 is calm and 60.2 is busy: the verdict changes.
+        assert!(sample_of(60.2, 8.0, None).differs_visibly(&sample_of(59.6, 8.0, None)));
+        // Busy and drifting inside one rounded value: still repaints (hysteresis compares raw).
+        assert!(sample_of(70.3, 8.0, None).differs_visibly(&sample_of(70.1, 8.0, None)));
+        // A busy GPU counts the same, whatever the CPU does.
+        assert!(sample_of(5.0, 8.0, Some(90.3)).differs_visibly(&sample_of(5.0, 8.0, Some(90.1))));
+    }
+
+    #[test]
+    fn the_change_gate_reports_the_first_sample_then_only_visible_changes() {
+        let a = sample_of(12.2, 8.0, None);
+        let same_looking = sample_of(12.3, 8.0, None);
+        let different = sample_of(40.0, 8.0, None);
+        // Not gated: every sample reports, as `spawn` always did.
+        assert!(should_report(false, Some(&a), &same_looking));
+        // Gated: first sample yes, an identical-looking one no, a changed one yes.
+        assert!(should_report(true, None, &a));
+        assert!(!should_report(true, Some(&a), &same_looking));
+        assert!(should_report(true, Some(&a), &different));
+    }
+
+    #[test]
+    fn spawn_on_change_reports_at_least_the_first_sample() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cb = Arc::clone(&calls);
+        let sampler = TelemetrySampler::spawn_on_change(
+            Box::new(UnavailableVramSource),
+            Box::new(UnavailableLoadSource),
+            Duration::from_millis(20),
+            move || {
+                calls_cb.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::Relaxed) < 1 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(sampler);
+        assert!(calls.load(Ordering::Relaxed) >= 1);
     }
 
     #[test]

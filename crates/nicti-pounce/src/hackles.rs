@@ -48,6 +48,11 @@ pub const SATURATED_THRESHOLD: f32 = 85.0;
 /// worth showing immediately.
 pub const HYSTERESIS_MARGIN: f32 = 5.0;
 
+/// True when `percent` is below [`BUSY_THRESHOLD`]: the verdict ignores its exact value there.
+pub fn is_calm(percent: f32) -> bool {
+    level(percent) == Level::Calm
+}
+
 fn level(percent: f32) -> Level {
     if percent >= SATURATED_THRESHOLD {
         Level::Saturated

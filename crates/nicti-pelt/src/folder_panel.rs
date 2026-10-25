@@ -164,6 +164,9 @@ struct Source<T> {
     stale: bool,
     /// A result has arrived at least once.
     loaded: bool,
+    /// The last value that landed, so a re-read that comes back identical can skip waking the UI
+    /// (#512): the panel already shows it, and the `CACHE_TTL` repaint timer picks the result up.
+    last: Option<T>,
 }
 
 impl<T> Default for Source<T> {
@@ -173,11 +176,12 @@ impl<T> Default for Source<T> {
             at: None,
             stale: false,
             loaded: false,
+            last: None,
         }
     }
 }
 
-impl<T: Send + 'static> Source<T> {
+impl<T: Send + Clone + PartialEq + 'static> Source<T> {
     /// Collects a finished read and starts the next one when due. Returns the new value, if one
     /// landed this call.
     fn step(
@@ -191,6 +195,7 @@ impl<T: Send + 'static> Source<T> {
                 Ok(None) => return None,
                 Ok(Some(v)) => {
                     self.loaded = true;
+                    self.last = Some(v.clone());
                     landed = Some(v);
                 }
                 // The worker panicked: keep the old value (`loaded` stays as it was) and retry on the
@@ -201,8 +206,14 @@ impl<T: Send + 'static> Source<T> {
             self.at = Some(std::time::Instant::now());
         }
         if self.stale || self.at.is_none_or(|t| t.elapsed() >= CACHE_TTL) {
+            // A read someone asked for (`invalidate`, a busy edge) must land promptly, changed or
+            // not: `settled()` waits on it.
+            let forced = self.stale;
+            let previous = self.last.clone();
             self.stale = false;
-            self.job = Some(Pending::spawn(ctx, work));
+            self.job = Some(Pending::spawn_waking(ctx, work, move |v| {
+                forced || previous.as_ref() != Some(v)
+            }));
         }
         landed
     }
@@ -528,6 +539,50 @@ fn show_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #512: a periodic re-read wakes the UI only when it brings something new.
+    #[test]
+    fn a_source_re_read_wakes_the_ui_only_when_the_value_changed_or_was_forced() {
+        let ctx = egui::Context::default();
+        let mut src: Source<Vec<u8>> = Source::default();
+
+        // Runs one read to completion and says whether it left a repaint requested.
+        let read = |src: &mut Source<Vec<u8>>, value: u8| -> bool {
+            // Empty passes clear whatever the previous read left requested (a fresh context asks
+            // for a few follow-up frames of its own first).
+            for _ in 0..8 {
+                let mut out = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+                out.textures_delta.clear();
+                if !ctx.has_requested_repaint() {
+                    break;
+                }
+            }
+            assert!(!ctx.has_requested_repaint(), "the context never settled");
+            // Age the last read so the next step() is due, whatever the TTL.
+            src.at = Instant::now().checked_sub(CACHE_TTL * 2);
+            let mut landed = src.step(&ctx, move || vec![value]);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while landed.is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+                landed = src.step(&ctx, move || vec![value]);
+            }
+            assert_eq!(landed, Some(vec![value]), "the read never landed");
+            // The worker wakes (or not) right after sending; give it time to.
+            std::thread::sleep(Duration::from_millis(150));
+            ctx.has_requested_repaint()
+        };
+
+        assert!(read(&mut src, 1), "the first load must wake the UI");
+        assert!(
+            !read(&mut src, 1),
+            "an identical re-read must not wake the UI"
+        );
+        assert!(read(&mut src, 2), "a changed re-read must wake the UI");
+
+        // A forced (invalidated) read wakes even when identical: `settled()` waits on it.
+        src.stale = true;
+        assert!(read(&mut src, 2), "a forced re-read must wake the UI");
+    }
 
     fn root(id: i64, path: &str) -> Root {
         Root {

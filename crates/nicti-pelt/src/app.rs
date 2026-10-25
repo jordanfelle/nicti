@@ -414,7 +414,7 @@ impl PeltApp {
             CatalogOpenState::Error(_) => (None, None),
         };
         let telemetry_ctx = cc.egui_ctx.clone();
-        let telemetry = TelemetrySampler::spawn(
+        let telemetry = TelemetrySampler::spawn_on_change(
             default_vram_source(),
             default_load_source(),
             TELEMETRY_MIN_INTERVAL,
