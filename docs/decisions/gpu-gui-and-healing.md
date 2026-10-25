@@ -148,3 +148,7 @@ often than once a second and a line count is not a clock. On failure it prints t
 entries name the `repaint_causes()` call sites. It catches repaint loops only, not a worker burn (#407). The step is
 advisory (`continue-on-error`, 3 min timeout) until its variance on WARP is known; the job's `ci-budgets.json` entry
 went 12 -> 13 min for it.
+Known limit: the trace prints from the UI pass, so a hang and a fully idle app both produce no lines and the probe
+cannot tell them apart; it treats too little post-settle data (under 5 s) as a failure so a hang is never a silent
+green. If idle ever drops below roughly 0.3 frames/s, revisit this (count the time since the last line as zero-frame
+span, or add a timer thread to the trace) instead of loosening the gate.
