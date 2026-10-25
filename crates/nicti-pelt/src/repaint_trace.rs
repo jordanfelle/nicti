@@ -40,6 +40,10 @@ struct Trace {
     unattributed: AtomicU64,
     per_source: [AtomicU64; WAKES.len()],
     window_start: Mutex<Instant>,
+    /// When the previous frame began, and the gaps (ms) before this second's unattributed frames:
+    /// a fixed gap after a known wake points at a `request_repaint_after` delay.
+    last_frame: Mutex<Instant>,
+    gaps_ms: Mutex<Vec<u64>>,
 }
 
 fn trace() -> Option<&'static Trace> {
@@ -53,6 +57,8 @@ fn trace() -> Option<&'static Trace> {
                 unattributed: AtomicU64::new(0),
                 per_source: Default::default(),
                 window_start: Mutex::new(Instant::now()),
+                last_frame: Mutex::new(Instant::now()),
+                gaps_ms: Mutex::new(Vec::new()),
             })
         })
         .as_ref()
@@ -79,8 +85,13 @@ pub(crate) fn frame(ctx: &egui::Context) {
     }
     let asked = t.asked.swap(0, Ordering::Relaxed);
     t.frames.fetch_add(1, Ordering::Relaxed);
+    let gap = std::mem::replace(&mut *t.last_frame.lock().unwrap(), Instant::now()).elapsed();
     if asked == 0 {
         t.unattributed.fetch_add(1, Ordering::Relaxed);
+        let mut gaps = t.gaps_ms.lock().unwrap();
+        if gaps.len() < 8 {
+            gaps.push(gap.as_millis() as u64);
+        }
     }
     for (i, (wake, _)) in WAKES.iter().enumerate() {
         if asked & bit(*wake) != 0 {
@@ -100,6 +111,10 @@ pub(crate) fn frame(ctx: &egui::Context) {
         line += &format!(
             " unattributed={}",
             t.unattributed.swap(0, Ordering::Relaxed)
+        );
+        line += &format!(
+            " unattributed_gaps_ms={:?}",
+            std::mem::take(&mut *t.gaps_ms.lock().unwrap())
         );
         eprintln!("{line}");
         *start = Instant::now();

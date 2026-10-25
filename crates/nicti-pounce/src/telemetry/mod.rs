@@ -306,17 +306,23 @@ impl Sample {
     /// picking the busiest), so two samples with identical text can still classify differently.
     /// While everything is calm the verdict is `Idle` whatever the exact values.
     pub fn differs_visibly(&self, previous: &Sample) -> bool {
-        let texts = |s: &Sample| {
-            [
-                s.cpu_text(),
-                s.ram_text(),
-                s.vram_text(),
-                s.gpu_text(),
-                s.disk_text(),
-            ]
-        };
-        if texts(self) != texts(previous) {
-            return true;
+        !self.changed_fields(previous).is_empty()
+    }
+
+    /// Which readouts make [`Self::differs_visibly`] true: `cpu`/`ram`/`vram`/`gpu`/`disk` for a
+    /// changed text, `busy-raw` for a moved reading at or above the busy threshold.
+    pub fn changed_fields(&self, previous: &Sample) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for (name, now, before) in [
+            ("cpu", self.cpu_text(), previous.cpu_text()),
+            ("ram", self.ram_text(), previous.ram_text()),
+            ("vram", self.vram_text(), previous.vram_text()),
+            ("gpu", self.gpu_text(), previous.gpu_text()),
+            ("disk", self.disk_text(), previous.disk_text()),
+        ] {
+            if now != before {
+                out.push(name);
+            }
         }
         let raw = |s: &Sample| {
             [
@@ -325,7 +331,7 @@ impl Sample {
                 s.load.disk_busy_percent,
             ]
         };
-        raw(self)
+        if raw(self)
             .into_iter()
             .zip(raw(previous))
             .any(|(now, before)| {
@@ -335,12 +341,23 @@ impl Sample {
                         .flatten()
                         .any(|p| !crate::hackles::is_calm(p))
             })
+        {
+            out.push("busy-raw");
+        }
+        out
     }
 }
 
 /// Whether the sampler thread calls back for `sample`, given the last one it reported.
 fn should_report(only_on_change: bool, reported: Option<&Sample>, sample: &Sample) -> bool {
-    !only_on_change || reported.is_none_or(|r| sample.differs_visibly(r))
+    let report = !only_on_change || reported.is_none_or(|r| sample.differs_visibly(r));
+    if only_on_change && report && std::env::var_os("NICTI_REPAINT_TRACE").is_some() {
+        // Diagnostic for #512: which readout made this sample worth a frame.
+        if let Some(r) = reported {
+            eprintln!("telemetry-gate: changed {:?}", sample.changed_fields(r));
+        }
+    }
+    report
 }
 
 /// Owns a background thread that samples host/VRAM/load telemetry at most once per
