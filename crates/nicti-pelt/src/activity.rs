@@ -71,52 +71,33 @@ pub fn show(
             // reading, same honesty convention as the individual VRAM/GPU/Disk "n/a" cases below.
             match sample {
                 Some(sample) => {
-                    ui.label(format!("CPU {:.0}%", sample.host.cpu_usage_percent));
-                    ui.label(format!(
-                        "RAM {:.1}/{:.1} GB",
-                        sample.host.used_memory_bytes as f64 / 1e9,
-                        sample.host.total_memory_bytes as f64 / 1e9
-                    ));
+                    // The readout strings live on `Sample` so the telemetry repaint gate
+                    // (`Sample::differs_visibly`, #512) can't drift from what is drawn.
+                    ui.label(sample.cpu_text());
+                    ui.label(sample.ram_text());
                     // VRAM is genuinely unavailable in this sandbox (no GPU adapter under WSL,
                     // and the DXGI source is Windows-only anyway) -- shown as "n/a", never a
                     // fabricated number, per this repo's own measured-vs-hypothesis convention
                     // (see `telemetry.rs`).
-                    match sample.vram {
-                        Some(v) => {
-                            ui.label(format!(
-                                "VRAM {:.2}/{:.2} GB",
-                                v.used_bytes as f64 / 1e9,
-                                v.budget_bytes as f64 / 1e9
-                            ));
-                        }
-                        None => {
-                            ui.label("VRAM: n/a");
-                        }
-                    }
+                    ui.label(sample.vram_text());
 
                     let gpu_level = bottleneck.as_ref().and_then(|v| v.gpu);
                     match sample.load.gpu_busy_percent {
-                        Some(pct) => {
-                            ui.colored_label(
-                                color_for_level(gpu_level, ui),
-                                format!("GPU {pct:.0}%"),
-                            );
+                        Some(_) => {
+                            ui.colored_label(color_for_level(gpu_level, ui), sample.gpu_text());
                         }
                         None => {
-                            ui.label("GPU: n/a");
+                            ui.label(sample.gpu_text());
                         }
                     }
 
                     let disk_level = bottleneck.as_ref().and_then(|v| v.disk);
                     match sample.load.disk_busy_percent {
-                        Some(pct) => {
-                            ui.colored_label(
-                                color_for_level(disk_level, ui),
-                                format!("Disk {pct:.0}%"),
-                            );
+                        Some(_) => {
+                            ui.colored_label(color_for_level(disk_level, ui), sample.disk_text());
                         }
                         None => {
-                            ui.label("Disk: n/a");
+                            ui.label(sample.disk_text());
                         }
                     }
                 }

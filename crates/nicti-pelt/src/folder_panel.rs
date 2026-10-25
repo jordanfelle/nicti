@@ -9,6 +9,8 @@
 //! [`MoveJob`]: nicti_lair::pounce_jobs::MoveJob
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use nicti_lair::carry::Resolution;
 use nicti_lair::{MoveState, Root, RootMove};
@@ -161,9 +163,12 @@ struct Source<T> {
     at: Option<std::time::Instant>,
     /// Re-read as soon as no worker is in flight, regardless of age. Stays set when it is raised
     /// while a read is running, because that read may predate whatever raised it.
-    stale: bool,
+    stale: Arc<AtomicBool>,
     /// A result has arrived at least once.
     loaded: bool,
+    /// The last value that landed, so a re-read that comes back identical can skip waking the UI
+    /// (#512): the panel already shows it, and the `CACHE_TTL` repaint timer picks the result up.
+    last: Option<T>,
 }
 
 impl<T> Default for Source<T> {
@@ -171,13 +176,14 @@ impl<T> Default for Source<T> {
         Self {
             job: None,
             at: None,
-            stale: false,
+            stale: Arc::new(AtomicBool::new(false)),
             loaded: false,
+            last: None,
         }
     }
 }
 
-impl<T: Send + 'static> Source<T> {
+impl<T: Send + Clone + PartialEq + 'static> Source<T> {
     /// Collects a finished read and starts the next one when due. Returns the new value, if one
     /// landed this call.
     fn step(
@@ -191,6 +197,7 @@ impl<T: Send + 'static> Source<T> {
                 Ok(None) => return None,
                 Ok(Some(v)) => {
                     self.loaded = true;
+                    self.last = Some(v.clone());
                     landed = Some(v);
                 }
                 // The worker panicked: keep the old value (`loaded` stays as it was) and retry on the
@@ -200,9 +207,17 @@ impl<T: Send + 'static> Source<T> {
             self.job = None;
             self.at = Some(std::time::Instant::now());
         }
-        if self.stale || self.at.is_none_or(|t| t.elapsed() >= CACHE_TTL) {
-            self.stale = false;
-            self.job = Some(Pending::spawn(ctx, work));
+        if self.stale.load(Ordering::SeqCst) || self.at.is_none_or(|t| t.elapsed() >= CACHE_TTL) {
+            // A read someone asked for (`invalidate`, a busy edge) must land promptly, changed or
+            // not: `settled()` waits on it.
+            let forced = self.stale.swap(false, Ordering::SeqCst);
+            let previous = self.last.clone();
+            // Raised again while this read runs, the flag means the result may predate the change,
+            // so the worker re-checks it when done: the next pass re-reads, and must come promptly.
+            let raised_since = self.stale.clone();
+            self.job = Some(Pending::spawn_waking(ctx, work, move |v| {
+                forced || previous.as_ref() != Some(v) || raised_since.load(Ordering::SeqCst)
+            }));
         }
         landed
     }
@@ -240,7 +255,7 @@ impl Cache {
     /// Marks the cached catalog scan out of date so it is re-read on the next frame (a stuck move
     /// was just settled). The old value keeps showing until the new one lands.
     pub fn invalidate(&mut self) {
-        self.catalog.stale = true;
+        self.catalog.stale.store(true, Ordering::SeqCst);
     }
 
     /// Drops a just-settled journal row from the cached list so its buttons vanish this frame
@@ -254,7 +269,7 @@ impl Cache {
     /// *path* should wait for this -- a just-moved root still shows its old location until then.
     /// Only the catalog read counts; the drive probe is deliberately not considered.
     pub fn settled(&self) -> bool {
-        !self.catalog.stale && self.catalog.job.is_none()
+        !self.catalog.stale.load(Ordering::SeqCst) && self.catalog.job.is_none()
     }
 
     /// True once the first catalog read has landed -- before that `roots` is empty because
@@ -528,6 +543,75 @@ fn show_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #512: a periodic re-read wakes the UI only when it brings something new.
+    #[test]
+    fn a_source_re_read_wakes_the_ui_only_when_the_value_changed_or_was_forced() {
+        let ctx = egui::Context::default();
+        let mut src: Source<Vec<u8>> = Source::default();
+
+        // Runs one read to completion and says whether it left a repaint requested.
+        let read = |src: &mut Source<Vec<u8>>, value: u8| -> bool {
+            // Empty passes clear whatever the previous read left requested (a fresh context asks
+            // for a few follow-up frames of its own first).
+            for _ in 0..8 {
+                let mut out = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+                out.textures_delta.clear();
+                if !ctx.has_requested_repaint() {
+                    break;
+                }
+            }
+            assert!(!ctx.has_requested_repaint(), "the context never settled");
+            // Age the last read so the next step() is due, whatever the TTL.
+            src.at = Instant::now().checked_sub(CACHE_TTL * 2);
+            let mut landed = src.step(&ctx, move || vec![value]);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while landed.is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+                landed = src.step(&ctx, move || vec![value]);
+            }
+            assert_eq!(landed, Some(vec![value]), "the read never landed");
+            // The worker wakes (or not) right after sending; give it time to.
+            std::thread::sleep(Duration::from_millis(150));
+            ctx.has_requested_repaint()
+        };
+
+        assert!(read(&mut src, 1), "the first load must wake the UI");
+        assert!(
+            !read(&mut src, 1),
+            "an identical re-read must not wake the UI"
+        );
+        assert!(read(&mut src, 2), "a changed re-read must wake the UI");
+
+        // A forced (invalidated) read wakes even when identical: `settled()` waits on it.
+        src.stale.store(true, Ordering::SeqCst);
+        assert!(read(&mut src, 2), "a forced re-read must wake the UI");
+
+        // `stale` raised while a read is in flight (an invalidate, a busy edge): that read may
+        // predate the change, so it must wake even when identical, or `settled()` waits on the
+        // CACHE_TTL timer instead of the next frame.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        out.textures_delta.clear();
+        while ctx.has_requested_repaint() {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+            out.textures_delta.clear();
+        }
+        src.at = Instant::now().checked_sub(CACHE_TTL * 2);
+        assert!(src
+            .step(&ctx, move || {
+                let _ = release_rx.recv();
+                vec![2]
+            })
+            .is_none());
+        src.stale.store(true, Ordering::SeqCst); // raised mid-flight
+        release_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            ctx.has_requested_repaint(),
+            "an identical read that finished after a mid-flight invalidate must wake the UI"
+        );
+    }
 
     fn root(id: i64, path: &str) -> Root {
         Root {

@@ -31,7 +31,10 @@ const MIB: u64 = 1024 * 1024;
 pub const MIN_CAP_BYTES: u64 = 256 * MIB;
 /// Upper bound on the typed value: keeps `GiB * 1024^3` well inside `u64` and rejects typos.
 pub const MAX_CAP_BYTES: u64 = 4096 * GIB;
-const STATS_REFRESH: Duration = Duration::from_secs(1);
+/// How often the idle panel re-reads the cache stats and asks for a frame to show them (#512: at 1 s
+/// this was a frame a second of an otherwise idle window). Finishing a purge/cap change resets
+/// `last_refresh`, so those still show at once, and a running one polls at 300 ms.
+const STATS_REFRESH: Duration = Duration::from_secs(5);
 const PURGE_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
 
 /// Parses the cap text box (GiB, decimals allowed) into bytes, enforcing the min/max bounds.

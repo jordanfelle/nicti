@@ -229,3 +229,22 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
   later -- `swat::harness` therefore installs the theme on a discarded first frame (the app's panels panic on
   the missing `semibold` family otherwise).
 - **Agent control channel (#434, ADR-0434, Proposed)** -- pelt-local command table + tokened 127.0.0.1 JSON-lines socket + MCP shim; 4 slices, nothing built.
+
+## #512: idle repaint rate
+
+An idle, empty Nicti repainted about 4.5 times a second (#409). `NICTI_REPAINT_TRACE=1` now prints, once a second to
+stderr, how many frames ran and which immediate-repaint source asked for them (`repaint_trace.rs`: telemetry, `Pending`
+workers, Pounce, cull; a frame none of them asked for is `unattributed`, with its gap since the previous frame and the
+`ctx.repaint_causes()` seen on it). egui multi-pass relayout was ruled out (`relayout=0`). Measured on `windows-latest`
+(WARP, release build, empty catalog, 15 s settle, 25-30 one-second samples), before: 4.50 frames/s = telemetry 2.00 +
+`Pending` 0.50 + unattributed 2.00. Changes: the telemetry sampler reports only a *visible* change (the readout text
+lives on `Sample` so the gate cannot drift from what is drawn; a reading at or above the busy threshold repaints on any
+movement because `hackles::classify` uses raw values) and at most once a second; folder-panel `Source` re-reads wake the
+UI only when the value changed or an invalidate was raised (the `CACHE_TTL` timer polls an unchanged result);
+the idle cache-stats refresh went 1 s -> 5 s. After the first three: 3.00 frames/s (telemetry 1.00 + one follow-up frame
+1-2 ms after each wake + a 1 s timer frame); with the fourth: **2.17 frames/s** (telemetry 1.00 + 1.17 unattributed,
+mostly that follow-up frame), a 52% cut from 4.50. The issue's ~1 frame/s target is not reached. **Not
+attributed**: why every wake is followed 1-2 ms later by a second frame whose only `repaint_causes()` are the delayed
+`request_repaint_after` sites (not multi-pass; eframe's `RequestRepaint` handling looked sane). **Not measured**: the
+runner's CPU/disk readouts jitter (the app's own software rendering), so the telemetry gate suppressed little there; a
+quiet real machine should save more, and idle frame cost on a real GPU (the issue's step 4) needs the reference machine.
