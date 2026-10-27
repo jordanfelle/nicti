@@ -4,6 +4,7 @@
     "cargo fmt": 2,
     "detect path changes": 1,
     "ADR reference check": 1,
+    "layering and asset attribution": 1,
     "cargo deny (licenses)": 2,
     "cargo clippy (linux)": 10,
     "cargo test (linux)": 10,
