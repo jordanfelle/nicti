@@ -58,6 +58,8 @@ impl Problem {
     ) -> Outcome<T> {
         match action {
             Action::Quit => Outcome::Quit,
+            // The picker's result will replace the path, so neither is meaningful while it is open.
+            Action::ChooseAnother | Action::TryAgain if self.picking => Outcome::Stay,
             Action::ChooseAnother => {
                 self.picking = true;
                 Outcome::Stay
@@ -94,6 +96,15 @@ impl Problem {
 
 fn open_catalog(path: &Path) -> Result<SqliteCatalog, String> {
     catalog::open(path).map_err(|e| e.to_string())
+}
+
+/// For a file the user picked: refuses anything that isn't already a Nicti catalog, because
+/// opening migrates (and switches to WAL) whatever SQLite file it is given.
+fn open_picked(path: &Path) -> Result<SqliteCatalog, String> {
+    if !SqliteCatalog::is_existing_catalog(path) {
+        return Err("That file isn't a Nicti catalog.".into());
+    }
+    open_catalog(path)
 }
 
 /// Asks for a catalog file on its own thread so the window keeps repainting.
@@ -203,7 +214,7 @@ impl eframe::App for Launcher {
             match rx.try_recv() {
                 Ok(choice) => {
                     *picker = None;
-                    outcome = problem.picked(choice, open_catalog);
+                    outcome = problem.picked(choice, open_picked);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
@@ -225,7 +236,10 @@ impl eframe::App for Launcher {
                 ui.colored_label(egui::Color32::RED, &problem.error);
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Try Again").clicked() {
+                    if ui
+                        .add_enabled(!problem.picking, egui::Button::new("Try Again"))
+                        .clicked()
+                    {
                         action = Some(Action::TryAgain);
                     }
                     if ui
@@ -243,7 +257,8 @@ impl eframe::App for Launcher {
                 });
             });
 
-        if let Some(action) = action {
+        // A catalog the picker just opened wins over a click on the same frame.
+        if let (Outcome::Stay, Some(action)) = (&outcome, action) {
             outcome = problem.act(action, open_catalog);
             if action == Action::ChooseAnother {
                 *picker = spawn_picker(&ctx, &problem.path);
@@ -311,6 +326,16 @@ mod tests {
         let out: Outcome<()> = p.picked(None, |_| panic!("must not open"));
         assert_eq!(out, Outcome::Stay);
         assert_eq!(p, problem());
+    }
+
+    #[test]
+    fn try_again_and_choose_are_ignored_while_the_picker_is_open() {
+        let mut p = problem();
+        p.picking = true;
+        let out: Outcome<()> = p.act(Action::TryAgain, |_| panic!("must not open"));
+        assert_eq!(out, Outcome::Stay);
+        let out: Outcome<()> = p.act(Action::Quit, |_| panic!("must not open"));
+        assert_eq!(out, Outcome::Quit);
     }
 
     #[test]
