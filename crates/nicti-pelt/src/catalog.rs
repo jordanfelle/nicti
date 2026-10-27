@@ -10,7 +10,7 @@ const DEFAULT_CATALOG_FILENAME: &str = "nicti.catalog.sqlite";
 /// The catalog path a real user would want: the first CLI argument if one was given (so a
 /// double-clicked catalog file or a scripted launch can point at a specific one), otherwise a
 /// fixed name in the current directory. A real per-platform app-data default (matching where
-/// #62's importer will eventually look) is left to whichever ticket adds catalog-picker UI --
+/// #62's importer will eventually look) is still open (the launch-failure window in `catalog_problem` only picks for the session) --
 /// this is a placeholder shell's "just open something" default, not a final location policy.
 pub fn resolve_path() -> PathBuf {
     std::env::args()

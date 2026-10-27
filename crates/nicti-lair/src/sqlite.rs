@@ -474,6 +474,30 @@ impl SqliteCatalog {
         Self::init(conn, Some(path.to_path_buf()))
     }
 
+    /// Whether `path` is an existing SQLite file that already carries a Nicti schema
+    /// (`user_version > 0` and an `asset` table). Opens read-only without touching the file, so a
+    /// user-picked foreign database isn't switched to WAL or given Nicti's tables by [`Self::open`].
+    pub fn is_existing_catalog(path: &Path) -> bool {
+        use rusqlite::OpenFlags;
+        let Ok(conn) = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return false;
+        };
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        let has_asset = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'asset'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        version > 0 && has_asset
+    }
+
     pub fn open_in_memory() -> Result<Self, CatalogError> {
         let conn = Connection::open_in_memory()?;
         Self::init(conn, None)
@@ -2526,6 +2550,28 @@ mod tests {
     #[test]
     fn empty_edit_document_matches_the_on_disk_shape_adr_0021_documents() {
         assert_eq!(empty_edit_document(), r#"{"stages":{}}"#);
+    }
+
+    #[test]
+    fn is_existing_catalog_accepts_a_catalog_and_leaves_foreign_databases_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.sqlite");
+        drop(SqliteCatalog::open(&real).unwrap());
+        assert!(SqliteCatalog::is_existing_catalog(&real));
+
+        let foreign = dir.path().join("places.sqlite");
+        let conn = Connection::open(&foreign).unwrap();
+        conn.execute_batch("CREATE TABLE moz_places (id INTEGER)")
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&foreign).unwrap();
+        assert!(!SqliteCatalog::is_existing_catalog(&foreign));
+        assert_eq!(std::fs::read(&foreign).unwrap(), before);
+
+        assert!(!SqliteCatalog::is_existing_catalog(
+            &dir.path().join("missing.sqlite")
+        ));
+        assert!(!dir.path().join("missing.sqlite").exists());
     }
 
     #[test]
