@@ -14,6 +14,7 @@ mod archive_drives;
 mod cache_settings;
 mod camera_profiles;
 mod catalog;
+mod catalog_problem;
 mod catseye;
 mod color_mgmt;
 mod cull;
@@ -65,11 +66,12 @@ pub use app::PeltApp;
 /// dependency just to spell this return type.
 pub use eframe::Result;
 
-/// The catalog's open state -- kept as an enum rather than an unwrapped `Arc<SqliteCatalog>` so a
-/// catalog that fails to open (a bad path, a permissions error) shows an in-window message instead
-/// of panicking the whole app on startup.
+/// The catalog's open state. A catalog that fails to open never reaches the app any more:
+/// `catalog_problem` shows the retry/choose/quit window first and only builds the app once one
+/// opens, so `Error` is no longer constructed (collapsing this enum is a follow-up).
 enum CatalogOpenState {
     Open(Arc<SqliteCatalog>),
+    #[allow(dead_code)]
     Error(String),
 }
 
@@ -97,6 +99,6 @@ pub fn run(version: &str) -> eframe::Result {
     eframe::run_native(
         "nicti",
         options,
-        Box::new(move |cc| Ok(Box::new(PeltApp::new(cc, version)))),
+        Box::new(move |cc| Ok(Box::new(catalog_problem::Launcher::new(cc, version)))),
     )
 }

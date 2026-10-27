@@ -61,7 +61,7 @@ use crate::update::UpdateChecker;
 use crate::verify_ui::{self, VerifyUi};
 use crate::viewport::{fit_rect, fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
-use crate::{catalog, CatalogOpenState};
+use crate::CatalogOpenState;
 
 /// Telemetry is throttled independently of egui's own repaint rate -- see `telemetry.rs`'s own
 /// doc comment for why re-sampling `sysinfo`/DXGI on every frame would be wasteful.
@@ -281,13 +281,17 @@ pub struct PeltApp {
 const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 impl PeltApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, version: String) -> Self {
-        crate::fur::install_fonts(&cc.egui_ctx);
-        crate::fur::apply(&cc.egui_ctx);
-        let render_state = cc
-            .wgpu_render_state
-            .as_ref()
-            .expect("nicti-pelt requires the wgpu backend (eframe::Renderer::Wgpu)");
+    /// `store` is the already-opened catalog at `catalog_path`: opening is the launcher's job
+    /// (`catalog_problem`), so a failure is handled before this ever builds an app around it.
+    pub fn new(
+        egui_ctx: &egui::Context,
+        render_state: &egui_wgpu::RenderState,
+        version: String,
+        catalog_path: PathBuf,
+        store: SqliteCatalog,
+    ) -> Self {
+        crate::fur::install_fonts(egui_ctx);
+        crate::fur::apply(egui_ctx);
 
         let gpu = Arc::new(GpuContext::from_device(
             &render_state.adapter,
@@ -303,17 +307,9 @@ impl PeltApp {
             .callback_resources
             .insert(resources);
 
-        let catalog_path = catalog::resolve_path();
-        let (catalog, nine_lives) = match catalog::open(&catalog_path) {
-            Ok(store) => {
-                let policy = BackupPolicy::for_catalog(&catalog_path);
-                (
-                    CatalogOpenState::Open(Arc::new(store)),
-                    Some(NineLives::new(policy)),
-                )
-            }
-            Err(e) => (CatalogOpenState::Error(e.to_string()), None),
-        };
+        let policy = BackupPolicy::for_catalog(&catalog_path);
+        let catalog = CatalogOpenState::Open(Arc::new(store));
+        let nine_lives = Some(NineLives::new(policy));
 
         // The T2 preview cache (#301) lives beside the catalog. Failing to open it (read-only
         // location, another instance holding its lock) only costs the T2 upgrade, never the loupe.
@@ -349,7 +345,7 @@ impl PeltApp {
             }
         }
 
-        let egui_ctx = cc.egui_ctx.clone();
+        let wake_ctx = egui_ctx.clone();
         let xmp = match &catalog {
             CatalogOpenState::Open(store) => {
                 let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -392,7 +388,7 @@ impl PeltApp {
             vram_budget,
             cpu_threads,
             (cpu_threads / 2).max(1),
-            move || crate::repaint_trace::request(&egui_ctx, crate::repaint_trace::Wake::Pounce),
+            move || crate::repaint_trace::request(&wake_ctx, crate::repaint_trace::Wake::Pounce),
         );
         // #307: recovery runs under `JobKind::Move`, so every "a move is running" guard (import,
         // sync, move, delete, loupe open) holds until it's done; `poll_recovery` folds in the
@@ -413,7 +409,7 @@ impl PeltApp {
             }
             CatalogOpenState::Error(_) => (None, None),
         };
-        let telemetry_ctx = cc.egui_ctx.clone();
+        let telemetry_ctx = egui_ctx.clone();
         let telemetry = TelemetrySampler::spawn_on_change(
             default_vram_source(),
             default_load_source(),
@@ -439,7 +435,7 @@ impl PeltApp {
             _ => None,
         });
         let preview_settings = preview_settings::load(&catalog_path);
-        crate::fur::install_section_states(&cc.egui_ctx, section_state::load(&catalog_path));
+        crate::fur::install_section_states(egui_ctx, section_state::load(&catalog_path));
         let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
             eyeshine::Env::new(
                 Arc::new(LibRawDecoder),
