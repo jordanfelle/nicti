@@ -1,0 +1,18 @@
+[package]
+name = "nicti-collar"
+version = "0.0.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Claw v2 third-party plugin security model (ADR-0214, #230): the strict `collar.toml` manifest parser, the capability-widening (re-consent) diff, the host-side network/filesystem authorizers, the Hiss kill-switch policy (bug vs violation, persisted state, safe-mode flag) and a wasmtime sandbox that interrupts a module mid-execution with an epoch. No plugin host exists yet: WASI linking and the consent/kill-switch UI are follow-ups."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+semver = "1"
+thiserror = "2"
+wasmtime = { version = "50", default-features = false, features = ["runtime", "cranelift", "wat"] }
+
+[dev-dependencies]
+tempfile = "3"

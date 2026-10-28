@@ -31,8 +31,8 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   manifest declares capabilities (kind + scope + required justification); undeclared = denied via
   unlinked WASI import, not just policy. Network capability is action-scoped per ADR-0218
   (`weight-download`/`cloud-feature`). Kill switch = wasmtime epoch interruption (works mid-loop,
-  no host-call boundary needed) + persisted safe-mode flag as UI-broken fallback. Docs-only —
-  no sandbox implementation yet.
+  no host-call boundary needed) + persisted safe-mode flag as UI-broken fallback. Docs-only until #230:
+  **`crates/nicti-collar`** now implements the pure parts: strict manifest, field-level re-consent diff, host-side network/path authorizers, Hiss policy (bug vs violation, persisted state, safe-mode flag) and a wasmtime epoch-kill sandbox; WASI linking, consent/kill-switch UI and lazy requests are not built.
 
 ## Package contents
 
@@ -50,3 +50,4 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   `before == after`, no step and redo kept, and `compact` drops a run netting to no change — strict
   compare, the caller resolves absent stages to defaults, ADR-0101 rule 6) — promoted from `spikes/pawprint` (now deleted). Its XMP
   round-trip proof stayed with #59/`spikes/scent` rather than being promoted here.
+- **`crates/nicti-collar`** (#230, ADR-0214, layer 0) — `manifest` (strict `collar.toml`), `consent` (`widenings`), `authorize` (`authorize_request`/`authorize_path`), `hiss` (`Hiss`, `SafeMode`) and `sandbox` (`Sandbox`/`Killer`/`Outcome`, wasmtime, Engine per module). Not hosted by anything yet.

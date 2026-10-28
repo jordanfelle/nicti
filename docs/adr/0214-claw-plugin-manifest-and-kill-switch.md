@@ -1,6 +1,10 @@
 # ADR-0214: Claw v2 plugin manifest, disclosure UX, and kill switch (Collar/Hiss)
 
-- **Status:** Proposed
+- **Status:** Proposed. Partly implemented 2026-10-28 (#230, `crates/nicti-collar`): the manifest parser, the
+  field-level re-consent diff, the host-side network/filesystem authorizers, the bug-vs-violation kill-switch policy with
+  persisted state and the safe-mode flag, and a wasmtime sandbox whose epoch kill is verified on a tight loop with no host
+  call. Not built (no plugin host exists): WASI linking, the consent screen, the kill-switch menu item and shortcut, lazy
+  requests, and the `gpu`/host-call-timeout bounds listed in section 4.
 - **Date:** 2026-09-27
 - **Ticket:** [#214](https://github.com/jordanfelle/nicti/issues/214) Research: third-party plugin
   sandbox manifest + kill switch (Claw v2 security model)
