@@ -327,5 +327,12 @@ not enlarge the crop (the overlay rotate drag already fit from `start_crop`). Th
 slider drag started in egui temp memory (no schema or hash change) and fits every step from it
 (`CropParams::with_rotation_fitted`, `develop_panel::crop_after_rotation_edit`); a keyboard nudge, typed value or reset has
 no drag base and fits from the current crop as before; the drag-start crop is the ceiling. (3) **Fit on load:**
-`DevelopDoc::load_real_frame` fits an old document's crop once (`fit_loaded_crop`); the fitted copy is also the saved
-baseline, so opening a photo never marks it edited, and a document with no rotation or one that already fits is untouched.
+`DevelopDoc::load_real_frame` fits an old document's crop once (`fit_loaded_crop`) and records no undo step, but the
+catalog's copy stays the saved baseline: the fitted crop is therefore dirty and is written back by the normal autosave.
+That is deliberate (the review's confirmed defect on the first version, which made the fitted copy the baseline):
+export, the grid thumbnails, prebake and the rendered-preview hash all read the catalog row and never run the fit, so
+fitting only in Develop's memory would have hidden the poking crop in Develop while those paths kept showing it.
+A document with no rotation, or one that already fits, is untouched and not dirty. A double-click **reset** of the angle
+has no drag base and keeps the current crop (a remembered "level" rect could discard crop edits made while rotated);
+dragging back to 0 restores it. The Upright regression sweep counts the cases that use a real homography (the stored
+extremes mostly fall back to the identity, which is safe but proves nothing) and asserts most do.

@@ -335,24 +335,28 @@ mod tests {
         };
         let max = crate::upright::MAX_CORRECTION_DEG as f32;
         let (w, h) = (600.0, 400.0);
+        let mut non_identity = 0;
         for case in 0..4000 {
-            // The extremes of the stored range are over-sampled: that is where a missing zoom shows.
-            let pick = |v: f32, lim: f32| match case % 4 {
-                0 => lim * v.signum(),
-                _ => v,
+            // Three quarters of the cases use corrections a photo really needs (the zoom keeps the
+            // frame covered, so the homography is real); the extremes of the stored range mostly
+            // need more zoom than `MIN_ZOOM` allows and fall back to the identity, which is safe
+            // but proves nothing, so they are only a quarter of the sweep.
+            let (rl, pl, yl, fl) = if case % 4 == 0 {
+                (max, max, max, 4.0)
+            } else {
+                (3.0, 6.0, 6.0, 3.0)
             };
-            let (roll, pitch, yaw) = (
-                pick(next(-max, max), max),
-                pick(next(-max, max), max),
-                pick(next(-max, max), max),
-            );
+            let (roll, pitch, yaw) = (next(-rl, rl), next(-pl, pl), next(-yl, yl));
             let hom = crate::coat::UprightParams {
                 roll_degrees: roll,
                 pitch_degrees: pitch,
                 yaw_degrees: yaw,
-                focal_diag: next(0.4, 4.0),
+                focal_diag: next(1.0, fl),
             }
             .homography(w, h);
+            // A fallback to the identity (the correction needed more zoom than allowed) passes
+            // trivially; count the cases that really exercise the homography.
+            non_identity += usize::from(!hom.is_identity());
             let rot = next(-MAX_STRAIGHTEN_DEGREES, MAX_STRAIGHTEN_DEGREES);
             let cw = next(40.0, w);
             let rect = CropRect {
@@ -379,6 +383,10 @@ mod tests {
                 }
             }
         }
+        assert!(
+            non_identity > 2000,
+            "only {non_identity} of 4000 cases used a real homography: the sweep proves nothing"
+        );
     }
 
     use super::*;

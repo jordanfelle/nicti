@@ -682,15 +682,18 @@ impl DevelopDoc {
         mut doc: EditDocument,
     ) {
         // An old document may hold a crop that pokes out of its straightened frame (saved before
-        // #557); fit it here so the first render is right, not only after the next angle edit. The
-        // fitted copy is also the saved baseline: opening a photo must not mark it edited.
+        // #557). The catalog's copy stays the saved baseline, so a fitted crop reads as an edit and
+        // is saved like any other: export, the grid and the rendered-preview tier all read the
+        // catalog row, and fitting only here would leave them showing the poking crop while Develop
+        // looks right. (No undo step is recorded: the history starts from the fitted document.)
+        let catalog_copy = doc.clone();
         fit_loaded_crop(&mut doc, (frame.width as f32, frame.height as f32));
         self.extent = Extent {
             width: frame.width,
             height: frame.height,
         };
         self.frame = frame;
-        self.saved = doc.clone();
+        self.saved = catalog_copy;
         self.history = History::new(doc);
         self.removals.clear();
         self.ai_alphas.clear();
@@ -1299,7 +1302,8 @@ pub enum AutoApplied {
 
 /// Fits `doc`'s crop to a photo of `extent` (#589): the same `CropParams::fit_to_rotated` every
 /// angle edit runs, applied once when a document is loaded, so an old document whose rotated crop
-/// pokes out of the frame renders right immediately. Only touches a document that has a crop entry
+/// pokes out of the frame renders right immediately (and, being unsaved, is then written back so the
+/// catalog agrees). Only touches a document that has a crop entry
 /// and only when the fit changes it (a document with no rotation, or one that already fits, is
 /// returned byte for byte as it came); the entry's schema version is kept.
 fn fit_loaded_crop(doc: &mut EditDocument, extent: (f32, f32)) {
@@ -1359,9 +1363,10 @@ mod tests {
     }
 
     /// #589: an old document whose rotated crop pokes out of the frame is fitted on load, and the
-    /// fitted document is the saved baseline (opening a photo does not mark it edited).
+    /// catalog's copy stays the baseline, so the fit is saved (export, the grid and the rendered
+    /// preview all read the catalog row and must not keep showing the poking crop).
     #[test]
-    fn loading_an_old_document_fits_its_rotated_crop_without_marking_it_edited() {
+    fn loading_an_old_document_fits_its_rotated_crop_and_marks_it_for_saving() {
         let frame = synthetic_linear_frame();
         let (w, h) = (frame.width as f32, frame.height as f32);
         let poking = CropParams {
@@ -1386,8 +1391,15 @@ mod tests {
             c
         };
         assert_eq!(again, loaded, "and it now fits");
-        assert!(!doc.is_dirty(), "loading is not an edit");
+        assert!(
+            doc.is_dirty(),
+            "the catalog still holds the poking crop: it must be written back"
+        );
         assert_eq!(doc.document(), &doc_with_crop(&loaded));
+        assert!(!doc.can_undo(), "the fit is not an undo step");
+        // Saving makes the catalog agree and the view clean again.
+        doc.mark_saved();
+        assert!(!doc.is_dirty());
     }
 
     #[test]

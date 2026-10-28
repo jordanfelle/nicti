@@ -1593,6 +1593,25 @@ mod crop_regrow_tests {
     }
 
     #[test]
+    fn a_reset_has_no_drag_base_so_it_keeps_the_current_crop() {
+        // Double-click reset sets the angle to 0 without a drag: there is no remembered "level"
+        // crop to regrow to (guessing one could discard crop edits made while rotated), so the
+        // crop stays as it is; dragging back to 0 is what restores it.
+        let src = (600.0, 400.0);
+        let shrunk = CropParams::with_rotation_fitted(CropParams::default(), 10.0, src);
+        let reset = fur::SliderOut {
+            changed: true,
+            reset: true,
+            ..Default::default()
+        };
+        let mut base = None;
+        let after = crop_after_rotation_edit(reset, 0.0, shrunk, &mut base, src).expect("changed");
+        assert_eq!(after.rotation_degrees, 0.0);
+        assert_eq!(after.effective_rect(src), shrunk.effective_rect(src));
+        assert_eq!(base, None);
+    }
+
+    #[test]
     fn a_user_crop_is_the_ceiling_the_drag_regrows_to() {
         let src = (600.0, 400.0);
         let user = CropParams {
