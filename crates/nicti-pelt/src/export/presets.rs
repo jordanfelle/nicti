@@ -120,7 +120,7 @@ impl PresetStore {
         }
         PresetStore {
             user,
-            last: file.last.unwrap_or_default(),
+            last: file.last.unwrap_or_default().without_location(),
         }
     }
 
@@ -128,7 +128,7 @@ impl PresetStore {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let file = PresetFile {
             presets: self.user.clone(),
-            last: Some(self.last.clone()),
+            last: Some(self.last.clone().without_location()),
         };
         let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
@@ -189,6 +189,28 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|e| panic!("{}: {e}", p.name));
         }
+    }
+
+    #[test]
+    fn the_last_used_settings_never_remember_the_gps_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cat.export-presets.json");
+        let mut store = PresetStore::default();
+        store.last.metadata.include_location = true;
+        store.last.dpi = 96;
+        store.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("\"include_location\": true"),
+            "the file must not carry the opt-in: {on_disk}"
+        );
+        let loaded = PresetStore::load(&path);
+        assert_eq!(loaded.last.dpi, 96, "other settings are remembered");
+        assert!(!loaded.last.metadata.include_location);
+        // A file written by hand (or an older build) with it on is also cleared on load.
+        let tampered = on_disk.replace("\"include_location\": false", "\"include_location\": true");
+        std::fs::write(&path, tampered).unwrap();
+        assert!(!PresetStore::load(&path).last.metadata.include_location);
     }
 
     #[test]

@@ -94,7 +94,11 @@ fn degrees(dms: &[(u32, u32); 3]) -> f64 {
 /// A reference letter (`N`/`S`/`E`/`W`), upper-cased, or `None` for anything else.
 fn hemisphere(field: &exif::Field, allowed: [u8; 2]) -> Option<u8> {
     let s = ascii(field)?;
-    let b = s.trim().bytes().next()?.to_ascii_uppercase();
+    // Exactly one letter: "Nope" or "North" is not a reference, whatever its first letter.
+    let [b] = s.trim().as_bytes() else {
+        return None;
+    };
+    let b = b.to_ascii_uppercase();
     allowed.contains(&b).then_some(b)
 }
 
@@ -102,6 +106,14 @@ fn read_gps(exif: &exif::Exif) -> Option<Gps> {
     let get = |tag| exif.get_field(tag, exif::In::PRIMARY);
     let lat = dms(get(exif::Tag::GPSLatitude)?)?;
     let lon = dms(get(exif::Tag::GPSLongitude)?)?;
+    // Minutes and seconds are fractions of a degree/minute: 99' is not a real reading.
+    let normalised = |v: &[(u32, u32); 3]| {
+        let part = |(n, d): (u32, u32)| f64::from(n) / f64::from(d);
+        part(v[1]) < 60.0 && part(v[2]) < 60.0
+    };
+    if !(normalised(&lat) && normalised(&lon)) {
+        return None;
+    }
     let lat_ref = hemisphere(get(exif::Tag::GPSLatitudeRef)?, *b"NS")?;
     let lon_ref = hemisphere(get(exif::Tag::GPSLongitudeRef)?, *b"EW")?;
     // Reject nonsense (and the (0,0) "no fix" some cameras write) rather than publish it.
@@ -244,7 +256,8 @@ pub struct ExifPayload(Metadata);
 
 #[cfg(test)]
 impl ExifPayload {
-    /// A payload with GPS tags, which `build_exif` does not produce yet (tests only).
+    /// A payload carrying GPS tags regardless of the metadata spec (tests only: lets the format
+    /// writers be exercised without going through a source file).
     pub(crate) fn with_gps(mut self) -> Self {
         self.0.set_tag(ExifTag::GPSVersionID(vec![2, 3, 0, 0]));
         self.0.set_tag(ExifTag::GPSLatitudeRef("N".to_string()));
@@ -760,6 +773,64 @@ mod tests {
         let mut zero = gps_tags("N", [10, 0, 0], "E", [20, 0, 0]);
         zero[2] = ExifTag::GPSLatitude(vec![urat(10, 0), urat(0, 1), urat(0, 1)]);
         assert!(source_with_gps(zero).gps.is_none());
+    }
+
+    #[test]
+    fn southern_eastern_fractional_and_below_sea_level_fixes_are_written_exactly() {
+        let mut tags = gps_tags("S", [33, 51, 0], "E", [151, 12, 0]);
+        tags[2] = ExifTag::GPSLatitude(vec![urat(33, 1), urat(51, 1), urat(1234, 100)]);
+        tags[4] = ExifTag::GPSLongitude(vec![urat(151, 1), urat(12, 1), urat(3456, 100)]);
+        tags[5] = ExifTag::GPSAltitudeRef(vec![1]);
+        tags[6] = ExifTag::GPSAltitude(vec![urat(250, 10)]);
+        let exif = source_with_gps(tags);
+        let gps = exif.gps.clone().expect("valid");
+        assert_eq!((gps.lat_ref, gps.lon_ref), (b'S', b'E'));
+        assert_eq!(gps.lat[2], (1234, 100));
+        assert_eq!(
+            gps.altitude,
+            Some(((250, 10), true)),
+            "below sea level is kept"
+        );
+        let keep = MetadataSpec {
+            policy: MetadataPolicy::All,
+            include_location: true,
+            ..MetadataSpec::default()
+        };
+        let src = SourceMetadata { exif, ..source() };
+        let payload = build_exif(&ctx(&keep, &src, ExportSpace::Srgb)).unwrap();
+        let out = write_exif_jpeg(&tiny_jpeg(), &payload).unwrap();
+        let back = read_exif(&out, FileExtension::JPEG).unwrap();
+        let dump = |p: ExifTag| {
+            back.get_tag(&p)
+                .next()
+                .map(|t| format!("{t:?}"))
+                .unwrap_or_default()
+        };
+        assert!(dump(ExifTag::GPSLatitudeRef(String::new())).contains('S'));
+        assert!(dump(ExifTag::GPSLongitudeRef(String::new())).contains('E'));
+        // The seconds keep their fractions (12.34", 34.56"), not truncated to whole numbers.
+        assert!(dump(ExifTag::GPSLatitude(vec![])).contains("1234"));
+        assert!(dump(ExifTag::GPSLongitude(vec![])).contains("3456"));
+        assert!(dump(ExifTag::GPSAltitudeRef(vec![])).contains('1'));
+        assert!(dump(ExifTag::GPSAltitude(vec![])).contains("250"));
+    }
+
+    #[test]
+    fn denormalised_minutes_seconds_and_wordy_references_are_rejected() {
+        for bad in [
+            gps_tags("N", [10, 99, 0], "E", [20, 0, 0]),
+            gps_tags("N", [10, 0, 99], "E", [20, 0, 0]),
+            gps_tags("N", [10, 0, 0], "E", [20, 60, 0]),
+            gps_tags("Nope", [10, 0, 0], "E", [20, 0, 0]),
+            gps_tags("N", [10, 0, 0], "West", [20, 0, 0]),
+        ] {
+            assert!(source_with_gps(bad).gps.is_none());
+        }
+        assert!(
+            source_with_gps(gps_tags("N", [10, 59, 59], "E", [20, 0, 0]))
+                .gps
+                .is_some()
+        );
     }
 
     #[test]

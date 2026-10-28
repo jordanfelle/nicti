@@ -155,7 +155,8 @@ impl ExportUi {
         self.dialog = Some(Dialog {
             ids,
             scope,
-            spec: self.presets.last.clone(),
+            // The GPS opt-in is per export, never remembered: reopen with location stripped.
+            spec: self.presets.last.clone().without_location(),
             samples,
             preset_name: String::new(),
             selected_preset: None,

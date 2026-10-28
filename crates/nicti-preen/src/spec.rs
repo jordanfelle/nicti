@@ -107,6 +107,13 @@ impl Default for ExportSpec {
 }
 
 impl ExportSpec {
+    /// The same settings with the GPS opt-in turned off. "Remember my last settings" must not
+    /// also remember that photos' positions were published.
+    pub fn without_location(mut self) -> Self {
+        self.metadata.include_location = false;
+        self
+    }
+
     /// Checks every field's range and parses both templates. `Err` names the first problem.
     pub fn validate(&self) -> Result<(), SpecError> {
         if let FormatSpec::Jpeg { quality, .. } = self.format {
