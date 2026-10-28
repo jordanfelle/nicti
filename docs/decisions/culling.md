@@ -110,7 +110,7 @@ Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX bui
   (`set_meta` / `set_rating` of 1000+ rows) drops `trg_facet_asset_update` inside its transaction and applies the
   exact facet delta once (`with_facet_delta`): the per-(volume, model, rating) counts of the touched ids are read
   before and after (read-only, chunked `IN` lists) and the difference is added to `facet_counts` (empty buckets swept),
-  then the trigger is recreated from its own `sqlite_master` definition (no second copy of its SQL to drift). SQLite
+  (ids are sorted and deduplicated first: `IN` counts a row once only within one chunk, and a duplicate id in two chunks doubled its delta, caught by the duplicate-id tests), then the trigger is recreated from its own `sqlite_master` definition (no second copy of its SQL to drift). SQLite
   DDL is transactional, so a failed batch rolls the trigger back; small batches keep the trigger. Measured (1M rows,
   one reference run, `tests/scale.rs`, niced): select-all rating change 22.4 s -> 11.1 s, longest single 20k
   transaction (the mutex hold) 759 ms -> 255 ms; a no-op rewrite 1.75 s -> 2.11 s (the read-only count queries).

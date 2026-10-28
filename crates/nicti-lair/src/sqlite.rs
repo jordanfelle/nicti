@@ -266,8 +266,9 @@ struct SmartRule {
 /// against an unusually large batch can't hit the limit (found by CodeRabbit's review).
 const MAX_IDS_PER_STATEMENT: usize = 500;
 
-/// Per-(volume, model, rating) asset counts for `ids` (sorted, no duplicates). Read-only: chunked
-/// `IN` lists, aggregated here, so measuring the delta writes nothing.
+/// Per-(volume, model, rating) asset counts for `ids`. Read-only: chunked `IN` lists, aggregated
+/// here, so measuring the delta writes nothing. `ids` must not repeat an id (a row counts once per
+/// chunk it appears in); an id that is not an asset counts nothing.
 fn facet_group_counts(
     tx: &rusqlite::Transaction<'_>,
     ids: &[i64],
@@ -300,8 +301,10 @@ fn facet_group_counts(
 ///
 /// The delta is the difference between the per-(volume, model, rating) counts of `ids` before and
 /// after `body`, so it is right whatever `body` changed, unchanged rows contribute nothing, and
-/// duplicate ids are counted once. Measuring it is read-only, so a rewrite that changes nothing still
-/// writes nothing. All of it happens inside `tx`: SQLite DDL is transactional, so
+/// duplicate ids are counted once (they are deduplicated first). Measuring it is read-only, so a rewrite that changes
+/// nothing still writes nothing. A catalog with no `trg_facet_asset_update` (nothing maintains its
+/// counts) is left as it is: no delta is invented. If another trigger on `asset` ever also reacts to
+/// `rating`, it must be dropped and compensated here too. All of it happens inside `tx`: SQLite DDL is transactional, so
 /// if `body` or anything after it fails (or the transaction is dropped) the rollback puts the
 /// trigger back, and the trigger is recreated from the definition read out of `sqlite_master`, never
 /// from a second copy of its SQL that could drift from the migrations. The semantics match the
@@ -311,7 +314,9 @@ fn with_facet_delta<T>(
     ids: &[i64],
     body: impl FnOnce() -> Result<T, CatalogError>,
 ) -> Result<T, CatalogError> {
-    let mut ids: Vec<i64> = ids.to_vec();
+    // Sorted and deduplicated: `IN` counts a row once only *within* one chunk, so an id listed twice in
+    // different chunks would be counted twice in `before`/`after` and double its share of the delta.
+    let mut ids = ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
     let before = facet_group_counts(tx, &ids)?;
@@ -386,6 +391,7 @@ fn set_column_for_assets(
         Ok(())
     };
     // A bulk rating change moves the facet counts in one aggregated step rather than per row (#580).
+    // Only `rating` feeds `trg_facet_asset_update`; flag/label rewrites never touch it.
     if column == "rating" && asset_ids.len() >= BULK_META_ROWS {
         with_facet_delta(&tx, asset_ids, update)?;
     } else {
@@ -4543,13 +4549,14 @@ mod tests {
             .collect();
         let ids: Vec<i64> = (0..n)
             .map(|i| {
-                let model = if i % 3 == 0 { "Z8" } else { "D7500" };
+                // Z8, D7500 and no model at all (the NULL bucket is '' in the counts).
+                let model = match i % 7 {
+                    0 => None,
+                    n if n % 3 == 0 => Some("Z8"),
+                    _ => Some("D7500"),
+                };
                 store
-                    .insert_asset(
-                        roots[i % 2],
-                        &new_asset(&format!("{i}.NEF"), Some(model)),
-                        None,
-                    )
+                    .insert_asset(roots[i % 2], &new_asset(&format!("{i}.NEF"), model), None)
                     .unwrap()
             })
             .collect();
@@ -4642,6 +4649,78 @@ mod tests {
         let good: Vec<(i64, AssetMeta)> = ids.iter().map(|id| (*id, ok(Some(5)))).collect();
         store.set_meta(&good).unwrap();
         assert_eq!(facet_table(&store), facet_truth(&store));
+    }
+
+    #[test]
+    fn a_catalog_without_the_facet_trigger_is_left_exactly_as_it_is() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 20);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER trg_facet_asset_update")
+            .unwrap();
+        let before = facet_table(&store);
+        store.set_rating(&ids, Some(4)).unwrap();
+        // Nothing maintains the counts here, so none may be invented, and the trigger is not
+        // resurrected by the bulk path.
+        assert_eq!(facet_table(&store), before);
+        assert!(!facet_trigger_exists(&store));
+        let rated: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM asset WHERE rating = 4", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            rated as usize,
+            ids.len(),
+            "the ratings themselves were written"
+        );
+    }
+
+    #[test]
+    fn a_stale_zero_row_in_a_touched_bucket_ends_up_exact() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 20);
+        // A leftover zero-count bucket for exactly the bucket the batch is about to fill.
+        let (vol, model): (i64, String) = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT r.volume_id, COALESCE(a.model, '') FROM asset a JOIN root r ON r.id = a.root_id WHERE a.id = ?1",
+                [ids[1]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO facet_counts (volume_id, model, rating, cnt) VALUES (?1, ?2, 4, 0)",
+                params![vol, model],
+            )
+            .unwrap();
+        store.set_rating(&ids, Some(4)).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+    }
+
+    #[test]
+    fn set_rating_with_duplicate_ids_counts_each_asset_once_and_a_bad_value_rolls_back() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 20);
+        let mut dup = ids.clone();
+        dup.extend_from_slice(&ids[..500]);
+        dup.push(9_999_999); // not an asset
+        store.set_rating(&dup, Some(2)).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+
+        let before = facet_table(&store);
+        assert!(store.set_rating(&dup, Some(99)).is_err(), "outside -1..=5");
+        assert_eq!(facet_table(&store), before, "rolled back");
+        assert!(facet_trigger_exists(&store), "and the trigger is back");
     }
 
     #[test]
