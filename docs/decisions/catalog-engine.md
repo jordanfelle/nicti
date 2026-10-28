@@ -245,6 +245,20 @@ card with DCIM device detection and in-place batch rename (deferred: Nicti inges
 product decision; recommended shape is copy-only import reusing `Carry`'s stream-hash-reread, and a rename-in-place
 that decides collisions by file identity, since the file itself is the "collision").
 
+- **2026-10-28 (#548), copy-only import from a card: decided go and the engine built.** `nicti_lair::offering`
+  (`list_card_files`, `offer_file`) and `nicti_lair::cards` (`scan_cards`, `default_mount_roots`). Each file is
+  streamed once while hashed with BLAKE3 into a temp name beside the final one (`create_new`, so a planted symlink is
+  never written through), `sync_all`'d, **re-read from the destination disk and re-hashed**, then given its final name by
+  claiming it with `create_new` (so nothing is ever overwritten): identical content already there is reported as
+  `AlreadyThere`, different content gets a `-N` suffix before the extension. The card is never written to or deleted from;
+  its symlinks are not followed or listed; `dest_rel` must be plain safe components and the real (canonicalised) folder
+  must stay under the destination root, which also stops a symlinked folder already in the library redirecting a copy.
+  `Carry`'s copy-verify was not extracted (it is a journal-bound state machine); the per-file version is new and
+  independently tested (escape, overwrite, symlink, cancel and read-back cases, mutation-checked). `cards` is pure over a
+  list of mount roots (DCIM matched case-insensitively, a symlinked or file-typed DCIM is not a card); the cached
+  coalesced rescan, the naming-template rendering, ingest of the copies and the UI are #602. Not yet run on a real
+  Windows volume or FAT/exFAT card.
+
 ## #441: LightCraft small utilities (ADR-0441)
 
 Research outcome from the LightCraft audit (#424), read at `23f5480`; nothing lifted. Two build slices: #558 (a blocking catalog-open failure window replacing the single red label, `CatalogOpenState::Error` in `app.rs`, since removed by #591 once the launch gate shipped; the in-memory "Continue Without Saving" exit is dropped because Nicti has no in-memory catalog) and #557 (keep the crop inside the rotated image; `nicti_tapetum::geometry` clamps the angle only and sampling clamps to the edge). Declined: container walkers (JPEG APP1 is already in `nicti-scent`; IPTC comes from `AgLibraryIPTC` on LRC import), smart-album rule editor (smart collections are a saved typed `hunt::Filter`; nesting waits on a real LRC example in #155), availability cache (#332 was a blocked drive probe, fixed with a stepped probe and a hung-probe test; #327 was a long lock hold, fixed by a Pounce job; neither is an existence problem. The grid module makes no filesystem calls; other views were not traced frame by frame), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (the Nikon MakerNote walk is `nicti-cornea`, AF areas are in `spikes/squint`, Z8 only; `nicti-iris/nikon.rs` is the lens-correction blob; LibRaw for the rest).

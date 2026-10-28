@@ -1,6 +1,6 @@
 # ADR-0436: Import-time rename, date folders and DCIM device detection
 
-**Status:** Proposed (no-go on lifting code; go on two slices; import-by-copy and in-place rename deferred pending a product call)
+**Status:** Proposed (no-go on lifting code; go on two slices; copy-only import from a card decided go on 2026-10-28 (#548), engine landed, UI wiring in #602; in-place rename still deferred)
 **Ticket:** #436
 **Part of:** #424
 **Related:** #342, #391, #392, #57, ADR-0026, ADR-0057
@@ -124,7 +124,15 @@ since a rename-in-place has the file itself as the "collision".
   1. `{Num}` token (falls back to empty when the stem has no trailing digits). **XS**
   2. Lens/ISO extraction in `scruff::read_exif_fields`, columns, migration, a backfill pass, `AssetFacts` fields,
      tokens, token help. **M**
-- **Needs an operator decision before any ticket:** copy-only import from card (+ device list), then in-place
+- **Decided 2026-10-28 (#548): copy-only import from a card + DCIM device list, built.** Engine landed as
+  `nicti_lair::offering` (`list_card_files`, `offer_file`: BLAKE3 while streaming, fsync, re-read from the
+  destination disk and re-hash, `create_new` name claim so nothing is overwritten, `-N` suffix on a name clash,
+  identical content reported as already there, card symlinks refused, `dest_rel` validated and the real folder
+  checked to stay under the root, cancel leaves no temp) and `nicti_lair::cards` (`scan_cards`, `default_mount_roots`).
+  Nicti never writes to or deletes from the card. The per-file copy-verify was written fresh rather than extracted from
+  `Carry` (whose state machine is tied to the `root_move` journal). UI, the naming-template call, the cached rescan job
+  and ingest are #602. In-place rename stays a separate later ticket.
+- **(Superseded for copy-only import) Needs an operator decision before any ticket:** copy-only import from card (+ device list), then in-place
   rename. #342's folder picker is a prerequisite for the import destination UI.
 - **Not taken:** LightCraft code, its hard-link placement, its source-deleting move, its undoable `SetFile` op.
 - **Nothing in the archive-drive work (#391/#392) depends on this.**

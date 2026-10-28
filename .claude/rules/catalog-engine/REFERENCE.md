@@ -58,7 +58,7 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 ## #436: import rename / date folders / devices (ADR-0436)
 
-- Research outcome, no code lifted. Date folders already work (`{Date:YYYY}/{Date:MM}` subfolder template, `naming.rs`). Go: `{Num}` (from `stem`), then `{Lens}`/`{ISO}` (need scruff EXIF extraction, columns and an explicit backfill: ingest skips unchanged files). Import-by-copy from a card (+ DCIM device list) and in-place rename are deferred pending a product call (Nicti ingests in place); if built, copy-only reusing `Carry`'s stream-hash-reread, and rename must use file identity not case-folded names. Detail: `docs/decisions/catalog-engine.md`.
+- Research outcome, no code lifted. Date folders already work (`{Date:YYYY}/{Date:MM}` subfolder template, `naming.rs`). Go: `{Num}` (from `stem`), then `{Lens}`/`{ISO}` (need scruff EXIF extraction, columns and an explicit backfill: ingest skips unchanged files). Copy-only import from a card (+ DCIM device list) was decided go (#548): engine in `nicti-lair/src/offering.rs` + `cards.rs` (verified copy, never overwrites, never touches the card; UI/job wiring #602). In-place rename stays deferred and must use file identity not case-folded names. Detail: `docs/decisions/catalog-engine.md`.
 
 ## #441: LightCraft small utilities (ADR-0441)
 
