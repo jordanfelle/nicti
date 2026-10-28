@@ -259,9 +259,14 @@ impl ExifPayload {
     /// A payload carrying GPS tags regardless of the metadata spec (tests only: lets the format
     /// writers be exercised without going through a source file).
     pub(crate) fn with_gps(mut self) -> Self {
+        let r = |v: [u32; 3]| v.iter().map(|&n| urat(n, 1)).collect::<Vec<_>>();
         self.0.set_tag(ExifTag::GPSVersionID(vec![2, 3, 0, 0]));
         self.0.set_tag(ExifTag::GPSLatitudeRef("N".to_string()));
+        self.0.set_tag(ExifTag::GPSLatitude(r([40, 26, 46])));
         self.0.set_tag(ExifTag::GPSLongitudeRef("W".to_string()));
+        self.0.set_tag(ExifTag::GPSLongitude(r([79, 58, 56])));
+        self.0.set_tag(ExifTag::GPSAltitudeRef(vec![0]));
+        self.0.set_tag(ExifTag::GPSAltitude(vec![urat(1523, 10)]));
         self
     }
 }
