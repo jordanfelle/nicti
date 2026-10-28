@@ -493,7 +493,7 @@ impl Exporter for TiffExporter {
 
     fn embeds(&self) -> EmbedSupport {
         EmbedSupport {
-            exif: false,
+            exif: true,
             xmp: true,
             icc: true,
             dpi: true,
@@ -506,7 +506,8 @@ impl Exporter for TiffExporter {
         fmt: &FormatSpec,
         embed: &Embed<'_>,
     ) -> Result<Vec<u8>, ExportError> {
-        use tiff::encoder::{colortype, Compression, DeflateLevel, Rational, TiffEncoder};
+        use crate::tiff_exif::{parse_exif_block, write_entry};
+        use tiff::encoder::{colortype, Compression, DeflateLevel, Ifd, Rational, TiffEncoder};
         use tiff::tags::{ResolutionUnit, Tag};
 
         let FormatSpec::Tiff {
@@ -527,6 +528,33 @@ impl Exporter for TiffExporter {
             .map_err(|e| encode_err("TIFF init", e))?
             .with_compression(compression);
 
+        // The Exif and GPS sub-IFDs are written first (they are not part of the image sequence);
+        // the image directory then points at them.
+        let exif = match embed.exif {
+            Some(payload) => parse_exif_block(&exif_tiff_bytes(payload)?),
+            None => Default::default(),
+        };
+        let mut sub_ifd =
+            |entries: &[crate::tiff_exif::Entry]| -> Result<Option<Ifd>, ExportError> {
+                if entries.is_empty() {
+                    return Ok(None);
+                }
+                let mut dir = encoder
+                    .extra_directory()
+                    .map_err(|e| encode_err("TIFF EXIF directory", e))?;
+                for e in entries {
+                    write_entry(&mut dir, e).map_err(|e| encode_err("TIFF EXIF tag", e))?;
+                }
+                let at = dir
+                    .finish_with_offsets()
+                    .map_err(|e| encode_err("TIFF EXIF directory", e))?;
+                let at = u32::try_from(at.pointer.0)
+                    .map_err(|_| encode_err("TIFF EXIF directory", "offset past 4 GB"))?;
+                Ok(Some(Ifd(at)))
+            };
+        let exif_ifd = sub_ifd(&exif.exif)?;
+        let gps_ifd = sub_ifd(&exif.gps)?;
+
         macro_rules! write_image {
             ($color:ty, $data:expr) => {{
                 let mut image = encoder
@@ -544,6 +572,21 @@ impl Exporter for TiffExporter {
                         .encoder()
                         .write_tag(Tag::Unknown(TIFF_TAG_XMP), xmp.as_bytes())
                         .map_err(|e| encode_err("TIFF XMP tag", e))?;
+                }
+                for e in &exif.ifd0 {
+                    write_entry(image.encoder(), e).map_err(|e| encode_err("TIFF EXIF tag", e))?;
+                }
+                if let Some(ifd) = &exif_ifd {
+                    image
+                        .encoder()
+                        .write_tag(Tag::ExifDirectory, Ifd(ifd.0))
+                        .map_err(|e| encode_err("TIFF EXIF pointer", e))?;
+                }
+                if let Some(ifd) = &gps_ifd {
+                    image
+                        .encoder()
+                        .write_tag(Tag::GpsDirectory, Ifd(ifd.0))
+                        .map_err(|e| encode_err("TIFF GPS pointer", e))?;
                 }
                 image
                     .write_data($data)
@@ -677,7 +720,7 @@ mod tests {
         }
         assert!(!reg.get(JPEG_ID).unwrap().supports_depth(BitDepth::Sixteen));
         assert!(reg.get(PNG_ID).unwrap().supports_depth(BitDepth::Sixteen));
-        assert!(!reg.get(TIFF_ID).unwrap().embeds().exif);
+        assert!(reg.get(TIFF_ID).unwrap().embeds().exif);
         assert_eq!(reg.get(AVIF_ID).is_some(), cfg!(feature = "avif"));
     }
 
@@ -945,6 +988,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tiff_carries_exif_in_its_ifd0_and_exif_sub_ifd() {
+        use tiff::decoder::{ifd::Value, Decoder};
+        use tiff::tags::{IfdPointer, Tag};
+        let (w, h) = (16u32, 8u32);
+        let f = fixture(OutputSpace::Srgb, w, h);
+        let px = gradient8(w, h);
+        let img = OutputImage {
+            width: w,
+            height: h,
+            pixels: &px,
+        };
+        let out = TiffExporter
+            .encode(
+                &img,
+                &FormatSpec::Tiff {
+                    depth: BitDepth::Eight,
+                    compression: TiffCompression::None,
+                },
+                &embed(&f, 300),
+            )
+            .unwrap();
+        let mut dec = Decoder::new(Cursor::new(&out)).unwrap();
+        let text = |v: Value| match v {
+            Value::Ascii(s) => s,
+            other => panic!("not ascii: {other:?}"),
+        };
+        assert_eq!(text(dec.get_tag(Tag::Unknown(271)).unwrap()), "NIKON");
+        assert_eq!(text(dec.get_tag(Tag::Unknown(315)).unwrap()), "Jo");
+        assert_eq!(text(dec.get_tag(Tag::Unknown(33432)).unwrap()), "(c) Jo");
+        let ptr = match dec.get_tag(Tag::ExifDirectory).unwrap() {
+            Value::Ifd(o) => u64::from(o),
+            other => panic!("not an IFD pointer: {other:?}"),
+        };
+        let dir = dec.read_directory(IfdPointer(ptr)).unwrap();
+        let mut tags = dec.read_directory_tags(&dir);
+        assert!(
+            tags.find_tag(Tag::Unknown(0x9000)).unwrap().is_some(),
+            "ExifVersion"
+        );
+        assert!(
+            tags.find_tag(Tag::Unknown(0xA000)).unwrap().is_some(),
+            "FlashpixVersion"
+        );
+        // Pixel size lives in the image directory, not the Exif one (TIFF rule).
+        assert!(tags.find_tag(Tag::Unknown(0xA002)).unwrap().is_none());
+        // And no EXIF at all under MetadataPolicy::None (no payload).
+        let bare = Embed {
+            exif: None,
+            ..embed(&f, 300)
+        };
+        let out = TiffExporter
+            .encode(
+                &img,
+                &FormatSpec::Tiff {
+                    depth: BitDepth::Eight,
+                    compression: TiffCompression::None,
+                },
+                &bare,
+            )
+            .unwrap();
+        let mut dec = Decoder::new(Cursor::new(&out)).unwrap();
+        assert!(dec.find_tag(Tag::ExifDirectory).unwrap().is_none());
+        assert!(dec.find_tag(Tag::Unknown(271)).unwrap().is_none());
     }
 
     #[test]

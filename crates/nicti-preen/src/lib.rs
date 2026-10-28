@@ -27,6 +27,7 @@ pub mod orient;
 pub mod plan;
 pub mod resize;
 pub mod spec;
+pub mod tiff_exif;
 pub mod watermark;
 pub mod write;
 
