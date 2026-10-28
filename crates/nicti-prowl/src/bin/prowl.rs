@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use nicti_prowl::manifest::{Manifest, Scope};
+use nicti_prowl::materialize::{self, Mode};
 use nicti_prowl::refset;
 
 #[derive(Parser)]
@@ -25,6 +26,32 @@ enum Command {
     Verify(VerifyArgs),
     /// Pick `n` reference files from one bucket.
     Select(SelectArgs),
+    /// Rebuild a ref-10k copy from a live photo library by matching files on sha256 (#136).
+    Materialize(MaterializeArgs),
+}
+
+#[derive(Args)]
+struct MaterializeArgs {
+    #[arg(long, default_value = "docs/ref-10k-manifest.csv")]
+    manifest: PathBuf,
+    /// The photo library to search (read-only; symlinks are not followed).
+    #[arg(long)]
+    source: PathBuf,
+    /// Where to put `ref-NNNNN.*`. Falls back to the NICTI_REF10K env var.
+    #[arg(long)]
+    dest: Option<PathBuf>,
+    /// Only this manifest bucket (e.g. "z8").
+    #[arg(long)]
+    bucket: Option<String>,
+    /// Only the first N matching manifest entries.
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Hard-link instead of copying (same volume only).
+    #[arg(long)]
+    hardlink: bool,
+    /// Report what would be placed without writing anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -68,6 +95,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Verify(args) => run_verify(args),
         Command::Select(args) => run_select(args),
+        Command::Materialize(args) => run_materialize(args),
     }
 }
 
@@ -128,4 +156,47 @@ fn run_select(args: SelectArgs) -> anyhow::Result<()> {
         println!("{}", entry.id);
     }
     Ok(())
+}
+
+fn run_materialize(args: MaterializeArgs) -> anyhow::Result<()> {
+    let manifest = Manifest::load(&args.manifest)?;
+    let dest = refset::resolve_root(args.dest.as_deref())?;
+    let report = materialize::materialize(
+        &manifest,
+        &materialize::Options {
+            source: &args.source,
+            dest: &dest,
+            mode: if args.hardlink {
+                Mode::Hardlink
+            } else {
+                Mode::Copy
+            },
+            bucket: args.bucket.as_deref(),
+            limit: args.limit,
+            dry_run: args.dry_run,
+        },
+    )?;
+    println!(
+        "{} placed={} already_present={} not_found={} failed={}",
+        if args.dry_run {
+            "dry-run"
+        } else {
+            "materialized"
+        },
+        report.placed.len(),
+        report.already_present.len(),
+        report.not_found.len(),
+        report.failed.len(),
+    );
+    for id in &report.not_found {
+        eprintln!("NOT FOUND {id}");
+    }
+    for (id, why) in &report.failed {
+        eprintln!("FAILED {id}: {why}");
+    }
+    if report.is_complete() {
+        Ok(())
+    } else {
+        anyhow::bail!("ref-10k is incomplete: the source library is missing some manifest files")
+    }
 }

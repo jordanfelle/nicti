@@ -193,7 +193,7 @@ fn check_one(root: &Path, entry: &Entry) -> CheckResult {
     }
 }
 
-fn hash_file(mut file: File) -> io::Result<String> {
+pub(crate) fn hash_file(mut file: File) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {

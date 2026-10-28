@@ -82,7 +82,21 @@ explicitly **not** used to judge any target in the table above.
   contain only placeholder files, nothing synced yet.
 - D3400 coverage is DNG-only (Lightroom-converted), not native NEF — see table above.
 
-**Freeze locations** (both are exact byte-identical copies, verified by SHA-256 at copy time):
+**Per-machine frozen copies are retired (#136).** The committed manifest below pins every file by
+SHA-256 and size, so any machine with the live photo library can rebuild a verified ref-10k itself:
+
+```
+prowl materialize --source <photo library> --dest <ref-10k root> [--bucket z8] [--limit N] [--hardlink] [--dry-run]
+prowl verify --root <ref-10k root>
+```
+
+`materialize` matches by content (folder layout and file names are irrelevant), renames each match
+to its manifest id, re-hashes every copy before it gets its final name, skips files already present
+and verified (so it is resumable), and exits non-zero if the library is missing manifest files.
+Nothing shared or cloud-hosted is needed; a machine that lacks some source files (e.g. no D3400
+DNGs) simply reports them as `NOT FOUND` and can run the buckets it does have via `--bucket`.
+
+**Historical freeze locations** (both were exact byte-identical copies, verified by SHA-256 at copy time; the model is retired, see above):
 - `<REF10K_ROOT>` — NVMe, for the "from NVMe" ingest/loupe targets.
 - `<REF10K_ROOT_HDD>` — HDD, for the "HDD allowance" targets.
 
