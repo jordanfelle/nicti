@@ -203,6 +203,34 @@ mod tests {
     }
 
     #[test]
+    fn a_wake_that_lands_in_the_middle_of_a_pass_still_gets_exactly_one_more() {
+        // A worker posts data while the UI thread is partway through a pass: the pass in flight may
+        // already have read its state, so one further pass must follow, and no more than one.
+        let ctx = egui::Context::default();
+        let pending = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&pending);
+        ctx.set_request_repaint_callback(move |_| *flag.lock().unwrap() = true);
+        let pass = |during: &dyn Fn()| {
+            ctx.begin_pass(egui::RawInput::default());
+            during();
+            ctx.end_pass().textures_delta.clear();
+        };
+        for _ in 0..4 {
+            pass(&|| {}); // settle past start-up
+        }
+        *pending.lock().unwrap() = false;
+
+        pass(&|| request(&ctx, Wake::Pounce));
+        let mut extra = 0;
+        while std::mem::take(&mut *pending.lock().unwrap()) {
+            pass(&|| {});
+            extra += 1;
+            assert!(extra < 8, "a single wake kept repainting");
+        }
+        assert_eq!(extra, 1, "one pass after the one it landed in");
+    }
+
+    #[test]
     fn the_wake_is_still_prompt_and_still_reaches_egui() {
         // A wake must still ask for a repaint (no silent drop), and soon.
         assert!(WAKE_DELAY > Duration::ZERO && WAKE_DELAY <= Duration::from_millis(5));
