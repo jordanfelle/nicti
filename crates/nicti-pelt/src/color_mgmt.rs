@@ -32,6 +32,8 @@ pub struct ColorManagement {
     /// Last-seen monitor of the window, to detect a move to another monitor.
     monitor: Option<isize>,
     soft_proof: bool,
+    /// Black-point compensation for a LUT-based monitor profile (#320). On by default, as in LRC.
+    black_point: bool,
     proof_space: OutputSpace,
     gamut_warn: bool,
     /// The transform must be rebuilt and re-pushed to the GPU.
@@ -58,6 +60,7 @@ impl ColorManagement {
             display_note: None,
             monitor: None,
             soft_proof: false,
+            black_point: true,
             proof_space: OutputSpace::Srgb,
             gamut_warn: false,
             dirty: true,
@@ -83,10 +86,13 @@ impl ColorManagement {
                 // A hostile or corrupt monitor profile must degrade to sRGB, not take down the UI
                 // thread: `moxcms` indexes/unwraps on some malformed inputs.
                 let display = self.display.clone();
-                let k = std::panic::catch_unwind(move || DisplayTransform::build(&display, None))
-                    .map_err(|_| "the color engine crashed on this profile".to_string())?
-                    .map_err(|e| e.to_string())?
-                    .kind;
+                let bpc = self.black_point;
+                let k = std::panic::catch_unwind(move || {
+                    DisplayTransform::build_with(&display, None, bpc)
+                })
+                .map_err(|_| "the color engine crashed on this profile".to_string())?
+                .map_err(|e| e.to_string())?
+                .kind;
                 self.display_kind = Some(k.clone());
                 k
             }
@@ -134,6 +140,18 @@ impl ColorManagement {
                     .changed();
             });
             ui.separator();
+            if ui
+                .checkbox(&mut self.black_point, "Black point compensation")
+                .on_hover_text(
+                    "Keeps shadow detail on a monitor profile with a lifted black (LUT-based \
+                     profiles only; sRGB and matrix profiles are unaffected).",
+                )
+                .changed()
+            {
+                // The baked LUT depends on it: rebuild, not just re-push.
+                self.display_kind = None;
+                changed = true;
+            }
             let profile_label = match &self.display {
                 DisplayProfile::Space(s) => format!("Display: {} (default)", s.name()),
                 DisplayProfile::Icc(_) => "Display: monitor ICC profile".to_string(),
@@ -255,6 +273,11 @@ mod tests {
         cm.adopt_profile(DisplayProfile::Space(OutputSpace::AdobeRgb));
         assert_eq!(cm.generation(), 2);
         assert!(!Arc::ptr_eq(&source, &cm.source_transforms()));
+    }
+
+    #[test]
+    fn black_point_compensation_is_on_by_default() {
+        assert!(ColorManagement::new().black_point);
     }
 
     #[test]
