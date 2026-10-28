@@ -286,8 +286,11 @@ mod tests {
             authorize_path(&root, &dir.path().join("refs_evil")),
             Err(Denied::PathEscapes)
         );
-        // Creating a file whose name is `..` is refused.
-        assert!(authorize_path(&root, Path::new("newdir/..")).is_err());
+        // A trailing `..` is refused, or (Windows resolves it lexically) lands on the root itself.
+        match authorize_path(&root, Path::new("newdir/..")) {
+            Err(_) => {}
+            Ok(p) => assert_eq!(p, root.canonicalize().unwrap()),
+        }
     }
 
     #[cfg(unix)]

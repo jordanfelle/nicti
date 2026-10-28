@@ -311,7 +311,20 @@ impl SafeMode {
     pub fn is_on(&self) -> bool {
         match fs::metadata(&self.path) {
             Ok(_) => true,
-            Err(e) => e.kind() != io::ErrorKind::NotFound,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // Windows reports a path *through a file* as NotFound too, so absence only counts
+                // as off when the nearest existing ancestor is a directory.
+                let mut dir = self.path.parent();
+                while let Some(d) = dir {
+                    match fs::metadata(d) {
+                        Ok(m) => return !m.is_dir(),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => dir = d.parent(),
+                        Err(_) => return true,
+                    }
+                }
+                false
+            }
+            Err(_) => true,
         }
     }
 
