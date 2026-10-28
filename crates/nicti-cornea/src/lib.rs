@@ -231,6 +231,7 @@ pub fn is_supported_raw(path: &Path) -> bool {
 /// The container's IFD0 Orientation as the EXIF value 1-8, or `0` when the file has none, is not a
 /// TIFF-family container, or holds an out-of-range value. Never an error: a photo whose
 /// orientation cannot be read is simply shown as stored.
+#[cfg(any(feature = "libraw", test))]
 fn container_orientation(data: &[u8]) -> u8 {
     embedded::Walker::new(embedded::SliceSource::new(data))
         .ok()
