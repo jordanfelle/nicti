@@ -692,16 +692,35 @@ mod tests {
 
     #[test]
     fn dropping_the_sampler_stops_the_background_thread_promptly() {
+        // The property: dropping never waits out `min_interval`. It is checked against a gap wide
+        // enough that scheduling jitter cannot reach it: the thread's first sample (a sysinfo
+        // refresh) runs before it ever looks at `stop`, and on a loaded Windows CI runner that
+        // alone exceeded the old 500 ms bound (observed flake). A regression back to one
+        // `sleep(min_interval)` takes the full 120 s, far over the 30 s bound.
+        let min_interval = Duration::from_secs(120);
         let sampler = TelemetrySampler::spawn(
             Box::new(UnavailableVramSource),
             Box::new(UnavailableLoadSource),
-            Duration::from_secs(3600),
+            min_interval,
             || {},
         );
+        // Drop only once the thread has taken its first sample, i.e. is inside the sleep: dropping
+        // before that lets it see `stop` at the top of the loop and exit without ever sleeping,
+        // which proves nothing about the chunked wait.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while sampler.sample().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the sampler never took a first sample"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         let start = std::time::Instant::now();
         drop(sampler);
-        // The sampler's own poll chunk is 50ms; dropping should never wait out the (here,
-        // 1-hour) min_interval.
-        assert!(start.elapsed() < Duration::from_millis(500));
+        let took = start.elapsed();
+        assert!(
+            took < Duration::from_secs(30),
+            "drop took {took:?}, it must not wait out the {min_interval:?} interval"
+        );
     }
 }
