@@ -245,6 +245,27 @@ card with DCIM device detection and in-place batch rename (deferred: Nicti inges
 product decision; recommended shape is copy-only import reusing `Carry`'s stream-hash-reread, and a rename-in-place
 that decides collisions by file identity, since the file itself is the "collision").
 
+- **2026-10-28 (#548), copy-only import from a card: decided go and the engine built.** `nicti_lair::offering`
+  (`list_card_files`, `offer_file`) and `nicti_lair::cards` (`scan_cards`, `default_mount_roots`). Each file is
+  streamed once while hashed with BLAKE3 into a uniquely named temp file beside the final one (`create_new`),
+  refused if the card file changed size during the read, `sync_all`'d, re-opened and re-hashed, then published
+  without ever overwriting: a hard link of the finished temp (atomic, no empty or partial file ever visible), or on
+  volumes without hard links a `create_new` claim plus rename. Identical content already there (regular file, same
+  size, same hash) is `AlreadyThere`; different content gets a `-N` suffix before the extension. The re-read is
+  **what the OS serves, not a cache-bypassing read of the media**, and the card is read once, so card-side
+  corruption that returns the same wrong bytes is invisible (a second card read and dropping the page cache are
+  #602). The card is never written to or deleted from; its symlinks are neither listed nor followed; `dest_rel`
+  must be plain safe components (UTF-16 length cap, Windows reserved names incl. `CONIN$`/superscript `COM`),
+  every existing folder it names must not be a link or a non-folder *before* anything is created below it, and the
+  final canonical folder must be under the destination root. Cancel is polled during the copy and the re-read; no
+  temp is left. `Carry`'s copy-verify was not extracted (journal-bound state machine); the per-file version is new,
+  tested (escape incl. multi-level, overwrite, symlink at the final name, concurrent same-name offers, size change
+  mid-copy, injected corrupt read-back, cancel) and mutation-checked. `cards` is pure over a list of mount roots
+  (DCIM matched case-insensitively, a symlinked or file-typed DCIM is not a card); `default_mount_roots` can block
+  on Windows and does not tell removable from fixed volumes. A crash can leave `*.nicti-part` temps (a sweep is
+  #602). Cached coalesced rescan, naming-template rendering, ingest of the copies and the UI are #602. Not yet run
+  on a real Windows volume or FAT/exFAT card.
+
 ## #441: LightCraft small utilities (ADR-0441)
 
 Research outcome from the LightCraft audit (#424), read at `23f5480`; nothing lifted. Two build slices: #558 (a blocking catalog-open failure window replacing the single red label, `CatalogOpenState::Error` in `app.rs`, since removed by #591 once the launch gate shipped; the in-memory "Continue Without Saving" exit is dropped because Nicti has no in-memory catalog) and #557 (keep the crop inside the rotated image; `nicti_tapetum::geometry` clamps the angle only and sampling clamps to the edge). Declined: container walkers (JPEG APP1 is already in `nicti-scent`; IPTC comes from `AgLibraryIPTC` on LRC import), smart-album rule editor (smart collections are a saved typed `hunt::Filter`; nesting waits on a real LRC example in #155), availability cache (#332 was a blocked drive probe, fixed with a stepped probe and a hung-probe test; #327 was a long lock hold, fixed by a Pounce job; neither is an existence problem. The grid module makes no filesystem calls; other views were not traced frame by frame), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (the Nikon MakerNote walk is `nicti-cornea`, AF areas are in `spikes/squint`, Z8 only; `nicti-iris/nikon.rs` is the lens-correction blob; LibRaw for the rest).

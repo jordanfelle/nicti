@@ -20,11 +20,13 @@ mod model;
 pub mod schema;
 mod sqlite;
 
+pub mod cards;
 pub mod carry;
 pub mod clowder;
 pub mod hunt;
 pub mod larder;
 pub mod ninelives;
+pub mod offering;
 pub mod patrol;
 pub mod pounce_jobs;
 pub mod scent_sync;

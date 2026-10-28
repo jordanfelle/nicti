@@ -351,7 +351,9 @@ pub(crate) fn extract_t0_preview(path: &Path) -> Option<Preview> {
 /// dropped -- found by CodeRabbit's review: `entry.ok()` used to discard that error outright, so
 /// every file under an unreadable subdirectory went unvisited *and* unreported, and a caller could
 /// see a clean `IngestReport` (`failed` empty) even though part of the tree was never scanned.
-fn candidate_files(root_path: &Path) -> impl Iterator<Item = Result<PathBuf, walkdir::Error>> {
+pub(crate) fn candidate_files(
+    root_path: &Path,
+) -> impl Iterator<Item = Result<PathBuf, walkdir::Error>> {
     WalkDir::new(root_path).into_iter().filter_map(|entry| {
         let entry = match entry {
             Ok(entry) => entry,
