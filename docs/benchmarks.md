@@ -96,6 +96,11 @@ and verified (so it is resumable), and exits non-zero if the library is missing 
 Nothing shared or cloud-hosted is needed; a machine that lacks some source files (e.g. no D3400
 DNGs) simply reports them as `NOT FOUND` and can run the buckets it does have via `--bucket`.
 
+Notes: files are pre-filtered by the manifest's `size_bytes`, then hashed (every library file of a
+wanted size is read once, so expect a full read of a large library); `--hardlink` aliases the
+library file, so use the default copy for a stable baseline; paths that could not be read are
+listed as `UNREADABLE` because they can make a present file look `NOT FOUND`.
+
 **Historical freeze locations** (both were exact byte-identical copies, verified by SHA-256 at copy time; the model is retired, see above):
 - `<REF10K_ROOT>` — NVMe, for the "from NVMe" ingest/loupe targets.
 - `<REF10K_ROOT_HDD>` — HDD, for the "HDD allowance" targets.

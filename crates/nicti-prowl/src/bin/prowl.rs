@@ -46,7 +46,9 @@ struct MaterializeArgs {
     /// Only the first N matching manifest entries.
     #[arg(long)]
     limit: Option<usize>,
-    /// Hard-link instead of copying (same volume only).
+    /// Hard-link instead of copying (same volume only). The result aliases the library file: if the
+    /// library app later rewrites that file in place (metadata embed, re-save), the ref-10k copy
+    /// changes with it and `prowl verify` will fail. Use the default copy for a stable baseline.
     #[arg(long)]
     hardlink: bool,
     /// Report what would be placed without writing anything.
@@ -177,7 +179,7 @@ fn run_materialize(args: MaterializeArgs) -> anyhow::Result<()> {
         },
     )?;
     println!(
-        "{} placed={} already_present={} not_found={} failed={}",
+        "{} placed={} already_present={} not_found={} failed={} unreadable={}",
         if args.dry_run {
             "dry-run"
         } else {
@@ -187,12 +189,22 @@ fn run_materialize(args: MaterializeArgs) -> anyhow::Result<()> {
         report.already_present.len(),
         report.not_found.len(),
         report.failed.len(),
+        report.unreadable.len(),
     );
     for id in &report.not_found {
         eprintln!("NOT FOUND {id}");
     }
     for (id, why) in &report.failed {
         eprintln!("FAILED {id}: {why}");
+    }
+    for path in &report.unreadable {
+        eprintln!("UNREADABLE {}", path.display());
+    }
+    if !report.unreadable.is_empty() && !report.not_found.is_empty() {
+        eprintln!(
+            "note: {} source path(s) could not be read, so NOT FOUND may mean unreadable, not absent",
+            report.unreadable.len()
+        );
     }
     if report.is_complete() {
         Ok(())
