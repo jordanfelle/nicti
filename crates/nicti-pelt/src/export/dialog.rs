@@ -238,7 +238,11 @@ impl ExportUi {
             let mut cancel = false;
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("Exporting {done} of {total}…"));
+                match run.preparing() {
+                    // Reading the photos from the catalog and planning their file names (#343).
+                    Some((prepared, ids)) => ui.label(format!("Preparing {prepared} of {ids}…")),
+                    None => ui.label(format!("Exporting {done} of {total}…")),
+                };
                 cancel = ui.button("Cancel export").clicked();
             });
             if cancel {
@@ -261,7 +265,13 @@ impl ExportUi {
             if report.cancelled > 0 {
                 line += &format!(", {} cancelled", report.cancelled);
             }
-            let colour = if report.failed.is_empty() {
+            // A run that never started (planning failed) has only a warning to say so.
+            let never_started = report.exported.is_empty()
+                && report.skipped.is_empty()
+                && report.failed.is_empty()
+                && report.cancelled == 0
+                && !report.warnings.is_empty();
+            let colour = if report.failed.is_empty() && !never_started {
                 ui.visuals().text_color()
             } else {
                 egui::Color32::YELLOW

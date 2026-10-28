@@ -101,6 +101,8 @@ pub enum StartError {
     NoExporter,
     #[error("there is nothing to export")]
     NothingToExport,
+    #[error("the background job runtime isn't running")]
+    Runtime,
 }
 
 /// What happened to every photo of a finished run.
@@ -143,13 +145,70 @@ pub fn facts_for(asset: &nicti_lair::Asset, source_path: &std::path::Path) -> As
 }
 
 pub struct ExportRun {
-    shared: Arc<Shared>,
+    inner: Arc<RunInner>,
+}
+
+/// Photos prepared per planning chunk: one catalog read each plus the keyword/edit lookups.
+const PLAN_CHUNK: usize = 64;
+
+/// The run's lifecycle: planning happens on a Pounce job (#343), then the pipeline runs.
+struct RunInner {
+    phase: Mutex<Phase>,
+    /// Set by [`ExportRun::cancel`] before the pipeline exists; the planning job checks it between
+    /// chunks.
+    cancelled: AtomicBool,
+    ids_total: usize,
+    prepared: AtomicUsize,
+}
+
+enum Phase {
+    Planning,
+    Running(Arc<Shared>),
+    /// Finished without a pipeline: planning failed or was cancelled. The report carries why.
+    Ended(ExportReport),
+}
+
+impl RunInner {
+    fn end(&self, report: ExportReport) {
+        let mut phase = self.phase.lock().unwrap();
+        if matches!(*phase, Phase::Planning) {
+            *phase = Phase::Ended(report);
+        }
+    }
+
+    fn fail(&self, why: String) {
+        self.end(ExportReport {
+            total: self.ids_total,
+            warnings: vec![why],
+            ..ExportReport::default()
+        });
+    }
+
+    fn cancelled_report(&self) -> ExportReport {
+        ExportReport {
+            total: self.ids_total,
+            cancelled: self.ids_total,
+            ..ExportReport::default()
+        }
+    }
+}
+
+/// One photo ready to be planned and run.
+struct Prepared {
+    plan_item: PlanItem,
+    source_path: PathBuf,
+    identity: blake3::Hash,
+    edit: EditDocument,
+    meta: SourceMetadata,
 }
 
 impl ExportRun {
-    /// Plans and starts exporting `asset_ids` (in that order -- it is also the `{Sequence}`
-    /// order). Planning runs on the calling thread (a few catalog reads and one `stat` per photo);
-    /// everything heavy runs on Pounce.
+    /// Starts exporting `asset_ids` (in that order -- it is also the `{Sequence}` order). The
+    /// settings, the exporter and the watermark file are checked here, on the calling thread, so a
+    /// mistake still comes straight back; reading the photos from the catalog and planning the
+    /// file names (one `stat` per photo) run as the first Pounce CPU job (#343), so a 10k-photo
+    /// batch never stalls the UI. [`Self::preparing`] reports that phase; a planning failure ends
+    /// the run with a report whose `warnings` say why.
     pub fn start(
         env: ExportEnv,
         asset_ids: &[i64],
@@ -164,100 +223,204 @@ impl ExportRun {
             Some(w) => Some(Arc::new(WatermarkSource::for_spec(w)?)),
             None => None,
         };
-
-        let catalog_err = |e: nicti_lair::CatalogError| StartError::Catalog(e.to_string());
-        let mut warnings = Vec::new();
-        let mut failed_up_front: Vec<(i64, String)> = Vec::new();
-        struct Prepared {
-            plan_item: PlanItem,
-            source_path: PathBuf,
-            identity: blake3::Hash,
-            edit: EditDocument,
-            meta: SourceMetadata,
-        }
-        let mut prepared: Vec<Prepared> = Vec::new();
-        // Id -> name for every keyword; read once, and only if a photo in the batch has keywords.
-        let mut keyword_names: Option<HashMap<i64, String>> = None;
-        for &id in asset_ids {
-            let Some(asset) = env.store.get_asset(id).map_err(catalog_err)? else {
-                warnings.push(format!("Photo {id} is no longer in the catalog."));
-                continue;
-            };
-            if asset.missing_since.is_some() {
-                failed_up_front.push((id, "the source file is missing from disk".into()));
-                continue;
-            }
-            let Some(root_path) = env
-                .store
-                .get_root_path(asset.root_id)
-                .map_err(catalog_err)?
-            else {
-                failed_up_front.push((id, "the photo's folder is no longer registered".into()));
-                continue;
-            };
-            let source_path = PathBuf::from(root_path).join(&asset.rel_path);
-            let source_dir = source_path.parent().map(PathBuf::from).unwrap_or_default();
-            let tagged = env.store.keywords_for(id).map_err(catalog_err)?;
-            let keyword_paths = if tagged.is_empty() {
-                Vec::new()
-            } else {
-                if keyword_names.is_none() {
-                    keyword_names = Some(
-                        env.store
-                            .list_keywords()
-                            .map_err(catalog_err)?
-                            .into_iter()
-                            .map(|k| (k.id, k.name))
-                            .collect(),
-                    );
-                }
-                let names = keyword_names.as_ref().expect("filled above");
-                nicti_lair::scent_sync::name_paths(&tagged, names)
-                    .into_iter()
-                    .collect()
-            };
-            // The flat list is the paths' leaves, as the sidecar writes it (normalised, deduped),
-            // so dc:subject and lr:hierarchicalSubject come from one snapshot and always agree.
-            let mut keywords: Vec<String> = keyword_paths
-                .iter()
-                .filter_map(|p: &Vec<String>| p.last().cloned())
-                .collect();
-            keywords.sort();
-            keywords.dedup();
-            // A photo whose saved edits can't be read fails on its own (naming it) instead of
-            // aborting the whole batch.
-            let edit = match env.store.get_master_edit(id) {
-                Ok(edit) => edit.unwrap_or_default(),
-                Err(e) => {
-                    failed_up_front.push((id, format!("its saved edits couldn't be read: {e}")));
-                    continue;
-                }
-            };
-            let facts = facts_for(&asset, &source_path);
-            prepared.push(Prepared {
-                plan_item: PlanItem { facts, source_dir },
-                source_path,
-                identity: asset_cache_key(&asset),
-                edit,
-                meta: SourceMetadata {
-                    exif: SourceExif::default(),
-                    catalog_make: asset.make,
-                    catalog_model: asset.model,
-                    catalog_captured_at: asset.captured_at,
-                    rating: asset.rating.map(|r| r as i32),
-                    label: asset.label,
-                    keywords,
-                    keyword_paths,
-                },
-            });
-        }
-        if prepared.is_empty() && failed_up_front.is_empty() {
+        if asset_ids.is_empty() {
             return Err(StartError::NothingToExport);
         }
+        let inner = Arc::new(RunInner {
+            phase: Mutex::new(Phase::Planning),
+            cancelled: AtomicBool::new(false),
+            ids_total: asset_ids.len(),
+            prepared: AtomicUsize::new(0),
+        });
+        let submitter = env.submitter.clone();
+        let job = PlanJob {
+            inner: Arc::clone(&inner),
+            extension: exporter.extension(),
+            env: Some(env),
+            ids: asset_ids.to_vec(),
+            spec: Some(spec),
+            watermark,
+            next: 0,
+            prepared: Vec::new(),
+            warnings: Vec::new(),
+            failed_up_front: Vec::new(),
+            keyword_names: None,
+        };
+        if submitter.submit(Box::new(job)).is_none() {
+            return Err(StartError::Runtime);
+        }
+        Ok(ExportRun { inner })
+    }
 
+    /// `(prepared, total)` while the photos are still being read from the catalog and their file
+    /// names planned; `None` once the export itself is running or has ended.
+    pub fn preparing(&self) -> Option<(usize, usize)> {
+        matches!(*self.inner.phase.lock().unwrap(), Phase::Planning).then(|| {
+            (
+                self.inner.prepared.load(Ordering::Relaxed),
+                self.inner.ids_total,
+            )
+        })
+    }
+
+    /// Drives the pipeline (a backstop: jobs normally chain themselves) and returns the final
+    /// report once every photo has settled. Call once per frame.
+    pub fn poll(&self) -> Option<ExportReport> {
+        let shared = match &*self.inner.phase.lock().unwrap() {
+            Phase::Planning => return None,
+            Phase::Ended(report) => return Some(report.clone()),
+            Phase::Running(shared) => Arc::clone(shared),
+        };
+        shared.advance();
+        let report = shared.report_slot.lock().unwrap().clone();
+        report
+    }
+
+    /// `(settled, total)` photos, lock-free once the pipeline runs; `(0, total)` while planning.
+    pub fn progress(&self) -> (usize, usize) {
+        match &*self.inner.phase.lock().unwrap() {
+            Phase::Planning => (0, self.inner.ids_total),
+            Phase::Running(shared) => (shared.settled.load(Ordering::Relaxed), shared.total),
+            Phase::Ended(report) => (report.settled(), report.total),
+        }
+    }
+
+    /// Stops after the photos currently mid-stage; everything not yet exported is reported as
+    /// cancelled. A decode or an encode can't be interrupted, so this can take a moment.
+    pub fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        let shared = match &*self.inner.phase.lock().unwrap() {
+            Phase::Running(shared) => Some(Arc::clone(shared)),
+            _ => None,
+        };
+        if let Some(shared) = shared {
+            shared.cancelled.store(true, Ordering::SeqCst);
+            shared.advance();
+        }
+    }
+}
+
+// --- stage 0: plan ------------------------------------------------------------------------------
+
+struct PlanJob {
+    inner: Arc<RunInner>,
+    extension: &'static str,
+    env: Option<ExportEnv>,
+    ids: Vec<i64>,
+    spec: Option<ExportSpec>,
+    watermark: Option<Arc<WatermarkSource>>,
+    next: usize,
+    prepared: Vec<Prepared>,
+    warnings: Vec<String>,
+    failed_up_front: Vec<(i64, String)>,
+    /// Id -> name for every keyword; read once, and only if a photo in the batch has keywords.
+    keyword_names: Option<HashMap<i64, String>>,
+}
+
+impl PlanJob {
+    /// Reads one photo from the catalog into `prepared` (or records why it can't be exported). A
+    /// catalog failure aborts the whole run.
+    fn prepare_one(&mut self, id: i64) -> Result<(), StartError> {
+        let env = self
+            .env
+            .as_ref()
+            .expect("env is present until planning ends");
+        let catalog_err = |e: nicti_lair::CatalogError| StartError::Catalog(e.to_string());
+        let Some(asset) = env.store.get_asset(id).map_err(catalog_err)? else {
+            self.warnings
+                .push(format!("Photo {id} is no longer in the catalog."));
+            return Ok(());
+        };
+        if asset.missing_since.is_some() {
+            self.failed_up_front
+                .push((id, "the source file is missing from disk".into()));
+            return Ok(());
+        }
+        let Some(root_path) = env
+            .store
+            .get_root_path(asset.root_id)
+            .map_err(catalog_err)?
+        else {
+            self.failed_up_front
+                .push((id, "the photo's folder is no longer registered".into()));
+            return Ok(());
+        };
+        let source_path = PathBuf::from(root_path).join(&asset.rel_path);
+        let source_dir = source_path.parent().map(PathBuf::from).unwrap_or_default();
+        let tagged = env.store.keywords_for(id).map_err(catalog_err)?;
+        let keyword_paths = if tagged.is_empty() {
+            Vec::new()
+        } else {
+            if self.keyword_names.is_none() {
+                self.keyword_names = Some(
+                    env.store
+                        .list_keywords()
+                        .map_err(catalog_err)?
+                        .into_iter()
+                        .map(|k| (k.id, k.name))
+                        .collect(),
+                );
+            }
+            let names = self.keyword_names.as_ref().expect("filled above");
+            nicti_lair::scent_sync::name_paths(&tagged, names)
+                .into_iter()
+                .collect()
+        };
+        // The flat list is the paths' leaves, as the sidecar writes it (normalised, deduped),
+        // so dc:subject and lr:hierarchicalSubject come from one snapshot and always agree.
+        let mut keywords: Vec<String> = keyword_paths
+            .iter()
+            .filter_map(|p: &Vec<String>| p.last().cloned())
+            .collect();
+        keywords.sort();
+        keywords.dedup();
+        // A photo whose saved edits can't be read fails on its own (naming it) instead of
+        // aborting the whole batch.
+        let edit = match env.store.get_master_edit(id) {
+            Ok(edit) => edit.unwrap_or_default(),
+            Err(e) => {
+                self.failed_up_front
+                    .push((id, format!("its saved edits couldn't be read: {e}")));
+                return Ok(());
+            }
+        };
+        let facts = facts_for(&asset, &source_path);
+        self.prepared.push(Prepared {
+            plan_item: PlanItem { facts, source_dir },
+            source_path,
+            identity: asset_cache_key(&asset),
+            edit,
+            meta: SourceMetadata {
+                exif: SourceExif::default(),
+                catalog_make: asset.make,
+                catalog_model: asset.model,
+                catalog_captured_at: asset.captured_at,
+                rating: asset.rating.map(|r| r as i32),
+                label: asset.label,
+                keywords,
+                keyword_paths,
+            },
+        });
+        Ok(())
+    }
+
+    /// The last chunk: plan the file names for everything prepared, build the pipeline and start
+    /// it.
+    fn finish(&mut self) -> Result<(), StartError> {
+        if self.prepared.is_empty() && self.failed_up_front.is_empty() {
+            return Err(StartError::NothingToExport);
+        }
+        let env = self.env.take().expect("env is present until planning ends");
+        let spec = self
+            .spec
+            .take()
+            .expect("spec is present until planning ends");
+        let prepared = std::mem::take(&mut self.prepared);
         let plan_items: Vec<PlanItem> = prepared.iter().map(|p| p.plan_item.clone()).collect();
-        let plan = plan_batch(&plan_items, &spec, exporter.extension(), &FsProbe)?;
+        let plan = plan_batch(&plan_items, &spec, self.extension, &FsProbe)?;
+        let mut warnings = std::mem::take(&mut self.warnings);
         warnings.extend(plan.warnings);
+        let failed_up_front = std::mem::take(&mut self.failed_up_front);
 
         let total = prepared.len() + failed_up_front.len();
         let items: Vec<Item> = prepared
@@ -286,9 +449,9 @@ impl ExportRun {
             software: env.software,
             larder: env.larder,
             spec,
-            watermark,
+            watermark: self.watermark.take(),
             items,
-            cancelled: AtomicBool::new(false),
+            cancelled: AtomicBool::new(self.inner.cancelled.load(Ordering::SeqCst)),
             settled: AtomicUsize::new(0),
             total,
             state: Mutex::new(RunState {
@@ -314,30 +477,77 @@ impl ExportRun {
                 shared.record_locked(&mut st, Outcome::Failed(id, why));
             }
         }
+        {
+            let mut phase = self.inner.phase.lock().unwrap();
+            if !matches!(*phase, Phase::Planning) {
+                return Ok(());
+            }
+            *phase = Phase::Running(Arc::clone(&shared));
+        }
         shared.advance();
-        Ok(ExportRun { shared })
+        Ok(())
+    }
+}
+
+impl ChunkedJob for PlanJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Export,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
     }
 
-    /// Drives the pipeline (a backstop: jobs normally chain themselves) and returns the final
-    /// report once every photo has settled. Call once per frame.
-    pub fn poll(&self) -> Option<ExportReport> {
-        self.shared.advance();
-        self.shared.report_slot.lock().unwrap().clone()
+    fn label(&self) -> String {
+        format!("Export: prepare {} photos", self.ids.len())
     }
 
-    /// `(settled, total)` photos, lock-free.
-    pub fn progress(&self) -> (usize, usize) {
-        (
-            self.shared.settled.load(Ordering::Relaxed),
-            self.shared.total,
-        )
+    fn progress(&self) -> Progress {
+        Progress {
+            done: self.next as u64,
+            total: Some(self.ids.len() as u64),
+        }
     }
 
-    /// Stops after the photos currently mid-stage; everything not yet exported is reported as
-    /// cancelled. A decode or an encode can't be interrupted, so this can take a moment.
-    pub fn cancel(&self) {
-        self.shared.cancelled.store(true, Ordering::SeqCst);
-        self.shared.advance();
+    fn step(&mut self) -> Result<Step, JobError> {
+        if self.env.is_none() {
+            return Ok(Step::Done);
+        }
+        if self.inner.cancelled.load(Ordering::SeqCst) {
+            self.inner.end(self.inner.cancelled_report());
+            self.env = None;
+            return Ok(Step::Done);
+        }
+        let end = (self.next + PLAN_CHUNK).min(self.ids.len());
+        while self.next < end {
+            let id = self.ids[self.next];
+            if let Err(e) = self.prepare_one(id) {
+                self.inner.fail(e.to_string());
+                self.env = None;
+                return Ok(Step::Done);
+            }
+            self.next += 1;
+        }
+        self.inner.prepared.store(self.next, Ordering::Relaxed);
+        if self.next < self.ids.len() {
+            return Ok(Step::Yield);
+        }
+        if let Err(e) = self.finish() {
+            self.inner.fail(e.to_string());
+            self.env = None;
+        }
+        Ok(Step::Done)
+    }
+}
+
+impl Drop for PlanJob {
+    fn drop(&mut self) {
+        // Dropped un-run or mid-planning (the runtime shut down, or the job was cancelled): the
+        // run must still end with a report rather than hang in `Planning` forever.
+        self.inner
+            .fail("the export was cancelled before it started".to_string());
     }
 }
 
@@ -1394,6 +1604,121 @@ mod tests {
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert!(report.failed[0].1.contains("camera profile"));
         assert_eq!(report.exported.len(), 1);
+    }
+
+    /// Occupies the Pounce CPU lane (limit 1) until released, so a job queued behind it cannot run.
+    struct LaneBlocker {
+        started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl ChunkedJob for LaneBlocker {
+        fn spec(&self) -> JobSpec {
+            JobSpec {
+                priority: Priority::Foreground,
+                kind: JobKind::Export,
+                lane: Lane::Cpu,
+                vram_bytes: 0,
+                image_index: None,
+            }
+        }
+        fn label(&self) -> String {
+            "test: hold the CPU lane".into()
+        }
+        fn progress(&self) -> Progress {
+            Progress {
+                done: 0,
+                total: None,
+            }
+        }
+        fn step(&mut self) -> Result<Step, JobError> {
+            self.started.store(true, Ordering::SeqCst);
+            let start = Instant::now();
+            while !self.release.load(Ordering::SeqCst) {
+                assert!(start.elapsed() < Duration::from_secs(60), "never released");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(Step::Done)
+        }
+    }
+
+    fn hold_the_cpu_lane(fx: &Fixture) -> Arc<AtomicBool> {
+        let (started, release) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        fx.pounce.set_cpu_limit(1);
+        fx.pounce.submit(Box::new(LaneBlocker {
+            started: started.clone(),
+            release: release.clone(),
+        }));
+        let t = Instant::now();
+        while !started.load(Ordering::SeqCst) {
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "blocker never started"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        release
+    }
+
+    #[test]
+    fn planning_runs_on_a_pounce_job_not_the_calling_thread() {
+        let Some(fx) = fixture(&["a.NEF", "b.NEF"]) else {
+            return;
+        };
+        let release = hold_the_cpu_lane(&fx);
+        let t = Instant::now();
+        let run = ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap();
+        // The lane is held, so nothing has been read or planned: start() returned without doing it.
+        assert!(t.elapsed() < Duration::from_secs(5));
+        assert_eq!(run.preparing(), Some((0, 2)));
+        assert_eq!(run.progress(), (0, 2));
+        assert!(run.poll().is_none());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(run.preparing(), Some((0, 2)), "still waiting for the lane");
+        // Cancelling while it is still planning ends the run as all-cancelled, writing nothing.
+        run.cancel();
+        release.store(true, Ordering::SeqCst);
+        let report = wait(&run);
+        assert_eq!((report.total, report.cancelled), (2, 2), "{report:?}");
+        assert!(report.exported.is_empty() && report.failed.is_empty());
+        assert!(fx.out_files().is_empty());
+        assert_eq!(run.preparing(), None);
+    }
+
+    #[test]
+    fn a_run_started_behind_a_busy_lane_plans_then_exports_normally() {
+        let Some(fx) = fixture(&["a.NEF"]) else {
+            return;
+        };
+        let release = hold_the_cpu_lane(&fx);
+        let run = ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap();
+        assert_eq!(run.preparing(), Some((0, 1)));
+        release.store(true, Ordering::SeqCst);
+        let report = wait(&run);
+        assert_eq!(report.exported.len(), 1, "{report:?}");
+        assert_eq!(run.preparing(), None);
+    }
+
+    #[test]
+    fn a_planning_failure_ends_the_run_with_a_report_that_says_why() {
+        let Some(fx) = fixture(&["a.NEF"]) else {
+            return;
+        };
+        // An id that is not in the catalog: nothing can be prepared.
+        let run = ExportRun::start(fx.env(), &[987_654], fx.spec()).unwrap();
+        let report = wait(&run);
+        assert_eq!(report.total, 1);
+        assert!(report.exported.is_empty() && report.failed.is_empty());
+        let text = report.warnings.join(" | ");
+        assert!(
+            text.contains("987654") || text.contains("nothing to export"),
+            "{text}"
+        );
+        assert!(fx.out_files().is_empty());
+        assert_eq!(run.progress().1, 1);
     }
 
     #[test]
