@@ -284,5 +284,11 @@ re-run only does what is left, and it reports what it could not fix (a T0 that i
 dropping it. **Settle:** `tier::settle_asset` on an archived root used to keep a byte-different blob/sidecar pair
 forever (the read path serves the sidecar first, so a half-finished backfill stayed sideways); when the blob is exactly
 the sidecar plus the Orientation segment (`is_retag_of`) it now refreshes the sidecar from the blob and drops the blob
-(`SettleReport::sidecars_refreshed`). The trigger (once-per-catalog marker, Library action, Pounce job, cache
-invalidation) is #606.
+(`SettleReport::sidecars_refreshed`); a sidecar that cannot be rewritten there is `kept`, it no longer aborts the
+root's settle. Safety checks in the backfill: a RAW whose size or mtime no longer matches its catalog row is left alone
+(`stale_file`: its T0 is of older content, the next ingest re-extracts and tags it), the blob is re-read just before it is
+replaced (`raced`), a thumbnail that is not a taggable JPEG is reported in `failed` and never used to rebuild a sidecar,
+an unreachable root is `root_offline` rather than a pile of "deleted files", and `RightingReport::can_mark_done()` is
+the gate for a once-per-catalog marker (root reachable, nothing failed, stale or raced). A T0 that already carries its
+own Orientation (even a different one) is left alone, exactly as ingest does. The trigger (marker, Library action,
+Pounce job, cache invalidation) is #606.

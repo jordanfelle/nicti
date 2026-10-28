@@ -19,6 +19,7 @@
 //! it can be spread over job chunks, [`backfill_root`] the whole-root loop.
 
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use nicti_cornea::embedded::{FileSource, Walker};
 
@@ -34,7 +35,8 @@ pub struct RightingReport {
     pub fixed_blobs: u64,
     /// Sidecars rewritten (a tagged JPEG, or an AVIF replaced by a JPEG).
     pub fixed_sidecars: u64,
-    /// Needs rotation but every thumbnail it has already carries the tag.
+    /// Needs rotation but every thumbnail it has already carries the tag (a T0 with its own
+    /// Orientation, even a different one, is left alone, exactly as ingest does).
     pub already_right: u64,
     /// JPEG assets, and RAWs with no Orientation or Orientation 1.
     pub no_rotation: u64,
@@ -42,8 +44,26 @@ pub struct RightingReport {
     pub no_thumbnail: u64,
     /// The RAW is gone from disk since the last sync.
     pub missing_file: u64,
+    /// The RAW on disk no longer matches the catalog row (size or mtime): its T0 is from older
+    /// content, so tagging it with the new file's rotation would be wrong. The next ingest/sync
+    /// re-extracts (and tags) it; run righting again afterwards.
+    pub stale_file: u64,
+    /// The catalog blob changed between reading and writing it (an ingest replaced it): left alone.
+    pub raced: u64,
+    /// The root's folder is not there (an unmounted drive): nothing was examined or touched, and
+    /// every asset would otherwise look like a deleted file.
+    pub root_offline: bool,
     /// Things that could not be fixed, with why. Never silently dropped.
     pub failed: Vec<(PathBuf, String)>,
+}
+
+impl RightingReport {
+    /// Whether a caller may record "this root has been righted" (a once-per-catalog marker): the
+    /// root was reachable and nothing was left undone. Deleted files (`missing_file`) and RAWs
+    /// that need no rotation are not leftovers.
+    pub fn can_mark_done(&self) -> bool {
+        !self.root_offline && self.failed.is_empty() && self.stale_file == 0 && self.raced == 0
+    }
 }
 
 /// The RAW's IFD0 Orientation when it is a rotation (2-8). `Ok(None)` for none, 1, or an odd tag.
@@ -57,8 +77,18 @@ fn raw_rotation(raw: &Path) -> Result<Option<u8>, String> {
         .filter(|o| (2..=8).contains(o)))
 }
 
+/// The file's mtime the way ingest records it (whole seconds since the epoch).
+fn mtime_unix(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 /// One asset's righting step. Store errors propagate; a problem with the file itself is recorded
-/// in `report.failed` instead, so one bad file never aborts a root.
+/// in `report.failed` instead, so one bad file never aborts a root. Run it serialised with ingest
+/// of the same root (the blob is re-checked just before it is replaced, which narrows but cannot
+/// close a race with a concurrent ingest).
 pub fn righting_asset(
     store: &dyn CatalogStore,
     root_path: &Path,
@@ -72,8 +102,18 @@ pub fn righting_asset(
         return Ok(());
     }
     let raw = root_path.join(rel);
-    if !raw.is_file() {
+    let Ok(meta) = std::fs::metadata(&raw) else {
         report.missing_file += 1;
+        return Ok(());
+    };
+    if !meta.is_file() {
+        report.missing_file += 1;
+        return Ok(());
+    }
+    // The catalog's T0 is of the content ingest saw; if the file changed since, its rotation is not
+    // this thumbnail's.
+    if meta.len() != asset.size_bytes || mtime_unix(&meta) != asset.mtime_unix {
+        report.stale_file += 1;
         return Ok(());
     }
     let o = match raw_rotation(&raw) {
@@ -95,8 +135,10 @@ pub fn righting_asset(
         return Ok(());
     }
 
+    let failed_before = report.failed.len();
     let mut changed = false;
-    // 1. The catalog blob. Its corrected bytes are also the source for an AVIF sidecar's replacement.
+    // 1. The catalog blob. Its corrected bytes are also the source for an AVIF sidecar's
+    // replacement, but only when they really are a JPEG.
     let mut corrected: Option<Preview> = None;
     if let Some(b) = blob {
         let t = tag_orientation(b.bytes.clone(), o);
@@ -104,18 +146,24 @@ pub fn righting_asset(
             report
                 .failed
                 .push((raw.clone(), "catalog T0 is not a taggable JPEG".into()));
+        } else {
+            let fixed = Preview {
+                width: b.width,
+                height: b.height,
+                bytes: t,
+            };
+            if fixed.bytes != b.bytes {
+                let now = store.get_preview(asset.id, PreviewTier::T0)?;
+                if now.as_ref().map(|p| &p.bytes) != Some(&b.bytes) {
+                    report.raced += 1;
+                    return Ok(());
+                }
+                store.put_preview(asset.id, PreviewTier::T0, &fixed)?;
+                report.fixed_blobs += 1;
+                changed = true;
+            }
+            corrected = Some(fixed);
         }
-        let fixed = Preview {
-            width: b.width,
-            height: b.height,
-            bytes: t,
-        };
-        if fixed.bytes != b.bytes {
-            store.put_preview(asset.id, PreviewTier::T0, &fixed)?;
-            report.fixed_blobs += 1;
-            changed = true;
-        }
-        corrected = Some(fixed);
     }
     // 2. The sidecar, in step with the blob.
     if let Some((codec, s)) = side {
@@ -138,16 +186,19 @@ pub fn righting_asset(
                 }
             }
             // An AVIF can't hold the tag: a JPEG of the corrected T0 replaces it (`export` removes
-            // the AVIF). With no catalog blob (archived), the RAW's own preview is re-extracted --
-            // which is tagged at extraction.
-            SidecarCodec::Avif => corrected.clone().or_else(|| extract_t0_preview(&raw)).or_else(|| {
-                report.failed.push((
-                    raw.clone(),
-                    "an AVIF sidecar cannot carry the rotation and the RAW's preview could not be re-extracted"
-                        .into(),
-                ));
-                None
-            }),
+            // the AVIF; the folder's codec becomes JPEG). With no usable catalog blob (archived),
+            // the RAW's own preview is re-extracted, which is tagged at extraction.
+            SidecarCodec::Avif => corrected
+                .clone()
+                .or_else(|| extract_t0_preview(&raw))
+                .or_else(|| {
+                    report.failed.push((
+                        raw.clone(),
+                        "an AVIF sidecar cannot carry the rotation and no JPEG T0 was available"
+                            .into(),
+                    ));
+                    None
+                }),
         };
         if let Some(p) = replacement {
             match sidecar::export(&raw, &p, SidecarCodec::Jpeg) {
@@ -161,13 +212,14 @@ pub fn righting_asset(
             }
         }
     }
-    if !changed {
+    if !changed && report.failed.len() == failed_before {
         report.already_right += 1;
     }
     Ok(())
 }
 
-/// [`righting_asset`] over every asset of `root_id`.
+/// [`righting_asset`] over every asset of `root_id`. An unreachable root (an unmounted drive) is
+/// reported as `root_offline` and nothing is touched, so a caller never marks it done.
 pub fn backfill_root(
     store: &dyn CatalogStore,
     root_id: i64,
@@ -176,6 +228,10 @@ pub fn backfill_root(
     let Some(root) = store.list_roots()?.into_iter().find(|r| r.id == root_id) else {
         return Ok(report);
     };
+    if !Path::new(&root.path).is_dir() {
+        report.root_offline = true;
+        return Ok(report);
+    }
     for asset in store.list_assets_by_root(root_id)? {
         righting_asset(store, Path::new(&root.path), &asset, &mut report)?;
     }

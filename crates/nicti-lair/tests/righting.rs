@@ -132,11 +132,17 @@ impl Fx {
     /// A RAW on disk with `orientation`, catalogued with an (untagged, pre-#476) T0 `blob`.
     fn asset(&self, name: &str, orientation: Option<u16>, blob: Option<&Preview>) -> i64 {
         std::fs::write(self.dir.join(name), nef(orientation, &real_jpeg(1))).unwrap();
+        let meta = std::fs::metadata(self.dir.join(name)).unwrap();
         let new = NewAsset {
             rel_path: name.to_string(),
             rel_path_fold: name.to_lowercase(),
-            size_bytes: 0,
-            mtime_unix: 0,
+            size_bytes: meta.len(),
+            mtime_unix: meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
             fingerprint: None,
             natural_key: None,
             make: Some("NIKON".into()),
@@ -377,4 +383,172 @@ fn settle_refreshes_a_stale_sidecar_from_a_retagged_blob_instead_of_keeping_the_
     let rep = tier::settle_root(&fx.store, fx.root_id).unwrap();
     assert_eq!((rep.sidecars_refreshed, rep.kept), (0, 1), "{rep:?}");
     assert!(fx.blob(id2).is_some());
+}
+
+/// A tagged JPEG for orientation `o`, made through the public API (righting a throwaway RAW).
+fn tagged_jpeg(fx: &Fx, name: &str, o: u16) -> Vec<u8> {
+    let id = fx.asset(name, Some(o), Some(&pv(real_jpeg(1))));
+    assert_eq!(fx.run(id).fixed_blobs, 1);
+    fx.blob(id).unwrap().bytes
+}
+
+/// Makes `export`'s temp file unwritable (a directory sits where it goes), portably and without
+/// depending on file permissions.
+fn block_sidecar_writes(raw: &std::path::Path) {
+    let sc = thumb_sidecar::sidecar_path(raw, SidecarCodec::Jpeg);
+    let tmp = sc.with_file_name(format!(
+        ".{}.thumb-tmp",
+        sc.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(tmp).unwrap();
+}
+
+#[test]
+fn a_garbage_blob_never_replaces_an_avif_sidecar_with_garbage() {
+    let fx = Fx::new();
+    let id = fx.asset("a.NEF", Some(6), Some(&pv(b"not a jpeg".to_vec())));
+    thumb_sidecar::export(&fx.raw("a.NEF"), &pv(real_jpeg(1)), SidecarCodec::Avif).unwrap();
+
+    let r = fx.run(id);
+    assert_eq!(r.failed.len(), 1, "the bad blob is reported: {r:?}");
+    assert_eq!(r.already_right, 0, "a failure is not 'already right'");
+    // The sidecar was rebuilt from the RAW's own preview, never from the garbage blob.
+    let (codec, side) = thumb_sidecar::read_with_codec(&fx.raw("a.NEF"), SidecarCodec::Jpeg)
+        .expect("a readable sidecar exists");
+    assert_eq!(codec, SidecarCodec::Jpeg);
+    assert_eq!(orientation_of(&side.bytes), Some(6));
+    assert_eq!(fx.blob(id).unwrap().bytes, b"not a jpeg");
+}
+
+#[test]
+fn a_raw_that_changed_since_ingest_is_left_alone_until_it_is_re_ingested() {
+    let fx = Fx::new();
+    let jpeg = real_jpeg(1);
+    let size = fx.asset("size.NEF", Some(6), Some(&pv(jpeg.clone())));
+    let mtime = fx.asset("mtime.NEF", Some(6), Some(&pv(jpeg.clone())));
+    // The file grew (an in-place edit) / was touched after the catalog row was written.
+    let mut grown = std::fs::read(fx.raw("size.NEF")).unwrap();
+    grown.extend_from_slice(&[0u8; 16]);
+    std::fs::write(fx.raw("size.NEF"), grown).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(fx.raw("mtime.NEF"))
+        .unwrap();
+    f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .unwrap();
+    drop(f);
+
+    for id in [size, mtime] {
+        let r = fx.run(id);
+        assert_eq!((r.stale_file, r.fixed_blobs), (1, 0), "{r:?}");
+        assert_eq!(
+            fx.blob(id).unwrap().bytes,
+            jpeg,
+            "the old thumbnail is not re-tagged"
+        );
+        assert!(!r.can_mark_done(), "a stale file is left undone");
+    }
+}
+
+#[test]
+fn a_failed_sidecar_write_is_a_failure_not_already_right() {
+    let fx = Fx::new();
+    let id = fx.asset("a.NEF", Some(6), None);
+    thumb_sidecar::export(&fx.raw("a.NEF"), &pv(real_jpeg(1)), SidecarCodec::Jpeg).unwrap();
+    block_sidecar_writes(&fx.raw("a.NEF"));
+
+    let r = fx.run(id);
+    assert_eq!(
+        (r.fixed_sidecars, r.already_right, r.failed.len()),
+        (0, 0, 1),
+        "{r:?}"
+    );
+    assert!(r.failed[0].1.contains("writing sidecar"));
+    assert!(!r.can_mark_done());
+}
+
+#[test]
+fn an_offline_root_is_not_a_pile_of_deleted_files() {
+    let fx = Fx::new();
+    fx.asset("a.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    fx.asset("b.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    std::fs::remove_dir_all(&fx.dir).unwrap(); // the drive is unmounted
+
+    let r = backfill_root(&fx.store, fx.root_id).unwrap();
+    assert!(r.root_offline);
+    assert_eq!(
+        (r.examined, r.missing_file),
+        (0, 0),
+        "nothing was judged: {r:?}"
+    );
+    assert!(
+        !r.can_mark_done(),
+        "an offline root must not be marked done"
+    );
+}
+
+#[test]
+fn a_clean_run_may_be_marked_done_even_with_deleted_files_and_unrotated_raws() {
+    let fx = Fx::new();
+    let jpeg = real_jpeg(1);
+    fx.asset("rot.NEF", Some(6), Some(&pv(jpeg.clone())));
+    fx.asset("flat.NEF", None, Some(&pv(jpeg.clone())));
+    let gone = fx.asset("gone.NEF", Some(6), Some(&pv(jpeg)));
+    std::fs::remove_file(fx.raw("gone.NEF")).unwrap();
+    let _ = gone;
+    let r = backfill_root(&fx.store, fx.root_id).unwrap();
+    assert_eq!(
+        (r.fixed_blobs, r.no_rotation, r.missing_file),
+        (1, 1, 1),
+        "{r:?}"
+    );
+    assert!(r.can_mark_done());
+}
+
+#[test]
+fn a_t0_with_its_own_orientation_is_left_alone_as_ingest_does() {
+    let fx = Fx::new();
+    let other = tagged_jpeg(&fx, "other.NEF", 8);
+    let id = fx.asset("a.NEF", Some(6), Some(&pv(other.clone())));
+    let r = fx.run(id);
+    assert_eq!((r.fixed_blobs, r.already_right), (0, 1), "{r:?}");
+    assert_eq!(fx.blob(id).unwrap().bytes, other);
+}
+
+#[test]
+fn settle_keeps_the_pair_when_the_sidecar_is_not_the_blobs_untagged_original() {
+    let fx = Fx::new();
+    let tagged6 = tagged_jpeg(&fx, "six.NEF", 6);
+    let tagged8 = tagged_jpeg(&fx, "eight.NEF", 8);
+    let id = fx.asset("a.NEF", Some(6), Some(&pv(tagged6)));
+    // The sidecar has its own, different orientation: not the untagged original of this blob.
+    thumb_sidecar::export(&fx.raw("a.NEF"), &pv(tagged8.clone()), SidecarCodec::Jpeg).unwrap();
+    fx.store.set_root_archived(fx.root_id, true).unwrap();
+
+    let rep = tier::settle_root(&fx.store, fx.root_id).unwrap();
+    let _ = id;
+    assert_eq!(rep.sidecars_refreshed, 0, "{rep:?}");
+    let (_, side) = thumb_sidecar::read_with_codec(&fx.raw("a.NEF"), SidecarCodec::Jpeg).unwrap();
+    assert_eq!(
+        side.bytes, tagged8,
+        "an unrelated sidecar is never overwritten"
+    );
+}
+
+#[test]
+fn settle_does_not_abort_the_root_when_one_sidecar_cannot_be_refreshed() {
+    let fx = Fx::new();
+    let jpeg = real_jpeg(1);
+    let id = fx.asset("a.NEF", Some(6), Some(&pv(jpeg.clone())));
+    assert_eq!(fx.run(id).fixed_blobs, 1); // blob tagged, no sidecar yet
+    thumb_sidecar::export(&fx.raw("a.NEF"), &pv(jpeg), SidecarCodec::Jpeg).unwrap(); // stale
+    block_sidecar_writes(&fx.raw("a.NEF"));
+    fx.store.set_root_archived(fx.root_id, true).unwrap();
+
+    let rep = tier::settle_root(&fx.store, fx.root_id).expect("settle carries on");
+    assert_eq!((rep.sidecars_refreshed, rep.kept), (0, 1), "{rep:?}");
+    assert!(
+        fx.blob(id).is_some(),
+        "the blob stays until its sidecar can be refreshed"
+    );
 }

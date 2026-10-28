@@ -99,11 +99,15 @@ pub fn settle_asset(
             // The blob was re-tagged with the RAW's rotation (righting, #561) and the JPEG sidecar
             // is its untagged original: refresh the sidecar from the blob, then drop the blob.
             (Some((SidecarCodec::Jpeg, side)), Some(blob)) if is_retag_of(&side, &blob) => {
-                sidecar::export(&raw, &blob, SidecarCodec::Jpeg)
-                    .map_err(|e| CatalogError::Io(format!("{}: {e}", raw.display())))?;
-                store.clear_preview(asset.id, PreviewTier::T0)?;
-                report.sidecars_refreshed += 1;
-                report.blobs_dropped += 1;
+                // An unwritable sidecar folder is this asset's problem, not the root's: keep the
+                // pair and carry on rather than abort every later asset on every startup.
+                if sidecar::export(&raw, &blob, SidecarCodec::Jpeg).is_ok() {
+                    store.clear_preview(asset.id, PreviewTier::T0)?;
+                    report.sidecars_refreshed += 1;
+                    report.blobs_dropped += 1;
+                } else {
+                    report.kept += 1;
+                }
             }
             (_, Some(_)) => report.kept += 1,
             _ => {}
@@ -142,7 +146,7 @@ fn is_retag_of(side: &Preview, blob: &Preview) -> bool {
     let Some(o) = jpeg_orientation(&blob.bytes) else {
         return false;
     };
-    jpeg_orientation(&side.bytes).is_none() && tag_orientation(side.bytes.clone(), o) == blob.bytes
+    tag_orientation(side.bytes.clone(), o) == blob.bytes
 }
 
 fn sidecar_matches(codec: SidecarCodec, side: &Preview, blob: &Preview) -> bool {
