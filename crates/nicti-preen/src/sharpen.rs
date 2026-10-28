@@ -308,6 +308,25 @@ mod tests {
     }
 
     #[test]
+    fn the_correction_to_one_pixel_never_exceeds_the_cap() {
+        let (w, h) = (32u32, 4u32);
+        let before = step(w, h, 0.2, 0.9);
+        let mut p = before.clone();
+        let hard = SharpenSpec {
+            media: SharpenMedia::Matte,
+            amount: SharpenAmount::High,
+        };
+        apply(&mut p, w, h, hard, 300);
+        let mut capped = 0;
+        for i in 0..(w * h) as usize {
+            let moved = (oetf(p[i * 3]) - oetf(before[i * 3])).abs();
+            assert!(moved <= MAX_DELTA + 1e-4, "pixel {i} moved {moved}");
+            capped += usize::from(moved > MAX_DELTA - 1e-3);
+        }
+        assert!(capped > 0, "the cap must actually bind in this fixture");
+    }
+
+    #[test]
     fn over_range_non_finite_and_tiny_inputs_are_safe() {
         let mut p = vec![
             1.5,
