@@ -146,7 +146,7 @@ pub struct PeltApp {
     /// non-directory path, registration failure). Cleared on the next valid submit.
     import_status: Option<String>,
     update: UpdateChecker,
-    /// Nine Lives' (#25) own scheduler, Always `Some` today (the launch gate guarantees an open catalog). See `poll_backup`'s own doc comment for how this gets checked and acted on.
+    /// Nine Lives' (#25) own scheduler. See `poll_backup`'s own doc comment for how this gets checked and acted on.
     nine_lives: NineLives,
     last_backup_poll: Option<Instant>,
     /// The most recently submitted `BackupJob`'s result slot, polled once per `poll_backup` tick
@@ -223,8 +223,7 @@ pub struct PeltApp {
     purge_rendered_pending: bool,
     /// The current pending purge's failure was already shown (see `try_purge_rendered`).
     purge_error_reported: bool,
-    /// Sidecar write-back for marker changes and its settings/review panel (#60); always `Some`
-    /// today.
+    /// Sidecar write-back for marker changes and its settings/review panel (#60).
     xmp: XmpWriter,
     xmp_ui: XmpUi,
     /// Keyword tagging (#373); its writes go through this `XmpMeta` so they reach the sidecar.
@@ -257,7 +256,7 @@ pub struct PeltApp {
     /// cursor is an index into the grid and can be mirrored back onto the grid selection. A loupe
     /// opened from the folder box (`open_in_loupe`) has its own list and must not touch the grid.
     loupe_from_grid: bool,
-    /// Culling (#32): marking, undo, and the markers the views draw. Always `Some` today.
+    /// Culling (#32): marking, undo, and the markers the views draw.
     cull: CullState,
     /// The Delete flow's prompt, job and status line (#32).
     delete: DeleteFlow,
