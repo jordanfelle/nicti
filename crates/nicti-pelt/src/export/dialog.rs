@@ -619,7 +619,7 @@ fn watermark_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
     ui.strong("Watermark");
     let mut enabled = spec.watermark.is_some();
     if ui
-        .checkbox(&mut enabled, "Add a logo (SVG or PNG)")
+        .checkbox(&mut enabled, "Add a watermark (logo or text)")
         .changed()
     {
         spec.watermark = enabled.then(WatermarkSpec::default);
@@ -628,7 +628,14 @@ fn watermark_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
         return;
     };
     ui.horizontal(|ui| {
-        ui.label("File");
+        ui.label("Text");
+        ui.text_edit_singleline(&mut w.text).on_hover_text(
+            "Set in Inter; Latin, Greek and Cyrillic. Used instead of the file below.",
+        );
+        ui.color_edit_button_srgb(&mut w.text_color);
+    });
+    ui.horizontal(|ui| {
+        ui.label("or file");
         let mut path = w.path.to_string_lossy().into_owned();
         if ui.text_edit_singleline(&mut path).changed() {
             w.path = PathBuf::from(path);

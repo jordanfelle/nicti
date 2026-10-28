@@ -8,3 +8,5 @@ is the repo-relative path in backticks.
 |------|--------|---------|--------------|
 | `crates/nicti-pelt/assets/fonts/Inter-Regular.ttf` | [Inter](https://github.com/rsms/inter) by The Inter Project Authors | SIL OFL 1.1 | `crates/nicti-pelt/assets/fonts/OFL-Inter.txt` |
 | `crates/nicti-pelt/assets/fonts/Inter-SemiBold.ttf` | [Inter](https://github.com/rsms/inter) by The Inter Project Authors | SIL OFL 1.1 | `crates/nicti-pelt/assets/fonts/OFL-Inter.txt` |
+
+Inter Regular is also `include_bytes!`'d by `crates/nicti-preen` for the text watermark (#338); it is the same file as above, not a second copy.

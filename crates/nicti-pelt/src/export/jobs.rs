@@ -161,7 +161,7 @@ impl ExportRun {
             .get(builtin_id(spec.format.format()))
             .ok_or(StartError::NoExporter)?;
         let watermark = match &spec.watermark {
-            Some(w) => Some(Arc::new(WatermarkSource::load(&w.path)?)),
+            Some(w) => Some(Arc::new(WatermarkSource::for_spec(w)?)),
             None => None,
         };
 

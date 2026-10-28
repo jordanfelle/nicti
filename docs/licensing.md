@@ -825,6 +825,10 @@ does not take the dependency). One new crate enters `Cargo.lock`: `toml_writer` 
 metadata`), required by `toml`'s `serde` feature. `cargo deny check licenses` passes. No ML model, font or other
 bundled data asset is introduced.
 
+## Update (2026-10-28, [#338](https://github.com/jordanfelle/nicti/issues/338)'s text watermark)
+
+`nicti-preen` gains a direct dependency on `skrifa` 0.44 (glyph outlines for the text watermark). It was already in the lockfile through egui's font stack (`epaint`), so it adds **no new crate**; its license is `MIT OR Apache-2.0`, the same as `read-fonts`/`font-types` it builds on, and `cargo deny check licenses` is unchanged. The font is **Inter Regular** (SIL OFL 1.1, see the #432 update and `assets/ATTRIBUTION.md`): `nicti-preen` `include_bytes!`s the existing `crates/nicti-pelt/assets/fonts/Inter-Regular.ttf`, so no second copy and no new attribution row. OFL 1.1 permits embedding a font in software provided the font is not sold by itself and its license text travels with it, which the existing `OFL-Inter.txt` does.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23
