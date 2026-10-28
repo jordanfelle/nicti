@@ -19,6 +19,8 @@ use tiff::tags::Type;
 const IMAGE_OWNED: &[u16] = &[
     254, 255, 256, 257, 258, 259, 262, 266, 273, 277, 278, 279, 282, 283, 284, 296, 317, 320, 338,
     339, 700, 34665, 34675, 34853, 40965,
+    // Tile layout, JPEG-in-TIFF, YCbCr-only tags: meaningless (or invalid) on our RGB image.
+    322, 323, 324, 325, 330, 513, 514, 530, 531,
 ];
 /// Exif-IFD tags a TIFF must not carry (exiftool `-validate`: "not allowed in TIFF"): the pixel
 /// size and component layout live in the image directory, not the Exif one.
@@ -392,5 +394,39 @@ mod tests {
             data: b"abcdef",
         };
         assert_eq!(even.data().len(), 6);
+    }
+
+    #[test]
+    fn eight_byte_values_swap_as_one_unit_in_a_big_endian_block() {
+        // IFD0 { tag 0x9999 DOUBLE x1 at offset 26 }, big endian.
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MM\0*");
+        b.extend_from_slice(&8u32.to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&0x9999u16.to_be_bytes());
+        b.extend_from_slice(&12u16.to_be_bytes());
+        b.extend_from_slice(&1u32.to_be_bytes());
+        b.extend_from_slice(&26u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(b.len(), 26);
+        b.extend_from_slice(&1.5f64.to_be_bytes());
+        let e = parse_exif_block(&b);
+        assert_eq!(e.ifd0.len(), 1);
+        assert_eq!(
+            f64::from_ne_bytes(e.ifd0[0].data[..8].try_into().unwrap()),
+            1.5
+        );
+    }
+
+    #[test]
+    fn tags_that_only_make_sense_for_the_source_image_are_not_copied() {
+        for tag in [322u16, 324, 330, 513, 530, 531] {
+            let mut b = block(true);
+            b[10..12].copy_from_slice(&tag.to_le_bytes());
+            assert!(
+                parse_exif_block(&b).ifd0.iter().all(|e| e.tag != tag),
+                "{tag}"
+            );
+        }
     }
 }

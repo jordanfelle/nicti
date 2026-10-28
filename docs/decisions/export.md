@@ -35,8 +35,7 @@ trail.
   the same way a naive resize does. Sequential compositing beat `rayon`-parallel at typical logo
   sizes (1.18ms vs. 6.10ms p50) — parallelism overhead exceeds the blend work below some size.
   Text watermarking is deferred (no vendored font with a confirmed license picked yet).
-- **TIFF export's metadata write (ICC/EXIF/XMP) stays deferred** — same class of gap ADR-0059 left
-  for DNG: no crate in this workspace builds arbitrary TIFF tags yet.
+- ~~TIFF export's metadata write (ICC/EXIF/XMP) stays deferred~~ — ICC/XMP landed in #57, EXIF in #337 (`tiff_exif.rs`, via the `tiff` encoder's `extra_directory`); DNG metadata write is still open (ADR-0059).
 
 ## #57: the export pipeline
 
