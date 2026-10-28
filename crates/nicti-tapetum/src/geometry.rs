@@ -319,6 +319,76 @@ pub fn output_encode(prophoto_linear: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    /// #589 item 1 asked for the crop fit to account for the Upright homography, on the premise
+    /// that it "can still sample outside the frame". It cannot: `upright::homography_for_rotation`
+    /// zooms the correction about the centre until the *whole* source frame samples inside the
+    /// source, and a projective map of a convex region stays convex, so any crop rect that lies in
+    /// the (straightened) frame -- which `fit_crop_to_rotated` guarantees -- samples inside after
+    /// Upright too. This pins that guarantee so an Upright change that breaks it (a homography
+    /// built without the zoom) fails here instead of showing edge-clamped smear in a render.
+    #[test]
+    fn upright_never_samples_outside_a_crop_the_straighten_fit_accepts() {
+        let mut s = 0x9E37_79B9u32;
+        let mut next = |lo: f32, hi: f32| {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            lo + (s >> 8) as f32 / (1u32 << 24) as f32 * (hi - lo)
+        };
+        let max = crate::upright::MAX_CORRECTION_DEG as f32;
+        let (w, h) = (600.0, 400.0);
+        let mut non_identity = 0;
+        for case in 0..4000 {
+            // Three quarters of the cases use corrections a photo really needs (the zoom keeps the
+            // frame covered, so the homography is real); the extremes of the stored range mostly
+            // need more zoom than `MIN_ZOOM` allows and fall back to the identity, which is safe
+            // but proves nothing, so they are only a quarter of the sweep.
+            let (rl, pl, yl, fl) = if case % 4 == 0 {
+                (max, max, max, 4.0)
+            } else {
+                (3.0, 6.0, 6.0, 3.0)
+            };
+            let (roll, pitch, yaw) = (next(-rl, rl), next(-pl, pl), next(-yl, yl));
+            let hom = crate::coat::UprightParams {
+                roll_degrees: roll,
+                pitch_degrees: pitch,
+                yaw_degrees: yaw,
+                focal_diag: next(1.0, fl),
+            }
+            .homography(w, h);
+            // A fallback to the identity (the correction needed more zoom than allowed) passes
+            // trivially; count the cases that really exercise the homography.
+            non_identity += usize::from(!hom.is_identity());
+            let rot = next(-MAX_STRAIGHTEN_DEGREES, MAX_STRAIGHTEN_DEGREES);
+            let cw = next(40.0, w);
+            let rect = CropRect {
+                x: next(0.0, w - cw),
+                y: next(0.0, h - cw * h / w),
+                width: cw,
+                height: cw * h / w,
+            };
+            let fit = fit_crop_to_rotated(rect, rot, (w, h));
+            let affine = affine_for_crop(fit, rot);
+            for iy in 0..=12 {
+                for ix in 0..=12 {
+                    let p =
+                        affine.apply((fit.width * ix as f32 / 12.0, fit.height * iy as f32 / 12.0));
+                    let q = hom.apply((f64::from(p.0), f64::from(p.1)));
+                    let inside = q.is_some_and(|(x, y)| {
+                        (-0.05..=f64::from(w) + 0.05).contains(&x)
+                            && (-0.05..=f64::from(h) + 0.05).contains(&y)
+                    });
+                    assert!(
+                        inside,
+                        "case {case}: roll {roll} pitch {pitch} yaw {yaw} rot {rot}: {p:?} -> {q:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            non_identity > 2000,
+            "only {non_identity} of 4000 cases used a real homography: the sweep proves nothing"
+        );
+    }
+
     use super::*;
 
     #[test]

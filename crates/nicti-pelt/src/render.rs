@@ -679,14 +679,21 @@ impl DevelopDoc {
         &mut self,
         frame: Arc<LinearFrame>,
         identity: blake3::Hash,
-        doc: EditDocument,
+        mut doc: EditDocument,
     ) {
+        // An old document may hold a crop that pokes out of its straightened frame (saved before
+        // #557). The catalog's copy stays the saved baseline, so a fitted crop reads as an edit and
+        // is saved like any other: export, the grid and the rendered-preview tier all read the
+        // catalog row, and fitting only here would leave them showing the poking crop while Develop
+        // looks right. (No undo step is recorded: the history starts from the fitted document.)
+        let catalog_copy = doc.clone();
+        fit_loaded_crop(&mut doc, (frame.width as f32, frame.height as f32));
         self.extent = Extent {
             width: frame.width,
             height: frame.height,
         };
         self.frame = frame;
-        self.saved = doc.clone();
+        self.saved = catalog_copy;
         self.history = History::new(doc);
         self.removals.clear();
         self.ai_alphas.clear();
@@ -1293,6 +1300,24 @@ pub enum AutoApplied {
     },
 }
 
+/// Fits `doc`'s crop to a photo of `extent` (#589): the same `CropParams::fit_to_rotated` every
+/// angle edit runs, applied once when a document is loaded, so an old document whose rotated crop
+/// pokes out of the frame renders right immediately (and, being unsaved, is then written back so the
+/// catalog agrees). Only touches a document that has a crop entry
+/// and only when the fit changes it (a document with no rotation, or one that already fits, is
+/// returned byte for byte as it came); the entry's schema version is kept.
+fn fit_loaded_crop(doc: &mut EditDocument, extent: (f32, f32)) {
+    let Some(entry) = doc.stages.get_mut(CROP) else {
+        return;
+    };
+    let before: CropParams = coat::parse(&entry.params);
+    let mut crop = before;
+    crop.fit_to_rotated(extent);
+    if crop != before {
+        entry.params = serde_json::to_value(crop).expect("a coat params struct always serializes");
+    }
+}
+
 /// A detected straighten angle within this many degrees of the current rotation counts as already
 /// level: below any visible change, and absorbs f32 noise between two runs on the same pixels.
 const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
@@ -1323,6 +1348,91 @@ mod tests {
 
         view.reset_stage(EXPOSURE);
         assert!(!view.has_edits(), "the only edit was just reset away");
+    }
+
+    fn doc_with_crop(crop: &CropParams) -> EditDocument {
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            CROP.to_string(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params: serde_json::to_value(crop).unwrap(),
+            },
+        );
+        doc
+    }
+
+    /// #589: an old document whose rotated crop pokes out of the frame is fitted on load, and the
+    /// catalog's copy stays the baseline, so the fit is saved (export, the grid and the rendered
+    /// preview all read the catalog row and must not keep showing the poking crop).
+    #[test]
+    fn loading_an_old_document_fits_its_rotated_crop_and_marks_it_for_saving() {
+        let frame = synthetic_linear_frame();
+        let (w, h) = (frame.width as f32, frame.height as f32);
+        let poking = CropParams {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            rotation_degrees: 10.0,
+            upright: None,
+        };
+        let mut doc = DevelopDoc::new();
+        doc.load_real_frame(
+            Arc::new(frame),
+            blake3::hash(b"old"),
+            doc_with_crop(&poking),
+        );
+        let loaded: CropParams = doc.stage_params(CROP);
+        assert!(loaded.width < w && loaded.height < h, "fitted: {loaded:?}");
+        let again = {
+            let mut c = loaded;
+            c.fit_to_rotated((w, h));
+            c
+        };
+        assert_eq!(again, loaded, "and it now fits");
+        assert!(
+            doc.is_dirty(),
+            "the catalog still holds the poking crop: it must be written back"
+        );
+        assert_eq!(doc.document(), &doc_with_crop(&loaded));
+        assert!(!doc.can_undo(), "the fit is not an undo step");
+        // Saving makes the catalog agree and the view clean again.
+        doc.mark_saved();
+        assert!(!doc.is_dirty());
+    }
+
+    #[test]
+    fn loading_leaves_a_document_that_needs_no_fit_exactly_as_it_was() {
+        let frame = synthetic_linear_frame();
+        let (w, h) = (frame.width as f32, frame.height as f32);
+        // No rotation (a plain crop), a rotation that already fits, and no crop entry at all.
+        let plain = CropParams {
+            x: 2.0,
+            y: 1.0,
+            width: w / 2.0,
+            height: h / 2.0,
+            ..Default::default()
+        };
+        let mut fitted = CropParams {
+            rotation_degrees: 3.0,
+            ..Default::default()
+        };
+        fitted.fit_to_rotated((w, h));
+        for original in [
+            doc_with_crop(&plain),
+            doc_with_crop(&fitted),
+            EditDocument::default(),
+        ] {
+            let mut doc = DevelopDoc::new();
+            doc.load_real_frame(
+                Arc::new(synthetic_linear_frame()),
+                blake3::hash(b"x"),
+                original.clone(),
+            );
+            assert_eq!(doc.document(), &original);
+            assert!(!doc.is_dirty());
+        }
     }
 
     /// Regression: `apply_document` used to reset the identity `load_real_frame` set on the DECODE

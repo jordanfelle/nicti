@@ -310,3 +310,29 @@ All constants untuned vs LRC.
 **NEF lens source (#410).** Full record: `docs/adr/0410-nef-embedded-lens-corrections.md`. Nikon Z bodies embed their own correction data in TIFF tag `0xC7D5` of a SubIFD (unencrypted `Nikon\0` blob, entry 0x05 distortion / 0x06 vignette). `nicti_cornea::embedded::Walker::find_nikon_lens_info` reads it -> `LinearFrame.nikon_lens_info` -> `nicti_iris::nikon` (`parse`, `NikonEmbedded`, polynomial refit onto the existing `Warp`/`Vignette` via `fit_even`). **Opt-in and unverified**: `LensParams::nikon_profile` defaults off (omitted from the JSON, `IMPL_VERSION` stays 0) because the polynomial semantics follow ART's reading and are unchecked on a real Z8 (parity vs Adobe DNG Converter is the follow-up, which also flips the default and bumps `IMPL_VERSION`). Lateral-CA block 0x07 not decoded; lensfun deferred. Real-file test: `nicti-tapetum/tests/real_nef_lens.rs` (`NICTI_TEST_REAL_NEF_DIR`).
 
 **Upright (#427).** Full record: `docs/adr/0427-upright-perspective-correction.md`. CPU segment detection + RANSAC vanishing points give a virtual camera rotation as a homography applied by `present_sample.wgsl` after the crop affine; stored as angles + diagonal-relative focal in `CropParams.upright`. Focal length falls back to 28mm-equivalent until EXIF is plumbed; thresholds untuned (synthetic tests only).
+
+## #557 / #589: the crop stays inside the straightened image
+
+`geometry::fit_crop_to_rotated` (via `CropParams::fit_to_rotated`) shrinks the crop about its centre, keeping its aspect,
+and slides it back if it was off-centre, so no corner of the rotated crop samples past the frame. Called on every angle
+edit. #589 follow-ups: (1) **Upright needs no extra fit.** The ticket assumed the Upright homography, applied after the
+crop affine, could still sample outside the frame. It cannot: `upright::homography_for_rotation` zooms the correction
+about the centre until the whole source frame samples inside the source (corner test, 40-step bisection), and a projective
+map of a convex region is convex, so every crop rect inside the (straightened) frame also samples inside it after Upright.
+A first version of an Upright-aware fit was written and removed when a 3000-case sweep showed the straighten fit alone
+never lets a sample out (roll/pitch/yaw up to the stored limit, focal 0.4-4x the diagonal, rotation up to 45 degrees);
+`geometry::upright_never_samples_outside_a_crop_the_straighten_fit_accepts` pins the guarantee and fails if the zoom is
+removed. (2) **Regrow:** the Rotate slider used to fit each step from the already-shrunk rect, so lowering the angle could
+not enlarge the crop (the overlay rotate drag already fit from `start_crop`). The panel now keeps the crop from when the
+slider drag started in egui temp memory (no schema or hash change) and fits every step from it
+(`CropParams::with_rotation_fitted`, `develop_panel::crop_after_rotation_edit`); a keyboard nudge, typed value or reset has
+no drag base and fits from the current crop as before; the drag-start crop is the ceiling. (3) **Fit on load:**
+`DevelopDoc::load_real_frame` fits an old document's crop once (`fit_loaded_crop`) and records no undo step, but the
+catalog's copy stays the saved baseline: the fitted crop is therefore dirty and is written back by the normal autosave.
+That is deliberate (the review's confirmed defect on the first version, which made the fitted copy the baseline):
+export, the grid thumbnails, prebake and the rendered-preview hash all read the catalog row and never run the fit, so
+fitting only in Develop's memory would have hidden the poking crop in Develop while those paths kept showing it.
+A document with no rotation, or one that already fits, is untouched and not dirty. A double-click **reset** of the angle
+has no drag base and keeps the current crop (a remembered "level" rect could discard crop edits made while rotated);
+dragging back to 0 restores it. The Upright regression sweep counts the cases that use a real homography (the stored
+extremes mostly fall back to the identity, which is safe but proves nothing) and asserts most do.

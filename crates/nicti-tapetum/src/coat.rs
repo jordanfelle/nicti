@@ -473,9 +473,11 @@ impl CropParams {
 
     /// Keeps the crop inside the straightened image (#557): resolves the effective rect against
     /// `source_extent`, shrinks/slides it with `geometry::fit_crop_to_rotated`, and stores it.
-    /// Call after every angle change. A no-op at zero rotation (so an untouched default stays the
-    /// "no crop" sentinel) and when the rect already fits; it only runs on edits, never on load,
-    /// so an old document that pokes out is left as saved until its next angle edit.
+    /// Call after every angle change (and once when a document loads, #589: `nicti-pelt`'s
+    /// `fit_loaded_crop`). A no-op at zero rotation (so an untouched default stays the "no crop"
+    /// sentinel) and when the rect already fits. An Upright correction needs no extra fitting
+    /// (#589): its homography is zoomed so the whole frame samples inside the source, so a rect
+    /// inside the straightened frame samples inside it after Upright too.
     pub fn fit_to_rotated(&mut self, source_extent: (f32, f32)) {
         if self.rotation_degrees == 0.0 {
             return;
@@ -488,6 +490,17 @@ impl CropParams {
             self.width = fit.width;
             self.height = fit.height;
         }
+    }
+
+    /// `base` with its rotation set to `degrees` (clamped) and refitted -- always from `base`'s own
+    /// rect, not from a rect an earlier, larger angle already shrank. A slider drag keeps the crop
+    /// from when the drag started as `base`, so lowering the angle again within the drag regrows
+    /// the crop (up to `base`) instead of leaving it as small as the largest angle made it (#589).
+    pub fn with_rotation_fitted(base: CropParams, degrees: f32, source_extent: (f32, f32)) -> Self {
+        let mut crop = base;
+        crop.set_rotation(degrees);
+        crop.fit_to_rotated(source_extent);
+        crop
     }
 
     /// Sets `rotation_degrees`, clamped to `geometry::MAX_STRAIGHTEN_DEGREES` -- the single
@@ -1107,6 +1120,43 @@ mod tests {
         let again = crop;
         crop.fit_to_rotated((600.0, 400.0));
         assert_eq!(crop, again, "idempotent");
+    }
+
+    #[test]
+    fn fitting_from_the_drag_start_rect_regrows_when_the_angle_comes_back_down() {
+        let src = (600.0, 400.0);
+        let base = CropParams::default();
+        // A drag up to 10 degrees shrinks the crop...
+        let at10 = CropParams::with_rotation_fitted(base, 10.0, src);
+        // ...and fitting from that shrunk rect at 5 degrees is the bug: it cannot grow.
+        let mut from_shrunk = at10;
+        from_shrunk.set_rotation(5.0);
+        from_shrunk.fit_to_rotated(src);
+        assert_eq!(from_shrunk.effective_rect(src), at10.effective_rect(src));
+        // From the rect the drag started with, 5 degrees gets its own, larger rect.
+        let at5 = CropParams::with_rotation_fitted(base, 5.0, src);
+        assert!(
+            at5.width > at10.width + 1.0,
+            "{} vs {}",
+            at5.width,
+            at10.width
+        );
+        // ...exactly what a fresh drag straight to 5 degrees produces, and 0 restores the start.
+        let mut direct = base;
+        direct.set_rotation(5.0);
+        direct.fit_to_rotated(src);
+        assert_eq!(at5, direct);
+        assert!(CropParams::with_rotation_fitted(base, 0.0, src).is_noop());
+        // A non-default start (a user crop) is the ceiling: it never grows past it.
+        let user = CropParams {
+            x: 100.0,
+            y: 80.0,
+            width: 300.0,
+            height: 200.0,
+            ..Default::default()
+        };
+        let low = CropParams::with_rotation_fitted(user, 1.0, src);
+        assert!(low.width <= 300.0 + 1e-3 && low.height <= 200.0 + 1e-3);
     }
 
     #[test]
