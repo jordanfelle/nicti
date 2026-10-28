@@ -18,7 +18,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 LAYERS = {
-    "nicti-claw": 0, "nicti-haw": 0, "nicti-pounce": 0, "nicti-pawprint": 0,
+    "nicti-claw": 0, "nicti-collar": 0, "nicti-haw": 0, "nicti-pounce": 0, "nicti-pawprint": 0,
     "nicti-shed": 0, "nicti-scent": 0, "nicti-prowl": 0,
     "nicti-calico": 1, "nicti-iris": 1, "nicti-stalk": 1, "dewclaw": 1,
     "nicti-cornea": 2, "nicti-preen": 2,

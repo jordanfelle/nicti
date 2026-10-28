@@ -65,3 +65,27 @@ Covers the implementation-language decision, v1 platform/camera scope, the non-d
   capability use — immediate quarantine, explicit re-enable required). Documentary only — no
   sandbox implementation; a follow-up `build`/v2 ticket implements it. Feeds ADR-0218 §4's
   enforcement requirement.
+
+## #230: Collar/Hiss implementation slice (ADR-0214)
+
+`crates/nicti-collar` (layer 0, its own crate so `nicti-claw` does not take wasmtime) implements the parts of ADR-0214 that
+need no plugin host. **Manifest** (`manifest::parse`): strict TOML, unknown fields refused, a justification and a scope
+required on every capability, `RenderStage` rejected, hosts canonical lowercase DNS names (no wildcard, IP literal, port,
+scheme, trailing dot or non-ASCII), one capability per (kind, scope), budgets only tighten the host ceilings, `nicti.`
+ids reserved. **Re-consent** (`consent::widenings`): field-level, so a new host in an existing network capability, a new
+filesystem scope, `gpu`, a new extension point or a looser budget (including dropping an override) all widen; removals and
+reworded justifications never do. **Authorizers** (`authorize`): a request must be `https://`, port 443, a canonical host
+exactly in `allowed_hosts` (no userinfo, escapes, brackets, trailing dot or subdomain implication) and in the *active*
+action scope; a path is judged by canonical containment under the one granted directory (symlinks, `..`, a sibling with a
+shared prefix, a not-yet-existing file via its parent). **Hiss** (`hiss`): states NeedsConsent / Enabled / AutoDisabled /
+Killed / Quarantined; unknown and never-consented modules do not run; N bugs in a window auto-disable with one-click
+re-enable; a violation quarantines at once and only an exact acknowledgement of what it attempted re-enables it (no
+update, consent or kill clears it); state persists atomically, a corrupt file is an *error* (fail closed to safe mode, never
+an empty registry that forgets a quarantine); the safe-mode marker file reads as ON when it cannot be checked.
+**Sandbox** (`sandbox`): an `Engine` per module with fuel, an epoch deadline, a wall-clock watchdog and a memory cap;
+`Killer::kill` interrupts a tight loop with no host call (verified: ADR-0214's claim holds on wasmtime 50), a module's own
+timeout is a Bug not a Kill, killing one module never interrupts another, and any import is a Violation (nothing is linked
+yet). Surviving equivalent mutants: the explicit `@` ban duplicates the canonical-host check, and the post-deadline kill
+flag check duplicates the one at the top of `run` (the window between them is not deterministically testable).
+Follow-ups: WASI linking per capability, the consent screen and kill-switch UI/shortcut (the Adobe binding cross-check is
+still open), lazy requests, a host-call timeout and a GPU cancellation path.

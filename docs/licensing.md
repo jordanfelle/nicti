@@ -814,6 +814,17 @@ linking GTK3 (`gtk3` is LGPL, and would have been a large native dependency for 
 Its one new transitive crate, `pollster` 0.4 (`Apache-2.0 OR MIT`), is allowlisted but duplicates the `pollster` 1.0 already in the tree (a `cargo deny` duplicate warning, not a failure).
 `cargo deny check licenses bans` passes with no `deny.toml` change; no data asset, model or font is added.
 
+## Update (2026-10-28, [#230](https://github.com/jordanfelle/nicti/issues/230)'s Collar/Hiss slice)
+
+New crate `nicti-collar` (ADR-0214's manifest parser, consent diff, host-side authorizers, kill-switch policy and a
+wasmtime sandbox). Direct dependencies: `toml` 1.1.8 (parse-only features), `semver` 1.0.28, `thiserror` 2 and `serde`/
+`serde_json`, all `MIT OR Apache-2.0` and already in the resolved graph; **`wasmtime` v50 (Apache-2.0 WITH
+LLVM-exception, already on `deny.toml`'s allowlist) is promoted from a dev-dependency of `nicti-claw` to a regular
+dependency of `nicti-collar`** (a separate crate on purpose, so layer-0 `nicti-claw`, which every domain crate builds on,
+does not take the dependency). One new crate enters `Cargo.lock`: `toml_writer` 1.1.3 (`MIT OR Apache-2.0` per `cargo
+metadata`), required by `toml`'s `serde` feature. `cargo deny check licenses` passes. No ML model, font or other
+bundled data asset is introduced.
+
 ## Footnotes
 
 [^lr1]: LibRaw dual license — https://github.com/LibRaw/LibRaw/blob/master/LICENSE.LGPL and repo README's dual LGPL-2.1/CDDL-1.0 statement — verified 2026-09-23
