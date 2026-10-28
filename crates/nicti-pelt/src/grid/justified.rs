@@ -6,7 +6,7 @@
 //! a background job ([`RowIndex::begin_group`], [`RowIndex::push_cells`], [`RowIndex::finish`]) in
 //! any chunking, and queried by binary search (`partition_point`) from the UI thread. A frame never
 //! lays anything out: it asks which rows overlap the viewport and then positions only those rows'
-//! cells ([`RowIndex::row_cells`]). At 1M photos with ~8 per row the table is ~1.3 MB, built once
+//! cells ([`RowIndex::row_cells`]). At 1M photos with ~8 per row the table is ~2.5 MB, built once
 //! per (generation, width bucket, target height) -- see [`LayoutGate`] -- not per frame or per pixel
 //! of a live resize.
 //!
@@ -29,6 +29,10 @@ pub const WIDTH_BUCKET: f32 = 16.0;
 pub const MAX_STRETCH: f32 = 1.5;
 const MIN_ASPECT: f32 = 0.1;
 const MAX_ASPECT: f32 = 10.0;
+/// The smallest target height: below this a row's height clamp would exceed the cap and rows would
+/// overflow the width.
+pub const MIN_TARGET_HEIGHT: f32 = 8.0;
+/// Reserved: a group id equal to this means "no header" in the row table.
 const NO_HEADER: u32 = u32::MAX;
 
 /// A width/height ratio the layout can trust: non-finite or non-positive becomes square, and the
@@ -83,19 +87,13 @@ pub struct RowParams {
 impl RowParams {
     fn sane(self) -> Self {
         let pos = |v: f32, d: f32| if v.is_finite() && v > 0.0 { v } else { d };
+        // Non-finite or negative becomes 0; `-0.0` becomes `0.0` so equal values hash equally.
+        let non_neg = |v: f32| if v.is_finite() && v > 0.0 { v } else { 0.0 };
         Self {
             width: pos(self.width, WIDTH_BUCKET),
-            target_height: pos(self.target_height, 1.0),
-            gap: if self.gap.is_finite() && self.gap >= 0.0 {
-                self.gap
-            } else {
-                0.0
-            },
-            header_height: if self.header_height.is_finite() && self.header_height >= 0.0 {
-                self.header_height
-            } else {
-                0.0
-            },
+            target_height: pos(self.target_height, MIN_TARGET_HEIGHT).max(MIN_TARGET_HEIGHT),
+            gap: non_neg(self.gap),
+            header_height: non_neg(self.header_height),
         }
     }
 }
@@ -103,7 +101,10 @@ impl RowParams {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CellRect {
     pub x: f32,
-    pub y: f32,
+    /// Distance from the top of the content. `f64` because at 2M photos that is ~10^8 points, where
+    /// an `f32` can no longer tell neighbouring rows apart: subtract the scroll offset (also `f64`)
+    /// first, then convert to `f32` for painting.
+    pub y: f64,
     pub w: f32,
     pub h: f32,
 }
@@ -115,9 +116,11 @@ pub enum Dir {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OutOfOrder {
-    pub expected: usize,
-    pub got: usize,
+pub enum PushError {
+    /// Cells must be pushed contiguously from 0.
+    OutOfOrder { expected: usize, got: usize },
+    /// The index was finished; start a new one.
+    Finished,
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +136,7 @@ struct Open {
 pub struct RowIndex {
     params: RowParams,
     first: Vec<u32>,
-    top: Vec<f32>,
+    top: Vec<f64>,
     height: Vec<f32>,
     header: Vec<u32>,
     open: Option<Open>,
@@ -141,7 +144,7 @@ pub struct RowIndex {
     pending_header: u32,
     /// Cells consumed so far (closed rows plus the open one).
     cells: usize,
-    y: f32,
+    y: f64,
     complete: bool,
 }
 
@@ -167,16 +170,26 @@ impl RowIndex {
 
     /// Starts a new group: the open row is closed (a group's last row is not stretched), and the
     /// next row gets a header above it when `header` is `Some(group id)`.
+    ///
+    /// A group with no cells has no rows, so its header is dropped (a following `begin_group`
+    /// replaces it). `u32::MAX` is reserved and means "no header".
     pub fn begin_group(&mut self, header: Option<u32>) {
+        if self.complete {
+            return;
+        }
+        debug_assert_ne!(header, Some(NO_HEADER), "u32::MAX is a reserved group id");
         self.close_open(false);
-        self.pending_header = header.filter(|h| *h != NO_HEADER).unwrap_or(NO_HEADER);
+        self.pending_header = header.unwrap_or(NO_HEADER);
     }
 
     /// Appends the aspects of cells `first_cell..first_cell + aspects.len()`. May be called any
     /// number of times with any chunking; the result is identical to one call.
-    pub fn push_cells(&mut self, first_cell: usize, aspects: &[f32]) -> Result<(), OutOfOrder> {
+    pub fn push_cells(&mut self, first_cell: usize, aspects: &[f32]) -> Result<(), PushError> {
+        if self.complete {
+            return Err(PushError::Finished);
+        }
         if first_cell != self.cells {
-            return Err(OutOfOrder {
+            return Err(PushError::OutOfOrder {
                 expected: self.cells,
                 got: first_cell,
             });
@@ -238,11 +251,12 @@ impl RowIndex {
         } else {
             header_height
         };
-        self.first.push(open.start as u32);
+        self.first
+            .push(u32::try_from(open.start).expect("fewer than 2^32 photos"));
         self.top.push(self.y);
         self.height.push(h);
         self.header.push(open.header);
-        self.y += head + h + gap;
+        self.y += f64::from(head) + f64::from(h) + f64::from(gap);
     }
 
     /// Whether [`Self::finish`] has been called (the index covers every cell).
@@ -261,11 +275,11 @@ impl RowIndex {
     }
 
     /// Total height of the addressable rows.
-    pub fn content_height(&self) -> f32 {
+    pub fn content_height(&self) -> f64 {
         self.y
     }
 
-    pub fn row_top(&self, row: usize) -> f32 {
+    pub fn row_top(&self, row: usize) -> f64 {
         self.top[row]
     }
 
@@ -300,7 +314,7 @@ impl RowIndex {
     }
 
     /// The row whose block (header included) contains `y`, clamped to the first/last row.
-    pub fn row_at_y(&self, y: f32) -> usize {
+    pub fn row_at_y(&self, y: f64) -> usize {
         if self.rows() == 0 {
             return 0;
         }
@@ -310,13 +324,15 @@ impl RowIndex {
             .min(self.rows() - 1)
     }
 
-    /// The rows overlapping `y0..y1` (a viewport), plus nothing else.
-    pub fn rows_between(&self, y0: f32, y1: f32) -> Range<usize> {
-        if self.rows() == 0 || y1 <= y0 {
+    /// The rows overlapping the viewport `y0..y1`, and nothing else: empty when the viewport is
+    /// empty, NaN, wholly above the content or wholly below it.
+    pub fn rows_between(&self, y0: f64, y1: f64) -> Range<usize> {
+        if self.rows() == 0 || y0.is_nan() || y1.is_nan() || y1 <= y0 || y1 <= 0.0 || y0 >= self.y {
             return 0..0;
         }
+        // `top[start] <= y0 < y1`, so at least the start row is below `y1`.
         let start = self.row_at_y(y0);
-        let end = self.top.partition_point(|t| *t < y1).max(start + 1);
+        let end = self.top.partition_point(|t| *t < y1);
         start..end.min(self.rows())
     }
 
@@ -345,7 +361,11 @@ impl RowIndex {
         row: usize,
         aspects: &'a [f32],
     ) -> impl Iterator<Item = (usize, CellRect)> + 'a {
-        let y = self.top[row] + self.header_offset(row);
+        debug_assert!(
+            aspects.len() >= self.end_cell(row),
+            "aspects must be the slice that was pushed"
+        );
+        let y = self.top[row] + f64::from(self.header_offset(row));
         let h = self.height[row];
         let gap = self.params.gap;
         let mut x = 0.0;
@@ -390,6 +410,8 @@ impl RowIndex {
     }
 
     /// Page-key navigation: the row about `view_height` above/below, same horizontal position.
+    /// Always moves at least one row in the requested direction (a non-finite or tiny
+    /// `view_height` is one row), and stays put at the first/last row.
     pub fn navigate_page(
         &self,
         index: usize,
@@ -400,12 +422,18 @@ impl RowIndex {
         let Some(row) = self.row_of(index) else {
             return index;
         };
-        let y = self.top[row]
-            + match dir {
-                Dir::Up => -view_height,
-                Dir::Down => view_height,
-            };
-        let target = self.row_at_y(y);
+        let reach = if view_height.is_finite() && view_height > 0.0 {
+            f64::from(view_height)
+        } else {
+            0.0
+        };
+        let target = match dir {
+            Dir::Up => self
+                .row_at_y(self.top[row] - reach)
+                .min(row.saturating_sub(1)),
+            Dir::Down => self.row_at_y(self.top[row] + reach).max(row + 1),
+        }
+        .min(self.rows() - 1);
         if target == row {
             return index;
         }
@@ -419,16 +447,40 @@ impl RowIndex {
     }
 }
 
-/// What a built [`RowIndex`] is for. A new key means a rebuild; the same key never does.
+/// What a built [`RowIndex`] is for. A new key means a rebuild; the same key never does. Build it
+/// with [`IndexKey::new`], which uses the same sanitised parameters the index would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexKey {
     /// The visible-list generation (changes with the query, sort or catalog contents).
     pub generation: u64,
     pub width_bucket: u32,
-    /// `f32::to_bits` of the target height.
-    pub target_bits: u32,
+    target_bits: u32,
+    gap_bits: u32,
+    header_bits: u32,
     /// Whether date headers are on.
     pub grouped: bool,
+}
+
+impl IndexKey {
+    pub fn new(generation: u64, grouped: bool, params: RowParams) -> Self {
+        let p = params.sane();
+        Self {
+            generation,
+            width_bucket: width_bucket(p.width),
+            target_bits: p.target_height.to_bits(),
+            gap_bits: p.gap.to_bits(),
+            header_bits: p.header_height.to_bits(),
+            grouped,
+        }
+    }
+
+    /// The parameters to build with: the width rounded down to its bucket.
+    pub fn bucketed(params: RowParams) -> RowParams {
+        RowParams {
+            width: width_bucket(params.sane().width) as f32 * WIDTH_BUCKET,
+            ..params
+        }
+    }
 }
 
 /// Decides when a layout build must start and counts them (`layout_builds`, ADR-0437): a frame with
@@ -629,13 +681,16 @@ mod tests {
         // rows_between returns exactly the rows whose blocks overlap the viewport.
         let h = idx.content_height();
         for k in 0..60 {
-            let y0 = h * k as f32 / 61.0;
+            let y0 = h * f64::from(k) / 61.0;
             let y1 = y0 + 700.0;
             let got = idx.rows_between(y0, y1);
             let want: Vec<usize> = (0..idx.rows())
                 .filter(|&r| {
                     let top = idx.row_top(r);
-                    let bottom = top + idx.header_offset(r) + idx.row_height(r) + idx.params().gap;
+                    let bottom = top
+                        + f64::from(idx.header_offset(r))
+                        + f64::from(idx.row_height(r))
+                        + f64::from(idx.params().gap);
                     top < y1 && bottom > y0
                 })
                 .collect();
@@ -688,7 +743,7 @@ mod tests {
         idx.begin_group(None);
         assert_eq!(
             idx.push_cells(3, &[1.0]),
-            Err(OutOfOrder {
+            Err(PushError::OutOfOrder {
                 expected: 0,
                 got: 3
             })
@@ -763,11 +818,17 @@ mod tests {
         assert_eq!(width_bucket(0.0), 1);
         assert_eq!(width_bucket(f32::NAN), 1);
 
-        let key = |w: f32, generation| IndexKey {
-            generation,
-            width_bucket: width_bucket(w),
-            target_bits: 180.0f32.to_bits(),
-            grouped: true,
+        let key = |w: f32, generation| {
+            IndexKey::new(
+                generation,
+                true,
+                RowParams {
+                    width: w,
+                    target_height: 180.0,
+                    gap: 4.0,
+                    header_height: 30.0,
+                },
+            )
         };
         let mut gate = LayoutGate::default();
         assert!(gate.request(key(800.0, 1)), "first frame builds");
@@ -789,6 +850,259 @@ mod tests {
     }
 
     #[test]
+    fn density_or_header_size_changes_rebuild_and_equal_values_share_a_key() {
+        let base = RowParams {
+            width: 800.0,
+            target_height: 180.0,
+            gap: 4.0,
+            header_height: 30.0,
+        };
+        let k = |p: RowParams| IndexKey::new(1, true, p);
+        assert_eq!(k(base), k(base));
+        for changed in [
+            RowParams { gap: 8.0, ..base },
+            RowParams {
+                header_height: 40.0,
+                ..base
+            },
+            RowParams {
+                target_height: 200.0,
+                ..base
+            },
+        ] {
+            assert_ne!(k(base), k(changed), "{changed:?}");
+        }
+        // -0.0 and 0.0, and every non-finite gap, are one value after sanitising.
+        assert_eq!(
+            k(RowParams { gap: -0.0, ..base }),
+            k(RowParams { gap: 0.0, ..base })
+        );
+        assert_eq!(
+            k(RowParams {
+                gap: f32::NAN,
+                ..base
+            }),
+            k(RowParams { gap: 0.0, ..base })
+        );
+        // The build uses the bucketed width.
+        assert_eq!(
+            IndexKey::bucketed(RowParams {
+                width: 815.0,
+                ..base
+            })
+            .width,
+            800.0
+        );
+    }
+
+    #[test]
+    fn a_mid_stream_index_exposes_only_closed_rows() {
+        let a = [1.0f32; 30];
+        let mut idx = RowIndex::new(params(500.0)); // 4 per row at 100 high
+        idx.begin_group(None);
+        idx.push_cells(0, &a).unwrap();
+        // Not finished: the last (open) row is not addressable, the closed ones are, and they stop
+        // exactly where the open row starts.
+        assert!(idx.rows() >= 2 && !idx.is_complete());
+        let closed = idx.cells();
+        assert!(closed < 30 && closed > 0);
+        assert_eq!(idx.indices_for_rows(0..idx.rows()), 0..closed);
+        assert_eq!(idx.end_cell(idx.rows() - 1), closed);
+        assert_eq!(idx.row_of(closed - 1), Some(idx.rows() - 1));
+        assert_eq!(
+            idx.row_of(closed),
+            None,
+            "the open row is not addressable yet"
+        );
+        idx.finish();
+        assert_eq!(idx.cells(), 30);
+        assert_eq!(idx.end_cell(idx.rows() - 1), 30);
+    }
+
+    #[test]
+    fn every_row_of_a_group_is_addressable_but_only_the_first_has_the_header() {
+        let a = [1.0f32; 30];
+        let mut idx = RowIndex::new(params(500.0));
+        idx.begin_group(Some(3));
+        idx.push_cells(0, &a[..20]).unwrap();
+        idx.begin_group(Some(4));
+        idx.push_cells(20, &a[20..]).unwrap();
+        idx.finish();
+        let firsts: Vec<_> = (0..idx.rows())
+            .filter_map(|r| idx.header_of_row(r))
+            .collect();
+        assert_eq!(firsts, vec![3, 4], "one header per group, not per row");
+        assert!(idx.rows() > 2);
+        assert_eq!(idx.header_of_row(1), None);
+    }
+
+    #[test]
+    fn chunking_across_group_boundaries_gives_the_same_headers_and_rows() {
+        let a = aspects(900);
+        let groups = [
+            (0u32, 0usize, 130usize),
+            (1, 130, 400),
+            (2, 530, 1),
+            (3, 531, 369),
+        ];
+        let build = |chunk: usize| {
+            let mut idx = RowIndex::new(params(640.0));
+            for (g, start, len) in groups {
+                idx.begin_group(Some(g));
+                let mut at = start;
+                for c in a[start..start + len].chunks(chunk) {
+                    idx.push_cells(at, c).unwrap();
+                    at += c.len();
+                }
+            }
+            idx.finish();
+            idx
+        };
+        let whole = build(10_000);
+        for chunk in [1usize, 5, 97] {
+            let idx = build(chunk);
+            assert_eq!(idx.first, whole.first, "chunk {chunk}");
+            assert_eq!(idx.top, whole.top, "chunk {chunk}");
+            assert_eq!(idx.height, whole.height, "chunk {chunk}");
+            assert_eq!(idx.header, whole.header, "chunk {chunk}");
+        }
+    }
+
+    #[test]
+    fn a_group_with_no_cells_has_no_rows_and_its_header_is_dropped() {
+        let mut idx = RowIndex::new(params(500.0));
+        idx.begin_group(Some(1)); // empty bucket
+        idx.begin_group(Some(2));
+        idx.push_cells(0, &[1.0, 1.0]).unwrap();
+        idx.finish();
+        assert_eq!(idx.rows(), 1);
+        assert_eq!(idx.header_of_row(0), Some(2));
+    }
+
+    #[test]
+    fn nothing_can_be_pushed_after_finish() {
+        let mut idx = RowIndex::new(params(500.0));
+        idx.begin_group(None);
+        idx.push_cells(0, &[1.0]).unwrap();
+        idx.finish();
+        assert_eq!(idx.push_cells(1, &[1.0]), Err(PushError::Finished));
+        idx.begin_group(Some(9)); // ignored
+        assert_eq!(idx.rows(), 1);
+        assert!(idx.is_complete());
+    }
+
+    #[test]
+    fn a_tiny_target_height_is_floored_so_rows_still_fit_the_width() {
+        let a = vec![1.0f32; 5000];
+        let mut idx = RowIndex::new(RowParams {
+            width: 800.0,
+            target_height: 0.01,
+            gap: 0.0,
+            header_height: 0.0,
+        });
+        idx.begin_group(None);
+        idx.push_cells(0, &a).unwrap();
+        idx.finish();
+        assert!(idx.params().target_height >= MIN_TARGET_HEIGHT);
+        for row in 0..idx.rows() - 1 {
+            let (_, last) = idx.row_cells(row, &a).last().unwrap();
+            assert!(
+                last.x + last.w <= 800.0 + 0.01,
+                "row {row} ends at {}",
+                last.x + last.w
+            );
+        }
+    }
+
+    #[test]
+    fn rows_between_is_empty_when_the_viewport_misses_the_content() {
+        let a = aspects(300);
+        let idx = built(700.0, &a);
+        let end = idx.content_height();
+        assert!(idx.rows_between(-100.0, -50.0).is_empty(), "wholly above");
+        assert!(idx.rows_between(0.0, 0.0).is_empty());
+        assert!(
+            idx.rows_between(end, end + 500.0).is_empty(),
+            "wholly below"
+        );
+        assert!(idx.rows_between(end + 10.0, end + 500.0).is_empty());
+        assert!(idx.rows_between(f64::NAN, 10.0).is_empty());
+        assert!(idx.rows_between(0.0, f64::NAN).is_empty());
+        // Straddling the top still returns the first row; one in a header band returns its row.
+        assert_eq!(idx.rows_between(-50.0, 10.0).start, 0);
+        let r = idx.rows_between(end - 1.0, end + 100.0);
+        assert_eq!(r.end, idx.rows(), "the last row is in view");
+    }
+
+    #[test]
+    fn page_navigation_always_moves_in_the_requested_direction_by_at_least_one_row() {
+        let a = aspects(400);
+        let idx = built(700.0, &a);
+        let mid_row = idx.rows() / 2;
+        let from = idx.first_cell(mid_row);
+        let row_of = |i| idx.row_of(i).unwrap();
+        for bad in [f32::NAN, -300.0, 0.0, 1.0, f32::INFINITY * 0.0] {
+            let down = idx.navigate_page(from, Dir::Down, bad, &a);
+            assert_eq!(row_of(down), mid_row + 1, "down with {bad}");
+            let up = idx.navigate_page(from, Dir::Up, bad, &a);
+            assert_eq!(row_of(up), mid_row - 1, "up with {bad}");
+        }
+        // A real page jumps about a viewport of rows and lands near the same x.
+        let page = idx.navigate_page(from, Dir::Down, 600.0, &a);
+        assert!(
+            row_of(page) >= mid_row + 3,
+            "a 600pt page is several 100pt rows"
+        );
+        let centre = |i: usize| {
+            let (_, r) = idx.row_cells(row_of(i), &a).find(|(c, _)| *c == i).unwrap();
+            r.x + r.w / 2.0
+        };
+        let (_, landed) = idx
+            .row_cells(row_of(page), &a)
+            .find(|(c, _)| *c == page)
+            .unwrap();
+        assert!(centre(from) >= landed.x - 1.0 && centre(from) <= landed.x + landed.w + 1.0);
+        // Sticky at both ends.
+        assert_eq!(idx.navigate_page(0, Dir::Up, 600.0, &a), 0);
+        let last = a.len() - 1;
+        assert_eq!(idx.navigate_page(last, Dir::Down, 600.0, &a), last);
+    }
+
+    #[test]
+    fn row_tops_stay_exact_at_two_million_photos() {
+        // f32 tops stop resolving neighbouring rows past ~16M points; at 2M photos the content is
+        // ~10^8 points tall. Each row's top must still equal the previous top + its own block.
+        let a = aspects(2_000_000);
+        let mut idx = RowIndex::new(RowParams {
+            width: 1600.0,
+            target_height: 220.0,
+            gap: 4.0,
+            header_height: 40.0,
+        });
+        idx.begin_group(None);
+        for (n, c) in a.chunks(50_000).enumerate() {
+            idx.push_cells(n * 50_000, c).unwrap();
+        }
+        idx.finish();
+        assert!(
+            idx.content_height() > 50_000_000.0,
+            "{}",
+            idx.content_height()
+        );
+        for row in (idx.rows() - 2_000..idx.rows() - 1).chain(0..2_000) {
+            let step = idx.row_top(row + 1) - idx.row_top(row);
+            let block = f64::from(idx.row_height(row)) + 4.0;
+            assert!(
+                (step - block).abs() < 1e-6,
+                "row {row}: step {step}, block {block}"
+            );
+        }
+        // And a lookup near the bottom still lands on the row whose block contains it.
+        let r = idx.rows() - 10;
+        assert_eq!(idx.row_at_y(idx.row_top(r) + 0.5), r);
+    }
+
+    #[test]
     fn a_million_photos_index_is_small_and_queries_are_logarithmic() {
         let a = aspects(1_000_000);
         let mut idx = RowIndex::new(params(1600.0));
@@ -798,8 +1112,8 @@ mod tests {
         }
         idx.finish();
         assert_eq!(idx.cells(), 1_000_000);
-        // ~13 bytes per row (u32 + three f32) and ~8-16 cells per row.
-        let bytes = idx.rows() * 16;
+        // 20 bytes per row (u32 first, f64 top, f32 height, u32 header) and ~8-16 cells per row.
+        let bytes = idx.rows() * 20;
         assert!(
             bytes < 4 * 1024 * 1024,
             "{bytes} bytes for {} rows",

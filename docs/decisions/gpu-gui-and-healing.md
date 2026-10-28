@@ -120,8 +120,9 @@ row-offset index keyed on (generation, width bucket, target height), `partition_
 `layout_builds` counter asserted flat across unchanged frames.
 
 2026-10-28 (#550): decided go for justified rows AND date-group headers, and the pure core was built:
-`nicti-pelt/src/grid/justified.rs`. `RowIndex` is an append-only table (first cell u32, top f32, height f32, header
-id u32 per row, about 16 bytes per row, asserted under 4 MB at 1M photos) filled by a streaming builder
+`nicti-pelt/src/grid/justified.rs`. `RowIndex` is an append-only table (first cell u32, top **f64**, height f32, header
+id u32 per row, about 20 bytes per row, asserted under 4 MB at 1M photos; `f32` tops drift by thousands of points at 2M
+photos, a test pins them exact) filled by a streaming builder
 (`begin_group`, `push_cells`, `finish`) whose result does not depend on the chunking; queries are `partition_point`
 (`row_at_y`, `rows_between`, `row_of`, `indices_for_rows`), `row_cells` positions only one row's cells, and
 `navigate`/`navigate_page` pick the cell nearest the current horizontal centre in the target row. Rows are filled to the

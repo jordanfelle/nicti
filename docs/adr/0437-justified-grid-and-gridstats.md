@@ -73,7 +73,7 @@ default, and measure against `docs/benchmarks.md` at ref-10k and a synthetic 1M 
   navigation by row), `oriented_aspect`, `width_bucket` (16 px) and `LayoutGate` (the `layout_builds` counter: an
   unchanged key never rebuilds). Rows stretch to the width up to 1.5x the target height, a group's last row keeps the
   target, a lone wide photo shrinks to fit, corrupt aspects are square and clamped to 0.1..10. At 1M photos the index
-  is about 16 bytes per row (asserted under 4 MB).
+  is about 20 bytes per row (asserted under 4 MB); row tops are `f64` because at 2M photos the content is ~10^8 points tall, where `f32` cannot tell neighbouring rows apart (a test pins exact tops at 2M).
   **The aspect/orientation question is answered: catalog `width`/`height` are not orientation-corrected** (RAW:
   the embedded preview's declared size; JPEG: the file's own size; both before EXIF rotation), so the layout takes
   `oriented_aspect(width, height, orientation)` and the catalog needs an orientation column plus a backfill (#604).
