@@ -523,6 +523,46 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
     });
 }
 
+fn sharpen_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
+    use nicti_preen::sharpen::{SharpenAmount, SharpenMedia, SharpenSpec};
+    ui.horizontal(|ui| {
+        ui.label("Sharpen");
+        let label = |s: &Option<SharpenSpec>| match s.map(|s| s.media) {
+            None => "Off",
+            Some(SharpenMedia::Screen) => "For screen",
+            Some(SharpenMedia::Matte) => "For matte paper",
+            Some(SharpenMedia::Glossy) => "For glossy paper",
+        };
+        egui::ComboBox::from_id_salt("export_sharpen_media")
+            .selected_text(label(&spec.sharpen))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut spec.sharpen, None, "Off");
+                for (m, name) in [
+                    (SharpenMedia::Screen, "For screen"),
+                    (SharpenMedia::Matte, "For matte paper"),
+                    (SharpenMedia::Glossy, "For glossy paper"),
+                ] {
+                    let amount = spec.sharpen.map(|s| s.amount).unwrap_or_default();
+                    let value = Some(SharpenSpec { media: m, amount });
+                    ui.selectable_value(&mut spec.sharpen, value, name);
+                }
+            });
+        if let Some(s) = spec.sharpen.as_mut() {
+            egui::ComboBox::from_id_salt("export_sharpen_amount")
+                .selected_text(match s.amount {
+                    SharpenAmount::Low => "Low",
+                    SharpenAmount::Standard => "Standard",
+                    SharpenAmount::High => "High",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.amount, SharpenAmount::Low, "Low");
+                    ui.selectable_value(&mut s.amount, SharpenAmount::Standard, "Standard");
+                    ui.selectable_value(&mut s.amount, SharpenAmount::High, "High");
+                });
+        }
+    });
+}
+
 fn depth_picker(ui: &mut egui::Ui, depth: &mut BitDepth) {
     ui.selectable_value(depth, BitDepth::Eight, "8-bit");
     ui.selectable_value(depth, BitDepth::Sixteen, "16-bit");
@@ -574,6 +614,7 @@ fn size_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
         )
         .on_hover_text("Written into the file; never resamples the image");
     });
+    sharpen_section(ui, spec);
 }
 
 fn metadata_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
