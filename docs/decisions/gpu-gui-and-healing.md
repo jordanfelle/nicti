@@ -153,6 +153,19 @@ attributed**: why every wake is followed 1-2 ms later by a second frame whose on
 runner's CPU/disk readouts jitter (the app's own software rendering), so the telemetry gate suppressed little there; a
 quiet real machine should save more, and idle frame cost on a real GPU (the issue's step 4) needs the reference machine.
 
+**2026-10-28 (#584): the follow-up frame is egui's, and it is fixed.** `egui::Context::request_repaint()` (zero delay)
+sets `outstanding = 1`, and `begin_pass_repaint_logic` then runs another pass: "Each request results in two repaints,
+just to give some things time to settle" (`egui-0.37 context.rs`, `request_repaint_after`). eframe 0.37 only forwards the
+callback (`run.rs`, `RepaintAt`), so it was never eframe or winit. `repaint_trace::request` (every instrumented wake:
+telemetry, `Pending`, Pounce, cull, all posted from worker threads) called `request_repaint()`, so each wake cost its
+own frame plus a settle frame 1-2 ms later that no source had asked for (hence `unattributed`, and why its
+`repaint_causes()` were only the previous pass's delayed requests). A non-zero delay is scheduled once ("for non-zero
+delays, we only repaint once"), so the wake is now `request_repaint_after(WAKE_DELAY)` with `WAKE_DELAY` = 1 ms. A test
+drives egui's own repaint callback as eframe's scheduler: the control (zero delay) costs 2 passes, every wake source
+now costs 1, and reverting the call fails it. Expected idle: telemetry 1.00 + the 1 s timer frame, about 1.0-1.2
+frames/s on the runner; the `scripts/idle-probe.ps1` figure on the PR's `build-windows` job is the measurement. Still
+open (the ticket's item 2): the ~1 frame/s target on a quiet machine and idle frame cost on a real GPU.
+
 ## #513: idle frame-rate probe in CI
 
 `scripts/idle-probe.ps1` runs in `cargo build (windows, v1 target)` after the release build: it launches `nicti.exe`
