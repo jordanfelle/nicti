@@ -55,7 +55,7 @@ use super::render_core::{
     declared_render_vram, load_stored_alphas, render_live_frame, ExportRenderer, LiveRender,
     LiveSource,
 };
-use super::sink::AccumSink;
+use super::sink::RenderSink;
 use crate::camera_profiles;
 use crate::loupe::asset_cache_key;
 use crate::t2::SharedLarder;
@@ -717,7 +717,7 @@ struct RenderPhase {
     base: Affine2D,
     tiles: Vec<Tile>,
     next: usize,
-    sink: AccumSink,
+    sink: RenderSink,
 }
 
 struct RenderJob {
@@ -803,7 +803,11 @@ impl RenderJob {
         inputs.bind_effects(&ctx.crop_kernel, 1.0);
         let out_w = (rect.width.round() as u32).max(1);
         let out_h = (rect.height.round() as u32).max(1);
-        let sink = match AccumSink::try_new(out_w, out_h) {
+        // A plain shrink (the usual web/preview export) is resized as the tiles arrive, so the
+        // full-size frame (~540 MB at 45 MP) never exists; anything else keeps the full buffer.
+        let shrink =
+            nicti_preen::resize::shrink_target(out_w, out_h, exif.orientation, &shared.spec.resize);
+        let sink = match RenderSink::try_new(out_w, out_h, shrink) {
             Ok(s) => s,
             Err(e) => {
                 self.give_back(ctx);
@@ -927,10 +931,11 @@ impl ChunkedJob for RenderJob {
         drop(live);
         self.give_back(ctx);
         self.finished = true;
+        let (width, height, pixels) = sink.into_frame();
         let frame = WorkingFrame {
-            width: sink.width,
-            height: sink.height,
-            pixels: sink.pixels,
+            width,
+            height,
+            pixels,
         };
         shared.with_state(|st| {
             st.rendering = false;
