@@ -17,7 +17,7 @@
 //! `memory.copy`/`memory.fill` is a native loop without a per-byte check; the memory cap bounds it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -52,7 +52,16 @@ pub struct Sandbox {
     engine: Engine,
     budget: Budget,
     killed: Arc<AtomicBool>,
+    /// The epoch is per engine, so two concurrent calls would interrupt each other (and a timeout
+    /// would be charged to the innocent one). One call at a time per module.
+    running: Mutex<()>,
 }
+
+/// Largest module accepted. Compilation is not bounded by fuel or the epoch, so a hostile huge
+/// function is refused before `Module::new` rather than stalling the host.
+pub const MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest table, in elements (tables are not counted by the memory cap).
+const MAX_TABLE_ELEMENTS: usize = 100_000;
 
 /// A handle the kill switch holds; cloneable and usable from any thread.
 #[derive(Clone)]
@@ -79,10 +88,20 @@ impl Sandbox {
         config.epoch_interruption(true);
         config.consume_fuel(true);
         let engine = Engine::new(&config).map_err(|e| e.to_string())?;
+        // A hand-built `Budget` is not trusted: clamp to the manifest ceilings (zero fuel or a
+        // wrapped byte count on a 32-bit target would otherwise be accepted).
+        let mut budget = budget;
+        budget.fuel_limit = Some(budget.effective_fuel().min(crate::manifest::MAX_FUEL));
+        budget.memory_mb_max = Some(
+            budget
+                .effective_memory_mb()
+                .min(crate::manifest::MAX_MEMORY_MB),
+        );
         Ok(Sandbox {
             engine,
             budget,
             killed: Arc::new(AtomicBool::new(false)),
+            running: Mutex::new(()),
         })
     }
 
@@ -101,6 +120,10 @@ impl Sandbox {
     /// Runs the exported no-argument function `export` (returning `i32` or `i64`) of the module in
     /// `wasm` (binary, or WAT text). Never panics on a hostile module; every failure is an `Outcome`.
     pub fn run(&self, wasm: &[u8], export: &str) -> Outcome {
+        if wasm.len() > MAX_MODULE_BYTES {
+            return Outcome::Bug(format!("module is {} bytes, over the limit", wasm.len()));
+        }
+        let _one_call = self.running.lock().unwrap_or_else(|p| p.into_inner());
         if self.is_killed() {
             return Outcome::Killed;
         }
@@ -120,7 +143,8 @@ impl Sandbox {
             .memory_size(self.budget.effective_memory_mb() as usize * 1024 * 1024)
             .instances(1)
             .tables(8)
-            .memories(2)
+            .table_elements(MAX_TABLE_ELEMENTS)
+            .memories(1)
             .trap_on_grow_failure(false)
             .build();
         let mut store = Store::new(&self.engine, Data { limits });
@@ -348,6 +372,18 @@ mod tests {
             m.contains("wasi_snapshot_preview1::fd_write"),
             "names exactly what was reached for: {m}"
         );
+    }
+
+    #[test]
+    fn tables_modules_and_extra_memories_are_bounded() {
+        let sb = Sandbox::new(Budget::default()).unwrap();
+        let grow = r#"(module (table 1 funcref) (func (export "run") (result i32) (table.grow (ref.null func) (i32.const 400000000))))"#;
+        assert_eq!(sb.run(grow.as_bytes(), "run"), Outcome::Returned(-1));
+        let two =
+            r#"(module (memory 1) (memory 1) (func (export "run") (result i32) (i32.const 1)))"#;
+        assert!(matches!(sb.run(two.as_bytes(), "run"), Outcome::Bug(_)));
+        let huge = vec![0u8; MAX_MODULE_BYTES + 1];
+        assert!(matches!(sb.run(&huge, "run"), Outcome::Bug(m) if m.contains("over the limit")));
     }
 
     #[test]

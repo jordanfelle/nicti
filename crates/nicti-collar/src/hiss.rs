@@ -69,6 +69,11 @@ struct Record {
     status: Status,
     /// Unix seconds of recent bugs, oldest first.
     bugs: Vec<u64>,
+    /// The user has consented to the module's *current* authority. Survives every soft state, so
+    /// no kill, auto-disable or quarantine path can re-enable a module past a missing consent.
+    /// Absent in an older state file reads false: fail closed.
+    #[serde(default)]
+    consented: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -112,6 +117,7 @@ impl Hiss {
         self.modules.entry(id.to_owned()).or_insert(Record {
             status: Status::NeedsConsent,
             bugs: Vec::new(),
+            consented: false,
         });
     }
 
@@ -122,6 +128,7 @@ impl Hiss {
             .modules
             .get_mut(id)
             .ok_or_else(|| HissError::Unknown(id.to_owned()))?;
+        rec.consented = true;
         if rec.status == Status::NeedsConsent {
             rec.status = Status::Enabled;
         }
@@ -133,8 +140,11 @@ impl Hiss {
     /// an update that gains nothing changes nothing.
     pub fn on_update(&mut self, id: &str, widened: bool) {
         if let Some(rec) = self.modules.get_mut(id) {
-            if widened && rec.status == Status::Enabled {
-                rec.status = Status::NeedsConsent;
+            if widened {
+                rec.consented = false;
+                if rec.status == Status::Enabled {
+                    rec.status = Status::NeedsConsent;
+                }
             }
         }
     }
@@ -146,6 +156,7 @@ impl Hiss {
         let rec = self.modules.entry(id.to_owned()).or_insert(Record {
             status: Status::NeedsConsent,
             bugs: Vec::new(),
+            consented: false,
         });
         match fault {
             Fault::Violation(attempted) => {
@@ -191,7 +202,7 @@ impl Hiss {
             .modules
             .get_mut(id)
             .ok_or_else(|| HissError::Unknown(id.to_owned()))?;
-        if !matches!(rec.status, Status::Quarantined { .. }) {
+        if matches!(rec.status, Status::Enabled | Status::AutoDisabled { .. }) {
             rec.status = Status::Killed { since: now };
         }
         Ok(())
@@ -209,6 +220,10 @@ impl Hiss {
                 Err(HissError::QuarantineNeedsAcknowledgement(id.to_owned()))
             }
             Status::NeedsConsent => Err(HissError::NeedsConsent(id.to_owned())),
+            _ if !rec.consented => {
+                rec.status = Status::NeedsConsent;
+                Err(HissError::NeedsConsent(id.to_owned()))
+            }
             _ => {
                 rec.status = Status::Enabled;
                 rec.bugs.clear();
@@ -226,9 +241,14 @@ impl Hiss {
             .ok_or_else(|| HissError::Unknown(id.to_owned()))?;
         match &rec.status {
             Status::Quarantined { attempted: a, .. } if a == attempted => {
-                rec.status = Status::Enabled;
                 rec.bugs.clear();
-                Ok(())
+                if rec.consented {
+                    rec.status = Status::Enabled;
+                    Ok(())
+                } else {
+                    rec.status = Status::NeedsConsent;
+                    Err(HissError::NeedsConsent(id.to_owned()))
+                }
             }
             Status::Quarantined { .. } => {
                 Err(HissError::QuarantineNeedsAcknowledgement(id.to_owned()))
@@ -246,8 +266,14 @@ impl Hiss {
     /// state, never a truncated one.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, json)?;
+        let mut name = path.as_os_str().to_owned();
+        name.push(".hiss-tmp");
+        let tmp = PathBuf::from(name);
+        {
+            let mut f = fs::File::create(&tmp)?;
+            io::Write::write_all(&mut f, &json)?;
+            f.sync_all()?;
+        }
         fs::rename(&tmp, path)
     }
 
@@ -320,6 +346,46 @@ mod tests {
     fn enabled(h: &mut Hiss, id: &str) {
         h.install(id);
         h.consent(id).unwrap();
+    }
+
+    #[test]
+    fn no_soft_state_re_enables_a_module_past_missing_consent() {
+        // kill an unconsented module, then re-enable
+        let mut h = Hiss::default();
+        h.install("v.m");
+        h.kill("v.m", 1).unwrap();
+        assert!(h.re_enable("v.m").is_err());
+        assert!(!h.may_run("v.m"));
+        // a widening update while killed
+        let mut h = Hiss::default();
+        enabled(&mut h, "v.m");
+        h.kill("v.m", 1).unwrap();
+        h.on_update("v.m", true);
+        assert_eq!(
+            h.re_enable("v.m"),
+            Err(HissError::NeedsConsent("v.m".into()))
+        );
+        assert!(!h.may_run("v.m"));
+        h.consent("v.m").unwrap();
+        h.re_enable("v.m").unwrap();
+        assert!(h.may_run("v.m"));
+        // a widening update while quarantined
+        let mut h = Hiss::default();
+        enabled(&mut h, "v.m");
+        h.record_fault("v.m", Fault::Violation("net".into()), 1);
+        h.on_update("v.m", true);
+        assert!(h.acknowledge_violation("v.m", "net").is_err());
+        assert!(!h.may_run("v.m"));
+    }
+
+    #[test]
+    fn save_with_a_tmp_named_state_file_keeps_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hiss.tmp");
+        let mut h = Hiss::default();
+        enabled(&mut h, "v.m");
+        h.save(&p).unwrap();
+        assert!(Hiss::load(&p, Policy::default()).unwrap().may_run("v.m"));
     }
 
     #[test]

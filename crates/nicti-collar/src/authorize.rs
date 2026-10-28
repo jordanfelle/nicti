@@ -108,6 +108,11 @@ pub fn authorize_request(
 pub fn authorize_path(root: &Path, requested: &Path) -> Result<PathBuf, Denied> {
     let bad = |e: std::io::Error| Denied::BadPath(e.to_string());
     let root = root.canonicalize().map_err(bad)?;
+    if root.parent().is_none() {
+        return Err(Denied::BadPath(
+            "a filesystem root cannot be granted".into(),
+        ));
+    }
     let joined = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
@@ -116,6 +121,11 @@ pub fn authorize_path(root: &Path, requested: &Path) -> Result<PathBuf, Denied> 
     let resolved = match joined.canonicalize() {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink also reads as NotFound; creating through it would write wherever
+            // it points.
+            if std::fs::symlink_metadata(&joined).is_ok() {
+                return Err(Denied::PathEscapes);
+            }
             let name = joined
                 .file_name()
                 .filter(|n| *n != "..")
@@ -304,6 +314,20 @@ mod tests {
         std::os::unix::fs::symlink(&root, &alias).unwrap();
         fs::write(root.join("ok.txt"), b"k").unwrap();
         assert!(authorize_path(&alias, Path::new("ok.txt")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("refs");
+        fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("new.txt"), root.join("link")).unwrap();
+        assert_eq!(
+            authorize_path(&root, Path::new("link")),
+            Err(Denied::PathEscapes)
+        );
+        assert!(authorize_path(Path::new("/"), Path::new("etc/passwd")).is_err());
     }
 
     #[test]
