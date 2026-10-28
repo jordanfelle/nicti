@@ -102,6 +102,12 @@ pub fn init_target(root: &Path) -> Result<BackupTarget, BackupError> {
     if !root.is_dir() {
         return Err(BackupError::Io(root, "not a directory".into()));
     }
+    if root.parent().is_none() {
+        return Err(BackupError::Io(
+            root,
+            "a drive root is not a backup folder; pick or create a folder on it".into(),
+        ));
+    }
     let marker = root.join(MARKER_NAME);
     let id = new_id();
     let mut f = match OpenOptions::new()
@@ -193,6 +199,24 @@ pub fn back_up_file(
             "not under the source folder".into(),
         )));
     };
+    // The OS follows a link in any *intermediate* folder, so a link inside the target would make
+    // `existing` resolve to some other copy and be reported Unchanged while nothing was backed up
+    // here. Refuse a link or non-folder among the folders that already exist.
+    let mut walk = target.root.clone();
+    for part in rel.parent().into_iter().flat_map(Path::components) {
+        walk.push(part);
+        match fs::symlink_metadata(&walk) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                return Err(BackupError::Offer(OfferError::Refused(
+                    src.to_path_buf(),
+                    format!("{} in the backup is a link, not a folder", walk.display()),
+                )))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            Err(e) => return Err(io_err(&walk, e)),
+        }
+    }
     let existing = target.root.join(&rel);
     match fs::symlink_metadata(&existing) {
         Ok(m) if m.is_file() => {
@@ -217,6 +241,11 @@ pub fn back_up_file(
         Err(e) => return Err(io_err(&existing, e)),
     }
     match offer_file(src, &target.root, &rel, cancelled).map_err(BackupError::Offer)? {
+        // A different file appeared at the name between the check and the copy, so the copy got a
+        // `-N` name: report the conflict rather than a clean copy.
+        Offered::Copied { dest, .. } if dest != existing => {
+            Ok(BackedUp::Differs { dest: existing })
+        }
         Offered::Copied { dest, blake3, size } => Ok(BackedUp::Copied { dest, blake3, size }),
         // Raced into existence between the check and the copy, with the same bytes.
         Offered::AlreadyThere { dest, .. } => Ok(BackedUp::Unchanged { dest }),
@@ -460,6 +489,25 @@ mod tests {
             .unwrap()
             .flatten()
             .any(|e| e.file_name().to_string_lossy().ends_with(".nicti-part")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_link_in_the_backup_cannot_fake_an_existing_copy() {
+        let f = fx();
+        put(&f.src, "2026/a.NEF", b"precious");
+        // The "backup" folder 2026 is a link to the source's own folder: same bytes, no backup.
+        std::os::unix::fs::symlink(f.src.join("2026"), f.dst.join("2026")).unwrap();
+        let t = init_target(&f.dst).unwrap();
+        let r = run(&t, &f.src);
+        assert_eq!((r.copied, r.unchanged), (0, 0), "{r:?}");
+        assert_eq!(r.failed.len(), 1, "{r:?}");
+    }
+
+    #[test]
+    fn a_drive_root_is_not_a_target() {
+        let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+        assert!(init_target(root).is_err());
     }
 
     #[test]
