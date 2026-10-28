@@ -78,6 +78,7 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
         pixels,
         dng_opcode_list3: None,
         nikon_lens_info: None,
+        orientation: 0,
     }
 }
 
@@ -722,6 +723,12 @@ impl DevelopDoc {
         self.graph
             .apply_document(&identity_only, &self.registry)
             .expect("build_registry covers every id build_graph adds");
+    }
+
+    /// How the loaded photo's EXIF orientation turns the on-screen image (#341). The frame, the edit
+    /// document and every render stage stay in sensor orientation; only the display turns.
+    pub fn view_orient(&self) -> crate::view_orient::ViewOrient {
+        crate::view_orient::ViewOrient::from_exif(self.frame.orientation)
     }
 
     /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).

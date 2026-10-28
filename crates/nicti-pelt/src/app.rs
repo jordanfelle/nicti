@@ -2944,9 +2944,13 @@ impl PeltApp {
         let Some(develop) = self.develop.as_mut() else {
             return;
         };
+        let orient = develop.view_orient();
         let rendered = develop.render();
-        // The rendered frame is the crop rect, not the source (#272).
-        let tex_extent = (rendered.extent.width as f32, rendered.extent.height as f32);
+        // The rendered frame is the crop rect, not the source (#272). The *displayed* image is that
+        // frame turned by the photo's EXIF orientation (#341), so fit, zoom and pan work on the
+        // turned size; the frame itself stays in sensor orientation.
+        let tex_extent =
+            orient.display_size((rendered.extent.width as f32, rendered.extent.height as f32));
 
         let available = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
@@ -2986,6 +2990,7 @@ impl PeltApp {
                 frame: rendered,
                 view_scale: scale,
                 view_offset: offset,
+                orient,
             },
         ));
     }

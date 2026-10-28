@@ -73,7 +73,7 @@ pub enum DecodeError {
 /// the in-memory equivalent of `spikes/retina dump-linear`'s TIFF+JSON sidecar pair (kept for
 /// `spikes/calico`'s own file-based tooling, see `spikes/calico/src/linear_input.rs`) — same
 /// fields, no round-trip through disk required for a production caller.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LinearFrame {
     pub make: String,
     pub model: String,
@@ -102,6 +102,10 @@ pub struct LinearFrame {
     /// NEF that carries one, `None` otherwise. Located by `embedded::Walker::find_nikon_lens_info`,
     /// decoded by `nicti_iris::nikon`, applied by the Tapetum lens stage when the user opts in (#410).
     pub nikon_lens_info: Option<Vec<u8>>,
+    /// The container's IFD0 Orientation as the EXIF value 1-8 (#341); `0` when the file has none
+    /// or it is out of range. The pixels above are **not** rotated by it: crop, heal and mask
+    /// coordinates stay in sensor orientation, and the on-screen view turns the image instead.
+    pub orientation: u8,
 }
 
 /// The production `RawDecoder`: LibRaw (vendored `yogthos/LibRaw#nikon-he-decoder`, see
@@ -168,6 +172,10 @@ impl RawDecoder for LibRawDecoder {
         let nikon_lens_info = embedded::Walker::new(embedded::SliceSource::new(&data))
             .ok()
             .and_then(|mut w| w.find_nikon_lens_info().ok().flatten());
+        let orientation = embedded::Walker::new(embedded::SliceSource::new(&data))
+            .ok()
+            .and_then(|mut w| w.ifd0_orientation().ok().flatten())
+            .unwrap_or(0);
         let image = handle
             .linear_image()
             .map_err(|source| DecodeError::Decode {
@@ -206,6 +214,7 @@ impl RawDecoder for LibRawDecoder {
             pixels,
             dng_opcode_list3,
             nikon_lens_info,
+            orientation,
         })
     }
 }

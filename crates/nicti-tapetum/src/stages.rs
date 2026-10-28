@@ -1870,6 +1870,7 @@ mod tests {
             ],
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         }
     }
 
@@ -1943,6 +1944,7 @@ mod tests {
             ],
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         };
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {
@@ -1995,6 +1997,7 @@ mod tests {
             pixels: vec![100, 200, 300], // R, G, B -- 3 samples, odd total.
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         };
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {

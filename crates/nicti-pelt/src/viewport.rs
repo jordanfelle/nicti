@@ -9,6 +9,8 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+
+use crate::view_orient::ViewOrient;
 use egui_wgpu::{CallbackResources, CallbackTrait};
 use half::f16;
 use nicti_calico::space::OutputSpace;
@@ -47,7 +49,9 @@ struct DisplayUniforms {
     gamut_warn: u32,
     /// 1 = run the proof stage (`p*`/`q*`).
     proof_enabled: u32,
-    _pad: [u32; 3],
+    /// The photo's EXIF orientation as `ViewOrient::index` (0 = none), #341.
+    orient: u32,
+    _pad: [u32; 2],
 }
 
 /// Built once against eframe's shared device (`PeltApp::new`), then reused every frame. The
@@ -172,6 +176,7 @@ impl ViewportResources {
         let mut u = uniforms_for(transform, gamut_warn, self.target_srgb);
         u.view_scale = self.uniforms.view_scale;
         u.view_offset = self.uniforms.view_offset;
+        u.orient = self.uniforms.orient;
         self.uniforms = u;
         self.lut_view = match &transform.kind {
             DisplayKind::Lut(lut) => upload_lut(device, queue, lut),
@@ -229,7 +234,8 @@ fn uniforms_for(
         trc: (mode == 0 && space == OutputSpace::AdobeRgb) as u32,
         gamut_warn: (gamut_warn && transform.proof.is_some()) as u32,
         proof_enabled: transform.proof.is_some() as u32,
-        _pad: [0; 3],
+        orient: 0,
+        _pad: [0; 2],
     }
 }
 
@@ -359,6 +365,10 @@ pub struct ViewportCallback {
     pub frame: Arc<FrameTexture>,
     pub view_scale: [f32; 2],
     pub view_offset: [f32; 2],
+    /// How the photo's EXIF orientation turns the displayed image (#341). `view_scale` and
+    /// `view_offset` are in *displayed* space, so a caller derives them from
+    /// [`ViewOrient::display_size`], not the texture's own size.
+    pub orient: ViewOrient,
 }
 
 impl ViewportCallback {
@@ -367,6 +377,7 @@ impl ViewportCallback {
             frame,
             view_scale: [1.0, 1.0],
             view_offset: [0.0, 0.0],
+            orient: ViewOrient::normal(),
         }
     }
 }
@@ -482,6 +493,7 @@ impl CallbackTrait for ViewportCallback {
         let mut uniforms = res.uniforms;
         uniforms.view_scale = self.view_scale;
         uniforms.view_offset = self.view_offset;
+        uniforms.orient = self.orient.index();
         queue.write_buffer(&res.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         let bind_group_layout = res.pipeline.get_bind_group_layout(0);
@@ -562,6 +574,7 @@ mod tests {
     }
 
     use nicti_calico::transform::DisplayProfile;
+    use nicti_preen::orient::Orientation;
     use nicti_tapetum::frame::Extent;
     use nicti_tapetum::gpu::GpuContext;
 
@@ -579,9 +592,7 @@ mod tests {
     /// WGSL struct fails here instead of only in a live app.
     #[test]
     fn bind_group_creation_matches_the_shaders_reflected_uniform_layout() {
-        let Some(gpu) = crate::test_gpu::shared() else {
-            return;
-        };
+        let Some(gpu) = gpu_or_skip() else { return };
 
         let target_format = wgpu::TextureFormat::Rgba8Unorm;
         let mut resources = ViewportResources::new(&gpu.device, target_format);
@@ -790,6 +801,201 @@ mod tests {
             .expect("device poll failed");
         let data = slice.get_mapped_range().expect("mapped range");
         data.as_chunks::<4>().0.to_vec()
+    }
+
+    /// Draws a 64x64 four-quadrant frame (TL red, TR green, BL blue, BR white) through the real
+    /// display pipeline with orientation index `orient` into a 64x64 `Rgba8Unorm` target and returns
+    /// the pixel at the centre of each displayed quadrant (TL, TR, BL, BR).
+    fn render_quadrants(
+        gpu: &GpuContext,
+        resources: &mut ViewportResources,
+        orient: ViewOrient,
+    ) -> [[u8; 4]; 4] {
+        let n = 64u32;
+        let frame = Arc::new(FrameTexture::new(
+            gpu,
+            Extent {
+                width: n,
+                height: n,
+            },
+        ));
+        let texels: Vec<u16> = (0..n * n)
+            .flat_map(|i| {
+                let (x, y) = (i % n, i / n);
+                let rgb = match (x < n / 2, y < n / 2) {
+                    (true, true) => [1.0f32, 0.0, 0.0],
+                    (false, true) => [0.0, 1.0, 0.0],
+                    (true, false) => [0.0, 0.0, 1.0],
+                    (false, false) => [1.0, 1.0, 1.0],
+                };
+                [rgb[0], rgb[1], rgb[2], 1.0]
+            })
+            .map(|v| f16::from_f32(v).to_bits())
+            .collect();
+        gpu.queue.write_texture(
+            frame.texture.as_image_copy(),
+            bytemuck::cast_slice(&texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(n * 8),
+                rows_per_image: Some(n),
+            },
+            wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: 1,
+            },
+        );
+        let mut uniforms = resources.uniforms;
+        uniforms.orient = orient.index();
+        gpu.queue
+            .write_buffer(&resources.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        let layout = resources.pipeline.get_bind_group_layout(0);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("orient test bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&frame.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&resources.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: resources.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&resources.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&resources.lut_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&resources.trc_view),
+                },
+            ],
+        });
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("orient test target"),
+            size: wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orient test readback"),
+            size: u64::from(n * n * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("orient test pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&resources.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(n * 4),
+                    rows_per_image: Some(n),
+                },
+            },
+            wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map failed"));
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+        let data = slice.get_mapped_range().expect("mapped range");
+        let px = |x: u32, y: u32| {
+            let i = ((y * n + x) * 4) as usize;
+            [data[i], data[i + 1], data[i + 2], data[i + 3]]
+        };
+        [px(16, 16), px(48, 16), px(16, 48), px(48, 48)]
+    }
+
+    /// Which of the four quadrant colours a rendered pixel is.
+    fn quadrant_colour(px: [u8; 4]) -> char {
+        match (px[0] > 128, px[1] > 128, px[2] > 128) {
+            (true, false, false) => 'R',
+            (false, true, false) => 'G',
+            (false, false, true) => 'B',
+            (true, true, true) => 'W',
+            _ => '?',
+        }
+    }
+
+    #[test]
+    fn the_display_shader_turns_the_image_exactly_as_view_orient_says_for_all_eight() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut resources = ViewportResources::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        // Sensor quadrants, as (u, v) of their centres -> colour.
+        let sensor = |(su, sv): (f32, f32)| match (su < 0.5, sv < 0.5) {
+            (true, true) => 'R',
+            (false, true) => 'G',
+            (true, false) => 'B',
+            (false, false) => 'W',
+        };
+        for o in [
+            Orientation::Normal,
+            Orientation::FlipH,
+            Orientation::Rotate180,
+            Orientation::FlipV,
+            Orientation::Transpose,
+            Orientation::Rotate90Cw,
+            Orientation::Transverse,
+            Orientation::Rotate270Cw,
+        ] {
+            let v = ViewOrient(o);
+            let got = render_quadrants(&gpu, &mut resources, v).map(quadrant_colour);
+            let want = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
+                .map(|d| sensor(v.to_sensor(d)));
+            assert_eq!(got, want, "{o:?}");
+        }
     }
 
     /// 64 spread-out linear working-space test colors: neutrals plus saturated ramps.

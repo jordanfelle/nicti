@@ -54,7 +54,11 @@ struct Uniforms {
     // 1 = tint pixels outside the proof space's gamut (needs `proof_enabled`).
     gamut_warn: u32,
     proof_enabled: u32,
-    _pad0: u32,
+    // The photo's EXIF orientation as an index 0..7 (Normal, FlipH, Rotate180, FlipV, Transpose,
+    // Rotate90Cw, Transverse, Rotate270Cw), #341. `view_scale`/`view_offset` live in *displayed*
+    // (rotated) space; `orient_to_sensor` maps a centred displayed point to the centred sensor-
+    // texture point. 0 takes the exact pre-#341 expression, so unrotated photos are bit-identical.
+    orient: u32,
     _pad1: u32,
     _pad2: u32,
     // Scalar u32s, not a `vec4<u32>`/`vec3<u32>` pad -- a vecN field would itself need align
@@ -131,9 +135,32 @@ fn encode_trc(c: f32) -> f32 {
 // background in "Fit" mode when the rect and image aspect ratios don't match.
 const LETTERBOX_BG: vec4<f32> = vec4<f32>(0.05, 0.05, 0.05, 1.0);
 
+// Centred displayed-space point -> centred sensor-texture-space point for EXIF orientation `o`
+// (the same table as `nicti_pelt::view_orient::ViewOrient::to_sensor`, pinned to export's rotation
+// by that module's tests and to this shader by a GPU readback test).
+fn orient_to_sensor(o: u32, d: vec2<f32>) -> vec2<f32> {
+    switch o {
+        case 1u: { return vec2<f32>(-d.x, d.y); }
+        case 2u: { return vec2<f32>(-d.x, -d.y); }
+        case 3u: { return vec2<f32>(d.x, -d.y); }
+        case 4u: { return vec2<f32>(d.y, d.x); }
+        case 5u: { return vec2<f32>(d.y, -d.x); }
+        case 6u: { return vec2<f32>(-d.y, -d.x); }
+        case 7u: { return vec2<f32>(-d.y, d.x); }
+        default: { return d; }
+    }
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let tex_uv = (in.uv - vec2<f32>(0.5, 0.5)) * u.view_scale + vec2<f32>(0.5, 0.5) + u.view_offset;
+    var tex_uv = (in.uv - vec2<f32>(0.5, 0.5)) * u.view_scale + vec2<f32>(0.5, 0.5) + u.view_offset;
+    if (u.orient != 0u) {
+        let centred = (in.uv - vec2<f32>(0.5, 0.5)) * u.view_scale + u.view_offset;
+        if (abs(centred.x) > 0.5 || abs(centred.y) > 0.5) {
+            return LETTERBOX_BG;
+        }
+        tex_uv = vec2<f32>(0.5, 0.5) + orient_to_sensor(u.orient, centred);
+    }
     if (tex_uv.x < 0.0 || tex_uv.x > 1.0 || tex_uv.y < 0.0 || tex_uv.y > 1.0) {
         return LETTERBOX_BG;
     }

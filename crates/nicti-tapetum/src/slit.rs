@@ -803,6 +803,7 @@ mod tests {
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         };
         let kernel = LensKernel::new(&gpu);
         let params = LensParams::default();
@@ -838,6 +839,7 @@ mod tests {
             pixels: (0..w * h * 3).map(|i| (i * 7919 % 60001) as u16).collect(),
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         };
         let params = LensParams {
             remove_ca: true,
@@ -880,6 +882,7 @@ mod tests {
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: None,
             nikon_lens_info: Some(blob),
+            orientation: 0,
         };
         assert!(has_nikon_profile(&frame) && !has_embedded_profile(&frame));
         // Default params: a NEF renders exactly as before (the lens stage's cache key is unchanged).
@@ -925,6 +928,7 @@ mod tests {
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: Some(blob),
             nikon_lens_info: None,
+            orientation: 0,
         };
         let on = LensPlan::resolve(&LensParams::default(), &frame, e);
         assert!(on.warp.is_some() && on.vignette.is_some());
