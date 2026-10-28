@@ -406,6 +406,45 @@ mod tests {
     }
 
     #[test]
+    fn sharpening_a_rotated_frame_equals_sharpening_it_upright() {
+        use crate::orient::Orientation;
+        use crate::sharpen::{SharpenAmount, SharpenMedia, SharpenSpec};
+        let reg = builtin_registry();
+        let spec = ExportSpec {
+            format: FormatSpec::Png {
+                depth: BitDepth::Sixteen,
+            },
+            sharpen: Some(SharpenSpec {
+                media: SharpenMedia::Screen,
+                amount: SharpenAmount::High,
+            }),
+            ..ExportSpec::default()
+        };
+        // A sensor frame stored 30 wide x 20 tall, displayed rotated 90 degrees clockwise.
+        let rotated_src = SourceMetadata {
+            exif: crate::metadata::SourceExif {
+                orientation: Orientation::Rotate90Cw,
+                ..Default::default()
+            },
+            ..SourceMetadata::default()
+        };
+        let sensor = split_frame(30, 20);
+        let (up_px, uw, uh) = orient::apply(&sensor.pixels, 30, 20, 3, Orientation::Rotate90Cw);
+        let upright = WorkingFrame {
+            width: uw,
+            height: uh,
+            pixels: up_px,
+        };
+        let a = export_frame(sensor, &ctx(&spec, &rotated_src), &reg).unwrap();
+        let b = export_frame(upright, &ctx(&spec, &SourceMetadata::default()), &reg).unwrap();
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        assert_eq!(
+            image::load_from_memory(&a.bytes).unwrap().to_rgb16(),
+            image::load_from_memory(&b.bytes).unwrap().to_rgb16()
+        );
+    }
+
+    #[test]
     fn a_saved_preset_without_the_sharpen_field_still_loads_with_it_off() {
         let spec: ExportSpec = serde_json::from_str(r#"{"dpi": 240}"#).unwrap();
         assert_eq!(spec.sharpen, None);

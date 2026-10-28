@@ -6,7 +6,8 @@
 //! Gaussian blur of it is added back, scaled, with a small noise threshold and a hard cap on the
 //! correction so a high-contrast edge cannot ring without limit. Hue is preserved (the pixel's
 //! linear RGB is scaled by the luma ratio, never offset per channel), and pixels over 1.0 are left
-//! alone. It runs on the output-space linear frame after the resize and before the watermark, so a
+//! alone (but still feed the blur at their clamped value, so a neighbour of a blown highlight sees
+//! a true edge). It runs on the output-space linear frame after the resize and before the watermark, so a
 //! logo is never sharpened.
 //!
 //! **Untuned.** The radius and amount tables below are reasoned starting points, not matched to
@@ -62,8 +63,6 @@ pub fn params(spec: SharpenSpec, dpi: u32) -> (f32, f32) {
 const THRESHOLD: f32 = 0.0025;
 /// The largest correction applied to one pixel (encoded luma), so an edge cannot ring wildly.
 const MAX_DELTA: f32 = 0.25;
-/// The most a pixel's linear RGB is scaled by.
-const MAX_GAIN: f32 = 8.0;
 
 fn oetf(l: f32) -> f32 {
     if l <= 0.003_130_8 {
@@ -93,13 +92,14 @@ fn kernel(sigma: f32) -> Vec<f32> {
     k
 }
 
-/// Separable Gaussian blur of a `w` x `h` plane, edge pixels replicated.
-fn blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+/// Separable Gaussian blur of a `w` x `h` plane in place (one scratch plane), edge pixels
+/// replicated.
+fn blur(plane: &mut [f32], w: usize, h: usize, sigma: f32) {
     let k = kernel(sigma);
     let half = (k.len() / 2) as isize;
-    let mut tmp = vec![0.0f32; src.len()];
+    let mut tmp = vec![0.0f32; plane.len()];
     for y in 0..h {
-        let row = &src[y * w..(y + 1) * w];
+        let row = &plane[y * w..(y + 1) * w];
         for x in 0..w {
             let mut acc = 0.0;
             for (i, &kv) in k.iter().enumerate() {
@@ -109,7 +109,6 @@ fn blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
             tmp[y * w + x] = acc;
         }
     }
-    let mut out = vec![0.0f32; src.len()];
     for y in 0..h {
         for x in 0..w {
             let mut acc = 0.0;
@@ -117,10 +116,20 @@ fn blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
                 let sy = (y as isize + i as isize - half).clamp(0, h as isize - 1) as usize;
                 acc += kv * tmp[sy * w + x];
             }
-            out[y * w + x] = acc;
+            plane[y * w + x] = acc;
         }
     }
-    out
+}
+
+/// The perceptual luma of a linear pixel for the mask, clamped to [0, 1]; `None` when it is not
+/// finite or is out of range (blown highlights and out-of-gamut darks are left unmodified, but
+/// still take part in the blur at their clamped value so their neighbours see a true edge).
+fn luma(p: &[f32]) -> (f32, bool) {
+    let y = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    if !y.is_finite() {
+        return (0.5, false);
+    }
+    (oetf(y.clamp(0.0, 1.0)), (0.0..=1.0).contains(&y))
 }
 
 /// Sharpens interleaved linear output-space RGB (`w` x `h`) in place.
@@ -130,30 +139,16 @@ pub fn apply(pixels: &mut [f32], w: u32, h: u32, spec: SharpenSpec, dpi: u32) {
         return;
     }
     let (radius, amount) = params(spec, dpi);
-    // Perceptual luma of every in-range pixel; out-of-range ones are marked NaN and skipped.
-    let luma: Vec<f32> = pixels
+    let mut blurred: Vec<f32> = pixels
         .as_chunks::<3>()
         .0
         .iter()
-        .map(|p| {
-            let y = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-            if y.is_finite() && (0.0..=1.0).contains(&y) {
-                oetf(y)
-            } else {
-                f32::NAN
-            }
-        })
+        .map(|p| luma(p).0)
         .collect();
-    // Blur needs a defined value everywhere: substitute neighbours-agnostic mid-grey for the
-    // skipped pixels (they are rare, and are not themselves modified).
-    let filled: Vec<f32> = luma
-        .iter()
-        .map(|&v| if v.is_nan() { 0.5 } else { v })
-        .collect();
-    let blurred = blur(&filled, w, h, radius);
+    blur(&mut blurred, w, h, radius);
     for (i, p) in pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-        let e = luma[i];
-        if e.is_nan() {
+        let (e, modifiable) = luma(p);
+        if !modifiable {
             continue;
         }
         let diff = (e - blurred[i]) * amount;
@@ -163,14 +158,12 @@ pub fn apply(pixels: &mut [f32], w: u32, h: u32, spec: SharpenSpec, dpi: u32) {
         }
         let e2 = (e + delta.clamp(-MAX_DELTA, MAX_DELTA)).clamp(0.0, 1.0);
         let (y_old, y_new) = (eotf(e), eotf(e2));
-        if y_old > 1e-6 {
-            let gain = (y_new / y_old).min(MAX_GAIN);
-            p.iter_mut().for_each(|c| *c *= gain);
-        } else {
-            // Near-black: no hue to preserve, add the luma change to every channel.
-            let add = y_new - y_old;
-            p.iter_mut().for_each(|c| *c += add);
+        if y_old <= 1e-6 {
+            // Black next to a bright edge: it cannot get darker, and a ratio would divide by ~0.
+            continue;
         }
+        let gain = y_new / y_old;
+        p.iter_mut().for_each(|c| *c *= gain);
     }
 }
 
@@ -324,6 +317,57 @@ mod tests {
             capped += usize::from(moved > MAX_DELTA - 1e-3);
         }
         assert!(capped > 0, "the cap must actually bind in this fixture");
+    }
+
+    #[test]
+    fn a_pixel_beside_a_blown_highlight_gets_the_same_edge_response_as_beside_white() {
+        let (w, h) = (32u32, 4u32);
+        let run = |bright: f32| {
+            let mut p = step(w, h, 0.5, bright);
+            apply(&mut p, w, h, STD, 300);
+            at(&p, w, w / 2 - 1, 2)
+        };
+        let beside_white = run(1.0);
+        let beside_blown = run(1.4);
+        assert!(
+            beside_white < 0.5,
+            "undershoot beside white: {beside_white}"
+        );
+        assert!(
+            (beside_white - beside_blown).abs() < 1e-4,
+            "blown {beside_blown} vs white {beside_white}"
+        );
+    }
+
+    #[test]
+    fn a_dark_out_of_gamut_pixel_is_blurred_as_black_and_itself_left_alone() {
+        let (w, h) = (16u32, 4u32);
+        let field = |spot: [f32; 3]| {
+            let mut p = vec![0.02f32; (w * h * 3) as usize];
+            let i = ((2 * w + 8) * 3) as usize;
+            p[i..i + 3].copy_from_slice(&spot);
+            p
+        };
+        let mut oog = field([-0.2, 0.0, 0.0]);
+        let mut black = field([0.0, 0.0, 0.0]);
+        apply(&mut oog, w, h, STD, 300);
+        apply(&mut black, w, h, STD, 300);
+        let i = ((2 * w + 8) * 3) as usize;
+        assert_eq!(
+            &oog[i..i + 3],
+            &[-0.2, 0.0, 0.0],
+            "the skipped pixel is not modified"
+        );
+        // Its neighbours get exactly the response they would beside a true black pixel.
+        for x in [6u32, 7, 9, 10] {
+            let j = ((2 * w + x) * 3) as usize;
+            assert!(
+                (oog[j] - black[j]).abs() < 1e-6,
+                "x={x}: {} vs {}",
+                oog[j],
+                black[j]
+            );
+        }
     }
 
     #[test]
