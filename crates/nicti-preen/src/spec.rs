@@ -78,6 +78,8 @@ pub struct ExportSpec {
     pub format: FormatSpec,
     pub color_space: ExportSpace,
     pub resize: ResizeSpec,
+    /// Output sharpening after the resize (#339); `None` = off.
+    pub sharpen: Option<crate::sharpen::SharpenSpec>,
     /// Pixels per inch written into the file. Metadata only -- never resamples.
     pub dpi: u32,
     pub metadata: MetadataSpec,
@@ -93,6 +95,7 @@ impl Default for ExportSpec {
             format: FormatSpec::default(),
             color_space: ExportSpace::default(),
             resize: ResizeSpec::default(),
+            sharpen: None,
             dpi: 300,
             metadata: MetadataSpec::default(),
             watermark: None,

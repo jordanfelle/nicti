@@ -26,6 +26,7 @@ pub mod naming;
 pub mod orient;
 pub mod plan;
 pub mod resize;
+pub mod sharpen;
 pub mod spec;
 pub mod tiff_exif;
 pub mod watermark;
@@ -203,6 +204,9 @@ pub fn export_frame(
 
     let space: OutputSpace = spec.color_space.into();
     color::to_output_linear(&mut pixels, space);
+    if let Some(sharpen) = spec.sharpen {
+        sharpen::apply(&mut pixels, tw, th, sharpen, spec.dpi);
+    }
     match (&spec.watermark, ctx.watermark) {
         (Some(wm_spec), Some(source)) => {
             watermark::apply(&mut pixels, tw, th, source, wm_spec, space)?
@@ -364,6 +368,53 @@ mod tests {
             let img = image::load_from_memory(&out.bytes).unwrap();
             assert_eq!((img.width(), img.height()), (40, 30));
         }
+    }
+
+    #[test]
+    fn output_sharpening_runs_after_the_resize_and_only_when_asked() {
+        use crate::sharpen::{SharpenAmount, SharpenMedia, SharpenSpec};
+        let reg = builtin_registry();
+        let src = SourceMetadata::default();
+        let export = |sharpen| {
+            let spec = ExportSpec {
+                format: FormatSpec::Png {
+                    depth: BitDepth::Eight,
+                },
+                resize: ResizeSpec {
+                    mode: ResizeMode::LongEdge(40),
+                    dont_enlarge: true,
+                },
+                sharpen,
+                ..ExportSpec::default()
+            };
+            let out = export_frame(split_frame(80, 60), &ctx(&spec, &src), &reg).unwrap();
+            image::load_from_memory(&out.bytes).unwrap().to_rgb8()
+        };
+        let plain = export(None);
+        assert_eq!(plain, export(None), "off is deterministic");
+        let sharp = export(Some(SharpenSpec {
+            media: SharpenMedia::Matte,
+            amount: SharpenAmount::High,
+        }));
+        assert_eq!(sharp.dimensions(), (40, 30), "size is the resized size");
+        // The step edge at x=20 gains contrast: brighter just right of it, darker just left.
+        assert!(sharp.get_pixel(20, 15)[0] > plain.get_pixel(20, 15)[0]);
+        assert!(sharp.get_pixel(19, 15)[0] < plain.get_pixel(19, 15)[0]);
+        // Flat areas are untouched.
+        assert_eq!(sharp.get_pixel(2, 15), plain.get_pixel(2, 15));
+        assert_eq!(sharp.get_pixel(37, 15), plain.get_pixel(37, 15));
+    }
+
+    #[test]
+    fn a_saved_preset_without_the_sharpen_field_still_loads_with_it_off() {
+        let spec: ExportSpec = serde_json::from_str(r#"{"dpi": 240}"#).unwrap();
+        assert_eq!(spec.sharpen, None);
+        let on: ExportSpec =
+            serde_json::from_str(r#"{"sharpen": {"media": "glossy", "amount": "low"}}"#).unwrap();
+        assert_eq!(
+            on.sharpen.unwrap().media,
+            crate::sharpen::SharpenMedia::Glossy
+        );
     }
 
     #[test]
