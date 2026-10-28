@@ -362,12 +362,17 @@ fn show_model_picker(ui: &mut egui::Ui, mask: &mut MaskUi) {
                             egui::ComboBox::from_id_salt(("mask-model", name))
                                 .selected_text(describe(sel))
                                 .show_ui(ui, |ui| {
-                                    for c in choices {
+                                    for (i, c) in choices.iter().enumerate() {
                                         let picked = c.model_id == sel.model_id;
-                                        if ui.selectable_label(picked, describe(c)).clicked()
-                                            && !picked
-                                        {
-                                            change = Some((*target, Some(c.model_id.clone())));
+                                        if ui.selectable_label(picked, describe(c)).clicked() {
+                                            // The first entry is the build's default: store "no
+                                            // choice", so a later change of the default reaches
+                                            // someone who only ever picked it, and a stale saved
+                                            // id can be cleared by clicking the default.
+                                            let new = (i != 0).then(|| c.model_id.clone());
+                                            if new.as_deref() != current {
+                                                change = Some((*target, new));
+                                            }
                                         }
                                     }
                                 });
@@ -381,7 +386,10 @@ fn show_model_picker(ui: &mut egui::Ui, mask: &mut MaskUi) {
             );
         });
     if let Some((target, id)) = change {
-        mask.status = mask.prefs.set(target, id).err();
+        // Only a failure is worth a message; a success must not wipe an install or bake status.
+        if let Err(e) = mask.prefs.set(target, id) {
+            mask.status = Some(e);
+        }
     }
 }
 
@@ -637,9 +645,9 @@ fn show_selected(
                         if ui
                             .small_button("Update mask")
                             .on_hover_text(format!(
-                                "This mask was made with model version {pinned}; version \
-                                 {current} is installed. Updating re-selects with the new \
-                                 model and can change the mask's edges."
+                                "This mask pins model version {pinned}; version {current} is \
+                                 installed. Switching re-selects with {current} and can change \
+                                 the mask's edges."
                             ))
                             .clicked()
                         {
