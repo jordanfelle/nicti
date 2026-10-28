@@ -1331,6 +1331,23 @@ const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_loaded_frames_exif_orientation_becomes_the_views_orientation() {
+        use crate::view_orient::ViewOrient;
+        let doc_with = |orientation: u8| {
+            let mut doc = DevelopDoc::new();
+            doc.frame = Arc::new(LinearFrame {
+                orientation,
+                ..Default::default()
+            });
+            doc
+        };
+        assert!(doc_with(0).view_orient().is_normal());
+        assert!(doc_with(1).view_orient().is_normal());
+        assert_eq!(doc_with(6).view_orient(), ViewOrient::from_exif(6));
+        assert_eq!(doc_with(8).view_orient().index(), 7);
+    }
+
     use super::*;
     use nicti_tapetum::coat::{ExposureParams, ToneParams, WbParams};
     use nicti_tapetum::stages::WB;

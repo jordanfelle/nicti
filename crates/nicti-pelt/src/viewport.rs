@@ -382,6 +382,20 @@ impl ViewportCallback {
     }
 }
 
+/// `base` with one paint's view mapping written in: what `prepare` uploads every frame. Split out
+/// so the orientation reaching the shader's uniform is testable without a GPU.
+fn view_uniforms(
+    mut base: DisplayUniforms,
+    scale: [f32; 2],
+    offset: [f32; 2],
+    orient: ViewOrient,
+) -> DisplayUniforms {
+    base.view_scale = scale;
+    base.view_offset = offset;
+    base.orient = orient.index();
+    base
+}
+
 /// The `view_scale` for "Fit": the source image maximized within `rect_size`, aspect-correct, no
 /// cropping -- the axis whose own aspect is the tighter constraint gets `1.0` (no letterbox), the
 /// other gets scaled up so the excess maps outside `[0,1]` texture UV (rendered as the letterbox
@@ -490,10 +504,7 @@ impl CallbackTrait for ViewportCallback {
             return Vec::new();
         };
 
-        let mut uniforms = res.uniforms;
-        uniforms.view_scale = self.view_scale;
-        uniforms.view_offset = self.view_offset;
-        uniforms.orient = self.orient.index();
+        let uniforms = view_uniforms(res.uniforms, self.view_scale, self.view_offset, self.orient);
         queue.write_buffer(&res.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         let bind_group_layout = res.pipeline.get_bind_group_layout(0);
@@ -1157,6 +1168,25 @@ mod tests {
         .unwrap();
         let u = uniforms_for(&p, true, false);
         assert_eq!((u.proof_enabled, u.gamut_warn), (1, 1));
+    }
+
+    #[test]
+    fn a_paints_view_mapping_and_orientation_reach_the_uniforms() {
+        let base: DisplayUniforms = bytemuck::Zeroable::zeroed();
+        for exif in 0..=8u8 {
+            let o = ViewOrient::from_exif(exif);
+            let u = view_uniforms(base, [2.0, 3.0], [0.25, -0.5], o);
+            assert_eq!(u.orient, o.index(), "exif {exif}");
+            assert_eq!((u.view_scale, u.view_offset), ([2.0, 3.0], [0.25, -0.5]));
+        }
+        assert_eq!(
+            view_uniforms(base, [1.0; 2], [0.0; 2], ViewOrient::from_exif(6)).orient,
+            5
+        );
+        assert_eq!(
+            view_uniforms(base, [1.0; 2], [0.0; 2], ViewOrient::normal()).orient,
+            0
+        );
     }
 
     #[test]
