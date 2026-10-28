@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use nicti_cornea::LinearFrame;
 use nicti_groom::{FramePixels, PixelSource};
-use nicti_siamese::providers::recipe_for;
-use nicti_stalk::SegmentTarget;
+use nicti_siamese::providers::{recipe_for, recipe_for_preference};
+use nicti_stalk::{SegmentTarget, SegmentationRegistry};
 use nicti_tapetum::coat::WbParams;
 use nicti_tapetum::color::{self, Mat3};
 use nicti_tapetum::mask::compose::{self, ai_bake_key};
@@ -87,6 +87,27 @@ impl NewMask {
         }
     }
 
+    /// [`Self::source`], with an AI kind's model taken from the user's per-target choice (#346)
+    /// when it names a registered model that supports the target, else the target's default.
+    pub fn source_with(
+        self,
+        registry: &SegmentationRegistry,
+        prefs: &crate::mask_models::MaskModelPrefs,
+    ) -> MaskSource {
+        let ai = |target: SegmentTarget| {
+            MaskSource::Ai(recipe_for_preference(
+                registry,
+                target,
+                prefs.preferred(target),
+            ))
+        };
+        match self {
+            NewMask::Subject | NewMask::Background => ai(SegmentTarget::Subject),
+            NewMask::Sky => ai(SegmentTarget::Sky),
+            other => other.source(),
+        }
+    }
+
     /// The component source this kind stands for.
     pub fn source(self) -> MaskSource {
         match self {
@@ -145,13 +166,19 @@ pub fn next_id(params: &MaskParams) -> String {
 }
 
 /// A new correction of `kind`, with no adjustment yet (the user picks what it does).
+#[cfg_attr(not(test), allow(dead_code))] // the panel uses `new_correction_from`
 pub fn new_correction(kind: NewMask, id: String) -> LocalCorrection {
+    new_correction_from(kind, id, kind.source())
+}
+
+/// [`new_correction`] for a source the caller already built (the model picker's choice).
+pub fn new_correction_from(kind: NewMask, id: String, source: MaskSource) -> LocalCorrection {
     LocalCorrection {
         id,
         name: kind.name().to_owned(),
         mask: MaskGroup {
             components: vec![MaskComponent {
-                source: kind.source(),
+                source,
                 invert: kind == NewMask::Background,
                 ..MaskComponent::default()
             }],
@@ -202,12 +229,23 @@ pub fn delete(params: &mut MaskParams, index: usize) -> bool {
 }
 
 /// Adds a component of `kind` with `op` to `c`, returning its index, or `None` at the limit.
+#[cfg_attr(not(test), allow(dead_code))] // the panel uses `add_component_from`
 pub fn add_component(c: &mut LocalCorrection, kind: NewMask, op: Op) -> Option<usize> {
+    add_component_from(c, kind, op, kind.source())
+}
+
+/// [`add_component`] for a source the caller already built (the model picker's choice).
+pub fn add_component_from(
+    c: &mut LocalCorrection,
+    kind: NewMask,
+    op: Op,
+    source: MaskSource,
+) -> Option<usize> {
     if c.mask.components.len() >= MAX_COMPONENTS {
         return None;
     }
     c.mask.components.push(MaskComponent {
-        source: kind.source(),
+        source,
         op,
         invert: kind == NewMask::Background,
         ..MaskComponent::default()
@@ -915,5 +953,115 @@ mod cap_tests {
         assert!(linear_ends(&c).is_none() && radial_shape(&c).is_none());
         assert!(has_brush(&new_correction(NewMask::Brush, "b".into())));
         assert!(has_color_range(&new_correction(NewMask::Color, "c".into())));
+    }
+
+    mod model_choice {
+        use super::*;
+        use crate::mask_models::MaskModelPrefs;
+        use nicti_claw::{Descriptor, Module, Registry};
+        use nicti_siamese::providers::segmentation_registry;
+        use nicti_stalk::{
+            LoadContext, ModelProvider, SegmentError, SegmentationProvider, Segmenter,
+        };
+
+        struct Small;
+        impl Module for Small {
+            fn id(&self) -> &str {
+                "test.ai.small"
+            }
+            fn schema_version(&self) -> u32 {
+                1
+            }
+            fn migrate_params(&self, _: u32, p: serde_json::Value) -> Option<serde_json::Value> {
+                Some(p)
+            }
+        }
+        impl ModelProvider for Small {}
+        impl SegmentationProvider for Small {
+            fn model_version(&self) -> &str {
+                "7"
+            }
+            fn targets(&self) -> &[SegmentTarget] {
+                &[SegmentTarget::Subject]
+            }
+            fn load(&self, _: &LoadContext) -> Result<Box<dyn Segmenter>, SegmentError> {
+                Err(SegmentError::Load("test".into()))
+            }
+        }
+
+        fn registry() -> nicti_stalk::SegmentationRegistry {
+            let mut r: nicti_stalk::SegmentationRegistry = Registry::new();
+            let _ = &r;
+            r = segmentation_registry();
+            r.register(
+                Descriptor {
+                    id: "test.ai.small",
+                    schema_version: 1,
+                },
+                || Arc::new(Small),
+            )
+            .unwrap();
+            r
+        }
+
+        fn recipe_of(s: &MaskSource) -> (&str, &str) {
+            match s {
+                MaskSource::Ai(r) => (r.model_id.as_str(), r.model_version.as_str()),
+                other => panic!("not AI: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_new_ai_mask_uses_the_users_model_for_its_target_and_the_default_otherwise() {
+            let reg = registry();
+            let mut prefs = MaskModelPrefs::default();
+            // No choice: the defaults, exactly what `source()` gives.
+            for kind in [NewMask::Subject, NewMask::Background, NewMask::Sky] {
+                assert_eq!(kind.source_with(&reg, &prefs), kind.source());
+            }
+            prefs
+                .set(SegmentTarget::Subject, Some("test.ai.small".into()))
+                .unwrap();
+            // Subject and Background are one target; Sky is unaffected; non-AI kinds ignore it.
+            assert_eq!(
+                recipe_of(&NewMask::Subject.source_with(&reg, &prefs)),
+                ("test.ai.small", "7")
+            );
+            assert_eq!(
+                recipe_of(&NewMask::Background.source_with(&reg, &prefs)),
+                ("test.ai.small", "7")
+            );
+            assert_eq!(
+                NewMask::Sky.source_with(&reg, &prefs),
+                NewMask::Sky.source()
+            );
+            assert_eq!(
+                NewMask::Brush.source_with(&reg, &prefs),
+                NewMask::Brush.source()
+            );
+            // The pick is written into the recipe the correction carries, Background still inverted.
+            let c = new_correction_from(
+                NewMask::Background,
+                "mask-1".into(),
+                NewMask::Background.source_with(&reg, &prefs),
+            );
+            assert!(c.mask.components[0].invert);
+            assert_eq!(recipe_of(&c.mask.components[0].source).0, "test.ai.small");
+            // A pick the build no longer has, or one that can't do the target, falls back.
+            prefs
+                .set(SegmentTarget::Subject, Some("gone.model".into()))
+                .unwrap();
+            assert_eq!(
+                NewMask::Subject.source_with(&reg, &prefs),
+                NewMask::Subject.source()
+            );
+            prefs
+                .set(SegmentTarget::Sky, Some("test.ai.small".into()))
+                .unwrap();
+            assert_eq!(
+                NewMask::Sky.source_with(&reg, &prefs),
+                NewMask::Sky.source()
+            );
+        }
     }
 }

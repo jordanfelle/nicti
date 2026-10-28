@@ -33,6 +33,7 @@ mod knead;
 mod loupe;
 mod lrc_import;
 mod mask_edit;
+mod mask_models;
 mod mask_panel;
 mod mask_tool;
 mod pending;

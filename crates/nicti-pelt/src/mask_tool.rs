@@ -193,6 +193,11 @@ impl MaskBakeService {
         })
     }
 
+    /// The registered segmentation providers (the Masks panel's model picker lists them).
+    pub fn registry(&self) -> &SegmentationRegistry {
+        &self.registry
+    }
+
     /// True if a provider is registered under `model_id` (an edit from a newer build, or an
     /// import, may name one this build doesn't have -- the panel shows it as unavailable).
     pub fn knows_model(&self, model_id: &str) -> bool {

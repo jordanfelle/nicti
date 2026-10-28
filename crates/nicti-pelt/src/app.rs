@@ -410,6 +410,7 @@ impl PeltApp {
             _ => None,
         });
         let preview_settings = preview_settings::load(&catalog_path);
+        let mask_prefs_path = catalog_path.clone();
         crate::fur::install_section_states(egui_ctx, section_state::load(&catalog_path));
         let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
             eyeshine::Env::new(
@@ -435,6 +436,7 @@ impl PeltApp {
                 // The disk tier for baked AI alphas (#353).
                 let mut mask_ui = MaskUi::new();
                 mask_ui.service.set_larder(larder.clone());
+                mask_ui.prefs = crate::mask_models::MaskModelPrefs::load(&mask_prefs_path);
                 mask_ui
             },
             pounce,

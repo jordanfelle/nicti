@@ -20,13 +20,14 @@ use nicti_tapetum::stages::MASKS;
 use crate::develop_panel::{image_to_screen, screen_to_image};
 use crate::fur::{self, SliderSpec};
 use crate::mask_edit::{
-    add_color_sample, add_component, add_correction, begin_stroke, delete, duplicate,
-    extend_stroke, has_brush, has_color_range, linear_ends, new_correction, next_id,
+    add_color_sample, add_component_from, add_correction, begin_stroke, delete, duplicate,
+    extend_stroke, has_brush, has_color_range, linear_ends, new_correction_from, next_id,
     preview_extent, preview_field, preview_key, radial_shape, set_linear, set_radial, Arm,
     BrushSettings, NewMask, Thumb, MAX_BRUSH_RADIUS, MIN_BRUSH_RADIUS,
 };
 use crate::mask_tool::MaskBakeService;
 use crate::render::DevelopDoc;
+use nicti_siamese::providers::{stale_model, updated_recipe};
 
 /// Screen pixels within which a press grabs a gradient handle.
 const HANDLE_GRAB_PX: f32 = 12.0;
@@ -77,6 +78,8 @@ pub struct MaskUi {
     drag: Option<MaskDrag>,
     thumb: Option<(u64, Arc<Thumb>)>,
     overlay: Option<Overlay>,
+    /// Which model a new Subject / Sky mask uses (#346); persisted beside the catalog.
+    pub prefs: crate::mask_models::MaskModelPrefs,
 }
 
 impl Default for MaskUi {
@@ -102,6 +105,7 @@ impl MaskUi {
             drag: None,
             thumb: None,
             overlay: None,
+            prefs: crate::mask_models::MaskModelPrefs::default(),
         }
     }
 
@@ -307,6 +311,80 @@ fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
     changed
 }
 
+/// The per-target model choice for new AI masks (#346): one row per target that has more than
+/// one registered model gets a picker; a target with a single model shows it (name, download
+/// size, licence) so the user knows what Select Subject / Sky will fetch and run.
+fn show_model_picker(ui: &mut egui::Ui, mask: &mut MaskUi) {
+    use nicti_siamese::providers::choices_for;
+    use nicti_stalk::SegmentTarget;
+    let registry = mask.service.registry();
+    let rows: Vec<(SegmentTarget, &str, Vec<_>)> = [
+        (SegmentTarget::Subject, "Subject / Background"),
+        (SegmentTarget::Sky, "Sky"),
+    ]
+    .into_iter()
+    .map(|(t, name)| (t, name, choices_for(registry, t)))
+    .collect();
+    let mut change: Option<(SegmentTarget, Option<String>)> = None;
+    egui::CollapsingHeader::new("AI mask models")
+        .default_open(false)
+        .show(ui, |ui| {
+            for (target, name, choices) in &rows {
+                let current = mask.prefs.preferred(*target);
+                // A saved choice that is no longer registered shows (and behaves) as the default.
+                let selected = choices
+                    .iter()
+                    .find(|c| Some(c.model_id.as_str()) == current)
+                    .or_else(|| choices.first());
+                let describe = |c: &nicti_siamese::providers::ModelChoice| {
+                    let size = if c.download_bytes == 0 {
+                        "no download".to_owned()
+                    } else {
+                        format!("{} MB download", megabytes(c.download_bytes))
+                    };
+                    let licence = if c.license.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {}", c.license)
+                    };
+                    format!("{} ({size}{licence})", c.label)
+                };
+                ui.horizontal(|ui| {
+                    ui.label(*name);
+                    match selected {
+                        None => {
+                            ui.weak("no model available in this build");
+                        }
+                        Some(sel) if choices.len() < 2 => {
+                            ui.label(describe(sel));
+                        }
+                        Some(sel) => {
+                            egui::ComboBox::from_id_salt(("mask-model", name))
+                                .selected_text(describe(sel))
+                                .show_ui(ui, |ui| {
+                                    for c in choices {
+                                        let picked = c.model_id == sel.model_id;
+                                        if ui.selectable_label(picked, describe(c)).clicked()
+                                            && !picked
+                                        {
+                                            change = Some((*target, Some(c.model_id.clone())));
+                                        }
+                                    }
+                                });
+                        }
+                    }
+                });
+            }
+            ui.weak(
+                "Applies to masks you create from now on. Existing masks keep the model and \
+                 version they were made with.",
+            );
+        });
+    if let Some((target, id)) = change {
+        mask.status = mask.prefs.set(target, id).err();
+    }
+}
+
 fn show_download(ui: &mut egui::Ui, mask: &mut MaskUi, develop: &DevelopDoc, pounce: &Pounce) {
     if let Some((done, total)) = mask.service.install_progress() {
         let fraction = if total == 0 {
@@ -397,7 +475,8 @@ pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, mask: &mut MaskUi
         for kind in NewMask::ALL {
             if ui.button(kind.label()).clicked() {
                 let id = next_id(&params);
-                match add_correction(&mut params, new_correction(kind, id)) {
+                let source = kind.source_with(mask.service.registry(), &mask.prefs);
+                match add_correction(&mut params, new_correction_from(kind, id, source)) {
                     Some(i) => {
                         mask.selected = Some(i);
                         mask.arm = kind.arm();
@@ -409,6 +488,7 @@ pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, mask: &mut MaskUi
         }
     });
 
+    show_model_picker(ui, mask);
     show_download(ui, mask, develop, pounce);
     if let Some(status) = mask.status() {
         ui.label(status.to_owned());
@@ -550,6 +630,26 @@ fn show_selected(
                     }
                     Some(AiState::Ready) | None => {}
                 }
+                // The pinned model has a newer registered version: an explicit edit, never a
+                // silent swap (#346). The old bake is dropped by the changed recipe's new key.
+                if let MaskSource::Ai(recipe) = &comp.source {
+                    if let Some((pinned, current)) = stale_model(mask.service.registry(), recipe) {
+                        if ui
+                            .small_button("Update mask")
+                            .on_hover_text(format!(
+                                "This mask was made with model version {pinned}; version \
+                                 {current} is installed. Updating re-selects with the new \
+                                 model and can change the mask's edges."
+                            ))
+                            .clicked()
+                        {
+                            if let Some(updated) = updated_recipe(mask.service.registry(), recipe) {
+                                comp.source = MaskSource::Ai(updated);
+                                edited = true;
+                            }
+                        }
+                    }
+                }
             });
             edited |= fraction_slider(ui, "Opacity", &mut comp.opacity, 1.0);
             // The range controls live with their component.
@@ -612,7 +712,13 @@ fn show_selected(
             NewMask::Color,
         ] {
             if ui.small_button(kind.label()).clicked()
-                && add_component(c, kind, mask.add_op).is_some()
+                && add_component_from(
+                    c,
+                    kind,
+                    mask.add_op,
+                    kind.source_with(mask.service.registry(), &mask.prefs),
+                )
+                .is_some()
             {
                 mask.arm = kind.arm();
                 edited = true;
@@ -1076,6 +1182,7 @@ fn draw_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mask_edit::{add_component, new_correction};
     use crate::render::DevelopView;
     use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2, Rect};
     use nicti_tapetum::mask::params::Stroke;
