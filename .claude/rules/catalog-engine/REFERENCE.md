@@ -71,3 +71,4 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 ...
+- **Additive backup copy (#305):** `nicti-lair/src/backup.rs`. `back_up_root` copies every RAW/JPEG under a source root to the same relative path under a target via `offering::offer_file` (verified, never overwrites). Never deletes or mirrors deletions; a differing backed-up copy is reported (`Differs`), not replaced or duplicated. Target identity: `init_target` writes a random-id `.nicti-backup-target` marker, `open_target(root, saved_id)` refuses a missing/foreign/other marker (secondary signal per ADR-0071; a cloned drive shares it). Source/target overlap refused. Not built: UI/scheduling, cloud targets, a cache-bypassing read-back.

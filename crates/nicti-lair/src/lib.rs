@@ -20,6 +20,7 @@ mod model;
 pub mod schema;
 mod sqlite;
 
+pub mod backup;
 pub mod cards;
 pub mod carry;
 pub mod clowder;

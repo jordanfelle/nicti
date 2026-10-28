@@ -197,7 +197,10 @@ fn hash_stream(
     Ok(Some((hasher.finalize().to_hex().to_string(), total)))
 }
 
-fn read_back(path: &Path, cancelled: &dyn Fn() -> bool) -> io::Result<Option<(String, u64)>> {
+pub(crate) fn read_back(
+    path: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Option<(String, u64)>> {
     hash_stream(File::open(path)?, cancelled)
 }
 
