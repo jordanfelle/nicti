@@ -39,6 +39,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 - `NICTI_REPAINT_TRACE=1` prints per-second frame wake attribution; telemetry reports only visible changes, at most 1/s; unchanged folder-panel reads don't wake the UI; idle cache stats 5 s. windows-latest idle 4.50 -> 2.17 frames/s. #584: the 1-2 ms follow-up frame after every wake was egui's own "two repaints per zero-delay `request_repaint()`"; wakes now use `request_repaint_after(WAKE_DELAY)` (one pass, test-pinned). Open: ~1 frame/s on a quiet machine, real-GPU frame cost. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 - #513: `scripts/idle-probe.ps1` gates idle frames/s (budget 6, baseline ~2.2) in build-windows; advisory (`continue-on-error`) until variance is known.
 
+## #341: display orientation
+
+- `LinearFrame.orientation` (IFD0, EXIF 1-8) turns only the on-screen image (`view_orient::ViewOrient`, `display.wgsl` `orient` uniform), pinned to export's `preen::orient`; Loupe done, Develop crop/heal/mask overlays still sensor-oriented (follow-up). Detail: `docs/decisions/gpu-gui-and-healing.md`.
+
 ## Package contents
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit

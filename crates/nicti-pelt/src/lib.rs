@@ -54,6 +54,7 @@ mod test_gpu;
 mod test_support;
 mod update;
 mod verify_ui;
+mod view_orient;
 mod viewport;
 mod xmp_sync;
 

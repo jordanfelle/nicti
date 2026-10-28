@@ -73,7 +73,7 @@ pub enum DecodeError {
 /// the in-memory equivalent of `spikes/retina dump-linear`'s TIFF+JSON sidecar pair (kept for
 /// `spikes/calico`'s own file-based tooling, see `spikes/calico/src/linear_input.rs`) — same
 /// fields, no round-trip through disk required for a production caller.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LinearFrame {
     pub make: String,
     pub model: String,
@@ -102,6 +102,10 @@ pub struct LinearFrame {
     /// NEF that carries one, `None` otherwise. Located by `embedded::Walker::find_nikon_lens_info`,
     /// decoded by `nicti_iris::nikon`, applied by the Tapetum lens stage when the user opts in (#410).
     pub nikon_lens_info: Option<Vec<u8>>,
+    /// The container's IFD0 Orientation as the EXIF value 1-8 (#341); `0` when the file has none
+    /// or it is out of range. The pixels above are **not** rotated by it: crop, heal and mask
+    /// coordinates stay in sensor orientation, and the on-screen view turns the image instead.
+    pub orientation: u8,
 }
 
 /// The production `RawDecoder`: LibRaw (vendored `yogthos/LibRaw#nikon-he-decoder`, see
@@ -168,6 +172,7 @@ impl RawDecoder for LibRawDecoder {
         let nikon_lens_info = embedded::Walker::new(embedded::SliceSource::new(&data))
             .ok()
             .and_then(|mut w| w.find_nikon_lens_info().ok().flatten());
+        let orientation = container_orientation(&data);
         let image = handle
             .linear_image()
             .map_err(|source| DecodeError::Decode {
@@ -206,6 +211,7 @@ impl RawDecoder for LibRawDecoder {
             pixels,
             dng_opcode_list3,
             nikon_lens_info,
+            orientation,
         })
     }
 }
@@ -220,6 +226,16 @@ pub fn is_supported_raw(path: &Path) -> bool {
             .as_deref(),
         Some("nef") | Some("dng")
     )
+}
+
+/// The container's IFD0 Orientation as the EXIF value 1-8, or `0` when the file has none, is not a
+/// TIFF-family container, or holds an out-of-range value. Never an error: a photo whose
+/// orientation cannot be read is simply shown as stored.
+fn container_orientation(data: &[u8]) -> u8 {
+    embedded::Walker::new(embedded::SliceSource::new(data))
+        .ok()
+        .and_then(|mut w| w.ifd0_orientation().ok().flatten())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -301,5 +317,38 @@ mod tests {
         assert!(is_supported_raw(Path::new("photo.dng")));
         assert!(!is_supported_raw(Path::new("photo.jpg")));
         assert!(!is_supported_raw(Path::new("photo")));
+    }
+
+    /// Little-endian TIFF whose IFD0 has one entry: tag 0x0112 (Orientation), `field_type`/`count`.
+    fn tiff_with_orientation(field_type: u16, count: u32, value: u16) -> Vec<u8> {
+        let mut t = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
+        t.extend_from_slice(&0x0112u16.to_le_bytes());
+        t.extend_from_slice(&field_type.to_le_bytes());
+        t.extend_from_slice(&count.to_le_bytes());
+        t.extend_from_slice(&value.to_le_bytes());
+        t.extend_from_slice(&[0, 0]); // value padding
+        t.extend_from_slice(&[0, 0, 0, 0]); // next IFD
+        t
+    }
+
+    #[test]
+    fn the_containers_orientation_is_read_and_anything_unreadable_is_zero() {
+        for exif in 1..=8u16 {
+            assert_eq!(
+                container_orientation(&tiff_with_orientation(3, 1, exif)),
+                exif as u8
+            );
+        }
+        // Out of range, wrong type/count, not a TIFF, too short: all "no orientation".
+        assert_eq!(container_orientation(&tiff_with_orientation(3, 1, 9)), 0);
+        assert_eq!(container_orientation(&tiff_with_orientation(3, 1, 0)), 0);
+        assert_eq!(container_orientation(&tiff_with_orientation(4, 1, 6)), 0);
+        assert_eq!(container_orientation(&tiff_with_orientation(3, 2, 6)), 0);
+        assert_eq!(container_orientation(b"JUNKJUNKJUNKJUNK"), 0);
+        assert_eq!(container_orientation(&[]), 0);
+        assert_eq!(
+            container_orientation(&tiff_with_orientation(3, 1, 6)[..5]),
+            0
+        );
     }
 }

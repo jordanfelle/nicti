@@ -78,6 +78,7 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
         pixels,
         dng_opcode_list3: None,
         nikon_lens_info: None,
+        orientation: 0,
     }
 }
 
@@ -724,6 +725,12 @@ impl DevelopDoc {
             .expect("build_registry covers every id build_graph adds");
     }
 
+    /// How the loaded photo's EXIF orientation turns the on-screen image (#341). The frame, the edit
+    /// document and every render stage stay in sensor orientation; only the display turns.
+    pub fn view_orient(&self) -> crate::view_orient::ViewOrient {
+        crate::view_orient::ViewOrient::from_exif(self.frame.orientation)
+    }
+
     /// The loaded frame, shared (a full-resolution frame is hundreds of MB; never clone the pixels).
     pub fn frame_arc(&self) -> Arc<LinearFrame> {
         Arc::clone(&self.frame)
@@ -1324,6 +1331,23 @@ const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_loaded_frames_exif_orientation_becomes_the_views_orientation() {
+        use crate::view_orient::ViewOrient;
+        let doc_with = |orientation: u8| {
+            let mut doc = DevelopDoc::new();
+            doc.frame = Arc::new(LinearFrame {
+                orientation,
+                ..Default::default()
+            });
+            doc
+        };
+        assert!(doc_with(0).view_orient().is_normal());
+        assert!(doc_with(1).view_orient().is_normal());
+        assert_eq!(doc_with(6).view_orient(), ViewOrient::from_exif(6));
+        assert_eq!(doc_with(8).view_orient().index(), 7);
+    }
+
     use super::*;
     use nicti_tapetum::coat::{ExposureParams, ToneParams, WbParams};
     use nicti_tapetum::stages::WB;

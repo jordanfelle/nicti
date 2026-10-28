@@ -118,6 +118,7 @@ mod tests {
             pixels: (0..3 * 2 * 3).map(|i| 100 + i * 50).collect(),
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         };
         let expected = normalize_pixels(&frame);
         let src = FramePixels(Arc::new(frame));

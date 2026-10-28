@@ -407,6 +407,7 @@ mod tests {
             pixels: vec![0; 12],
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            orientation: 0,
         }
     }
 
