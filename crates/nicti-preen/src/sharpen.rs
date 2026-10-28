@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn the_correction_to_one_pixel_never_exceeds_the_cap() {
         let (w, h) = (32u32, 4u32);
-        let before = step(w, h, 0.02, 0.95);
+        let before = step(w, h, 0.0865, 0.98);
         let mut p = before.clone();
         let hard = SharpenSpec {
             media: SharpenMedia::Matte,
