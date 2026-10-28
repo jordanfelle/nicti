@@ -25,8 +25,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   parts` (embed, both JPEG/PNG), hand-rolled XMP JPEG-APP1/PNG-iTXt insert on `img-parts`
   primitives (adapted from `spikes/scent`'s approach — copied, not depended-on). `metadata::
   wrap_xpacket` wraps a raw XMP document in the standard xpacket PI pair; a real pipeline output
-  needs this or `exiftool -validate` flags it. TIFF metadata write deferred (no TIFF-tag-writer
-  crate in this workspace, same gap ADR-0059 left for DNG).
+  needs this or `exiftool -validate` flags it. TIFF EXIF landed in #337 (`tiff_exif.rs`); DNG metadata write is still open (ADR-0059).
 - **Watermark**: `resvg`/`usvg`/`tiny-skia` SVG rasterization + linear-premultiplied "over"
   compositing (`watermark::composite_sequential`). Sequential beats `rayon`-parallel at typical
   logo sizes — don't reach for `composite_parallel` without measuring first. Text watermarking
@@ -54,7 +53,7 @@ Full reasoning/history: `docs/decisions/export.md`.
 - **Formats (#57)**: JPEG = `jpeg-encoder` (subsampling pinned, JFIF density, ICC native, XMP APP1,
   EXIF via `little_exif`). PNG = `image` + one `img-parts` pass (iCCP, pHYs, iTXt, `eXIf` from the
   raw TIFF block — `little_exif`'s own PNG writer emits a non-standard zTXt and rewrites XMP).
-  TIFF = `tiff` crate with resolution/ICC (UNDEFINED type)/XMP tags, no EXIF. EXIF `ColorSpace` is
+  TIFF = `tiff` crate with resolution/ICC (UNDEFINED type)/XMP tags and EXIF (#337, `tiff_exif.rs`). EXIF `ColorSpace` is
   0xFFFF for non-sRGB. exiftool `-validate` clean, except two known TIFF quirks (Adobe-Deflate
   flag; odd IFD offsets after an odd compressed strip).
 - **WebP/AVIF (#429)**: lossless WebP (`image-webp`); AVIF (`ravif`, feature `avif`/`avif-export`, sRGB only) ...

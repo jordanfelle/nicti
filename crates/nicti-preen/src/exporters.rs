@@ -474,7 +474,35 @@ impl tiff::encoder::TiffValue for Undefined<'_> {
     }
 
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-        std::borrow::Cow::Borrowed(self.0)
+        pad_even(self.0)
+    }
+}
+
+/// An out-of-line value must start on a word boundary: pad an odd length with a zero byte that the
+/// entry's count does not include (a value of 4 bytes or fewer is inline and needs none).
+fn pad_even(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if data.len() > 4 && data.len() % 2 == 1 {
+        let mut padded = data.to_vec();
+        padded.push(0);
+        std::borrow::Cow::Owned(padded)
+    } else {
+        std::borrow::Cow::Borrowed(data)
+    }
+}
+
+/// The XMP packet as TIFF's BYTE type, word-aligned like [`Undefined`].
+struct XmpBytes<'a>(&'a [u8]);
+
+impl tiff::encoder::TiffValue for XmpBytes<'_> {
+    const BYTE_LEN: u8 = 1;
+    const FIELD_TYPE: tiff::tags::Type = tiff::tags::Type::BYTE;
+
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        pad_even(self.0)
     }
 }
 
@@ -493,7 +521,7 @@ impl Exporter for TiffExporter {
 
     fn embeds(&self) -> EmbedSupport {
         EmbedSupport {
-            exif: false,
+            exif: true,
             xmp: true,
             icc: true,
             dpi: true,
@@ -506,7 +534,8 @@ impl Exporter for TiffExporter {
         fmt: &FormatSpec,
         embed: &Embed<'_>,
     ) -> Result<Vec<u8>, ExportError> {
-        use tiff::encoder::{colortype, Compression, DeflateLevel, Rational, TiffEncoder};
+        use crate::tiff_exif::{parse_exif_block, write_entry};
+        use tiff::encoder::{colortype, Compression, DeflateLevel, Ifd, Rational, TiffEncoder};
         use tiff::tags::{ResolutionUnit, Tag};
 
         let FormatSpec::Tiff {
@@ -527,6 +556,33 @@ impl Exporter for TiffExporter {
             .map_err(|e| encode_err("TIFF init", e))?
             .with_compression(compression);
 
+        // The Exif and GPS sub-IFDs are written first (they are not part of the image sequence);
+        // the image directory then points at them.
+        let exif = match embed.exif {
+            Some(payload) => parse_exif_block(&exif_tiff_bytes(payload)?),
+            None => Default::default(),
+        };
+        let mut sub_ifd =
+            |entries: &[crate::tiff_exif::Entry]| -> Result<Option<Ifd>, ExportError> {
+                if entries.is_empty() {
+                    return Ok(None);
+                }
+                let mut dir = encoder
+                    .extra_directory()
+                    .map_err(|e| encode_err("TIFF EXIF directory", e))?;
+                for e in entries {
+                    write_entry(&mut dir, e).map_err(|e| encode_err("TIFF EXIF tag", e))?;
+                }
+                let at = dir
+                    .finish_with_offsets()
+                    .map_err(|e| encode_err("TIFF EXIF directory", e))?;
+                let at = u32::try_from(at.pointer.0)
+                    .map_err(|_| encode_err("TIFF EXIF directory", "offset past 4 GB"))?;
+                Ok(Some(Ifd(at)))
+            };
+        let exif_ifd = sub_ifd(&exif.exif)?;
+        let gps_ifd = sub_ifd(&exif.gps)?;
+
         macro_rules! write_image {
             ($color:ty, $data:expr) => {{
                 let mut image = encoder
@@ -542,8 +598,23 @@ impl Exporter for TiffExporter {
                 if let Some(xmp) = embed.xmp {
                     image
                         .encoder()
-                        .write_tag(Tag::Unknown(TIFF_TAG_XMP), xmp.as_bytes())
+                        .write_tag(Tag::Unknown(TIFF_TAG_XMP), XmpBytes(xmp.as_bytes()))
                         .map_err(|e| encode_err("TIFF XMP tag", e))?;
+                }
+                for e in &exif.ifd0 {
+                    write_entry(image.encoder(), e).map_err(|e| encode_err("TIFF EXIF tag", e))?;
+                }
+                if let Some(ifd) = &exif_ifd {
+                    image
+                        .encoder()
+                        .write_tag(Tag::ExifDirectory, Ifd(ifd.0))
+                        .map_err(|e| encode_err("TIFF EXIF pointer", e))?;
+                }
+                if let Some(ifd) = &gps_ifd {
+                    image
+                        .encoder()
+                        .write_tag(Tag::GpsDirectory, Ifd(ifd.0))
+                        .map_err(|e| encode_err("TIFF GPS pointer", e))?;
                 }
                 image
                     .write_data($data)
@@ -677,7 +748,7 @@ mod tests {
         }
         assert!(!reg.get(JPEG_ID).unwrap().supports_depth(BitDepth::Sixteen));
         assert!(reg.get(PNG_ID).unwrap().supports_depth(BitDepth::Sixteen));
-        assert!(!reg.get(TIFF_ID).unwrap().embeds().exif);
+        assert!(reg.get(TIFF_ID).unwrap().embeds().exif);
         assert_eq!(reg.get(AVIF_ID).is_some(), cfg!(feature = "avif"));
     }
 
@@ -943,6 +1014,153 @@ mod tests {
                     dec.get_tag(Tag::XResolution).unwrap(),
                     tiff::decoder::ifd::Value::Rational(300, 1)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn tiff_carries_exif_in_its_ifd0_and_exif_sub_ifd() {
+        use tiff::decoder::{ifd::Value, Decoder};
+        use tiff::tags::{IfdPointer, Tag};
+        let (w, h) = (16u32, 8u32);
+        let f = fixture(OutputSpace::Srgb, w, h);
+        let px = gradient8(w, h);
+        let img = OutputImage {
+            width: w,
+            height: h,
+            pixels: &px,
+        };
+        let out = TiffExporter
+            .encode(
+                &img,
+                &FormatSpec::Tiff {
+                    depth: BitDepth::Eight,
+                    compression: TiffCompression::None,
+                },
+                &embed(&f, 300),
+            )
+            .unwrap();
+        let mut dec = Decoder::new(Cursor::new(&out)).unwrap();
+        let text = |v: Value| match v {
+            Value::Ascii(s) => s,
+            other => panic!("not ascii: {other:?}"),
+        };
+        assert_eq!(text(dec.get_tag(Tag::Unknown(271)).unwrap()), "NIKON");
+        assert_eq!(text(dec.get_tag(Tag::Unknown(315)).unwrap()), "Jo");
+        assert_eq!(text(dec.get_tag(Tag::Unknown(33432)).unwrap()), "(c) Jo");
+        let ptr = match dec.get_tag(Tag::ExifDirectory).unwrap() {
+            Value::Ifd(o) => u64::from(o),
+            other => panic!("not an IFD pointer: {other:?}"),
+        };
+        let dir = dec.read_directory(IfdPointer(ptr)).unwrap();
+        let mut tags = dec.read_directory_tags(&dir);
+        assert!(
+            tags.find_tag(Tag::Unknown(0x9000)).unwrap().is_some(),
+            "ExifVersion"
+        );
+        assert!(
+            tags.find_tag(Tag::Unknown(0xA000)).unwrap().is_some(),
+            "FlashpixVersion"
+        );
+        // Pixel size lives in the image directory, not the Exif one (TIFF rule).
+        assert!(tags.find_tag(Tag::Unknown(0xA002)).unwrap().is_none());
+        // And no EXIF at all under MetadataPolicy::None (no payload).
+        let bare = Embed {
+            exif: None,
+            ..embed(&f, 300)
+        };
+        let out = TiffExporter
+            .encode(
+                &img,
+                &FormatSpec::Tiff {
+                    depth: BitDepth::Eight,
+                    compression: TiffCompression::None,
+                },
+                &bare,
+            )
+            .unwrap();
+        let mut dec = Decoder::new(Cursor::new(&out)).unwrap();
+        assert!(dec.find_tag(Tag::ExifDirectory).unwrap().is_none());
+        assert!(dec.find_tag(Tag::Unknown(271)).unwrap().is_none());
+    }
+
+    fn tiff_bytes(f: &Fixture, w: u32, h: u32) -> Vec<u8> {
+        let px = gradient8(w, h);
+        let img = OutputImage {
+            width: w,
+            height: h,
+            pixels: &px,
+        };
+        TiffExporter
+            .encode(
+                &img,
+                &FormatSpec::Tiff {
+                    depth: BitDepth::Eight,
+                    compression: TiffCompression::None,
+                },
+                &embed(f, 300),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn tiff_gps_sub_ifd_is_written_and_linked() {
+        use tiff::decoder::{ifd::Value, Decoder};
+        use tiff::tags::{IfdPointer, Tag};
+        let mut f = fixture(OutputSpace::Srgb, 16, 8);
+        f.exif = f.exif.with_gps();
+        let out = tiff_bytes(&f, 16, 8);
+        let mut dec = Decoder::new(Cursor::new(&out)).unwrap();
+        let ptr = match dec.get_tag(Tag::GpsDirectory).unwrap() {
+            Value::Ifd(o) => u64::from(o),
+            other => panic!("not an IFD pointer: {other:?}"),
+        };
+        let dir = dec.read_directory(IfdPointer(ptr)).unwrap();
+        let mut tags = dec.read_directory_tags(&dir);
+        assert!(
+            tags.find_tag(Tag::Unknown(0x0001)).unwrap().is_some(),
+            "GPSLatitudeRef"
+        );
+        assert!(
+            tags.find_tag(Tag::Unknown(0x0003)).unwrap().is_some(),
+            "GPSLongitudeRef"
+        );
+    }
+
+    #[test]
+    fn odd_length_xmp_keeps_the_exif_values_word_aligned() {
+        use tiff::decoder::Decoder;
+        use tiff::tags::Tag;
+        let mut f = fixture(OutputSpace::Srgb, 16, 8);
+        if f.xmp.len().is_multiple_of(2) {
+            f.xmp.push(' ');
+        }
+        let out = tiff_bytes(&f, 16, 8);
+        let mut dec = Decoder::new(Cursor::new(&out)).unwrap();
+        // The XMP value reads back at its true (odd) length, unpadded.
+        assert_eq!(
+            dec.get_tag_u8_vec(Tag::Unknown(TIFF_TAG_XMP))
+                .unwrap()
+                .len(),
+            f.xmp.len()
+        );
+        let ifd0 = u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize;
+        let n = u16::from_le_bytes(out[ifd0..ifd0 + 2].try_into().unwrap()) as usize;
+        for i in 0..n {
+            let e = ifd0 + 2 + i * 12;
+            let tag = u16::from_le_bytes(out[e..e + 2].try_into().unwrap());
+            let ty = u16::from_le_bytes(out[e + 2..e + 4].try_into().unwrap());
+            let count = u32::from_le_bytes(out[e + 4..e + 8].try_into().unwrap()) as usize;
+            let size = match ty {
+                1 | 2 | 6 | 7 => 1,
+                3 | 8 => 2,
+                4 | 9 | 11 | 13 => 4,
+                _ => 8,
+            };
+            // The strip data the encoder writes may be odd; every tag we add must start even.
+            if count * size > 4 && matches!(tag, 700 | 34675 | 271 | 272 | 305 | 315 | 33432) {
+                let off = u32::from_le_bytes(out[e + 8..e + 12].try_into().unwrap());
+                assert_eq!(off % 2, 0, "tag {tag} at odd offset {off}");
             }
         }
     }

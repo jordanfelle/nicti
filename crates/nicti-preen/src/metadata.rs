@@ -157,6 +157,17 @@ impl SourceMetadata {
 /// [`write_exif_png`]).
 pub struct ExifPayload(Metadata);
 
+#[cfg(test)]
+impl ExifPayload {
+    /// A payload with GPS tags, which `build_exif` does not produce yet (tests only).
+    pub(crate) fn with_gps(mut self) -> Self {
+        self.0.set_tag(ExifTag::GPSVersionID(vec![2, 3, 0, 0]));
+        self.0.set_tag(ExifTag::GPSLatitudeRef("N".to_string()));
+        self.0.set_tag(ExifTag::GPSLongitudeRef("W".to_string()));
+        self
+    }
+}
+
 /// Inputs to [`build_exif`].
 pub struct ExifContext<'a> {
     pub spec: &'a MetadataSpec,

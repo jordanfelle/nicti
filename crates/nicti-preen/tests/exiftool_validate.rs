@@ -165,3 +165,99 @@ fn every_format_passes_exiftool_validate_with_no_warnings() {
         problems.join("\n")
     );
 }
+
+/// The #337 acceptance: a TIFF carries the same EXIF a JPEG does (the tags a viewer or DAM reads),
+/// read back by exiftool itself.
+#[test]
+fn a_tiff_carries_the_same_exif_as_a_jpeg() {
+    if !exiftool_available() {
+        eprintln!("SKIPPED: exiftool not on PATH");
+        return;
+    }
+    let reg = builtin_registry();
+    let src = source();
+    let dir = tempfile::tempdir().unwrap();
+    let read = |name: &str, format: FormatSpec| -> serde_json::Value {
+        let spec = ExportSpec {
+            format,
+            color_space: ExportSpace::Srgb,
+            metadata: MetadataSpec {
+                policy: MetadataPolicy::All,
+                include_keywords: false,
+                artist: Some("Jo Photographer".into()),
+                copyright: Some("(c) 2026 Jo Photographer".into()),
+            },
+            ..ExportSpec::default()
+        };
+        let out = export_frame(
+            frame(64, 48),
+            &ExportContext {
+                spec: &spec,
+                source: &src,
+                watermark: None,
+                software: "Nicti test",
+            },
+            &reg,
+        )
+        .unwrap();
+        let path = dir.path().join(format!("{name}.{}", out.extension));
+        std::fs::write(&path, &out.bytes).unwrap();
+        let res = Command::new("exiftool")
+            .args([
+                "-j",
+                "-n",
+                "-Make",
+                "-Model",
+                "-LensModel",
+                "-ISO",
+                "-ExposureTime",
+            ])
+            .args([
+                "-FNumber",
+                "-FocalLength",
+                "-DateTimeOriginal",
+                "-OffsetTimeOriginal",
+            ])
+            .args(["-Artist", "-Copyright", "-Software", "-Orientation"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Vec<serde_json::Value>>(&res.stdout).unwrap()[0].clone()
+    };
+    let jpeg = read(
+        "j",
+        FormatSpec::Jpeg {
+            quality: 90,
+            subsampling: Subsampling::S420,
+        },
+    );
+    let tiff = read(
+        "t",
+        FormatSpec::Tiff {
+            depth: BitDepth::Eight,
+            compression: TiffCompression::None,
+        },
+    );
+    for key in [
+        "Make",
+        "Model",
+        "LensModel",
+        "ISO",
+        "ExposureTime",
+        "FNumber",
+        "FocalLength",
+        "DateTimeOriginal",
+        "OffsetTimeOriginal",
+        "Artist",
+        "Copyright",
+        "Software",
+        "Orientation",
+    ] {
+        assert!(jpeg.get(key).is_some(), "the JPEG lacks {key}: {jpeg}");
+        assert_eq!(
+            tiff.get(key),
+            jpeg.get(key),
+            "{key}\nTIFF: {tiff}\nJPEG: {jpeg}"
+        );
+    }
+}
