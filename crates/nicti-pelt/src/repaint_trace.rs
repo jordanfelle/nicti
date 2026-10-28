@@ -75,12 +75,23 @@ fn bit(wake: Wake) -> u32 {
     1 << WAKES.iter().position(|(w, _)| *w == wake).unwrap()
 }
 
-/// `ctx.request_repaint()`, recording who asked when tracing is on.
+/// How long after a wake the frame runs. Non-zero on purpose, see [`request`].
+pub(crate) const WAKE_DELAY: Duration = Duration::from_millis(1);
+
+/// Wakes the UI for one frame, recording who asked when tracing is on.
+///
+/// This is `request_repaint_after(WAKE_DELAY)`, not `request_repaint()`: egui answers a zero-delay
+/// request with **two** passes ("each request results in two repaints, just to give some things
+/// time to settle", `egui::context::request_repaint_after`), the second one 1-2 ms after the
+/// first and with no source of its own. For these wakes -- a worker thread posting data the next
+/// pass reads -- that second pass is pure idle cost, and it was the "unattributed follow-up frame
+/// after every wake" of #584 (about 1.2 of the 2.17 idle frames/s #512 left). egui schedules a
+/// non-zero delay once, so the wake costs one frame.
 pub(crate) fn request(ctx: &egui::Context, wake: Wake) {
     if let Some(t) = trace() {
         t.asked.fetch_or(bit(wake), Ordering::Relaxed);
     }
-    ctx.request_repaint();
+    ctx.request_repaint_after(WAKE_DELAY);
 }
 
 /// Call once per UI pass.
@@ -136,5 +147,76 @@ pub(crate) fn frame(ctx: &egui::Context) {
         }
         eprintln!("{line}");
         *start = Instant::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Runs the passes eframe would run for a wake made from outside a pass: `egui`'s repaint
+    /// callback is eframe's trigger, so "a callback is pending" means "eframe would paint again".
+    /// Returns how many passes the wake cost once the context was otherwise idle.
+    fn passes_for_wake(wake: impl Fn(&egui::Context)) -> usize {
+        let ctx = egui::Context::default();
+        let pending = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&pending);
+        ctx.set_request_repaint_callback(move |_| *flag.lock().unwrap() = true);
+        let pass = |ctx: &egui::Context| {
+            ctx.begin_pass(egui::RawInput::default());
+            ctx.end_pass().textures_delta.clear();
+        };
+
+        // egui runs a couple of passes at start-up; let it settle to idle first.
+        pass(&ctx);
+        for _ in 0..8 {
+            if !std::mem::take(&mut *pending.lock().unwrap()) {
+                break;
+            }
+            pass(&ctx);
+        }
+        assert!(!*pending.lock().unwrap(), "the context did not go idle");
+
+        wake(&ctx);
+        let mut passes = 0;
+        while std::mem::take(&mut *pending.lock().unwrap()) {
+            pass(&ctx);
+            passes += 1;
+            assert!(passes < 8, "a single wake kept repainting");
+        }
+        passes
+    }
+
+    #[test]
+    fn egui_answers_a_zero_delay_request_with_two_passes() {
+        // The control: this is the behaviour #584 traced. If egui ever stops doing this, the
+        // reason for `WAKE_DELAY` is gone and this test says so.
+        assert_eq!(passes_for_wake(|ctx| ctx.request_repaint()), 2);
+    }
+
+    #[test]
+    fn a_wake_from_a_worker_thread_costs_one_pass_not_two() {
+        for wake in [Wake::Telemetry, Wake::Pending, Wake::Pounce, Wake::Cull] {
+            assert_eq!(passes_for_wake(|ctx| request(ctx, wake)), 1, "{wake:?}");
+        }
+    }
+
+    #[test]
+    fn the_wake_is_still_prompt_and_still_reaches_egui() {
+        // A wake must still ask for a repaint (no silent drop), and soon.
+        assert!(WAKE_DELAY > Duration::ZERO && WAKE_DELAY <= Duration::from_millis(5));
+        let ctx = egui::Context::default();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        ctx.set_request_repaint_callback(move |info| seen.lock().unwrap().push(info.delay));
+        // egui runs a couple of passes at start-up; settle past them before the wake.
+        for _ in 0..3 {
+            ctx.begin_pass(egui::RawInput::default());
+            ctx.end_pass().textures_delta.clear();
+        }
+        asked.lock().unwrap().clear();
+        request(&ctx, Wake::Pounce);
+        assert_eq!(*asked.lock().unwrap(), vec![WAKE_DELAY]);
     }
 }

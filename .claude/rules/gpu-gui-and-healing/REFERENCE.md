@@ -36,7 +36,7 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #512: idle repaint rate
 
-- `NICTI_REPAINT_TRACE=1` prints per-second frame wake attribution; telemetry reports only visible changes, at most 1/s; unchanged folder-panel reads don't wake the UI; idle cache stats 5 s. windows-latest idle 4.50 -> 2.17 frames/s. Open: the 1-2 ms follow-up frame after every wake, real-GPU frame cost. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+- `NICTI_REPAINT_TRACE=1` prints per-second frame wake attribution; telemetry reports only visible changes, at most 1/s; unchanged folder-panel reads don't wake the UI; idle cache stats 5 s. windows-latest idle 4.50 -> 2.17 frames/s. #584: the 1-2 ms follow-up frame after every wake was egui's own "two repaints per zero-delay `request_repaint()`"; wakes now use `request_repaint_after(WAKE_DELAY)` (one pass, test-pinned). Open: ~1 frame/s on a quiet machine, real-GPU frame cost. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 - #513: `scripts/idle-probe.ps1` gates idle frames/s (budget 6, baseline ~2.2) in build-windows; advisory (`continue-on-error`) until variance is known.
 
 ## Package contents
