@@ -59,7 +59,7 @@ bullet to both files of its topic (or a new topic) and to this list — not inli
   license string doesn't cleanly match an allowed SPDX id in `deny.toml`; tested only against
   synthetic images since no real NEF→render path exists yet, see the follow-up issue filed
   alongside #17 for wiring in real goldens once #41 lands). `prowl` (the bin target) exposes
-  `verify`/`select` for PowerShell/CI callers.
+  `verify`/`select`/`materialize` (#136, rebuilds a ref-10k from a live library by sha256) for PowerShell/CI callers.
 
 ## Naming convention: feline references
 

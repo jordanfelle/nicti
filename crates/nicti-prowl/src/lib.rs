@@ -3,6 +3,7 @@
 
 pub mod golden;
 pub mod manifest;
+pub mod materialize;
 pub mod metrics;
 pub mod perf;
 pub mod refset;
