@@ -92,8 +92,20 @@ impl DisplayTransform {
         }
     }
 
-    /// Builds the transform for `display`, optionally soft-proofing through `proof`.
+    /// Builds the transform for `display`, optionally soft-proofing through `proof`. Relative
+    /// colorimetric without black-point compensation; see [`Self::build_with`].
     pub fn build(display: &DisplayProfile, proof: Option<OutputSpace>) -> Result<Self, CmsError> {
+        Self::build_with(display, proof, false)
+    }
+
+    /// Like [`Self::build`], with black-point compensation (#320) when `bpc` is set. BPC only
+    /// changes a LUT-based monitor profile whose black is lifted: matrix/TRC and built-in spaces
+    /// are unaffected (their black is XYZ 0, so there is nothing to compensate).
+    pub fn build_with(
+        display: &DisplayProfile,
+        proof: Option<OutputSpace>,
+        bpc: bool,
+    ) -> Result<Self, CmsError> {
         let kind = match display {
             DisplayProfile::Space(s) => DisplayKind::Space(*s),
             // A monitor profile that is just one of the built-in spaces (Windows' stock
@@ -102,7 +114,7 @@ impl DisplayTransform {
                 (Some(s), _) => DisplayKind::Space(s),
                 (None, Some(m)) => DisplayKind::MatrixTrc(m),
                 // Not a matrix/TRC profile (LUT-based): the 3D LUT is the only option.
-                (None, None) => DisplayKind::Lut(bake_lut(p)?),
+                (None, None) => DisplayKind::Lut(bake_lut(p, bpc)?),
             },
         };
         Ok(Self { proof, kind })
@@ -112,9 +124,18 @@ impl DisplayTransform {
     /// profile that is neither a built-in space nor matrix/TRC). Exposed so that path stays
     /// testable end to end.
     pub fn with_lut(profile: &ColorProfile, proof: Option<OutputSpace>) -> Result<Self, CmsError> {
+        Self::with_lut_bpc(profile, proof, false)
+    }
+
+    /// [`Self::with_lut`] with black-point compensation when `bpc` is set.
+    pub fn with_lut_bpc(
+        profile: &ColorProfile,
+        proof: Option<OutputSpace>,
+        bpc: bool,
+    ) -> Result<Self, CmsError> {
         Ok(Self {
             proof,
-            kind: DisplayKind::Lut(bake_lut(profile)?),
+            kind: DisplayKind::Lut(bake_lut(profile, bpc)?),
         })
     }
 
@@ -271,15 +292,80 @@ impl MatrixTrc {
     }
 }
 
-/// Bakes `working -> monitor` (relative colorimetric). moxcms clamps f32 output to [0, 1].
-fn bake_lut(display_profile: &ColorProfile) -> Result<Lut3d, CmsError> {
+/// A black point above this (linear, per channel) is not a real display black; it is ignored.
+const MAX_BLACK_POINT: f32 = 0.2;
+
+/// The display's own black, in linear working (ProPhoto) RGB: what device RGB (0, 0, 0) shows.
+/// Zero (no compensation) when it cannot be measured, is not finite, or is not above the working
+/// black: moxcms clamps its output to [0, 1], so a display blacker than the working space reads
+/// as 0 (any one channel failing zeroes all three), and a profile with no usable A2B table fails the probe. Never an error: BPC is an
+/// improvement, not a reason to lose the display profile.
+fn display_black_linear(display_profile: &ColorProfile) -> [f32; 3] {
+    let probe = || -> Option<[f32; 3]> {
+        let mut out = [0.0f32; 3];
+        display_profile
+            .create_transform_f32(
+                Layout::Rgb,
+                &working_profile(),
+                Layout::Rgb,
+                TransformOptions {
+                    rendering_intent: RenderingIntent::RelativeColorimetric,
+                    allow_use_cicp_transfer: false,
+                    ..TransformOptions::default()
+                },
+            )
+            .ok()?
+            .transform(&[0.0, 0.0, 0.0], &mut out)
+            .ok()?;
+        Some(out)
+    };
+    let Some(encoded) = probe() else {
+        return [0.0; 3];
+    };
+    let lin = encoded.map(|c| f64::from(c).clamp(0.0, 1.0).powf(PROPHOTO_GAMMA) as f32);
+    // All or nothing: dropping only the bad channels would leave the others compensated and tint
+    // black (a lift of [0.15, 0.2, 0.25] with a capped blue gave a saturated red black).
+    if lin
+        .iter()
+        .all(|&v| v.is_finite() && v > 0.0 && v <= MAX_BLACK_POINT)
+    {
+        lin
+    } else {
+        [0.0; 3]
+    }
+}
+
+/// Maps working black to the display's black and keeps white: `bp + v * (1 - bp)` on a linear
+/// working channel. Applied to the bake's input, so the shadows the monitor can show are spread
+/// over its real range instead of the part below its black point collapsing to one value.
+fn compensate(encoded: f32, bp: f32) -> f32 {
+    if bp == 0.0 {
+        return encoded;
+    }
+    let lin = f64::from(encoded).powf(PROPHOTO_GAMMA);
+    let lin = f64::from(bp) + lin * (1.0 - f64::from(bp));
+    lin.powf(1.0 / PROPHOTO_GAMMA) as f32
+}
+
+/// Bakes `working -> monitor` (relative colorimetric, with black-point compensation when `bpc`).
+/// moxcms clamps f32 output to [0, 1].
+fn bake_lut(display_profile: &ColorProfile, bpc: bool) -> Result<Lut3d, CmsError> {
     let n = LUT_SIZE;
+    let bp = if bpc {
+        display_black_linear(display_profile)
+    } else {
+        [0.0; 3]
+    };
     let mut grid = Vec::with_capacity(n * n * n * 3);
     for b in 0..n {
         for g in 0..n {
             for r in 0..n {
                 let s = (n - 1) as f32;
-                grid.extend_from_slice(&[r as f32 / s, g as f32 / s, b as f32 / s]);
+                grid.extend_from_slice(&[
+                    compensate(r as f32 / s, bp[0]),
+                    compensate(g as f32 / s, bp[1]),
+                    compensate(b as f32 / s, bp[2]),
+                ]);
             }
         }
     }
@@ -521,6 +607,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// sRGB-primaries monitor whose device black shows `floor` linear light (a lifted black, as a
+    /// LUT-based printer-style or washed-out display profile has): every TRC starts at `floor`.
+    fn lifted_black_monitor(floor: f32) -> ColorProfile {
+        lifted_black_rgb([floor; 3])
+    }
+
+    fn lifted_black_rgb(floors: [f32; 3]) -> ColorProfile {
+        let mut p = ColorProfile::new_srgb();
+        let table = |floor: f32| -> ToneReprCurve {
+            ToneReprCurve::Lut(
+                (0..1024)
+                    .map(|i| {
+                        let e = f64::from(i) / 1023.0;
+                        let lin = if e <= 0.04045 {
+                            e / 12.92
+                        } else {
+                            ((e + 0.055) / 1.055).powf(2.4)
+                        };
+                        let v = f64::from(floor) + lin * (1.0 - f64::from(floor));
+                        (v * 65535.0).round() as u16
+                    })
+                    .collect(),
+            )
+        };
+        p.red_trc = Some(table(floors[0]));
+        p.green_trc = Some(table(floors[1]));
+        p.blue_trc = Some(table(floors[2]));
+        p
+    }
+
+    fn shadow(t: &DisplayTransform, lin: f32) -> f32 {
+        t.apply([lin; 3]).0[1]
+    }
+
+    #[test]
+    fn bpc_keeps_shadow_detail_a_lifted_black_monitor_would_crush() {
+        let p = lifted_black_monitor(0.02);
+        let off = DisplayTransform::with_lut_bpc(&p, None, false).unwrap();
+        let on = DisplayTransform::with_lut_bpc(&p, None, true).unwrap();
+        // Below the monitor's black point every shadow collapses to the same output...
+        let (a, b) = (shadow(&off, 0.003), shadow(&off, 0.012));
+        assert!((a - b).abs() < 1e-3, "off: {a} vs {b}");
+        // ...with BPC they stay distinct and ordered.
+        let (a, b, c) = (shadow(&on, 0.003), shadow(&on, 0.012), shadow(&on, 0.04));
+        assert!(a + 0.003 < b && b + 0.003 < c, "on: {a} {b} {c}");
+        // Black stays the darkest the monitor can show, white stays white.
+        let (blk, _) = on.apply([0.0; 3]);
+        assert!(blk.iter().all(|&v| v < 0.02), "{blk:?}");
+        let (wht, _) = on.apply([1.0; 3]);
+        assert!(wht.iter().all(|&v| (v - 1.0).abs() < 0.01), "{wht:?}");
+    }
+
+    #[test]
+    fn bpc_is_a_no_op_when_the_monitor_black_is_true_black() {
+        let p = ColorProfile::new_srgb();
+        let off = DisplayTransform::with_lut_bpc(&p, None, false).unwrap();
+        let on = DisplayTransform::with_lut_bpc(&p, None, true).unwrap();
+        let (DisplayKind::Lut(a), DisplayKind::Lut(b)) = (&off.kind, &on.kind) else {
+            panic!("not a LUT")
+        };
+        assert_eq!(a.rgba, b.rgba, "an sRGB monitor has no black to compensate");
+    }
+
+    #[test]
+    fn the_measured_black_is_the_lift_and_nonsense_is_ignored() {
+        let bp = display_black_linear(&lifted_black_monitor(0.02));
+        assert!(bp.iter().all(|&v| (v - 0.02).abs() < 0.004), "{bp:?}");
+        // A "black" above 20% is not a display black: no compensation.
+        assert_eq!(display_black_linear(&lifted_black_monitor(0.5)), [0.0; 3]);
+        // One unusable channel disables compensation for all three (no coloured black).
+        let mixed = lifted_black_rgb([0.15, 0.2, 0.25]);
+        assert_eq!(display_black_linear(&mixed), [0.0; 3]);
+        // A profile that cannot be probed (no usable tags) degrades to no compensation.
+        let mut broken = ColorProfile::new_srgb();
+        broken.red_trc = None;
+        assert_eq!(display_black_linear(&broken), [0.0; 3]);
+        assert_eq!(compensate(0.37, 0.0), 0.37);
+        assert!((compensate(0.0, 0.02) - 0.02f32.powf(1.0 / 1.8)).abs() < 1e-5);
+        assert!((compensate(1.0, 0.02) - 1.0).abs() < 1e-5);
     }
 
     #[test]
