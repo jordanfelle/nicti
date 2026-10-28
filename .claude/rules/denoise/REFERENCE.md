@@ -48,3 +48,7 @@ Full reasoning/history: `docs/decisions/denoise.md`.
 - **`spikes/rods`** (#40/ADR-0040's demosaic+denoise comparison harness) — alignment, a fixed
   color treatment, and a tiled CUDA/TensorRT-capable `ort` AI-denoise wrapper. See
   `docs/research/rods-demosaic-denoise.md` for the module breakdown and results.
+
+## #174: AI Super Resolution (research only, `docs/research/ai-super-resolution.md`)
+
+- LRC's Super Resolution is a 2x-linear (4x-pixel) ML "Enhance" that writes a new DNG; 6 of 380,307 real rows. #62/#379 already route it to provenance. Off-the-shelf models suffice (Real-ESRGAN x2plus BSD-3, Swin2SR Classical x2 Apache-2.0; evaluate-only rows in `docs/licensing.md`). Not a live Develop stage: a Z8 frame at 2x is ~1.4 GiB; plan is an export-time/derivative stage after the baked prefix (demosaic + denoise), tiled through ONNX, weights on-demand (ADR-0218). Nothing measured yet; build ticket #612 carries the gates.
