@@ -238,6 +238,18 @@ pub(crate) fn tag_orientation(jpeg: Vec<u8>, orientation: u8) -> Vec<u8> {
     out
 }
 
+/// The EXIF Orientation (as stored, any value) carried by a whole JPEG's own EXIF, if it has one.
+pub(crate) fn jpeg_orientation(jpeg: &[u8]) -> Option<u8> {
+    exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(jpeg))
+        .ok()
+        .and_then(|e| {
+            e.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|f| f.value.get_uint(0))
+        })
+        .and_then(|o| u8::try_from(o).ok())
+}
+
 /// A JPEG asset's T0 (#489) plus its full-resolution pixel size. Already grid-sized files are
 /// stored verbatim (their own EXIF Orientation travels with them); larger ones are decoded and
 /// downscaled to [`T0_LONG_EDGE`], with the source's Orientation re-tagged onto the result so the
@@ -298,14 +310,7 @@ fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
     encoder
         .encode(thumb.as_raw(), tw, th, image::ExtendedColorType::Rgb8)
         .ok()?;
-    let orientation = exif::Reader::new()
-        .read_from_container(&mut std::io::Cursor::new(&bytes))
-        .ok()
-        .and_then(|e| {
-            e.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
-                .and_then(|f| f.value.get_uint(0))
-        })
-        .and_then(|o| u8::try_from(o).ok());
+    let orientation = jpeg_orientation(&bytes);
     let out = match orientation {
         Some(o) => tag_orientation(out, o),
         None => out,

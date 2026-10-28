@@ -29,6 +29,7 @@ pub mod ninelives;
 pub mod offering;
 pub mod patrol;
 pub mod pounce_jobs;
+pub mod righting;
 pub mod scent_sync;
 pub mod scruff;
 pub mod shred;
