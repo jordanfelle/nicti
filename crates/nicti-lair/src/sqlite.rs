@@ -266,6 +266,100 @@ struct SmartRule {
 /// against an unusually large batch can't hit the limit (found by CodeRabbit's review).
 const MAX_IDS_PER_STATEMENT: usize = 500;
 
+/// Per-(volume, model, rating) asset counts for `ids`. Read-only: chunked `IN` lists, aggregated
+/// here, so measuring the delta writes nothing. `ids` must not repeat an id (a row counts once per
+/// chunk it appears in); an id that is not an asset counts nothing.
+fn facet_group_counts(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<(i64, String, i64), i64>, CatalogError> {
+    let mut counts = std::collections::HashMap::new();
+    for chunk in ids.chunks(MAX_IDS_PER_STATEMENT) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut stmt = tx.prepare_cached(&format!(
+            "SELECT r.volume_id, COALESCE(a.model, ''), COALESCE(a.rating, {FACET_UNRATED_SENTINEL}), COUNT(*) \
+             FROM asset a JOIN root r ON r.id = a.root_id \
+             WHERE a.id IN ({placeholders}) GROUP BY 1, 2, 3"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk), |row| {
+            Ok((
+                (row.get(0)?, row.get(1)?, row.get(2)?),
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (key, n) = row?;
+            *counts.entry(key).or_insert(0) += n;
+        }
+    }
+    Ok(counts)
+}
+
+/// Runs `body` (a bulk rewrite of `rating` for `ids`) without `trg_facet_asset_update`, then applies
+/// the **exact** facet delta once instead of letting the trigger move one count per row (#580: the
+/// trigger was ~9 s of a 32 s select-all rating change at 1M rows).
+///
+/// The delta is the difference between the per-(volume, model, rating) counts of `ids` before and
+/// after `body`, so it is right whatever `body` changed, unchanged rows contribute nothing, and
+/// duplicate ids are counted once (they are deduplicated first). Measuring it is read-only, so a rewrite that changes
+/// nothing still writes nothing. A catalog with no `trg_facet_asset_update` (nothing maintains its
+/// counts) is left as it is: no delta is invented. If another trigger on `asset` ever also reacts to
+/// `rating`, it must be dropped and compensated here too. All of it happens inside `tx`: SQLite DDL is transactional, so
+/// if `body` or anything after it fails (or the transaction is dropped) the rollback puts the
+/// trigger back, and the trigger is recreated from the definition read out of `sqlite_master`, never
+/// from a second copy of its SQL that could drift from the migrations. The semantics match the
+/// trigger: decrement the old bucket, delete it when it reaches zero, increment the new one.
+fn with_facet_delta<T>(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[i64],
+    body: impl FnOnce() -> Result<T, CatalogError>,
+) -> Result<T, CatalogError> {
+    // Sorted and deduplicated: `IN` counts a row once only *within* one chunk, so an id listed twice in
+    // different chunks would be counted twice in `before`/`after` and double its share of the delta.
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let before = facet_group_counts(tx, &ids)?;
+
+    let trigger_sql: Option<String> = tx
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_facet_asset_update'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if trigger_sql.is_some() {
+        tx.execute_batch("DROP TRIGGER trg_facet_asset_update")?;
+    }
+    let out = body()?;
+    if let Some(sql) = &trigger_sql {
+        tx.execute_batch(sql)?;
+    }
+
+    let after = facet_group_counts(tx, &ids)?;
+    // Only needed when the trigger was bypassed: with it in place `body` already moved the counts.
+    if trigger_sql.is_some() {
+        let mut keys: std::collections::HashSet<&(i64, String, i64)> = before.keys().collect();
+        keys.extend(after.keys());
+        let mut bump = tx.prepare_cached(
+            "INSERT INTO facet_counts (volume_id, model, rating, cnt) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(volume_id, model, rating) DO UPDATE SET cnt = cnt + excluded.cnt",
+        )?;
+        let mut sweep = tx.prepare_cached(
+            "DELETE FROM facet_counts WHERE cnt <= 0 AND volume_id = ?1 AND model = ?2 AND rating = ?3",
+        )?;
+        for key in keys {
+            let delta =
+                after.get(key).copied().unwrap_or(0) - before.get(key).copied().unwrap_or(0);
+            if delta != 0 {
+                bump.execute(params![key.0, key.1, key.2, delta])?;
+                sweep.execute(params![key.0, key.1, key.2])?;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Shared by `set_rating`/`set_flag`/`set_label`: builds and runs `UPDATE asset SET <column> = ?
 /// WHERE id IN (...)`, chunked to stay under SQLite's parameter limit, all chunks committed
 /// together in one transaction so the whole call is atomic (a partial write across chunks would
@@ -283,15 +377,25 @@ fn set_column_for_assets(
         return Ok(());
     }
     let tx = conn.transaction()?;
-    for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!("UPDATE asset SET {column} = ?1 WHERE id IN ({placeholders})");
-        let mut bound: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
-        bound.push(value);
-        for id in chunk {
-            bound.push(id);
+    let update = || -> Result<(), CatalogError> {
+        for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("UPDATE asset SET {column} = ?1 WHERE id IN ({placeholders})");
+            let mut bound: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
+            bound.push(value);
+            for id in chunk {
+                bound.push(id);
+            }
+            tx.execute(&sql, bound.as_slice())?;
         }
-        tx.execute(&sql, bound.as_slice())?;
+        Ok(())
+    };
+    // A bulk rating change moves the facet counts in one aggregated step rather than per row (#580).
+    // Only `rating` feeds `trg_facet_asset_update`; flag/label rewrites never touch it.
+    if column == "rating" && asset_ids.len() >= BULK_META_ROWS {
+        with_facet_delta(&tx, asset_ids, update)?;
+    } else {
+        update()?;
     }
     tx.commit()?;
     Ok(())
@@ -1788,7 +1892,13 @@ impl CatalogStore for SqliteCatalog {
         };
         let result = (|| -> Result<(), CatalogError> {
             let tx = conn.transaction()?;
-            {
+            let bulk = items.len() >= BULK_META_ROWS;
+            let ids: Vec<i64> = if bulk {
+                items.iter().map(|(id, _)| *id).collect()
+            } else {
+                Vec::new()
+            };
+            let write = || -> Result<(), CatalogError> {
                 // One guarded statement per column (#499): SQLite rewrites every index containing a
                 // column in the SET list whether or not the value changed, and fires the facet
                 // trigger's row machinery on `rating`. Guarding with `IS NOT` makes an unchanged
@@ -1807,6 +1917,13 @@ impl CatalogStore for SqliteCatalog {
                     flag.execute(params![meta.flag, id])?;
                     label.execute(params![meta.label, id])?;
                 }
+                Ok(())
+            };
+            // A bulk mark moves the facet counts in one aggregated step, not one trigger per row (#580).
+            if bulk {
+                with_facet_delta(&tx, &ids, write)?;
+            } else {
+                write()?;
             }
             tx.commit()?;
             Ok(())
@@ -4371,6 +4488,251 @@ mod tests {
             Some(3),
             "the failed batch must leave the earlier row untouched"
         );
+    }
+
+    // ---- #580: a bulk rating change moves the facet counts in one aggregated step ----
+
+    fn facet_table(store: &SqliteCatalog) -> std::collections::BTreeMap<(i64, String, i64), i64> {
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT volume_id, model, rating, cnt FROM facet_counts")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// What `facet_counts` must be, recomputed from the asset rows.
+    fn facet_truth(store: &SqliteCatalog) -> std::collections::BTreeMap<(i64, String, i64), i64> {
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT r.volume_id, COALESCE(a.model, ''), COALESCE(a.rating, -128), COUNT(*) \
+                 FROM asset a JOIN root r ON r.id = a.root_id GROUP BY 1, 2, 3",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows
+    }
+
+    fn facet_trigger_exists(store: &SqliteCatalog) -> bool {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_facet_asset_update'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    }
+
+    /// Two volumes, two models, a spread of ratings including unrated: enough buckets that a
+    /// wrong delta shows up.
+    fn facet_fixture(n: usize) -> (SqliteCatalog, Vec<i64>) {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        let roots: Vec<i64> = ["a", "b"]
+            .iter()
+            .map(|name| {
+                let vol = store.upsert_volume(name, None, None, 0).unwrap();
+                store.ensure_root(vol, "").unwrap()
+            })
+            .collect();
+        let ids: Vec<i64> = (0..n)
+            .map(|i| {
+                // Z8, D7500 and no model at all (the NULL bucket is '' in the counts).
+                let model = match i % 7 {
+                    0 => None,
+                    n if n % 3 == 0 => Some("Z8"),
+                    _ => Some("D7500"),
+                };
+                store
+                    .insert_asset(roots[i % 2], &new_asset(&format!("{i}.NEF"), model), None)
+                    .unwrap()
+            })
+            .collect();
+        let pattern = [None, Some(1), Some(3), Some(5), Some(-1)];
+        for (i, id) in ids.iter().enumerate() {
+            store
+                .set_rating(&[*id], pattern[i % pattern.len()])
+                .unwrap();
+        }
+        assert_eq!(
+            facet_table(&store),
+            facet_truth(&store),
+            "the fixture itself is consistent"
+        );
+        (store, ids)
+    }
+
+    #[test]
+    fn a_bulk_set_meta_keeps_every_facet_count_exact_and_leaves_the_trigger_working() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 300);
+        let meta = |rating| AssetMeta {
+            rating,
+            flag: None,
+            label: None,
+        };
+        // Changed to a new value, changed to unrated, left alone, and the same asset listed twice
+        // (the later entry wins, the id must count once).
+        let mut items: Vec<(i64, AssetMeta)> = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let m = match i % 5 {
+                0 => meta(Some(4)),
+                1 => meta(None),
+                2 => meta(Some(3)), // some already 3, some not
+                3 => continue,
+                _ => meta(Some(-1)),
+            };
+            items.push((*id, m));
+        }
+        items.push((ids[0], meta(Some(2))));
+        assert!(items.len() >= BULK_META_ROWS);
+
+        store.set_meta(&items).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+        assert!(
+            facet_table(&store).values().all(|c| *c > 0),
+            "no zero rows left behind"
+        );
+        assert!(facet_trigger_exists(&store), "the trigger is back");
+
+        // And it still fires for an ordinary (non-bulk) change.
+        store.set_rating(&[ids[7]], Some(2)).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+    }
+
+    #[test]
+    fn a_bulk_set_rating_keeps_every_facet_count_exact() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 300);
+        store.set_rating(&ids, Some(4)).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+        assert!(facet_trigger_exists(&store));
+        // Every bucket of the old ratings is gone, not left at zero.
+        assert!(facet_table(&store)
+            .keys()
+            .all(|(_, _, rating)| *rating == 4));
+        // And back to unrated.
+        store.set_rating(&ids, None).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+    }
+
+    #[test]
+    fn a_failed_bulk_rewrite_rolls_back_the_counts_and_the_trigger() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 50);
+        let before = facet_table(&store);
+        let ok = |rating| AssetMeta {
+            rating,
+            flag: None,
+            label: None,
+        };
+        let mut items: Vec<(i64, AssetMeta)> = ids.iter().map(|id| (*id, ok(Some(2)))).collect();
+        items.push((ids[0], ok(Some(99)))); // outside -1..=5: the CHECK fails at the very end
+        assert!(store.set_meta(&items).is_err());
+
+        assert_eq!(facet_table(&store), before, "the counts are untouched");
+        assert_eq!(facet_table(&store), facet_truth(&store));
+        assert!(
+            facet_trigger_exists(&store),
+            "the rollback restored the trigger"
+        );
+        // The temp bookkeeping is not stale: the next bulk call is exact too.
+        let good: Vec<(i64, AssetMeta)> = ids.iter().map(|id| (*id, ok(Some(5)))).collect();
+        store.set_meta(&good).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+    }
+
+    #[test]
+    fn a_catalog_without_the_facet_trigger_is_left_exactly_as_it_is() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 20);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER trg_facet_asset_update")
+            .unwrap();
+        let before = facet_table(&store);
+        store.set_rating(&ids, Some(4)).unwrap();
+        // Nothing maintains the counts here, so none may be invented, and the trigger is not
+        // resurrected by the bulk path.
+        assert_eq!(facet_table(&store), before);
+        assert!(!facet_trigger_exists(&store));
+        let rated: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM asset WHERE rating = 4", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            rated as usize,
+            ids.len(),
+            "the ratings themselves were written"
+        );
+    }
+
+    #[test]
+    fn a_stale_zero_row_in_a_touched_bucket_ends_up_exact() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 20);
+        // A leftover zero-count bucket for exactly the bucket the batch is about to fill.
+        let (vol, model): (i64, String) = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT r.volume_id, COALESCE(a.model, '') FROM asset a JOIN root r ON r.id = a.root_id WHERE a.id = ?1",
+                [ids[1]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO facet_counts (volume_id, model, rating, cnt) VALUES (?1, ?2, 4, 0)",
+                params![vol, model],
+            )
+            .unwrap();
+        store.set_rating(&ids, Some(4)).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+    }
+
+    #[test]
+    fn set_rating_with_duplicate_ids_counts_each_asset_once_and_a_bad_value_rolls_back() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 20);
+        let mut dup = ids.clone();
+        dup.extend_from_slice(&ids[..500]);
+        dup.push(9_999_999); // not an asset
+        store.set_rating(&dup, Some(2)).unwrap();
+        assert_eq!(facet_table(&store), facet_truth(&store));
+
+        let before = facet_table(&store);
+        assert!(store.set_rating(&dup, Some(99)).is_err(), "outside -1..=5");
+        assert_eq!(facet_table(&store), before, "rolled back");
+        assert!(facet_trigger_exists(&store), "and the trigger is back");
+    }
+
+    #[test]
+    fn a_bulk_rewrite_that_changes_nothing_changes_no_counts() {
+        let (store, ids) = facet_fixture(BULK_META_ROWS + 10);
+        let current = store.get_meta(&ids).unwrap();
+        let items: Vec<(i64, AssetMeta)> =
+            ids.iter().map(|id| (*id, current[id].clone())).collect();
+        let before = facet_table(&store);
+        store.set_meta(&items).unwrap();
+        assert_eq!(facet_table(&store), before);
+        assert!(facet_trigger_exists(&store));
     }
 
     #[test]

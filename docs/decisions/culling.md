@@ -106,8 +106,15 @@ Ultralytics YOLO as a culling/detection candidate (#108), and the culling UX bui
   ~200 ms -> ~2 ms. **Fixed (#499)**: `set_meta` guards each column (`... AND col IS NOT ?`) so a no-op rewrite
   skips the index/trigger work (23 -> ~2.5 us/row) and borrows a 256 MB page cache for batches of 1000+ rows
   (the default ~2 MB thrashed on the five rating-keyed indexes): a select-all rating change at 1M 50 s -> 32 s
-  (the facet trigger is ~9 s of that, the rest is index maintenance). Still open (own ticket): batching
-  `trg_facet_asset_update` / fewer rating-keyed indexes (a schema change, tracked as a follow-up).
+  (the facet trigger is ~9 s of that, the rest is index maintenance). **Fixed (#580)**: a bulk rating change
+  (`set_meta` / `set_rating` of 1000+ rows) drops `trg_facet_asset_update` inside its transaction and applies the
+  exact facet delta once (`with_facet_delta`): the per-(volume, model, rating) counts of the touched ids are read
+  before and after (read-only, chunked `IN` lists) and the difference is added to `facet_counts` (empty buckets swept),
+  (ids are sorted and deduplicated first: `IN` counts a row once only within one chunk, and a duplicate id in two chunks doubled its delta, caught by the duplicate-id tests), then the trigger is recreated from its own `sqlite_master` definition (no second copy of its SQL to drift). SQLite
+  DDL is transactional, so a failed batch rolls the trigger back; small batches keep the trigger. Measured (1M rows,
+  one reference run, `tests/scale.rs`, niced): select-all rating change 22.4 s -> 11.1 s, longest single 20k
+  transaction (the mutex hold) 759 ms -> 255 ms; a no-op rewrite 1.75 s -> 2.11 s (the read-only count queries).
+  The rating-keyed sort indexes were kept (decision on #580); pruning them is a separate, schema-changing ticket.
   **Not fixed (follow-ups)**: the marker
   filters' 1.5-2 s sort-index scan, and the ~128 MB undo entry (deliberate, ADR-0032). Harnesses:
   `nicti-lair/tests/scale.rs::select_all_mark_at_one_million_assets`,
