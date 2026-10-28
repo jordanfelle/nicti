@@ -125,9 +125,10 @@ since a rename-in-place has the file itself as the "collision".
   2. Lens/ISO extraction in `scruff::read_exif_fields`, columns, migration, a backfill pass, `AssetFacts` fields,
      tokens, token help. **M**
 - **Decided 2026-10-28 (#548): copy-only import from a card + DCIM device list, built.** Engine landed as
-  `nicti_lair::offering` (`list_card_files`, `offer_file`: BLAKE3 while streaming, fsync, re-read from the
-  destination disk and re-hash, `create_new` name claim so nothing is overwritten, `-N` suffix on a name clash,
-  identical content reported as already there, card symlinks refused, `dest_rel` validated and the real folder
+  `nicti_lair::offering` (`list_card_files`, `offer_file`: BLAKE3 while streaming into a unique temp, size-change
+  check, fsync, re-open and re-hash (OS-served, not a cache-bypassing read), hard-link publish (or claim+rename) so
+  nothing is overwritten and no partial file is visible, `-N` suffix on a name clash, identical content reported as
+  already there, card symlinks refused, `dest_rel` validated, no link followed on the way down and the real folder
   checked to stay under the root, cancel leaves no temp) and `nicti_lair::cards` (`scan_cards`, `default_mount_roots`).
   Nicti never writes to or deletes from the card. The per-file copy-verify was written fresh rather than extracted from
   `Carry` (whose state machine is tied to the `root_move` journal). UI, the naming-template call, the cached rescan job

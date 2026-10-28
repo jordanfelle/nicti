@@ -38,7 +38,8 @@ fn find_dcim(mount: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The cards among `mounts`, in the order given. Unreadable mounts are skipped.
+/// The cards among `mounts`, in the order given. Unreadable mounts are skipped. Probes sequentially
+/// with no timeout: a stale network mount can stall it, so call it off the UI thread.
 pub fn scan_cards(mounts: &[PathBuf]) -> Vec<CardVolume> {
     mounts
         .iter()
@@ -57,6 +58,11 @@ pub fn scan_cards(mounts: &[PathBuf]) -> Vec<CardVolume> {
         .collect()
 }
 
+/// **Can block**: on Windows this probes every drive letter (an empty reader, a disconnected network
+/// drive or a spinning-up card reader can take tens of seconds), so run it, like [`scan_cards`], off
+/// the UI thread. It does not tell removable from fixed volumes; an internal drive with a DCIM folder
+/// is listed too.
+///
 /// Where removable volumes are mounted on this platform: drive letters on Windows (the required
 /// platform), and the usual per-user and system mount parents elsewhere.
 pub fn default_mount_roots() -> Vec<PathBuf> {
@@ -90,7 +96,9 @@ pub fn default_mount_roots() -> Vec<PathBuf> {
             found.sort();
             roots.extend(found);
         }
-        roots.dedup();
+        // `/media/$USER` and `/run/media/$USER` are often the same place: list each volume once.
+        let mut seen = std::collections::HashSet::new();
+        roots.retain(|r| seen.insert(fs::canonicalize(r).unwrap_or_else(|_| r.clone())));
         roots
     }
 }
