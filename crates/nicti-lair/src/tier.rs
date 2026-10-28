@@ -48,6 +48,10 @@ pub struct SettleReport {
     pub blobs_dropped: u64,
     /// Active root: sidecars folded back into the catalog and deleted.
     pub sidecars_ingested: u64,
+    /// Archived root: a sidecar rewritten from a catalog blob that had been re-tagged with the
+    /// RAW's rotation (#561) while the sidecar still had the old untagged bytes (the blob is then
+    /// dropped as usual); without this the byte-different pair would stay `kept` forever.
+    pub sidecars_refreshed: u64,
     /// Assets left as they were because the other tier isn't there yet (sidecar missing on an
     /// archived root, e.g. the drive is unmounted).
     pub kept: u64,
@@ -92,6 +96,15 @@ pub fn settle_asset(
                 store.clear_preview(asset.id, PreviewTier::T0)?;
                 report.blobs_dropped += 1;
             }
+            // The blob was re-tagged with the RAW's rotation (righting, #561) and the JPEG sidecar
+            // is its untagged original: refresh the sidecar from the blob, then drop the blob.
+            (Some((SidecarCodec::Jpeg, side)), Some(blob)) if is_retag_of(&side, &blob) => {
+                sidecar::export(&raw, &blob, SidecarCodec::Jpeg)
+                    .map_err(|e| CatalogError::Io(format!("{}: {e}", raw.display())))?;
+                store.clear_preview(asset.id, PreviewTier::T0)?;
+                report.sidecars_refreshed += 1;
+                report.blobs_dropped += 1;
+            }
             (_, Some(_)) => report.kept += 1,
             _ => {}
         }
@@ -120,6 +133,16 @@ pub fn settle_asset(
         }
     }
     Ok(())
+}
+
+/// `blob` is `side` plus the EXIF Orientation segment righting adds (and nothing else), and `side`
+/// has no Orientation of its own: the sidecar is the stale, untagged original of the blob.
+fn is_retag_of(side: &Preview, blob: &Preview) -> bool {
+    use crate::scruff::{jpeg_orientation, tag_orientation};
+    let Some(o) = jpeg_orientation(&blob.bytes) else {
+        return false;
+    };
+    jpeg_orientation(&side.bytes).is_none() && tag_orientation(side.bytes.clone(), o) == blob.bytes
 }
 
 fn sidecar_matches(codec: SidecarCodec, side: &Preview, blob: &Preview) -> bool {

@@ -269,3 +269,20 @@ that decides collisions by file identity, since the file itself is the "collisio
 ## #441: LightCraft small utilities (ADR-0441)
 
 Research outcome from the LightCraft audit (#424), read at `23f5480`; nothing lifted. Two build slices: #558 (a blocking catalog-open failure window replacing the single red label, `CatalogOpenState::Error` in `app.rs`, since removed by #591 once the launch gate shipped; the in-memory "Continue Without Saving" exit is dropped because Nicti has no in-memory catalog) and #557 (keep the crop inside the rotated image; `nicti_tapetum::geometry` clamps the angle only and sampling clamps to the edge). Declined: container walkers (JPEG APP1 is already in `nicti-scent`; IPTC comes from `AgLibraryIPTC` on LRC import), smart-album rule editor (smart collections are a saved typed `hunt::Filter`; nesting waits on a real LRC example in #155), availability cache (#332 was a blocked drive probe, fixed with a stepped probe and a hung-probe test; #327 was a long lock hold, fixed by a Pounce job; neither is an existence problem. The grid module makes no filesystem calls; other views were not traced frame by frame), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (the Nikon MakerNote walk is `nicti-cornea`, AF areas are in `spikes/squint`, Z8 only; `nicti-iris/nikon.rs` is the lens-correction blob; LibRaw for the rest).
+
+## #561: backfill T0 orientation for already-ingested assets
+
+Since #476/#560 a new ingest tags the RAW's T0 JPEG with the RAW's IFD0 Orientation, but `ingest_one` skips a file
+whose size and mtime are unchanged, so T0s already in a catalog (and the `.thumb.jpg` sidecars made from them) stayed
+sideways. `nicti_lair::righting` (`righting_asset`, `backfill_root`) finds a RAW whose IFD0 Orientation is 2-8 and whose
+T0 carries no Orientation and tags the **existing bytes** in place (the same `tag_orientation` ingest uses; no RAW
+preview re-extraction, same pixels, dimensions kept). It brings both tiers into line: a catalog blob is rewritten tagged,
+a JPEG sidecar is rewritten tagged atomically (`thumb_sidecar::export`), and an AVIF sidecar, which cannot hold the tag
+(AVIF encode refuses a rotated T0), is replaced by a JPEG of the corrected T0 (or of the RAW's own re-extracted preview
+on an archived root with no blob). JPEG assets are skipped (their own EXIF travels). It is idempotent, so a crash or
+re-run only does what is left, and it reports what it could not fix (a T0 that is not a taggable JPEG) instead of
+dropping it. **Settle:** `tier::settle_asset` on an archived root used to keep a byte-different blob/sidecar pair
+forever (the read path serves the sidecar first, so a half-finished backfill stayed sideways); when the blob is exactly
+the sidecar plus the Orientation segment (`is_retag_of`) it now refreshes the sidecar from the blob and drops the blob
+(`SettleReport::sidecars_refreshed`). The trigger (once-per-catalog marker, Library action, Pounce job, cache
+invalidation) is #606.

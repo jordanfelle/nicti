@@ -60,6 +60,10 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 - Research outcome, no code lifted. Date folders already work (`{Date:YYYY}/{Date:MM}` subfolder template, `naming.rs`). Go: `{Num}` (from `stem`), then `{Lens}`/`{ISO}` (need scruff EXIF extraction, columns and an explicit backfill: ingest skips unchanged files). Copy-only import from a card (+ DCIM device list) was decided go (#548): engine in `nicti-lair/src/offering.rs` + `cards.rs` (verified copy, never overwrites, never touches the card; UI/job wiring #602). In-place rename stays deferred and must use file identity not case-folded names. Detail: `docs/decisions/catalog-engine.md`.
 
+## #561: T0 orientation backfill
+
+- `nicti-lair/src/righting.rs` (`righting_asset`, `backfill_root`) tags existing T0 blobs and `.thumb.jpg` sidecars of rotated RAWs (IFD0 Orientation 2-8, T0 untagged) in place; an AVIF sidecar (can't hold the tag) becomes a tagged JPEG; idempotent; `tier::settle_asset` refreshes a stale sidecar from a re-tagged blob (`SettleReport::sidecars_refreshed`) instead of keeping the pair forever. Trigger/job/UI is #606. Detail: `docs/decisions/catalog-engine.md`.
+
 ## #441: LightCraft small utilities (ADR-0441)
 
 - Research outcome, nothing lifted. Build: #558 catalog-open failure window (Try Again / Choose Another / Quit; no "Continue Without Saving", Nicti has no in-memory catalog) and #557 crop constrained to the rotated image (max inscribed rect; sampling currently edge-clamps). Declined: container walkers (`nicti-scent` already walks JPEG APP1; IPTC is read from the LRC catalog, file IPTC waits on JPEG ingestion #371), smart-album rule editor (Nicti smart collections are a typed `hunt::Filter`; OR/NOT nesting waits on real data in #155), availability cache (#332 stepped probe, #327 a Pounce job; both closed, neither needed it), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (Nikon MakerNote walk is `nicti-cornea`, AF in `spikes/squint`; `nicti-iris/nikon.rs` is the lens blob). Detail: `docs/decisions/catalog-engine.md`.
