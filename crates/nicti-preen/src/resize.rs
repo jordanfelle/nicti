@@ -535,4 +535,59 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn shrink_target_handles_rotation_and_never_enlarges() {
+        use crate::orient::Orientation;
+        let long = ResizeSpec {
+            mode: ResizeMode::LongEdge(2048),
+            dont_enlarge: true,
+        };
+        // A portrait shot stored as a 6000x4000 sensor frame: the target is chosen upright
+        // (1365x2048) and swapped back to the sensor frame (2048x1365).
+        let (rw, rh) = shrink_target(6000, 4000, Orientation::Rotate90Cw, &long).unwrap();
+        assert_eq!((rw, rh), (2048, 1365));
+        assert_eq!(
+            target_size(
+                Orientation::Rotate90Cw.oriented_size(rw, rh).0,
+                Orientation::Rotate90Cw.oriented_size(rw, rh).1,
+                &long
+            ),
+            Orientation::Rotate90Cw.oriented_size(rw, rh)
+        );
+        // Enlargement is never a shrink, even when the spec allows enlarging.
+        let up = ResizeSpec {
+            mode: ResizeMode::LongEdge(4000),
+            dont_enlarge: false,
+        };
+        assert_eq!(shrink_target(1000, 800, Orientation::Normal, &up), None);
+    }
+
+    #[test]
+    fn a_tile_overhanging_the_frame_is_clipped_not_added_twice() {
+        let (sw, sh, dw, dh) = (50u32, 40u32, 10u32, 8u32);
+        let src = test_image(sw, sh);
+        let want = resize_linear_f32(src.clone(), sw, sh, dw, dh).unwrap();
+        let mut r = StreamResizer::try_new(sw, sh, dw, dh).unwrap();
+        // 64x64 tiles starting inside the frame, each claiming more than the frame has left.
+        for (x0, y0) in [(0u32, 0u32), (32, 0), (0, 32), (32, 32)] {
+            let (w, h) = (32u32, 32u32);
+            let px: Vec<[f32; 4]> = (0..h)
+                .flat_map(|ty| (0..w).map(move |tx| (tx, ty)))
+                .map(|(tx, ty)| {
+                    let (x, y) = ((x0 + tx).min(sw - 1), (y0 + ty).min(sh - 1));
+                    let i = ((y * sw + x) * 3) as usize;
+                    [src[i], src[i + 1], src[i + 2], 1.0]
+                })
+                .collect();
+            r.add_tile_rgba(x0, y0, w, h, &px);
+        }
+        let got = r.finish();
+        let worst = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 2e-3, "worst {worst}");
+    }
 }
