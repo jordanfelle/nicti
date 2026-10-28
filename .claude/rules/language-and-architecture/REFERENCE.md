@@ -31,8 +31,8 @@ Full reasoning/history: `docs/decisions/language-and-architecture.md`.
   manifest declares capabilities (kind + scope + required justification); undeclared = denied via
   unlinked WASI import, not just policy. Network capability is action-scoped per ADR-0218
   (`weight-download`/`cloud-feature`). Kill switch = wasmtime epoch interruption (works mid-loop,
-  no host-call boundary needed) + persisted safe-mode flag as UI-broken fallback. Docs-only —
-  **`crates/nicti-collar` (#230)** implements the pure parts: strict manifest, field-level re-consent diff, host-side network/path authorizers, Hiss policy (bug vs violation, persisted state, safe-mode flag) and a wasmtime epoch-kill sandbox; WASI linking, consent/kill-switch UI and lazy requests are not built.
+  no host-call boundary needed) + persisted safe-mode flag as UI-broken fallback. Docs-only until #230:
+  **`crates/nicti-collar`** now implements the pure parts: strict manifest, field-level re-consent diff, host-side network/path authorizers, Hiss policy (bug vs violation, persisted state, safe-mode flag) and a wasmtime epoch-kill sandbox; WASI linking, consent/kill-switch UI and lazy requests are not built.
 
 ## Package contents
 
