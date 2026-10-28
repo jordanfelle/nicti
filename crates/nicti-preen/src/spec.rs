@@ -39,8 +39,10 @@ pub enum SpecError {
         range: &'static str,
         value: f32,
     },
-    #[error("watermark file path is empty")]
+    #[error("a watermark needs a logo file or a text")]
     WatermarkPath,
+    #[error("watermark text must be 1-{MAX_WATERMARK_TEXT} characters with no control characters")]
+    WatermarkText,
     #[error("filename template: {0}")]
     Template(#[from] crate::naming::TemplateError),
     #[error("subfolder template: {0}")]
@@ -376,8 +378,13 @@ pub enum Anchor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WatermarkSpec {
-    /// An `.svg` or `.png` logo.
+    /// An `.svg` or `.png` logo. Ignored when [`Self::text`] is set.
     pub path: PathBuf,
+    /// A text watermark (#338), set in the bundled Inter Regular, instead of a logo. Latin,
+    /// Greek and Cyrillic only; no shaping, so no complex scripts or kerning.
+    pub text: String,
+    /// The text's sRGB color.
+    pub text_color: [u8; 3],
     pub anchor: Anchor,
     /// Logo width as a percentage of the exported image's width.
     pub scale_pct: f32,
@@ -391,6 +398,8 @@ impl Default for WatermarkSpec {
     fn default() -> Self {
         Self {
             path: PathBuf::new(),
+            text: String::new(),
+            text_color: [255, 255, 255],
             anchor: Anchor::BottomRight,
             scale_pct: 15.0,
             opacity: 1.0,
@@ -399,10 +408,19 @@ impl Default for WatermarkSpec {
     }
 }
 
+/// Longest text watermark, in characters.
+pub const MAX_WATERMARK_TEXT: usize = 120;
+
 impl WatermarkSpec {
     pub fn validate(&self) -> Result<(), SpecError> {
-        if self.path.as_os_str().is_empty() {
-            return Err(SpecError::WatermarkPath);
+        if self.text.is_empty() {
+            if self.path.as_os_str().is_empty() {
+                return Err(SpecError::WatermarkPath);
+            }
+        } else if self.text.chars().count() > MAX_WATERMARK_TEXT
+            || self.text.chars().any(char::is_control)
+        {
+            return Err(SpecError::WatermarkText);
         }
         let check = |field, range, value: f32, lo: f32, hi: f32| {
             if value.is_finite() && value > lo && value <= hi {
@@ -539,6 +557,19 @@ mod tests {
         let mut s = good.clone();
         s.watermark = Some(WatermarkSpec::default()); // empty path
         assert_eq!(s.validate(), Err(SpecError::WatermarkPath));
+        // Text instead of a path is valid; control characters and over-long text are not.
+        s.watermark = Some(WatermarkSpec {
+            text: "(c) Jo".into(),
+            ..WatermarkSpec::default()
+        });
+        assert_eq!(s.validate(), Ok(()));
+        for bad in ["a\nb", &"x".repeat(MAX_WATERMARK_TEXT + 1)] {
+            s.watermark = Some(WatermarkSpec {
+                text: bad.to_string(),
+                ..WatermarkSpec::default()
+            });
+            assert_eq!(s.validate(), Err(SpecError::WatermarkText), "{bad:?}");
+        }
         s.watermark = Some(WatermarkSpec {
             path: "logo.png".into(),
             opacity: 1.5,

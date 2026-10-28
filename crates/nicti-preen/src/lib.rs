@@ -494,6 +494,7 @@ mod tests {
                 scale_pct: 25.0,
                 opacity: 1.0,
                 inset_pct: 0.0,
+                ..WatermarkSpec::default()
             }),
             ..ExportSpec::default()
         };

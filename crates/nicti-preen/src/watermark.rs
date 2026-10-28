@@ -6,7 +6,10 @@
 //! linear sRGB and then into the export space through the working-space matrices, so a logo keeps
 //! its look in Display P3 / Adobe RGB output.
 //!
-//! Text watermarks are deferred (they need a vendored font with a confirmed license).
+//! A text watermark (#338) is set in the bundled Inter Regular (SIL OFL 1.1, already vendored for
+//! the UI; see `assets/ATTRIBUTION.md`): glyph outlines from `skrifa`, filled with `tiny-skia`,
+//! then composited exactly like a logo. There is no shaping, so Latin/Greek/Cyrillic only, no
+//! kerning and no complex scripts; a character the font lacks draws its `.notdef` box.
 
 use std::path::Path;
 
@@ -15,6 +18,9 @@ use nicti_calico::space::OutputSpace;
 
 use crate::color::srgb_to_output_matrix;
 use crate::spec::{Anchor, WatermarkSpec};
+
+/// Inter Regular, SIL OFL 1.1. The one copy in the repo lives with the UI fonts.
+const INTER_REGULAR: &[u8] = include_bytes!("../../nicti-pelt/assets/fonts/Inter-Regular.ttf");
 
 #[derive(Debug, thiserror::Error)]
 pub enum WatermarkError {
@@ -29,6 +35,8 @@ pub enum WatermarkError {
     Png(String),
     #[error("parsing watermark SVG: {0}")]
     Svg(String),
+    #[error("text watermark: {0}")]
+    Text(String),
     #[error("watermark has zero size")]
     Empty,
 }
@@ -42,6 +50,17 @@ pub enum WatermarkSource {
         aspect: f64,
     },
     Png(RgbaImage),
+    /// Laid-out text: glyph outlines in font units, with `width` x `height` of the line box.
+    Text(Box<TextLayout>),
+}
+
+/// A line of text as one filled path, in font units with y down from the top of the line box.
+#[derive(Debug, Clone)]
+pub struct TextLayout {
+    path: tiny_skia::Path,
+    width: f32,
+    height: f32,
+    color: [u8; 3],
 }
 
 impl WatermarkSource {
@@ -89,9 +108,24 @@ impl WatermarkSource {
         Ok(WatermarkSource::Png(img))
     }
 
+    /// The source a spec asks for: its text if it has one, else the logo file.
+    pub fn for_spec(spec: &WatermarkSpec) -> Result<Self, WatermarkError> {
+        if spec.text.is_empty() {
+            Self::load(&spec.path)
+        } else {
+            Self::from_text(&spec.text, spec.text_color)
+        }
+    }
+
+    /// Lays out `text` in the bundled font. Fails on an empty string or one with no ink.
+    pub fn from_text(text: &str, color: [u8; 3]) -> Result<Self, WatermarkError> {
+        layout_text(text, color).map(|l| WatermarkSource::Text(Box::new(l)))
+    }
+
     /// Intrinsic aspect ratio (height / width).
     fn aspect(&self) -> f64 {
         match self {
+            WatermarkSource::Text(t) => f64::from(t.height) / f64::from(t.width),
             WatermarkSource::Png(img) => img.height() as f64 / img.width() as f64,
             WatermarkSource::Svg { aspect, .. } => *aspect,
         }
@@ -113,6 +147,7 @@ impl WatermarkSource {
                 }
             }
             WatermarkSource::Svg { text, .. } => rasterize_svg(text, width, height),
+            WatermarkSource::Text(t) => rasterize_text(t, width, height),
         }
     }
 }
@@ -138,9 +173,13 @@ pub fn rasterize_svg(svg: &str, width: u32, height: u32) -> Result<RgbaImage, Wa
     );
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-    // tiny-skia stores premultiplied alpha; un-premultiply so an SVG and a PNG logo enter the
-    // compositor in the same representation.
-    let mut out = RgbaImage::new(width, height);
+    Ok(pixmap_to_rgba(&pixmap))
+}
+
+/// tiny-skia stores premultiplied alpha; un-premultiply so an SVG, text and a PNG logo enter the
+/// compositor in the same representation.
+fn pixmap_to_rgba(pixmap: &tiny_skia::Pixmap) -> RgbaImage {
+    let mut out = RgbaImage::new(pixmap.width(), pixmap.height());
     for (dst, px) in out.pixels_mut().zip(pixmap.pixels()) {
         let a = px.alpha();
         *dst = if a == 0 {
@@ -155,7 +194,108 @@ pub fn rasterize_svg(svg: &str, width: u32, height: u32) -> Result<RgbaImage, Wa
             ])
         };
     }
-    Ok(out)
+    out
+}
+
+/// Collects a glyph outline into a tiny-skia path, offset by the pen position and flipped to y-down.
+struct GlyphPen<'a> {
+    builder: &'a mut tiny_skia::PathBuilder,
+    x: f32,
+    ascent: f32,
+}
+
+impl GlyphPen<'_> {
+    fn pt(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.x + x, self.ascent - y)
+    }
+}
+
+impl skrifa::outline::OutlinePen for GlyphPen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.pt(x, y);
+        self.builder.move_to(x, y);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.pt(x, y);
+        self.builder.line_to(x, y);
+    }
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        let ((cx, cy), (x, y)) = (self.pt(cx, cy), self.pt(x, y));
+        self.builder.quad_to(cx, cy, x, y);
+    }
+    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
+        let ((a, b), (c, d), (x, y)) = (self.pt(c1x, c1y), self.pt(c2x, c2y), self.pt(x, y));
+        self.builder.cubic_to(a, b, c, d, x, y);
+    }
+    fn close(&mut self) {
+        self.builder.close();
+    }
+}
+
+fn layout_text(text: &str, color: [u8; 3]) -> Result<TextLayout, WatermarkError> {
+    use skrifa::instance::{LocationRef, Size};
+    use skrifa::outline::DrawSettings;
+    use skrifa::{FontRef, MetadataProvider};
+
+    let bad = |why: &str| WatermarkError::Text(why.to_string());
+    if text.is_empty() {
+        return Err(bad("the text is empty"));
+    }
+    let font = FontRef::new(INTER_REGULAR).map_err(|e| bad(&e.to_string()))?;
+    let loc = LocationRef::default();
+    let metrics = font.metrics(Size::unscaled(), loc);
+    let (ascent, descent) = (metrics.ascent, metrics.descent.abs());
+    let charmap = font.charmap();
+    let glyph_metrics = font.glyph_metrics(Size::unscaled(), loc);
+    let outlines = font.outline_glyphs();
+
+    let mut builder = tiny_skia::PathBuilder::new();
+    let mut x = 0.0f32;
+    for ch in text.chars() {
+        let gid = charmap.map(ch).unwrap_or_default();
+        if let Some(glyph) = outlines.get(gid) {
+            let mut pen = GlyphPen {
+                builder: &mut builder,
+                x,
+                ascent,
+            };
+            glyph
+                .draw(DrawSettings::unhinted(Size::unscaled(), loc), &mut pen)
+                .map_err(|e| bad(&e.to_string()))?;
+        }
+        x += glyph_metrics.advance_width(gid).unwrap_or(0.0);
+    }
+    let path = builder
+        .finish()
+        .ok_or_else(|| bad("the text has no visible glyphs"))?;
+    let height = ascent + descent;
+    if !(x > 0.0 && height > 0.0) {
+        return Err(WatermarkError::Empty);
+    }
+    Ok(TextLayout {
+        path,
+        width: x,
+        height,
+        color,
+    })
+}
+
+/// Fills the laid-out text at `width` x `height` into straight-alpha RGBA (sRGB-encoded color).
+fn rasterize_text(t: &TextLayout, width: u32, height: u32) -> Result<RgbaImage, WatermarkError> {
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or(WatermarkError::Empty)?;
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(t.color[0], t.color[1], t.color[2], 255);
+    paint.anti_alias = true;
+    let transform =
+        tiny_skia::Transform::from_scale(width as f32 / t.width, height as f32 / t.height);
+    pixmap.fill_path(
+        &t.path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        transform,
+        None,
+    );
+    Ok(pixmap_to_rgba(&pixmap))
 }
 
 fn srgb_eotf(encoded: f32) -> f32 {
@@ -270,6 +410,7 @@ mod tests {
             scale_pct: scale,
             opacity,
             inset_pct: inset,
+            ..WatermarkSpec::default()
         }
     }
 
@@ -460,5 +601,119 @@ mod tests {
             r > 0.6 && r < 1.0 && g > -1e-3 && g < 0.3 && b.abs() < 0.05,
             "{r} {g} {b}"
         );
+    }
+
+    #[test]
+    fn text_renders_ink_in_the_requested_color_and_leaves_the_rest_clear() {
+        let src = WatermarkSource::from_text("(c) Jo Photographer 2026", [200, 30, 40]).unwrap();
+        let w = 400;
+        let h = (f64::from(w) * src.aspect()).round() as u32;
+        let img = src.render(w, h).unwrap();
+        let inked: Vec<_> = img.pixels().filter(|p| p[3] > 200).collect();
+        assert!(inked.len() > 300, "{} opaque pixels", inked.len());
+        // Un-premultiplying a partly covered edge pixel rounds by a level or two.
+        let near = |a: u8, b: u8| a.abs_diff(b) <= 3;
+        assert!(inked
+            .iter()
+            .all(|p| near(p[0], 200) && near(p[1], 30) && near(p[2], 40)));
+        assert!(
+            img.pixels().any(|p| p[3] == 0),
+            "background stays transparent"
+        );
+        // Roughly a line of text: wider than tall, ink covers well under half the box.
+        assert!(src.aspect() < 0.2, "aspect {}", src.aspect());
+        assert!(inked.len() < (w * h) as usize / 2);
+    }
+
+    #[test]
+    fn longer_text_is_wider_and_different_text_looks_different() {
+        let short = WatermarkSource::from_text("Jo", [255; 3]).unwrap();
+        let long = WatermarkSource::from_text("Jo Photographer", [255; 3]).unwrap();
+        assert!(long.aspect() < short.aspect());
+        let a = short
+            .render(120, (120.0 * short.aspect()).round() as u32)
+            .unwrap();
+        let b = WatermarkSource::from_text("Ox", [255; 3])
+            .unwrap()
+            .render(120, (120.0 * short.aspect()).round() as u32)
+            .unwrap();
+        assert_ne!(a.as_raw(), b.as_raw());
+    }
+
+    #[test]
+    fn text_handles_latin1_symbols_unmapped_characters_and_rejects_nothing_to_draw() {
+        assert!(WatermarkSource::from_text("© Zoë Ünï", [255; 3]).is_ok());
+        // A CJK character the font lacks draws .notdef instead of failing the export.
+        assert!(WatermarkSource::from_text("日本", [255; 3]).is_ok());
+        assert!(matches!(
+            WatermarkSource::from_text("", [255; 3]),
+            Err(WatermarkError::Text(_))
+        ));
+        assert!(matches!(
+            WatermarkSource::from_text("   ", [255; 3]),
+            Err(WatermarkError::Text(_)) | Err(WatermarkError::Empty)
+        ));
+    }
+
+    #[test]
+    fn a_text_spec_composites_at_its_anchor_only() {
+        let spec = WatermarkSpec {
+            text: "Jo".into(),
+            text_color: [255, 255, 255],
+            anchor: Anchor::BottomRight,
+            scale_pct: 20.0,
+            opacity: 1.0,
+            inset_pct: 2.0,
+            ..WatermarkSpec::default()
+        };
+        assert!(spec.validate().is_ok());
+        let src = WatermarkSource::for_spec(&spec).unwrap();
+        let (w, h) = (200u32, 100u32);
+        let mut base = vec![0.0f32; (w * h * 3) as usize];
+        apply(&mut base, w, h, &src, &spec, OutputSpace::Srgb).unwrap();
+        let lit = |x: u32, y: u32| base[((y * w + x) * 3) as usize] > 0.01;
+        let top_left_lit = (0..w / 2).any(|x| (0..h / 2).any(|y| lit(x, y)));
+        let bottom_right_lit = (w / 2..w).any(|x| (h / 2..h).any(|y| lit(x, y)));
+        assert!(!top_left_lit, "text must not spill outside its anchor");
+        assert!(
+            bottom_right_lit,
+            "text must reach the bottom-right corner area"
+        );
+    }
+
+    #[test]
+    fn text_is_right_side_up_and_left_to_right() {
+        // A "T" has its bar at the top: more ink in the top third than the bottom third.
+        let t = WatermarkSource::from_text("T", [255; 3]).unwrap();
+        let (w, h) = (90u32, (90.0 * t.aspect()).round() as u32);
+        let img = t.render(w, h).unwrap();
+        let ink = |y0: u32, y1: u32| -> u32 {
+            (y0..y1)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .map(|(x, y)| u32::from(img.get_pixel(x, y)[3]))
+                .sum()
+        };
+        assert!(
+            ink(0, h / 3) > 2 * ink(2 * h / 3, h),
+            "top {} bottom {}",
+            ink(0, h / 3),
+            ink(2 * h / 3, h)
+        );
+        // "Ix" vs "xI": the thin "I" sits on the left in the first and on the right in the second.
+        let render = |s: &str| {
+            let src = WatermarkSource::from_text(s, [255; 3]).unwrap();
+            let h = (120.0 * src.aspect()).round() as u32;
+            src.render(120, h).unwrap()
+        };
+        let col_ink = |img: &RgbaImage, x0: u32, x1: u32| -> u32 {
+            (x0..x1)
+                .flat_map(|x| (0..img.height()).map(move |y| (x, y)))
+                .map(|(x, y)| u32::from(img.get_pixel(x, y)[3]))
+                .sum()
+        };
+        let a = render("IxxxxxxX");
+        let b = render("XxxxxxxI");
+        assert!(col_ink(&a, 0, 12) > 0 && col_ink(&b, 108, 120) > 0);
+        assert_ne!(a.as_raw(), b.as_raw());
     }
 }

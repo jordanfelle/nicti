@@ -28,8 +28,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   needs this or `exiftool -validate` flags it. TIFF EXIF landed in #337 (`tiff_exif.rs`); DNG metadata write is still open (ADR-0059).
 - **Watermark**: `resvg`/`usvg`/`tiny-skia` SVG rasterization + linear-premultiplied "over"
   compositing (`watermark::composite_sequential`). Sequential beats `rayon`-parallel at typical
-  logo sizes — don't reach for `composite_parallel` without measuring first. Text watermarking
-  deferred (no vendored font license picked).
+  logo sizes — don't reach for `composite_parallel` without measuring first. Text watermark: #338 (Inter Regular via `skrifa`, no shaping).
 - **Gotchas hit building this**: `wgpu`'s default buffer-size limits are too small for a full-res
   linear-light source buffer (request `adapter.limits()` on device creation); a shader module with
   entry points at different `@group` indices needs `get_bind_group_layout`/`set_bind_group` called
