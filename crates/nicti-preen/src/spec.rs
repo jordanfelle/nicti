@@ -408,6 +408,16 @@ impl Default for WatermarkSpec {
     }
 }
 
+/// Zero-width, soft-hyphen and bidi-control characters: they draw nothing (or a `.notdef` box)
+/// and can reorder what a reader sees, so a watermark may not contain them.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}' | '\u{feff}'
+    )
+}
+
 /// Longest text watermark, in characters.
 pub const MAX_WATERMARK_TEXT: usize = 120;
 
@@ -417,8 +427,12 @@ impl WatermarkSpec {
             if self.path.as_os_str().is_empty() {
                 return Err(SpecError::WatermarkPath);
             }
-        } else if self.text.chars().count() > MAX_WATERMARK_TEXT
-            || self.text.chars().any(char::is_control)
+        } else if self.text.trim().is_empty()
+            || self.text.chars().count() > MAX_WATERMARK_TEXT
+            || self
+                .text
+                .chars()
+                .any(|c| c.is_control() || is_invisible_format(c))
         {
             return Err(SpecError::WatermarkText);
         }
@@ -563,7 +577,13 @@ mod tests {
             ..WatermarkSpec::default()
         });
         assert_eq!(s.validate(), Ok(()));
-        for bad in ["a\nb", &"x".repeat(MAX_WATERMARK_TEXT + 1)] {
+        for bad in [
+            "a\nb",
+            "   ",
+            "\u{200b}",
+            "\u{202e}ab",
+            &"x".repeat(MAX_WATERMARK_TEXT + 1),
+        ] {
             s.watermark = Some(WatermarkSpec {
                 text: bad.to_string(),
                 ..WatermarkSpec::default()

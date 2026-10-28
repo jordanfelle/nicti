@@ -54,6 +54,9 @@ pub enum WatermarkSource {
     Text(Box<TextLayout>),
 }
 
+/// Padding around the ink of a text watermark, in em.
+const TEXT_PAD_EM: f32 = 0.03;
+
 /// A line of text as one filled path, in font units with y down from the top of the line box.
 #[derive(Debug, Clone)]
 pub struct TextLayout {
@@ -244,7 +247,7 @@ fn layout_text(text: &str, color: [u8; 3]) -> Result<TextLayout, WatermarkError>
     let font = FontRef::new(INTER_REGULAR).map_err(|e| bad(&e.to_string()))?;
     let loc = LocationRef::default();
     let metrics = font.metrics(Size::unscaled(), loc);
-    let (ascent, descent) = (metrics.ascent, metrics.descent.abs());
+    let ascent = metrics.ascent;
     let charmap = font.charmap();
     let glyph_metrics = font.glyph_metrics(Size::unscaled(), loc);
     let outlines = font.outline_glyphs();
@@ -268,13 +271,24 @@ fn layout_text(text: &str, color: [u8; 3]) -> Result<TextLayout, WatermarkError>
     let path = builder
         .finish()
         .ok_or_else(|| bad("the text has no visible glyphs"))?;
-    let height = ascent + descent;
-    if !(x > 0.0 && height > 0.0) {
+    // The box is the *ink*, plus a little padding: leading/trailing spaces and the font's line
+    // metrics must not shift the visible text inside its box (anchoring would look off by the
+    // space), and tall accents or deep descenders must not be clipped by it.
+    let bounds = path.bounds();
+    let pad = metrics.units_per_em as f32 * TEXT_PAD_EM;
+    let path = path
+        .transform(tiny_skia::Transform::from_translate(
+            pad - bounds.left(),
+            pad - bounds.top(),
+        ))
+        .ok_or_else(|| bad("the text could not be placed"))?;
+    let (width, height) = (bounds.width() + 2.0 * pad, bounds.height() + 2.0 * pad);
+    if !(width > 0.0 && height > 0.0) {
         return Err(WatermarkError::Empty);
     }
     Ok(TextLayout {
         path,
-        width: x,
+        width,
         height,
         color,
     })
@@ -715,5 +729,27 @@ mod tests {
         let b = render("XxxxxxxI");
         assert!(col_ink(&a, 0, 12) > 0 && col_ink(&b, 108, 120) > 0);
         assert_ne!(a.as_raw(), b.as_raw());
+    }
+
+    #[test]
+    fn the_box_follows_the_ink_so_spaces_do_not_shift_it_and_accents_are_not_clipped() {
+        // Leading/trailing spaces change nothing.
+        let plain = WatermarkSource::from_text("ab", [255; 3]).unwrap();
+        let spaced = WatermarkSource::from_text("   ab    ", [255; 3]).unwrap();
+        assert!((plain.aspect() - spaced.aspect()).abs() < 1e-6);
+        // Tall accents and descenders stay inside the box: ink reaches (nearly) every edge but
+        // is never cut by it, so the first and last rows carry only padding-level ink.
+        let src = WatermarkSource::from_text("gypqj(\u{c5})", [255; 3]).unwrap();
+        let w = 800;
+        let h = (f64::from(w) * src.aspect()).round() as u32;
+        let img = src.render(w, h).unwrap();
+        let row = |y: u32| {
+            (0..w)
+                .map(|x| u32::from(img.get_pixel(x, y)[3]))
+                .sum::<u32>()
+        };
+        assert_eq!(row(0), 0, "padding row above the accent");
+        assert_eq!(row(h - 1), 0, "padding row below the descender");
+        assert!(row(h / 10) > 0 || row(h / 5) > 0, "ink near the top");
     }
 }
