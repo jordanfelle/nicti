@@ -6,6 +6,8 @@
 //! [`crate::job::RemoveJob`] on Pounce's GPU-lane worker thread. A failed load is retried on the
 //! next removal (the user may have fixed the install) rather than cached as a permanent failure.
 
+use std::time::{Duration, Instant};
+
 use nicti_haw::ExecutionProvider;
 use nicti_stalk::models::RemovalModels;
 use nicti_tapetum::heal::RemovalPatch;
@@ -16,6 +18,89 @@ use crate::remove::{RemovalBackend, RemovalEngine, RemovalRequest};
 use crate::sam::MobileSam;
 use crate::RemovalError;
 
+/// First cool-down after a GPU provider failure. Each further consecutive failure doubles it, up
+/// to `GPU_RETRY_MAX`, so a GPU that is permanently broken (cuDNN missing) costs one double model
+/// load per hour at worst rather than one every few minutes.
+const GPU_RETRY_BASE: Duration = Duration::from_secs(300);
+const GPU_RETRY_MAX: Duration = Duration::from_secs(3600);
+
+/// Substrings of an ONNX Runtime error message that mean "this GPU provider can't run" (missing
+/// cuDNN/cuBLAS, out of memory, device lost/suspended), as opposed to a deterministic bad-input or
+/// shape-mismatch error that would fail identically on the CPU. The DirectML wording does not say
+/// "directml": its errors name `DmlFusedNode`, `DmlCommandRecorder` and HRESULT texts.
+const PROVIDER_FAILURE_MARKERS: &[&str] = &[
+    "cudnn",
+    "cublas",
+    "cuda",
+    "dml",
+    "d3d12",
+    "dxgi",
+    "hresult",
+    "gpu device",
+    "gpu will not respond",
+    "execution provider",
+    "out of memory",
+    "not enough memory",
+    "e_outofmemory",
+    "failed to allocate",
+    "memory allocation",
+    "bfcarena",
+    "device lost",
+    "device removed",
+    "device hung",
+    "suspended",
+];
+
+/// True when `msg` (an `Ort` error's text) says the GPU provider itself failed.
+fn is_provider_failure(msg: &str) -> bool {
+    let msg = msg.to_ascii_lowercase();
+    PROVIDER_FAILURE_MARKERS.iter().any(|m| msg.contains(m))
+}
+
+/// Tracks "running on the CPU after a GPU failure, try the GPU again at `retry_at`". Time is passed
+/// in so the transitions are unit-testable without models.
+#[derive(Debug, Default)]
+struct Demotion {
+    retry_at: Option<Instant>,
+    /// Consecutive failed GPU attempts; drives the backoff.
+    failures: u32,
+}
+
+impl Demotion {
+    fn cooldown(&self) -> Duration {
+        GPU_RETRY_BASE
+            .saturating_mul(1u32 << self.failures.min(8))
+            .min(GPU_RETRY_MAX)
+    }
+
+    /// The GPU just failed (a provider error, a failed load, or a silent fall back to the CPU).
+    fn demote(&mut self, now: Instant) {
+        self.retry_at = Some(now + self.cooldown());
+        self.failures = self.failures.saturating_add(1);
+    }
+
+    /// True once it is time to try the GPU again; the caller then reloads, and `demote`s again if
+    /// that attempt fails.
+    fn take_due(&mut self, now: Instant) -> bool {
+        match self.retry_at {
+            Some(t) if now >= t => {
+                self.retry_at = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A removal succeeded on the GPU.
+    fn recovered(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_demoted(&self) -> bool {
+        self.retry_at.is_some()
+    }
+}
+
 /// A check run before the sessions are loaded (see [`LazyBackend::verified_by`]).
 pub type Verifier = Box<dyn Fn() -> Result<(), String> + Send>;
 
@@ -25,6 +110,8 @@ pub struct LazyBackend {
     engine: Option<RemovalEngine<MobileSam, Lama>>,
     /// The provider the loaded sessions run on (CPU until loaded).
     active: ExecutionProvider,
+    /// While the backend runs on the CPU after a GPU failure: when to try the GPU provider again.
+    demotion: Demotion,
 }
 
 impl LazyBackend {
@@ -34,6 +121,7 @@ impl LazyBackend {
             verify: None,
             engine: None,
             active: ExecutionProvider::Cpu,
+            demotion: Demotion::default(),
         }
     }
 
@@ -44,6 +132,11 @@ impl LazyBackend {
     pub fn verified_by(mut self, verify: impl Fn() -> Result<(), String> + Send + 'static) -> Self {
         self.verify = Some(Box::new(verify));
         self
+    }
+
+    /// True while removals run on the CPU because the GPU provider failed (the UI can surface it).
+    pub fn is_demoted(&self) -> bool {
+        self.demotion.is_demoted()
     }
 
     /// True once the sessions have been loaded.
@@ -88,6 +181,30 @@ impl LazyBackend {
     }
 }
 
+impl LazyBackend {
+    /// Loads on `requested`. If the GPU provider can't be used -- the load errors, or the sessions
+    /// quietly came up on the CPU -- the backend ends up on a working CPU engine and is demoted
+    /// (with backoff) rather than failing the removal or forgetting to try the GPU again.
+    fn load_preferred(&mut self, requested: ExecutionProvider) -> Result<(), RemovalError> {
+        if requested == ExecutionProvider::Cpu {
+            return self.load_engine(ExecutionProvider::Cpu);
+        }
+        match self.load_engine(requested) {
+            Ok(()) if self.active == ExecutionProvider::Cpu => {
+                self.demotion.demote(Instant::now());
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("nicti-groom: loading on {requested:?} failed ({e}); using the CPU");
+                self.load_engine(ExecutionProvider::Cpu)?;
+                self.demotion.demote(Instant::now());
+                Ok(())
+            }
+        }
+    }
+}
+
 impl Drop for LazyBackend {
     fn drop(&mut self) {
         // The sessions go with the backend; so does their claim on the VRAM budget.
@@ -104,24 +221,35 @@ impl RemovalBackend for LazyBackend {
                 verify().map_err(RemovalError::Integrity)?;
             }
             let requested = provider::requested_for(&self.models.ort_dylib);
-            self.load_engine(requested)?;
+            self.load_preferred(requested)?;
+        } else if self.demotion.take_due(Instant::now()) {
+            let requested = provider::requested_for(&self.models.ort_dylib);
+            self.load_preferred(requested)?;
         }
-        match self.engine.as_mut().expect("just loaded").remove(req) {
-            // Any `Ort` error counts, not only GPU ones (the variant carries no origin): a
-            // deterministic model/input bug costs one wasted CPU retry and returns the CPU's error.
-            // The GPU provider registered but can't run (cuDNN missing from the pack, out of VRAM
-            // beside the renderer, a driver reset): redo this removal -- and every later one -- on
-            // the CPU rather than failing it.
-            Err(RemovalError::Ort(e)) if self.active != ExecutionProvider::Cpu => {
+        let result = match self.engine.as_mut().expect("just loaded").remove(req) {
+            // Only an error that says the GPU provider can't run (cuDNN missing from the pack, out
+            // of VRAM beside the renderer, a driver reset) falls back: redo this removal on the CPU
+            // and stay there until the cool-down passes. A deterministic model/input error is
+            // returned as-is and leaves the GPU engine in place.
+            Err(RemovalError::Ort(e))
+                if self.active != ExecutionProvider::Cpu && is_provider_failure(&e) =>
+            {
                 eprintln!(
                     "nicti-groom: removal failed on {:?} ({e}); using the CPU",
                     self.active
                 );
                 self.load_engine(ExecutionProvider::Cpu)?;
+                self.demotion.demote(Instant::now());
                 self.engine.as_mut().expect("just loaded").remove(req)
             }
-            other => other,
-        }
+            other => {
+                if other.is_ok() && self.active != ExecutionProvider::Cpu {
+                    self.demotion.recovered();
+                }
+                other
+            }
+        };
+        result
     }
 }
 
@@ -141,6 +269,74 @@ mod tests {
             center: (4.0, 4.0),
             radius: 3.0,
         }
+    }
+
+    #[test]
+    fn only_gpu_provider_failures_trigger_the_cpu_fallback() {
+        for msg in [
+            "CUDA failure 35: cudnn64_9.dll not found",
+            "Failed to allocate memory: out of memory",
+            "DXGI_ERROR_DEVICE_REMOVED",
+            "Error in Execution Provider",
+        ] {
+            assert!(is_provider_failure(msg), "{msg}");
+        }
+        for msg in [
+            "Got invalid dimensions for input: image for the following indices",
+            "Non-zero status code returned while running Conv node",
+        ] {
+            assert!(!is_provider_failure(msg), "{msg}");
+        }
+    }
+
+    #[test]
+    fn directml_and_arena_failures_are_provider_failures() {
+        for msg in [
+            "Non-zero status code returned while running DmlFusedNode_0_0 node. 887A0005 The GPU device instance has been suspended",
+            "E_OUTOFMEMORY: Not enough memory resources are available to complete this operation",
+            "BFCArena::AllocateRawInternal Available memory of 0 is smaller than requested bytes",
+        ] {
+            assert!(is_provider_failure(msg), "{msg}");
+        }
+    }
+
+    #[test]
+    fn demotion_waits_out_the_cooldown_then_backs_off_on_repeat_failures() {
+        let t0 = Instant::now();
+        let mut d = Demotion::default();
+        assert!(!d.is_demoted() && !d.take_due(t0));
+        d.demote(t0);
+        assert!(d.is_demoted());
+        assert!(!d.take_due(t0 + GPU_RETRY_BASE - Duration::from_secs(1)));
+        assert!(d.take_due(t0 + GPU_RETRY_BASE));
+        assert!(
+            !d.is_demoted(),
+            "due clears the timer; the reload re-demotes on failure"
+        );
+        // The retry failed again: the next wait is doubled, and capped.
+        d.demote(t0);
+        assert_eq!(d.retry_at, Some(t0 + GPU_RETRY_BASE * 2));
+        for _ in 0..20 {
+            d.demote(t0);
+        }
+        assert_eq!(d.retry_at, Some(t0 + GPU_RETRY_MAX));
+    }
+
+    #[test]
+    fn a_gpu_success_resets_the_backoff() {
+        let t0 = Instant::now();
+        let mut d = Demotion::default();
+        d.demote(t0);
+        d.demote(t0);
+        d.recovered();
+        assert!(!d.is_demoted());
+        d.demote(t0);
+        assert_eq!(d.retry_at, Some(t0 + GPU_RETRY_BASE));
+    }
+
+    #[test]
+    fn a_fresh_backend_is_not_demoted() {
+        assert!(!LazyBackend::new(fake_models()).is_demoted());
     }
 
     fn tiny() -> RgbBuffer {
