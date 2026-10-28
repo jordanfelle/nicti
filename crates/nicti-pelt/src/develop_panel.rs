@@ -259,6 +259,32 @@ const GRAIN_SIZE: SliderSpec = SliderSpec::new("fx.grain_size", "Grain Size", 0.
 const GRAIN_ROUGHNESS: SliderSpec =
     SliderSpec::new("fx.grain_roughness", "Grain Roughness", 0.0, 1.0, 0.5);
 
+/// The crop after one frame of the Rotate slider, or `None` when it did not change (#589).
+///
+/// A drag remembers the crop it started from in `base`, and every step fits from that rect rather
+/// than from the already-shrunk current one, so dragging the angle down again enlarges the crop
+/// back (up to what the drag started with). Edits that are not drags (a keyboard nudge, a typed
+/// value, a reset) have no base and fit from the current crop, as before.
+fn crop_after_rotation_edit(
+    out: fur::SliderOut,
+    rotation: f32,
+    current: CropParams,
+    base: &mut Option<CropParams>,
+    source: (f32, f32),
+) -> Option<CropParams> {
+    if out.drag_started {
+        // `current` is the document's value from before this frame's edit.
+        *base = Some(current);
+    }
+    let next = out
+        .changed
+        .then(|| CropParams::with_rotation_fitted(base.unwrap_or(current), rotation, source));
+    if out.drag_stopped {
+        *base = None;
+    }
+    next
+}
+
 /// One slider row bound to a single `f32` field -- the repeated shape every panel section below
 /// uses. Reset (double-click) and the value display come from the spec.
 fn slider(ui: &mut egui::Ui, spec: &SliderSpec, value: &mut f32) -> fur::SliderOut {
@@ -478,10 +504,19 @@ pub fn show(
              rotate handle / freeform drag on the overlay.",
         );
         let mut rotation = crop.rotation_degrees;
-        if slider(ui, &ROTATION, &mut rotation).changed {
-            crop.set_rotation(rotation);
-            crop.fit_to_rotated(develop.source_extent());
+        // The crop from when this drag began: each step of the drag fits from it, so lowering the
+        // angle again regrows the crop instead of leaving it as small as the largest angle made it.
+        let base_id = ui.scope_id().with("crop_rotation_drag_base");
+        let mut base: Option<CropParams> = ui
+            .data(|d| d.get_temp::<Option<CropParams>>(base_id))
+            .flatten();
+        let out = slider(ui, &ROTATION, &mut rotation);
+        if let Some(next) =
+            crop_after_rotation_edit(out, rotation, crop, &mut base, develop.source_extent())
+        {
+            crop = next;
         }
+        ui.data_mut(|d| d.insert_temp(base_id, base));
         let auto_level = ui.add_enabled(gpu.is_some(), egui::Button::new("Auto-level"));
         if let (true, Some((engine, _))) = (auto_level.clicked(), gpu.as_mut()) {
             let result = engine.apply_auto_straighten(develop);
@@ -1467,5 +1502,118 @@ mod auto_hint_tests {
         let mut ui = AutoHintUi::default();
         ui.record(AutoOp::Straighten, AutoApplied::Unchanged, 7, tone(0.0));
         assert_eq!(ui.hint.map(|h| h.3), Some(7));
+    }
+}
+
+#[cfg(test)]
+mod crop_regrow_tests {
+    use super::*;
+
+    fn drag(started: bool, changed: bool, stopped: bool) -> fur::SliderOut {
+        fur::SliderOut {
+            changed,
+            drag_started: started,
+            drag_stopped: stopped,
+            reset: false,
+        }
+    }
+
+    #[test]
+    fn dragging_the_rotate_slider_back_down_regrows_the_crop_within_one_drag() {
+        let src = (600.0, 400.0);
+        let mut base = None;
+        // Frame 1: the drag starts and moves to 10 degrees; the document still holds the default.
+        let at10 = crop_after_rotation_edit(
+            drag(true, true, false),
+            10.0,
+            CropParams::default(),
+            &mut base,
+            src,
+        )
+        .expect("changed");
+        assert!(
+            at10.width > 0.0 && at10.width < 600.0,
+            "shrunk to fit: {at10:?}"
+        );
+        // Frame 2: the document now holds the shrunk crop; the drag comes back to 5 degrees.
+        let at5 = crop_after_rotation_edit(drag(false, true, false), 5.0, at10, &mut base, src)
+            .expect("changed");
+        assert!(
+            at5.width > at10.width + 1.0,
+            "regrown: {} vs {}",
+            at5.width,
+            at10.width
+        );
+        // Frame 3: all the way back to level restores the crop the drag started with.
+        let level = crop_after_rotation_edit(drag(false, true, true), 0.0, at5, &mut base, src)
+            .expect("changed");
+        assert!(level.is_noop(), "{level:?}");
+        assert_eq!(base, None, "releasing the slider forgets the base");
+    }
+
+    #[test]
+    fn a_non_drag_edit_or_an_unchanged_frame_does_not_use_a_stale_base() {
+        let src = (600.0, 400.0);
+        let mut base = None;
+        // Nothing changed: no edit, and no base is invented.
+        assert_eq!(
+            crop_after_rotation_edit(
+                drag(false, false, false),
+                3.0,
+                CropParams::default(),
+                &mut base,
+                src
+            ),
+            None
+        );
+        assert_eq!(base, None);
+        // A keyboard nudge (changed, no drag) fits from the current crop.
+        let shrunk = CropParams::with_rotation_fitted(CropParams::default(), 10.0, src);
+        let nudged =
+            crop_after_rotation_edit(drag(false, true, false), 9.0, shrunk, &mut base, src)
+                .expect("changed");
+        let mut expect = shrunk;
+        expect.set_rotation(9.0);
+        expect.fit_to_rotated(src);
+        assert_eq!(
+            nudged, expect,
+            "no base: fit from the current rect as before"
+        );
+        assert_eq!(base, None);
+        // A drag that starts and ends in one frame leaves nothing behind for the next one.
+        let mut base = None;
+        crop_after_rotation_edit(
+            drag(true, true, true),
+            10.0,
+            CropParams::default(),
+            &mut base,
+            src,
+        );
+        assert_eq!(base, None);
+    }
+
+    #[test]
+    fn a_user_crop_is_the_ceiling_the_drag_regrows_to() {
+        let src = (600.0, 400.0);
+        let user = CropParams {
+            x: 100.0,
+            y: 80.0,
+            width: 300.0,
+            height: 200.0,
+            ..Default::default()
+        };
+        let mut base = None;
+        let up = crop_after_rotation_edit(drag(true, true, false), 20.0, user, &mut base, src)
+            .expect("changed");
+        let down = crop_after_rotation_edit(drag(false, true, false), 1.0, up, &mut base, src)
+            .expect("changed");
+        assert!(
+            down.width <= 300.0 + 1e-3 && down.height <= 200.0 + 1e-3,
+            "{down:?}"
+        );
+        assert!(
+            down.width >= up.width,
+            "never smaller than at the larger angle"
+        );
     }
 }

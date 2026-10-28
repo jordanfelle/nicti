@@ -319,6 +319,68 @@ pub fn output_encode(prophoto_linear: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    /// #589 item 1 asked for the crop fit to account for the Upright homography, on the premise
+    /// that it "can still sample outside the frame". It cannot: `upright::homography_for_rotation`
+    /// zooms the correction about the centre until the *whole* source frame samples inside the
+    /// source, and a projective map of a convex region stays convex, so any crop rect that lies in
+    /// the (straightened) frame -- which `fit_crop_to_rotated` guarantees -- samples inside after
+    /// Upright too. This pins that guarantee so an Upright change that breaks it (a homography
+    /// built without the zoom) fails here instead of showing edge-clamped smear in a render.
+    #[test]
+    fn upright_never_samples_outside_a_crop_the_straighten_fit_accepts() {
+        let mut s = 0x9E37_79B9u32;
+        let mut next = |lo: f32, hi: f32| {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            lo + (s >> 8) as f32 / (1u32 << 24) as f32 * (hi - lo)
+        };
+        let max = crate::upright::MAX_CORRECTION_DEG as f32;
+        let (w, h) = (600.0, 400.0);
+        for case in 0..4000 {
+            // The extremes of the stored range are over-sampled: that is where a missing zoom shows.
+            let pick = |v: f32, lim: f32| match case % 4 {
+                0 => lim * v.signum(),
+                _ => v,
+            };
+            let (roll, pitch, yaw) = (
+                pick(next(-max, max), max),
+                pick(next(-max, max), max),
+                pick(next(-max, max), max),
+            );
+            let hom = crate::coat::UprightParams {
+                roll_degrees: roll,
+                pitch_degrees: pitch,
+                yaw_degrees: yaw,
+                focal_diag: next(0.4, 4.0),
+            }
+            .homography(w, h);
+            let rot = next(-MAX_STRAIGHTEN_DEGREES, MAX_STRAIGHTEN_DEGREES);
+            let cw = next(40.0, w);
+            let rect = CropRect {
+                x: next(0.0, w - cw),
+                y: next(0.0, h - cw * h / w),
+                width: cw,
+                height: cw * h / w,
+            };
+            let fit = fit_crop_to_rotated(rect, rot, (w, h));
+            let affine = affine_for_crop(fit, rot);
+            for iy in 0..=12 {
+                for ix in 0..=12 {
+                    let p =
+                        affine.apply((fit.width * ix as f32 / 12.0, fit.height * iy as f32 / 12.0));
+                    let q = hom.apply((f64::from(p.0), f64::from(p.1)));
+                    let inside = q.is_some_and(|(x, y)| {
+                        (-0.05..=f64::from(w) + 0.05).contains(&x)
+                            && (-0.05..=f64::from(h) + 0.05).contains(&y)
+                    });
+                    assert!(
+                        inside,
+                        "case {case}: roll {roll} pitch {pitch} yaw {yaw} rot {rot}: {p:?} -> {q:?}"
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
