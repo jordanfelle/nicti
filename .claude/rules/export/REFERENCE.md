@@ -42,6 +42,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   pipeline exists (synthetic-image-only so far).
 
 - **Export pipeline (#57, landed)** — ...
+- **Streaming shrink (#336)** — a plain-shrink export resizes tiles as they arrive (`preen::resize::StreamResizer`, `pelt::export::sink::RenderSink`), so the full frame is never resident. Readback is still full-res. ...
 - **Gotcha (#57)**: `RenderGraph::apply_document` recomputes *every* node's hash from the document,
   so `set_own_hash(DECODE, identity)` is undone on the next render and two same-size photos share
   cache keys. Always `spine::stamp_source_identity` on the render-time document copy (Develop and
