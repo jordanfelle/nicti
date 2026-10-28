@@ -146,8 +146,8 @@ pub struct PeltApp {
     /// non-directory path, registration failure). Cleared on the next valid submit.
     import_status: Option<String>,
     update: UpdateChecker,
-    /// Nine Lives' (#25) own scheduler, Always `Some` today (the launch gate guarantees an open catalog). See `poll_backup`'s own doc comment for how this gets checked and acted on.
-    nine_lives: Option<NineLives>,
+    /// Nine Lives' (#25) own scheduler. See `poll_backup`'s own doc comment for how this gets checked and acted on.
+    nine_lives: NineLives,
     last_backup_poll: Option<Instant>,
     /// The most recently submitted `BackupJob`'s result slot, polled once per `poll_backup` tick
     /// until it reports -- then folded into `last_backup_summary` and dropped.
@@ -223,12 +223,11 @@ pub struct PeltApp {
     purge_rendered_pending: bool,
     /// The current pending purge's failure was already shown (see `try_purge_rendered`).
     purge_error_reported: bool,
-    /// Sidecar write-back for marker changes and its settings/review panel (#60); always `Some`
-    /// today.
-    xmp: Option<XmpWriter>,
+    /// Sidecar write-back for marker changes and its settings/review panel (#60).
+    xmp: XmpWriter,
     xmp_ui: XmpUi,
     /// Keyword tagging (#373); its writes go through this `XmpMeta` so they reach the sidecar.
-    keyword_meta: Option<XmpMeta>,
+    keyword_meta: XmpMeta,
     keyword_ui: KeywordUi,
     /// The Lightroom Classic catalog import panel (#62).
     lrc_ui: LrcImportUi,
@@ -257,8 +256,8 @@ pub struct PeltApp {
     /// cursor is an index into the grid and can be mirrored back onto the grid selection. A loupe
     /// opened from the folder box (`open_in_loupe`) has its own list and must not touch the grid.
     loupe_from_grid: bool,
-    /// Culling (#32): marking, undo, and the markers the views draw. Always `Some` today.
-    cull: Option<CullState>,
+    /// Culling (#32): marking, undo, and the markers the views draw.
+    cull: CullState,
     /// The Delete flow's prompt, job and status line (#32).
     delete: DeleteFlow,
     survey: Option<SurveySession>,
@@ -306,7 +305,7 @@ impl PeltApp {
 
         let policy = BackupPolicy::for_catalog(&catalog_path);
         let catalog = Arc::new(store);
-        let nine_lives = Some(NineLives::new(policy));
+        let nine_lives = NineLives::new(policy);
 
         // The T2 preview cache (#301) lives beside the catalog. Failing to open it (read-only
         // location, another instance holding its lock) only costs the T2 upgrade, never the loupe.
@@ -344,30 +343,14 @@ impl PeltApp {
         }
 
         let wake_ctx = egui_ctx.clone();
-        let xmp = {
-            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = catalog.clone();
-            Some(XmpWriter::spawn(
-                dyn_store,
-                xmp_sync::load_autowrite(&catalog_path),
-            ))
-        };
-        let keyword_meta = match (&catalog, &xmp) {
-            (store, Some(xmp)) => {
-                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-                Some(XmpMeta::new(dyn_store, xmp.clone()))
-            }
-            _ => None,
-        };
-        let cull = match (&catalog, &xmp) {
-            (store, Some(xmp)) => {
-                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-                let ctx = egui_ctx.clone();
-                Some(CullState::new(
-                    Arc::new(XmpMeta::new(dyn_store, xmp.clone())),
-                    move || crate::repaint_trace::request(&ctx, crate::repaint_trace::Wake::Cull),
-                ))
-            }
-            _ => None,
+        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = catalog.clone();
+        let xmp = XmpWriter::spawn(dyn_store.clone(), xmp_sync::load_autowrite(&catalog_path));
+        let keyword_meta = XmpMeta::new(dyn_store.clone(), xmp.clone());
+        let cull = {
+            let ctx = egui_ctx.clone();
+            CullState::new(Arc::new(XmpMeta::new(dyn_store, xmp.clone())), move || {
+                crate::repaint_trace::request(&ctx, crate::repaint_trace::Wake::Cull)
+            })
         };
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -546,10 +529,8 @@ impl PeltApp {
         if let Some(result) = self.pending_backup_result.clone() {
             if let Some(report) = result.lock().unwrap().take() {
                 if matches!(report.outcome, BackupOutcome::Verified(_)) {
-                    if let (Some(nine_lives), Some(changes)) =
-                        (self.nine_lives.as_mut(), self.pending_backup_changes)
-                    {
-                        nine_lives.record_ran(changes);
+                    if let Some(changes) = self.pending_backup_changes {
+                        self.nine_lives.record_ran(changes);
                     }
                 }
                 self.last_backup_summary = Some(summarize_backup(&report));
@@ -559,9 +540,7 @@ impl PeltApp {
         }
 
         let store = &self.catalog;
-        let Some(nine_lives) = self.nine_lives.as_mut() else {
-            return;
-        };
+        let nine_lives = &mut self.nine_lives;
 
         let now = Instant::now();
         if self
@@ -658,9 +637,7 @@ impl PeltApp {
             grid.refresh(&self.pounce);
             // New rows can reuse the ids of photos deleted earlier; don't let them inherit a
             // stale cached marker.
-            if let Some(cull) = self.cull.as_mut() {
-                cull.invalidate();
-            }
+            self.cull.invalidate();
         } else if busy {
             let due = self
                 .grid_last_live_reload
@@ -758,9 +735,7 @@ impl PeltApp {
 impl PeltApp {
     /// Folds culling worker replies and delete progress into the UI. Once per frame.
     fn poll_cull(&mut self) {
-        if let Some(cull) = self.cull.as_mut() {
-            cull.poll();
-        }
+        self.cull.poll();
         // Marking changes what the filter bar's counts say without changing the filter. Once it
         // goes quiet, recompute them -- not per keypress, which at 1M photos would be a facet
         // scan for every mark.
@@ -777,9 +752,7 @@ impl PeltApp {
     /// Photos left the catalog: forget their markers/previews, and drop any session that listed
     /// them (the loupe's id list is frozen at open time, so it would still walk onto them).
     fn after_photos_removed(&mut self, gone: &[i64]) {
-        if let Some(cull) = self.cull.as_mut() {
-            cull.forget(gone);
-        }
+        self.cull.forget(gone);
         for id in gone {
             self.tile_previews.forget(*id);
         }
@@ -816,10 +789,7 @@ impl PeltApp {
     /// Reads this frame's culling keys and acts on them. Off while the Develop view is showing
     /// (its sliders own the digit keys) and while the delete prompt is up.
     fn handle_cull_keys(&mut self, ctx: &egui::Context) {
-        if self.cull.is_none()
-            || !cull_keys_active(self.view, self.delete.is_confirming())
-            || self.knead.is_asking()
-        {
+        if !cull_keys_active(self.view, self.delete.is_confirming()) || self.knead.is_asking() {
             return;
         }
         for command in crate::cull::input::poll(ctx) {
@@ -829,16 +799,12 @@ impl PeltApp {
                     invert_advance,
                 } => self.apply_mark(action, invert_advance),
                 KeyCommand::Undo => {
-                    if let Some(cull) = &self.cull {
-                        cull.undo();
-                        self.facets_dirty_since = Some(Instant::now());
-                    }
+                    self.cull.undo();
+                    self.facets_dirty_since = Some(Instant::now());
                 }
                 KeyCommand::Redo => {
-                    if let Some(cull) = &self.cull {
-                        cull.redo();
-                        self.facets_dirty_since = Some(Instant::now());
-                    }
+                    self.cull.redo();
+                    self.facets_dirty_since = Some(Instant::now());
                 }
                 KeyCommand::Delete => self.request_delete(),
                 KeyCommand::Survey => self.open_survey(),
@@ -885,11 +851,9 @@ impl PeltApp {
             return;
         }
         self.facets_dirty_since = Some(Instant::now());
-        let auto = self.cull.as_ref().is_some_and(|c| c.auto_advance);
+        let auto = self.cull.auto_advance;
         let advance = crate::cull::should_advance(auto, invert_advance, ids.len());
-        if let Some(cull) = self.cull.as_mut() {
-            cull.mark(ids, action);
-        }
+        self.cull.mark(ids, action);
         self.cull_notice = None;
         if !advance {
             return;
@@ -1050,13 +1014,12 @@ impl PeltApp {
     }
 
     fn show_survey(&mut self, ui: &mut egui::Ui) {
-        let (store, Some(session), Some(cull)) =
-            (&self.catalog, self.survey.as_mut(), self.cull.as_mut())
-        else {
+        let Some(session) = self.survey.as_mut() else {
             self.view = View::Library;
             return;
         };
-        let store = store.clone();
+        let cull = &mut self.cull;
+        let store = self.catalog.clone();
         let outcome = cull_survey::show(
             ui,
             session,
@@ -1086,13 +1049,12 @@ impl PeltApp {
     }
 
     fn show_compare(&mut self, ui: &mut egui::Ui) {
-        let (store, Some(session), Some(cull)) =
-            (&self.catalog, self.compare.as_mut(), self.cull.as_mut())
-        else {
+        let Some(session) = self.compare.as_mut() else {
             self.view = View::Library;
             return;
         };
-        let store = store.clone();
+        let cull = &mut self.cull;
+        let store = self.catalog.clone();
         let outcome = cull_compare::show(
             ui,
             session,
@@ -1398,7 +1360,8 @@ impl eframe::App for PeltApp {
                     ui.selectable_value(&mut self.view, View::Compare, "Compare");
                 }
                 ui.separator();
-                if let Some(cull) = self.cull.as_mut() {
+                {
+                    let cull = &mut self.cull;
                     ui.checkbox(&mut cull.auto_advance, "Auto-advance")
                         .on_hover_text(
                             "After marking a photo, move to the next one. Hold Shift while \
@@ -1873,7 +1836,8 @@ impl PeltApp {
         if let Some(action) = knead_action {
             self.handle_knead_action(action);
         }
-        if let Some(meta) = &self.keyword_meta {
+        {
+            let meta = &self.keyword_meta;
             let grid = self.grid.as_ref();
             let cursor = grid.and_then(GridSession::cursor_id);
             if self.keyword_ui.show(
@@ -1927,12 +1891,12 @@ impl PeltApp {
             .show(ui, |ui| self.show_library_controls(ui));
         ui.separator();
 
-        let outcome = match (self.grid.as_mut(), self.cull.as_mut()) {
-            (Some(grid), Some(cull)) => grid::view::show(
+        let outcome = match self.grid.as_mut() {
+            Some(grid) => grid::view::show(
                 ui,
                 grid,
                 &mut self.grid_view,
-                cull,
+                &mut self.cull,
                 &self.pounce,
                 self.preview_settings.policy_for(Surface::Grid) != eyeshine::RenderPolicy::Off,
             ),
@@ -2244,13 +2208,17 @@ impl PeltApp {
             self.apply_preview_settings();
         }
         ui.separator();
-        if let (store, Some(xmp)) = (&self.catalog, &self.xmp) {
-            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-            if xmp_sync::show(ui, &mut self.xmp_ui, &dyn_store, xmp, &self.catalog_path) {
+        {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = self.catalog.clone();
+            if xmp_sync::show(
+                ui,
+                &mut self.xmp_ui,
+                &dyn_store,
+                &self.xmp,
+                &self.catalog_path,
+            ) {
                 // "Use file" rewrote markers in the catalog; the grid's cached ones are stale.
-                if let Some(cull) = self.cull.as_mut() {
-                    cull.invalidate();
-                }
+                self.cull.invalidate();
                 self.filter_bar.invalidate_options();
                 self.filter_bar.invalidate_facets();
             }
@@ -2858,10 +2826,8 @@ impl PeltApp {
 
         // #32: the markers of the photo on screen -- and the ones the auto-advance is about to
         // land on, so the header is right the instant the cursor moves.
-        if let Some(cull) = self.cull.as_mut() {
-            cull.ensure([asset_id]);
-        }
-        let marks = self.cull.as_ref().and_then(|c| c.meta(asset_id)).cloned();
+        self.cull.ensure([asset_id]);
+        let marks = self.cull.meta(asset_id).cloned();
 
         let mut retry_clicked = false;
         ui.horizontal(|ui| {
