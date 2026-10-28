@@ -332,7 +332,7 @@ impl ThumbBatchJob {
             else {
                 continue;
             };
-            let Some(want) = crate::eyeshine::rendered_hash(&identity, doc) else {
+            let Some(want) = crate::eyeshine::rendered_hash_in(&larder, *id, &identity, doc) else {
                 continue;
             };
             let render = if hash == want && !crate::eyeshine::hash_is_partial(&hash) {

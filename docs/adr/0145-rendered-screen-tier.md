@@ -23,7 +23,10 @@ Nothing rendered an edited photo to a screen-size image or cached one, and the L
    `Larder::stored_hash` is the index-only "is a current one cached?" check.
 2. **`render_hash`** = `rendered:v{EYESHINE_VERSION}:{blake3(identity || EditDocument::content_hash)}`,
    plus a `:partial` suffix when the document holds adjustments the preview render cannot show yet
-   (active local masks, #354; AI-removal spots, #324 -- patches aren't persisted). Bump
+   (AI-removal spots, #324 -- patches aren't persisted; or an active AI mask whose baked alpha is not
+   stored, #354). For a document with AI masks the hash also carries `:a{blake3 of the stored
+   alphas' bake keys}` (#531), so a render made before an alpha landed is not current once it does and
+   is redone; `:partial` goes away when every needed alpha is stored. Bump
    `EYESHINE_VERSION` whenever the render pipeline's output changes.
 3. **The render job ("Eyeshine", `nicti-pelt/src/eyeshine.rs`)**: three chained Pounce jobs per
    photo, the lane split export (#57) uses -- decode (CPU) -> render, one tile per step (GPU,
