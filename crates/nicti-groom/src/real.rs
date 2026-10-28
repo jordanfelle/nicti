@@ -6,6 +6,8 @@
 //! [`crate::job::RemoveJob`] on Pounce's GPU-lane worker thread. A failed load is retried on the
 //! next removal (the user may have fixed the install) rather than cached as a permanent failure.
 
+use std::time::{Duration, Instant};
+
 use nicti_haw::ExecutionProvider;
 use nicti_stalk::models::RemovalModels;
 use nicti_tapetum::heal::RemovalPatch;
@@ -16,6 +18,34 @@ use crate::remove::{RemovalBackend, RemovalEngine, RemovalRequest};
 use crate::sam::MobileSam;
 use crate::RemovalError;
 
+/// How long a removal backend that fell back to the CPU stays there before it tries the GPU
+/// provider again (a transient failure -- VRAM pressure from the renderer, a driver reset -- must
+/// not cost the user the GPU for the rest of the session).
+const GPU_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
+
+/// Substrings of an ONNX Runtime error message that mean "this GPU provider can't run" (missing
+/// cuDNN/cuBLAS, out of memory, device lost), as opposed to a deterministic bad-input or
+/// shape-mismatch error that would fail identically on the CPU.
+const PROVIDER_FAILURE_MARKERS: &[&str] = &[
+    "cudnn",
+    "cublas",
+    "cuda",
+    "directml",
+    "dxgi",
+    "execution provider",
+    "out of memory",
+    "failed to allocate",
+    "device lost",
+    "device removed",
+    "device hung",
+];
+
+/// True when `msg` (an `Ort` error's text) says the GPU provider itself failed.
+fn is_provider_failure(msg: &str) -> bool {
+    let msg = msg.to_ascii_lowercase();
+    PROVIDER_FAILURE_MARKERS.iter().any(|m| msg.contains(m))
+}
+
 /// A check run before the sessions are loaded (see [`LazyBackend::verified_by`]).
 pub type Verifier = Box<dyn Fn() -> Result<(), String> + Send>;
 
@@ -25,6 +55,9 @@ pub struct LazyBackend {
     engine: Option<RemovalEngine<MobileSam, Lama>>,
     /// The provider the loaded sessions run on (CPU until loaded).
     active: ExecutionProvider,
+    /// Set while the backend runs on the CPU after a GPU provider failure: when it passes, the next
+    /// removal tries the GPU provider again.
+    gpu_retry_at: Option<Instant>,
 }
 
 impl LazyBackend {
@@ -34,6 +67,7 @@ impl LazyBackend {
             verify: None,
             engine: None,
             active: ExecutionProvider::Cpu,
+            gpu_retry_at: None,
         }
     }
 
@@ -44,6 +78,11 @@ impl LazyBackend {
     pub fn verified_by(mut self, verify: impl Fn() -> Result<(), String> + Send + 'static) -> Self {
         self.verify = Some(Box::new(verify));
         self
+    }
+
+    /// True while removals run on the CPU because the GPU provider failed (the UI can surface it).
+    pub fn is_demoted(&self) -> bool {
+        self.gpu_retry_at.is_some()
     }
 
     /// True once the sessions have been loaded.
@@ -105,18 +144,27 @@ impl RemovalBackend for LazyBackend {
             }
             let requested = provider::requested_for(&self.models.ort_dylib);
             self.load_engine(requested)?;
+        } else if self.gpu_retry_at.is_some_and(|t| Instant::now() >= t) {
+            self.gpu_retry_at = None;
+            let requested = provider::requested_for(&self.models.ort_dylib);
+            if requested != ExecutionProvider::Cpu {
+                self.load_engine(requested)?;
+            }
         }
         match self.engine.as_mut().expect("just loaded").remove(req) {
-            // Any `Ort` error counts, not only GPU ones (the variant carries no origin): a
-            // deterministic model/input bug costs one wasted CPU retry and returns the CPU's error.
-            // The GPU provider registered but can't run (cuDNN missing from the pack, out of VRAM
-            // beside the renderer, a driver reset): redo this removal -- and every later one -- on
-            // the CPU rather than failing it.
-            Err(RemovalError::Ort(e)) if self.active != ExecutionProvider::Cpu => {
+            // Only an error that says the GPU provider can't run (cuDNN missing from the pack, out
+            // of VRAM beside the renderer, a driver reset) falls back: redo this removal on the CPU
+            // and stay there for `GPU_RETRY_COOLDOWN`, then try the GPU again. A deterministic
+            // model/input error is returned as-is and leaves the GPU engine in place.
+            Err(RemovalError::Ort(e))
+                if self.active != ExecutionProvider::Cpu && is_provider_failure(&e) =>
+            {
                 eprintln!(
-                    "nicti-groom: removal failed on {:?} ({e}); using the CPU",
-                    self.active
+                    "nicti-groom: removal failed on {:?} ({e}); using the CPU for {}s",
+                    self.active,
+                    GPU_RETRY_COOLDOWN.as_secs()
                 );
+                self.gpu_retry_at = Some(Instant::now() + GPU_RETRY_COOLDOWN);
                 self.load_engine(ExecutionProvider::Cpu)?;
                 self.engine.as_mut().expect("just loaded").remove(req)
             }
@@ -141,6 +189,30 @@ mod tests {
             center: (4.0, 4.0),
             radius: 3.0,
         }
+    }
+
+    #[test]
+    fn only_gpu_provider_failures_trigger_the_cpu_fallback() {
+        for msg in [
+            "CUDA failure 35: cudnn64_9.dll not found",
+            "Failed to allocate memory: out of memory",
+            "DXGI_ERROR_DEVICE_REMOVED",
+            "Error in Execution Provider",
+        ] {
+            assert!(is_provider_failure(msg), "{msg}");
+        }
+        for msg in [
+            "Got invalid dimensions for input: image for the following indices",
+            "Non-zero status code returned while running Conv node",
+        ] {
+            assert!(!is_provider_failure(msg), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_fresh_backend_is_not_demoted() {
+        let backend = LazyBackend::new(fake_models());
+        assert!(!backend.is_demoted());
     }
 
     fn tiny() -> RgbBuffer {
