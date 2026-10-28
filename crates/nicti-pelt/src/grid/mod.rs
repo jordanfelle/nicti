@@ -4,6 +4,8 @@
 //! 1M assets.
 //!
 //! - `layout`: pure geometry (columns, rows, visible index range, batching) -- unit-tested alone.
+//! - `justified`: the pure core of justified rows with date-group headers (#550, ADR-0437 section 3):
+//!   a streamed row-offset index, lookups, navigation and the rebuild gate. Not yet wired into `view`.
 //! - `jobs`: `SnapshotJob` (one index-ordered `hunt_ids` scan) and `ThumbBatchJob` (batched T0
 //!   decode + downsize).
 //! - `selection`: the multi-selection (sorted index ranges), for culling's select-all-then-delete.
@@ -11,6 +13,7 @@
 //! - `view`: the egui drawing and keyboard/mouse handling on top of a session.
 
 pub mod jobs;
+pub mod justified;
 pub mod layout;
 pub mod selection;
 pub mod session;

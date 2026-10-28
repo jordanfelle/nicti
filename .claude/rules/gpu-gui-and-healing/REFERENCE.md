@@ -32,7 +32,7 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #437: justified grid / GridStats (ADR-0437)
 
-- `ViewState.stats` (`GridStats { frames, cells_built }`) pins grid frame cost to the viewport: swat test seeds 5000 photos, asserts <30 cells/frame at top and end (mutation-proved). Justified rows and date headers: no-go for now (O(n) layout vs 1M target; `cols`-based index math and `show_rows` assume fixed columns; asset width/height orientation unverified); design = chunked Pounce-built row-offset index. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+- `ViewState.stats` (`GridStats { frames, cells_built }`) pins grid frame cost to the viewport: swat test seeds 5000 photos, asserts <30 cells/frame at top and end (mutation-proved). Justified rows + date headers decided go (#550): pure core `grid/justified.rs` landed (`RowIndex` streamed row table, `oriented_aspect`, `width_bucket`, `LayoutGate`/`layout_builds`); catalog width/height are NOT orientation-corrected (needs an orientation column + backfill); view wiring is #604. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #512: idle repaint rate
 

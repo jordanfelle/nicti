@@ -119,6 +119,21 @@ and whether catalog `width`/`height` are orientation-corrected is unverified. If
 row-offset index keyed on (generation, width bucket, target height), `partition_point` for the visible rows, and a
 `layout_builds` counter asserted flat across unchanged frames.
 
+2026-10-28 (#550): decided go for justified rows AND date-group headers, and the pure core was built:
+`nicti-pelt/src/grid/justified.rs`. `RowIndex` is an append-only table (first cell u32, top **f64**, height f32, header
+id u32 per row, about 20 bytes per row, asserted under 4 MB at 1M photos; `f32` tops drift by thousands of points at 2M
+photos, a test pins them exact) filled by a streaming builder
+(`begin_group`, `push_cells`, `finish`) whose result does not depend on the chunking; queries are `partition_point`
+(`row_at_y`, `rows_between`, `row_of`, `indices_for_rows`), `row_cells` positions only one row's cells, and
+`navigate`/`navigate_page` pick the cell nearest the current horizontal centre in the target row. Rows are filled to the
+width and stretched at most 1.5x the target height; a group's last row keeps the target; a lone wide photo shrinks to
+fit; non-finite or non-positive aspects are square and the rest clamped to 0.1..10. `LayoutGate` keys a build on
+(generation, width bucket of 16 px, target height, headers on) and counts them (`layout_builds`). **Catalog
+`width`/`height` are not orientation-corrected**: a RAW asset's size is its embedded preview's declared size and a
+JPEG asset's is the file's own size, both before EXIF rotation, so `oriented_aspect` swaps the axes for
+orientations 5-8 and the catalog needs an orientation column and a backfill (ingest skips unchanged files). All of that
+and the view wiring (build job, `show_viewport` loop, toggle, swat assertion, 1M measurement) is #604.
+
 ## #512: idle repaint rate
 
 An idle, empty Nicti repainted about 4.5 times a second (#409). `NICTI_REPAINT_TRACE=1` now prints, once a second to
