@@ -1,6 +1,6 @@
 # ADR-0437: Justified grid layout and cheap-frame assertions (GridStats)
 
-**Status:** Proposed (assertion pattern adopted and landed; justified layout and date headers: no-go for now, with a design if wanted)
+**Status:** Proposed (assertion pattern adopted and landed; justified rows and date headers decided go on 2026-10-28 (#550): pure layout core landed, view wiring in #604)
 **Ticket:** #437
 **Part of:** #424
 **Related:** #233, #335, ADR-0068
@@ -67,5 +67,15 @@ default, and measure against `docs/benchmarks.md` at ref-10k and a synthetic 1M 
 ## Consequences
 
 - `GridStats` is part of the grid's test surface: new per-frame work in `view::show` should count into it.
-- Justified layout: not started. If the operator wants it, file a build ticket with section 3 as the starting design
-  and verify the aspect-ratio/orientation question first.
+- **Decided 2026-10-28 (#550): justified rows with date-group headers, built per section 3.** The pure core landed as
+  `nicti-pelt/src/grid/justified.rs`: `RowIndex` (an append-only table of rows, streamed in any chunking, groups close
+  rows and carry header space; lookups by `partition_point`; `row_cells` positions only a row's cells; arrow/page
+  navigation by row), `oriented_aspect`, `width_bucket` (16 px) and `LayoutGate` (the `layout_builds` counter: an
+  unchanged key never rebuilds). Rows stretch to the width up to 1.5x the target height, a group's last row keeps the
+  target, a lone wide photo shrinks to fit, corrupt aspects are square and clamped to 0.1..10. At 1M photos the index
+  is about 16 bytes per row (asserted under 4 MB).
+  **The aspect/orientation question is answered: catalog `width`/`height` are not orientation-corrected** (RAW:
+  the embedded preview's declared size; JPEG: the file's own size; both before EXIF rotation), so the layout takes
+  `oriented_aspect(width, height, orientation)` and the catalog needs an orientation column plus a backfill (#604).
+  Not wired into `view.rs` yet (#604: orientation column, Pounce build job, `show_viewport` loop, toggle, swat
+  `layout_builds` assertion, 1M measurement).
