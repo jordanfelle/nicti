@@ -445,6 +445,20 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_preset_without_the_location_field_loads_with_location_stripped() {
+        let spec: ExportSpec =
+            serde_json::from_str(r#"{"metadata": {"policy": "all", "artist": "Jo"}}"#).unwrap();
+        assert!(
+            !spec.metadata.include_location,
+            "privacy default for old presets"
+        );
+        let on: ExportSpec =
+            serde_json::from_str(r#"{"metadata": {"include_location": true}}"#).unwrap();
+        assert!(on.metadata.include_location);
+        assert!(!ExportSpec::default().metadata.include_location);
+    }
+
+    #[test]
     fn a_saved_preset_without_the_sharpen_field_still_loads_with_it_off() {
         let spec: ExportSpec = serde_json::from_str(r#"{"dpi": 240}"#).unwrap();
         assert_eq!(spec.sharpen, None);

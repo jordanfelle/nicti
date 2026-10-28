@@ -28,6 +28,7 @@ const EXIF_NOT_IN_TIFF: &[u16] = &[0x9101, 0xA002, 0xA003];
 /// `FlashpixVersion` (UNDEFINED x4, "0100"): required in a TIFF's Exif IFD.
 const FLASHPIX_VERSION: u16 = 0xA000;
 const EXIF_IFD_POINTER: u16 = 34665;
+const GPS_PROCESSING_METHOD: u16 = 0x001b;
 const GPS_IFD_POINTER: u16 = 34853;
 /// More than this many entries in one IFD is not a real EXIF block.
 const MAX_ENTRIES: usize = 512;
@@ -189,6 +190,18 @@ pub fn parse_exif_block(block: &[u8]) -> ExifEntries {
     }
     dedupe(&mut exif);
     let mut gps = sub(GPS_IFD_POINTER);
+    // TIFF/EP (exiftool's TIFF validation) requires GPSProcessingMethod in a GPS IFD; the
+    // registered values are GPS / CELLID / WLAN / MANUAL, and a position read from a camera's
+    // EXIF is the first. UNDEFINED, with EXIF's 8-byte character-code prefix.
+    if !gps.is_empty() && !gps.iter().any(|e| e.tag == GPS_PROCESSING_METHOD) {
+        let value = b"ASCII\0\0\0GPS".to_vec();
+        gps.push(Entry {
+            tag: GPS_PROCESSING_METHOD,
+            ty: 7,
+            count: value.len() as u32,
+            data: value,
+        });
+    }
     dedupe(&mut gps);
     ExifEntries { ifd0, exif, gps }
 }
@@ -428,5 +441,33 @@ mod tests {
                 "{tag}"
             );
         }
+    }
+
+    #[test]
+    fn a_gps_ifd_gets_the_processing_method_a_tiff_requires_and_an_empty_one_stays_empty() {
+        // IFD0 { ExifIFD? no; GPS pointer -> GPS IFD with one entry (GPSLatitudeRef) }.
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II*\0");
+        b.extend_from_slice(&8u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        for v in [34853u16.to_le_bytes().to_vec(), 4u16.to_le_bytes().to_vec()] {
+            b.extend_from_slice(&v);
+        }
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&26u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(b.len(), 26);
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // GPSLatitudeRef
+        b.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+        b.extend_from_slice(&2u32.to_le_bytes());
+        b.extend_from_slice(&[b'N', 0, 0, 0]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let e = parse_exif_block(&b);
+        let tags: Vec<u16> = e.gps.iter().map(|x| x.tag).collect();
+        assert_eq!(tags, [1, GPS_PROCESSING_METHOD], "{tags:?}");
+        assert_eq!(e.gps[1].data, b"ASCII\0\0\0GPS");
+        // No GPS IFD -> none invented.
+        assert!(parse_exif_block(&block(true)).gps.is_empty());
     }
 }

@@ -673,6 +673,7 @@ mod tests {
             include_keywords: true,
             artist: Some("Jo".into()),
             copyright: Some("(c) Jo".into()),
+            ..Default::default()
         };
         let src = SourceMetadata {
             exif: SourceExif {
@@ -1124,6 +1125,37 @@ mod tests {
         assert!(
             tags.find_tag(Tag::Unknown(0x0003)).unwrap().is_some(),
             "GPSLongitudeRef"
+        );
+        // The coordinates themselves, not just the references: 40 deg 26' 46" and 79 deg 58' 56".
+        let rationals = |v: Value| match v {
+            Value::List(items) => items
+                .iter()
+                .map(|r| match r {
+                    Value::Rational(n, d) => (*n, *d),
+                    other => panic!("not a rational: {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("not a list: {other:?}"),
+        };
+        let lat = rationals(
+            tags.find_tag(Tag::Unknown(0x0002))
+                .unwrap()
+                .expect("GPSLatitude"),
+        );
+        let lon = rationals(
+            tags.find_tag(Tag::Unknown(0x0004))
+                .unwrap()
+                .expect("GPSLongitude"),
+        );
+        assert_eq!(lat, [(40, 1), (26, 1), (46, 1)]);
+        assert_eq!(lon, [(79, 1), (58, 1), (56, 1)]);
+        assert!(
+            tags.find_tag(Tag::Unknown(0x0006)).unwrap().is_some(),
+            "GPSAltitude"
+        );
+        assert!(
+            tags.find_tag(Tag::Unknown(0x001b)).unwrap().is_some(),
+            "GPSProcessingMethod"
         );
     }
 

@@ -47,6 +47,7 @@ fn source() -> SourceMetadata {
             date_time_original: Some("2026:09:27 14:03:09".into()),
             offset_time_original: Some("-04:00".into()),
             orientation: Orientation::Normal,
+            ..Default::default()
         },
         rating: Some(4),
         label: Some("Red".into()),
@@ -115,6 +116,7 @@ fn every_format_passes_exiftool_validate_with_no_warnings() {
                 include_keywords: true,
                 artist: Some("Jo Photographer".into()),
                 copyright: Some("(c) 2026 Jo Photographer".into()),
+                ..Default::default()
             },
             ..ExportSpec::default()
         };
@@ -186,6 +188,7 @@ fn a_tiff_carries_the_same_exif_as_a_jpeg() {
                 include_keywords: false,
                 artist: Some("Jo Photographer".into()),
                 copyright: Some("(c) 2026 Jo Photographer".into()),
+                ..Default::default()
             },
             ..ExportSpec::default()
         };
@@ -259,5 +262,110 @@ fn a_tiff_carries_the_same_exif_as_a_jpeg() {
             jpeg.get(key),
             "{key}\nTIFF: {tiff}\nJPEG: {jpeg}"
         );
+    }
+}
+
+/// #340: a position is written only on request, reads back correctly in exiftool for every
+/// format that carries EXIF, and does not trip the validator.
+#[test]
+fn location_is_opt_in_and_reads_back_in_every_exif_format() {
+    if !exiftool_available() {
+        eprintln!("SKIPPED: exiftool not on PATH");
+        return;
+    }
+    use nicti_preen::metadata::Gps;
+    let reg = builtin_registry();
+    let mut src = source();
+    src.exif.gps = Some(Gps {
+        lat_ref: b'N',
+        lat: [(40, 1), (26, 1), (46, 1)],
+        lon_ref: b'W',
+        lon: [(79, 1), (58, 1), (56, 1)],
+        altitude: Some(((1523, 10), false)),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            "jpeg",
+            FormatSpec::Jpeg {
+                quality: 90,
+                subsampling: Subsampling::S420,
+            },
+        ),
+        (
+            "png",
+            FormatSpec::Png {
+                depth: BitDepth::Eight,
+            },
+        ),
+        (
+            "tiff",
+            FormatSpec::Tiff {
+                depth: BitDepth::Eight,
+                compression: TiffCompression::None,
+            },
+        ),
+    ];
+    for (name, format) in cases {
+        for include_location in [false, true] {
+            let spec = ExportSpec {
+                format,
+                color_space: ExportSpace::Srgb,
+                metadata: MetadataSpec {
+                    policy: MetadataPolicy::All,
+                    include_location,
+                    ..MetadataSpec::default()
+                },
+                ..ExportSpec::default()
+            };
+            let out = export_frame(
+                frame(64, 48),
+                &ExportContext {
+                    spec: &spec,
+                    source: &src,
+                    watermark: None,
+                    software: "Nicti test",
+                },
+                &reg,
+            )
+            .unwrap();
+            let path = dir
+                .path()
+                .join(format!("{name}-{include_location}.{}", out.extension));
+            std::fs::write(&path, &out.bytes).unwrap();
+            let run = |args: &[&str]| {
+                let o = Command::new("exiftool")
+                    .args(args)
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)
+            };
+            let gps = run(&["-n", "-s3", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude"]);
+            if include_location {
+                let nums: Vec<f64> = gps
+                    .split_whitespace()
+                    .filter_map(|v| v.parse().ok())
+                    .collect();
+                assert_eq!(nums.len(), 3, "{name}: {gps}");
+                assert!((nums[0] - 40.446_111).abs() < 1e-4, "{name} lat {gps}");
+                assert!((nums[1] + 79.982_222).abs() < 1e-4, "{name} lon {gps}");
+                assert!((nums[2] - 152.3).abs() < 1e-3, "{name} alt {gps}");
+                let all = run(&["-a", "-G1", "-s", "-GPS:all"]);
+                assert!(!all.trim().is_empty(), "{name}: {all}");
+            } else {
+                assert!(gps.trim().is_empty(), "{name} leaked a location: {gps}");
+                let all = run(&["-a", "-G1", "-GPS:all"]);
+                assert!(all.trim().is_empty(), "{name} leaked GPS tags: {all}");
+            }
+            let validate = run(&["-validate", "-warning", "-a", "-G1"]);
+            let findings: Vec<&str> = validate
+                .lines()
+                .filter(|l| l.contains("Warning") && !l.contains("Validate"))
+                .filter(|l| !l.contains("[minor] Odd offset for IFD0 tag"))
+                .collect();
+            println!("--- {name} location={include_location} ---\n{validate}");
+            assert!(findings.is_empty(), "{name}: {findings:?}");
+        }
     }
 }

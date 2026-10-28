@@ -155,7 +155,8 @@ impl ExportUi {
         self.dialog = Some(Dialog {
             ids,
             scope,
-            spec: self.presets.last.clone(),
+            // The GPS opt-in is per export, never remembered: reopen with location stripped.
+            spec: self.presets.last.clone().without_location(),
             samples,
             preset_name: String::new(),
             selected_preset: None,
@@ -639,6 +640,14 @@ fn metadata_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
         ui.add_enabled(
             m.policy == MetadataPolicy::All,
             egui::Checkbox::new(&mut m.include_keywords, "Include keywords"),
+        );
+        ui.add_enabled(
+            m.policy == MetadataPolicy::All,
+            egui::Checkbox::new(&mut m.include_location, "Include location (GPS)"),
+        )
+        .on_hover_text(
+            "Off by default: the photo's GPS position is removed from the exported file. \
+             Only photos that have a position in their EXIF are affected.",
         );
     });
     optional_text(ui, "Artist", &mut m.artist);
