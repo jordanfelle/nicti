@@ -149,7 +149,7 @@ pub struct ExportRun {
 }
 
 /// Photos prepared per planning chunk: one catalog read each plus the keyword/edit lookups.
-const PLAN_CHUNK: usize = 64;
+const PLAN_CHUNK: usize = if cfg!(test) { 2 } else { 64 };
 
 /// The run's lifecycle: planning happens on a Pounce job (#343), then the pipeline runs.
 struct RunInner {
@@ -484,6 +484,12 @@ impl PlanJob {
             }
             *phase = Phase::Running(Arc::clone(&shared));
         }
+        // A cancel that landed after `Shared` was built but before the flip saw `Planning` and had
+        // nothing to forward it to. It stored the flag *before* reading the phase, so reading the
+        // flag again after the flip cannot miss it.
+        if self.inner.cancelled.load(Ordering::SeqCst) {
+            shared.cancelled.store(true, Ordering::SeqCst);
+        }
         shared.advance();
         Ok(())
     }
@@ -492,7 +498,9 @@ impl PlanJob {
 impl ChunkedJob for PlanJob {
     fn spec(&self) -> JobSpec {
         JobSpec {
-            priority: Priority::Background,
+            // Foreground: the user just pressed Export and planning is brief, so it must not queue
+            // behind a library scan or ingest (the heavy stages stay Background).
+            priority: Priority::Foreground,
             kind: JobKind::Export,
             lane: Lane::Cpu,
             vram_bytes: 0,
@@ -1700,6 +1708,64 @@ mod tests {
         let report = wait(&run);
         assert_eq!(report.exported.len(), 1, "{report:?}");
         assert_eq!(run.preparing(), None);
+    }
+
+    #[test]
+    fn a_batch_larger_than_one_planning_chunk_is_prepared_in_order_and_in_full() {
+        let names: Vec<String> = (0..7).map(|i| format!("p{i}.NEF")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let Some(fx) = fixture(&refs) else {
+            return;
+        };
+        let run = ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap();
+        let report = wait(&run);
+        // 7 photos over chunks of PLAN_CHUNK (2 under test): every one prepared, in id order, so
+        // the {Sequence} numbering follows the order given.
+        assert_eq!(report.exported.len(), 7, "{report:?}");
+        assert_eq!(run.inner.prepared.load(Ordering::Relaxed), 7);
+        let mut ids: Vec<i64> = report.exported.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, fx.ids);
+        let files = fx.out_files();
+        assert_eq!(
+            files.first().map(String::as_str),
+            Some("01_p0.png"),
+            "{files:?}"
+        );
+        assert_eq!(
+            files.last().map(String::as_str),
+            Some("07_p6.png"),
+            "{files:?}"
+        );
+    }
+
+    #[test]
+    fn a_planning_job_cancelled_in_pounce_still_ends_the_run_with_a_report() {
+        let Some(fx) = fixture(&["a.NEF"]) else {
+            return;
+        };
+        let release = hold_the_cpu_lane(&fx);
+        let run = ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap();
+        // The activity panel's per-job cancel button: find the queued planning job and cancel it.
+        let job = fx
+            .pounce
+            .snapshot()
+            .into_iter()
+            .find(|j| j.label.starts_with("Export: prepare"))
+            .expect("the planning job is queued");
+        fx.pounce.cancel(job.id);
+        release.store(true, Ordering::SeqCst);
+        let report = wait(&run);
+        assert_eq!(run.preparing(), None, "must not hang in Planning");
+        assert!(report.exported.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("cancelled before it started")),
+            "{report:?}"
+        );
+        assert!(fx.out_files().is_empty());
     }
 
     #[test]
