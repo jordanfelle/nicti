@@ -298,7 +298,7 @@ const MAX_BLACK_POINT: f32 = 0.2;
 /// The display's own black, in linear working (ProPhoto) RGB: what device RGB (0, 0, 0) shows.
 /// Zero (no compensation) when it cannot be measured, is not finite, or is not above the working
 /// black: moxcms clamps its output to [0, 1], so a display blacker than the working space reads
-/// as 0, and a profile with no usable A2B table fails the probe. Never an error: BPC is an
+/// as 0 (any one channel failing zeroes all three), and a profile with no usable A2B table fails the probe. Never an error: BPC is an
 /// improvement, not a reason to lose the display profile.
 fn display_black_linear(display_profile: &ColorProfile) -> [f32; 3] {
     let probe = || -> Option<[f32; 3]> {
@@ -322,14 +322,17 @@ fn display_black_linear(display_profile: &ColorProfile) -> [f32; 3] {
     let Some(encoded) = probe() else {
         return [0.0; 3];
     };
-    encoded.map(|c| {
-        let lin = f64::from(c).clamp(0.0, 1.0).powf(PROPHOTO_GAMMA) as f32;
-        if lin.is_finite() && lin > 0.0 && lin <= MAX_BLACK_POINT {
-            lin
-        } else {
-            0.0
-        }
-    })
+    let lin = encoded.map(|c| f64::from(c).clamp(0.0, 1.0).powf(PROPHOTO_GAMMA) as f32);
+    // All or nothing: dropping only the bad channels would leave the others compensated and tint
+    // black (a lift of [0.15, 0.2, 0.25] with a capped blue gave a saturated red black).
+    if lin
+        .iter()
+        .all(|&v| v.is_finite() && v > 0.0 && v <= MAX_BLACK_POINT)
+    {
+        lin
+    } else {
+        [0.0; 3]
+    }
 }
 
 /// Maps working black to the display's black and keeps white: `bp + v * (1 - bp)` on a linear
@@ -609,22 +612,30 @@ mod tests {
     /// sRGB-primaries monitor whose device black shows `floor` linear light (a lifted black, as a
     /// LUT-based printer-style or washed-out display profile has): every TRC starts at `floor`.
     fn lifted_black_monitor(floor: f32) -> ColorProfile {
+        lifted_black_rgb([floor; 3])
+    }
+
+    fn lifted_black_rgb(floors: [f32; 3]) -> ColorProfile {
         let mut p = ColorProfile::new_srgb();
-        let table: Vec<u16> = (0..1024)
-            .map(|i| {
-                let e = f64::from(i) / 1023.0;
-                let lin = if e <= 0.04045 {
-                    e / 12.92
-                } else {
-                    ((e + 0.055) / 1.055).powf(2.4)
-                };
-                let v = f64::from(floor) + lin * (1.0 - f64::from(floor));
-                (v * 65535.0).round() as u16
-            })
-            .collect();
-        for slot in [&mut p.red_trc, &mut p.green_trc, &mut p.blue_trc] {
-            *slot = Some(ToneReprCurve::Lut(table.clone()));
-        }
+        let table = |floor: f32| -> ToneReprCurve {
+            ToneReprCurve::Lut(
+                (0..1024)
+                    .map(|i| {
+                        let e = f64::from(i) / 1023.0;
+                        let lin = if e <= 0.04045 {
+                            e / 12.92
+                        } else {
+                            ((e + 0.055) / 1.055).powf(2.4)
+                        };
+                        let v = f64::from(floor) + lin * (1.0 - f64::from(floor));
+                        (v * 65535.0).round() as u16
+                    })
+                    .collect(),
+            )
+        };
+        p.red_trc = Some(table(floors[0]));
+        p.green_trc = Some(table(floors[1]));
+        p.blue_trc = Some(table(floors[2]));
         p
     }
 
@@ -667,6 +678,9 @@ mod tests {
         assert!(bp.iter().all(|&v| (v - 0.02).abs() < 0.004), "{bp:?}");
         // A "black" above 20% is not a display black: no compensation.
         assert_eq!(display_black_linear(&lifted_black_monitor(0.5)), [0.0; 3]);
+        // One unusable channel disables compensation for all three (no coloured black).
+        let mixed = lifted_black_rgb([0.15, 0.2, 0.25]);
+        assert_eq!(display_black_linear(&mixed), [0.0; 3]);
         // A profile that cannot be probed (no usable tags) degrades to no compensation.
         let mut broken = ColorProfile::new_srgb();
         broken.red_trc = None;

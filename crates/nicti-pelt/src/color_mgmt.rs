@@ -103,6 +103,11 @@ impl ColorManagement {
         })
     }
 
+    /// The baked LUT depends on `black_point`: drop it so the next build rebakes, not just re-pushes.
+    fn invalidate_bake(&mut self) {
+        self.display_kind = None;
+    }
+
     /// The gamut overlay only means something while proofing.
     fn gamut_warn_active(&self) -> bool {
         self.gamut_warn && self.soft_proof
@@ -148,8 +153,7 @@ impl ColorManagement {
                 )
                 .changed()
             {
-                // The baked LUT depends on it: rebuild, not just re-push.
-                self.display_kind = None;
+                self.invalidate_bake();
                 changed = true;
             }
             let profile_label = match &self.display {
@@ -276,8 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn black_point_compensation_is_on_by_default() {
-        assert!(ColorManagement::new().black_point);
+    fn black_point_compensation_is_on_by_default_and_a_toggle_drops_the_cached_bake() {
+        let mut cm = ColorManagement::new();
+        assert!(cm.black_point);
+        cm.build_transform().unwrap();
+        assert!(cm.display_kind.is_some());
+        cm.black_point = false;
+        cm.invalidate_bake();
+        assert!(cm.display_kind.is_none(), "a toggle must rebake");
     }
 
     #[test]
