@@ -66,43 +66,134 @@ pub fn has_edits(doc: &EditDocument) -> bool {
     !doc.stages.is_empty()
 }
 
-/// True when the preview render may silently lack something the Develop view shows: AI removal
-/// spots (their patches aren't persisted, #324) or an active AI-mask component (the preview renders
-/// the alphas Develop already baked and stored, but the hash can't tell whether they are there).
-/// Brush / gradient / range masks render fully (#399).
-pub fn is_partial(doc: &EditDocument) -> bool {
+/// The bake keys the document's active AI masks need (empty when it has none). These are the
+/// alphas a render can only show if they are already stored (#354).
+pub fn needed_alpha_keys(identity: &blake3::Hash, doc: &EditDocument) -> Vec<blake3::Hash> {
+    // `neutral_key` builds the render graph, so skip it for the (common) document with no masks.
+    if !doc.stages.contains_key(MASKS) {
+        return Vec::new();
+    }
     let params = spine::resolve::<MaskParams>(doc, MASKS);
     let active = MaskParams {
         corrections: params.active().cloned().collect(),
     };
-    let ai_mask =
-        !mask_compose::bake_requests(&active, blake3::Hash::from_bytes([0; 32])).is_empty();
-    let ai_removal = spine::resolve::<HealParams>(doc, HEAL)
-        .spots
+    let neutral_key = spine::neutral_key(doc, *identity);
+    let mut keys: Vec<blake3::Hash> = mask_compose::bake_requests(&active, neutral_key)
         .iter()
-        .any(|s| s.kind == SpotKind::Remove);
-    ai_mask || ai_removal
+        .map(|r| r.key)
+        .collect();
+    keys.sort_by_key(|k| *k.as_bytes());
+    keys.dedup();
+    keys
+}
+
+/// Which of the document's needed AI alphas are stored for `asset_id` right now.
+pub fn ready_alphas(
+    larder: &nicti_lair::larder::Larder,
+    asset_id: i64,
+    needed: &[blake3::Hash],
+) -> std::collections::HashSet<blake3::Hash> {
+    needed
+        .iter()
+        .filter(|k| {
+            larder
+                .contains_keyed(crate::stash::keyed(asset_id, k.as_bytes()))
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect()
 }
 
 /// The Larder `render_hash` for the rendered tier: pipeline version + the photo's identity + the
-/// whole edit document's content hash (which already includes a chosen camera profile's hash).
+/// whole edit document's content hash (which already includes a chosen camera profile's hash) +,
+/// for a document with AI masks, which of their baked alphas are stored (`ready`).
+///
+/// Folding the ready set in matters because a render shows only the alphas that exist when it runs:
+/// without it, a preview rendered before a bake finished would be stored under the final hash and
+/// read as current forever (#531). With it, the hash changes when an alpha lands, so the preview is
+/// re-rendered. The `:partial` suffix now means "an AI removal, or an AI mask whose alpha isn't
+/// stored", so a fully baked AI-mask document is no longer perpetually partial.
+///
 /// `None` when the document can't be canonicalised (non-finite floats) -- nothing is cached then.
-pub fn rendered_hash(identity: &blake3::Hash, doc: &EditDocument) -> Option<String> {
+pub fn rendered_hash_with(
+    identity: &blake3::Hash,
+    doc: &EditDocument,
+    ready: &std::collections::HashSet<blake3::Hash>,
+) -> Option<String> {
+    hash_from(identity, doc, &needed_alpha_keys(identity, doc), ready)
+}
+
+fn hash_from(
+    identity: &blake3::Hash,
+    doc: &EditDocument,
+    needed: &[blake3::Hash],
+    ready: &std::collections::HashSet<blake3::Hash>,
+) -> Option<String> {
     let doc_hash = doc.content_hash().ok()?;
     let mut h = blake3::Hasher::new();
     h.update(doc_hash.as_bytes());
-    // `rendered:v{N}:{identity}:{document}`: the identity segment lets a reader tell an older
-    // render of the *same file* (fine to show while updating) from one of a file that was
-    // replaced under the same asset id (never to be shown).
+    // `rendered:v{N}:{identity}:{document}[:a{ready alphas}][:partial]`: the identity segment lets
+    // a reader tell an older render of the *same file* (fine to show while updating) from one of a
+    // file that was replaced under the same asset id (never to be shown).
     let mut out = format!(
         "rendered:v{EYESHINE_VERSION}:{}:{}",
         identity.to_hex(),
         h.finalize().to_hex()
     );
-    if is_partial(doc) {
+    let mut all_ready = true;
+    if !needed.is_empty() {
+        let mut r = blake3::Hasher::new();
+        for key in needed {
+            if ready.contains(key) {
+                r.update(key.as_bytes());
+            } else {
+                all_ready = false;
+            }
+        }
+        out.push_str(&format!(":a{}", &r.finalize().to_hex()[..16]));
+    }
+    let ai_removal = spine::resolve::<HealParams>(doc, HEAL)
+        .spots
+        .iter()
+        .any(|s| s.kind == SpotKind::Remove);
+    if ai_removal || !all_ready {
         out.push_str(PARTIAL_SUFFIX);
     }
     Some(out)
+}
+
+/// [`rendered_hash_with`] reading the ready set from `larder`.
+pub fn rendered_hash_in(
+    larder: &nicti_lair::larder::Larder,
+    asset_id: i64,
+    identity: &blake3::Hash,
+    doc: &EditDocument,
+) -> Option<String> {
+    let needed = needed_alpha_keys(identity, doc);
+    let ready = if needed.is_empty() {
+        Default::default()
+    } else {
+        ready_alphas(larder, asset_id, &needed)
+    };
+    hash_from(identity, doc, &needed, &ready)
+}
+
+/// [`rendered_hash_with`] when no alpha is known to be stored (no Larder at hand): a document with
+/// AI masks hashes as not-ready and partial.
+pub fn rendered_hash(identity: &blake3::Hash, doc: &EditDocument) -> Option<String> {
+    rendered_hash_with(identity, doc, &Default::default())
+}
+
+/// Whether two rendered hashes are of the same photo *and* the same edit document (they may still
+/// differ in which AI alphas were ready).
+pub fn same_document(a: &str, b: &str) -> bool {
+    let head = |h: &str| {
+        h.splitn(5, ':')
+            .take(4)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    head(a) == head(b)
 }
 
 /// Whether two rendered hashes are renders of the same file (same identity segment), whatever
@@ -165,7 +256,7 @@ pub enum Badge {
     Stale,
     /// Showing an older render while a newer one is made.
     Updating,
-    /// The render may lack AI masks / AI removals (see [`is_partial`]).
+    /// The render may lack AI masks / AI removals (the hash is `:partial`, see [`rendered_hash_with`]).
     Partial,
     /// An unedited photo still showing the camera's own rendering (policy `All`, render pending).
     CameraRendering,
@@ -527,13 +618,19 @@ fn decode_stage(task: &Task) -> Result<Decoded, T2Outcome> {
         .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
     let look = camera_profiles::load_look_for_document(&task.req.edit)
         .map_err(|e| T2Outcome::Failed(format!("camera profile: {e}")))?;
-    let (ai_alphas, _missing) = load_stored_alphas(
+    let (ai_alphas, missing) = load_stored_alphas(
         Some(&task.env.larder),
         task.req.asset_id,
         &task.req.edit,
         task.req.identity,
         || task.is_cancelled(),
     );
+    // The hash says every needed alpha was stored, but one is gone now (evicted since the hash was
+    // taken): storing this render under that hash would show the mask missing as if current. Retry;
+    // the next resolve hashes the new readiness (and `:partial`).
+    if missing > 0 && !hash_is_partial(&task.req.hash) {
+        return Err(T2Outcome::Retry("an AI mask alpha went missing".into()));
+    }
     Ok(Decoded {
         frame,
         exif,
@@ -602,7 +699,7 @@ impl RenderJob {
                 frame: &frame,
                 profile: profile.as_deref(),
                 look: look.as_deref(),
-                // AI removals are left out and marked partial (`is_partial`).
+                // AI removals are left out and marked partial (see `rendered_hash_with`).
                 masks: Some(&ai_alphas),
             },
         ) {
@@ -1102,6 +1199,32 @@ impl EyeshineService {
         self.resolved.clear();
     }
 
+    /// The render hash for `edit`, folding in which AI alphas are stored (#531). A Larder that is
+    /// busy right now keeps the previous answer for the same document when there is one; with none
+    /// (just after `invalidate`) it falls back to the not-ready hash, which the next resolve after
+    /// the lock frees corrects -- a render started under it is redone once, not wrong.
+    fn hash_for(
+        &self,
+        asset_id: i64,
+        identity: &blake3::Hash,
+        edit: &EditDocument,
+    ) -> Option<String> {
+        if !edit.stages.contains_key(MASKS) {
+            return rendered_hash(identity, edit);
+        }
+        let fresh = rendered_hash(identity, edit)?;
+        let guard = self.env.as_ref().and_then(|e| try_lock_larder(&e.larder));
+        match guard {
+            Some(larder) => rendered_hash_in(&larder, asset_id, identity, edit),
+            None => self
+                .resolved
+                .get(&asset_id)
+                .and_then(|r| r.hash.clone())
+                .filter(|prev| same_document(prev, &fresh))
+                .or(Some(fresh)),
+        }
+    }
+
     /// The photo's identity, edit document and current render hash, cached. `None` when the asset
     /// or its root is unknown.
     pub fn resolve(&mut self, store: &dyn CatalogStore, asset_id: i64) -> Option<&Resolved> {
@@ -1118,7 +1241,7 @@ impl EyeshineService {
             let (edit, hash) = match store.get_master_edit(asset_id) {
                 Ok(doc) => {
                     let edit = doc.unwrap_or_default();
-                    let hash = rendered_hash(&identity, &edit);
+                    let hash = self.hash_for(asset_id, &identity, &edit);
                     (edit, hash)
                 }
                 // Cached for the TTL with no hash: nothing is rendered or badged for a document
@@ -1214,7 +1337,14 @@ impl EyeshineService {
         // A render in flight for an out-of-date document is obsolete whatever happens next --
         // including the early returns below (edit A -> B -> A: A is already stored, so B's render
         // finishing would overwrite it with the wrong pixels).
-        if self.inflight.get(&asset_id).is_some_and(|f| f.hash != hash) {
+        // (A change in which AI alphas are stored is not "out of date": the render finishes, and the
+        // next request sees the stored hash differ and redoes it once, instead of cancelling and
+        // restarting for every alpha a bake job stores.)
+        if self
+            .inflight
+            .get(&asset_id)
+            .is_some_and(|f| f.hash != hash && !same_document(&f.hash, &hash))
+        {
             if let Some(old) = self.inflight.remove(&asset_id) {
                 old.cancelled.store(true, Ordering::SeqCst);
                 pounce.cancel(old.job);
@@ -1386,7 +1516,7 @@ mod tests {
     fn an_empty_document_has_no_edits_and_is_not_partial() {
         let d = EditDocument::default();
         assert!(!has_edits(&d));
-        assert!(!is_partial(&d));
+        assert!(!hash_is_partial(&rendered_hash(&id(1), &d).unwrap()));
     }
 
     #[test]
@@ -1405,9 +1535,8 @@ mod tests {
     fn classic_heal_spots_are_not_partial_but_ai_removals_are() {
         let spot = |kind: &str| json!({"kind": kind, "center": [0.5, 0.5], "radius": 10.0});
         let classic = doc_with(HEAL, json!({"spots": [spot("heal"), spot("clone")]}));
-        assert!(!is_partial(&classic));
+        assert!(!hash_is_partial(&rendered_hash(&id(1), &classic).unwrap()));
         let ai = doc_with(HEAL, json!({"spots": [spot("heal"), spot("remove")]}));
-        assert!(is_partial(&ai));
         let h = rendered_hash(&id(1), &ai).unwrap();
         assert!(hash_is_partial(&h));
     }
@@ -1441,14 +1570,180 @@ mod tests {
             p0: [0.0, 0.0],
             p1: [0.0, 1.0],
         });
-        assert!(!is_partial(&linear), "a gradient mask is rendered");
+        assert!(
+            !hash_is_partial(&rendered_hash(&id(1), &linear).unwrap()),
+            "a gradient mask is rendered"
+        );
         let ai = masks(MaskSource::Ai(MaskRecipe {
             model_id: "nicti.mask.birefnet".into(),
             model_version: "1".into(),
             params: json!({"target": "subject"}),
             seed: None,
         }));
-        assert!(is_partial(&ai), "an AI mask depends on a stored bake");
+        assert!(
+            hash_is_partial(&rendered_hash(&id(1), &ai).unwrap()),
+            "an AI mask with no stored bake is partial"
+        );
+    }
+
+    fn ai_mask_doc(exposure: f32) -> EditDocument {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::params::{
+            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+        };
+        let params = MaskParams {
+            corrections: vec![LocalCorrection {
+                id: "a".into(),
+                mask: MaskGroup {
+                    components: vec![MaskComponent {
+                        source: MaskSource::Ai(MaskRecipe {
+                            model_id: "nicti.mask.birefnet".into(),
+                            model_version: "1".into(),
+                            params: json!({"target": "subject"}),
+                            seed: None,
+                        }),
+                        ..MaskComponent::default()
+                    }],
+                },
+                adjust: LocalAdjust {
+                    exposure,
+                    ..LocalAdjust::default()
+                },
+                ..LocalCorrection::default()
+            }],
+        };
+        doc_with(MASKS, serde_json::to_value(&params).unwrap())
+    }
+
+    #[test]
+    fn a_baked_alpha_changes_the_hash_so_a_preview_rendered_before_it_is_redone() {
+        // #531: the ready set is part of the hash. Before the fix a render made while the alpha was
+        // missing was stored under the same hash as the finished one and read as current forever.
+        let doc = ai_mask_doc(1.0);
+        let needed = needed_alpha_keys(&id(1), &doc);
+        assert_eq!(needed.len(), 1);
+        let none = std::collections::HashSet::new();
+        let ready: std::collections::HashSet<_> = needed.iter().copied().collect();
+
+        let before = rendered_hash_with(&id(1), &doc, &none).unwrap();
+        let after = rendered_hash_with(&id(1), &doc, &ready).unwrap();
+        assert_ne!(before, after);
+        assert!(hash_is_partial(&before), "alpha missing: partial");
+        assert!(
+            !hash_is_partial(&after),
+            "alpha stored: the render is complete"
+        );
+        // The same photo and document either way, so the old render still shows while updating.
+        assert!(same_file(&before, &after) && same_document(&before, &after));
+        assert_eq!(after, rendered_hash_with(&id(1), &doc, &ready).unwrap());
+        assert_eq!(before, rendered_hash(&id(1), &doc).unwrap());
+    }
+
+    #[test]
+    fn readiness_only_matters_for_active_ai_masks() {
+        let none = std::collections::HashSet::new();
+        // Inert AI mask (no slider moved): needs no alpha, so no readiness segment.
+        let inert = ai_mask_doc(0.0);
+        assert!(needed_alpha_keys(&id(1), &inert).is_empty());
+        let h = rendered_hash_with(&id(1), &inert, &none).unwrap();
+        assert!(h.split(':').count() == 4 && !hash_is_partial(&h), "{h}");
+        // A different document is a different document, whatever is ready.
+        let other = ai_mask_doc(2.0);
+        let ready: std::collections::HashSet<_> =
+            needed_alpha_keys(&id(1), &other).into_iter().collect();
+        assert!(!same_document(
+            &rendered_hash_with(&id(1), &ai_mask_doc(1.0), &none).unwrap(),
+            &rendered_hash_with(&id(1), &other, &ready).unwrap()
+        ));
+    }
+
+    fn two_ai_masks_doc() -> EditDocument {
+        use nicti_tapetum::coat::MaskRecipe;
+        use nicti_tapetum::mask::params::{
+            LocalAdjust, LocalCorrection, MaskComponent, MaskGroup, MaskSource,
+        };
+        let correction = |id: &str, target: &str| LocalCorrection {
+            id: id.into(),
+            mask: MaskGroup {
+                components: vec![MaskComponent {
+                    source: MaskSource::Ai(MaskRecipe {
+                        model_id: "nicti.mask.birefnet".into(),
+                        model_version: "1".into(),
+                        params: json!({ "target": target }),
+                        seed: None,
+                    }),
+                    ..MaskComponent::default()
+                }],
+            },
+            adjust: LocalAdjust {
+                exposure: 1.0,
+                ..LocalAdjust::default()
+            },
+            ..LocalCorrection::default()
+        };
+        let params = MaskParams {
+            corrections: vec![correction("a", "subject"), correction("b", "sky")],
+        };
+        doc_with(MASKS, serde_json::to_value(&params).unwrap())
+    }
+
+    #[test]
+    fn each_alpha_that_lands_changes_the_hash_and_only_the_last_clears_partial() {
+        let doc = two_ai_masks_doc();
+        let needed = needed_alpha_keys(&id(1), &doc);
+        assert_eq!(needed.len(), 2);
+        let set =
+            |n: usize| -> std::collections::HashSet<_> { needed[..n].iter().copied().collect() };
+        let h: Vec<String> = (0..=2)
+            .map(|n| rendered_hash_with(&id(1), &doc, &set(n)).unwrap())
+            .collect();
+        assert!(h[0] != h[1] && h[1] != h[2] && h[0] != h[2]);
+        assert!(hash_is_partial(&h[0]) && hash_is_partial(&h[1]) && !hash_is_partial(&h[2]));
+        assert!(same_document(&h[0], &h[2]));
+    }
+
+    #[test]
+    fn readiness_is_read_from_the_larder() {
+        use nicti_lair::larder::{Larder, LarderConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let mut larder = Larder::open(dir.path(), LarderConfig::default()).unwrap();
+        let doc = ai_mask_doc(1.0);
+        let key = needed_alpha_keys(&id(1), &doc)[0];
+
+        let before = rendered_hash_in(&larder, 7, &id(1), &doc).unwrap();
+        assert!(hash_is_partial(&before));
+        larder
+            .put_keyed(crate::stash::keyed(7, key.as_bytes()), b"NAL1 payload")
+            .unwrap();
+        let after = rendered_hash_in(&larder, 7, &id(1), &doc).unwrap();
+        assert!(!hash_is_partial(&after) && after != before);
+        // Alphas are content-addressed (the same as `fetch_alpha`): the bake key is the identity, so
+        // another asset id sees the same stored alpha.
+        assert_eq!(rendered_hash_in(&larder, 8, &id(1), &doc).unwrap(), after);
+    }
+
+    #[test]
+    fn a_document_without_masks_never_pays_for_the_alpha_lookup() {
+        let d = doc_with("nicti.exposure", json!({"ev": 0.5}));
+        assert!(needed_alpha_keys(&id(1), &d).is_empty());
+    }
+
+    #[test]
+    fn an_ai_removal_stays_partial_even_when_every_alpha_is_stored() {
+        let spot = json!({"kind": "remove", "center": [0.5, 0.5], "radius": 10.0});
+        let mut doc = ai_mask_doc(1.0);
+        doc.stages.insert(
+            HEAL.to_string(),
+            nicti_pawprint::StageEntry {
+                schema_version: 1,
+                params: json!({"spots": [spot]}),
+            },
+        );
+        let ready: std::collections::HashSet<_> =
+            needed_alpha_keys(&id(1), &doc).into_iter().collect();
+        assert!(hash_is_partial(
+            &rendered_hash_with(&id(1), &doc, &ready).unwrap()
+        ));
     }
 
     #[test]
@@ -1818,7 +2113,7 @@ mod tests {
             }],
         };
         let doc = doc_with(MASKS, serde_json::to_value(&params).unwrap());
-        assert!(!is_partial(&doc));
+        assert!(!hash_is_partial(&rendered_hash(&id(1), &doc).unwrap()));
         let (_, h0) = fx.run("a.NEF", EditDocument::default());
         let base = fx.stored(&h0).unwrap();
         let (_, h1) = fx.run("a.NEF", doc);
@@ -1892,7 +2187,9 @@ mod tests {
             p1: [0.0, 1.0],
         };
         assert_eq!(missing(&doc(gradient, 1.0)), 0);
-        assert!(!is_partial(&doc(ai(), 0.0)));
+        assert!(!hash_is_partial(
+            &rendered_hash(&id(1), &doc(ai(), 0.0)).unwrap()
+        ));
     }
 
     #[test]
