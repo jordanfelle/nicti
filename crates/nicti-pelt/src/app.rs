@@ -61,7 +61,6 @@ use crate::update::UpdateChecker;
 use crate::verify_ui::{self, VerifyUi};
 use crate::viewport::{fit_rect, fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
-use crate::CatalogOpenState;
 
 /// Telemetry is throttled independently of egui's own repaint rate -- see `telemetry.rs`'s own
 /// doc comment for why re-sampling `sysinfo`/DXGI on every frame would be wasteful.
@@ -103,7 +102,7 @@ pub struct PeltApp {
     color: ColorManagement,
     version: String,
     catalog_path: PathBuf,
-    catalog: CatalogOpenState,
+    catalog: Arc<SqliteCatalog>,
     develop: Option<DevelopView>,
     /// The device Develop and export both render on (one shared device, ADR-0016).
     gpu: Arc<GpuContext>,
@@ -147,8 +146,7 @@ pub struct PeltApp {
     /// non-directory path, registration failure). Cleared on the next valid submit.
     import_status: Option<String>,
     update: UpdateChecker,
-    /// Nine Lives' (#25) own scheduler, `None` when the catalog itself failed to open (nothing to
-    /// back up). See `poll_backup`'s own doc comment for how this gets checked and acted on.
+    /// Nine Lives' (#25) own scheduler, Always `Some` today (the launch gate guarantees an open catalog). See `poll_backup`'s own doc comment for how this gets checked and acted on.
     nine_lives: Option<NineLives>,
     last_backup_poll: Option<Instant>,
     /// The most recently submitted `BackupJob`'s result slot, polled once per `poll_backup` tick
@@ -225,8 +223,8 @@ pub struct PeltApp {
     purge_rendered_pending: bool,
     /// The current pending purge's failure was already shown (see `try_purge_rendered`).
     purge_error_reported: bool,
-    /// Sidecar write-back for marker changes and its settings/review panel (#60); `None` when
-    /// the catalog failed to open.
+    /// Sidecar write-back for marker changes and its settings/review panel (#60); always `Some`
+    /// today.
     xmp: Option<XmpWriter>,
     xmp_ui: XmpUi,
     /// Keyword tagging (#373); its writes go through this `XmpMeta` so they reach the sidecar.
@@ -259,8 +257,7 @@ pub struct PeltApp {
     /// cursor is an index into the grid and can be mirrored back onto the grid selection. A loupe
     /// opened from the folder box (`open_in_loupe`) has its own list and must not touch the grid.
     loupe_from_grid: bool,
-    /// Culling (#32): marking, undo, and the markers the views draw. `None` when the catalog
-    /// failed to open (nothing to mark).
+    /// Culling (#32): marking, undo, and the markers the views draw. Always `Some` today.
     cull: Option<CullState>,
     /// The Delete flow's prompt, job and status line (#32).
     delete: DeleteFlow,
@@ -308,7 +305,7 @@ impl PeltApp {
             .insert(resources);
 
         let policy = BackupPolicy::for_catalog(&catalog_path);
-        let catalog = CatalogOpenState::Open(Arc::new(store));
+        let catalog = Arc::new(store);
         let nine_lives = Some(NineLives::new(policy));
 
         // The T2 preview cache (#301) lives beside the catalog. Failing to open it (read-only
@@ -326,7 +323,8 @@ impl PeltApp {
         // whose files are in the Recycle Bin, keep the ones whose files are still on disk) before
         // the grid reads the catalog.
         let mut delete = DeleteFlow::new();
-        if let CatalogOpenState::Open(store) = &catalog {
+        {
+            let store = &catalog;
             match shred::resume_open_deletes(&**store, |ids| {
                 crate::cull::delete::purge_previews(larder.as_ref(), ids);
             }) {
@@ -346,25 +344,22 @@ impl PeltApp {
         }
 
         let wake_ctx = egui_ctx.clone();
-        let xmp = match &catalog {
-            CatalogOpenState::Open(store) => {
-                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-                Some(XmpWriter::spawn(
-                    dyn_store,
-                    xmp_sync::load_autowrite(&catalog_path),
-                ))
-            }
-            CatalogOpenState::Error(_) => None,
+        let xmp = {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = catalog.clone();
+            Some(XmpWriter::spawn(
+                dyn_store,
+                xmp_sync::load_autowrite(&catalog_path),
+            ))
         };
         let keyword_meta = match (&catalog, &xmp) {
-            (CatalogOpenState::Open(store), Some(xmp)) => {
+            (store, Some(xmp)) => {
                 let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
                 Some(XmpMeta::new(dyn_store, xmp.clone()))
             }
             _ => None,
         };
         let cull = match (&catalog, &xmp) {
-            (CatalogOpenState::Open(store), Some(xmp)) => {
+            (store, Some(xmp)) => {
                 let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
                 let ctx = egui_ctx.clone();
                 Some(CullState::new(
@@ -393,21 +388,18 @@ impl PeltApp {
         // #307: recovery runs under `JobKind::Move`, so every "a move is running" guard (import,
         // sync, move, delete, loupe open) holds until it's done; `poll_recovery` folds in the
         // result.
-        let (pending_recovery_result, last_move_summary) = match &catalog {
-            CatalogOpenState::Open(store) => {
-                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-                match ResumeMovesJob::new(dyn_store) {
-                    Some((job, result)) => {
-                        pounce.submit(Box::new(job));
-                        (
-                            Some(result),
-                            Some("Recovering an interrupted folder move\u{2026}".to_string()),
-                        )
-                    }
-                    None => (None, None),
+        let (pending_recovery_result, last_move_summary) = {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = catalog.clone();
+            match ResumeMovesJob::new(dyn_store) {
+                Some((job, result)) => {
+                    pounce.submit(Box::new(job));
+                    (
+                        Some(result),
+                        Some("Recovering an interrupted folder move\u{2026}".to_string()),
+                    )
                 }
+                None => (None, None),
             }
-            CatalogOpenState::Error(_) => (None, None),
         };
         let telemetry_ctx = egui_ctx.clone();
         let telemetry = TelemetrySampler::spawn_on_change(
@@ -426,7 +418,7 @@ impl PeltApp {
         update.spawn_check(&version, false);
 
         let prebake = PrebakeService::new(match (&catalog, &larder) {
-            (CatalogOpenState::Open(store), Some(larder)) => Some(prebake::Env {
+            (store, Some(larder)) => Some(prebake::Env {
                 decoder: Arc::new(LibRawDecoder),
                 store: store.clone(),
                 larder: larder.clone(),
@@ -566,9 +558,7 @@ impl PeltApp {
             }
         }
 
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return;
-        };
+        let store = &self.catalog;
         let Some(nine_lives) = self.nine_lives.as_mut() else {
             return;
         };
@@ -631,7 +621,8 @@ impl PeltApp {
             return;
         };
         self.pending_recovery_result = None;
-        if let CatalogOpenState::Open(store) = &self.catalog {
+        {
+            let store = &self.catalog;
             for r in &resumed {
                 if let carry::Resumed::Committed { root_id }
                 | carry::Resumed::CleanedUp { root_id, .. } = r
@@ -912,9 +903,7 @@ impl PeltApp {
                 }
             }
             View::Loupe => {
-                let CatalogOpenState::Open(store) = &self.catalog else {
-                    return;
-                };
+                let store = &self.catalog;
                 if let Some(loupe) = self.loupe.as_mut() {
                     if loupe.cursor() + 1 < loupe.len() {
                         let _ = loupe.set_cursor(loupe.cursor() + 1, store.as_ref(), &self.pounce);
@@ -968,9 +957,7 @@ impl PeltApp {
         let Some((request, mode)) = self.delete.show_modal(ctx) else {
             return;
         };
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return;
-        };
+        let store = &self.catalog;
         if self.job_active(&[
             JobKind::Import,
             JobKind::Sync,
@@ -1063,7 +1050,7 @@ impl PeltApp {
     }
 
     fn show_survey(&mut self, ui: &mut egui::Ui) {
-        let (CatalogOpenState::Open(store), Some(session), Some(cull)) =
+        let (store, Some(session), Some(cull)) =
             (&self.catalog, self.survey.as_mut(), self.cull.as_mut())
         else {
             self.view = View::Library;
@@ -1099,7 +1086,7 @@ impl PeltApp {
     }
 
     fn show_compare(&mut self, ui: &mut egui::Ui) {
-        let (CatalogOpenState::Open(store), Some(session), Some(cull)) =
+        let (store, Some(session), Some(cull)) =
             (&self.catalog, self.compare.as_mut(), self.cull.as_mut())
         else {
             self.view = View::Library;
@@ -1689,14 +1676,7 @@ impl PeltApp {
     /// #30: the Library view -- a root/sort toolbar, the import/sync/move controls (collapsible,
     /// so a big catalog can have the whole window), and the virtualized thumbnail grid.
     fn show_library(&mut self, ui: &mut egui::Ui) {
-        let store = match &self.catalog {
-            CatalogOpenState::Open(store) => store.clone(),
-            CatalogOpenState::Error(_) => {
-                ui.heading("Library");
-                self.show_library_controls(ui);
-                return;
-            }
-        };
+        let store = self.catalog.clone();
         if self.grid.is_none() {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
             let mut grid = GridSession::new(dyn_store, PLACEHOLDER_GRID_TEXTURE_BUDGET_BYTES);
@@ -2161,9 +2141,9 @@ impl PeltApp {
     /// The import/sync/move controls and their status lines -- everything the Library view had
     /// before the grid (#30) except the asset count, which the grid's own snapshot now supplies.
     fn show_library_controls(&mut self, ui: &mut egui::Ui) {
-        match &self.catalog {
-            CatalogOpenState::Open(store) => {
-                let store = store.clone();
+        {
+            {
+                let store = self.catalog.clone();
                 ui.horizontal(|ui| {
                     ui.label("Folder:");
                     // Read-only while Browse is open, so a pick can't clobber a newer edit.
@@ -2251,15 +2231,6 @@ impl PeltApp {
                     self.submit_move(&store, root_id);
                 }
             }
-            CatalogOpenState::Error(msg) => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    format!(
-                        "Failed to open catalog {}: {msg}",
-                        self.catalog_path.display()
-                    ),
-                );
-            }
         }
         ui.separator();
         cache_settings::show(
@@ -2273,7 +2244,7 @@ impl PeltApp {
             self.apply_preview_settings();
         }
         ui.separator();
-        if let (CatalogOpenState::Open(store), Some(xmp)) = (&self.catalog, &self.xmp) {
+        if let (store, Some(xmp)) = (&self.catalog, &self.xmp) {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
             if xmp_sync::show(ui, &mut self.xmp_ui, &dyn_store, xmp, &self.catalog_path) {
                 // "Use file" rewrote markers in the catalog; the grid's cached ones are stale.
@@ -2285,7 +2256,8 @@ impl PeltApp {
             }
             ui.separator();
         }
-        if let CatalogOpenState::Open(store) = &self.catalog {
+        {
+            let store = &self.catalog;
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
             let blocked = self
                 .job_active(&[
@@ -2519,9 +2491,7 @@ impl PeltApp {
             );
             return;
         }
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return;
-        };
+        let store = &self.catalog;
         let samples = ids
             .iter()
             .take(3)
@@ -2570,9 +2540,7 @@ impl PeltApp {
                 return Some((id, develop.document().clone()));
             }
         }
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return None;
-        };
+        let store = &self.catalog;
         store
             .get_master_edit(id)
             .ok()
@@ -2682,9 +2650,7 @@ impl PeltApp {
     /// edits are flushed first so the batch sees them, and its `DevelopView` is refreshed after,
     /// or the per-frame autosave would write the stale in-memory document back over the batch.
     fn run_knead_command(&mut self, command: KneadCommand) {
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return;
-        };
+        let store = &self.catalog;
         let store = store.clone();
         if self.knead_busy() {
             return;
@@ -2758,9 +2724,7 @@ impl PeltApp {
     /// Draws the Export dialog while open; starting it builds the run's environment from live
     /// app state.
     fn show_export_dialog(&mut self, ctx: &egui::Context) {
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return;
-        };
+        let store = &self.catalog;
         let store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
         let env = || {
             Some(ExportEnv {
@@ -2820,9 +2784,7 @@ impl PeltApp {
 
     /// [`Self::save_develop_edits_to`] against the app's own catalog.
     fn save_develop_edits(&mut self, force: bool) -> bool {
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            return true;
-        };
+        let store = &self.catalog;
         let store = store.clone();
         self.save_develop_edits_to(store.as_ref(), force)
     }
@@ -2832,11 +2794,7 @@ impl PeltApp {
     /// and drags to pan while zoomed. Shows the T0 embedded preview instantly while a real decode
     /// is still in flight -- the real "< 50ms next/prev" target a RAW decode itself can't hit.
     fn show_loupe(&mut self, ui: &mut egui::Ui) {
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            ui.heading("Loupe");
-            ui.colored_label(egui::Color32::RED, "Catalog is not open.");
-            return;
-        };
+        let store = &self.catalog;
         let store = store.clone();
 
         let Some(loupe) = self.loupe.as_mut() else {
@@ -3115,11 +3073,7 @@ impl PeltApp {
     /// #398: queues the debounced render of the last-saved photo once its deadline passes, and
     /// prefetches renders for the loupe's neighbours (never evicting the current photo's).
     fn queue_due_renders(&mut self, ctx: &egui::Context) {
-        let CatalogOpenState::Open(store) = &self.catalog else {
-            // Pending ids belong to the catalog that was open when they were saved.
-            self.render_due.clear();
-            return;
-        };
+        let store = &self.catalog;
         let store = store.clone();
         let now = std::time::Instant::now();
         let policy = self.preview_settings.effective_policy();

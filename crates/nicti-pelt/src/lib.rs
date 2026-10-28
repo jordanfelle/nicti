@@ -59,21 +59,10 @@ mod xmp_sync;
 
 use std::sync::Arc;
 
-use nicti_lair::SqliteCatalog;
-
 pub use app::PeltApp;
 /// Re-exported so `src/main.rs` (the root `nicti` binary) doesn't need its own direct `eframe`
 /// dependency just to spell this return type.
 pub use eframe::Result;
-
-/// The catalog's open state. A catalog that fails to open never reaches the app any more:
-/// `catalog_problem` shows the retry/choose/quit window first and only builds the app once one
-/// opens, so `Error` is no longer constructed (collapsing this enum is a follow-up).
-enum CatalogOpenState {
-    Open(Arc<SqliteCatalog>),
-    #[allow(dead_code)]
-    Error(String),
-}
 
 /// Runs the app. `WgpuSetup::CreateNew`'s `device_descriptor` closure requests
 /// `nicti_tapetum::gpu::device_descriptor_for`'s own descriptor (the adapter's real limits plus
