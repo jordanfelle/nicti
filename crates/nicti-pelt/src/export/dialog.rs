@@ -640,6 +640,14 @@ fn metadata_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             m.policy == MetadataPolicy::All,
             egui::Checkbox::new(&mut m.include_keywords, "Include keywords"),
         );
+        ui.add_enabled(
+            m.policy == MetadataPolicy::All,
+            egui::Checkbox::new(&mut m.include_location, "Include location (GPS)"),
+        )
+        .on_hover_text(
+            "Off by default: the photo's GPS position is removed from the exported file. \
+             Only photos that have a position in their EXIF are affected.",
+        );
     });
     optional_text(ui, "Artist", &mut m.artist);
     optional_text(ui, "Copyright", &mut m.copyright);

@@ -673,6 +673,7 @@ mod tests {
             include_keywords: true,
             artist: Some("Jo".into()),
             copyright: Some("(c) Jo".into()),
+            ..Default::default()
         };
         let src = SourceMetadata {
             exif: SourceExif {

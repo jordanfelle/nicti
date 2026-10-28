@@ -357,6 +357,10 @@ pub struct MetadataSpec {
     pub policy: MetadataPolicy,
     /// Write the photo's catalog keywords into XMP (`dc:subject`). Ignored for `None`.
     pub include_keywords: bool,
+    /// Write the photo's GPS position (EXIF GPS sub-IFD) when the source file has one. Off by
+    /// default: a position is the most sensitive thing a photo carries, so sharing it is opt-in.
+    /// Only applies under [`MetadataPolicy::All`]; `CopyrightOnly` and `None` never carry it.
+    pub include_location: bool,
     pub artist: Option<String>,
     pub copyright: Option<String>,
 }
