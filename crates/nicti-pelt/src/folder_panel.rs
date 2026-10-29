@@ -16,6 +16,7 @@ use nicti_lair::carry::Resolution;
 use nicti_lair::{MoveState, Root, RootMove};
 
 use crate::archive_drives::ArchiveDrives;
+use crate::folder_browse::Browse;
 use crate::pending::Pending;
 
 /// A move the user asked for by dropping `root_id` on a drive or another folder.
@@ -35,6 +36,8 @@ pub struct PanelOutput {
     /// already-selected root again).
     pub select_root: Option<Option<i64>>,
     pub import_from: Option<String>,
+    /// A browsed (not yet imported) folder whose "Import this folder" button was clicked (#472).
+    pub import_folder: Option<PathBuf>,
     /// The root whose "Verify folder" context-menu entry was clicked (#386).
     pub verify: Option<i64>,
     /// A stuck journal row's resolution button that was clicked (#334): `(journal id, choice)`.
@@ -384,8 +387,13 @@ pub fn show(
     set_archive: &mut Option<(String, bool)>,
     selected_root: Option<i64>,
     verify_enabled: bool,
+    browse: &mut Browse,
 ) -> PanelOutput {
     let mut out = PanelOutput::default();
+    let registered: std::collections::HashSet<PathBuf> = tree
+        .iter()
+        .flat_map(|d| d.roots.iter().map(|r| PathBuf::from(&r.path)))
+        .collect();
     if tree.is_empty() {
         ui.weak("No folders yet -- import one.");
     }
@@ -418,6 +426,12 @@ pub fn show(
                     {
                         out.import_from = Some(drive.path.clone());
                     }
+                    // The folder the user is filtering to: open its location in the browse tree once.
+                    if let Some(sel) =
+                        selected_root.and_then(|id| drive.roots.iter().find(|r| r.id == id))
+                    {
+                        browse.reveal_once(sel.id, Path::new(&drive.path), Path::new(&sel.path));
+                    }
                     for root in &drive.roots {
                         let row = show_root(
                             ui,
@@ -432,6 +446,17 @@ pub fn show(
                         if row.verify {
                             out.verify = Some(root.id);
                         }
+                    }
+                    // Not for the `/` catch-all "drive": it is not a place to browse from.
+                    if drive.path != "/" {
+                        show_browse(
+                            ui,
+                            Path::new(&drive.path),
+                            "Browse folders",
+                            &registered,
+                            browse,
+                            &mut out,
+                        );
                     }
                 });
         });
@@ -473,6 +498,74 @@ pub fn show(
         ui.label(status);
     }
     out
+}
+
+/// An expandable folder row (a drive's "Browse folders" or a subfolder) whose body lists its
+/// subfolders, read lazily and off the UI thread (#472). The disclosure triangle is the header's
+/// own hit-rect, so opening a row never selects, imports or starts a drag.
+fn show_browse(
+    ui: &mut egui::Ui,
+    dir: &Path,
+    title: &str,
+    registered: &std::collections::HashSet<PathBuf>,
+    browse: &mut Browse,
+    out: &mut PanelOutput,
+) {
+    let open = browse.is_open(dir);
+    let resp = egui::CollapsingHeader::new(title)
+        .id_salt(("folder_panel_browse", dir))
+        .open(Some(open))
+        .show(ui, |ui| {
+            if dir.parent().is_some()
+                && !registered.contains(dir)
+                && title != "Browse folders"
+                && ui
+                    .small_button("Import this folder")
+                    .on_hover_text("Register this folder and import its photos.")
+                    .clicked()
+            {
+                out.import_folder = Some(dir.to_path_buf());
+            }
+            let ctx = ui.ctx().clone();
+            let Some(listing) = browse.listing(&ctx, dir).cloned() else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Reading\u{2026}");
+                });
+                return;
+            };
+            if let Some(err) = &listing.error {
+                ui.weak(format!("Can't read this folder: {err}"));
+                return;
+            }
+            if listing.names.is_empty() {
+                ui.weak("No subfolders.");
+            }
+            for name in &listing.names {
+                let child = dir.join(name);
+                if registered.contains(&child) {
+                    ui.weak(format!("\u{1F4C1} {name} (imported)"));
+                } else {
+                    show_browse(
+                        ui,
+                        &child,
+                        &format!("\u{1F4C2} {name}"),
+                        registered,
+                        browse,
+                        out,
+                    );
+                }
+            }
+            if listing.truncated {
+                ui.weak(format!(
+                    "\u{2026}only the first {} subfolders are shown.",
+                    crate::folder_browse::MAX_BROWSE_ENTRIES
+                ));
+            }
+        });
+    if resp.header_response.clicked() {
+        browse.set_open(dir, !open);
+    }
 }
 
 fn find_root(tree: &[DriveNode], id: i64) -> Option<&Root> {
@@ -722,6 +815,7 @@ mod tests {
                     &mut set_archive,
                     selected,
                     true,
+                    &mut crate::folder_browse::Browse::already_revealed(7),
                 );
                 if got != PanelOutput::default() {
                     *out = got;
@@ -732,6 +826,116 @@ mod tests {
         h.get_by_label(label).click();
         h.run();
         h.state().0.clone()
+    }
+
+    /// A panel over a real directory tree: the drive is `base`, with subfolders `a/x`, `b`, and
+    /// `b` registered as an imported root.
+    fn browse_harness(
+        base: &Path,
+    ) -> egui_kittest::Harness<'static, (PanelOutput, Vec<DriveNode>, crate::folder_browse::Browse)>
+    {
+        let drive = base.to_string_lossy().into_owned();
+        let registered = root(9, &base.join("b").to_string_lossy());
+        let tree = build_tree(&[registered], std::slice::from_ref(&drive));
+        egui_kittest::Harness::new_ui_state(
+            |ui, (out, tree, browse)| {
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                let got = show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                    browse,
+                );
+                if got != PanelOutput::default() {
+                    *out = got;
+                }
+            },
+            (
+                PanelOutput::default(),
+                tree,
+                crate::folder_browse::Browse::default(),
+            ),
+        )
+    }
+
+    /// Steps the harness until `label` is on screen (a listing is read on a real thread).
+    fn run_until_labelled(
+        h: &mut egui_kittest::Harness<
+            '_,
+            (PanelOutput, Vec<DriveNode>, crate::folder_browse::Browse),
+        >,
+        label: &str,
+    ) {
+        use egui_kittest::kittest::Queryable;
+        let start = std::time::Instant::now();
+        loop {
+            h.run();
+            if h.query_by_label(label).is_some() {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "{label:?} never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_drive_can_be_browsed_down_to_a_folder_and_imported_without_selecting_anything() {
+        use egui_kittest::kittest::Queryable;
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("a/x")).unwrap();
+        std::fs::create_dir(t.path().join("b")).unwrap();
+        let mut h = browse_harness(t.path());
+        // Nothing is read until the user opens it: no spinner, no children yet.
+        assert!(h.query_by_label("\u{1F4C2} a").is_none());
+        h.get_by_label("Browse folders").click();
+        run_until_labelled(&mut h, "\u{1F4C2} a");
+        // The imported root is listed as such, not offered for import again.
+        assert!(h.query_by_label("\u{1F4C1} b (imported)").is_some());
+        h.get_by_label("\u{1F4C2} a").click();
+        run_until_labelled(&mut h, "\u{1F4C2} x");
+        h.get_by_label("Import this folder").click();
+        h.run();
+        let out = h.state().0.clone();
+        assert_eq!(out.import_folder, Some(t.path().join("a")));
+        assert_eq!(
+            out.select_root, None,
+            "browsing never changes the grid filter"
+        );
+        assert_eq!(out.import_from, None);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_read_says_so_instead_of_spinning() {
+        use egui_kittest::kittest::Queryable;
+        let t = tempfile::tempdir().unwrap();
+        let gone = t.path().join("gone");
+        let mut h = browse_harness(&gone);
+        h.get_by_label("Browse folders").click();
+        let start = std::time::Instant::now();
+        loop {
+            h.run();
+            if h.query_all_by_label_contains("Can't read this folder")
+                .next()
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "no error shown"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -763,6 +967,7 @@ mod tests {
                     &mut set_archive,
                     None,
                     true,
+                    &mut crate::folder_browse::Browse::default(),
                 );
                 if got != PanelOutput::default() {
                     *out = got;
@@ -813,6 +1018,7 @@ mod tests {
                     &mut set_archive,
                     None,
                     true,
+                    &mut crate::folder_browse::Browse::default(),
                 );
                 if got != PanelOutput::default() {
                     *out = got;
