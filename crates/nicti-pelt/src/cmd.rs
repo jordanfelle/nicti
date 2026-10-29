@@ -62,8 +62,11 @@ pub trait CommandHost {
     fn view_name(&self) -> &'static str;
     /// Switches view. Only `"library"` and `"loupe"` can be entered on request.
     fn set_view(&mut self, view: &str) -> Result<(), String>;
-    /// Makes `asset_id` the grid's selected photo.
+    /// Makes `asset_id` the only selected photo (clearing any multi-selection). Library view only:
+    /// the loupe and Develop follow their own cursor and would undo it.
     fn select_asset(&mut self, asset_id: i64) -> Result<(), String>;
+    /// Whether the catalog holds a photo with this id.
+    fn known_asset(&self, asset_id: i64) -> bool;
     /// The photos a mark acts on right now (the selection, else the cursor).
     fn target_ids(&self) -> Vec<i64>;
     /// Sets (or with `None` clears) the star rating, `-1` being reject, of `ids`.
@@ -131,14 +134,6 @@ fn run_grid_select(host: &mut dyn CommandHost, params: &Value) -> Result<Value, 
     Ok(json!({ "selected": id }))
 }
 
-fn rate_enabled(host: &dyn CommandHost) -> Result<(), String> {
-    if host.target_ids().is_empty() {
-        Err("no photo is selected".into())
-    } else {
-        Ok(())
-    }
-}
-
 fn run_photo_rate(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
     only_keys(params, &["rating", "assets"])?;
     // `null` clears; 1..=5 are stars; -1 rejects. 0 is not a rating, so it is refused rather than
@@ -165,6 +160,13 @@ fn run_photo_rate(host: &mut dyn CommandHost, params: &Value) -> Result<Value, S
     }
     if ids.len() > MAX_RATE_BATCH {
         return Err(format!("at most {MAX_RATE_BATCH} photos per call"));
+    }
+    // Ratings write XMP sidecars, so only photos the catalog really holds are touched, each once,
+    // and the count reported is the count rated.
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<i64> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
+    if let Some(bad) = ids.iter().find(|id| !host.known_asset(**id)) {
+        return Err(format!("photo {bad} is not in the catalog"));
     }
     host.rate(&ids, rating)?;
     Ok(json!({ "rated": ids.len(), "rating": rating }))
@@ -233,7 +235,7 @@ pub const COMMANDS: &[Command] = &[
         label: "Rate photos",
         params: r#"{"rating": null | -1 | 1..5, "assets"?: [ids]}  (default: the selection)"#,
         risk: Risk::Mutate,
-        enabled: rate_enabled,
+        enabled: always,
         run: run_photo_rate,
     },
     Command {
@@ -332,13 +334,16 @@ pub struct Request {
 /// The requests waiting for the UI thread.
 pub struct CommandQueue {
     tx: Sender<Request>,
-    rx: Receiver<Request>,
+    rx: std::sync::Mutex<Receiver<Request>>,
 }
 
 impl Default for CommandQueue {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx }
+        Self {
+            tx,
+            rx: std::sync::Mutex::new(rx),
+        }
     }
 }
 
@@ -358,7 +363,9 @@ impl CommandQueue {
     pub fn drain(&self, host: &mut dyn CommandHost, policy: Policy) -> usize {
         let mut ran = 0;
         while ran < MAX_PER_DRAIN {
-            let Ok(req) = self.rx.try_recv() else { break };
+            // The lock is held only for the pop, so a command may itself submit.
+            let next = self.rx.lock().ok().and_then(|rx| rx.try_recv().ok());
+            let Some(req) = next else { break };
             let result = if req.id == "commands" {
                 Ok(list(host, policy))
             } else {
@@ -399,12 +406,70 @@ where
 pub fn develop_stage_get(dev: &DevelopView, stage: &str) -> Result<Value, String> {
     check_stage(stage)?;
     Ok(match stage {
-        WB => read_typed::<WbParams>(dev, stage),
+        WB => {
+            let mut v = read_typed::<WbParams>(dev, stage);
+            // `temp_k` is left out of the document while the white balance is as-shot; show it.
+            if let Some(o) = v.as_object_mut() {
+                o.entry("temp_k").or_insert(Value::Null);
+            }
+            v
+        }
         EXPOSURE => read_typed::<ExposureParams>(dev, stage),
         TONE => read_typed::<ToneParams>(dev, stage),
         VIBRANCE => read_typed::<VibranceParams>(dev, stage),
         _ => read_typed::<PresenceParams>(dev, stage),
     })
+}
+
+/// Fields a stage may have that serialize only when set (so `read_typed` does not show them).
+fn optional_fields(stage: &str) -> &'static [&'static str] {
+    if stage == WB {
+        &["temp_k"]
+    } else {
+        &[]
+    }
+}
+
+/// The accepted range of a stage's numeric fields, from the documented slider ranges. A value
+/// outside it is refused rather than clamped, so an agent learns it was wrong.
+fn field_range(stage: &str, field: &str) -> (f64, f64) {
+    match (stage, field) {
+        (WB, "temp_k") => (2000.0, 50000.0),
+        (WB, _) => (-150.0, 150.0),
+        (EXPOSURE, _) => (-5.0, 5.0),
+        _ => (-1.0, 1.0),
+    }
+}
+
+/// Merges `patch` into `current` (a stage's serialized params), refusing unknown fields,
+/// non-numeric or out-of-range values (`null` clears an optional field). Pure, so it is tested
+/// without a `DevelopView`.
+fn merge_patch(
+    stage: &str,
+    mut current: Map<String, Value>,
+    patch: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
+    let optional = optional_fields(stage);
+    for (k, v) in patch {
+        if !current.contains_key(k) && !optional.contains(&k.as_str()) {
+            return Err(format!("stage `{stage}` has no field `{k}`"));
+        }
+        if v.is_null() && optional.contains(&k.as_str()) {
+            current.remove(k);
+            continue;
+        }
+        let n = v
+            .as_f64()
+            .ok_or_else(|| format!("field `{k}` must be a number"))?;
+        let (lo, hi) = field_range(stage, k);
+        // `1e300` parses into an f32 as infinity, which would serialize back to `null` and poison
+        // the document, so the bound is checked on the caller's number, not on the parsed one.
+        if !(lo..=hi).contains(&n) {
+            return Err(format!("field `{k}` must be within {lo}..={hi}"));
+        }
+        current.insert(k.clone(), v.clone());
+    }
+    Ok(current)
 }
 
 fn apply_patch<T>(
@@ -415,22 +480,16 @@ fn apply_patch<T>(
 where
     T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
 {
-    let mut current = match read_typed::<T>(dev, stage) {
+    let current = match read_typed::<T>(dev, stage) {
         Value::Object(o) => o,
         _ => return Err(format!("stage `{stage}` has no named fields")),
     };
-    for (k, v) in patch {
-        let Some(slot) = current.get_mut(k) else {
-            return Err(format!("stage `{stage}` has no field `{k}`"));
-        };
-        // A wrong JSON type (or a non-finite number, which JSON can't carry) fails the typed
-        // re-parse below, before anything is written.
-        *slot = v.clone();
-    }
-    let next: T = serde_json::from_value(Value::Object(current))
+    let merged = merge_patch(stage, current, patch)?;
+    let next: T = serde_json::from_value(Value::Object(merged))
         .map_err(|e| format!("invalid params for `{stage}`: {e}"))?;
-    dev.set_stage_params(stage, &next);
-    Ok(read_typed::<T>(dev, stage))
+    // Each scripted write is its own undo step, never folded into the user's last slider drag.
+    dev.without_gesture_merging(|dev| dev.set_stage_params(stage, &next));
+    develop_stage_get(dev, stage)
 }
 
 /// Sets the named fields of a stage (leaving the rest), through the undo history. Unknown fields,
@@ -485,6 +544,9 @@ mod tests {
         fn select_asset(&mut self, id: i64) -> Result<(), String> {
             self.selected = Some(id);
             Ok(())
+        }
+        fn known_asset(&self, id: i64) -> bool {
+            (1..=100).contains(&id)
         }
         fn target_ids(&self) -> Vec<i64> {
             self.selected.into_iter().collect()
@@ -548,10 +610,26 @@ mod tests {
     fn select_then_rate_acts_on_the_selection_and_validates_the_rating() {
         let mut m = Mock::default();
         let e = dispatch(&mut m, OPEN, "photo.rate", &json!({"rating": 3})).unwrap_err();
-        assert!(
-            e.contains("not available") && e.contains("no photo is selected"),
-            "{e}"
-        );
+        assert!(e.contains("no photo is selected"), "{e}");
+        // Explicit ids work with nothing selected; unknown ids refuse the whole call; repeats are
+        // rated once and counted once.
+        let out = dispatch(
+            &mut m,
+            OPEN,
+            "photo.rate",
+            &json!({"rating": 2, "assets": [9, 9, 10]}),
+        )
+        .unwrap();
+        assert_eq!(out, json!({"rated": 2, "rating": 2}));
+        assert_eq!(m.rated.pop().unwrap().0, vec![9, 10]);
+        let e = dispatch(
+            &mut m,
+            OPEN,
+            "photo.rate",
+            &json!({"rating": 2, "assets": [9, 5000]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("5000") && m.rated.is_empty(), "{e}");
         dispatch(&mut m, OPEN, "grid.select", &json!({"asset": 42})).unwrap();
         let out = dispatch(&mut m, OPEN, "photo.rate", &json!({"rating": 3})).unwrap();
         assert_eq!(out, json!({"rated": 1, "rating": 3}));
@@ -695,6 +773,60 @@ mod tests {
         );
     }
 
+    fn obj(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn merge_patch_refuses_unknown_fields_wrong_types_and_out_of_range_numbers() {
+        let cur = obj(json!({"stops": 0.0}));
+        let ok = merge_patch(EXPOSURE, cur.clone(), &obj(json!({"stops": 2.5}))).unwrap();
+        assert_eq!(ok["stops"], 2.5);
+        for bad in [
+            json!({"nope": 1}),
+            json!({"stops": "high"}),
+            json!({"stops": true}),
+            json!({"stops": null}),
+            json!({"stops": 5.1}),
+            json!({"stops": -5.1}),
+            // f32 parses this as infinity, which would serialize to null and poison the document.
+            json!({"stops": 1e300}),
+            json!({"stops": 3e38}),
+        ] {
+            assert!(
+                merge_patch(EXPOSURE, cur.clone(), &obj(bad.clone())).is_err(),
+                "{bad}"
+            );
+        }
+        // The documented limits are inclusive.
+        assert!(merge_patch(EXPOSURE, cur.clone(), &obj(json!({"stops": 5.0}))).is_ok());
+        assert!(merge_patch(
+            TONE,
+            obj(json!({"contrast": 0.0})),
+            &obj(json!({"contrast": 1.0}))
+        )
+        .is_ok());
+        assert!(merge_patch(
+            TONE,
+            obj(json!({"contrast": 0.0})),
+            &obj(json!({"contrast": 1.5}))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn white_balance_temperature_can_be_set_and_cleared_although_as_shot_omits_it() {
+        let as_shot = obj(json!({"tint": 0.0})); // `temp_k` is not serialized while as-shot
+        let set = merge_patch(WB, as_shot, &obj(json!({"temp_k": 5500.0}))).unwrap();
+        assert_eq!(set["temp_k"], 5500.0);
+        let cleared = merge_patch(WB, set, &obj(json!({"temp_k": null}))).unwrap();
+        assert!(!cleared.contains_key("temp_k"), "null returns to as-shot");
+        assert!(merge_patch(WB, cleared.clone(), &obj(json!({"temp_k": 100.0}))).is_err());
+        assert!(merge_patch(WB, cleared.clone(), &obj(json!({"tint": 200.0}))).is_err());
+        // `null` clears only optional fields.
+        assert!(merge_patch(WB, cleared, &obj(json!({"tint": null}))).is_err());
+    }
+
     fn develop() -> Option<DevelopView> {
         Some(DevelopView::new(crate::test_gpu::shared()?))
     }
@@ -709,14 +841,29 @@ mod tests {
         assert_eq!(develop_stage_get(&dev, EXPOSURE).unwrap()["stops"], 1.5);
         // Patching one field keeps the others.
         develop_stage_set(&mut dev, TONE, &json!({"contrast": 0.25})).unwrap();
+        // History timestamps are whole milliseconds; two writes in the same one are one gesture.
+        std::thread::sleep(std::time::Duration::from_millis(3));
         develop_stage_set(&mut dev, TONE, &json!({"shadows": 0.5})).unwrap();
         let tone = develop_stage_get(&dev, TONE).unwrap();
         assert_eq!(
             (tone["contrast"].as_f64(), tone["shadows"].as_f64()),
             (Some(0.25), Some(0.5))
         );
-        // It is an undoable edit.
+        // Each scripted write is its own undo step, even straight after another one: undoing
+        // the `shadows` write leaves the earlier `contrast` write in place.
         assert!(dev.undo());
+        let tone = develop_stage_get(&dev, TONE).unwrap();
+        assert_eq!(
+            (tone["contrast"].as_f64(), tone["shadows"].as_f64()),
+            (Some(0.25), Some(0.0))
+        );
+        // White balance reads back with an explicit as-shot `temp_k`, and can be set and cleared.
+        assert!(develop_stage_get(&dev, WB).unwrap()["temp_k"].is_null());
+        develop_stage_set(&mut dev, WB, &json!({"temp_k": 6500.0})).unwrap();
+        assert_eq!(develop_stage_get(&dev, WB).unwrap()["temp_k"], 6500.0);
+        develop_stage_set(&mut dev, WB, &json!({"temp_k": null})).unwrap();
+        assert!(develop_stage_get(&dev, WB).unwrap()["temp_k"].is_null());
+        assert!(develop_stage_set(&mut dev, EXPOSURE, &json!({"stops": 1e300})).is_err());
         // Bad input writes nothing.
         let stops = develop_stage_get(&dev, EXPOSURE).unwrap();
         for (stage, patch) in [

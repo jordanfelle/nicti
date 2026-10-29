@@ -38,7 +38,7 @@ LightCraft sources below are the reference read for the questions, at the pinned
 - **#426 landed `swat/`** (`#[cfg(test)]` only): egui_kittest + a CPU softpaint rasteriser, finding
   widgets by AccessKit label. It cannot draw the wgpu photo viewport (paint callbacks), by design, and
   it did **not** deliver the named-widget registry its title mentions; section 4 adds one.
-- `PeltApp` implements only `eframe::App::ui`, not `logic`. eframe 0.37 runs **no egui pass** while the
+- `PeltApp` implemented only `eframe::App::ui`, not `logic` (slice 1, #542, added `logic`). eframe 0.37 runs **no egui pass** while the
   window is hidden or minimised (it calls only `logic`), and throttles invisible windows to 100 ms.
 - The layering check (`scripts/check-repo-policy.py`) allows egui/eframe/accesskit only in
   `nicti-pelt` and the root `nicti` binary. Anything GUI-aware has to live in pelt.
@@ -196,7 +196,7 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
 ## Slice 1 as built (#542)
 
 - `crates/nicti-pelt/src/cmd.rs`: `Command` / `Risk` / `Policy`, `dispatch`, `list`, `CommandQueue`
-  (drained by `PeltApp::drain_commands` from both `eframe::App::logic` and `ui`, at most 16 per drain).
+  (drained by `PeltApp::drain_commands` from both `eframe::App::logic` and `ui`, at most 16 per drain, so up to 32 requests a frame; `Arc`-shared so a command may itself submit).
 - **Deviation from section 1:** `run`/`enabled` take `&mut dyn CommandHost`, not `&mut PeltApp`.
   `PeltApp::new` needs eframe's wgpu `RenderState`, so a `PeltApp` cannot be built in a test; the
   trait is mocked there and `PeltApp` implements it. The Develop get/set core is a free function
@@ -211,3 +211,11 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
   follow-up with the transport slice.
 - `Risk::Destructive` is enforced by `Policy::allow_destructive` (tested with a synthetic entry);
   no destructive command exists yet. Nothing feeds the queue until slice 2a.
+- Hardening from the pre-PR review: `develop.set` refuses out-of-range numbers (the documented slider
+  ranges; an f32 parse of `1e300` is infinity and would serialize to `null`, poisoning the document),
+  can set/clear the as-shot-omitted `temp_k`, and each call is its own undo step
+  (`DevelopView::without_gesture_merging`). `grid.select` clears the multi-selection and only works
+  in the library view; `photo.rate` rates only catalog photos, each once, and reports that count;
+  `export.open` and `view.set loupe` report failure instead of silently succeeding; `ui.inspect`
+  lists at most 1000 selected ids (plus the exact count). Still for slice 2a: a request-size cap
+  before parsing, and waking an idle window when a request arrives.

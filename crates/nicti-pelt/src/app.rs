@@ -274,7 +274,7 @@ pub struct PeltApp {
     cull_notice: Option<String>,
     /// Requests for the command table (#542), run on the UI thread in `logic` and `ui`. Nothing
     /// feeds it until the control channel (ADR-0434 slice 2a) lands; tests and a palette can.
-    commands: crate::cmd::CommandQueue,
+    commands: Arc<crate::cmd::CommandQueue>,
     command_policy: crate::cmd::Policy,
 }
 
@@ -2472,9 +2472,9 @@ impl PeltApp {
     }
 
     /// Opens the Export dialog for the current view's photos (#57).
-    fn request_export(&mut self) {
+    fn request_export(&mut self) -> bool {
         if self.export.is_running() {
-            return;
+            return false;
         }
         if self.job_active(&[
             JobKind::Import,
@@ -2488,11 +2488,11 @@ impl PeltApp {
                 "Wait for the running import, sync, move or delete to finish before exporting."
                     .into(),
             );
-            return;
+            return false;
         }
         let ids = self.export_targets();
         if ids.is_empty() {
-            return;
+            return false;
         }
         // Export renders what the catalog holds, so put Develop's pending edits there first.
         // If that save fails, export would silently render the older stored edits: stop instead.
@@ -2501,7 +2501,7 @@ impl PeltApp {
                 "Couldn't save Develop's edits, so nothing was exported (see the message above)."
                     .into(),
             );
-            return;
+            return false;
         }
         let store = &self.catalog;
         let samples = ids
@@ -2521,6 +2521,7 @@ impl PeltApp {
             n => format!("{n} photos"),
         };
         self.export.request(ids, scope, samples);
+        true
     }
 
     /// The photos a copy/paste/preset acts on. Develop edits the one photo `DevelopView` has
@@ -3542,13 +3543,15 @@ mod folder_input_tests {
     }
 }
 
+/// Most selected ids `ui.inspect` lists (the count is always exact).
+const MAX_INSPECT_IDS: usize = 1000;
+
 impl PeltApp {
     /// Runs the waiting command-table requests; asks for another frame if the cap left some.
     fn drain_commands(&mut self, ctx: &egui::Context) {
-        let queue = std::mem::take(&mut self.commands);
+        let queue = Arc::clone(&self.commands);
         let policy = self.command_policy;
         let ran = queue.drain(self, policy);
-        self.commands = queue;
         if ran >= crate::cmd::MAX_PER_DRAIN {
             ctx.request_repaint();
         }
@@ -3559,7 +3562,8 @@ impl crate::cmd::CommandHost for PeltApp {
     fn inspect(&self) -> serde_json::Value {
         serde_json::json!({
             "view": self.view_name(),
-            "selected": self.mark_targets(),
+            "selected": self.mark_targets().into_iter().take(MAX_INSPECT_IDS).collect::<Vec<_>>(),
+            "selected_count": self.mark_targets().len(),
             "grid_cursor": self.grid.as_ref().and_then(GridSession::cursor_id),
             "grid_len": self.grid.as_ref().map(GridSession::len),
             "develop_asset": self.loupe_loaded_asset.map(|(id, _)| id),
@@ -3584,6 +3588,14 @@ impl crate::cmd::CommandHost for PeltApp {
                 Ok(())
             }
             "loupe" => {
+                if self.view == View::Loupe {
+                    return Ok(()); // already there; don't rebuild the session
+                }
+                if self.job_active(&[JobKind::Move, JobKind::Delete, JobKind::Export]) {
+                    return Err(
+                        "the loupe can't open while a move, delete or export is running".into(),
+                    );
+                }
                 let index = self
                     .grid
                     .as_ref()
@@ -3605,13 +3617,21 @@ impl crate::cmd::CommandHost for PeltApp {
     }
 
     fn select_asset(&mut self, asset_id: i64) -> Result<(), String> {
+        if self.view != View::Library {
+            return Err("grid.select works in the library view (view.set library first)".into());
+        }
         let grid = self.grid.as_mut().ok_or("the library has no grid yet")?;
         if !grid.ids().contains(&asset_id) {
             return Err(format!("photo {asset_id} is not in the current grid"));
         }
+        grid.clear_selection();
         grid.select_asset(asset_id);
         self.grid_view.reveal_cursor();
         Ok(())
+    }
+
+    fn known_asset(&self, asset_id: i64) -> bool {
+        self.catalog.get_asset(asset_id).ok().flatten().is_some()
     }
 
     fn target_ids(&self) -> Vec<i64> {
@@ -3652,7 +3672,12 @@ impl crate::cmd::CommandHost for PeltApp {
         if self.export.is_running() {
             return Err("an export is already running".into());
         }
-        self.request_export();
-        Ok(())
+        if self.request_export() {
+            Ok(())
+        } else {
+            Err(self.cull_notice.clone().unwrap_or_else(|| {
+                "the export dialog could not open (no photos, or a job is running)".into()
+            }))
+        }
     }
 }
