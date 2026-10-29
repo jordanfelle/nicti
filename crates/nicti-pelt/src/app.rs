@@ -276,6 +276,9 @@ pub struct PeltApp {
     /// feeds it until the control channel (ADR-0434 slice 2a) lands; tests and a palette can.
     commands: Arc<crate::cmd::CommandQueue>,
     command_policy: crate::cmd::Policy,
+    /// The running control channel (#543), if `--control` asked for one. Dropping it closes the
+    /// socket and removes the token file.
+    control: Option<crate::control::Control>,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -512,6 +515,7 @@ impl PeltApp {
             compare: None,
             tile_previews: TilePreviews::new(larder.clone()),
             cull_notice: None,
+            control: None,
             commands: Default::default(),
             command_policy: Default::default(),
             facets_dirty_since: None,
@@ -3540,6 +3544,40 @@ mod folder_input_tests {
             validate_folder_input(gone.to_str().unwrap(), false).unwrap(),
             gone
         );
+    }
+}
+
+impl PeltApp {
+    /// Starts the opt-in control channel (#543): a tokened loopback socket feeding the command
+    /// table. A failure is reported and the app carries on without it.
+    pub fn enable_control(&mut self, opts: crate::control::ControlOptions, ctx: &egui::Context) {
+        let started = crate::control::token_dir().and_then(|dir| {
+            let waker = ctx.clone();
+            crate::control::start(
+                opts,
+                &dir,
+                &self.commands,
+                Arc::new(move || waker.request_repaint()),
+            )
+        });
+        match started {
+            Ok(control) => {
+                eprintln!(
+                    "nicti: control channel on {} (token file {})",
+                    control.addr(),
+                    control.token_path().display()
+                );
+                self.command_policy = opts.policy();
+                // A hidden window runs `logic` but no `ui`; frame-dependent work still needs a
+                // paint (ADR-0434 section 2).
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+                self.control = Some(control);
+            }
+            Err(e) => {
+                eprintln!("nicti: control channel not started: {e}");
+                self.cull_notice = Some(format!("Control channel not started: {e}"));
+            }
+        }
     }
 }
 

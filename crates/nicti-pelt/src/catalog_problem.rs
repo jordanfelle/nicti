@@ -142,10 +142,16 @@ pub struct Launcher {
     version: String,
     ctx: egui::Context,
     render_state: egui_wgpu::RenderState,
+    /// The opt-in agent control channel (#543); started on the app that opens a catalog.
+    control: Option<crate::control::ControlOptions>,
 }
 
 impl Launcher {
-    pub fn new(cc: &eframe::CreationContext<'_>, version: String) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        version: String,
+        control: Option<crate::control::ControlOptions>,
+    ) -> Self {
         let render_state = cc
             .wgpu_render_state
             .clone()
@@ -159,6 +165,7 @@ impl Launcher {
             version,
             ctx: cc.egui_ctx.clone(),
             render_state,
+            control,
         };
         let path = catalog::resolve_path();
         launcher.stage = match open_catalog(&path) {
@@ -172,13 +179,17 @@ impl Launcher {
     }
 
     fn build(&self, path: PathBuf, store: SqliteCatalog) -> PeltApp {
-        PeltApp::new(
+        let mut app = PeltApp::new(
             &self.ctx,
             &self.render_state,
             self.version.clone(),
             path,
             store,
-        )
+        );
+        if let Some(opts) = self.control {
+            app.enable_control(opts, &self.ctx);
+        }
+        app
     }
 
     fn apply(&mut self, ctx: &egui::Context, outcome: Outcome<SqliteCatalog>) {
@@ -197,6 +208,12 @@ impl eframe::App for Launcher {
     fn on_exit(&mut self) {
         if let Stage::Running(app) = &mut self.stage {
             app.on_exit();
+        }
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Stage::Running(app) = &mut self.stage {
+            app.logic(ctx, frame);
         }
     }
 

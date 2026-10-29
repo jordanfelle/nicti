@@ -329,6 +329,9 @@ pub struct Request {
     pub id: String,
     pub params: Value,
     pub reply: Sender<Result<Value, String>>,
+    /// Set by the transport when it gave up waiting (and told the client so): the request must
+    /// not run afterwards.
+    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The requests waiting for the UI thread.
@@ -366,6 +369,10 @@ impl CommandQueue {
             // The lock is held only for the pop, so a command may itself submit.
             let next = self.rx.lock().ok().and_then(|rx| rx.try_recv().ok());
             let Some(req) = next else { break };
+            if req.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                ran += 1; // dropped requests count against the cap too
+                continue; // the client was already told it timed out
+            }
             let result = if req.id == "commands" {
                 Ok(list(host, policy))
             } else {
@@ -736,6 +743,7 @@ mod tests {
                 id: "grid.select".into(),
                 params: json!({ "asset": i as i64 }),
                 reply: rtx,
+                cancelled: Default::default(),
             })
             .unwrap();
             replies.push(rrx);
@@ -757,6 +765,7 @@ mod tests {
             id: "commands".into(),
             params: Value::Null,
             reply: rtx,
+            cancelled: Default::default(),
         })
         .unwrap();
         let (dead, _) = mpsc::channel();
@@ -764,6 +773,7 @@ mod tests {
             id: "ui.inspect".into(),
             params: Value::Null,
             reply: dead,
+            cancelled: Default::default(),
         })
         .unwrap();
         assert_eq!(q.drain(&mut m, OPEN), 2);
@@ -825,6 +835,33 @@ mod tests {
         assert!(merge_patch(WB, cleared.clone(), &obj(json!({"tint": 200.0}))).is_err());
         // `null` clears only optional fields.
         assert!(merge_patch(WB, cleared, &obj(json!({"tint": null}))).is_err());
+    }
+
+    #[test]
+    fn abandoned_requests_count_against_the_per_drain_cap() {
+        let q = CommandQueue::default();
+        let tx = q.sender();
+        for _ in 0..(MAX_PER_DRAIN + 4) {
+            let (rtx, _rrx) = mpsc::channel();
+            tx.send(Request {
+                id: "ui.inspect".into(),
+                params: Value::Null,
+                reply: rtx,
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            })
+            .unwrap();
+        }
+        let mut m = Mock::default();
+        assert_eq!(
+            q.drain(&mut m, OPEN),
+            MAX_PER_DRAIN,
+            "a flood of abandoned requests stalled the frame"
+        );
+        assert_eq!(
+            q.drain(&mut m, OPEN),
+            4,
+            "the rest are left for the next frame"
+        );
     }
 
     fn develop() -> Option<DevelopView> {
