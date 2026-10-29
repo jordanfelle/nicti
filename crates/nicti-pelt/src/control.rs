@@ -723,8 +723,8 @@ mod tests {
         // Built, not spelled out: a long hex literal in source trips the repo's secret scanner.
         let t = "ab".repeat(16);
         let t = t.as_str();
-        let nonce = "cd".repeat(16);
-        let cn = "ef".repeat(16);
+        let nonce = new_token().unwrap();
+        let cn = new_token().unwrap();
         let line = |auth: &str, cnonce: &str| json!({"auth": auth, "cnonce": cnonce}).to_string();
         let good = mac(t, "client", &nonce, &cn);
         assert_eq!(
@@ -738,7 +738,7 @@ mod tests {
         let mut near = good.clone();
         near.replace_range(..1, if good.starts_with('0') { "1" } else { "0" });
         assert_eq!(authenticates(&line(&near, &cn), t, &nonce), None);
-        let other_nonce = "12".repeat(16);
+        let other_nonce = new_token().unwrap();
         assert_eq!(authenticates(&line(&good, &cn), t, &other_nonce), None);
         let reflected = mac(t, "server", &nonce, &cn);
         assert_eq!(authenticates(&line(&reflected, &cn), t, &nonce), None);
@@ -747,7 +747,7 @@ mod tests {
         assert_eq!(authenticates(&line(&theirs, &cn), t, &nonce), None);
         // The client nonce is part of what is signed, and must look like one.
         assert_eq!(
-            authenticates(&line(&good, &"ee".repeat(16)), t, &nonce),
+            authenticates(&line(&good, &new_token().unwrap()), t, &nonce),
             None
         );
         let short = "ab".repeat(4);
@@ -769,7 +769,11 @@ mod tests {
             assert_eq!(authenticates(&bad, t, &nonce), None, "{bad}");
         }
         // Length-prefixing: moving a byte between the nonces changes the MAC.
-        assert_ne!(mac(t, "client", "aab", "c"), mac(t, "client", "aa", "bc"));
+        let both = new_token().unwrap();
+        assert_ne!(
+            mac(t, "client", &both[..17], &both[17..]),
+            mac(t, "client", &both[..16], &both[16..])
+        );
     }
 
     #[cfg(unix)]
@@ -1021,7 +1025,7 @@ mod tests {
             let nonce = nonce_of(&mut s);
             let line = match variant {
                 0 => answer(&"00".repeat(16), &nonce, &cn), // another token's answer
-                1 => answer(&rig.token, &"11".repeat(16), &cn), // an answer to another nonce
+                1 => answer(&rig.token, &new_token().unwrap(), &cn), // an answer to another nonce
                 2 => json!({"auth": rig.token, "cnonce": cn}).to_string(), // the token itself
                 3 => r#"{"method":"grid.select","params":{"asset":1}}"#.to_owned(),
                 4 => "POST / HTTP/1.1".to_owned(),
