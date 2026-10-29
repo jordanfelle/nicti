@@ -354,7 +354,7 @@ pub fn begin_stroke_pressure(
         pressure: pressure
             .map(|v| vec![v.clamp(0.0, 1.0)])
             .unwrap_or_default(),
-        buildup: brush.buildup,
+        buildup: brush.buildup && !erase,
     });
     Some((comp, strokes.len() - 1))
 }

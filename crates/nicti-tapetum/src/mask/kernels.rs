@@ -532,7 +532,7 @@ impl MaskKernels {
                 bh as f32,
                 stroke.tiles_x as f32,
                 f32::from(erase),
-                f32::from(buildup),
+                f32::from(buildup && !erase),
                 0.0,
             ],
         );

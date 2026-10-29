@@ -6,7 +6,9 @@
 //! and a length is `n * long_edge`. Pixel centres sit at `+0.5`.
 //!
 //! Brush dabs blend with `max` inside a stroke (overlapping dabs must not double-darken) and strokes
-//! apply in order: an add stroke is `max(acc, s)`, an erase stroke is `max(acc - s, 0)`.
+//! apply in order: an add stroke is `max(acc, s)`, an erase stroke is `max(acc - s, 0)`. A build-up
+//! add stroke (#357) instead accumulates its dabs, `1-(1-s)(1-w)`, on top of what earlier strokes
+//! painted, so repeated passes darken.
 
 use super::params::{MaskSource, Stroke, MIN_RADIUS};
 use super::Field;
@@ -102,9 +104,16 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
     let nominal = (radius * SPACING_FRACTION).max(MIN_SPACING_PX);
     // A build-up dab's flow is rescaled by the spacing actually used, so a widened spacing (very
     // long strokes) deposits as much per unit length as the nominal one.
+    // (Erase strokes ignore build-up: they remove at full strength, like a max-blended stroke.)
     let buildup = |mut dabs: Vec<Dab>, spacing: f32| {
-        if stroke.buildup {
-            let n = spacing / nominal;
+        if stroke.buildup && !stroke.erase {
+            // A lone dab (a click, or a stroke shorter than one spacing) has no neighbours to
+            // build on, so it deposits what a stroke's centre gets from the dabs overlapping it.
+            let n = if dabs.len() == 1 {
+                2.0 / SPACING_FRACTION
+            } else {
+                spacing / nominal
+            };
             for d in &mut dabs {
                 d.flow = 1.0 - (1.0 - d.flow * BUILDUP_GAIN).powf(n);
             }
@@ -361,7 +370,7 @@ pub fn rasterize_brush(strokes: &[Stroke], width: usize, height: usize) -> Field
                 for x in lo_x..hi_x {
                     let w = d.weight(x as f32 + 0.5, y as f32 + 0.5);
                     let s = &mut scratch[(y - y0) * bw + (x - x0)];
-                    *s = if stroke.buildup {
+                    *s = if stroke.buildup && !stroke.erase {
                         1.0 - (1.0 - *s) * (1.0 - w)
                     } else {
                         s.max(w)
@@ -674,6 +683,22 @@ mod tests {
         let (b1, b2) = (pass(true, 1), pass(true, 2));
         assert!(b1 > 0.3 && b1 < 1.0, "one pass should not saturate: {b1}");
         assert!(b2 > b1 + 0.1, "second pass must darken: {b1} -> {b2}");
+    }
+
+    #[test]
+    fn a_buildup_click_is_not_fainter_than_a_stroke_and_erase_ignores_buildup() {
+        let mut click = stroke(&[[0.5, 0.5]], 0.1, 0.0, false);
+        click.buildup = true;
+        let peak = rasterize_brush(&[click.clone()], 100, 100).get(50, 50);
+        assert!(
+            peak > 0.7,
+            "a click should build up to a usable weight: {peak}"
+        );
+        // Erase removes at full strength whether or not Build-up is ticked.
+        let add = stroke(&[[0.5, 0.5]], 0.2, 0.0, false);
+        let mut erase = stroke(&[[0.5, 0.5]], 0.2, 0.0, true);
+        erase.buildup = true;
+        assert_eq!(rasterize_brush(&[add, erase], 100, 100).get(50, 50), 0.0);
     }
 
     #[test]
