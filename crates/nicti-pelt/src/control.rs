@@ -955,7 +955,7 @@ mod tests {
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut r = BufReader::new(s.try_clone().unwrap());
         let nonce = read_hello(&mut r);
-        let cnonce = "cd".repeat(16);
+        let cnonce = new_token().unwrap();
         writeln!(s, "{}", answer(token, &nonce, &cnonce)).map_err(|e| e.to_string())?;
         let reply: Value = serde_json::from_str(
             &read_line_limited(&mut r, 4096)
@@ -1015,7 +1015,7 @@ mod tests {
             let mut r = BufReader::new(s.try_clone().unwrap());
             read_hello(&mut r)
         };
-        let cn = "cd".repeat(16);
+        let cn = new_token().unwrap();
         for variant in 0..6 {
             let mut s = rig.connect();
             let nonce = nonce_of(&mut s);
@@ -1089,7 +1089,7 @@ mod tests {
         let mut s = rig.connect();
         let mut r = BufReader::new(s.try_clone().unwrap());
         let nonce = read_hello(&mut r);
-        writeln!(s, "{}", answer(&rig.token, &nonce, &"cd".repeat(16))).unwrap();
+        writeln!(s, "{}", answer(&rig.token, &nonce, &new_token().unwrap())).unwrap();
         let mut all = String::new();
         let _ = s.read_to_string(&mut all);
         assert!(all.contains("too many"), "{all}");
