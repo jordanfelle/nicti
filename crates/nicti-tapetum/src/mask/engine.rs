@@ -618,6 +618,7 @@ impl MaskEngine {
                             &out,
                             &binned,
                             stroke.erase,
+                            stroke.buildup,
                         );
                     });
                     Arc::new(out)
@@ -1221,6 +1222,7 @@ mod tests {
             feather: 0.02,
             flow: 1.0,
             erase,
+            ..Default::default()
         }
     }
 
@@ -1780,6 +1782,7 @@ mod tests {
                                     feather: 0.01,
                                     flow: 1.0,
                                     erase: false,
+                                    ..Default::default()
                                 }],
                             },
                             0.5,

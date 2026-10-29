@@ -1,12 +1,12 @@
 // One brush stroke folded into the running brush field (#49). Dispatched over the stroke's
 // bounding box only (the caller copies `prev` into the output first, so everything outside the box
 // is already right). Dabs are pre-binned on the CPU into 64x64 tiles, so a pixel only visits the
-// dabs that can touch its tile instead of all of them. Dabs blend with `max`; an erase stroke
+// dabs that can touch its tile instead of all of them. Dabs blend with `max` (a build-up stroke accumulates them as `1-(1-s)(1-w)`); an erase stroke
 // subtracts. CPU twin: mask::raster::rasterize_brush.
 
 struct Uniforms {
     origin: vec4<f32>, // bbox x0, y0, width, height (pixels)
-    mode: vec4<f32>,   // tiles_x, erase (0/1), 0, 0
+    mode: vec4<f32>,   // tiles_x, erase (0/1), buildup (0/1), 0
 }
 
 @group(0) @binding(0) var prev_tex: texture_2d<f32>;
@@ -40,11 +40,22 @@ fn mask_brush(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fx = f32(px.x) + 0.5;
     let fy = f32(px.y) + 0.5;
     let tile = (gid.y / 64u) * u32(u.mode.x) + (gid.x / 64u);
-    var s = 0.0;
-    for (var k = tile_offsets[tile]; k < tile_offsets[tile + 1u]; k = k + 1u) {
-        s = max(s, dab_weight(tile_dabs[k], fx, fy));
-    }
     let prev = textureLoad(prev_tex, px, 0).r;
+    // A build-up add stroke keeps accumulating on what earlier strokes painted, so passes build.
+    // Erase strokes never accumulate, whatever the uniform says (CPU twin: raster.rs).
+    let accumulate = u.mode.z > 0.5 && u.mode.y < 0.5;
+    var s = 0.0;
+    if (accumulate) {
+        s = prev;
+    }
+    for (var k = tile_offsets[tile]; k < tile_offsets[tile + 1u]; k = k + 1u) {
+        let w = dab_weight(tile_dabs[k], fx, fy);
+        if (accumulate) {
+            s = 1.0 - (1.0 - s) * (1.0 - w);
+        } else {
+            s = max(s, w);
+        }
+    }
     var out = max(prev, s);
     if (u.mode.y > 0.5) {
         out = max(prev - s, 0.0);

@@ -20,8 +20,8 @@ use nicti_tapetum::stages::MASKS;
 use crate::develop_panel::{image_to_screen, screen_to_image};
 use crate::fur::{self, SliderSpec};
 use crate::mask_edit::{
-    add_color_sample, add_component_from, add_correction, begin_stroke, delete, duplicate,
-    extend_stroke, has_brush, has_color_range, linear_ends, new_correction_from, next_id,
+    add_color_sample, add_component_from, add_correction, begin_stroke_pressure, delete, duplicate,
+    extend_stroke_pressure, has_brush, has_color_range, linear_ends, new_correction_from, next_id,
     preview_extent, preview_field, preview_key, radial_shape, set_linear, set_radial, Arm,
     BrushSettings, NewMask, Thumb, MAX_BRUSH_RADIUS, MIN_BRUSH_RADIUS,
 };
@@ -314,6 +314,17 @@ fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
     }
     changed |= fraction_slider(ui, "Moire", &mut a.moire, 0.0);
     changed
+}
+
+/// The stylus pressure (0..=1) reported by the latest touch event this frame, if any. egui only
+/// forwards a force for touch/pen input (a mouse reports none, so its strokes stay full pressure).
+fn stylus_pressure(ui: &egui::Ui) -> Option<f32> {
+    ui.input(|i| {
+        i.events.iter().rev().find_map(|e| match e {
+            egui::Event::Touch { force, .. } => *force,
+            _ => None,
+        })
+    })
 }
 
 /// The per-target model choice for new AI masks (#346): one row per target that has more than
@@ -776,6 +787,8 @@ fn show_selected(
         feather.default = feather.default.min(feather.max);
         fur_slider(ui, &feather, &mut mask.brush.feather);
         fraction_slider(ui, "Flow", &mut mask.brush.flow, 1.0);
+        ui.checkbox(&mut mask.brush.buildup, "Build-up")
+            .on_hover_text("Repeated passes over the same spot darken the mask, like an airbrush.");
     }
     ui.checkbox(&mut mask.show_overlay, "Show mask overlay");
 
@@ -946,11 +959,12 @@ pub fn handle_viewport(
                 if response.drag_started() {
                     if let Some(p) = press {
                         let erase = ui.input(|i| i.modifiers.alt);
-                        if let Some((comp, stroke)) = begin_stroke(
+                        if let Some((comp, stroke)) = begin_stroke_pressure(
                             &mut params.corrections[sel],
                             &mask.brush,
                             erase,
                             to_norm(rect, source, p),
+                            stylus_pressure(ui),
                         ) {
                             mask.drag = Some(MaskDrag::Stroke { comp, stroke });
                             changed = true;
@@ -966,12 +980,13 @@ pub fn handle_viewport(
                     {
                         // A quarter of the brush radius between stored points, in normalized x.
                         let step = mask.brush.radius * 0.25 * long / source.0.max(1.0);
-                        changed |= extend_stroke(
+                        changed |= extend_stroke_pressure(
                             &mut params.corrections[sel],
                             comp,
                             stroke,
                             to_norm(rect, source, p),
                             step,
+                            stylus_pressure(ui),
                         );
                     }
                 }

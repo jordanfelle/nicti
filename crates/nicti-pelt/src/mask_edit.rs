@@ -259,6 +259,8 @@ pub struct BrushSettings {
     pub radius: f32,
     pub feather: f32,
     pub flow: f32,
+    /// Airbrush build-up: repeated passes darken the mask (#357).
+    pub buildup: bool,
 }
 
 impl Default for BrushSettings {
@@ -267,6 +269,7 @@ impl Default for BrushSettings {
             radius: 0.03,
             feather: 0.012,
             flow: 1.0,
+            buildup: false,
         }
     }
 }
@@ -310,11 +313,23 @@ fn first_brush(c: &LocalCorrection) -> Option<usize> {
 
 /// Starts a stroke at `p` (normalized) on the correction's first brush component -- adding one if
 /// it has none -- and returns `(component, stroke)` indices.
+#[cfg(test)]
 pub fn begin_stroke(
     c: &mut LocalCorrection,
     brush: &BrushSettings,
     erase: bool,
     p: [f32; 2],
+) -> Option<(usize, usize)> {
+    begin_stroke_pressure(c, brush, erase, p, None)
+}
+
+/// [`begin_stroke`] with the stylus pressure (0..=1) at the first point, if the device reports one.
+pub fn begin_stroke_pressure(
+    c: &mut LocalCorrection,
+    brush: &BrushSettings,
+    erase: bool,
+    p: [f32; 2],
+    pressure: Option<f32>,
 ) -> Option<(usize, usize)> {
     let comp = match first_brush(c) {
         Some(i) => i,
@@ -336,18 +351,37 @@ pub fn begin_stroke(
         feather: brush.feather.min(brush.radius),
         flow: brush.flow,
         erase,
+        pressure: pressure
+            .map(|v| vec![v.clamp(0.0, 1.0)])
+            .unwrap_or_default(),
+        buildup: brush.buildup && !erase,
     });
     Some((comp, strokes.len() - 1))
 }
 
 /// Appends `p` to a stroke if it moved at least `min_step` (normalized) from the last point, so a
 /// slow drag doesn't store a point per frame. Returns whether it appended.
+#[cfg(test)]
 pub fn extend_stroke(
     c: &mut LocalCorrection,
     comp: usize,
     stroke: usize,
     p: [f32; 2],
     min_step: f32,
+) -> bool {
+    extend_stroke_pressure(c, comp, stroke, p, min_step, None)
+}
+
+/// [`extend_stroke`] with the stylus pressure at `p`. The stroke's pressure list stays aligned with
+/// its points: it is created (padded with 1) the first time a pressure arrives, and a point
+/// without one on a pressure stroke counts as full pressure.
+pub fn extend_stroke_pressure(
+    c: &mut LocalCorrection,
+    comp: usize,
+    stroke: usize,
+    p: [f32; 2],
+    min_step: f32,
+    pressure: Option<f32>,
 ) -> bool {
     let Some(MaskSource::Brush { strokes }) =
         c.mask.components.get_mut(comp).map(|m| &mut m.source)
@@ -365,6 +399,10 @@ pub fn extend_stroke(
         ((p[0] - last[0]).powi(2) + (p[1] - last[1]).powi(2)).sqrt() >= min_step
     });
     if moved {
+        if pressure.is_some() || !s.pressure.is_empty() {
+            s.pressure.resize(s.points.len(), 1.0);
+            s.pressure.push(pressure.unwrap_or(1.0).clamp(0.0, 1.0));
+        }
         s.points.push(p);
     }
     moved
@@ -763,6 +801,57 @@ mod tests {
         assert!(!strokes[0].erase && strokes[1].erase);
         assert_eq!(strokes[1].points, vec![[0.6, 0.6]]);
         assert_eq!(strokes[0].radius, brush.radius);
+    }
+
+    #[test]
+    fn pressure_stays_aligned_with_the_points_and_a_mouse_stroke_stores_none() {
+        let brush = BrushSettings {
+            buildup: true,
+            ..BrushSettings::default()
+        };
+        let mut c = new_correction(NewMask::Brush, "b".into());
+        let (comp, stroke) = begin_stroke(&mut c, &brush, false, [0.5, 0.5]).unwrap();
+        // A mouse reports no force: no pressure list at all.
+        assert!(extend_stroke_pressure(
+            &mut c,
+            comp,
+            stroke,
+            [0.6, 0.5],
+            0.01,
+            None
+        ));
+        let get = |c: &LocalCorrection| {
+            let MaskSource::Brush { strokes } = &c.mask.components[0].source else {
+                panic!()
+            };
+            strokes[0].clone()
+        };
+        let s = get(&c);
+        assert!(s.pressure.is_empty() && s.buildup);
+        // The first pressure pads the earlier points with 1 and later gaps count as full.
+        assert!(extend_stroke_pressure(
+            &mut c,
+            comp,
+            stroke,
+            [0.7, 0.5],
+            0.01,
+            Some(0.25)
+        ));
+        assert!(extend_stroke_pressure(
+            &mut c,
+            comp,
+            stroke,
+            [0.8, 0.5],
+            0.01,
+            None
+        ));
+        let s = get(&c);
+        assert_eq!(s.pressure, vec![1.0, 1.0, 0.25, 1.0]);
+        assert_eq!(s.pressure.len(), s.points.len());
+        // A pen stroke starts with its first pressure, clamped.
+        let mut d = new_correction(NewMask::Brush, "d".into());
+        begin_stroke_pressure(&mut d, &brush, false, [0.5, 0.5], Some(7.0)).unwrap();
+        assert_eq!(get(&d).pressure, vec![1.0]);
     }
 
     #[test]

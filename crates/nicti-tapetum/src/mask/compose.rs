@@ -132,6 +132,8 @@ pub fn hash_group(group: &MaskGroup) -> blake3::Hash {
                         feather,
                         flow,
                         erase,
+                        pressure,
+                        buildup,
                     } = stroke;
                     h.update(&(points.len() as u64).to_le_bytes());
                     for p in points {
@@ -141,7 +143,11 @@ pub fn hash_group(group: &MaskGroup) -> blake3::Hash {
                     for v in [radius, feather, flow] {
                         h.update(&v.to_bits().to_le_bytes());
                     }
-                    h.update(&[*erase as u8]);
+                    h.update(&[*erase as u8, *buildup as u8]);
+                    h.update(&(pressure.len() as u64).to_le_bytes());
+                    for v in pressure {
+                        h.update(&v.to_bits().to_le_bytes());
+                    }
                 }
             }
             // Everything else is a handful of numbers: canonical JSON is cheap and can't drift.
@@ -260,6 +266,7 @@ mod tests {
                         feather: 0.01,
                         flow: 1.0,
                         erase: false,
+                        ..Default::default()
                     }],
                 },
                 op: Op::Add,
@@ -287,6 +294,9 @@ mod tests {
             Box::new(|s| s.feather *= 1.01),
             Box::new(|s| s.flow = 0.5),
             Box::new(|s| s.erase = true),
+            Box::new(|s| s.buildup = true),
+            Box::new(|s| s.pressure = vec![0.5, 1.0, 1.0]),
+            Box::new(|s| s.pressure = vec![0.25, 1.0, 1.0]),
         ];
         for edit in &edits {
             let mut g = base.clone();
@@ -349,6 +359,7 @@ mod tests {
                 feather: 0.0,
                 flow: 1.0,
                 erase,
+                ..Default::default()
             }],
         }
     }
