@@ -164,6 +164,8 @@ pub struct PeltApp {
     move_dest_input: String,
     /// The folder panel's (#303) throttled read of roots/journal rows/mounted drives.
     folder_cache: folder_panel::Cache,
+    /// Which browsed (not yet imported) folders are open in the sidebar (#472).
+    folder_browse: crate::folder_browse::Browse,
     /// Drives/folders whose contents are archived (thumbnails as sidecars) -- #72.
     archive_drives: crate::archive_drives::ArchiveDrives,
     /// The in-flight `MoveJob`'s result slot, folded into `last_move_summary` once it resolves.
@@ -454,6 +456,7 @@ impl PeltApp {
             last_backup_summary: None,
             move_dest_input: String::new(),
             folder_cache: folder_panel::Cache::default(),
+            folder_browse: crate::folder_browse::Browse::default(),
             archive_drives,
             pending_move_result: None,
             pending_recovery_result,
@@ -1968,6 +1971,7 @@ impl PeltApp {
                             &mut set_archive,
                             selected_root,
                             !moving,
+                            &mut self.folder_browse,
                         );
                     } else {
                         // Not "No folders yet": nothing has been read, so nothing is known.
@@ -1998,6 +2002,31 @@ impl PeltApp {
             // field via `import_picker.poll`. No-op while a dialog is already open.
             self.import_picker
                 .open(ui.ctx(), "Choose a folder to import", &drive);
+        }
+        if let Some(folder) = out.import_folder {
+            // A browsed folder's "Import this folder": the same path as typing it in the Folder
+            // field and pressing Import (validation, registration and the job guards are shared).
+            let roots: Vec<PathBuf> = self
+                .folder_cache
+                .roots
+                .iter()
+                .map(|r| PathBuf::from(&r.path))
+                .collect();
+            match folder_panel::nesting_conflict(&folder, &roots) {
+                Some(folder_panel::NestingConflict::Inside) => {
+                    self.import_status =
+                        Some("That folder is inside a folder that is already imported.".into());
+                }
+                Some(folder_panel::NestingConflict::Contains) => {
+                    self.import_status =
+                        Some("That folder contains a folder that is already imported.".into());
+                }
+                None => {
+                    self.import_path_input = folder.to_string_lossy().into_owned();
+                    self.import_status = None;
+                    self.submit_root_job(store, RootAction::Import);
+                }
+            }
         }
         if let Some(r) = out.drop {
             self.submit_move_to(store, r.root_id, r.dest_parent);

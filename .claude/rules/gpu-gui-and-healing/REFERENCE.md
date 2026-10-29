@@ -43,6 +43,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - `LinearFrame.orientation` (IFD0, EXIF 1-8) turns only the on-screen image (`view_orient::ViewOrient`, `display.wgsl` `orient` uniform), pinned to export's `preen::orient`; Loupe done, Develop crop/heal/mask overlays still sensor-oriented (follow-up). Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
+## #472: sidebar folder browsing
+
+- `folder_browse.rs` + `folder_panel::show_browse`: lazy, off-thread subfolder listing per drive/folder, real directories only, "Import this folder" per row. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+
 ## Package contents
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit

@@ -23,6 +23,7 @@ mod develop_panel;
 mod export;
 mod eyeshine;
 mod filter_bar;
+mod folder_browse;
 mod folder_dialog;
 mod folder_panel;
 mod fur;
