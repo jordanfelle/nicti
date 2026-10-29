@@ -3567,9 +3567,7 @@ impl PeltApp {
                     control.addr(),
                     control.token_path().display()
                 );
-                self.command_policy = crate::cmd::Policy {
-                    allow_destructive: opts.allow_destructive,
-                };
+                self.command_policy = opts.policy();
                 // A hidden window runs `logic` but no `ui`; frame-dependent work still needs a
                 // paint (ADR-0434 section 2).
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);

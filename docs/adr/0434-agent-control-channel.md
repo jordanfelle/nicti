@@ -224,20 +224,42 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
 
 - `crates/nicti-pelt/src/control.rs`; started by `PeltApp::enable_control` when the root binary was
   run with `--control[=PORT]` (or `NICTI_CONTROL_PORT`); `--control-allow-destructive` lifts the risk
-  gate (nothing destructive exists yet). An unknown `--control-*` flag is an error, not ignored.
-- Wire format: JSON lines. First line `{"auth":"<token>"}` within 5 s *total* (a client trickling bytes is
-  cut off at the deadline, not just at a per-read timeout); then `{"id":..,"method":"<command id | commands>","params":{..}}`
-  answered by `{"id":..,"ok":true,"result":..}` or `{"id":..,"ok":false,"error":".."}`.
+  gate (nothing destructive exists yet; `ControlOptions::policy` is what reaches the gate). An unknown
+  `--control-*` flag is an error, not ignored. macOS has no per-user runtime directory fallback, so
+  `--control` fails there with a clear message (v2 target).
+- **Handshake: the token never crosses the wire** (this replaces section 3's "first line is
+  `{"auth":"<token>"}`", because a cleartext token is stolen by whoever binds the port first; on
+  Windows a second socket can bind a listening 127.0.0.1 port unless `SO_EXCLUSIVEADDRUSE` is set):
+  1. server -> `{"hello":"nicti-control","protocol":2,"nonce":N}`
+  2. client -> `{"auth":MAC_c,"cnonce":C}` within 5 s *total* (a trickled line is cut off at the
+     deadline, not just at a per-read timeout), `MAC_c = blake3_keyed(blake3(token), "client"|N|C)`
+     (each part length-prefixed)
+  3. server -> `{"ok":true,"proof":MAC_s}`, `MAC_s` the same with `"server"`; the client must check it.
+  Then `{"id":..,"method":"<command id | commands>","params":{..}}` answered by
+  `{"id":..,"ok":true,"result":..}` or `{"id":..,"ok":false,"error":".."}`. An impostor on the port
+  sees only N and MAC_c, can't forge MAC_s and so fails the client's check (tested). The first
+  non-answering line (HTTP, a bare string, an array) closes the connection.
 - Token: 128 bits from the OS RNG (`getrandom`, already in the lockfile), compared in constant time, in
-  `$XDG_RUNTIME_DIR/nicti-control-<pid>.json` (Windows: `%LOCALAPPDATA%\nicti`), created `O_EXCL` with
-  mode `0600` at creation, holding the *bound* port; a stale file is replaced (a planted symlink is
-  replaced, its target untouched); the directory must not be group/other accessible on Unix or the
-  channel refuses to start; there is no `/tmp` fallback. Removed on exit.
-- Caps: 1 MiB per line (rejected without buffering the excess), 4 authenticated + 4 unauthenticated
-  connections, 30 s per request, 5 min idle timeout, 16 requests per UI drain. `logic` drains too and
-  the app sends `RequestPaintWhileHidden`; a queued request wakes an idle window (`request_repaint`).
+  `$XDG_RUNTIME_DIR/nicti-control-<pid>.json` (Windows: `%LOCALAPPDATA%\\nicti`) holding the *bound*
+  port and the pid, created `O_EXCL` with mode `0600` at creation; a stale file is replaced (a planted
+  symlink is replaced, its target untouched); on Unix the directory must not be group/other accessible
+  or the channel refuses to start; there is no `/tmp` fallback. Removed on a clean exit; a crash or
+  SIGKILL leaves a stale file, so a client should check the pid in it is alive (the handshake would
+  fail anyway: nothing listens, or the proof is wrong).
+- Caps: 1 MiB per line (rejected without buffering the excess), 4 authenticated connections, 4
+  unauthenticated ones where **a new connection evicts the oldest silent one** (so another local user
+  holding sockets open cannot lock the agent out; they would have to open four new connections inside
+  the milliseconds the real client takes to answer), 30 s per request, 5 min idle timeout, 16 requests
+  per UI drain. A request the client was told timed out is cancelled and never runs later. The accept
+  loop backs off on errors. `logic` drains too, the app sends `RequestPaintWhileHidden`, and a queued
+  request wakes an idle window (`request_repaint`).
+- Known limits: dropping `Control` wakes the accept thread with a best-effort connect and does not
+  join it; connection threads outlive it. The idle timeout applies per read, so an authenticated client
+  can trickle. Neither crosses the trust boundary (the token holder is already trusted).
 - **Not built (follow-up):** the widget-rect registry, click/key/drag injection, `settle`, confirm-dialog
-  gating (slice 2b); screenshot (3a); the MCP shim (3b). The risk gate is therefore only the policy flag
-  for now, and no command can reach a delete/confirm dialog.
-- Verified here: token/auth/cap/deadline/size guards by unit and loopback-socket tests (each guard
-  mutation-checked). Not verified: Windows ACL behaviour of `%LOCALAPPDATA%`, and a real GUI session.
+  gating (slice 2b); screenshot (3a); the MCP shim (3b), which must implement the handshake above. The
+  risk gate is therefore only the policy flag for now, and no command can reach a delete/confirm dialog.
+- Verified here: token/handshake/cap/eviction/deadline/size/cancel guards by unit and loopback-socket
+  tests, each guard broken in turn to see a test fail (the peer-address check is belt and braces and
+  unobservable on loopback). Not verified: Windows ACL behaviour of `%LOCALAPPDATA%`, the
+  `SO_EXCLUSIVEADDRUSE`-free bind on Windows beyond the protocol argument, and a real GUI session.

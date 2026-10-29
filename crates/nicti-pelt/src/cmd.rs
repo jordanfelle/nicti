@@ -329,6 +329,9 @@ pub struct Request {
     pub id: String,
     pub params: Value,
     pub reply: Sender<Result<Value, String>>,
+    /// Set by the transport when it gave up waiting (and told the client so): the request must
+    /// not run afterwards.
+    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The requests waiting for the UI thread.
@@ -366,6 +369,9 @@ impl CommandQueue {
             // The lock is held only for the pop, so a command may itself submit.
             let next = self.rx.lock().ok().and_then(|rx| rx.try_recv().ok());
             let Some(req) = next else { break };
+            if req.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                continue; // the client was already told it timed out
+            }
             let result = if req.id == "commands" {
                 Ok(list(host, policy))
             } else {
@@ -736,6 +742,7 @@ mod tests {
                 id: "grid.select".into(),
                 params: json!({ "asset": i as i64 }),
                 reply: rtx,
+                cancelled: Default::default(),
             })
             .unwrap();
             replies.push(rrx);
@@ -757,6 +764,7 @@ mod tests {
             id: "commands".into(),
             params: Value::Null,
             reply: rtx,
+            cancelled: Default::default(),
         })
         .unwrap();
         let (dead, _) = mpsc::channel();
@@ -764,6 +772,7 @@ mod tests {
             id: "ui.inspect".into(),
             params: Value::Null,
             reply: dead,
+            cancelled: Default::default(),
         })
         .unwrap();
         assert_eq!(q.drain(&mut m, OPEN), 2);

@@ -2,12 +2,15 @@
 //! that submits requests to the command table ([`crate::cmd`]) and returns their replies.
 //!
 //! **Off unless asked for** (`--control[=PORT]` or `NICTI_CONTROL_PORT`). Loopback only, never
-//! `0.0.0.0`. Every connection must send `{"auth":"<token>"}` as its first line within 5 s; the
-//! token is 128 random bits from the OS, compared in constant time, and lives in a file created
-//! `O_EXCL` with mode `0600` (the bound port is written *into* that file, so a predictable port
-//! can't be pre-bound by another local user to harvest the token). A non-object first line, a wrong
-//! token or a late one closes the connection, which also stops a web page's cross-origin `fetch`
-//! from smuggling a request in an HTTP body.
+//! `0.0.0.0`. The token is 128 random bits from the OS and lives in a file created `O_EXCL` with
+//! mode `0600`; the bound port is written *into* that file. The token **never crosses the wire**:
+//! the server opens with `{"hello":..,"nonce":N}`, the client answers `{"auth":MAC,"cnonce":C}` with
+//! `MAC = blake3_keyed(hash(token), "client"|N|C)` within 5 s, and the server replies with its own
+//! proof `blake3_keyed(hash(token), "server"|N|C)`. So another local process that grabbed the port
+//! first (Windows lets a second socket bind a listening 127.0.0.1 port unless `SO_EXCLUSIVEADDRUSE`)
+//! can neither read the token nor impersonate the app to the client. A non-object, wrong or late
+//! answer closes the connection, which also stops a web page's cross-origin `fetch` from smuggling a
+//! request in an HTTP body (the browser cannot read a non-HTTP reply either).
 //!
 //! Threat model (ADR-0434 section 3): anything running as the same user can read the token file and
 //! drive the app; that is the same trust boundary as the user's own session and catalog, and is why
@@ -39,7 +42,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// cannot lock the agent out of the [`MAX_AUTHED`] slots.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// What `--control...` asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +88,15 @@ impl ControlOptions {
             port,
             allow_destructive,
         }))
+    }
+}
+
+impl ControlOptions {
+    /// What a client of this channel may run.
+    pub fn policy(self) -> crate::cmd::Policy {
+        crate::cmd::Policy {
+            allow_destructive: self.allow_destructive,
+        }
     }
 }
 
@@ -259,7 +271,7 @@ pub fn read_line_limited<R: BufRead>(r: &mut R, max: usize) -> io::Result<Option
     }
     String::from_utf8(line)
         .map(Some)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not UTF-8"))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "not UTF-8"))
 }
 
 /// A reader that enforces a *total* deadline across reads: a socket read timeout alone resets
@@ -318,9 +330,16 @@ pub struct Shared {
     /// Wakes the UI thread so it drains the queue (an idle window runs no frames).
     wake: Arc<dyn Fn() + Send + Sync>,
     authed: Arc<AtomicUsize>,
-    unauthed: Arc<AtomicUsize>,
+    /// Connections that have not authenticated yet, oldest first. A new one evicts the oldest
+    /// when [`MAX_UNAUTHED`] are open, so silent sockets from another local user cannot lock the
+    /// real client out: the real client authenticates in milliseconds, they would have to open
+    /// [`MAX_UNAUTHED`] new connections inside that window.
+    pending: Arc<std::sync::Mutex<std::collections::VecDeque<(u64, TcpStream)>>>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
     /// [`AUTH_DEADLINE`] outside tests.
     auth_deadline: Duration,
+    /// [`REQUEST_TIMEOUT`] outside tests.
+    request_timeout: Duration,
 }
 
 impl Shared {
@@ -332,12 +351,46 @@ impl Shared {
     ) -> Self {
         Self {
             auth_deadline,
+            request_timeout: REQUEST_TIMEOUT,
             token: Arc::new(token),
             submit: queue.sender(),
             wake,
             authed: Arc::default(),
-            unauthed: Arc::default(),
+            pending: Arc::default(),
+            next_id: Arc::default(),
         }
+    }
+}
+
+/// An unauthenticated connection's place in [`Shared::pending`]; leaves it when dropped.
+struct Pending<'a> {
+    shared: &'a Shared,
+    id: u64,
+}
+
+impl<'a> Pending<'a> {
+    /// Registers `stream` (a clone, kept so it can be shut down), evicting the oldest if full.
+    fn enter(shared: &'a Shared, stream: TcpStream) -> Self {
+        let id = shared.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut q = shared.pending.lock().unwrap_or_else(|e| e.into_inner());
+        while q.len() >= MAX_UNAUTHED {
+            if let Some((_, old)) = q.pop_front() {
+                let _ = old.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        q.push_back((id, stream));
+        Self { shared, id }
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        let mut q = self
+            .shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        q.retain(|(id, _)| *id != self.id);
     }
 }
 
@@ -348,29 +401,54 @@ fn send_line(w: &mut impl Write, v: &Value) -> io::Result<()> {
     w.flush()
 }
 
-/// Whether `first` is `{"auth":"<token>"}` with the right token. Only a JSON *object* with a
-/// string `auth` can pass: an HTTP request line or a bare string never parses as one.
-fn authenticates(first: &str, token: &str) -> bool {
-    match serde_json::from_str::<Value>(first) {
-        Ok(Value::Object(o)) => o
-            .get("auth")
-            .and_then(Value::as_str)
-            .is_some_and(|given| ct_eq(given.as_bytes(), token.as_bytes())),
-        _ => false,
+fn mac(token: &str, role: &str, nonce: &str, cnonce: &str) -> String {
+    let key = *blake3::hash(token.as_bytes()).as_bytes();
+    let mut msg = Vec::new();
+    for part in [role, nonce, cnonce] {
+        // Length-prefixed, so ("a","bc") and ("ab","c") can never collide.
+        msg.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        msg.extend_from_slice(part.as_bytes());
     }
+    blake3::keyed_hash(&key, &msg).to_hex().to_string()
+}
+
+/// The client's `cnonce` when `first` is `{"auth":MAC,"cnonce":C}` answering `nonce` with the
+/// right MAC. Only a JSON *object* can pass: an HTTP request line or a bare string never parses
+/// as one.
+fn authenticates(first: &str, token: &str, nonce: &str) -> Option<String> {
+    let Ok(Value::Object(o)) = serde_json::from_str::<Value>(first) else {
+        return None;
+    };
+    let cnonce = o.get("cnonce")?.as_str()?;
+    if !(16..=64).contains(&cnonce.len()) || !cnonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let given = o.get("auth")?.as_str()?;
+    ct_eq(
+        given.as_bytes(),
+        mac(token, "client", nonce, cnonce).as_bytes(),
+    )
+    .then(|| cnonce.to_owned())
 }
 
 /// Runs one connection to completion.
 pub fn serve_connection(stream: TcpStream, shared: &Shared) {
-    let Some(unauth_slot) = Slot::take(&shared.unauthed, MAX_UNAUTHED) else {
-        return; // too many half-open connections; drop this one without a word
-    };
     let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-    let Ok(read_half) = stream.try_clone() else {
+    let (Ok(read_half), Ok(evict_handle)) = (stream.try_clone(), stream.try_clone()) else {
         return;
     };
+    let pending = Pending::enter(shared, evict_handle);
     let mut writer = stream;
+    let Ok(nonce) = new_token() else { return };
+    if send_line(
+        &mut writer,
+        &json!({"hello": "nicti-control", "protocol": PROTOCOL, "nonce": nonce}),
+    )
+    .is_err()
+    {
+        return;
+    }
     // The size cap is enforced per line by `read_line_limited`, not by the reader. The deadline
     // covers the whole first line, however slowly it is trickled in.
     let mut reader = BufReader::new(DeadlineRead {
@@ -381,14 +459,14 @@ pub fn serve_connection(stream: TcpStream, shared: &Shared) {
         Ok(Some(l)) => l,
         _ => return,
     };
-    if !authenticates(&first, &shared.token) {
+    let Some(cnonce) = authenticates(&first, &shared.token, &nonce) else {
         let _ = send_line(
             &mut writer,
             &json!({"ok": false, "error": "authentication failed"}),
         );
         return;
-    }
-    drop(unauth_slot);
+    };
+    drop(pending);
     let Some(_auth_slot) = Slot::take(&shared.authed, MAX_AUTHED) else {
         let _ = send_line(
             &mut writer,
@@ -398,12 +476,8 @@ pub fn serve_connection(stream: TcpStream, shared: &Shared) {
     };
     reader.get_mut().deadline = None;
     let _ = reader.get_ref().inner.set_read_timeout(Some(IDLE_TIMEOUT));
-    if send_line(
-        &mut writer,
-        &json!({"ok": true, "hello": "nicti-control", "protocol": PROTOCOL}),
-    )
-    .is_err()
-    {
+    let proof = mac(&shared.token, "server", &nonce, &cnonce);
+    if send_line(&mut writer, &json!({"ok": true, "proof": proof})).is_err() {
         return;
     }
 
@@ -417,6 +491,13 @@ pub fn serve_connection(stream: TcpStream, shared: &Shared) {
                     &json!({"ok": false, "error": "request too large"}),
                 );
                 return;
+            }
+            // The line was consumed whole, so the stream is still in sync.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                if send_line(&mut writer, &json!({"ok": false, "error": "not UTF-8"})).is_err() {
+                    return;
+                }
+                continue;
             }
             Err(_) => return, // idle timeout, reset, or a torn line
         };
@@ -444,22 +525,29 @@ fn handle_request(line: &str, shared: &Shared) -> Value {
     };
     let params = obj.get("params").cloned().unwrap_or(Value::Null);
     let (tx, rx) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
     if shared
         .submit
         .send(Request {
             id: method.to_owned(),
             params,
             reply: tx,
+            cancelled: Arc::clone(&cancelled),
         })
         .is_err()
     {
         return fail("the app is shutting down".into());
     }
     (shared.wake)();
-    match rx.recv_timeout(REQUEST_TIMEOUT) {
+    match rx.recv_timeout(shared.request_timeout) {
         Ok(Ok(result)) => json!({"id": id, "ok": true, "result": result}),
         Ok(Err(e)) => fail(e),
-        Err(_) => fail("timed out waiting for the app".into()),
+        Err(_) => {
+            // The client is told it failed, so the app must not run it later: a retry would then
+            // apply a non-idempotent command twice.
+            cancelled.store(true, Ordering::SeqCst);
+            fail("timed out waiting for the app".into())
+        }
     }
 }
 
@@ -495,7 +583,7 @@ pub fn start(
     queue: &CommandQueue,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<Control, String> {
-    start_with(opts, dir, queue, wake, AUTH_DEADLINE)
+    start_with(opts, dir, queue, wake, AUTH_DEADLINE, REQUEST_TIMEOUT)
 }
 
 fn start_with(
@@ -504,6 +592,7 @@ fn start_with(
     queue: &CommandQueue,
     wake: Arc<dyn Fn() + Send + Sync>,
     auth_deadline: Duration,
+    request_timeout: Duration,
 ) -> Result<Control, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, opts.port))
         .map_err(|e| format!("can't listen on 127.0.0.1:{}: {e}", opts.port))?;
@@ -512,7 +601,8 @@ fn start_with(
         .map_err(|e| format!("can't read the listening address: {e}"))?;
     let token = new_token()?;
     let token_file = TokenFile::create(dir, addr.port(), &token)?;
-    let shared = Shared::new(token, queue, wake, auth_deadline);
+    let mut shared = Shared::new(token, queue, wake, auth_deadline);
+    shared.request_timeout = request_timeout;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
     thread::Builder::new()
@@ -522,7 +612,11 @@ fn start_with(
                 if stop_flag.load(Ordering::SeqCst) {
                     return;
                 }
-                let Ok(stream) = stream else { continue };
+                let Ok(stream) = stream else {
+                    // Out of file descriptors etc.: don't spin on it.
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
                 // Belt and braces: the socket is bound to loopback, but never serve anything else.
                 if !stream.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
                     continue;
@@ -625,26 +719,57 @@ mod tests {
     }
 
     #[test]
-    fn only_a_json_object_with_the_right_token_authenticates() {
-        // Built, not spelled out: a 32-hex literal in source trips the repo's secret scanner.
+    fn only_a_json_object_with_the_right_mac_authenticates_and_the_token_never_does() {
+        // Built, not spelled out: a long hex literal in source trips the repo's secret scanner.
         let t = "ab".repeat(16);
         let t = t.as_str();
-        assert!(authenticates(&format!(r#"{{"auth":"{t}"}}"#), t));
-        // Same length, one character off: the length check alone must not let it through.
-        let near = format!("{}ac", "ab".repeat(15));
-        assert!(!authenticates(&format!(r#"{{"auth":"{near}"}}"#), t));
+        let nonce = "cd".repeat(16);
+        let cn = "ef".repeat(16);
+        let line = |auth: &str, cnonce: &str| json!({"auth": auth, "cnonce": cnonce}).to_string();
+        let good = mac(t, "client", &nonce, &cn);
+        assert_eq!(
+            authenticates(&line(&good, &cn), t, &nonce),
+            Some(cn.clone())
+        );
+        // The token itself is not an answer, whatever it is dressed as.
+        assert_eq!(authenticates(&line(t, &cn), t, &nonce), None);
+        // One character off (same length), a replayed answer to another nonce, the server's proof
+        // reflected back as the client's answer, another token's answer: all refused.
+        let mut near = good.clone();
+        near.replace_range(..1, if good.starts_with('0') { "1" } else { "0" });
+        assert_eq!(authenticates(&line(&near, &cn), t, &nonce), None);
+        let other_nonce = "12".repeat(16);
+        assert_eq!(authenticates(&line(&good, &cn), t, &other_nonce), None);
+        let reflected = mac(t, "server", &nonce, &cn);
+        assert_eq!(authenticates(&line(&reflected, &cn), t, &nonce), None);
+        let other_token = "99".repeat(16);
+        let theirs = mac(&other_token, "client", &nonce, &cn);
+        assert_eq!(authenticates(&line(&theirs, &cn), t, &nonce), None);
+        // The client nonce is part of what is signed, and must look like one.
+        assert_eq!(
+            authenticates(&line(&good, &"ee".repeat(16)), t, &nonce),
+            None
+        );
+        let short = "ab".repeat(4);
+        let short_mac = mac(t, "client", &nonce, &short);
+        assert_eq!(authenticates(&line(&short_mac, &short), t, &nonce), None);
+        let nonhex = "zz".repeat(16);
+        let nonhex_mac = mac(t, "client", &nonce, &nonhex);
+        assert_eq!(authenticates(&line(&nonhex_mac, &nonhex), t, &nonce), None);
         for bad in [
             "GET / HTTP/1.1".to_owned(),
-            format!(r#""{t}""#),
+            format!(r#""{good}""#),
             r#"["auth"]"#.to_owned(),
-            r#"{"auth":"nope"}"#.to_owned(),
-            r#"{"auth":""}"#.to_owned(),
-            r#"{"auth":123}"#.to_owned(),
-            format!(r#"{{"token":"{t}"}}"#),
+            r#"{"auth":"nope","cnonce":"x"}"#.to_owned(),
+            json!({"auth": good}).to_string(),
+            json!({"cnonce": cn}).to_string(),
+            json!({"auth": 123, "cnonce": cn}).to_string(),
             String::new(),
         ] {
-            assert!(!authenticates(&bad, t), "{bad}");
+            assert_eq!(authenticates(&bad, t, &nonce), None, "{bad}");
         }
+        // Length-prefixing: moving a byte between the nonces changes the MAC.
+        assert_ne!(mac(t, "client", "aab", "c"), mac(t, "client", "aa", "bc"));
     }
 
     #[cfg(unix)]
@@ -694,7 +819,10 @@ mod tests {
         dir
     }
 
-    /// A host that answers `ui.inspect` and nothing else.
+    /// How many times a client reached `grid.select` (a visible side effect).
+    static SELECTS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A host that answers `ui.inspect` and records `grid.select`.
     #[derive(Default)]
     struct Echo;
     impl CommandHost for Echo {
@@ -708,6 +836,7 @@ mod tests {
             Ok(())
         }
         fn select_asset(&mut self, _: i64) -> Result<(), String> {
+            SELECTS.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn known_asset(&self, _: i64) -> bool {
@@ -790,12 +919,7 @@ mod tests {
         }
 
         fn authed(&self) -> (TcpStream, BufReader<TcpStream>) {
-            let mut s = self.connect();
-            writeln!(s, r#"{{"auth":"{}"}}"#, self.token).unwrap();
-            let mut r = BufReader::new(s.try_clone().unwrap());
-            let hello = read_line_limited(&mut r, 4096).unwrap().unwrap();
-            assert!(hello.contains("nicti-control"), "{hello}");
-            (s, r)
+            handshake(self.control.addr(), &self.token).expect("handshake")
         }
     }
 
@@ -807,6 +931,45 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    /// Reads the server's hello and returns its nonce.
+    fn read_hello(r: &mut BufReader<TcpStream>) -> String {
+        let hello: Value =
+            serde_json::from_str(&read_line_limited(r, 4096).unwrap().unwrap()).unwrap();
+        assert_eq!(hello["hello"], "nicti-control");
+        assert_eq!(hello["protocol"], PROTOCOL);
+        hello["nonce"].as_str().unwrap().to_owned()
+    }
+
+    fn answer(token: &str, nonce: &str, cnonce: &str) -> String {
+        json!({"auth": mac(token, "client", nonce, cnonce), "cnonce": cnonce}).to_string()
+    }
+
+    /// The client side of the handshake, including checking the server's proof.
+    fn handshake(
+        addr: SocketAddr,
+        token: &str,
+    ) -> Result<(TcpStream, BufReader<TcpStream>), String> {
+        let mut s = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let nonce = read_hello(&mut r);
+        let cnonce = "cd".repeat(16);
+        writeln!(s, "{}", answer(token, &nonce, &cnonce)).map_err(|e| e.to_string())?;
+        let reply: Value = serde_json::from_str(
+            &read_line_limited(&mut r, 4096)
+                .map_err(|e| e.to_string())?
+                .ok_or("closed")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if reply["ok"] != true {
+            return Err(reply.to_string());
+        }
+        if reply["proof"] != mac(token, "server", &nonce, &cnonce) {
+            return Err("the server's proof is wrong".into());
+        }
+        Ok((s, r))
     }
 
     fn ask(s: &mut TcpStream, r: &mut BufReader<TcpStream>, req: &str) -> Value {
@@ -844,24 +1007,44 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_token_a_non_json_first_line_and_an_http_request_are_all_closed_without_running_anything(
+    fn a_wrong_answer_a_non_json_first_line_and_an_http_request_are_closed_without_running_anything(
     ) {
         let rig = Rig::new();
-        for first in [
-            r#"{"auth":"wrong"}"#.to_owned(),
-            r#"{"method":"ui.inspect"}"#.to_owned(),
-            "POST / HTTP/1.1".to_owned(),
-            format!(r#"["{}"]"#, rig.token),
-        ] {
+        let before = SELECTS.load(Ordering::SeqCst);
+        let nonce_of = |s: &mut TcpStream| {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            read_hello(&mut r)
+        };
+        let cn = "cd".repeat(16);
+        for variant in 0..6 {
             let mut s = rig.connect();
-            writeln!(s, "{first}").unwrap();
+            let nonce = nonce_of(&mut s);
+            let line = match variant {
+                0 => answer(&"00".repeat(16), &nonce, &cn), // another token's answer
+                1 => answer(&rig.token, &"11".repeat(16), &cn), // an answer to another nonce
+                2 => json!({"auth": rig.token, "cnonce": cn}).to_string(), // the token itself
+                3 => r#"{"method":"grid.select","params":{"asset":1}}"#.to_owned(),
+                4 => "POST / HTTP/1.1".to_owned(),
+                _ => format!(r#"["{}"]"#, rig.token),
+            };
+            writeln!(s, "{line}").unwrap();
             let mut all = String::new();
             let _ = s.read_to_string(&mut all); // the server closes the connection
-            assert!(!all.contains("hello"), "{first} got in: {all}");
-            assert!(!all.contains("view"), "{first} ran a command: {all}");
+            assert!(!all.contains("proof"), "variant {variant} got in: {all}");
+            assert!(
+                !all.contains("\"result\""),
+                "variant {variant} ran a command: {all}"
+            );
         }
-        // A client that never sends a token is dropped at the deadline.
+        assert_eq!(
+            SELECTS.load(Ordering::SeqCst),
+            before,
+            "a refused client ran a command"
+        );
+        // A client that never answers is dropped at the deadline.
         let mut s = rig.connect();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        read_hello(&mut r);
         let started = std::time::Instant::now();
         let mut buf = [0u8; 8];
         assert_eq!(s.read(&mut buf).unwrap_or(0), 0);
@@ -869,12 +1052,44 @@ mod tests {
     }
 
     #[test]
+    fn a_server_that_does_not_hold_the_token_cannot_pass_the_clients_check() {
+        // A process that grabbed the port first sees only the nonce and the client's MAC; it can
+        // not compute the server proof without the token, so the client rejects it.
+        let rig = Rig::new();
+        let imposter = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = imposter.local_addr().unwrap();
+        let t = thread::spawn(move || {
+            let (mut s, _) = imposter.accept().unwrap();
+            writeln!(
+                s,
+                r#"{{"hello":"nicti-control","protocol":{PROTOCOL},"nonce":"{}"}}"#,
+                "ab".repeat(16)
+            )
+            .unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let seen = read_line_limited(&mut r, 4096).unwrap().unwrap();
+            // The best it can do: claim success with a made-up proof.
+            writeln!(s, r#"{{"ok":true,"proof":"{}"}}"#, "00".repeat(32)).unwrap();
+            seen
+        });
+        let err = handshake(addr, &rig.token).unwrap_err();
+        assert!(err.contains("proof"), "{err}");
+        let seen = t.join().unwrap();
+        assert!(
+            !seen.contains(&rig.token),
+            "the token crossed the wire: {seen}"
+        );
+    }
+
+    #[test]
     fn the_connection_caps_hold_and_a_closed_connection_frees_its_slot() {
         let rig = Rig::new();
         let mut held: Vec<_> = (0..MAX_AUTHED).map(|_| rig.authed()).collect();
-        // A fifth authenticated client is told no.
+        // A fifth authenticated client is told no (after it proves it knows the token).
         let mut s = rig.connect();
-        writeln!(s, r#"{{"auth":"{}"}}"#, rig.token).unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let nonce = read_hello(&mut r);
+        writeln!(s, "{}", answer(&rig.token, &nonce, &"cd".repeat(16))).unwrap();
         let mut all = String::new();
         let _ = s.read_to_string(&mut all);
         assert!(all.contains("too many"), "{all}");
@@ -882,14 +1097,7 @@ mod tests {
         drop(held.pop());
         let mut ok = false;
         for _ in 0..50 {
-            let mut s = rig.connect();
-            writeln!(s, r#"{{"auth":"{}"}}"#, rig.token).unwrap();
-            let mut r = BufReader::new(s.try_clone().unwrap());
-            if read_line_limited(&mut r, 4096)
-                .ok()
-                .flatten()
-                .is_some_and(|l| l.contains("hello"))
-            {
+            if handshake(rig.control.addr(), &rig.token).is_ok() {
                 ok = true;
                 break;
             }
@@ -899,23 +1107,33 @@ mod tests {
     }
 
     #[test]
-    fn silent_unauthenticated_connections_are_capped_so_they_cannot_exhaust_the_server() {
+    fn silent_connections_cannot_lock_the_real_client_out_the_oldest_is_evicted() {
         let rig = Rig::new();
-        let idle: Vec<_> = (0..MAX_UNAUTHED).map(|_| rig.connect()).collect();
-        thread::sleep(Duration::from_millis(300)); // let the server threads take their slots
-        let mut s = rig.connect();
-        let _ = writeln!(s, r#"{{"auth":"{}"}}"#, rig.token);
-        let mut all = String::new();
-        let _ = s.read_to_string(&mut all);
-        assert!(
-            all.is_empty(),
-            "a connection over the cap was served: {all}"
-        );
-        drop(idle);
+        // Fill every unauthenticated slot with sockets that say nothing. Reading the hello proves
+        // the server registered each one.
+        let mut idle: Vec<_> = (0..MAX_UNAUTHED)
+            .map(|_| {
+                let s = rig.connect();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                read_hello(&mut r);
+                (s, r)
+            })
+            .collect();
+        // The real client still gets in: it evicts the oldest silent one.
+        assert!(handshake(rig.control.addr(), &rig.token).is_ok());
+        let (s, _) = &mut idle[0];
+        let mut buf = [0u8; 8];
+        // Well inside the 5 s auth deadline, which would close it anyway.
+        s.set_read_timeout(Some(Duration::from_millis(1500)))
+            .unwrap();
+        let n = s
+            .read(&mut buf)
+            .expect("the oldest silent socket was not closed (the read timed out)");
+        assert_eq!(n, 0, "the oldest silent socket was sent data");
     }
 
     #[test]
-    fn a_client_trickling_its_first_line_is_cut_off_at_the_total_deadline() {
+    fn a_client_trickling_its_answer_is_cut_off_at_the_total_deadline() {
         let dir = tempfile_dir("slow");
         #[cfg(unix)]
         {
@@ -932,10 +1150,13 @@ mod tests {
             &queue,
             Arc::new(|| {}),
             Duration::from_millis(600),
+            REQUEST_TIMEOUT,
         )
         .unwrap();
-        let mut s = TcpStream::connect(control.addr()).unwrap();
+        let s = TcpStream::connect(control.addr()).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        read_hello(&mut r);
         let mut w = s.try_clone().unwrap();
         // One byte every 200 ms and never a newline: each read is well inside any per-read
         // timeout, so only a total deadline stops it.
@@ -948,9 +1169,10 @@ mod tests {
             }
         });
         let started = std::time::Instant::now();
-        let mut buf = [0u8; 8];
-        let n = s.read(&mut buf).unwrap_or(0);
-        assert_eq!(n, 0, "the connection should be closed, not answered");
+        let mut rest = String::new();
+        let mut s = s;
+        let _ = s.read_to_string(&mut rest);
+        assert!(!rest.contains("proof"), "{rest}");
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "{:?}",
@@ -960,6 +1182,80 @@ mod tests {
         let _ = feeder.join();
         drop(control);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_request_the_client_was_told_timed_out_never_runs_afterwards() {
+        let dir = tempfile_dir("cancel");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let queue = CommandQueue::default();
+        let control = start_with(
+            ControlOptions {
+                port: 0,
+                allow_destructive: false,
+            },
+            &dir,
+            &queue,
+            Arc::new(|| {}),
+            AUTH_DEADLINE,
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        let token = {
+            let v: Value =
+                serde_json::from_str(&std::fs::read_to_string(control.token_path()).unwrap())
+                    .unwrap();
+            v["token"].as_str().unwrap().to_owned()
+        };
+        let (mut s, mut r) = handshake(control.addr(), &token).unwrap();
+        let before = SELECTS.load(Ordering::SeqCst);
+        // Nothing drains the queue, so the request times out.
+        let out = ask(
+            &mut s,
+            &mut r,
+            r#"{"id":1,"method":"grid.select","params":{"asset":5}}"#,
+        );
+        assert_eq!(out["ok"], false);
+        assert!(out["error"].as_str().unwrap().contains("timed out"));
+        // The UI thread comes back later: the abandoned request must not run.
+        let mut host = Echo;
+        queue.drain(&mut host, Policy::default());
+        assert_eq!(
+            SELECTS.load(Ordering::SeqCst),
+            before,
+            "an abandoned request ran"
+        );
+        drop(s);
+        drop(control);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_policy_flag_reaches_the_command_gate_and_a_bad_line_does_not_end_the_session() {
+        let on = ControlOptions {
+            port: 0,
+            allow_destructive: true,
+        };
+        let off = ControlOptions {
+            allow_destructive: false,
+            ..on
+        };
+        assert!(on.policy().allow_destructive && !off.policy().allow_destructive);
+        let rig = Rig::new();
+        let (mut s, mut r) = rig.authed();
+        // A non-UTF-8 line is answered, and the session carries on.
+        s.write_all(&[0xff, 0xfe, b'\n']).unwrap();
+        let out: Value =
+            serde_json::from_str(&read_line_limited(&mut r, 4096).unwrap().unwrap()).unwrap();
+        assert!(out["error"].as_str().unwrap().contains("UTF-8"), "{out}");
+        assert_eq!(
+            ask(&mut s, &mut r, r#"{"id":2,"method":"ui.inspect"}"#)["ok"],
+            true
+        );
     }
 
     #[test]
