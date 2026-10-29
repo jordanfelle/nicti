@@ -517,6 +517,15 @@ impl DevelopDoc {
         self.history.compact(self.gesture_window_ms);
     }
 
+    /// Runs `f` with slider-drag merging off, so each write inside it is its own undo step (a
+    /// scripted edit is not a drag and must not fold into the user's previous one).
+    pub fn without_gesture_merging<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = std::mem::replace(&mut self.gesture_window_ms, 0);
+        let out = f(self);
+        self.gesture_window_ms = saved;
+        out
+    }
+
     /// Test seam: makes every write its own gesture once the clock has ticked over (see
     /// [`wait_for_next_ms`]), so tests need no real-time waits.
     #[cfg(test)]

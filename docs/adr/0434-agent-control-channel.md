@@ -1,6 +1,6 @@
 # ADR-0434: Agent-drivable command table, loopback control channel and MCP shim for nicti-pelt
 
-**Status:** Proposed (go, phased; nothing built yet)
+**Status:** Proposed (go, phased; slice 1 built in #542, see "Slice 1 as built" below)
 **Ticket:** #434
 **Part of:** #424
 **Related:** #426 (headless harness, landed), #233, #368, #294, #295, #272
@@ -38,7 +38,7 @@ LightCraft sources below are the reference read for the questions, at the pinned
 - **#426 landed `swat/`** (`#[cfg(test)]` only): egui_kittest + a CPU softpaint rasteriser, finding
   widgets by AccessKit label. It cannot draw the wgpu photo viewport (paint callbacks), by design, and
   it did **not** deliver the named-widget registry its title mentions; section 4 adds one.
-- `PeltApp` implements only `eframe::App::ui`, not `logic`. eframe 0.37 runs **no egui pass** while the
+- `PeltApp` implemented only `eframe::App::ui`, not `logic` (slice 1, #542, added `logic`). eframe 0.37 runs **no egui pass** while the
   window is hidden or minimised (it calls only `logic`), and throttles invisible windows to 100 ms.
 - The layering check (`scripts/check-repo-policy.py`) allows egui/eframe/accesskit only in
   `nicti-pelt` and the root `nicti` binary. Anything GUI-aware has to live in pelt.
@@ -192,3 +192,30 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
 - **Caveat on the benefit:** this speeds up GPU/UI verification only where an agent can reach a GPU
   display. On this headless host that means driving a remote instance over `ssh -L`.
 - **Deferred:** shortcut/menu unification, rebinding, remote (non-loopback) control, a UI test recorder.
+
+## Slice 1 as built (#542)
+
+- `crates/nicti-pelt/src/cmd.rs`: `Command` / `Risk` / `Policy`, `dispatch`, `list`, `CommandQueue`
+  (drained by `PeltApp::drain_commands` from both `eframe::App::logic` and `ui`, at most 16 per drain, so up to 32 requests a frame; `Arc`-shared so a command may itself submit).
+- **Deviation from section 1:** `run`/`enabled` take `&mut dyn CommandHost`, not `&mut PeltApp`.
+  `PeltApp::new` needs eframe's wgpu `RenderState`, so a `PeltApp` cannot be built in a test; the
+  trait is mocked there and `PeltApp` implements it. The Develop get/set core is a free function
+  over a real `DevelopView`, tested on it (lavapipe where there is no GPU).
+- Commands: `ui.inspect`, `view.set` (library | loupe), `grid.select`, `photo.rate` (null/-1/1..5,
+  at most 1000 photos), `develop.get` / `develop.set` (stages wb, exposure, tone, vibrance,
+  presence; unknown fields refused; goes through the undo history), `export.open`. Unknown
+  parameters are refused everywhere; no command takes a path.
+- **`export.run` is not built.** The export flow starts inside the dialog's own Start button; a
+  headless run needs the dialog's settings/destination step to become a callable, which is
+  `Destructive` per section 3. `export.open` (opens the dialog) is the Mutate stand-in. Filed as a
+  follow-up with the transport slice.
+- `Risk::Destructive` is enforced by `Policy::allow_destructive` (tested with a synthetic entry);
+  no destructive command exists yet. Nothing feeds the queue until slice 2a.
+- Hardening from the pre-PR review: `develop.set` refuses out-of-range numbers (the documented slider
+  ranges; an f32 parse of `1e300` is infinity and would serialize to `null`, poisoning the document),
+  can set/clear the as-shot-omitted `temp_k`, and each call is its own undo step
+  (`DevelopView::without_gesture_merging`). `grid.select` clears the multi-selection and only works
+  in the library view; `photo.rate` rates only catalog photos, each once, and reports that count;
+  `export.open` and `view.set loupe` report failure instead of silently succeeding; `ui.inspect`
+  lists at most 1000 selected ids (plus the exact count). Still for slice 2a: a request-size cap
+  before parsing, and waking an idle window when a request arrives.
