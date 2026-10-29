@@ -1,6 +1,6 @@
 # ADR-0434: Agent-drivable command table, loopback control channel and MCP shim for nicti-pelt
 
-**Status:** Proposed (go, phased; nothing built yet)
+**Status:** Proposed (go, phased; slice 1 built in #542, see "Slice 1 as built" below)
 **Ticket:** #434
 **Part of:** #424
 **Related:** #426 (headless harness, landed), #233, #368, #294, #295, #272
@@ -192,3 +192,22 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
 - **Caveat on the benefit:** this speeds up GPU/UI verification only where an agent can reach a GPU
   display. On this headless host that means driving a remote instance over `ssh -L`.
 - **Deferred:** shortcut/menu unification, rebinding, remote (non-loopback) control, a UI test recorder.
+
+## Slice 1 as built (#542)
+
+- `crates/nicti-pelt/src/cmd.rs`: `Command` / `Risk` / `Policy`, `dispatch`, `list`, `CommandQueue`
+  (drained by `PeltApp::drain_commands` from both `eframe::App::logic` and `ui`, at most 16 per drain).
+- **Deviation from section 1:** `run`/`enabled` take `&mut dyn CommandHost`, not `&mut PeltApp`.
+  `PeltApp::new` needs eframe's wgpu `RenderState`, so a `PeltApp` cannot be built in a test; the
+  trait is mocked there and `PeltApp` implements it. The Develop get/set core is a free function
+  over a real `DevelopView`, tested on it (lavapipe where there is no GPU).
+- Commands: `ui.inspect`, `view.set` (library | loupe), `grid.select`, `photo.rate` (null/-1/1..5,
+  at most 1000 photos), `develop.get` / `develop.set` (stages wb, exposure, tone, vibrance,
+  presence; unknown fields refused; goes through the undo history), `export.open`. Unknown
+  parameters are refused everywhere; no command takes a path.
+- **`export.run` is not built.** The export flow starts inside the dialog's own Start button; a
+  headless run needs the dialog's settings/destination step to become a callable, which is
+  `Destructive` per section 3. `export.open` (opens the dialog) is the Mutate stand-in. Filed as a
+  follow-up with the transport slice.
+- `Risk::Destructive` is enforced by `Policy::allow_destructive` (tested with a synthetic entry);
+  no destructive command exists yet. Nothing feeds the queue until slice 2a.

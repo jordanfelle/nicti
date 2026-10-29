@@ -16,6 +16,7 @@ mod camera_profiles;
 mod catalog;
 mod catalog_problem;
 mod catseye;
+mod cmd;
 mod color_mgmt;
 mod cull;
 mod decode_job;

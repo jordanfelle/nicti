@@ -272,6 +272,10 @@ pub struct PeltApp {
     /// A short hint about the last culling action that couldn't happen ("select two or more
     /// photos to survey"), cleared by the next successful one.
     cull_notice: Option<String>,
+    /// Requests for the command table (#542), run on the UI thread in `logic` and `ui`. Nothing
+    /// feeds it until the control channel (ADR-0434 slice 2a) lands; tests and a palette can.
+    commands: crate::cmd::CommandQueue,
+    command_policy: crate::cmd::Policy,
 }
 
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
@@ -508,6 +512,8 @@ impl PeltApp {
             compare: None,
             tile_previews: TilePreviews::new(larder.clone()),
             cull_notice: None,
+            commands: Default::default(),
+            command_policy: Default::default(),
             facets_dirty_since: None,
         }
     }
@@ -1260,8 +1266,15 @@ impl eframe::App for PeltApp {
         self.save_develop_edits(true);
     }
 
+    /// Runs queued commands even when no egui pass will (a hidden or minimised window): they touch
+    /// `PeltApp`, not egui input (ADR-0434 section 2).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_commands(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         crate::repaint_trace::frame(ui.ctx());
+        self.drain_commands(ui.ctx());
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
@@ -3526,5 +3539,120 @@ mod folder_input_tests {
             validate_folder_input(gone.to_str().unwrap(), false).unwrap(),
             gone
         );
+    }
+}
+
+impl PeltApp {
+    /// Runs the waiting command-table requests; asks for another frame if the cap left some.
+    fn drain_commands(&mut self, ctx: &egui::Context) {
+        let queue = std::mem::take(&mut self.commands);
+        let policy = self.command_policy;
+        let ran = queue.drain(self, policy);
+        self.commands = queue;
+        if ran >= crate::cmd::MAX_PER_DRAIN {
+            ctx.request_repaint();
+        }
+    }
+}
+
+impl crate::cmd::CommandHost for PeltApp {
+    fn inspect(&self) -> serde_json::Value {
+        serde_json::json!({
+            "view": self.view_name(),
+            "selected": self.mark_targets(),
+            "grid_cursor": self.grid.as_ref().and_then(GridSession::cursor_id),
+            "grid_len": self.grid.as_ref().map(GridSession::len),
+            "develop_asset": self.loupe_loaded_asset.map(|(id, _)| id),
+            "export_running": self.export.is_running(),
+        })
+    }
+
+    fn view_name(&self) -> &'static str {
+        match self.view {
+            View::Library => "library",
+            View::Loupe => "loupe",
+            View::Develop => "develop",
+            View::Survey => "survey",
+            View::Compare => "compare",
+        }
+    }
+
+    fn set_view(&mut self, view: &str) -> Result<(), String> {
+        match view {
+            "library" => {
+                self.view = View::Library;
+                Ok(())
+            }
+            "loupe" => {
+                let index = self
+                    .grid
+                    .as_ref()
+                    .and_then(GridSession::cursor)
+                    .ok_or("select a photo first (grid.select)")?;
+                let store = Arc::clone(&self.catalog);
+                self.open_from_grid(&store, index);
+                if self.view == View::Loupe {
+                    Ok(())
+                } else {
+                    Err(
+                        "the loupe could not be opened (a move, delete or export is running)"
+                            .into(),
+                    )
+                }
+            }
+            other => Err(format!("cannot switch to `{other}` (library or loupe)")),
+        }
+    }
+
+    fn select_asset(&mut self, asset_id: i64) -> Result<(), String> {
+        let grid = self.grid.as_mut().ok_or("the library has no grid yet")?;
+        if !grid.ids().contains(&asset_id) {
+            return Err(format!("photo {asset_id} is not in the current grid"));
+        }
+        grid.select_asset(asset_id);
+        self.grid_view.reveal_cursor();
+        Ok(())
+    }
+
+    fn target_ids(&self) -> Vec<i64> {
+        self.mark_targets()
+    }
+
+    fn rate(&mut self, ids: &[i64], rating: Option<i64>) -> Result<(), String> {
+        self.facets_dirty_since = Some(Instant::now());
+        self.cull.mark(ids.to_vec(), CullAction::SetRating(rating));
+        Ok(())
+    }
+
+    fn develop_ready(&self) -> Result<(), String> {
+        if self.develop.is_some() && self.loupe_loaded_asset.is_some() {
+            Ok(())
+        } else {
+            Err("no photo is loaded in Develop (open one in the loupe first)".into())
+        }
+    }
+
+    fn develop_get(&self, stage: &str) -> Result<serde_json::Value, String> {
+        self.develop_ready()?;
+        let dev = self.develop.as_ref().ok_or("Develop is not available")?;
+        crate::cmd::develop_stage_get(dev, stage)
+    }
+
+    fn develop_set(
+        &mut self,
+        stage: &str,
+        patch: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.develop_ready()?;
+        let dev = self.develop.as_mut().ok_or("Develop is not available")?;
+        crate::cmd::develop_stage_set(dev, stage, patch)
+    }
+
+    fn export_open(&mut self) -> Result<(), String> {
+        if self.export.is_running() {
+            return Err("an export is already running".into());
+        }
+        self.request_export();
+        Ok(())
     }
 }
