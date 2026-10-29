@@ -737,6 +737,7 @@ mod gpu_tests {
         tone: ToneParams,
         vibrance: f32,
         presence: PresenceParams,
+        global_defringe: crate::coat::DefringeParams,
     }
 
     /// Renders `setup` through the real `LiveSuffixKernel` and returns GPU pixels.
@@ -773,7 +774,7 @@ mod gpu_tests {
                     amount: setup.vibrance,
                 },
                 presence: setup.presence,
-                defringe: Default::default(),
+                defringe: setup.global_defringe,
                 calibration: Default::default(),
                 look_curve: Vec::new(),
                 hsl: HslParams::default(),
@@ -868,6 +869,7 @@ mod gpu_tests {
             },
             vibrance: 0.1,
             presence: PresenceParams::default(),
+            global_defringe: Default::default(),
         }
     }
 
@@ -1037,14 +1039,34 @@ mod gpu_tests {
         // Moire is chroma-only: the checker's luminance is untouched.
         let luma = |p: &[f32; 4]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
         assert!((luma(&mo[j]) - luma(&base[j])).abs() < 1e-3);
-        // A zero local amount leaves the frame bit-identical to no masks at all.
-        let none = render_pixels(
-            &gpu,
-            &local_fringe_setup(LocalAdjust::default()),
-            false,
-            &px,
-        );
-        assert_eq!(base, none);
+    }
+
+    /// The defringe/shadow-tint block now runs after `accumulate_locals`: with an *active*
+    /// correction whose mask selects nothing (so every stacked sum is exactly 0) and the global
+    /// Defringe on, the frame must equal the no-mask render bit for bit.
+    #[test]
+    fn a_mask_selecting_nothing_leaves_global_defringe_bit_identical() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let px = fringe_and_checker();
+        let mut s = local_fringe_setup(LocalAdjust {
+            exposure: 0.5,
+            moire: 1.0,
+            defringe: 1.0,
+            ..Default::default()
+        });
+        s.global_defringe = crate::coat::DefringeParams {
+            purple_amount: 0.6,
+            green_amount: 0.6,
+            ..Default::default()
+        };
+        s.fields[0].data = vec![0.0; W * H];
+        let masked = render_pixels(&gpu, &s, true, &px);
+        let none = render_pixels(&gpu, &s, false, &px);
+        assert_eq!(masked, none);
+        // The global Defringe really did something on this frame.
+        s.global_defringe = Default::default();
+        let off = render_pixels(&gpu, &s, false, &px);
+        assert_ne!(none, off);
     }
 
     #[test]

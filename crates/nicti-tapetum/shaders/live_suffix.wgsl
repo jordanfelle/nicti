@@ -730,7 +730,7 @@ fn apply_moire(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>, a
     mean = mean + chroma_of(tap_rgb(x, y + r, m));
     mean = mean + chroma_of(tap_rgb(x + r, y + r, m));
     let l = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    return vec3<f32>(l) + own + (mean / 9.0 - own) * k;
+    return max(vec3<f32>(l) + own + (mean / 9.0 - own) * k, vec3<f32>(0.0));
 }
 
 // ---- #381 shadows tint (color.rs::shadow_tint_pixel is the CPU twin; keep the constants in sync) ----

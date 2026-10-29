@@ -308,11 +308,11 @@ fn adjust_sliders(ui: &mut egui::Ui, a: &mut LocalAdjust) -> bool {
     for (label, v) in [
         ("Sharpness", &mut a.sharpness),
         ("Noise", &mut a.noise),
-        ("Moire", &mut a.moire),
         ("Defringe", &mut a.defringe),
     ] {
         changed |= percent_slider(ui, label, v);
     }
+    changed |= fraction_slider(ui, "Moire", &mut a.moire, 0.0);
     changed
 }
 

@@ -513,7 +513,7 @@ pub fn moire_pixel(rgb: [f32; 3], taps: &[[f32; 3]; 8], amount: f32) -> [f32; 3]
         }
     }
     let l = luma(rgb);
-    std::array::from_fn(|i| l + own[i] + (mean[i] / 9.0 - own[i]) * k)
+    std::array::from_fn(|i| (l + own[i] + (mean[i] / 9.0 - own[i]) * k).max(0.0))
 }
 
 /// Basic-panel tone controls in a rough perceptual (cube-root) space: whites/blacks remap the
@@ -843,6 +843,12 @@ mod tests {
         // A flat neighbourhood is already its own mean.
         let flat = moire_pixel(red, &[red; 8], 1.0);
         assert!(flat.iter().zip(red).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn moire_never_outputs_a_negative_channel() {
+        let out = moire_pixel([0.01; 3], &[[0.4, 0.1, 0.1]; 8], 1.0);
+        assert!(out.iter().all(|&c| c >= 0.0), "{out:?}");
     }
 
     #[test]

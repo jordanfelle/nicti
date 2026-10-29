@@ -195,7 +195,7 @@ pub struct LocalAdjust {
     pub noise: f32,
     /// Added to both the purple and the green global Defringe amount (#351).
     pub defringe: f32,
-    /// Chroma low-pass strength, 0..1; a negative value does nothing (#351).
+    /// Chroma low-pass strength, 0..=1 (unipolar; sanitized, LRC has no negative Moire) (#351).
     pub moire: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<TintColor>,
@@ -360,10 +360,10 @@ impl LocalAdjust {
             &mut self.sharpness,
             &mut self.noise,
             &mut self.defringe,
-            &mut self.moire,
         ] {
             *v = clean(*v, -1.0, 1.0);
         }
+        self.moire = clean(self.moire, 0.0, 1.0);
         if let Some(c) = &mut self.color {
             c.hue_deg = clean(c.hue_deg, 0.0, 360.0);
             c.saturation = clean(c.saturation, 0.0, 1.0);
@@ -423,6 +423,13 @@ mod tests {
         };
         a.sanitize();
         assert_eq!((a.moire, a.defringe), (0.0, 1.0));
+        // Moire is unipolar: a negative value is dropped, so it never keeps a correction active.
+        let mut n = LocalAdjust {
+            moire: -0.5,
+            ..Default::default()
+        };
+        n.sanitize();
+        assert!(n.is_noop());
     }
 
     use super::*;
