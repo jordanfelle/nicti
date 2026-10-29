@@ -370,6 +370,7 @@ impl CommandQueue {
             let next = self.rx.lock().ok().and_then(|rx| rx.try_recv().ok());
             let Some(req) = next else { break };
             if req.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                ran += 1; // dropped requests count against the cap too
                 continue; // the client was already told it timed out
             }
             let result = if req.id == "commands" {
@@ -834,6 +835,33 @@ mod tests {
         assert!(merge_patch(WB, cleared.clone(), &obj(json!({"tint": 200.0}))).is_err());
         // `null` clears only optional fields.
         assert!(merge_patch(WB, cleared, &obj(json!({"tint": null}))).is_err());
+    }
+
+    #[test]
+    fn abandoned_requests_count_against_the_per_drain_cap() {
+        let q = CommandQueue::default();
+        let tx = q.sender();
+        for _ in 0..(MAX_PER_DRAIN + 4) {
+            let (rtx, _rrx) = mpsc::channel();
+            tx.send(Request {
+                id: "ui.inspect".into(),
+                params: Value::Null,
+                reply: rtx,
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            })
+            .unwrap();
+        }
+        let mut m = Mock::default();
+        assert_eq!(
+            q.drain(&mut m, OPEN),
+            MAX_PER_DRAIN,
+            "a flood of abandoned requests stalled the frame"
+        );
+        assert_eq!(
+            q.drain(&mut m, OPEN),
+            4,
+            "the rest are left for the next frame"
+        );
     }
 
     fn develop() -> Option<DevelopView> {
