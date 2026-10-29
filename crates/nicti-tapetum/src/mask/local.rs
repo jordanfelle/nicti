@@ -935,8 +935,10 @@ mod gpu_tests {
     fn cpu_with_fringe(s: &Setup, px: &[[f32; 4]]) -> Vec<[f32; 3]> {
         let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
         let hsl = HslParams::default();
+        // The shader applies the camera->working matrix first and defringes/de-moires the result
+        // (taps included), so the twin does the same and hands `live_pixel` an identity matrix.
         let p = PixelParams {
-            matrix: s.matrix,
+            matrix: color::mat3_identity(),
             exposure_mult: color::exposure_multiplier(s.exposure),
             tone: s.tone,
             lut: &lut,
@@ -947,13 +949,14 @@ mod gpu_tests {
         let uniforms = pack_active(&MaskParams {
             corrections: s.corrections.clone(),
         });
+        let to_working = |p: [f32; 4]| color::mat3_apply(s.matrix, [p[0], p[1], p[2]]);
         let dp = crate::coat::DefringeParams::default();
         (0..W * H)
             .map(|i| {
                 let (x, y) = (i % W, i / W);
                 let sums = LocalSums::accumulate(&uniforms, &[s.fields[0].data[i]]);
-                let taps = working_taps(px, x, y);
-                let c = [px[i][0], px[i][1], px[i][2]];
+                let taps = working_taps(px, x, y).map(|t| color::mat3_apply(s.matrix, t));
+                let c = to_working(px[i]);
                 let c = color::defringe_pixel_with(c, &taps, &dp, sums.defringe);
                 let c = color::moire_pixel(c, &taps, sums.moire);
                 live_pixel(c, &p, &sums, None)
@@ -991,11 +994,17 @@ mod gpu_tests {
                 ..Default::default()
             },
         ] {
-            let s = local_fringe_setup(adjust);
-            let got = render_pixels(&gpu, &s, true, &px);
-            let want = cpu_with_fringe(&s, &px);
-            let d = max_diff(&got, &want);
-            assert!(d < 2e-3, "{adjust:?}: max diff {d}");
+            for matrix in [
+                color::mat3_identity(),
+                [[1.4, -0.3, -0.1], [-0.2, 1.3, -0.1], [0.0, -0.2, 1.2]],
+            ] {
+                let mut s = local_fringe_setup(adjust);
+                s.matrix = matrix;
+                let got = render_pixels(&gpu, &s, true, &px);
+                let want = cpu_with_fringe(&s, &px);
+                let d = max_diff(&got, &want);
+                assert!(d < 2e-3, "{adjust:?} {matrix:?}: max diff {d}");
+            }
         }
     }
 
