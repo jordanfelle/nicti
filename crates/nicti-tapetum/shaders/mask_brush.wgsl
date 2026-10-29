@@ -42,13 +42,15 @@ fn mask_brush(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tile = (gid.y / 64u) * u32(u.mode.x) + (gid.x / 64u);
     let prev = textureLoad(prev_tex, px, 0).r;
     // A build-up add stroke keeps accumulating on what earlier strokes painted, so passes build.
+    // Erase strokes never accumulate, whatever the uniform says (CPU twin: raster.rs).
+    let accumulate = u.mode.z > 0.5 && u.mode.y < 0.5;
     var s = 0.0;
-    if (u.mode.z > 0.5 && u.mode.y < 0.5) {
+    if (accumulate) {
         s = prev;
     }
     for (var k = tile_offsets[tile]; k < tile_offsets[tile + 1u]; k = k + 1u) {
         let w = dab_weight(tile_dabs[k], fx, fy);
-        if (u.mode.z > 0.5) {
+        if (accumulate) {
             s = 1.0 - (1.0 - s) * (1.0 - w);
         } else {
             s = max(s, w);
