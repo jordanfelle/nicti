@@ -18,6 +18,7 @@ mod catalog_problem;
 mod catseye;
 mod cmd;
 mod color_mgmt;
+mod control;
 mod cull;
 mod decode_job;
 mod develop_panel;
@@ -64,6 +65,7 @@ mod xmp_sync;
 use std::sync::Arc;
 
 pub use app::PeltApp;
+pub use control::ControlOptions;
 /// Re-exported so `src/main.rs` (the root `nicti` binary) doesn't need its own direct `eframe`
 /// dependency just to spell this return type.
 pub use eframe::Result;
@@ -75,6 +77,11 @@ pub use eframe::Result;
 /// `GpuContext::from_device` then wraps in [`app::PeltApp::new`] would be undersized for a real
 /// full-resolution Tapetum render (ADR-0016).
 pub fn run(version: &str) -> eframe::Result {
+    run_with(version, None)
+}
+
+/// [`run`] with the opt-in agent control channel (#543, ADR-0434) when `control` is `Some`.
+pub fn run_with(version: &str, control: Option<ControlOptions>) -> eframe::Result {
     let wgpu_setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
         device_descriptor: Arc::new(nicti_tapetum::gpu::device_descriptor_for),
         ..egui_wgpu::WgpuSetupCreateNew::without_display_handle()
@@ -92,6 +99,10 @@ pub fn run(version: &str) -> eframe::Result {
     eframe::run_native(
         "nicti",
         options,
-        Box::new(move |cc| Ok(Box::new(catalog_problem::Launcher::new(cc, version)))),
+        Box::new(move |cc| {
+            Ok(Box::new(catalog_problem::Launcher::new(
+                cc, version, control,
+            )))
+        }),
     )
 }

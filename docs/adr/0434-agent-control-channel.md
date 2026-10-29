@@ -219,3 +219,25 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
   `export.open` and `view.set loupe` report failure instead of silently succeeding; `ui.inspect`
   lists at most 1000 selected ids (plus the exact count). Still for slice 2a: a request-size cap
   before parsing, and waking an idle window when a request arrives.
+
+## Slice 2a as built (#543)
+
+- `crates/nicti-pelt/src/control.rs`; started by `PeltApp::enable_control` when the root binary was
+  run with `--control[=PORT]` (or `NICTI_CONTROL_PORT`); `--control-allow-destructive` lifts the risk
+  gate (nothing destructive exists yet). An unknown `--control-*` flag is an error, not ignored.
+- Wire format: JSON lines. First line `{"auth":"<token>"}` within 5 s *total* (a client trickling bytes is
+  cut off at the deadline, not just at a per-read timeout); then `{"id":..,"method":"<command id | commands>","params":{..}}`
+  answered by `{"id":..,"ok":true,"result":..}` or `{"id":..,"ok":false,"error":".."}`.
+- Token: 128 bits from the OS RNG (`getrandom`, already in the lockfile), compared in constant time, in
+  `$XDG_RUNTIME_DIR/nicti-control-<pid>.json` (Windows: `%LOCALAPPDATA%\nicti`), created `O_EXCL` with
+  mode `0600` at creation, holding the *bound* port; a stale file is replaced (a planted symlink is
+  replaced, its target untouched); the directory must not be group/other accessible on Unix or the
+  channel refuses to start; there is no `/tmp` fallback. Removed on exit.
+- Caps: 1 MiB per line (rejected without buffering the excess), 4 authenticated + 4 unauthenticated
+  connections, 30 s per request, 5 min idle timeout, 16 requests per UI drain. `logic` drains too and
+  the app sends `RequestPaintWhileHidden`; a queued request wakes an idle window (`request_repaint`).
+- **Not built (follow-up):** the widget-rect registry, click/key/drag injection, `settle`, confirm-dialog
+  gating (slice 2b); screenshot (3a); the MCP shim (3b). The risk gate is therefore only the policy flag
+  for now, and no command can reach a delete/confirm dialog.
+- Verified here: token/auth/cap/deadline/size guards by unit and loopback-socket tests (each guard
+  mutation-checked). Not verified: Windows ACL behaviour of `%LOCALAPPDATA%`, and a real GUI session.
