@@ -25,6 +25,12 @@ pub const MAX_TILE_ENTRIES_PER_STROKE: usize = 2_000_000;
 pub const BRUSH_TILE: usize = 64;
 /// Dab spacing as a fraction of the radius (LRC-style overlap; 1/4 keeps an edge visibly smooth).
 pub const SPACING_FRACTION: f32 = 0.25;
+/// A zero-pressure dab keeps this fraction of the stroke's radius (a stylus at rest still marks).
+pub const PRESSURE_MIN_SIZE: f32 = 0.2;
+/// Per-dab flow of a build-up stroke at the nominal spacing, before the spacing correction: one
+/// pass of a stroke at flow 1 reaches about `1 - (1 - BUILDUP_GAIN)^(2 / SPACING_FRACTION)` at its
+/// centre, so repeated passes keep darkening it.
+pub const BUILDUP_GAIN: f32 = 0.2;
 /// Never space dabs closer than this many pixels.
 pub const MIN_SPACING_PX: f32 = 0.5;
 
@@ -71,17 +77,42 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
     }
     let feather = (stroke.feather * long).clamp(0.0, radius);
     let to_px = |p: [f32; 2]| (p[0] * width as f32, p[1] * height as f32);
-    let make = |(cx, cy): (f32, f32)| Dab {
-        cx,
-        cy,
-        radius,
-        feather,
-        flow: stroke.flow,
+    let min_radius = MIN_RADIUS * long;
+    let pressure_at = |i: usize| {
+        stroke
+            .pressure
+            .get(i)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0)
+    };
+    // `pr` is the pressure at the dab (already interpolated along the segment).
+    let make = |(cx, cy): (f32, f32), pr: f32| {
+        let r = (radius * (PRESSURE_MIN_SIZE + (1.0 - PRESSURE_MIN_SIZE) * pr)).max(min_radius);
+        Dab {
+            cx,
+            cy,
+            radius: r,
+            feather: feather.min(r),
+            flow: stroke.flow * pr,
+        }
     };
 
     let pts: Vec<(f32, f32)> = stroke.points.iter().copied().map(to_px).collect();
+    let nominal = (radius * SPACING_FRACTION).max(MIN_SPACING_PX);
+    // A build-up dab's flow is rescaled by the spacing actually used, so a widened spacing (very
+    // long strokes) deposits as much per unit length as the nominal one.
+    let buildup = |mut dabs: Vec<Dab>, spacing: f32| {
+        if stroke.buildup {
+            let n = spacing / nominal;
+            for d in &mut dabs {
+                d.flow = 1.0 - (1.0 - d.flow * BUILDUP_GAIN).powf(n);
+            }
+        }
+        dabs
+    };
     if pts.len() == 1 {
-        return vec![make(pts[0])];
+        return buildup(vec![make(pts[0], pressure_at(0))], nominal);
     }
     let total: f32 = pts
         .windows(2)
@@ -96,7 +127,7 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
     let cap = cap
         .min(MAX_DABS_PER_STROKE)
         .min((MAX_TILE_ENTRIES_PER_STROKE / tiles_per_dab).max(1));
-    let mut spacing = (radius * SPACING_FRACTION).max(MIN_SPACING_PX);
+    let mut spacing = nominal;
     // Widen rather than truncate, so the whole path is still covered at a coarser spacing. The
     // first dab is placed separately, so `cap - 1` more are available -- however many points the
     // stroke has (a point is not a dab: points closer than `spacing` produce none).
@@ -105,11 +136,12 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
         spacing = total / steps;
     }
 
-    let mut dabs = vec![make(pts[0])];
+    let mut dabs = vec![make(pts[0], pressure_at(0))];
     let mut carry = 0.0f32; // distance already walked since the last dab
-    for w in pts.windows(2) {
+    for (k, w) in pts.windows(2).enumerate() {
         let (x0, y0) = w[0];
         let (x1, y1) = w[1];
+        let (p0, p1) = (pressure_at(k), pressure_at(k + 1));
         let seg = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
         if seg <= f32::EPSILON {
             continue;
@@ -119,13 +151,16 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
         // rounding error past the end of the path and lose it.
         while at <= seg + spacing * 1e-3 && dabs.len() < cap {
             let t = (at / seg).min(1.0);
-            dabs.push(make((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)));
+            dabs.push(make(
+                (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t),
+                p0 + (p1 - p0) * t,
+            ));
             at += spacing;
         }
         carry = seg - (at - spacing);
     }
     dabs.truncate(cap);
-    dabs
+    buildup(dabs, spacing)
 }
 
 /// Linear gradient weight at pixel-space `(x, y)`: 1 at `p0`, 0 at `p1`, constant across.
@@ -309,6 +344,15 @@ pub fn rasterize_brush(strokes: &[Stroke], width: usize, height: usize) -> Field
         let (bw, bh) = (x1 - x0, y1 - y0);
         // The stroke's own field, only over the box its dabs touch.
         let mut scratch = vec![0.0f32; bw * bh];
+        // A build-up add stroke keeps accumulating on what earlier strokes painted (as the GPU
+        // kernel does), so repeated passes build.
+        if stroke.buildup && !stroke.erase {
+            for y in 0..bh {
+                for x in 0..bw {
+                    scratch[y * bw + x] = acc.data[(y + y0) * width + (x + x0)];
+                }
+            }
+        }
         for d in &dabs {
             let Some((lo_x, lo_y, hi_x, hi_y)) = dab_box(d, width, height) else {
                 continue;
@@ -317,7 +361,11 @@ pub fn rasterize_brush(strokes: &[Stroke], width: usize, height: usize) -> Field
                 for x in lo_x..hi_x {
                     let w = d.weight(x as f32 + 0.5, y as f32 + 0.5);
                     let s = &mut scratch[(y - y0) * bw + (x - x0)];
-                    *s = s.max(w);
+                    *s = if stroke.buildup {
+                        1.0 - (1.0 - *s) * (1.0 - w)
+                    } else {
+                        s.max(w)
+                    };
                 }
             }
         }
@@ -407,6 +455,7 @@ mod tests {
             feather,
             flow: 1.0,
             erase,
+            ..Default::default()
         }
     }
 
@@ -584,6 +633,83 @@ mod tests {
         );
         assert!(f.data.iter().all(|&v| v <= 1.0 + 1e-6));
         assert!((f.get(42, 50) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pressure_scales_dab_size_and_flow_along_the_path_and_defaults_to_full() {
+        let mut s = straight(2, 0.05);
+        s.points = vec![[0.1, 0.5], [0.9, 0.5]];
+        let full = dabs_for_stroke(&s, 200, 100, 1000);
+        s.pressure = vec![1.0, 0.0];
+        let ramp = dabs_for_stroke(&s, 200, 100, 1000);
+        assert_eq!(full.len(), ramp.len());
+        assert_eq!(
+            (ramp[0].radius, ramp[0].flow),
+            (full[0].radius, full[0].flow)
+        );
+        let last = ramp.last().unwrap();
+        assert!(
+            last.radius < 0.3 * full[0].radius && last.flow < 0.1,
+            "{last:?}"
+        );
+        assert!(ramp.windows(2).all(|w| w[1].radius <= w[0].radius + 1e-4));
+        // A short list pads with full pressure; an empty one is the unpressured stroke.
+        s.pressure = vec![1.0];
+        assert_eq!(dabs_for_stroke(&s, 200, 100, 1000), full);
+        s.pressure = Vec::new();
+        assert_eq!(dabs_for_stroke(&s, 200, 100, 1000), full);
+    }
+
+    #[test]
+    fn buildup_deposits_more_on_a_second_pass_while_max_blending_does_not() {
+        let pass = |buildup: bool, passes: usize| {
+            let mut s = stroke(&[[0.2, 0.5], [0.8, 0.5]], 0.1, 0.05, false);
+            s.flow = 0.6;
+            s.buildup = buildup;
+            let strokes = vec![s; passes];
+            rasterize_brush(&strokes, 100, 100).get(50, 50)
+        };
+        let (m1, m2) = (pass(false, 1), pass(false, 2));
+        assert!((m1 - m2).abs() < 1e-6, "max blending: {m1} vs {m2}");
+        let (b1, b2) = (pass(true, 1), pass(true, 2));
+        assert!(b1 > 0.3 && b1 < 1.0, "one pass should not saturate: {b1}");
+        assert!(b2 > b1 + 0.1, "second pass must darken: {b1} -> {b2}");
+    }
+
+    #[test]
+    fn buildup_is_independent_of_how_densely_the_path_is_sampled() {
+        // The same geometric path with 2 and with 400 points must deposit the same amount.
+        let coarse = {
+            let mut s = stroke(&[[0.2, 0.5], [0.8, 0.5]], 0.1, 0.05, false);
+            s.buildup = true;
+            rasterize_brush(&[s], 100, 100).get(50, 50)
+        };
+        let fine = {
+            let pts: Vec<[f32; 2]> = (0..400)
+                .map(|i| [0.2 + 0.6 * i as f32 / 399.0, 0.5])
+                .collect();
+            let mut s = stroke(&pts, 0.1, 0.05, false);
+            s.buildup = true;
+            rasterize_brush(&[s], 100, 100).get(50, 50)
+        };
+        assert!((coarse - fine).abs() < 0.03, "{coarse} vs {fine}");
+    }
+
+    #[test]
+    fn buildup_deposits_the_same_per_unit_length_when_the_cap_widens_the_spacing() {
+        let mut s = straight(2, 0.02);
+        s.points = vec![[0.05, 0.5], [0.95, 0.5]];
+        s.buildup = true;
+        // "Deposit" = sum of -ln(1 - flow): additive for the accumulate blend.
+        let deposit = |cap: usize| -> f32 {
+            dabs_for_stroke(&s, 4000, 100, cap)
+                .iter()
+                .map(|d| -(1.0 - d.flow).ln())
+                .sum()
+        };
+        let (dense, sparse) = (deposit(100_000), deposit(40));
+        let rel = (dense - sparse).abs() / dense;
+        assert!(rel < 0.1, "dense {dense} vs widened {sparse}");
     }
 
     #[test]

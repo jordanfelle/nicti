@@ -70,6 +70,15 @@ pub struct Stroke {
     pub flow: f32,
     /// True: this stroke removes from the mask rather than adding to it.
     pub erase: bool,
+    /// Stylus pressure per point, 0..=1 (#357). Empty = no pressure data (every point full); a
+    /// shorter list is padded with 1. Pressure scales the dab size (down to
+    /// `raster::PRESSURE_MIN_SIZE`) and the dab flow.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pressure: Vec<f32>,
+    /// True: dabs accumulate (airbrush build-up) instead of blending with `max`, so repeated
+    /// passes, and a stroke crossing itself, darken the mask towards `flow`'s ceiling of 1 (#357).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub buildup: bool,
 }
 
 impl Default for Stroke {
@@ -80,6 +89,8 @@ impl Default for Stroke {
             feather: 0.01,
             flow: 1.0,
             erase: false,
+            pressure: Vec::new(),
+            buildup: false,
         }
     }
 }
@@ -309,6 +320,10 @@ impl MaskSource {
                 for stroke in strokes.iter_mut() {
                     let room = (*brush_budget).min(stroke.points.len());
                     stroke.points.truncate(room);
+                    stroke.pressure.truncate(stroke.points.len());
+                    for v in &mut stroke.pressure {
+                        *v = clean(*v, 0.0, 1.0);
+                    }
                     *brush_budget -= room;
                     for p in &mut stroke.points {
                         *p = clean_point(*p);
@@ -434,6 +449,41 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stroke_pressure_is_clamped_trimmed_to_the_points_and_old_documents_still_load() {
+        let mut p = MaskParams {
+            corrections: vec![LocalCorrection {
+                mask: MaskGroup {
+                    components: vec![MaskComponent {
+                        source: MaskSource::Brush {
+                            strokes: vec![Stroke {
+                                points: vec![[0.1, 0.1], [0.2, 0.2]],
+                                pressure: vec![2.0, f32::NAN, 0.5, 0.5],
+                                buildup: true,
+                                ..Stroke::default()
+                            }],
+                        },
+                        ..MaskComponent::default()
+                    }],
+                },
+                ..LocalCorrection::default()
+            }],
+        };
+        p = p.sanitized();
+        let MaskSource::Brush { strokes } = &p.corrections[0].mask.components[0].source else {
+            panic!()
+        };
+        assert_eq!(strokes[0].pressure, vec![1.0, 0.0]);
+        assert!(strokes[0].buildup);
+        // A stroke saved before #357 has neither field.
+        let old: Stroke =
+            serde_json::from_value(json!({"points": [[0.1, 0.2]], "radius": 0.02})).unwrap();
+        assert!(old.pressure.is_empty() && !old.buildup);
+        // Defaults are not written, so unpressured documents keep their bytes.
+        let v = serde_json::to_value(Stroke::default()).unwrap();
+        assert!(v.get("pressure").is_none() && v.get("buildup").is_none());
+    }
 
     fn brush(n: usize) -> MaskSource {
         MaskSource::Brush {

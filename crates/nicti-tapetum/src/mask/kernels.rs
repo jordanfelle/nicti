@@ -488,6 +488,7 @@ impl MaskKernels {
     /// Folds one binned stroke into the brush field: `out = fold(prev, stroke)`. `prev` is copied
     /// into `out` first (so everything outside the stroke's box is carried over), then only the
     /// box is dispatched.
+    #[allow(clippy::too_many_arguments)] // the two blend flags are a kernel uniform, not a config
     pub fn brush_stroke(
         &self,
         gpu: &GpuContext,
@@ -496,6 +497,7 @@ impl MaskKernels {
         out: &FieldTexture,
         stroke: &BinnedStroke,
         erase: bool,
+        buildup: bool,
     ) {
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
@@ -530,7 +532,7 @@ impl MaskKernels {
                 bh as f32,
                 stroke.tiles_x as f32,
                 f32::from(erase),
-                0.0,
+                f32::from(buildup),
                 0.0,
             ],
         );
@@ -742,6 +744,7 @@ pub(crate) mod tests {
             feather,
             flow,
             erase,
+            ..Stroke::default()
         }
     }
 
@@ -760,10 +763,37 @@ pub(crate) mod tests {
             let Some(binned) = bin_stroke(&dabs, w, h) else {
                 continue;
             };
-            run(gpu, |e| k.brush_stroke(gpu, e, &a, &b, &binned, s.erase));
+            run(gpu, |e| {
+                k.brush_stroke(gpu, e, &a, &b, &binned, s.erase, s.buildup)
+            });
             std::mem::swap(&mut a, &mut b);
         }
         a.read(gpu)
+    }
+
+    #[test]
+    fn buildup_and_pressure_strokes_match_the_cpu_reference() {
+        let Some(gpu) = gpu() else { return };
+        let k = shared_kernels(&gpu);
+        let mut a = stroke(
+            &[[0.1, 0.3], [0.5, 0.6], [0.9, 0.4]],
+            0.04,
+            0.02,
+            0.7,
+            false,
+        );
+        a.buildup = true;
+        a.pressure = vec![0.3, 1.0, 0.5];
+        let mut b = a.clone();
+        b.pressure = Vec::new();
+        b.points = vec![[0.15, 0.35], [0.85, 0.45]];
+        let strokes = [a, b];
+        let cpu = raster::rasterize_brush(&strokes, 300, 200);
+        assert!(
+            cpu.data.iter().any(|&v| v > 0.3 && v < 0.95),
+            "the build-up should leave partial coverage to compare"
+        );
+        assert_close(&gpu_brush(&gpu, &k, &strokes, 300, 200), &cpu, "buildup");
     }
 
     #[test]
