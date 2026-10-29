@@ -237,6 +237,8 @@ fn adjust_for(c: &Value<'_>) -> LocalAdjust {
         dehaze: unit("LocalDehaze"),
         sharpness: unit("LocalSharpness"),
         noise: unit("LocalLuminanceNoise"),
+        moire: unit("LocalMoire").max(0.0),
+        defringe: unit("LocalDefringe"),
         color: (tint_saturation > 0.0).then(|| TintColor {
             hue_deg: field_num(c, "LocalToningHue")
                 .unwrap_or(0.0)
@@ -270,6 +272,19 @@ mod tests {
         CorrectionMasks = { { FullX = 0.1, FullY = 0.2, MaskActive = true, MaskBlendMode = 0,
           MaskInverted = false, MaskValue = 1, What = "Mask/Gradient", ZeroX = 0.1, ZeroY = 0.6 } },
         LocalExposure2012 = -0.175, LocalShadows2012 = 0.2, What = "Correction" } } }"#;
+
+    #[test]
+    fn local_moire_and_defringe_are_imported_and_a_negative_moire_is_dropped() {
+        let src = LINEAR.replace(
+            "LocalShadows2012 = 0.2,",
+            "LocalShadows2012 = 0.2, LocalMoire = 0.4, LocalDefringe = -0.3,",
+        );
+        let c = &masks(&translate(&src, &upright()).unwrap()).corrections[0];
+        assert_eq!((c.adjust.moire, c.adjust.defringe), (0.4, -0.3));
+        let neg = LINEAR.replace("LocalShadows2012 = 0.2,", "LocalMoire = -0.4,");
+        let c = &masks(&translate(&neg, &upright()).unwrap()).corrections[0];
+        assert_eq!(c.adjust.moire, 0.0);
+    }
 
     #[test]
     fn a_linear_gradient_correction_maps_geometry_amount_and_scales_exposure_by_four() {

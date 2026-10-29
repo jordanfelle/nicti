@@ -442,13 +442,25 @@ fn perceptual_l(rgb: [f32; 3]) -> f32 {
 /// edge. `taps` are the 8 neighbours at [`defringe_radius`] in [`DEFRINGE_TAPS`] order, in the
 /// same space. CPU twin of `live_suffix.wgsl`'s `apply_defringe`.
 pub fn defringe_pixel(rgb: [f32; 3], taps: &[[f32; 3]; 8], p: &DefringeParams) -> [f32; 3] {
-    if p.is_noop() {
+    defringe_pixel_with(rgb, taps, p, 0.0)
+}
+
+/// [`defringe_pixel`] with `extra` (the stacked local Defringe delta, #351) added to both the
+/// purple and the green amount before they are clamped to 0..=1. The hue windows stay the global
+/// ones. CPU twin of `apply_defringe`'s `extra` argument.
+pub fn defringe_pixel_with(
+    rgb: [f32; 3],
+    taps: &[[f32; 3]; 8],
+    p: &DefringeParams,
+    extra: f32,
+) -> [f32; 3] {
+    if p.purple_amount + extra <= 0.0 && p.green_amount + extra <= 0.0 {
         return rgb;
     }
     let (hue, sat) = hue_sat(rgb);
     // Linear in the normalized amount (LRC 0..20): every slider position does something, so an
     // imported LRC amount of 8 and of 20 stay distinguishable. (LightCraft saturated at 8 of 20.)
-    let strength = |amount: f32| amount.clamp(0.0, 1.0);
+    let strength = |amount: f32| (amount + extra).clamp(0.0, 1.0);
     let window = |base: f32, lo: f32, hi: f32| {
         hue_window(
             hue,
@@ -474,6 +486,34 @@ pub fn defringe_pixel(rgb: [f32; 3], taps: &[[f32; 3]; 8], p: &DefringeParams) -
     let k = gate * smoothstep(DEFRINGE_EDGE.0, DEFRINGE_EDGE.1, hi - lo);
     let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
     rgb.map(|c| luma + (c - luma) * (1.0 - k))
+}
+
+/// Moire (#351): pulls the chroma of `rgb` toward the mean chroma of itself and its 8 compass
+/// neighbours, keeping its own luminance, by `amount` (0..=1; a negative amount is a no-op). A
+/// colour moire is a chroma-only beat between the sensor grid and fine detail, so a chroma
+/// low-pass whose footprint is the defringe tap radius (resolution-scaled, see
+/// [`defringe_radius`]) removes it without softening the luminance detail. `taps` are in
+/// [`DEFRINGE_TAPS`] order, in the same linear working space. CPU twin of `apply_moire`.
+pub fn moire_pixel(rgb: [f32; 3], taps: &[[f32; 3]; 8], amount: f32) -> [f32; 3] {
+    let k = amount.clamp(0.0, 1.0);
+    if k <= 0.0 {
+        return rgb;
+    }
+    let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let chroma = |c: [f32; 3]| {
+        let l = luma(c);
+        c.map(|v| v - l)
+    };
+    let own = chroma(rgb);
+    let mut mean = own;
+    for t in taps {
+        let c = chroma(*t);
+        for i in 0..3 {
+            mean[i] += c[i];
+        }
+    }
+    let l = luma(rgb);
+    std::array::from_fn(|i| (l + own[i] + (mean[i] / 9.0 - own[i]) * k).max(0.0))
 }
 
 /// Basic-panel tone controls in a rough perceptual (cube-root) space: whites/blacks remap the
@@ -788,6 +828,50 @@ pub fn srgb_oetf(linear: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moire_keeps_luma_removes_checker_chroma_and_ignores_negative() {
+        let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let red = [0.4, 0.1, 0.1];
+        let green = [0.1, 0.4, 0.1];
+        let taps = [green, red, green, red, red, green, red, green];
+        let out = moire_pixel(red, &taps, 1.0);
+        assert!((luma(out) - luma(red)).abs() < 1e-6);
+        let spread = |c: [f32; 3]| c[0].max(c[1]) - c[0].min(c[1]);
+        assert!(spread(out) < 0.5 * spread(red), "{out:?}");
+        assert_eq!(moire_pixel(red, &taps, 0.0), red);
+        assert_eq!(moire_pixel(red, &taps, -1.0), red);
+        // A flat neighbourhood is already its own mean.
+        let flat = moire_pixel(red, &[red; 8], 1.0);
+        assert!(flat.iter().zip(red).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn moire_never_outputs_a_negative_channel() {
+        let out = moire_pixel([0.01; 3], &[[0.4, 0.1, 0.1]; 8], 1.0);
+        assert!(out.iter().all(|&c| c >= 0.0), "{out:?}");
+    }
+
+    #[test]
+    fn local_defringe_extra_adds_to_the_global_amount_and_zero_is_the_global_result() {
+        let fringe = [0.55, 0.2, 0.6];
+        let taps = [[0.8; 3]; 8];
+        let p = DefringeParams::default();
+        assert_eq!(defringe_pixel_with(fringe, &taps, &p, 0.0), fringe);
+        assert_eq!(defringe_pixel(fringe, &taps, &p), fringe);
+        let some = defringe_pixel_with(fringe, &taps, &p, 0.5);
+        let all = defringe_pixel_with(fringe, &taps, &p, 1.0);
+        let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
+        assert!(chroma(all) < chroma(some) && chroma(some) < chroma(fringe));
+        let global = DefringeParams {
+            purple_amount: 0.5,
+            ..p
+        };
+        assert_eq!(
+            defringe_pixel_with(fringe, &taps, &p, 0.5),
+            defringe_pixel(fringe, &taps, &global)
+        );
+    }
+
     use super::*;
     use crate::coat::HslBand;
 

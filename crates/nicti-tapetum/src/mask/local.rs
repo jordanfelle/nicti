@@ -52,7 +52,7 @@ pub const TONE_LIMIT: f32 = 2.0;
 
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
-/// One correction as the shader reads it: five `vec4`s.
+/// One correction as the shader reads it: six `vec4`s.
 ///
 /// | field | x | y | z | w |
 /// |---|---|---|---|---|
@@ -61,6 +61,7 @@ const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 /// | `d2` | tint | saturation | hue | noise |
 /// | `d3` | tint multiplier r | g | b | sharpness |
 /// | `d4` | clarity | texture | dehaze | 0 |
+/// | `d5` | defringe | moire | 0 | 0 |
 #[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct LocalUniform {
@@ -69,6 +70,7 @@ pub struct LocalUniform {
     pub d2: [f32; 4],
     pub d3: [f32; 4],
     pub d4: [f32; 4],
+    pub d5: [f32; 4],
 }
 
 /// HSV -> RGB with `s = 1, v = 1`, hue in degrees: the pure colour of a tint swatch.
@@ -105,6 +107,7 @@ impl LocalUniform {
             d2: [a.tint, a.saturation, a.hue, a.noise],
             d3: [tint[0], tint[1], tint[2], a.sharpness],
             d4: [a.clarity, a.texture, a.dehaze, 0.0],
+            d5: [a.defringe, a.moire, 0.0, 0.0],
         }
     }
 }
@@ -133,6 +136,8 @@ pub struct LocalSums {
     pub clarity: f32,
     pub texture: f32,
     pub dehaze: f32,
+    pub defringe: f32,
+    pub moire: f32,
 }
 
 impl LocalSums {
@@ -160,6 +165,8 @@ impl LocalSums {
             s.clarity += f * u.d4[0];
             s.texture += f * u.d4[1];
             s.dehaze += f * u.d4[2];
+            s.defringe += f * u.d5[0];
+            s.moire += f * u.d5[1];
         }
         s
     }
@@ -625,7 +632,7 @@ mod tests {
         assert_eq!(u.d0, [0.75, 0.1, 0.2, 0.3]);
         assert_eq!(u.d1, [0.4, 0.5, 0.6, 0.7]);
         assert_eq!(u.d2, [0.8, 0.9, 0.11, 0.0]);
-        assert_eq!(std::mem::size_of::<LocalUniform>(), 80);
+        assert_eq!(std::mem::size_of::<LocalUniform>(), 96);
     }
 
     #[test]
@@ -730,15 +737,25 @@ mod gpu_tests {
         tone: ToneParams,
         vibrance: f32,
         presence: PresenceParams,
+        global_defringe: crate::coat::DefringeParams,
     }
 
     /// Renders `setup` through the real `LiveSuffixKernel` and returns GPU pixels.
     fn render(gpu: &Arc<GpuContext>, setup: &Setup, with_masks: bool) -> Vec<[f32; 4]> {
+        render_pixels(gpu, setup, with_masks, &frame_pixels())
+    }
+
+    fn render_pixels(
+        gpu: &Arc<GpuContext>,
+        setup: &Setup,
+        with_masks: bool,
+        pixels: &[[f32; 4]],
+    ) -> Vec<[f32; 4]> {
         let extent = Extent {
             width: W as u32,
             height: H as u32,
         };
-        let input = upload_frame(gpu, extent, &frame_pixels());
+        let input = upload_frame(gpu, extent, pixels);
         let output = FrameTexture::new(gpu, extent);
         let kernel = LiveSuffixKernel::new(gpu);
         kernel.set_params(
@@ -757,7 +774,7 @@ mod gpu_tests {
                     amount: setup.vibrance,
                 },
                 presence: setup.presence,
-                defringe: Default::default(),
+                defringe: setup.global_defringe,
                 calibration: Default::default(),
                 look_curve: Vec::new(),
                 hsl: HslParams::default(),
@@ -852,6 +869,7 @@ mod gpu_tests {
             },
             vibrance: 0.1,
             presence: PresenceParams::default(),
+            global_defringe: Default::default(),
         }
     }
 
@@ -865,6 +883,199 @@ mod gpu_tests {
             }
         }
         assert!(worst < 0.02, "{what}: GPU vs CPU differ by {worst}");
+    }
+
+    /// A dark/bright edge with a purple fringe column beside it and a red/green chroma checker
+    /// (the moire stand-in) on the dark side.
+    fn fringe_and_checker() -> Vec<[f32; 4]> {
+        (0..W * H)
+            .map(|i| {
+                let (x, y) = (i % W, i / W);
+                if x >= 12 {
+                    [0.8, 0.8, 0.8, 1.0]
+                } else if x == 11 {
+                    [0.55, 0.2, 0.6, 1.0]
+                } else if x < 8 && (x + y) % 2 == 0 {
+                    [0.3, 0.1, 0.1, 1.0]
+                } else if x < 8 {
+                    [0.1, 0.3, 0.1, 1.0]
+                } else {
+                    [0.05, 0.05, 0.05, 1.0]
+                }
+            })
+            .collect()
+    }
+
+    fn working_taps(px: &[[f32; 4]], x: usize, y: usize) -> [[f32; 3]; 8] {
+        let r = color::defringe_radius(W as u32);
+        color::DEFRINGE_TAPS.map(|(dx, dy)| {
+            let sx = (x as i32 + dx * r).clamp(0, W as i32 - 1) as usize;
+            let sy = (y as i32 + dy * r).clamp(0, H as i32 - 1) as usize;
+            let p = px[sy * W + sx];
+            [p[0], p[1], p[2]]
+        })
+    }
+
+    fn identity_setup(adjust: LocalAdjust) -> Setup {
+        let mut s = setup(
+            vec![correction(adjust, 1.0)],
+            vec![Field {
+                width: W,
+                height: H,
+                data: vec![1.0; W * H],
+            }],
+        );
+        s.matrix = color::mat3_identity();
+        s.exposure = 0.0;
+        s.tone = ToneParams::default();
+        s.vibrance = 0.0;
+        s
+    }
+
+    fn cpu_with_fringe(s: &Setup, px: &[[f32; 4]]) -> Vec<[f32; 3]> {
+        let lut = color::build_tone_curve_lut(&ToneCurveParams::default());
+        let hsl = HslParams::default();
+        // The shader applies the camera->working matrix first and defringes/de-moires the result
+        // (taps included), so the twin does the same and hands `live_pixel` an identity matrix.
+        let p = PixelParams {
+            matrix: color::mat3_identity(),
+            exposure_mult: color::exposure_multiplier(s.exposure),
+            tone: s.tone,
+            lut: &lut,
+            vibrance: s.vibrance,
+            presence: s.presence,
+            hsl: &hsl,
+        };
+        let uniforms = pack_active(&MaskParams {
+            corrections: s.corrections.clone(),
+        });
+        let to_working = |p: [f32; 4]| color::mat3_apply(s.matrix, [p[0], p[1], p[2]]);
+        let dp = crate::coat::DefringeParams::default();
+        (0..W * H)
+            .map(|i| {
+                let (x, y) = (i % W, i / W);
+                let sums = LocalSums::accumulate(&uniforms, &[s.fields[0].data[i]]);
+                let taps = working_taps(px, x, y).map(|t| color::mat3_apply(s.matrix, t));
+                let c = to_working(px[i]);
+                let c = color::defringe_pixel_with(c, &taps, &dp, sums.defringe);
+                let c = color::moire_pixel(c, &taps, sums.moire);
+                live_pixel(c, &p, &sums, None)
+            })
+            .collect()
+    }
+
+    fn local_fringe_setup(adjust: LocalAdjust) -> Setup {
+        identity_setup(adjust)
+    }
+
+    fn max_diff(a: &[[f32; 4]], b: &[[f32; 3]]) -> f32 {
+        a.iter()
+            .zip(b)
+            .flat_map(|(g, c)| (0..3).map(move |i| (g[i] - c[i]).abs()))
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn local_defringe_and_moire_match_the_cpu_twin() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let px = fringe_and_checker();
+        for adjust in [
+            LocalAdjust {
+                defringe: 0.8,
+                ..Default::default()
+            },
+            LocalAdjust {
+                moire: 0.7,
+                ..Default::default()
+            },
+            LocalAdjust {
+                defringe: 0.5,
+                moire: 1.0,
+                ..Default::default()
+            },
+        ] {
+            for matrix in [
+                color::mat3_identity(),
+                [[1.4, -0.3, -0.1], [-0.2, 1.3, -0.1], [0.0, -0.2, 1.2]],
+            ] {
+                let mut s = local_fringe_setup(adjust);
+                s.matrix = matrix;
+                let got = render_pixels(&gpu, &s, true, &px);
+                let want = cpu_with_fringe(&s, &px);
+                let d = max_diff(&got, &want);
+                assert!(d < 2e-3, "{adjust:?} {matrix:?}: max diff {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn local_defringe_desaturates_the_fringe_and_moire_flattens_the_checker() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let px = fringe_and_checker();
+        let chroma = |p: &[f32; 4]| {
+            let m = p[0].max(p[1]).max(p[2]);
+            m - p[0].min(p[1]).min(p[2])
+        };
+        let base = render_pixels(&gpu, &local_fringe_setup(LocalAdjust::default()), true, &px);
+        let fr = render_pixels(
+            &gpu,
+            &local_fringe_setup(LocalAdjust {
+                defringe: 1.0,
+                ..Default::default()
+            }),
+            true,
+            &px,
+        );
+        let i = 5 * W + 11;
+        assert!(
+            chroma(&fr[i]) < 0.3 * chroma(&base[i]),
+            "fringe kept chroma"
+        );
+        let mo = render_pixels(
+            &gpu,
+            &local_fringe_setup(LocalAdjust {
+                moire: 1.0,
+                ..Default::default()
+            }),
+            true,
+            &px,
+        );
+        let j = 5 * W + 3;
+        assert!(
+            chroma(&mo[j]) < 0.6 * chroma(&base[j]),
+            "checker kept chroma"
+        );
+        // Moire is chroma-only: the checker's luminance is untouched.
+        let luma = |p: &[f32; 4]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        assert!((luma(&mo[j]) - luma(&base[j])).abs() < 1e-3);
+    }
+
+    /// The defringe/shadow-tint block now runs after `accumulate_locals`: with an *active*
+    /// correction whose mask selects nothing (so every stacked sum is exactly 0) and the global
+    /// Defringe on, the frame must equal the no-mask render bit for bit.
+    #[test]
+    fn a_mask_selecting_nothing_leaves_global_defringe_bit_identical() {
+        let Some(gpu) = shared_test_gpu() else { return };
+        let px = fringe_and_checker();
+        let mut s = local_fringe_setup(LocalAdjust {
+            exposure: 0.5,
+            moire: 1.0,
+            defringe: 1.0,
+            ..Default::default()
+        });
+        s.global_defringe = crate::coat::DefringeParams {
+            purple_amount: 0.6,
+            green_amount: 0.6,
+            ..Default::default()
+        };
+        s.fields[0].data = vec![0.0; W * H];
+        let masked = render_pixels(&gpu, &s, true, &px);
+        let none = render_pixels(&gpu, &s, false, &px);
+        assert_eq!(masked, none);
+        // The global Defringe really did something on this frame.
+        s.global_defringe = Default::default();
+        let off = render_pixels(&gpu, &s, false, &px);
+        assert_ne!(none, off);
     }
 
     #[test]
