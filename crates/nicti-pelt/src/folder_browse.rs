@@ -18,8 +18,11 @@ pub const MAX_BROWSE_ENTRIES: usize = 500;
 /// One folder's immediate subfolders.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listing {
-    /// Names (not paths), case-insensitively sorted.
+    /// Display names (lossy for a non-UTF-8 folder), case-insensitively sorted.
     pub names: Vec<String>,
+    /// The real file names, parallel to `names`: `dir.join` these, never the lossy display name,
+    /// or a folder called `caf\xe9` would browse and import a path that does not exist.
+    pub os_names: Vec<std::ffi::OsString>,
     /// More subfolders existed than [`MAX_BROWSE_ENTRIES`].
     pub truncated: bool,
     /// Why the folder could not be read (permissions, gone, not a directory); `names` is empty.
@@ -47,24 +50,27 @@ pub fn list_subfolders(dir: &Path) -> Listing {
             }
         }
     };
-    let mut names = Vec::new();
+    let mut found: Vec<(String, std::ffi::OsString)> = Vec::new();
     for entry in entries.flatten() {
         // `DirEntry::file_type` does not follow links: a symlink to a directory is a symlink here.
         let Ok(ty) = entry.file_type() else { continue };
         if !ty.is_dir() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let os = entry.file_name();
+        let name = os.to_string_lossy().into_owned();
         if name.starts_with('.') || is_system_name(&name) {
             continue;
         }
-        names.push(name);
+        found.push((name, os));
     }
-    names.sort_by_cached_key(|n| (n.to_lowercase(), n.clone()));
-    let truncated = names.len() > MAX_BROWSE_ENTRIES;
-    names.truncate(MAX_BROWSE_ENTRIES);
+    found.sort_by_cached_key(|(n, os)| (n.to_lowercase(), n.clone(), os.clone()));
+    let truncated = found.len() > MAX_BROWSE_ENTRIES;
+    found.truncate(MAX_BROWSE_ENTRIES);
+    let (names, os_names) = found.into_iter().unzip();
     Listing {
         names,
+        os_names,
         truncated,
         error: None,
     }
@@ -87,7 +93,7 @@ pub struct Browse {
 
 impl Browse {
     #[cfg(test)]
-    fn with_lister(lister: fn(&Path) -> Listing) -> Self {
+    pub(crate) fn with_lister(lister: fn(&Path) -> Listing) -> Self {
         Self {
             lister: Some(lister),
             ..Self::default()
@@ -115,7 +121,12 @@ impl Browse {
             self.open.insert(path.to_path_buf());
         } else {
             self.open.remove(path);
-            self.slots.remove(path);
+            // A read still in flight stays: dropping it would let the next open spawn another
+            // thread, and a hung share would leak one per open/close. A finished listing is
+            // dropped, so reopening re-reads what is on disk.
+            if !matches!(self.slots.get(path), Some(Slot::Loading(_))) {
+                self.slots.remove(path);
+            }
         }
     }
 
@@ -193,7 +204,8 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         for d in [
             "beta",
-            "Alpha",
+            "Zed",
+            "apple",
             "gamma",
             ".hidden",
             "$RECYCLE.BIN",
@@ -203,7 +215,17 @@ mod tests {
         }
         fs::write(t.path().join("file.txt"), b"x").unwrap();
         let l = list_subfolders(t.path());
-        assert_eq!(l.names, ["Alpha", "beta", "gamma"]);
+        assert_eq!(
+            l.names,
+            ["apple", "beta", "gamma", "Zed"],
+            "case-insensitive, not byte order"
+        );
+        let real: Vec<String> = l
+            .os_names
+            .iter()
+            .map(|o| o.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(real, l.names);
         assert!(!l.truncated && l.error.is_none());
     }
 
@@ -251,8 +273,10 @@ mod tests {
     }
 
     fn fake(dir: &Path) -> Listing {
+        let name = format!("in-{}", dir.file_name().unwrap().to_string_lossy());
         Listing {
-            names: vec![format!("in-{}", dir.file_name().unwrap().to_string_lossy())],
+            os_names: vec![name.clone().into()],
+            names: vec![name],
             ..Listing::default()
         }
     }
@@ -311,5 +335,60 @@ mod tests {
         let mut c = Browse::default();
         c.reveal(root, Path::new("/mnt/e/x"));
         assert!(!c.is_open(root) && !c.is_open(Path::new("/mnt/e")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_folder_name_keeps_its_real_name_for_joining() {
+        use std::os::unix::ffi::OsStrExt;
+        let t = tempfile::tempdir().unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"caf\xe9");
+        fs::create_dir(t.path().join(odd)).unwrap();
+        let l = list_subfolders(t.path());
+        assert_eq!(l.names.len(), 1);
+        assert!(l.names[0].contains('\u{FFFD}'), "the display name is lossy");
+        assert!(
+            t.path().join(&l.os_names[0]).is_dir(),
+            "the real name still resolves"
+        );
+        assert!(
+            !t.path().join(&l.names[0]).exists(),
+            "the lossy one would not"
+        );
+    }
+
+    #[test]
+    fn closing_a_node_mid_read_keeps_that_one_read_so_reopening_does_not_spawn_another() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        fn blocked(dir: &Path) -> Listing {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            while !RELEASE.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            fake(dir)
+        }
+        let ctx = egui::Context::default();
+        let mut b = Browse::with_lister(blocked);
+        let p = Path::new("/x/hung");
+        for _ in 0..5 {
+            b.set_open(p, true);
+            assert!(b.listing(&ctx, p).is_none());
+            b.set_open(p, false);
+        }
+        let t = std::time::Instant::now();
+        while CALLS.load(Ordering::SeqCst) == 0 {
+            assert!(t.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "one thread per path while it hangs"
+        );
+        RELEASE.store(true, Ordering::SeqCst);
+        b.set_open(p, true);
+        assert_eq!(wait_for(&mut b, &ctx, p).names, ["in-hung"]);
     }
 }

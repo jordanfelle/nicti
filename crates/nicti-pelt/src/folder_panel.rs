@@ -390,7 +390,7 @@ pub fn show(
     browse: &mut Browse,
 ) -> PanelOutput {
     let mut out = PanelOutput::default();
-    let registered: std::collections::HashSet<PathBuf> = tree
+    let registered: Vec<PathBuf> = tree
         .iter()
         .flat_map(|d| d.roots.iter().map(|r| PathBuf::from(&r.path)))
         .collect();
@@ -453,6 +453,7 @@ pub fn show(
                             ui,
                             Path::new(&drive.path),
                             "Browse folders",
+                            true,
                             &registered,
                             browse,
                             &mut out,
@@ -500,6 +501,55 @@ pub fn show(
     out
 }
 
+/// How a folder relates to the imported roots: importing it would overlap one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestingConflict {
+    /// The folder is inside (or is) an imported root.
+    Inside,
+    /// The folder contains an imported root.
+    Contains,
+}
+
+/// A comparison key for a folder path: separators unified, a trailing separator and a Windows
+/// verbatim `\\?\` prefix dropped, and lower-cased on Windows (NTFS paths are case-insensitive).
+fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let s = s.strip_prefix("//?/").unwrap_or(&s);
+    let s = s.trim_end_matches('/');
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s.to_owned()
+    }
+}
+
+/// Whether two paths name the same folder, for display and overlap purposes.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    path_key(a) == path_key(b)
+}
+
+/// Whether `candidate` overlaps an imported root: registering it would ingest the same files under
+/// two roots. `Inside` includes "is the root itself".
+pub fn nesting_conflict(candidate: &Path, roots: &[PathBuf]) -> Option<NestingConflict> {
+    let c = path_key(candidate);
+    let under = |child: &str, parent: &str| {
+        child == parent
+            || child
+                .strip_prefix(parent)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    for r in roots {
+        let r = path_key(r);
+        if under(&c, &r) {
+            return Some(NestingConflict::Inside);
+        }
+        if under(&r, &c) {
+            return Some(NestingConflict::Contains);
+        }
+    }
+    None
+}
+
 /// An expandable folder row (a drive's "Browse folders" or a subfolder) whose body lists its
 /// subfolders, read lazily and off the UI thread (#472). The disclosure triangle is the header's
 /// own hit-rect, so opening a row never selects, imports or starts a drag.
@@ -507,7 +557,8 @@ fn show_browse(
     ui: &mut egui::Ui,
     dir: &Path,
     title: &str,
-    registered: &std::collections::HashSet<PathBuf>,
+    is_drive: bool,
+    registered: &[PathBuf],
     browse: &mut Browse,
     out: &mut PanelOutput,
 ) {
@@ -516,22 +567,35 @@ fn show_browse(
         .id_salt(("folder_panel_browse", dir))
         .open(Some(open))
         .show(ui, |ui| {
-            if dir.parent().is_some()
-                && !registered.contains(dir)
-                && title != "Browse folders"
-                && ui
-                    .small_button("Import this folder")
-                    .on_hover_text("Register this folder and import its photos.")
-                    .clicked()
-            {
-                out.import_folder = Some(dir.to_path_buf());
+            // The body also runs while the close animation plays; reading then would start a
+            // second listing for a node the user just closed.
+            if !browse.is_open(dir) {
+                return;
+            }
+            if !is_drive {
+                match nesting_conflict(dir, registered) {
+                    None => {
+                        if ui
+                            .small_button("Import this folder")
+                            .on_hover_text("Register this folder and import its photos.")
+                            .clicked()
+                        {
+                            out.import_folder = Some(dir.to_path_buf());
+                        }
+                    }
+                    Some(NestingConflict::Inside) => {
+                        ui.weak("Inside an imported folder.");
+                    }
+                    Some(NestingConflict::Contains) => {
+                        ui.weak("Contains an imported folder.");
+                    }
+                }
             }
             let ctx = ui.ctx().clone();
             let Some(listing) = browse.listing(&ctx, dir).cloned() else {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.weak("Reading\u{2026}");
-                });
+                // A static label, not a spinner: a spinner repaints every frame, forever, if the
+                // read hangs (a dead share). The worker wakes the UI when it answers.
+                ui.weak("Reading\u{2026}");
                 return;
             };
             if let Some(err) = &listing.error {
@@ -541,15 +605,16 @@ fn show_browse(
             if listing.names.is_empty() {
                 ui.weak("No subfolders.");
             }
-            for name in &listing.names {
-                let child = dir.join(name);
-                if registered.contains(&child) {
+            for (name, os) in listing.names.iter().zip(&listing.os_names) {
+                let child = dir.join(os);
+                if registered.iter().any(|r| same_folder(r, &child)) {
                     ui.weak(format!("\u{1F4C1} {name} (imported)"));
                 } else {
                     show_browse(
                         ui,
                         &child,
                         &format!("\u{1F4C2} {name}"),
+                        false,
                         registered,
                         browse,
                         out,
@@ -865,6 +930,22 @@ mod tests {
         )
     }
 
+    fn run_until_labelled_generic<S>(h: &mut egui_kittest::Harness<'_, S>, label: &str) {
+        use egui_kittest::kittest::Queryable;
+        let start = std::time::Instant::now();
+        loop {
+            h.run();
+            if h.query_by_label(label).is_some() {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "{label:?} never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// Steps the harness until `label` is on screen (a listing is read on a real thread).
     fn run_until_labelled(
         h: &mut egui_kittest::Harness<
@@ -886,6 +967,86 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn overlap_with_an_imported_root_is_detected_in_both_directions_and_across_spellings() {
+        let roots = [PathBuf::from("/mnt/e/photos/2026")];
+        let p = |s: &str| nesting_conflict(Path::new(s), &roots);
+        assert_eq!(
+            p("/mnt/e/photos/2026"),
+            Some(NestingConflict::Inside),
+            "the root itself"
+        );
+        assert_eq!(p("/mnt/e/photos/2026/trip"), Some(NestingConflict::Inside));
+        assert_eq!(
+            p("/mnt/e/photos/2026/"),
+            Some(NestingConflict::Inside),
+            "trailing separator"
+        );
+        assert_eq!(p("/mnt/e/photos"), Some(NestingConflict::Contains));
+        assert_eq!(p("/mnt/e"), Some(NestingConflict::Contains));
+        // A sibling that merely shares a name prefix is not an overlap.
+        assert_eq!(p("/mnt/e/photos/2026-old"), None);
+        assert_eq!(p("/mnt/e/photos-raw"), None);
+        assert_eq!(p("/mnt/f/photos/2026"), None);
+        // Windows spellings: verbatim prefix and backslashes compare equal to the plain form.
+        let win = [PathBuf::from(r"\\?\D:\Photos")];
+        assert_eq!(
+            nesting_conflict(Path::new(r"D:\Photos\2026"), &win),
+            Some(NestingConflict::Inside)
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                nesting_conflict(Path::new(r"d:\photos"), &win),
+                Some(NestingConflict::Inside)
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_inside_or_around_an_imported_root_is_not_offered_for_import() {
+        use egui_kittest::kittest::Queryable;
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("a/b/c")).unwrap();
+        std::fs::create_dir(t.path().join("a/other")).unwrap();
+        // The imported root is a/b.
+        let drive = t.path().to_string_lossy().into_owned();
+        let tree = build_tree(
+            &[root(9, &t.path().join("a/b").to_string_lossy())],
+            &[drive],
+        );
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, (tree, browse): &mut (Vec<DriveNode>, crate::folder_browse::Browse)| {
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                    browse,
+                );
+            },
+            (tree, crate::folder_browse::Browse::default()),
+        );
+        h.get_by_label("Browse folders").click();
+        run_until_labelled_generic(&mut h, "\u{1F4C2} a");
+        h.get_by_label("\u{1F4C2} a").click();
+        run_until_labelled_generic(&mut h, "\u{1F4C2} other");
+        // `a` contains the imported root: no Import button, a note instead.
+        assert!(h.query_by_label("Import this folder").is_none());
+        assert!(h.query_by_label("Contains an imported folder.").is_some());
+        assert!(h.query_by_label("\u{1F4C1} b (imported)").is_some());
+        // `other` is free of the root, so opening it offers the import.
+        h.get_by_label("\u{1F4C2} other").click();
+        run_until_labelled_generic(&mut h, "Import this folder");
+        assert!(h.query_by_label("Contains an imported folder.").is_some());
     }
 
     #[test]
@@ -912,6 +1073,56 @@ mod tests {
             "browsing never changes the grid filter"
         );
         assert_eq!(out.import_from, None);
+    }
+
+    #[test]
+    fn closing_a_node_while_it_animates_shut_does_not_read_it_again() {
+        use egui_kittest::kittest::Queryable;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counted(_: &Path) -> crate::folder_browse::Listing {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            crate::folder_browse::Listing {
+                names: vec!["kid".into()],
+                os_names: vec!["kid".into()],
+                ..Default::default()
+            }
+        }
+        let tree = build_tree(&[], &["/mnt/q".to_string()]);
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, (tree, browse): &mut (Vec<DriveNode>, crate::folder_browse::Browse)| {
+                // The default animation time is what makes the body run during a close.
+                ui.ctx().global_style_mut(|s| s.animation_time = 0.4);
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                    browse,
+                );
+            },
+            (tree, crate::folder_browse::Browse::with_lister(counted)),
+        );
+        h.get_by_label("Browse folders").click();
+        run_until_labelled_generic(&mut h, "\u{1F4C2} kid");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        h.get_by_label("Browse folders").click();
+        for _ in 0..30 {
+            h.step();
+        }
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "no second read while closing or after"
+        );
+        assert!(h.query_by_label("\u{1F4C2} kid").is_none(), "closed");
     }
 
     #[test]

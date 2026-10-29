@@ -2006,9 +2006,27 @@ impl PeltApp {
         if let Some(folder) = out.import_folder {
             // A browsed folder's "Import this folder": the same path as typing it in the Folder
             // field and pressing Import (validation, registration and the job guards are shared).
-            self.import_path_input = folder.to_string_lossy().into_owned();
-            self.import_status = None;
-            self.submit_root_job(store, RootAction::Import);
+            let roots: Vec<PathBuf> = self
+                .folder_cache
+                .roots
+                .iter()
+                .map(|r| PathBuf::from(&r.path))
+                .collect();
+            match folder_panel::nesting_conflict(&folder, &roots) {
+                Some(folder_panel::NestingConflict::Inside) => {
+                    self.import_status =
+                        Some("That folder is inside a folder that is already imported.".into());
+                }
+                Some(folder_panel::NestingConflict::Contains) => {
+                    self.import_status =
+                        Some("That folder contains a folder that is already imported.".into());
+                }
+                None => {
+                    self.import_path_input = folder.to_string_lossy().into_owned();
+                    self.import_status = None;
+                    self.submit_root_job(store, RootAction::Import);
+                }
+            }
         }
         if let Some(r) = out.drop {
             self.submit_move_to(store, r.root_id, r.dest_parent);
