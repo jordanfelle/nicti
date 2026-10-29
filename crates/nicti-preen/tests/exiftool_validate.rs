@@ -65,7 +65,7 @@ fn every_format_passes_exiftool_validate_with_no_warnings() {
     let reg = builtin_registry();
     let src = source();
     let dir = tempfile::tempdir().unwrap();
-    let cases = [
+    let mut cases = vec![
         (
             "jpeg",
             FormatSpec::Jpeg {
@@ -105,7 +105,17 @@ fn every_format_passes_exiftool_validate_with_no_warnings() {
             },
             ExportSpace::Srgb,
         ),
+        ("webp", FormatSpec::Webp, ExportSpace::Srgb),
     ];
+    #[cfg(feature = "avif")]
+    cases.push((
+        "avif",
+        FormatSpec::Avif {
+            quality: 70,
+            depth: BitDepth::Eight,
+        },
+        ExportSpace::Srgb,
+    ));
     let mut problems = Vec::new();
     for (name, format, color_space) in cases {
         let spec = ExportSpec {
