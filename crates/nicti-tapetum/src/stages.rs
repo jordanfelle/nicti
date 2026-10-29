@@ -776,7 +776,7 @@ struct MaskBinding {
     dummy_haze: crate::mask::kernels::FieldTexture,
 }
 
-/// Bytes of the mask uniform block: two `vec4` headers plus 16 corrections x 5 `vec4`s.
+/// Bytes of the mask uniform block: two `vec4` headers plus 16 corrections x 6 `vec4`s.
 const MASK_UNIFORM_BYTES: u64 = 32
     + (crate::mask::params::MAX_CORRECTIONS as u64)
         * std::mem::size_of::<crate::mask::local::LocalUniform>() as u64;

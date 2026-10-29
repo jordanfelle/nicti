@@ -193,6 +193,10 @@ pub struct LocalAdjust {
     pub dehaze: f32,
     pub sharpness: f32,
     pub noise: f32,
+    /// Added to both the purple and the green global Defringe amount (#351).
+    pub defringe: f32,
+    /// Chroma low-pass strength, 0..1; a negative value does nothing (#351).
+    pub moire: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<TintColor>,
 }
@@ -217,6 +221,8 @@ impl LocalAdjust {
             && self.dehaze == 0.0
             && self.sharpness == 0.0
             && self.noise == 0.0
+            && self.defringe == 0.0
+            && self.moire == 0.0
     }
 
     /// True when any adjustment needs a spatial pass (a cached detail base) rather than being
@@ -353,6 +359,8 @@ impl LocalAdjust {
             &mut self.dehaze,
             &mut self.sharpness,
             &mut self.noise,
+            &mut self.defringe,
+            &mut self.moire,
         ] {
             *v = clean(*v, -1.0, 1.0);
         }
@@ -394,6 +402,29 @@ impl MaskParams {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moire_and_defringe_count_as_adjustments_and_are_sanitized() {
+        for a in [
+            LocalAdjust {
+                moire: 0.2,
+                ..Default::default()
+            },
+            LocalAdjust {
+                defringe: -0.2,
+                ..Default::default()
+            },
+        ] {
+            assert!(!a.is_noop());
+        }
+        let mut a = LocalAdjust {
+            moire: f32::NAN,
+            defringe: 9.0,
+            ..Default::default()
+        };
+        a.sanitize();
+        assert_eq!((a.moire, a.defringe), (0.0, 1.0));
+    }
+
     use super::*;
     use serde_json::json;
 

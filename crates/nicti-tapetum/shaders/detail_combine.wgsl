@@ -17,7 +17,7 @@ struct Uniforms {
 struct MaskUniforms {
     header: vec4<f32>,
     airlight: vec4<f32>,
-    corr: array<vec4<f32>, 80>,
+    corr: array<vec4<f32>, 96>,
 }
 
 @group(0) @binding(0) var original_tex: texture_2d<f32>;
@@ -51,9 +51,9 @@ fn local_detail_sums(uv: vec2<f32>) -> vec2<f32> {
             texel = textureSampleLevel(mask_atlas, mask_sampler, uv, l, 0.0);
             layer = l;
         }
-        let f = channel_of(texel, i % 4) * mu.corr[i * 5].x;
-        s.x = s.x + f * mu.corr[i * 5 + 2].w;
-        s.y = s.y + f * mu.corr[i * 5 + 3].w;
+        let f = channel_of(texel, i % 4) * mu.corr[i * 6].x;
+        s.x = s.x + f * mu.corr[i * 6 + 2].w;
+        s.y = s.y + f * mu.corr[i * 6 + 3].w;
     }
     return s;
 }

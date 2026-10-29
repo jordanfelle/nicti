@@ -237,6 +237,8 @@ fn adjust_for(c: &Value<'_>) -> LocalAdjust {
         dehaze: unit("LocalDehaze"),
         sharpness: unit("LocalSharpness"),
         noise: unit("LocalLuminanceNoise"),
+        moire: unit("LocalMoire"),
+        defringe: unit("LocalDefringe"),
         color: (tint_saturation > 0.0).then(|| TintColor {
             hue_deg: field_num(c, "LocalToningHue")
                 .unwrap_or(0.0)

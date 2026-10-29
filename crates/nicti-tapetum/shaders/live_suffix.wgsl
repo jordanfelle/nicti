@@ -74,14 +74,14 @@ struct Uniforms {
 
 // Local corrections (#49, mask/local.rs is the CPU twin). `mask_atlas` packs four correction
 // composites per layer, one per channel, at the mask extent (sampled bilinearly). Each correction
-// is five vec4s: (amount, exposure, contrast, highlights), (shadows, whites, blacks, temp),
-// (tint, saturation, hue, noise), (tint multiplier rgb, sharpness), (clarity, texture, dehaze, _).
+// is six vec4s: (amount, exposure, contrast, highlights), (shadows, whites, blacks, temp),
+// (tint, saturation, hue, noise), (tint multiplier rgb, sharpness), (clarity, texture, dehaze, _), (defringe, moire, _, _).
 // A 1x1 one-layer dummy and count 0 are bound when there are none, and every local step below is
 // skipped, so an unmasked image runs the exact pre-#49 path.
 struct MaskUniforms {
     header: vec4<f32>,   // x = active correction count (<= 16), y = bands bound, z = haze bound
     airlight: vec4<f32>, // camera-linear airlight colour (dehaze)
-    corr: array<vec4<f32>, 80>,
+    corr: array<vec4<f32>, 96>,
 }
 @group(0) @binding(6) var mask_atlas: texture_2d_array<f32>;
 @group(0) @binding(7) var<uniform> mu: MaskUniforms;
@@ -118,6 +118,8 @@ struct LocalSums {
     clarity: f32,
     texture_amt: f32,
     dehaze: f32,
+    defringe: f32,
+    moire: f32,
 }
 
 fn channel_of(v: vec4<f32>, c: i32) -> f32 {
@@ -134,6 +136,7 @@ fn accumulate_locals(uv: vec2<f32>) -> LocalSums {
     s.blacks = 0.0; s.temp = 0.0; s.tint = 0.0; s.saturation = 0.0; s.hue = 0.0;
     s.tint_mult = vec3<f32>(0.0);
     s.noise = 0.0; s.sharpness = 0.0; s.clarity = 0.0; s.texture_amt = 0.0; s.dehaze = 0.0;
+    s.defringe = 0.0; s.moire = 0.0;
     let n = i32(mu.header.x);
     var layer = -1;
     var texel = vec4<f32>(0.0);
@@ -143,11 +146,12 @@ fn accumulate_locals(uv: vec2<f32>) -> LocalSums {
             texel = textureSampleLevel(mask_atlas, mask_sampler, uv, l, 0.0);
             layer = l;
         }
-        let d0 = mu.corr[i * 5];
-        let d1 = mu.corr[i * 5 + 1];
-        let d2 = mu.corr[i * 5 + 2];
-        let d3 = mu.corr[i * 5 + 3];
-        let d4 = mu.corr[i * 5 + 4];
+        let d0 = mu.corr[i * 6];
+        let d1 = mu.corr[i * 6 + 1];
+        let d2 = mu.corr[i * 6 + 2];
+        let d3 = mu.corr[i * 6 + 3];
+        let d4 = mu.corr[i * 6 + 4];
+        let d5 = mu.corr[i * 6 + 5];
         let f = channel_of(texel, i % 4) * d0.x;
         s.exposure = s.exposure + f * d0.y;
         s.contrast = s.contrast + f * d0.z;
@@ -165,6 +169,8 @@ fn accumulate_locals(uv: vec2<f32>) -> LocalSums {
         s.clarity = s.clarity + f * d4.x;
         s.texture_amt = s.texture_amt + f * d4.y;
         s.dehaze = s.dehaze + f * d4.z;
+        s.defringe = s.defringe + f * d5.x;
+        s.moire = s.moire + f * d5.y;
     }
     return s;
 }
@@ -659,10 +665,10 @@ fn tap_l(x: i32, y: i32, m: mat3x3<f32>) -> f32 {
     return perceptual_l(m * textureLoad(input_tex, c, 0).rgb);
 }
 
-fn apply_defringe(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>) -> vec3<f32> {
+fn apply_defringe(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>, extra: f32) -> vec3<f32> {
     let hs = dcp_rgb_to_hsv(rgb);
-    let strength_p = clamp(u.defringe0.x, 0.0, 1.0);
-    let strength_g = clamp(u.defringe0.w, 0.0, 1.0);
+    let strength_p = clamp(u.defringe0.x + extra, 0.0, 1.0);
+    let strength_g = clamp(u.defringe0.w + extra, 0.0, 1.0);
     let purple = strength_p * hue_window(
         hs.x,
         DEFRINGE_PURPLE_BASE + DEFRINGE_HUE_SPAN * u.defringe0.y,
@@ -694,6 +700,39 @@ fn apply_defringe(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>
     return vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * (1.0 - k);
 }
 
+fn tap_rgb(x: i32, y: i32, m: mat3x3<f32>) -> vec3<f32> {
+    let d = vec2<i32>(textureDimensions(input_tex));
+    let c = clamp(vec2<i32>(x, y), vec2<i32>(0, 0), d - vec2<i32>(1, 1));
+    return m * textureLoad(input_tex, c, 0).rgb;
+}
+
+fn chroma_of(c: vec3<f32>) -> vec3<f32> {
+    return c - vec3<f32>(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)));
+}
+
+// ---- #351 local Moire (color.rs::moire_pixel is the CPU twin) ----
+// A chroma low-pass: the pixel's chroma moves toward the mean chroma of itself and the same 8
+// compass taps the defringe edge test reads, luminance untouched.
+fn apply_moire(rgb: vec3<f32>, x: i32, y: i32, long_edge: u32, m: mat3x3<f32>, amount: f32) -> vec3<f32> {
+    let k = clamp(amount, 0.0, 1.0);
+    if (k <= 0.0) {
+        return rgb;
+    }
+    let r = i32(clamp(floor(2.0 * f32(long_edge) / 4000.0 + 0.5), 1.0, 6.0));
+    let own = chroma_of(rgb);
+    var mean = own;
+    mean = mean + chroma_of(tap_rgb(x - r, y - r, m));
+    mean = mean + chroma_of(tap_rgb(x, y - r, m));
+    mean = mean + chroma_of(tap_rgb(x + r, y - r, m));
+    mean = mean + chroma_of(tap_rgb(x - r, y, m));
+    mean = mean + chroma_of(tap_rgb(x + r, y, m));
+    mean = mean + chroma_of(tap_rgb(x - r, y + r, m));
+    mean = mean + chroma_of(tap_rgb(x, y + r, m));
+    mean = mean + chroma_of(tap_rgb(x + r, y + r, m));
+    let l = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec3<f32>(l) + own + (mean / 9.0 - own) * k;
+}
+
 // ---- #381 shadows tint (color.rs::shadow_tint_pixel is the CPU twin; keep the constants in sync) ----
 fn apply_shadow_tint(rgb: vec3<f32>, tint: f32) -> vec3<f32> {
     let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -711,12 +750,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = textureLoad(input_tex, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let m = mat3x3<f32>(u.col0.xyz, u.col1.xyz, u.col2.xyz);
     var rgb = m * px.rgb;
-    if (u.defringe0.x > 0.0 || u.defringe0.w > 0.0) {
-        rgb = apply_defringe(rgb, i32(gid.x), i32(gid.y), max(dims.x, dims.y), m);
-    }
-    if (u.defringe1.z != 0.0) {
-        rgb = apply_shadow_tint(rgb, u.defringe1.z);
-    }
 
     let has_locals = mu.header.x > 0.5;
     var locals: LocalSums;
@@ -724,12 +757,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     locals.whites = 0.0; locals.blacks = 0.0; locals.temp = 0.0; locals.tint = 0.0;
     locals.saturation = 0.0; locals.hue = 0.0; locals.tint_mult = vec3<f32>(0.0);
     locals.noise = 0.0; locals.sharpness = 0.0; locals.clarity = 0.0; locals.texture_amt = 0.0;
-    locals.dehaze = 0.0;
+    locals.dehaze = 0.0; locals.defringe = 0.0; locals.moire = 0.0;
     // The bases (and so `uv`) are also needed for a global clarity/texture/dehaze with no mask at
     // all: the header's bands/haze flags say whether the caller bound them.
     let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
     if (has_locals) {
         locals = accumulate_locals(uv);
+    }
+    // Defringe, local Moire and the shadows tint act on the colours as they leave the matrix, before
+    // any exposure/tone, so they run here only because the local sums are needed first.
+    let long_edge = max(dims.x, dims.y);
+    if (u.defringe0.x + locals.defringe > 0.0 || u.defringe0.w + locals.defringe > 0.0) {
+        rgb = apply_defringe(rgb, i32(gid.x), i32(gid.y), long_edge, m, locals.defringe);
+    }
+    if (locals.moire > 0.0) {
+        rgb = apply_moire(rgb, i32(gid.x), i32(gid.y), long_edge, m, locals.moire);
+    }
+    if (u.defringe1.z != 0.0) {
+        rgb = apply_shadow_tint(rgb, u.defringe1.z);
     }
     let dehaze_total = locals.dehaze + u.presence.z;
     let clarity_total = locals.clarity + u.presence.y;
