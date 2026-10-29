@@ -901,7 +901,12 @@ mod tests {
     {
         let drive = base.to_string_lossy().into_owned();
         let registered = root(9, &base.join("b").to_string_lossy());
-        let tree = build_tree(&[registered], std::slice::from_ref(&drive));
+        // One drive node, built directly: `build_tree` would file the root under its real drive
+        // (`C:\` on Windows CI) and leave this temp-dir "drive" as a second, empty node.
+        let tree = vec![DriveNode {
+            path: drive,
+            roots: vec![registered],
+        }];
         egui_kittest::Harness::new_ui_state(
             |ui, (out, tree, browse)| {
                 let archive = ArchiveDrives::with_locations(&[]);
@@ -1012,10 +1017,10 @@ mod tests {
         std::fs::create_dir(t.path().join("a/other")).unwrap();
         // The imported root is a/b.
         let drive = t.path().to_string_lossy().into_owned();
-        let tree = build_tree(
-            &[root(9, &t.path().join("a/b").to_string_lossy())],
-            &[drive],
-        );
+        let tree = vec![DriveNode {
+            path: drive,
+            roots: vec![root(9, &t.path().join("a/b").to_string_lossy())],
+        }];
         let mut h = egui_kittest::Harness::new_ui_state(
             |ui, (tree, browse): &mut (Vec<DriveNode>, crate::folder_browse::Browse)| {
                 let archive = ArchiveDrives::with_locations(&[]);
