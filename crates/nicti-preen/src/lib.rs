@@ -37,7 +37,7 @@ use nicti_claw::{Module, Registry};
 
 use crate::color::OutputPixels;
 use crate::metadata::{ExifContext, ExifPayload, SourceMetadata};
-use crate::spec::{BitDepth, ExportFormat, ExportSpec, FormatSpec};
+use crate::spec::{BitDepth, ExportFormat, ExportSpace, ExportSpec, FormatSpec};
 use crate::watermark::WatermarkSource;
 
 /// Which metadata containers an exporter can write into.
@@ -65,6 +65,9 @@ pub struct Embed<'a> {
     pub exif: Option<&'a ExifPayload>,
     /// A complete XMP packet.
     pub xmp: Option<&'a str>,
+    /// The output color space (a format that signals its space itself, instead of embedding the
+    /// ICC profile, reads it from here).
+    pub color_space: ExportSpace,
 }
 
 /// An export target (JPEG, PNG, TIFF, ...). Resize/color/orientation/watermark are shared by every
@@ -254,6 +257,7 @@ pub fn export_frame(
                 dpi: spec.dpi,
                 exif: exif.as_ref(),
                 xmp: xmp.as_deref(),
+                color_space: spec.color_space,
             },
         )
     };

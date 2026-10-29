@@ -35,6 +35,7 @@ pub const PNG_ID: &str = "nicti.exporter.png";
 pub const TIFF_ID: &str = "nicti.exporter.tiff";
 pub const AVIF_ID: &str = "nicti.exporter.avif";
 pub const WEBP_ID: &str = "nicti.exporter.webp";
+pub const JXL_ID: &str = "nicti.exporter.jxl";
 
 /// The registry id of the built-in exporter for `format`.
 pub fn builtin_id(format: ExportFormat) -> &'static str {
@@ -44,6 +45,7 @@ pub fn builtin_id(format: ExportFormat) -> &'static str {
         ExportFormat::Tiff => TIFF_ID,
         ExportFormat::Avif => AVIF_ID,
         ExportFormat::Webp => WEBP_ID,
+        ExportFormat::Jxl => JXL_ID,
     }
 }
 
@@ -61,6 +63,9 @@ pub fn builtin_registry() -> ExporterRegistry {
     fn webp() -> Arc<dyn Exporter> {
         Arc::new(WebpExporter)
     }
+    fn jxl() -> Arc<dyn Exporter> {
+        Arc::new(JxlExporter)
+    }
     #[cfg(feature = "avif")]
     fn avif() -> Arc<dyn Exporter> {
         Arc::new(AvifExporter)
@@ -71,6 +76,7 @@ pub fn builtin_registry() -> ExporterRegistry {
         (PNG_ID, png),
         (TIFF_ID, tiff),
         (WEBP_ID, webp),
+        (JXL_ID, jxl),
         #[cfg(feature = "avif")]
         (AVIF_ID, avif),
     ] {
@@ -519,6 +525,83 @@ fn bt601(r: f32, g: f32, b: f32, mid: f32, max: f32) -> (f32, f32, f32) {
     let cr = (r - y) / 1.402 + mid;
     let q = |v: f32| v.round().clamp(0.0, max);
     (q(y), q(cb), q(cr))
+}
+
+// --- JPEG XL ----------------------------------------------------------------------------------
+
+/// JPEG XL (#359) through `jixel` (pure Rust, BSD-3-Clause OR Apache-2.0): lossy VarDCT by quality,
+/// or lossless modular, 8- or 16-bit. The color space is *signalled* in the codestream header
+/// (sRGB, or Display P3 primaries with the sRGB curve), not embedded as an ICC profile; the encoder
+/// converts the pixels through those primaries, which is why Adobe RGB (no enumerated primaries)
+/// is refused by `ExportSpec::validate`. EXIF and XMP go into the container's `Exif` and `xml `
+/// boxes. The frame is already upright, so the orientation field stays `Normal`.
+pub struct JxlExporter;
+module_impl!(JxlExporter, JXL_ID);
+
+impl Exporter for JxlExporter {
+    fn format(&self) -> ExportFormat {
+        ExportFormat::Jxl
+    }
+
+    fn extension(&self) -> &'static str {
+        "jxl"
+    }
+
+    fn supports_depth(&self, _depth: BitDepth) -> bool {
+        true
+    }
+
+    fn embeds(&self) -> EmbedSupport {
+        EmbedSupport {
+            exif: true,
+            xmp: true,
+            icc: false,
+            dpi: false,
+        }
+    }
+
+    fn encode(
+        &self,
+        img: &OutputImage<'_>,
+        fmt: &FormatSpec,
+        embed: &Embed<'_>,
+    ) -> Result<Vec<u8>, ExportError> {
+        use jixel::{ColorEncoding, EncodeConfig};
+
+        let FormatSpec::Jxl {
+            quality, lossless, ..
+        } = fmt
+        else {
+            return Err(wrong_format("JxlExporter", fmt));
+        };
+        let color_encoding = match embed.color_space {
+            ExportSpace::Srgb => ColorEncoding::srgb(),
+            ExportSpace::DisplayP3 => ColorEncoding::display_p3(),
+            ExportSpace::AdobeRgb => {
+                return Err(ExportError::Encode(
+                    "JPEG XL export supports sRGB and Display P3 only".into(),
+                ))
+            }
+        };
+        let mut config = EncodeConfig::default().with_color_encoding(color_encoding);
+        config = if *lossless {
+            config.with_lossless(true)
+        } else {
+            config.with_quality(f32::from(*quality))
+        };
+        if let Some(exif) = embed.exif {
+            config = config.with_exif(exif_tiff_bytes(exif)?);
+        }
+        if let Some(xmp) = embed.xmp {
+            config = config.with_xmp(xmp.as_bytes().to_vec());
+        }
+        let (w, h) = (img.width as usize, img.height as usize);
+        match img.pixels {
+            OutputPixels::Rgb8(px) => jixel::encode_image(px, w, h, &config),
+            OutputPixels::Rgb16(px) => jixel::encode_image_16bit(px, w, h, &config),
+        }
+        .map_err(|e| encode_err("JPEG XL encode", e))
+    }
 }
 
 // --- TIFF -------------------------------------------------------------------------------------
