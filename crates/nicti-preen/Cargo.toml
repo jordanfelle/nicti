@@ -25,7 +25,7 @@ jpeg-encoder = "0.7"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tiff = "0.11"
 # Text watermark outlines (#338): MIT OR Apache-2.0, already in the lockfile via egui's font stack.
-skrifa = "0.44"
+skrifa = "0.49"
 # Lossless WebP (pure Rust; lossy isn't available in it, #361).
 image-webp = "0.2"
 # AVIF (rav1e, slow to compile -- #286), so opt-in via the `avif` feature.
