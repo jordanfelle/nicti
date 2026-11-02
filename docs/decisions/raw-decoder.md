@@ -48,3 +48,21 @@ share of T2 latency first (the 1-2.4 s HE/HE* figure is end-to-end, not a decode
 the PR fork's and LibRaw's official snapshot output on the same frames; a lossless-vs-HE pair would need a PSNR bound
 (lossy), and that a Z8 can record such same-frame pairs is unverified. Also found: no `USE_JPEG`, so lossy/JPEG-compressed
 DNGs do not decode.
+
+## JPEG assets decode through `nicti_cornea::jpeg` (#576)
+
+`LibRawDecoder` is RAW-only, so loupe, develop and export on a JPEG asset (landed by #489) fell back to T0 or failed.
+`JpegDecoder` (`crates/nicti-cornea/src/jpeg.rs`) implements the same `RawDecoder` trait and returns a `LinearFrame`,
+so no caller needs a JPEG branch. `SourceDecoder` (libraw feature) dispatches on extension (`.jpg`/`.jpeg` to
+`JpegDecoder`, everything else to LibRaw) and replaces `LibRawDecoder` in `app.rs`.
+
+- **Colour management:** the embedded ICC profile is converted to sRGB with calico's `SourceTransforms` (panic-guarded
+  moxcms; none or an unusable profile means sRGB), then the sRGB curve is undone into 16-bit linear (256-entry LUT).
+- **Frame contract:** `black` 0, `maximum` 65535, `cam_mul`/`pre_mul` neutral (a JPEG is already white balanced),
+  `cam_xyz` = Bradford-adapted XYZ(D50) -> linear sRGB (the matrix is XYZ -> "camera", so it is the sRGB matrix itself),
+  `model` "JPEG". Pixels are not rotated; `orientation` carries the EXIF value 2-8 (1 and "no tag" both give 0).
+- **Limits:** 8-bit source, so no highlight recovery and visible banding when shadows are pushed hard; CMYK/other
+  non-RGB JPEGs return `DecodeError::Jpeg`; files over 512 MB are refused. Not validated against a wide-gamut
+  (Adobe RGB / Display P3) real file in this sandbox; the unit tests cover linearisation, neutral stays neutral,
+  routing and errors.
+- **T2:** already handled before this change (`t2.rs` `is_plain_jpeg` derives T2 from the file itself).

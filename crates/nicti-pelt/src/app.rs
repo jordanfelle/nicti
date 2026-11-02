@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::folder_dialog::FolderPicker;
 use crate::folder_panel;
-use nicti_cornea::{LibRawDecoder, RawDecoder};
+use nicti_cornea::{RawDecoder, SourceDecoder};
 use nicti_lair::carry::{self, CarryOptions, CarryOutcome, Resumed};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy, BackupReport, NineLives};
 use nicti_lair::patrol::SyncOptions;
@@ -411,7 +411,7 @@ impl PeltApp {
 
         let prebake = PrebakeService::new(match (&catalog, &larder) {
             (store, Some(larder)) => Some(prebake::Env {
-                decoder: Arc::new(LibRawDecoder),
+                decoder: Arc::new(SourceDecoder),
                 store: store.clone(),
                 larder: larder.clone(),
                 submitter: pounce.submitter(),
@@ -423,7 +423,7 @@ impl PeltApp {
         crate::fur::install_section_states(egui_ctx, section_state::load(&catalog_path));
         let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
             eyeshine::Env::new(
-                Arc::new(LibRawDecoder),
+                Arc::new(SourceDecoder),
                 gpu.clone(),
                 l.clone(),
                 pounce.submitter(),
@@ -468,7 +468,7 @@ impl PeltApp {
             pending_move_result: None,
             pending_recovery_result,
             last_move_summary,
-            decoder: Arc::new(LibRawDecoder),
+            decoder: Arc::new(SourceDecoder),
             loupe: None,
             loupe_loaded_asset: None,
             gpu,
