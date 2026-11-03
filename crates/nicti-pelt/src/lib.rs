@@ -45,6 +45,7 @@ mod preview_color;
 mod preview_settings;
 mod render;
 mod repaint_trace;
+mod righting_ui;
 mod section_state;
 mod stash;
 #[cfg(test)]

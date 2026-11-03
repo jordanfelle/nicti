@@ -50,6 +50,8 @@ pub struct RightingReport {
     pub stale_file: u64,
     /// The catalog blob changed between reading and writing it (an ingest replaced it): left alone.
     pub raced: u64,
+    /// Rows whose `asset.orientation` was NULL and got filled in the same pass (#604/#606).
+    pub orientation_filled: u64,
     /// The root's folder is not there (an unmounted drive): nothing was examined or touched, and
     /// every asset would otherwise look like a deleted file.
     pub root_offline: bool,
@@ -58,6 +60,22 @@ pub struct RightingReport {
 }
 
 impl RightingReport {
+    /// Adds `other`'s counters and problems to this report.
+    pub fn absorb(&mut self, other: RightingReport) {
+        self.examined += other.examined;
+        self.fixed_blobs += other.fixed_blobs;
+        self.fixed_sidecars += other.fixed_sidecars;
+        self.already_right += other.already_right;
+        self.no_rotation += other.no_rotation;
+        self.no_thumbnail += other.no_thumbnail;
+        self.missing_file += other.missing_file;
+        self.stale_file += other.stale_file;
+        self.raced += other.raced;
+        self.orientation_filled += other.orientation_filled;
+        self.root_offline |= other.root_offline;
+        self.failed.extend(other.failed);
+    }
+
     /// Whether a caller may record "this root has been righted" (a once-per-catalog marker): the
     /// root was reachable and nothing was left undone. Deleted files (`missing_file`) and RAWs
     /// that need no rotation are not leftovers.
@@ -236,4 +254,118 @@ pub fn backfill_root(
         righting_asset(store, Path::new(&root.path), &asset, &mut report)?;
     }
     Ok(report)
+}
+
+/// What a whole [`Righting`] run did.
+#[derive(Debug, Clone, Default)]
+pub struct RightingRun {
+    /// Totals over every root visited.
+    pub total: RightingReport,
+    /// Roots that were reachable and left nothing undone ([`RightingReport::can_mark_done`]): the
+    /// caller records these so the next start skips them. An offline or partly failed root is not
+    /// listed and is tried again next time.
+    pub done_roots: Vec<i64>,
+    /// The run was dropped before it finished (a cancelled job): `done_roots` only has the roots
+    /// that did finish.
+    pub cancelled: bool,
+}
+
+/// A steppable righting run over every root not in `skip` (#606): one bounded chunk of assets per
+/// [`Righting::step`], so a Pounce job can spread it out and stay cancellable. Each asset gets the
+/// thumbnail righting ([`righting_asset`]) and, when its `orientation` column is still NULL, the
+/// orientation read ([`crate::orient::orient_asset`]) in the same pass.
+pub struct Righting {
+    roots: std::collections::VecDeque<(i64, PathBuf)>,
+    current: Option<Current>,
+    run: RightingRun,
+    done: u64,
+}
+
+struct Current {
+    root_id: i64,
+    path: PathBuf,
+    assets: std::vec::IntoIter<Asset>,
+    report: RightingReport,
+}
+
+/// Assets handled per [`Righting::step`].
+const STEP_ASSETS: usize = 16;
+
+impl Righting {
+    pub fn new(
+        store: &dyn CatalogStore,
+        skip: &std::collections::HashSet<i64>,
+    ) -> Result<Self, CatalogError> {
+        let roots = store
+            .list_roots()?
+            .into_iter()
+            .filter(|r| !skip.contains(&r.id))
+            .map(|r| (r.id, PathBuf::from(r.path)))
+            .collect();
+        Ok(Self {
+            roots,
+            current: None,
+            run: RightingRun::default(),
+            done: 0,
+        })
+    }
+
+    /// Assets handled so far.
+    pub fn progress(&self) -> u64 {
+        self.done
+    }
+
+    /// Roots still to visit, including the one in progress.
+    pub fn roots_left(&self) -> usize {
+        self.roots.len() + usize::from(self.current.is_some())
+    }
+
+    /// Advances one chunk. `Ok(true)` while there is more to do.
+    pub fn step(&mut self, store: &dyn CatalogStore) -> Result<bool, CatalogError> {
+        if self.current.is_none() {
+            let Some((root_id, path)) = self.roots.pop_front() else {
+                return Ok(false);
+            };
+            if !path.is_dir() {
+                self.run.total.root_offline = true;
+                return Ok(true);
+            }
+            self.current = Some(Current {
+                root_id,
+                assets: store.list_assets_by_root(root_id)?.into_iter(),
+                path,
+                report: RightingReport::default(),
+            });
+        }
+        let cur = self.current.as_mut().expect("just set");
+        for _ in 0..STEP_ASSETS {
+            let Some(asset) = cur.assets.next() else {
+                let finished = self.current.take().expect("current");
+                if finished.report.can_mark_done() {
+                    self.run.done_roots.push(finished.root_id);
+                }
+                self.run.total.absorb(finished.report);
+                return Ok(true);
+            };
+            righting_asset(store, &cur.path, &asset, &mut cur.report)?;
+            if asset.orientation.is_none() && crate::orient::orient_asset(store, &cur.path, &asset)?
+            {
+                cur.report.orientation_filled += 1;
+            }
+            self.done += 1;
+        }
+        Ok(true)
+    }
+
+    /// The finished run.
+    pub fn into_run(mut self) -> RightingRun {
+        // A root in progress counts for its totals, never as done.
+        if let Some(cur) = self.current.take() {
+            self.run.total.absorb(cur.report);
+            self.run.cancelled = true;
+        } else if !self.roots.is_empty() {
+            self.run.cancelled = true;
+        }
+        self.run
+    }
 }
