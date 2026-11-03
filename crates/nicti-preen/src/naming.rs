@@ -2,7 +2,9 @@
 //!
 //! ```text
 //! template := (literal | "{{" | "}}" | token)*        token := "{" NAME (":" ARG)? "}"
-//! NAME (case-insensitive): Filename | Sequence | Date | Rating | Make | Model | Folder
+//! NAME (case-insensitive): Filename | Num | Sequence | Date | Rating | Make | Model | Lens | ISO | Folder
+//! Num: the trailing digits of the source file name ({Num} of DSC_0042 -> 0042; empty if none)
+//! Lens / ISO: the EXIF lens model / ISO sensitivity (empty when the photo has none)
 //! Sequence ARG: zero-pad width 1..=9         {Sequence:4} -> 0007
 //! Date ARG: YYYY YY MM DD hh mm ss, plus literal - _ . and space      (default YYYYMMDD)
 //! ```
@@ -53,6 +55,10 @@ pub struct AssetFacts {
     pub rating: Option<i32>,
     pub make: Option<String>,
     pub model: Option<String>,
+    /// EXIF `LensModel` (#547).
+    pub lens: Option<String>,
+    /// EXIF ISO (#547).
+    pub iso: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,11 +153,14 @@ enum DateTok {
 enum Part {
     Lit(String),
     Filename,
+    Num,
     Sequence(u8),
     Date(Vec<DateTok>),
     Rating,
     Make,
     Model,
+    Lens,
+    Iso,
     Folder,
 }
 
@@ -189,6 +198,26 @@ fn parse_date_arg(arg: &str) -> Option<Vec<DateTok>> {
         rest = &rest[n..];
     }
     (!toks.is_empty()).then_some(toks)
+}
+
+/// Appends a token's *value*. A path separator inside it (a lens `24-70mm f/4`, a camera model
+/// `X/Y`) is not a template separator: it becomes `_` here, because `render_subfolder` splits the
+/// rendered text at separators and would otherwise turn one EXIF string into extra folders.
+fn push_value(out: &mut String, value: &str) {
+    out.extend(
+        value
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\') { '_' } else { c }),
+    );
+}
+
+/// The run of ASCII digits at the end of `stem` (`DSC_0042` -> `0042`), empty when it doesn't end
+/// in one. Leading zeros are kept: the digits are the camera's own file number, not a quantity.
+fn trailing_digits(stem: &str) -> &str {
+    let start = stem.rfind(|c: char| !c.is_ascii_digit()).map_or(0, |i| {
+        i + stem[i..].chars().next().map_or(1, char::len_utf8)
+    });
+    &stem[start..]
 }
 
 impl Template {
@@ -262,9 +291,12 @@ impl Template {
         };
         match name.to_ascii_lowercase().as_str() {
             "filename" => no_arg("Filename", Part::Filename),
+            "num" => no_arg("Num", Part::Num),
             "rating" => no_arg("Rating", Part::Rating),
             "make" => no_arg("Make", Part::Make),
             "model" => no_arg("Model", Part::Model),
+            "lens" => no_arg("Lens", Part::Lens),
+            "iso" => no_arg("ISO", Part::Iso),
             "folder" => no_arg("Folder", Part::Folder),
             "sequence" => match arg {
                 None => Ok(Part::Sequence(1)),
@@ -289,10 +321,17 @@ impl Template {
         for part in &self.parts {
             match part {
                 Part::Lit(s) => out.push_str(s),
-                Part::Filename => out.push_str(&facts.stem),
-                Part::Folder => out.push_str(&facts.folder),
-                Part::Make => out.push_str(facts.make.as_deref().unwrap_or("")),
-                Part::Model => out.push_str(facts.model.as_deref().unwrap_or("")),
+                Part::Filename => push_value(&mut out, &facts.stem),
+                Part::Num => out.push_str(trailing_digits(&facts.stem)),
+                Part::Folder => push_value(&mut out, &facts.folder),
+                Part::Make => push_value(&mut out, facts.make.as_deref().unwrap_or("")),
+                Part::Model => push_value(&mut out, facts.model.as_deref().unwrap_or("")),
+                Part::Lens => push_value(&mut out, facts.lens.as_deref().unwrap_or("")),
+                Part::Iso => {
+                    if let Some(iso) = facts.iso {
+                        let _ = write!(out, "{iso}");
+                    }
+                }
                 Part::Rating => out.push_str(match facts.rating {
                     None => "0",
                     Some(r) if r < 0 => "X",
@@ -450,6 +489,8 @@ mod tests {
             rating: Some(4),
             make: Some("NIKON CORPORATION".into()),
             model: Some("NIKON Z 8".into()),
+            lens: Some("NIKKOR Z 24-70mm f/4 S".into()),
+            iso: Some(1600),
         }
     }
 
@@ -605,6 +646,66 @@ mod tests {
         assert_eq!(
             (before.year, before.month, before.day, before.second),
             (1969, 12, 31, 59)
+        );
+    }
+
+    #[test]
+    fn num_is_the_trailing_digits_of_the_stem() {
+        assert_eq!(render("{Num}", 1), "0042");
+        assert_eq!(render("{num}-{Sequence}", 3), "0042-3");
+        assert_eq!(trailing_digits("DSC_0042"), "0042");
+        assert_eq!(trailing_digits("IMG1234_5678"), "5678");
+        assert_eq!(trailing_digits("1234"), "1234");
+        assert_eq!(trailing_digits("photo"), "");
+        assert_eq!(trailing_digits(""), "");
+        assert_eq!(trailing_digits("DSC_0042 copy"), "");
+        // Non-ASCII before the digits: the slice must land on a char boundary.
+        assert_eq!(trailing_digits("日本語_007"), "007");
+        assert_eq!(trailing_digits("é9"), "9");
+        // Non-ASCII digits are not file numbers.
+        assert_eq!(trailing_digits("a٣"), "");
+        assert!(Template::parse("{Num:3}").is_err());
+    }
+
+    #[test]
+    fn lens_and_iso_render_and_are_empty_when_absent() {
+        assert_eq!(render("{Lens}", 1), "NIKKOR Z 24-70mm f_4 S");
+        assert_eq!(render("{iso}", 1), "1600");
+        assert_eq!(render("{Filename}_{ISO}", 1), "DSC_0042_1600");
+        let none = AssetFacts {
+            lens: None,
+            iso: None,
+            ..facts()
+        };
+        let t = Template::parse("{Filename}-{Lens}{ISO}").unwrap();
+        assert_eq!(t.render(&none, 1), "DSC_0042-");
+        assert!(Template::parse("{ISO:4}").is_err());
+        assert!(Template::parse("{Lens:x}").is_err());
+        // A lens name never becomes a path component split: the slash is sanitized away.
+        let sub = Template::parse_subfolder("{Lens}/{ISO}").unwrap();
+        assert_eq!(
+            sub.render_subfolder(&facts(), 1),
+            vec!["NIKKOR Z 24-70mm f_4 S".to_string(), "1600".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_separator_inside_a_value_never_splits_a_subfolder() {
+        let f = AssetFacts {
+            model: Some("X/Y\\Z".into()),
+            make: Some("../..".into()),
+            ..facts()
+        };
+        let t = Template::parse_subfolder("{Make}/{Model}/{Lens}").unwrap();
+        // One component per token: the separators inside the values became `_`, and `..` can't
+        // survive as a traversal component (sanitize trims its trailing dots).
+        assert_eq!(
+            t.render_subfolder(&f, 1),
+            vec![
+                ".._".to_string(),
+                "X_Y_Z".to_string(),
+                "NIKKOR Z 24-70mm f_4 S".to_string()
+            ]
         );
     }
 }

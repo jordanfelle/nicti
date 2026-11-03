@@ -504,6 +504,16 @@ CREATE TABLE asset_gps (
 );
 "#;
 
+/// Lens and ISO for the `{Lens}`/`{ISO}` naming tokens (#547). `exif_extra_read` is 0 until the
+/// file's EXIF has been read for them (ingest skips an unchanged file, so existing rows need an
+/// explicit backfill) and goes back to 0 when the file's size/mtime change; lens/iso are NULL when
+/// the file simply has none.
+const MIGRATION_V13: &str = r#"
+ALTER TABLE asset ADD COLUMN lens TEXT;
+ALTER TABLE asset ADD COLUMN iso INTEGER;
+ALTER TABLE asset ADD COLUMN exif_extra_read INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -521,6 +531,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V10,
     MIGRATION_V11,
     MIGRATION_V12,
+    MIGRATION_V13,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call

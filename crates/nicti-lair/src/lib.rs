@@ -27,6 +27,7 @@ pub mod carry;
 pub mod clowder;
 pub mod hunt;
 pub mod larder;
+pub mod lens_iso;
 pub mod ninelives;
 pub mod offering;
 pub mod orient;
@@ -383,6 +384,24 @@ pub trait CatalogStore: Module {
     /// (#604). Ingest calls this after `insert_asset`; `insert_asset` itself resets it to `NULL`
     /// when the file's size or mtime changed.
     fn set_orientation(&self, asset_id: i64, orientation: u8) -> Result<(), CatalogError>;
+
+    /// Records the lens and ISO read from an asset's EXIF (#547) and marks them read; `None`
+    /// means the file has no such value (not "unknown": the backfill won't retry it).
+    fn set_exif_extra(
+        &self,
+        asset_id: i64,
+        lens: Option<&str>,
+        iso: Option<u32>,
+    ) -> Result<(), CatalogError>;
+
+    /// Up to `limit` assets under `root_id` whose lens/ISO have not been read yet, with `id >
+    /// after_id`, in `id` order (#547): the backfill pass pages through these.
+    fn assets_missing_exif_extra(
+        &self,
+        root_id: i64,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Asset>, CatalogError>;
 
     /// Up to `limit` assets under `root_id` whose orientation has not been read yet, with `id >
     /// after_id`, in `id` order (#604): the backfill pass pages through these.

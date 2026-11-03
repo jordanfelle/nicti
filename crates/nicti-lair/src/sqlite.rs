@@ -810,13 +810,17 @@ impl SqliteCatalog {
             orientation: row
                 .get::<_, Option<i64>>(18)?
                 .and_then(|o| u8::try_from(o).ok()),
+            lens: row.get(19)?,
+            iso: row
+                .get::<_, Option<i64>>(20)?
+                .and_then(|i| u32::try_from(i).ok()),
         })
     }
 }
 
 const ASSET_COLUMNS: &str = "id, root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
     fingerprint, natural_key, make, model, captured_at, rating, flag, label, width, height, \
-    imported_at, missing_since, orientation";
+    imported_at, missing_since, orientation, lens, iso";
 
 impl Module for SqliteCatalog {
     fn id(&self) -> &str {
@@ -1542,6 +1546,15 @@ impl CatalogStore for SqliteCatalog {
                 orientation = CASE WHEN asset.size_bytes IS excluded.size_bytes \
                     AND asset.mtime_unix IS excluded.mtime_unix \
                     THEN asset.orientation ELSE NULL END, \
+                exif_extra_read = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.exif_extra_read ELSE 0 END, \
+                lens = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.lens ELSE NULL END, \
+                iso = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.iso ELSE NULL END, \
                 rel_path_fold = excluded.rel_path_fold, \
                 size_bytes = excluded.size_bytes, \
                 mtime_unix = excluded.mtime_unix, \
@@ -1624,6 +1637,12 @@ impl CatalogStore for SqliteCatalog {
                     THEN content_hash ELSE NULL END, \
                 orientation = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
                     THEN orientation ELSE NULL END, \
+                exif_extra_read = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN exif_extra_read ELSE 0 END, \
+                lens = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN lens ELSE NULL END, \
+                iso = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN iso ELSE NULL END, \
                 size_bytes = ?4, mtime_unix = ?5, missing_since = NULL WHERE id = ?6",
             params![
                 new_root_id,
@@ -1775,6 +1794,38 @@ impl CatalogStore for SqliteCatalog {
             params![i64::from(orientation.clamp(1, 8)), asset_id],
         )?;
         Ok(())
+    }
+
+    fn set_exif_extra(
+        &self,
+        asset_id: i64,
+        lens: Option<&str>,
+        iso: Option<u32>,
+    ) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE asset SET lens = ?1, iso = ?2, exif_extra_read = 1 WHERE id = ?3",
+            params![lens, iso.map(i64::from), asset_id],
+        )?;
+        Ok(())
+    }
+
+    fn assets_missing_exif_extra(
+        &self,
+        root_id: i64,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Asset>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS} FROM asset \
+             WHERE root_id = ?1 AND exif_extra_read = 0 AND missing_since IS NULL \
+             AND id > ?2 ORDER BY id ASC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![root_id, after_id, limit as i64], Self::row_to_asset)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     fn assets_missing_orientation(

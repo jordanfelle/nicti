@@ -141,6 +141,8 @@ pub fn facts_for(asset: &nicti_lair::Asset, source_path: &std::path::Path) -> As
         rating: asset.rating.map(|r| r as i32),
         make: asset.make.clone(),
         model: asset.model.clone(),
+        lens: asset.lens.clone(),
+        iso: asset.iso,
     }
 }
 

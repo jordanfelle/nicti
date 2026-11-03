@@ -755,7 +755,7 @@ fn naming_section(ui: &mut egui::Ui, d: &mut Dialog) {
         ui.label("Template");
         ui.text_edit_singleline(&mut d.spec.naming.template)
             .on_hover_text(
-                "{Filename} {Sequence} {Sequence:4} {Date} {Date:YYYY-MM-DD} {Rating} {Make} {Model} {Folder}",
+                "{Filename} {Num} {Sequence} {Sequence:4} {Date} {Date:YYYY-MM-DD} {Rating} {Make} {Model} {Lens} {ISO} {Folder}",
             );
         ui.label("start at");
         ui.add(egui::DragValue::new(&mut d.spec.naming.sequence_start).range(0..=999_999_999));
