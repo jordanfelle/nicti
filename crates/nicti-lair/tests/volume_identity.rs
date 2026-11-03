@@ -221,19 +221,49 @@ fn identification_flipping_never_registers_a_second_root_for_the_same_folder() {
     assert_eq!((first, second), (first, first));
     assert_eq!(third, first);
     assert_eq!(store.list_roots().unwrap().len(), 1);
-    // The same, the other way round, and when the folder is later found on a *different* volume.
+    // A folder that was only ever unidentified is adopted by whichever volume then claims it.
     let a = register_root_with(&store, Path::new("/elsewhere/x"), &|_| None).unwrap();
     let other = |_: &Path| Some(ident("ntfs64:z+gpt:z", "Z", None));
     assert_eq!(
         register_root_with(&store, Path::new("/elsewhere/x"), &other).unwrap(),
         a
     );
+    assert_eq!(volume_key_of_any(&store, a), "ntfs64:z+gpt:z");
+    // But a *different* real volume appearing at a path already filed under another real volume
+    // (a reused drive letter, a swapped removable disk) gets its own root: its files must not
+    // inherit the first disk's root, ratings and edits.
+    let swapped = register_root_with(&store, Path::new("/photos/2026"), &other).unwrap();
+    assert_ne!(swapped, first, "a different disk is a different root");
+    assert_eq!(store.list_roots().unwrap().len(), 3);
+    // ...while the unidentified lookup (identification flipping off) still reuses a root.
     assert_eq!(
-        register_root_with(&store, Path::new("/photos/2026"), &other).unwrap(),
-        first,
-        "filed under another real volume: reused, not duplicated"
+        register_root_with(&store, Path::new("/photos/2026"), &|_| None).unwrap(),
+        first.min(swapped)
     );
-    assert_eq!(store.list_roots().unwrap().len(), 2);
+    assert_eq!(store.list_roots().unwrap().len(), 3);
+}
+
+/// The key of the real volume a root is filed under, through the same upsert-back trick as
+/// `volume_key_of`, for volumes beyond the three it knows.
+fn volume_key_of_any(store: &SqliteCatalog, root_id: i64) -> String {
+    let vol = store
+        .list_roots()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == root_id)
+        .unwrap()
+        .volume_id;
+    for key in [
+        "ntfs64:a+gpt:a",
+        "ntfs64:b+gpt:b",
+        "ntfs64:z+gpt:z",
+        PLACEHOLDER_VOLUME_IDENTITY_KEY,
+    ] {
+        if store.upsert_volume(key, None, None, 0).ok() == Some(vol) {
+            return key.to_owned();
+        }
+    }
+    panic!("unknown volume {vol}");
 }
 
 #[test]

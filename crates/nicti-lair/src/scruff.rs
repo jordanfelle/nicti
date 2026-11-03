@@ -482,9 +482,9 @@ pub fn register_root_with(
         let _ = store.reassign_root_volume(root.id, volume_id);
         return Ok(root.id);
     }
-    if let Some(root) = same_path.first() {
-        return Ok(root.id); // filed under another real volume; never duplicated
-    }
+    // Not reused from another real volume: the folder is positively on *this* volume now, and a
+    // different disk mounted at the same path (a reused drive letter, a swapped removable drive)
+    // is a different volume whose files must not inherit the first disk's root, ratings and edits.
     store.ensure_root(volume_id, &canonical)
 }
 
