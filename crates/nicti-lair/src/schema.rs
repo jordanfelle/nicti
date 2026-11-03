@@ -493,6 +493,17 @@ const MIGRATION_V11: &str = r#"
 ALTER TABLE asset ADD COLUMN orientation INTEGER;
 "#;
 
+/// The GPS position per asset (#536), a side table so the (huge) `asset` table stays narrow and an
+/// asset with no position costs nothing. Latitude/longitude are WGS-84 degrees, altitude metres.
+const MIGRATION_V12: &str = r#"
+CREATE TABLE asset_gps (
+    asset_id  INTEGER PRIMARY KEY REFERENCES asset(id) ON DELETE CASCADE,
+    latitude  REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
+    longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
+    altitude  REAL
+);
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -509,6 +520,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V9,
     MIGRATION_V10,
     MIGRATION_V11,
+    MIGRATION_V12,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call

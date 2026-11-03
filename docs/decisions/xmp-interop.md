@@ -50,3 +50,11 @@ only, so re-encoding pixels or touching EXIF is never read as an XMP change. A J
 imports as `NoSidecar`; a write splices a new packet in (atomic temp-file + rename, everything
 outside the APP1-XMP segment byte-identical) and never creates the file. `IMG.xmp` stays the RAW's
 in a RAW+JPEG pair. DNG remains read-only for embedded XMP (writes go to a sidecar).
+
+## #536: geotag engine
+
+`asset_gps(asset_id, latitude, longitude, altitude)` (schema v12, cascade-deleted with the asset) is a side table so the wide `asset` table is untouched. `trail::geotag_assets` takes `(asset_id, path)` items plus a parsed `Tracklog` and `GeotagOptions`, and per asset: reads `captured_at`, locates a position, stores it, then writes it through the normal sidecar path (so a sidecar changed under us is held for review, never clobbered). With auto-write off the asset is only marked dirty, like a marker edit. An asset that already has a position is left alone unless `overwrite`.
+
+Sync semantics: `Markers.gps` is carried next to the markers but excluded from `==` and the conflict hash, so a position never raises a conflict by itself. The catalog's position is written whenever it has one and the file's differs; a position only the file has is left in place and adopted by the catalog when it has none; a file with no position never clears the catalog's. A pending catalog position with the catalog marked newer is pushed even when every marker agrees (otherwise the dirty flag would be cleared and the position lost). `gpx::read_gps` reads attribute and element forms and rounds-trips what `Patch.gps` writes (1e-5 degree / 2 cm tolerance).
+
+Known limitation, unchanged from #431: a log with overlapping tracks from two devices is interpolated in global time order. The UI half (apply dialog, Info display) is #668.

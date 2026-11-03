@@ -38,6 +38,7 @@ pub mod scruff;
 pub mod shred;
 pub mod thumb_sidecar;
 pub mod tier;
+pub mod trail;
 pub mod verify;
 
 pub use clowder::{Collection, CollectionKind};
@@ -351,6 +352,20 @@ pub trait CatalogStore: Module {
 
     /// Upserts the XMP sidecar sync state for one asset (#60).
     fn record_sidecar(&self, asset_id: i64, state: &SidecarState) -> Result<(), CatalogError>;
+
+    /// The stored GPS position of each listed asset that has one (#536); ids without are absent.
+    fn get_gps(
+        &self,
+        asset_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, nicti_scent::gpx::Gps>, CatalogError>;
+
+    /// Stores (`Some`) or clears (`None`) one asset's GPS position (#536). An out-of-range or
+    /// non-finite position is refused rather than stored.
+    fn set_gps(
+        &self,
+        asset_id: i64,
+        gps: Option<nicti_scent::gpx::Gps>,
+    ) -> Result<(), CatalogError>;
 
     /// Asset ids whose sidecar is flagged `needs_review`, in id order (#60).
     fn sidecar_review_assets(&self) -> Result<Vec<i64>, CatalogError>;

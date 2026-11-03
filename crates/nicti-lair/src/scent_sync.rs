@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use nicti_scent::conflict::{read_hashed, resolve_conflict, Resolution, Side};
+use nicti_scent::gpx::Gps;
 use nicti_scent::lrc_fields::{self, LrcMeta};
 use nicti_scent::packet::{self, Patch};
 use nicti_scent::sidecar::atomic_write;
@@ -77,6 +78,21 @@ pub struct Markers {
     pub pick: bool,
     /// Each keyword as its name path (`["Events", "Anthrocon"]`); flat keywords are 1-segment.
     pub keywords: BTreeSet<Vec<String>>,
+    /// The `exif:GPS*` position (#536). Deliberately outside `==` and the hash: a position never
+    /// raises a conflict by itself (it is carried alongside the markers, written whenever the
+    /// catalog has one, and imported when the catalog has none or the sidecar wins).
+    pub gps: Option<Gps>,
+}
+
+/// Whether two positions are the same to the precision XMP stores (1e-6 degrees ~ 0.1 m, 1 cm).
+fn gps_close(a: &Gps, b: &Gps) -> bool {
+    (a.latitude - b.latitude).abs() < 1e-5
+        && (a.longitude - b.longitude).abs() < 1e-5
+        && match (a.altitude, b.altitude) {
+            (Some(x), Some(y)) => (x - y).abs() < 0.02,
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 /// One keyword path segment in canonical form: trimmed, and with `|` (the `lr:hierarchicalSubject`
@@ -113,7 +129,14 @@ impl Markers {
     /// Equality without case folding: whether the sidecar would need rewriting to show exactly
     /// these keyword spellings (a case-only rename is "equal" for conflict detection only).
     fn exactly_eq(&self, o: &Self) -> bool {
-        self == o && self.keywords == o.keywords
+        self == o
+            && self.keywords == o.keywords
+            // Only a catalog position needs to show up in the file; a file-only one is left alone.
+            && match (&self.gps, &o.gps) {
+                (Some(file), Some(cat)) => gps_close(file, cat),
+                (_, None) => true,
+                (None, Some(_)) => false,
+            }
     }
 }
 
@@ -167,6 +190,7 @@ impl Markers {
             label: meta.label.clone(),
             pick: meta.pick,
             keywords,
+            gps: None,
         }
     }
 
@@ -187,6 +211,8 @@ impl Markers {
             // read-back (a flat entry that is the leaf of any path is treated as that path's).
             hierarchical_keywords: Some(self.keywords.iter().cloned().collect()),
             nicti_pick: Some(self.pick),
+            // `None` leaves whatever position the file has; only a catalog position is written.
+            gps: self.gps.map(Some),
             ..Default::default()
         }
     }
@@ -240,6 +266,7 @@ pub fn catalog_markers(store: &dyn CatalogStore, asset_id: i64) -> Result<Marker
         label: meta.label,
         pick: meta.flag == Some(1),
         keywords: keyword_name_paths(store, asset_id)?,
+        gps: store.get_gps(&[asset_id])?.remove(&asset_id),
     })
 }
 
@@ -275,6 +302,11 @@ fn apply_to_catalog(
         },
         &ids,
     )?;
+    // A file with no position never clears the catalog's (a sidecar LRC rewrote without GPS is
+    // not a decision to drop it); a file with one is the newer side here, so it wins.
+    if let Some(g) = m.gps {
+        store.set_gps(asset_id, Some(g))?;
+    }
     Ok(())
 }
 
@@ -379,11 +411,13 @@ fn load(path: &Path) -> Result<Option<Loaded>, ScentSyncError> {
         (text, hash, None)
     };
     let meta = lrc_fields::read(&text).map_err(|e| xmp_err(e.to_string()))?;
+    let mut markers = Markers::from_lrc(&meta);
+    markers.gps = nicti_scent::gpx::read_gps(&text);
     Ok(Some(Loaded {
         text,
         hash,
         mtime_ms,
-        markers: Markers::from_lrc(&meta),
+        markers,
         file,
     }))
 }
@@ -471,6 +505,19 @@ pub fn import_sidecar(
     seen(&mut state, &loaded, now_ms);
 
     if catalog == loaded.markers {
+        // Markers agree, but the file may carry a position the catalog lacks (an LRC sidecar of
+        // an already-geotagged photo): adopt it. Never overwrites a catalog position here.
+        // A catalog position the file doesn't show yet, with the catalog marked newer, is a
+        // pending write (a geotag with auto-write off): push it, don't clear the dirty flag.
+        let gps_pending = catalog
+            .gps
+            .is_some_and(|c| loaded.markers.gps.is_none_or(|l| !gps_close(&l, &c)));
+        if gps_pending && state.catalog_dirty_since_ms.is_some() {
+            return write_locked(store, asset_id, raw_path, now_ms, true);
+        }
+        if let (None, Some(g)) = (catalog.gps, loaded.markers.gps) {
+            store.set_gps(asset_id, Some(g))?;
+        }
         state.catalog_dirty_since_ms = None;
         state.needs_review = false;
         store.record_sidecar(asset_id, &state)?;
