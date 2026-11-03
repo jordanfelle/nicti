@@ -12,9 +12,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     Asset, AssetMeta, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, DeleteItem,
-    DeleteState, FacetCounts, Filter, Keyword, LrcChunkOutcome, LrcItem, LrcProvenance, MoveState,
-    NewAsset, Page, Preview, PreviewTier, Root, RootMove, SidecarState, Sort, SortDirection,
-    SortField,
+    DeleteState, FacetCounts, Filter, Keyword, LayoutItem, LrcChunkOutcome, LrcItem, LrcProvenance,
+    MoveState, NewAsset, Page, Preview, PreviewTier, Root, RootMove, SidecarState, Sort,
+    SortDirection, SortField,
 };
 use nicti_claw::Module;
 
@@ -423,6 +423,55 @@ const BULK_META_ROWS: usize = 1000;
 const BULK_META_CACHE_KIB: i64 = 256 * 1024;
 
 impl SqliteCatalog {
+    /// One index-ordered scan of every asset a `hunt` with this `Filter`/`Sort` would return, in the
+    /// same order, mapping each row from `columns`. Shared by `hunt_ids` and `hunt_layout` so the
+    /// two can never disagree about order or scoping.
+    fn scan_ordered<T>(
+        &self,
+        filter: &Filter,
+        sort: Sort,
+        columns: &str,
+        map: impl Fn(&rusqlite::Row) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, CatalogError> {
+        // A file-backed catalog scans on its own read-only connection (WAL: a consistent snapshot,
+        // never blocking a writer): this runs for ~0.2-1 s at 1M rows, and holding the shared
+        // mutex that long would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
+        // for the duration. An in-memory catalog (tests) has no second connection to open.
+        let reader = if self.path.is_some() {
+            Some(self.open_snapshot_reader()?)
+        } else {
+            None
+        };
+        let guard;
+        let conn: &Connection = match &reader {
+            Some(reader) => reader,
+            None => {
+                guard = self.conn.lock().unwrap();
+                &guard
+            }
+        };
+        let filter_sql = build_filter_sql(conn, filter)?;
+        let sort_column = sort_column_sql(sort.field);
+        let order = match sort.direction {
+            SortDirection::Asc => "ASC",
+            SortDirection::Desc => "DESC",
+        };
+        let sql = format!(
+            "SELECT {columns} FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE {} \
+             ORDER BY {sort_column} {order}, a.id {order}",
+            filter_sql.where_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| map(row))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Runs a long read-only scan on its own snapshot connection when the catalog is file-backed
     /// (WAL: consistent, never blocks a writer), else on the shared one. Holding the shared mutex
     /// for a full-table scan would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
@@ -2597,43 +2646,28 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError> {
-        // A file-backed catalog scans on its own read-only connection (WAL: a consistent snapshot,
-        // never blocking a writer): this runs for ~0.2-1 s at 1M rows, and holding the shared
-        // mutex that long would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
-        // for the duration. An in-memory catalog (tests) has no second connection to open.
-        let reader = if self.path.is_some() {
-            Some(self.open_snapshot_reader()?)
-        } else {
-            None
-        };
-        let guard;
-        let conn: &Connection = match &reader {
-            Some(reader) => reader,
-            None => {
-                guard = self.conn.lock().unwrap();
-                &guard
-            }
-        };
-        let filter_sql = build_filter_sql(conn, filter)?;
-        let sort_column = sort_column_sql(sort.field);
-        let order = match sort.direction {
-            SortDirection::Asc => "ASC",
-            SortDirection::Desc => "DESC",
-        };
-        let sql = format!(
-            "SELECT a.id FROM asset a \
-             JOIN root r ON r.id = a.root_id \
-             JOIN volume v ON v.id = r.volume_id \
-             WHERE {} \
-             ORDER BY {sort_column} {order}, a.id {order}",
-            filter_sql.where_clause
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
-        let ids = stmt
-            .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ids)
+        self.scan_ordered(filter, sort, "a.id", |row| row.get::<_, i64>(0))
+    }
+
+    fn hunt_layout(&self, filter: &Filter, sort: Sort) -> Result<Vec<LayoutItem>, CatalogError> {
+        self.scan_ordered(
+            filter,
+            sort,
+            "a.id, a.width, a.height, a.orientation, substr(a.captured_at, 1, 10)",
+            |row| {
+                Ok(LayoutItem {
+                    id: row.get(0)?,
+                    width: row.get(1)?,
+                    height: row.get(2)?,
+                    orientation: row.get(3)?,
+                    // EXIF text is `YYYY:MM:DD`, other sources `YYYY-MM-DD`: one spelling for grouping.
+                    day: row
+                        .get::<_, Option<String>>(4)?
+                        .filter(|d| !d.is_empty())
+                        .map(|d| d.replace(':', "-")),
+                })
+            },
+        )
     }
 
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError> {
@@ -3856,6 +3890,91 @@ mod tests {
             }
         }
         root_id
+    }
+
+    #[test]
+    fn hunt_layout_is_hunt_ids_with_size_orientation_and_day() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 40);
+        let any = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+        store.set_orientation(any[3], 6).unwrap();
+        for field in ALL_SORT_FIELDS {
+            for direction in BOTH_DIRECTIONS {
+                let sort = Sort { field, direction };
+                let ids = store.hunt_ids(&Filter::default(), sort).unwrap();
+                let layout = store.hunt_layout(&Filter::default(), sort).unwrap();
+                assert_eq!(
+                    layout.iter().map(|l| l.id).collect::<Vec<_>>(),
+                    ids,
+                    "{field:?} {direction:?}"
+                );
+            }
+        }
+        let layout = store
+            .hunt_layout(&Filter::default(), default_sort())
+            .unwrap();
+        let rotated = layout.iter().find(|l| l.id == any[3]).unwrap();
+        assert_eq!(rotated.orientation, Some(6));
+        // Seeded capture times are "2026:01:01 ..." (or none): normalised to a dashed day.
+        assert!(layout
+            .iter()
+            .all(|l| l.day.as_deref().is_none_or(|d| d == "2026-01-01")));
+        assert!(layout.iter().any(|l| l.day.is_none()));
+        assert!(layout.iter().any(|l| l.day.is_some()));
+    }
+
+    /// Measurement for #656 (`cargo test -p nicti-lair --release -- --ignored --nocapture
+    /// hunt_layout_cost`): the cost of the justified grid's catalog scan next to `hunt_ids`, on a
+    /// file-backed catalog (the snapshot-reader path the app uses). Set `NICTI_SCALE_N` (default
+    /// 200000).
+    #[test]
+    #[ignore = "measurement, minutes at 1M"]
+    fn hunt_layout_cost_at_scale() {
+        let n: usize = std::env::var("NICTI_SCALE_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200_000);
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteCatalog::open(&dir.path().join("scale.db")).unwrap();
+        let volume = store.upsert_volume("v", None, None, 0).unwrap();
+        let root = store.ensure_root(volume, "").unwrap();
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let path = format!("{i:07}.NEF");
+            let asset = NewAsset {
+                rel_path_fold: path.to_lowercase(),
+                rel_path: path,
+                size_bytes: 1,
+                mtime_unix: 0,
+                fingerprint: None,
+                natural_key: None,
+                make: None,
+                model: None,
+                captured_at: Some(format!("2026:{:02}:{:02} 10:00:00", 1 + i % 12, 1 + i % 28)),
+                width: Some(6048),
+                height: Some(4024),
+                imported_at: 0,
+            };
+            store.insert_asset(root, &asset, None).unwrap();
+        }
+        eprintln!("seeded {n} assets in {:?}", t.elapsed());
+        let sort = Sort {
+            field: SortField::Captured,
+            direction: SortDirection::Asc,
+        };
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let ids = store.hunt_ids(&Filter::default(), sort).unwrap();
+            let ids_time = t.elapsed();
+            let t = std::time::Instant::now();
+            let layout = store.hunt_layout(&Filter::default(), sort).unwrap();
+            eprintln!(
+                "n={n}: hunt_ids {ids_time:?}, hunt_layout {:?} ({} items)",
+                t.elapsed(),
+                layout.len()
+            );
+            assert_eq!(ids.len(), layout.len());
+        }
     }
 
     #[test]

@@ -70,6 +70,9 @@ pub struct GridSession {
     filter: Filter,
     sort: Sort,
     ids: Vec<i64>,
+    /// Bumped whenever `ids` changes or [`Self::refresh`] may have changed what the photos look
+    /// like (their sizes, orientations or dates): the justified layout is built per generation.
+    generation: u64,
     /// `true` once a snapshot has ever been applied, so the view can tell "still loading" from
     /// "loaded, and empty" -- and stays `false` if the first read failed.
     loaded: bool,
@@ -138,6 +141,7 @@ impl GridSession {
             filter: Filter::default(),
             sort: DEFAULT_SORT,
             ids: Vec::new(),
+            generation: 0,
             loaded: false,
             requested: false,
             pending_snapshot: None,
@@ -223,6 +227,24 @@ impl GridSession {
 
     pub fn ids(&self) -> &[i64] {
         &self.ids
+    }
+
+    /// See the field: a layout built for another generation does not describe [`Self::ids`].
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The catalog this session reads (the justified layout build scans it too).
+    pub fn store(&self) -> Arc<dyn CatalogStore + Send + Sync> {
+        self.store.clone()
+    }
+
+    pub fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
+    pub fn sort(&self) -> Sort {
+        self.sort
     }
 
     pub fn len(&self) -> usize {
@@ -421,6 +443,7 @@ impl GridSession {
         self.render_current.clear();
         self.redo.clear();
         self.edit_overrides.clear();
+        self.generation += 1;
         self.transient_failed.clear();
         self.pending_uploads.clear();
         self.pending_ids.clear();
@@ -478,6 +501,7 @@ impl GridSession {
                 }
                 self.cancel_batches(pounce);
                 let old_ids = std::mem::replace(&mut self.ids, ids);
+                self.generation += 1;
                 self.selection.remap(&old_ids, &self.ids);
                 self.loaded = true;
                 // Keep the selection on the same photo, wherever it landed (or drop it if the

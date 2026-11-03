@@ -134,6 +134,28 @@ JPEG asset's is the file's own size, both before EXIF rotation, so `oriented_asp
 orientations 5-8 and the catalog needs an orientation column and a backfill (ingest skips unchanged files). All of that
 and the view wiring (build job, `show_viewport` loop, toggle, swat assertion, 1M measurement) is #604.
 
+2026-11-03 (#656): the view is wired. `CatalogStore::hunt_layout` is `hunt_ids` plus width/height/orientation and the
+capture day (first ten characters of `captured_at`, `:` normalised to `-`), from one shared `scan_ordered` so the two
+orders cannot disagree. `LayoutJob` (`grid/layout_build.rs`, Pounce CPU lane, `JobKind::Snapshot` so it sorts ahead of
+thumbnail batches) runs that scan as one step, then pushes cells into the `RowIndex` 65,536 per step (cancel lands between
+steps); days become groups ("No date" for undated photos; headers only while sorted by capture time). The layout is keyed
+on `GridSession::generation()` (bumped when the id list changes or on `refresh`) plus width bucket, row height and
+headers; a layout lands only if its ids equal the session's list exactly (else the session re-reads and the build
+repeats), and the previous layout stays on screen until the next lands. `view.rs` has two bodies, `show_square` and
+`show_justified` (`ScrollArea::show_viewport` over `rows_between`, f64 row tops, header text per group, navigation
+through `RowIndex::navigate`/`navigate_page`, reveal by row span), behind a Square | Justified switch and a Date headers
+checkbox above the grid (session-only, **square stays the default**; the snapshot `library_grid` gained that toolbar row).
+`GridStats` gained `layout_builds` and `justified_frames`; swat tests assert one height per row, varied widths, <60
+cells/frame at 5000 photos, **no layout build across unchanged frames** (mutation-proved: invalidating the gate every
+frame fails it), End/arrow-down on 1500 photos, and switching back to square. Measured here (release, Linux CPU, **not**
+the reference machine, no real ref-10k): `hunt_layout` 0.39-0.54 s at 300k photos on a file-backed catalog vs 0.31-0.35 s
+for `hunt_ids` (about 1.3x, so ~1.4 s at 1M by linear extrapolation, in the background); `RowIndex` build over 1M cells in
+40-photo groups 3.9 ms (150k rows, ~3 MB; 8 ms at 2M), a viewport query ~40 ns. f32 scroll offsets lose exactness
+past ~1.6x10^7 points (about 100k rows), the same limit `show_rows` has; rows are positioned from f64 tops. Not verified:
+the look on a real display, scrolling feel at 1M, and the reference-machine numbers `docs/benchmarks.md` asks for.
+`cargo test -p nicti-lair --release -- --ignored --nocapture hunt_layout_cost` repeats the scan measurement
+(`NICTI_SCALE_N`).
+
 ## #512: idle repaint rate
 
 An idle, empty Nicti repainted about 4.5 times a second (#409). `NICTI_REPAINT_TRACE=1` now prints, once a second to

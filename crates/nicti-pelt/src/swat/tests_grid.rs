@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use egui_kittest::kittest::{NodeT, Queryable};
-use nicti_lair::{CatalogStore, Filter, Sort, SortDirection, SortField, SqliteCatalog};
+use nicti_lair::{CatalogStore, Filter, NewAsset, Sort, SortDirection, SortField, SqliteCatalog};
 use nicti_pounce::Pounce;
 
 use super::{click_at, click_at_with, harness, wait_until};
@@ -229,4 +229,174 @@ fn clicking_moves_the_cursor_and_ctrl_click_builds_a_selection() {
 fn library_grid_snapshot() {
     let mut h = grid_harness(40);
     h.snapshot("library_grid");
+}
+
+/// A catalog whose photos differ in shape, orientation and capture day, sorted by capture time:
+/// what the justified layout needs (#656). Every fifth photo is portrait, every seventh is stored
+/// landscape with a 90-degree orientation tag, and a new day starts every 40 photos.
+fn shaped_rig(n: usize) -> Rig {
+    let catalog = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let volume = catalog.upsert_volume("v", None, None, 0).unwrap();
+    let root = catalog.ensure_root(volume, "").unwrap();
+    for i in 0..n {
+        let path = format!("{i:05}.NEF");
+        let (w, h) = if i % 5 == 0 {
+            (2000, 3000)
+        } else {
+            (3000, 2000)
+        };
+        let asset = NewAsset {
+            rel_path_fold: path.to_lowercase(),
+            rel_path: path,
+            size_bytes: 1,
+            mtime_unix: 0,
+            fingerprint: None,
+            natural_key: None,
+            make: None,
+            model: None,
+            captured_at: Some(format!("2026:03:{:02} 10:00:{:02}", 1 + i / 40, i % 40)),
+            width: Some(w),
+            height: Some(h),
+            imported_at: 0,
+        };
+        let id = catalog.insert_asset(root, &asset, None).unwrap();
+        if i % 7 == 0 {
+            catalog.set_orientation(id, 6).unwrap();
+        }
+    }
+    let store: Arc<dyn CatalogStore + Send + Sync> = catalog;
+    let cull = CullState::new(Arc::new(CatalogMeta(store.clone())), || {});
+    let pounce = Pounce::new(0, 2, 2, || {});
+    let mut session = GridSession::new(store, 1 << 20);
+    let sort = Sort {
+        field: SortField::Captured,
+        direction: SortDirection::Asc,
+    };
+    session.set_query(Filter::default(), sort, &pounce);
+    let mut view = ViewState::default();
+    view.justified = true;
+    Rig {
+        session,
+        view,
+        cull,
+        pounce,
+    }
+}
+
+fn justified_harness(n: usize) -> egui_kittest::Harness<'static, Rig> {
+    let mut h = harness(
+        egui::vec2(900.0, 600.0),
+        |ui, rig: &mut Rig| {
+            view::show(
+                ui,
+                &mut rig.session,
+                &mut rig.view,
+                &mut rig.cull,
+                &rig.pounce,
+                false,
+            );
+        },
+        shaped_rig(n),
+    );
+    wait_until(
+        &mut h,
+        "the justified layout",
+        Duration::from_secs(20),
+        |r| r.session.is_loaded() && r.view.justified_ready(&r.session),
+    );
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn justified_rows_share_a_height_and_fill_the_width() {
+    let h = justified_harness(400);
+    let cells: Vec<_> = h
+        .query_all_by_label_contains("Photo ")
+        .map(|n| n.rect())
+        .collect();
+    assert!(cells.len() > 4, "built {} cells", cells.len());
+    // Group the drawn cells into rows by their top edge.
+    let mut rows: Vec<(f32, Vec<egui::Rect>)> = Vec::new();
+    for r in cells {
+        match rows.iter_mut().find(|(top, _)| (top - r.min.y).abs() < 0.5) {
+            Some((_, row)) => row.push(r),
+            None => rows.push((r.min.y, vec![r])),
+        }
+    }
+    assert!(rows.len() >= 2, "at least two rows are on screen");
+    for (_, row) in &rows {
+        let h0 = row[0].height();
+        assert!(
+            row.iter().all(|r| (r.height() - h0).abs() < 0.5),
+            "one height per row"
+        );
+        assert!(
+            row.iter().all(|r| r.max.x <= 900.0),
+            "no cell overflows the width"
+        );
+    }
+    // Different shapes mean different widths within a row (this is not the square grid).
+    let widths: Vec<f32> = rows
+        .iter()
+        .flat_map(|(_, row)| row.iter().map(|r| r.width()))
+        .collect();
+    let (lo, hi) = widths
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(l, h), w| (l.min(*w), h.max(*w)));
+    assert!(hi > lo + 20.0, "cells vary in width: {lo}..{hi}");
+}
+
+#[test]
+fn a_justified_frame_builds_only_the_visible_cells_and_never_relays_out() {
+    let mut h = justified_harness(5000);
+    let before = h.state().view.stats.clone();
+    h.run_steps(8);
+    let s = &h.state().view.stats;
+    let frames = s.frames - before.frames;
+    assert!(frames > 0 && s.justified_frames > 0, "justified frames ran");
+    let per_frame = (s.cells_built - before.cells_built) / frames;
+    assert!(
+        per_frame > 0 && per_frame < 60,
+        "built {per_frame} of 5000 cells per frame"
+    );
+    assert_eq!(
+        s.layout_builds, before.layout_builds,
+        "an unchanged frame must not start a layout build (ADR-0437)"
+    );
+}
+
+#[test]
+fn end_scrolls_a_justified_grid_to_its_last_photo() {
+    let mut h = justified_harness(1500);
+    let first = h.state().session.ids()[0];
+    let rect = h.get_by_label(&format!("Photo {first}")).rect();
+    click_at(&mut h, rect.center());
+    h.key_press(egui::Key::End);
+    h.run_steps(5);
+    let last = h.state().session.ids()[1499];
+    assert_eq!(h.state().session.cursor(), Some(1499));
+    assert!(
+        h.query_by_label(&format!("Photo {last}")).is_some(),
+        "End scrolled the last photo into view"
+    );
+    // And arrow-down then moves by a row, not by one cell.
+    h.key_press(egui::Key::Home);
+    h.run_steps(5);
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(3);
+    let c = h.state().session.cursor().unwrap();
+    assert!(c > 1, "down moved to a later row, got cell {c}");
+}
+
+#[test]
+fn switching_back_to_square_keeps_the_square_grid() {
+    let mut h = justified_harness(200);
+    h.state_mut().view.justified = false;
+    h.run_steps(3);
+    let cells: Vec<_> = h
+        .query_all_by_label_contains("Photo ")
+        .map(|n| n.rect())
+        .collect();
+    assert!(cells.iter().all(|r| r.size() == egui::Vec2::splat(CELL)));
 }

@@ -46,8 +46,8 @@ pub mod volume;
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
 pub use model::{
-    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, LrcChunkOutcome, LrcItem, LrcProvenance,
-    MoveState, NewAsset, Preview, PreviewTier, Root, RootMove, SidecarState,
+    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, LayoutItem, LrcChunkOutcome, LrcItem,
+    LrcProvenance, MoveState, NewAsset, Preview, PreviewTier, Root, RootMove, SidecarState,
 };
 pub use sqlite::SqliteCatalog;
 
@@ -537,6 +537,11 @@ pub trait CatalogStore: Module {
     /// for a scrollbar drag. Ids only: 8 bytes each, ~8 MB at 1M assets. Same online-volume
     /// scoping as `hunt`.
     fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError>;
+
+    /// [`Self::hunt_ids`] with what the justified grid needs to size each photo (#656): stored
+    /// width/height, EXIF orientation and capture day, in the identical order, from the same scan
+    /// shape (so ~1 s at 1M rows, off the shared mutex on a file-backed catalog).
+    fn hunt_layout(&self, filter: &Filter, sort: Sort) -> Result<Vec<LayoutItem>, CatalogError>;
 
     /// The total row count a `hunt` call with this `Filter` would match, ignoring `Page`.
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError>;
