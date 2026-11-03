@@ -39,14 +39,18 @@ pub struct HostTelemetry {
 }
 
 pub struct HostTelemetrySource {
-    system: System,
+    /// `None` when `sysinfo` 0.40+ cannot initialise on this host (`System::new` is fallible
+    /// there); `sample` then reports zeros, the same "no reading" the first call already gives.
+    system: Option<System>,
 }
 
 impl HostTelemetrySource {
     pub fn new() -> Self {
-        let mut system = System::new();
-        system.refresh_cpu_usage();
-        system.refresh_memory();
+        let mut system = System::new().ok();
+        if let Some(s) = system.as_mut() {
+            s.refresh_cpu_usage();
+            s.refresh_memory();
+        }
         HostTelemetrySource { system }
     }
 
@@ -55,12 +59,19 @@ impl HostTelemetrySource {
     /// polling this repeatedly (as a real telemetry indicator would) get a real number from the
     /// second call onward; a single call right after construction reports 0%.
     pub fn sample(&mut self) -> HostTelemetry {
-        self.system.refresh_cpu_usage();
-        self.system.refresh_memory();
+        let Some(system) = self.system.as_mut() else {
+            return HostTelemetry {
+                cpu_usage_percent: 0.0,
+                used_memory_bytes: 0,
+                total_memory_bytes: 0,
+            };
+        };
+        system.refresh_cpu_usage();
+        system.refresh_memory();
         HostTelemetry {
-            cpu_usage_percent: self.system.global_cpu_usage(),
-            used_memory_bytes: self.system.used_memory(),
-            total_memory_bytes: self.system.total_memory(),
+            cpu_usage_percent: system.global_cpu_usage(),
+            used_memory_bytes: system.used_memory(),
+            total_memory_bytes: system.total_memory(),
         }
     }
 }
