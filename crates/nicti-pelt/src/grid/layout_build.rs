@@ -38,7 +38,15 @@ impl BuiltLayout {
     }
 }
 
-pub type LayoutResult = Result<BuiltLayout, String>;
+/// Why a build failed, and for which list generation (a failure that lands after the list moved
+/// on must not be pinned to the new list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutError {
+    pub generation: u64,
+    pub message: String,
+}
+
+pub type LayoutResult = Result<BuiltLayout, LayoutError>;
 
 /// The chunked build. `step()` never returns `Err`: a failure goes in the slot (the scheduler
 /// drops an erroring job without touching its slot).
@@ -71,6 +79,14 @@ impl LayoutJob {
             result: result.clone(),
         };
         (job, result)
+    }
+
+    fn fail(&mut self, message: String) {
+        let generation = self.key.generation;
+        self.finish(Err(LayoutError {
+            generation,
+            message,
+        }));
     }
 
     fn finish(&mut self, outcome: LayoutResult) {
@@ -168,12 +184,12 @@ impl ChunkedJob for LayoutJob {
         let items = match self.store.layout_items(&self.ids[self.next..end]) {
             Ok(items) => items,
             Err(e) => {
-                self.finish(Err(e.to_string()));
+                self.fail(e.to_string());
                 return Ok(Step::Done);
             }
         };
         if let Err(msg) = build.feed(&items, self.key.grouped) {
-            self.finish(Err(msg));
+            self.fail(msg);
             return Ok(Step::Done);
         }
         self.next = end;

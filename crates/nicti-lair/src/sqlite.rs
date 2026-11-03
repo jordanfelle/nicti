@@ -2660,7 +2660,7 @@ impl CatalogStore for SqliteCatalog {
                 "SELECT id, width, height, orientation, substr(captured_at, 1, 10) \
                  FROM asset WHERE id IN ({marks})"
             ))?;
-            let mut found: std::collections::HashMap<i64, LayoutItem> = stmt
+            let found: std::collections::HashMap<i64, LayoutItem> = stmt
                 .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
                     // Wrong-typed or out-of-range values are "unknown", not a failed layout.
                     let num = |i: usize| row.get::<_, Option<i64>>(i).ok().flatten();
@@ -2684,7 +2684,7 @@ impl CatalogStore for SqliteCatalog {
                 .map(|item| (item.id, item))
                 .collect();
             out.extend(chunk.iter().map(|&id| {
-                found.remove(&id).unwrap_or(LayoutItem {
+                found.get(&id).cloned().unwrap_or(LayoutItem {
                     id,
                     width: None,
                     height: None,
@@ -3927,9 +3927,15 @@ mod tests {
         // The caller's order wins (reversed here), and ids past the 900-per-statement chunk too.
         ids.reverse();
         let mut many = ids.clone();
-        many.extend(std::iter::repeat_n(ids[0], 1000));
+        many.extend(std::iter::repeat_n(ids[ids.len() - 4], 1000));
         let items = store.layout_items(&many).unwrap();
         assert_eq!(items.iter().map(|l| l.id).collect::<Vec<_>>(), many);
+        // A repeated id yields the real item every time, not just the first.
+        let rotated_id = ids[ids.len() - 4];
+        many.iter()
+            .zip(&items)
+            .filter(|(id, _)| **id == rotated_id)
+            .for_each(|(_, l)| assert_eq!(l.orientation, Some(6)));
         let rotated = items.iter().find(|l| l.id == ids[ids.len() - 4]).unwrap();
         assert_eq!(rotated.orientation, Some(6));
         // Seeded capture times are "2026:01:01 ..." (or none): normalised to a dashed day.

@@ -445,3 +445,35 @@ fn a_justified_scroll_position_survives_a_trip_through_the_square_fallback() {
     let after = h.state().view.justified_scroll_y;
     assert!((after - offset).abs() < 1.0, "{after} vs {offset}");
 }
+
+#[test]
+fn a_new_list_never_shows_the_previous_layout_even_for_one_frame() {
+    let mut h = justified_harness(300);
+    let before = h.state().session.generation();
+    // A reversed sort changes the order (so the ids), which is a new generation.
+    {
+        let rig = h.state_mut();
+        let sort = Sort {
+            field: SortField::Captured,
+            direction: SortDirection::Desc,
+        };
+        rig.session.set_query(Filter::default(), sort, &rig.pounce);
+    }
+    let checked = std::cell::Cell::new(false);
+    wait_until(&mut h, "the reversed list", Duration::from_secs(20), |r| {
+        if r.session.generation() != before && !checked.get() {
+            // The frame that landed the new ids submitted the build; it cannot have landed yet.
+            assert!(
+                !r.view.justified_ready(&r.session),
+                "the old layout was offered for the new list"
+            );
+            checked.set(true);
+        }
+        r.session.generation() != before && r.view.justified_ready(&r.session)
+    });
+    assert!(checked.get());
+    // The rebuilt layout is for the reversed list: its first cell is the new first photo.
+    let first = h.state().session.ids()[0];
+    h.run_steps(2);
+    assert!(h.query_by_label(&format!("Photo {first}")).is_some());
+}

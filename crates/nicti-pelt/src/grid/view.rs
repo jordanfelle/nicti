@@ -355,11 +355,14 @@ fn layout_tick(
                     layout.error = None;
                     layout.built = Some(Arc::new(built));
                 }
-                Ok(_) => layout.error = Some("the layout build did not finish".to_string()),
-                Err(msg) => layout.error = Some(msg),
-            }
-            if layout.error.is_some() {
-                layout.error_generation = session.generation();
+                Ok(_) => {
+                    layout.error = Some("the layout build did not finish".to_string());
+                    layout.error_generation = session.generation();
+                }
+                Err(e) => {
+                    layout.error = Some(e.message);
+                    layout.error_generation = e.generation;
+                }
             }
         }
     }
@@ -504,7 +507,9 @@ fn show_square(
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt("nicti_grid_square")
         .auto_shrink([false, false]);
-    if state.reveal_cursor {
+    // While the justified layout is only waiting to be built this body is a stand-in: leave the
+    // request for the justified body, which can place the cursor's row.
+    if state.reveal_cursor && !state.justified {
         state.reveal_cursor = false;
         if let Some(cursor) = session.cursor() {
             scroll = scroll.vertical_scroll_offset(scroll_to_reveal(
