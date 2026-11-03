@@ -705,6 +705,26 @@ impl PeltApp {
     }
 
     fn job_active(&self, kinds: &[JobKind]) -> bool {
+        // A card copy being planned has no job yet, but must still hold the same guards.
+        if self.card_copy.is_busy()
+            && kinds.iter().any(|k| {
+                matches!(
+                    k,
+                    JobKind::Move
+                        | JobKind::Delete
+                        | JobKind::Sync
+                        | JobKind::Verify
+                        | JobKind::Baseline
+                )
+            })
+        {
+            return true;
+        }
+        self.pounce_job_active(kinds)
+    }
+
+    /// Like [`Self::job_active`] but only looks at Pounce's queue (not a card copy being planned).
+    fn pounce_job_active(&self, kinds: &[JobKind]) -> bool {
         self.pounce.snapshot().into_iter().any(|s| {
             kinds.contains(&s.kind) && matches!(s.state, JobState::Queued | JobState::Running)
         })
@@ -2253,7 +2273,7 @@ impl PeltApp {
 
                 // #602: copy a camera card into a folder (verified copy, then registered).
                 let other_running = self.righting.is_running()
-                    || self.job_active(&[
+                    || self.pounce_job_active(&[
                         JobKind::Import,
                         JobKind::Sync,
                         JobKind::Move,

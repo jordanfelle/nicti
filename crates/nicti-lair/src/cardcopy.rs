@@ -8,6 +8,7 @@
 //! is listed in [`CardCopyReport::failed`] with why, and `verify_failed` is counted on its own
 //! because it means the destination disk, not the card, misbehaved.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::offering::{offer_file, CardFile, OfferError, Offered};
@@ -35,6 +36,10 @@ pub struct CardCopyReport {
     pub listing_problems: Vec<String>,
     /// Final paths of everything now on the destination from this run (copied or already there).
     pub destinations: Vec<PathBuf>,
+    /// Files on the card that this run does not copy (videos, other RAW formats, anything outside
+    /// `DCIM`, links), summarised like `"3 .mov"`. They block `is_clean`: formatting the card would
+    /// lose them.
+    pub not_considered: Vec<String>,
     /// Files that were never attempted because the run was cancelled.
     pub not_attempted: u64,
     /// What registering the copies in the catalog did (`None` if it did not run).
@@ -49,6 +54,7 @@ impl CardCopyReport {
         self.failed.is_empty()
             && self.not_attempted == 0
             && self.listing_problems.is_empty()
+            && self.not_considered.is_empty()
             && self.ingest_error.is_none()
             && self.ingest.as_ref().is_some_and(|i| i.failed.is_empty())
     }
@@ -96,6 +102,12 @@ impl CardCopy {
                 ..Default::default()
             },
         }
+    }
+
+    /// Records what the survey found on the card that this run will not copy ([`survey_card`]).
+    pub fn with_not_considered(mut self, not_considered: Vec<String>) -> Self {
+        self.report.not_considered = not_considered;
+        self
     }
 
     /// `(done, total)` in files; the registration step counts after the copies.
@@ -180,5 +192,183 @@ impl CardCopy {
     pub fn into_report(mut self) -> CardCopyReport {
         self.report.not_attempted += self.plan.len() as u64;
         self.report
+    }
+}
+
+/// Names that every card or OS puts on a volume and nobody wants copied.
+fn is_card_housekeeping(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    name.starts_with('.')
+        || matches!(
+            lower.as_str(),
+            "system volume information"
+                | "$recycle.bin"
+                | "thumbs.db"
+                | "desktop.ini"
+                | "found.000"
+        )
+}
+
+/// What is on the card under `mount` that a copy of `copied` (the files [`crate::offering::list_card_files`]
+/// returned) leaves behind, as short strings (`"3 .mov"`, `"2 link(s)"`, `"1 unreadable folder(s)"`).
+/// Empty when the card holds nothing else. Housekeeping names are ignored. The walk does not follow
+/// links. Reads directory entries only; run it off the UI thread.
+pub fn survey_card(mount: &Path, copied: &HashSet<PathBuf>) -> Vec<String> {
+    let mut by_ext: BTreeMap<String, u64> = BTreeMap::new();
+    let (mut links, mut unreadable) = (0u64, 0u64);
+    let walker = walkdir::WalkDir::new(mount).into_iter().filter_entry(|e| {
+        e.depth() == 0 || !e.file_name().to_str().is_some_and(is_card_housekeeping)
+    });
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        let ft = entry.file_type();
+        if ft.is_symlink() {
+            links += 1;
+        } else if ft.is_file() && !copied.contains(entry.path()) {
+            let ext = entry
+                .path()
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
+                .unwrap_or_else(|| "(no extension)".into());
+            *by_ext.entry(ext).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<String> = by_ext
+        .into_iter()
+        .map(|(e, n)| format!("{n} {e}"))
+        .collect();
+    if links > 0 {
+        out.push(format!("{links} link(s)"));
+    }
+    if unreadable > 0 {
+        out.push(format!("{unreadable} unreadable folder(s)"));
+    }
+    out
+}
+
+/// Resolves `dest` and refuses a destination on (or containing) any of the `cards`: copying onto
+/// the card would write to the volume the user is about to format, and break the promise that the
+/// card is only read. Returns the canonical destination, which is also the spelling to register as
+/// the catalog root (so `a/../b` and `b` are one root).
+pub fn check_destination(dest: &Path, cards: &[PathBuf]) -> Result<PathBuf, String> {
+    let dest = dest
+        .canonicalize()
+        .map_err(|e| format!("{} can't be used: {e}", dest.display()))?;
+    if !dest.is_dir() {
+        return Err(format!("{} is not a folder.", dest.display()));
+    }
+    for card in cards {
+        let Ok(card) = card.canonicalize() else {
+            continue;
+        };
+        if dest.starts_with(&card) || card.starts_with(&dest) {
+            return Err(format!(
+                "{} is on (or contains) the card {}; choose a folder on another drive.",
+                dest.display(),
+                card.display()
+            ));
+        }
+    }
+    Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn done_with_ingest() -> CardCopyReport {
+        CardCopyReport {
+            copied: 1,
+            ingest: Some(IngestReport::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_clean_report_needs_every_clause_and_each_clause_alone_makes_it_unclean() {
+        assert!(done_with_ingest().is_clean());
+        let mut r = done_with_ingest();
+        r.ingest = None;
+        assert!(!r.is_clean(), "ingest never ran");
+        let mut r = done_with_ingest();
+        r.ingest
+            .as_mut()
+            .unwrap()
+            .failed
+            .push((PathBuf::from("a"), "x".into()));
+        assert!(!r.is_clean(), "ingest failure");
+        let mut r = done_with_ingest();
+        r.ingest_error = Some("db".into());
+        assert!(!r.is_clean());
+        let mut r = done_with_ingest();
+        r.not_attempted = 1;
+        assert!(!r.is_clean());
+        let mut r = done_with_ingest();
+        r.listing_problems.push("p".into());
+        assert!(!r.is_clean());
+        let mut r = done_with_ingest();
+        r.not_considered.push("3 .mov".into());
+        assert!(!r.is_clean(), "videos left on the card");
+        let mut r = done_with_ingest();
+        r.failed.push((PathBuf::from("a"), "x".into()));
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn the_survey_names_what_a_copy_leaves_behind_and_ignores_housekeeping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let card = tmp.path();
+        let w = |rel: &str| {
+            let p = card.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+            p
+        };
+        let nef = w("DCIM/100NIKON/a.NEF");
+        w("DCIM/100NIKON/b.MOV");
+        w("DCIM/100NIKON/c.MOV");
+        w("MISC/d.NEV");
+        w("System Volume Information/x.dat");
+        w(".Trashes/y");
+        let copied: HashSet<PathBuf> = [nef].into_iter().collect();
+        let found = survey_card(card, &copied);
+        assert_eq!(found, vec!["2 .mov".to_string(), "1 .nev".to_string()]);
+        // Nothing left behind: empty.
+        let all: HashSet<PathBuf> = [
+            card.join("DCIM/100NIKON/a.NEF"),
+            card.join("DCIM/100NIKON/b.MOV"),
+            card.join("DCIM/100NIKON/c.MOV"),
+            card.join("MISC/d.NEV"),
+        ]
+        .into_iter()
+        .collect();
+        assert!(survey_card(card, &all).is_empty());
+    }
+
+    #[test]
+    fn a_destination_on_the_card_or_containing_it_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let card = tmp.path().join("card");
+        let inside = card.join("copies");
+        let elsewhere = tmp.path().join("photos");
+        for d in [&inside, &elsewhere] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let cards = vec![card.clone()];
+        assert!(check_destination(&inside, &cards).is_err());
+        assert!(check_destination(&card, &cards).is_err());
+        assert!(
+            check_destination(tmp.path(), &cards).is_err(),
+            "contains the card"
+        );
+        let ok = check_destination(&elsewhere.join("../photos"), &cards).unwrap();
+        assert_eq!(ok, elsewhere.canonicalize().unwrap());
+        assert!(check_destination(&tmp.path().join("missing"), &cards).is_err());
     }
 }

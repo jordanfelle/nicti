@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nicti_lair::cardcopy::{CardCopy, CardCopyReport, PlannedCopy};
+use nicti_lair::cardcopy::{check_destination, survey_card, CardCopy, CardCopyReport, PlannedCopy};
 use nicti_lair::cards::{default_mount_roots, scan_cards, CardVolume};
 use nicti_lair::offering::{list_card_files, CardFile};
 use nicti_lair::pounce_jobs::{CardCopyJob, ReportSlot};
@@ -21,8 +21,11 @@ use nicti_preen::naming::{AssetFacts, DateParts, Template};
 
 use crate::folder_dialog::FolderPicker;
 
-/// Cards are re-detected at most this often while the panel is on screen.
+/// Cards are re-detected at most this often while the panel is open.
 const RESCAN_AFTER: Duration = Duration::from_secs(10);
+/// A detection that has not answered by now (a dead network mount, an empty reader) is abandoned:
+/// its thread may linger, but the panel stops waiting and repainting for it.
+const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const DEFAULT_FILENAME_TEMPLATE: &str = "{Filename}";
 pub const DEFAULT_SUBFOLDER_TEMPLATE: &str = "{Date:YYYY-MM-DD}";
@@ -136,6 +139,14 @@ pub fn summarize(r: &CardCopyReport) -> String {
     }
     if let Some(e) = &r.ingest_error {
         s.push_str(&format!("; registering stopped: {e}"));
+    } else if r.ingest.is_none() && !r.destinations.is_empty() {
+        s.push_str("; adding the copies to the catalog did not finish");
+    }
+    if !r.not_considered.is_empty() {
+        s.push_str(&format!(
+            "; NOT copied (this tool copies .nef/.nrw/.dng/.jpg from the card): {}",
+            r.not_considered.join(", ")
+        ));
     }
     if r.is_clean() {
         s.push_str(
@@ -162,18 +173,24 @@ fn human_bytes(b: u64) -> String {
     }
 }
 
-type PlanMsg = Result<(Vec<PlannedCopy>, Vec<String>), String>;
+type PlanMsg = Result<(Vec<PlannedCopy>, Vec<String>, Vec<String>), String>;
 
 pub struct CardCopyUi {
     cards: Vec<CardVolume>,
     scan: Option<Arc<Mutex<Option<Vec<CardVolume>>>>>,
+    scan_started: Option<Instant>,
     scanned_at: Option<Instant>,
+    /// The panel was open on the last frame: detection only runs then.
+    panel_open: bool,
     selected: Option<PathBuf>,
     pub dest_input: String,
     picker: FolderPicker,
     pub filename_template: String,
     pub subfolder_template: String,
     planning: Option<Receiver<PlanMsg>>,
+    /// The checked, canonical destination the running plan was made for (not the text field, which
+    /// may have changed since).
+    planning_dest: Option<PathBuf>,
     pending: Option<ReportSlot<CardCopyReport>>,
     pub status: Option<String>,
 }
@@ -183,13 +200,16 @@ impl Default for CardCopyUi {
         Self {
             cards: Vec::new(),
             scan: None,
+            scan_started: None,
             scanned_at: None,
+            panel_open: false,
             selected: None,
             dest_input: String::new(),
             picker: FolderPicker::default(),
             filename_template: DEFAULT_FILENAME_TEMPLATE.into(),
             subfolder_template: DEFAULT_SUBFOLDER_TEMPLATE.into(),
             planning: None,
+            planning_dest: None,
             pending: None,
             status: None,
         }
@@ -207,6 +227,7 @@ impl CardCopyUi {
         }
         let slot = Arc::new(Mutex::new(None));
         self.scan = Some(slot.clone());
+        self.scan_started = Some(Instant::now());
         let ctx = ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("card-scan".into())
@@ -221,6 +242,14 @@ impl CardCopyUi {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        if self.scan.is_some()
+            && self
+                .scan_started
+                .is_some_and(|t| t.elapsed() >= SCAN_TIMEOUT)
+        {
+            self.scan = None;
+            self.scanned_at = Some(Instant::now());
+        }
         if let Some(slot) = self.scan.clone() {
             if let Some(found) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.scan = None;
@@ -235,7 +264,8 @@ impl CardCopyUi {
                 }
                 self.cards = found;
             }
-        } else if self.pending.is_none()
+        } else if self.panel_open
+            && self.pending.is_none()
             && self.scanned_at.is_none_or(|t| t.elapsed() >= RESCAN_AFTER)
         {
             self.start_scan(ctx);
@@ -246,7 +276,13 @@ impl CardCopyUi {
     }
 
     /// Handles a finished listing/planning thread: registers the destination and submits the job.
-    fn poll_planning(&mut self, pounce: &Pounce, store: &Arc<SqliteCatalog>, dest: &Path) {
+    /// `other_job_running` is re-checked here, because the planning window itself is long.
+    fn poll_planning(
+        &mut self,
+        pounce: &Pounce,
+        store: &Arc<SqliteCatalog>,
+        other_job_running: bool,
+    ) {
         let Some(rx) = &self.planning else { return };
         let msg = match rx.try_recv() {
             Ok(m) => m,
@@ -254,14 +290,24 @@ impl CardCopyUi {
             Err(TryRecvError::Disconnected) => Err("The card could not be read.".into()),
         };
         self.planning = None;
+        let Some(dest) = self.planning_dest.take() else {
+            return;
+        };
         match msg {
             Err(e) => self.status = Some(e),
-            Ok((plan, problems)) => {
-                if plan.is_empty() && problems.is_empty() {
+            Ok((plan, problems, not_considered)) => {
+                if plan.is_empty() && problems.is_empty() && not_considered.is_empty() {
                     self.status = Some("No photos found on the card.".into());
                     return;
                 }
-                let root_id = match nicti_lair::scruff::register_root(store.as_ref(), dest) {
+                if other_job_running {
+                    self.status = Some(
+                        "Another job started while the card was being read; try again when it finishes."
+                            .into(),
+                    );
+                    return;
+                }
+                let root_id = match nicti_lair::scruff::register_root(store.as_ref(), &dest) {
                     Ok(id) => id,
                     Err(e) => {
                         self.status = Some(format!("Couldn't register {}: {e}", dest.display()));
@@ -269,7 +315,8 @@ impl CardCopyUi {
                     }
                 };
                 let n = plan.len();
-                let copy = CardCopy::new(plan, problems, dest, root_id);
+                let copy = CardCopy::new(plan, problems, &dest, root_id)
+                    .with_not_considered(not_considered);
                 let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
                 let (job, slot) =
                     CardCopyJob::new(dyn_store, copy, format!("Copy {n} file(s) from card"));
@@ -296,25 +343,37 @@ impl CardCopyUi {
             self.filename_template.clone(),
             self.subfolder_template.clone(),
         );
-        // Fail on a bad template here, before touching the card.
+        // Fail on a bad template or a destination on the card here, before touching the card.
         if let Err(e) = build_plan(Vec::new(), &name_tpl, &sub_tpl, &|_| (None, 0, None, None)) {
             self.status = Some(e);
             return;
         }
+        let mounts: Vec<PathBuf> = self.cards.iter().map(|c| c.mount.clone()).collect();
+        let dest = match check_destination(Path::new(self.dest_input.trim()), &mounts) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = Some(e);
+                return;
+            }
+        };
         let (tx, rx) = mpsc::channel();
-        let dcim = card.dcim.clone();
+        let (dcim, mount) = (card.dcim.clone(), card.mount.clone());
         let ctx = ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("card-plan".into())
             .spawn(move || {
                 let (files, problems) = list_card_files(&dcim);
+                let copied: std::collections::HashSet<PathBuf> =
+                    files.iter().map(|f| f.path.clone()).collect();
+                let not_considered = survey_card(&mount, &copied);
                 let msg = build_plan(files, &name_tpl, &sub_tpl, &read_capture)
-                    .map(|plan| (plan, problems));
+                    .map(|plan| (plan, problems, not_considered));
                 let _ = tx.send(msg);
                 ctx.request_repaint();
             });
         if spawned.is_ok() {
             self.planning = Some(rx);
+            self.planning_dest = Some(dest);
             self.status = Some("Reading the card\u{2026}".into());
         } else {
             self.status = Some("Couldn't start reading the card.".into());
@@ -330,13 +389,12 @@ impl CardCopyUi {
     ) {
         self.poll(ui.ctx());
         self.poll_result();
-        let dest = PathBuf::from(self.dest_input.trim());
-        self.poll_planning(pounce, store, &dest);
+        self.poll_planning(pounce, store, other_job_running);
         if self.is_busy() || self.scan.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
 
-        egui::CollapsingHeader::new("Copy from card")
+        let panel = egui::CollapsingHeader::new("Copy from card")
             .id_salt("nicti_pelt_copy_from_card")
             .show(ui, |ui| {
                 ui.label(
@@ -372,11 +430,14 @@ impl CardCopyUi {
                 ui.horizontal(|ui| {
                     ui.label("Copy into:");
                     ui.add_enabled(
-                        !self.picker.is_open(),
+                        !self.picker.is_open() && !self.is_busy(),
                         egui::TextEdit::singleline(&mut self.dest_input),
                     );
                     if ui
-                        .add_enabled(!self.picker.is_open(), egui::Button::new("Browse..."))
+                        .add_enabled(
+                            !self.picker.is_open() && !self.is_busy(),
+                            egui::Button::new("Browse..."),
+                        )
                         .clicked()
                     {
                         self.picker
@@ -385,11 +446,17 @@ impl CardCopyUi {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Subfolder:");
-                    ui.text_edit_singleline(&mut self.subfolder_template)
-                        .on_hover_text("e.g. {Date:YYYY-MM-DD}; empty = straight into the folder");
+                    ui.add_enabled(
+                        !self.is_busy(),
+                        egui::TextEdit::singleline(&mut self.subfolder_template),
+                    )
+                    .on_hover_text("e.g. {Date:YYYY-MM-DD}; empty = straight into the folder");
                     ui.label("File name:");
-                    ui.text_edit_singleline(&mut self.filename_template)
-                        .on_hover_text("e.g. {Filename} or {Date:YYYYMMDD}_{Filename}");
+                    ui.add_enabled(
+                        !self.is_busy(),
+                        egui::TextEdit::singleline(&mut self.filename_template),
+                    )
+                    .on_hover_text("e.g. {Filename} or {Date:YYYYMMDD}_{Filename}");
                 });
                 let card = self
                     .selected
@@ -404,9 +471,7 @@ impl CardCopyUi {
                     .add_enabled(can_start, egui::Button::new("Copy from card"))
                     .clicked()
                 {
-                    if !dest.is_dir() {
-                        self.status = Some(format!("{} is not an existing folder.", dest.display()));
-                    } else if let Some(card) = card {
+                    if let Some(card) = card {
                         self.begin(ui.ctx(), &card);
                     }
                 }
@@ -414,6 +479,7 @@ impl CardCopyUi {
                     ui.label(s.clone());
                 }
             });
+        self.panel_open = panel.body_returned.is_some();
     }
 }
 
@@ -480,6 +546,52 @@ mod tests {
         assert!(e.starts_with("File name template"), "{e}");
         let e = build_plan(Vec::new(), "{Filename}", "{Nope}", &stub).unwrap_err();
         assert!(e.starts_with("Subfolder template"), "{e}");
+    }
+
+    #[test]
+    fn every_unclean_cause_is_named_and_blocks_the_safe_to_format_line() {
+        let base = || CardCopyReport {
+            copied: 1,
+            destinations: vec![PathBuf::from("d")],
+            ingest: Some(Default::default()),
+            ..Default::default()
+        };
+        assert!(summarize(&base()).contains("safe to format"));
+        let mut r = base();
+        r.not_considered = vec!["3 .mov".into()];
+        let s = summarize(&r);
+        assert!(
+            s.contains("NOT copied") && s.contains("3 .mov") && !s.contains("safe to format"),
+            "{s}"
+        );
+        let mut r = base();
+        r.ingest = None;
+        let s = summarize(&r);
+        assert!(
+            s.contains("did not finish") && !s.contains("safe to format"),
+            "{s}"
+        );
+        let mut r = base();
+        r.not_attempted = 2;
+        let s = summarize(&r);
+        assert!(
+            s.contains("2 not attempted") && !s.contains("safe to format"),
+            "{s}"
+        );
+        let mut r = base();
+        r.listing_problems = vec!["x".into()];
+        let s = summarize(&r);
+        assert!(
+            s.contains("could not be read") && !s.contains("safe to format"),
+            "{s}"
+        );
+        let mut r = base();
+        r.ingest_error = Some("db locked".into());
+        let s = summarize(&r);
+        assert!(
+            s.contains("db locked") && !s.contains("safe to format"),
+            "{s}"
+        );
     }
 
     #[test]

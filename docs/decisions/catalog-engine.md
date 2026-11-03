@@ -328,6 +328,16 @@ Wires #548's engine (`offering`, `cards`) into the app. Slice shipped: everythin
   the job happen on the UI thread.
 - **Panel:** Library > Folders > "Copy from card": detected cards, destination (text + Browse), the two templates, progress in
   the activity panel, a result line that says the card was not modified, or "Do not format the card yet" when anything failed.
-- **Not done (follow-up):** verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename
+- **"Safe to format" honesty:** the engine copies only .nef/.nrw/.dng/.jpg under `DCIM`. `cardcopy::survey_card` lists
+  everything else on the card (videos, other RAW formats, files outside DCIM, links, unreadable folders; OS housekeeping
+  ignored) into `CardCopyReport::not_considered`, which blocks `is_clean` and is named in the result line, so a card with
+  .MOV clips never gets the "safe to format" line. An ingest that never ran/finished is also unclean and says so.
+- **Destination checks:** `check_destination` canonicalizes the destination (that spelling is registered as the root, so
+  `a/../b` and `b` are one root) and refuses one on, or containing, any detected card. The checked destination is captured
+  when the run starts (the text field is disabled meanwhile). Move/Delete/Sync/Verify/Baseline guards (`job_active`) and
+  Import/Sync (`submit_root_job`) also hold during the planning window, and the other-job check is repeated before submit.
+  Detection runs only while the panel is open and a scan with no answer after 30 s is abandoned.
+- **Not done (follow-up):** a same-device check for the destination (a path on the card's volume reached through a mount
+  alias), verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename
   path), a second card read / cache-bypassing read-back, reusing the returned blake3 in ingest instead of re-hashing, and a
   cancel button (a job can be cancelled from the activity panel; the stepper polls per file).
