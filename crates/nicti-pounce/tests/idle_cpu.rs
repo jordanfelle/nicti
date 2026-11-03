@@ -22,7 +22,7 @@ use nicti_pounce::Pounce;
 fn pounce_cpu_ms() -> u64 {
     use sysinfo::{get_current_pid, ProcessesToUpdate, System};
     let pid = get_current_pid().unwrap();
-    let mut sys = System::new();
+    let mut sys = System::new().expect("sysinfo initialises on the test host");
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     sys.process(pid).map_or(0, |p| p.accumulated_cpu_time())
 }
