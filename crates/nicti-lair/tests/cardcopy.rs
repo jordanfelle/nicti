@@ -111,21 +111,20 @@ fn the_copies_hash_becomes_the_assets_trusted_baseline_without_rehashing() {
     assert!(report.is_clean(), "{report:?}");
     assert_eq!(report.baseline_recorded, 2, "{report:?}");
     assert!(report.baseline_error.is_none());
-    for dest in &report.destinations {
-        let rel = dest.strip_prefix(&fx.dest).unwrap();
-        let rel = nicti_lair::scruff::normalize_rel_path(rel);
-        let asset = fx
-            .store
-            .find_asset_by_path(fx.root_id, &rel)
-            .unwrap()
-            .unwrap();
-        let want = blake3::hash(&std::fs::read(dest).unwrap())
+    // Compare through the catalog's own paths (not by stripping the reported destinations, whose
+    // spelling differs from `fx.dest` on Windows: verbatim prefix, long vs 8.3 names).
+    let assets = fx.store.list_assets_by_root(fx.root_id).unwrap();
+    assert_eq!(assets.len(), 2);
+    for asset in assets {
+        let file = fx.dest.join(&asset.rel_path);
+        let want = blake3::hash(&std::fs::read(&file).unwrap())
             .to_hex()
             .to_string();
         assert_eq!(
             fx.store.content_hash(asset.id).unwrap().as_deref(),
             Some(want.as_str()),
-            "{rel}"
+            "{}",
+            asset.rel_path
         );
     }
     // A second run finds the files already there and must not overwrite the baselines.
