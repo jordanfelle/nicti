@@ -26,6 +26,9 @@ const APP1: u8 = 0xE1;
 const SOS: u8 = 0xDA;
 const SOI: u8 = 0xD8;
 const JFIF_SIGNATURE: &[u8] = b"JFIF\0";
+const EXIF_SIGNATURE: &[u8] = b"Exif\0\0";
+const APP2: u8 = 0xE2;
+const MPF_SIGNATURE: &[u8] = b"MPF\0";
 /// Segment length field is a u16 including itself -- max payload is
 /// 65535 - 2 = 65533 bytes.
 const MAX_SEGMENT_PAYLOAD: usize = 65533;
@@ -41,6 +44,10 @@ pub enum JpegXmpError {
          APP1 segment limit -- would need JPEG's multi-segment extension, not implemented here"
     )]
     TooLarge { actual: usize },
+    #[error("xmp packet is not valid UTF-8; refusing to rewrite it lossily")]
+    InvalidUtf8,
+    #[error("multi-picture (MPF) JPEG: rewriting would invalidate its image offsets")]
+    MultiPicture,
 }
 
 struct Segment {
@@ -135,7 +142,9 @@ pub fn read_xmp(data: &[u8]) -> Result<Option<String>, JpegXmpError> {
         let payload = &data[start..end];
         if payload.starts_with(XMP_SIGNATURE) {
             let xmp_bytes = &payload[XMP_SIGNATURE.len()..];
-            return Ok(Some(String::from_utf8_lossy(xmp_bytes).into_owned()));
+            return std::str::from_utf8(xmp_bytes)
+                .map(|t| Some(t.to_owned()))
+                .map_err(|_| JpegXmpError::InvalidUtf8);
         }
     }
     Ok(None)
@@ -165,6 +174,16 @@ fn find_xmp_segment(data: &[u8]) -> Result<Option<(usize, usize)>, JpegXmpError>
 /// re-derives the untouched prefix/suffix and asserts byte equality against
 /// the input.
 pub fn write_xmp(data: &[u8], new_xmp: &str) -> Result<Vec<u8>, JpegXmpError> {
+    // MPF image offsets are absolute file positions; a size change before them would corrupt them.
+    for seg in walk_segments(data)? {
+        if seg.marker == APP2
+            && seg
+                .payload
+                .is_some_and(|(s, e)| data[s..e].starts_with(MPF_SIGNATURE))
+        {
+            return Err(JpegXmpError::MultiPicture);
+        }
+    }
     let payload_len = XMP_SIGNATURE.len() + new_xmp.len();
     if payload_len > MAX_SEGMENT_PAYLOAD {
         return Err(JpegXmpError::TooLarge {
@@ -200,17 +219,19 @@ pub fn write_xmp(data: &[u8], new_xmp: &str) -> Result<Vec<u8>, JpegXmpError> {
                 return Err(JpegXmpError::NotAJpeg);
             }
             let segments = walk_segments(data)?;
-            let insert_at = match segments.get(1) {
-                Some(seg)
-                    if seg.marker == APP0
-                        && seg
-                            .payload
-                            .is_some_and(|(s, e)| data[s..e].starts_with(JFIF_SIGNATURE)) =>
-                {
-                    seg.end
+            // After a leading JFIF APP0 and/or Exif APP1: JFIF must be first after SOI, and Exif
+            // must follow SOI (or JFIF) directly, so strict readers still find both.
+            let mut insert_at = 2;
+            for seg in segments.iter().skip(1).take(2) {
+                let keeps_order = seg.payload.is_some_and(|(s, e)| {
+                    (seg.marker == APP0 && data[s..e].starts_with(JFIF_SIGNATURE))
+                        || (seg.marker == APP1 && data[s..e].starts_with(EXIF_SIGNATURE))
+                });
+                if !keeps_order {
+                    break;
                 }
-                _ => 2,
-            };
+                insert_at = seg.end;
+            }
             out.extend_from_slice(&data[..insert_at]);
             out.extend_from_slice(&new_segment);
             out.extend_from_slice(&data[insert_at..]);
@@ -337,5 +358,45 @@ mod tests {
             read_xmp(b"not a jpeg"),
             Err(JpegXmpError::NotAJpeg)
         ));
+    }
+
+    fn jpeg_with(segs: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut d = vec![0xFF, SOI];
+        for (m, payload) in segs {
+            d.extend_from_slice(&[0xFF, *m]);
+            d.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            d.extend_from_slice(payload);
+        }
+        d.extend_from_slice(&[0xFF, SOS, 0x00, 0x02, 0xAB, 0xFF, 0xD9]);
+        d
+    }
+
+    #[test]
+    fn a_new_packet_goes_after_the_exif_segment_not_before_it() {
+        let jpeg = jpeg_with(&[(APP1, b"Exif\0\0II*\0"), (0xDB, b"\0")]);
+        let out = write_xmp(&jpeg, "<x/>").unwrap();
+        let segs = walk_segments(&out).unwrap();
+        assert_eq!(segs[1].marker, APP1);
+        assert!(out[segs[1].start..segs[1].end]
+            .windows(6)
+            .any(|w| w == EXIF_SIGNATURE));
+        assert_eq!(read_xmp(&out).unwrap().as_deref(), Some("<x/>"));
+    }
+
+    #[test]
+    fn a_multi_picture_jpeg_is_refused_rather_than_corrupted() {
+        let jpeg = jpeg_with(&[(APP2, b"MPF\0xxxx")]);
+        assert!(matches!(
+            write_xmp(&jpeg, "<x/>"),
+            Err(JpegXmpError::MultiPicture)
+        ));
+    }
+
+    #[test]
+    fn a_non_utf8_packet_is_an_error_not_silently_mangled() {
+        let mut payload = XMP_SIGNATURE.to_vec();
+        payload.extend_from_slice(b"<a>caf\xE9</a>");
+        let jpeg = jpeg_with(&[(APP1, &payload)]);
+        assert!(matches!(read_xmp(&jpeg), Err(JpegXmpError::InvalidUtf8)));
     }
 }
