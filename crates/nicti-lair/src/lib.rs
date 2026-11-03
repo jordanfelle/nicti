@@ -41,6 +41,7 @@ pub mod thumb_sidecar;
 pub mod tier;
 pub mod trail;
 pub mod verify;
+pub mod volume;
 
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
@@ -104,6 +105,12 @@ pub trait CatalogStore: Module {
 
     /// Every registered folder, in `id` order.
     fn list_roots(&self) -> Result<Vec<Root>, CatalogError>;
+
+    /// Re-files a root under another volume, keeping its id (and so every asset, edit and
+    /// sidecar row under it) -- how a root registered under the placeholder volume moves to its
+    /// real volume (#510). Fails (`CatalogError`) rather than merging if `volume_id` already has a
+    /// root at the same path, or the root or volume doesn't exist.
+    fn reassign_root_volume(&self, root_id: i64, volume_id: i64) -> Result<(), CatalogError>;
 
     /// Opens a `copying` journal row for a verified folder move of `root_id` to `dest_path`
     /// (#26). Refuses (`CatalogError::Io`) if the root doesn't exist, already has an open move,
