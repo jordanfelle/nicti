@@ -24,7 +24,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nicti_groom::install::{InstallHandle, InstallModelsJob};
-use nicti_groom::FramePixels;
 use nicti_pounce::Pounce;
 use nicti_siamese::backend::RegistryBackend;
 use nicti_siamese::job::{
@@ -445,7 +444,7 @@ impl MaskBakeService {
             let backend = self.shared_backend();
             let (job, slot) = MaskBakeJob::new(
                 backend,
-                Arc::new(FramePixels::new(frame)),
+                Arc::new(develop.lensed_pixels()),
                 image_key,
                 cam_mul,
                 request.recipe,

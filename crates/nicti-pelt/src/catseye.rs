@@ -133,13 +133,13 @@ pub fn set_status(ctx: &egui::Context, message: Option<String>) {
 /// pick no longer reads it (it samples the rendered frame); the targeted-adjustment tool does.
 pub(crate) fn thumb_for(ctx: &egui::Context, develop: &DevelopDoc) -> Arc<Thumb> {
     let id = egui::Id::unique(THUMB_ID);
-    let key = develop.frame_key();
+    let key = develop.lensed_frame_key();
     if let Some((k, t)) = ctx.data(|d| d.get_temp::<(u64, Arc<Thumb>)>(id)) {
         if k == key {
             return t;
         }
     }
-    let t = Arc::new(Thumb::build(develop.frame_arc()));
+    let t = Arc::new(Thumb::build(develop.frame_arc(), develop.lens_params()));
     ctx.data_mut(|d| d.insert_temp(id, (key, Arc::clone(&t))));
     t
 }

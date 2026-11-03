@@ -42,7 +42,7 @@ use nicti_tapetum::mask::compose::{bake_requests, BakeRequest};
 use nicti_tapetum::mask::engine::AiAlpha;
 use nicti_tapetum::mask::params::MaskParams;
 use nicti_tapetum::spine;
-use nicti_tapetum::stages::MASKS;
+use nicti_tapetum::stages::{LENS, MASKS};
 
 use crate::loupe::asset_cache_key;
 use crate::mask_tool::MaskBakeService;
@@ -66,6 +66,8 @@ struct Plan {
     identity: blake3::Hash,
     path: PathBuf,
     requests: Vec<BakeRequest>,
+    /// The document's lens options: the model must see the post-lens pixels the render holds (#358).
+    lens: nicti_tapetum::coat::LensParams,
 }
 
 /// `None` = nothing to do for this photo (no AI masks, all stored, or it couldn't be read).
@@ -128,6 +130,7 @@ impl PlanJob {
             identity,
             path: PathBuf::from(root).join(&asset.rel_path),
             requests,
+            lens: spine::resolve(&doc, LENS),
         })
     }
 }
@@ -191,7 +194,8 @@ impl DecodeJob {
             return Err(CANCELLED.into());
         }
         let key = frame_key(&self.plan.identity);
-        let source: Arc<dyn PixelSource> = Arc::new(FramePixels::new(Arc::clone(&frame)));
+        let source: Arc<dyn PixelSource> =
+            Arc::new(FramePixels::lensed(Arc::clone(&frame), self.plan.lens));
         let mut slots = Vec::with_capacity(self.plan.requests.len());
         for request in &self.plan.requests {
             let (job, slot) = MaskBakeJob::new(

@@ -25,7 +25,6 @@ use nicti_groom::job::{RemoveJob, RemoveOutcome, SharedBackend, Slot};
 use nicti_groom::real::LazyBackend;
 use nicti_groom::sam::Prompt;
 use nicti_groom::source::auto_source_pick;
-use nicti_groom::FramePixels;
 use nicti_pounce::Pounce;
 use nicti_stalk::models::{self, HttpDownloader, ModelStore, RemovalModels};
 use nicti_tapetum::coat::{HealParams, MaskRecipe, Spot, SpotKind};
@@ -391,7 +390,7 @@ impl RemovalService {
         let cam_mul = frame.cam_mul;
         let (job, slot) = RemoveJob::new(
             backend,
-            Arc::new(FramePixels::new(frame)),
+            Arc::new(develop.lensed_pixels()),
             develop.frame_key(),
             cam_mul,
             prompt,
@@ -862,7 +861,7 @@ fn place_spot(
     let spot = match heal.kind {
         SpotKind::Clone | SpotKind::Heal => {
             let offset = auto_source_pick(
-                &FramePixels::new(develop.frame_arc()),
+                &develop.lensed_pixels(),
                 (p.0.round() as i32, p.1.round() as i32),
                 radius,
             )

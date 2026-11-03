@@ -421,6 +421,27 @@ impl DevelopDoc {
     /// registered stage's own `default_params()`. Never affected by `show_before` (that only
     /// changes what `render()` itself uses); a UI slider always reflects the real edit, not
     /// whatever the before/after toggle happens to show right now.
+    /// The lens correction the open photo's document asks for.
+    pub fn lens_params(&self) -> coat::LensParams {
+        self.stage_params(LENS)
+    }
+
+    /// [`Self::frame_key`] folded with the lens options, for caches of lens-dependent CPU data (the
+    /// colour-sampling thumbnail): a lens toggle changes the pixels, so it must change the key.
+    pub fn lensed_frame_key(&self) -> u64 {
+        let l = self.lens_params();
+        let bits = u64::from(l.remove_ca)
+            | u64::from(l.embedded_profile) << 1
+            | u64::from(l.nikon_profile) << 2;
+        self.frame_key() ^ (bits << 56)
+    }
+
+    /// The open photo's pixels as the baked frame holds them after lens correction (#358), for the
+    /// CPU consumers that must line up with the render: AI masks, AI removal, the source pick.
+    pub fn lensed_pixels(&self) -> nicti_groom::FramePixels {
+        nicti_groom::FramePixels::lensed(self.frame_arc(), self.lens_params())
+    }
+
     pub fn stage_params<T: serde::de::DeserializeOwned + Default>(&self, stage_id: &str) -> T {
         match self.history.document().stages.get(stage_id) {
             Some(entry) => coat::parse(&entry.params),
@@ -1349,6 +1370,30 @@ const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
 
 #[cfg(test)]
 mod tests {
+    /// #358: CPU data derived from the lens-corrected frame (the colour-sampling thumbnail) must be
+    /// rebuilt when the lens options change, and the lensed pixel source must carry those options.
+    #[test]
+    fn the_lens_options_key_the_cpu_frame_caches() {
+        let mut doc = DevelopDoc::new();
+        let base_key = doc.lensed_frame_key();
+        assert_eq!(
+            base_key,
+            doc.frame_key() ^ (2u64 << 56),
+            "embedded profile is on by default"
+        );
+        doc.set_stage_params(
+            LENS,
+            &coat::LensParams {
+                remove_ca: true,
+                ..Default::default()
+            },
+        );
+        assert_ne!(doc.lensed_frame_key(), base_key);
+        assert_eq!(doc.frame_key(), DevelopDoc::new().frame_key());
+        assert!(doc.lens_params().remove_ca);
+        let _ = doc.lensed_pixels(); // builds lazily; no plan is resolved until a pixel is read
+    }
+
     #[test]
     fn the_loaded_frames_exif_orientation_becomes_the_views_orientation() {
         use crate::view_orient::ViewOrient;
