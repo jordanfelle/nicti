@@ -149,6 +149,16 @@ pub fn summarize(r: &CardCopyReport) -> String {
             r.listing_problems.len()
         ));
     }
+    if r.baseline_recorded > 0 {
+        s.push_str(&format!(
+            "; {} verified hash(es) recorded for the bit-rot check",
+            r.baseline_recorded
+        ));
+    }
+    if let Some(e) = &r.baseline_error {
+        // Not a copy problem (the files are copied and registered): the baseline pass hashes them later.
+        s.push_str(&format!("; couldn't record their verified hashes: {e}"));
+    }
     if let Some(e) = &r.ingest_error {
         s.push_str(&format!("; registering stopped: {e}"));
     } else if r.ingest.is_none() && !r.destinations.is_empty() {
@@ -204,6 +214,8 @@ pub struct CardCopyUi {
     /// may have changed since).
     planning_dest: Option<PathBuf>,
     pending: Option<ReportSlot<CardCopyReport>>,
+    /// The running copy's Pounce job, for the Cancel button (#659).
+    job: Option<nicti_pounce::JobId>,
     pub status: Option<String>,
 }
 
@@ -223,6 +235,7 @@ impl Default for CardCopyUi {
             planning: None,
             planning_dest: None,
             pending: None,
+            job: None,
             status: None,
         }
     }
@@ -332,10 +345,20 @@ impl CardCopyUi {
                 let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
                 let (job, slot) =
                     CardCopyJob::new(dyn_store, copy, format!("Copy {n} file(s) from card"));
-                pounce.submit(Box::new(job));
+                self.job = Some(pounce.submit(Box::new(job)));
                 self.pending = Some(slot);
                 self.status = Some(format!("Copying {n} file(s) from the card\u{2026}"));
             }
+        }
+    }
+
+    /// Asks the running copy to stop (#659). It is honoured between files: the file being copied
+    /// is finished and verified first, so nothing half-written is left behind, and the files not
+    /// reached are counted as not attempted in the report that follows.
+    pub(crate) fn cancel(&mut self, pounce: &Pounce) {
+        if let Some(job) = self.job {
+            pounce.cancel(job);
+            self.status = Some("Stopping after the current file\u{2026}".into());
         }
     }
 
@@ -347,6 +370,7 @@ impl CardCopyUi {
             return;
         };
         self.pending = None;
+        self.job = None;
         self.status = Some(summarize(&report));
     }
 
@@ -488,6 +512,14 @@ impl CardCopyUi {
                     if let Some(card) = card {
                         self.begin(ui.ctx(), &card);
                     }
+                }
+                if self.job.is_some()
+                    && ui
+                        .button("Cancel")
+                        .on_hover_text("Stops after the file being copied; copies already made stay.")
+                        .clicked()
+                {
+                    self.cancel(pounce);
                 }
                 if let Some(s) = &self.status {
                     ui.label(s.clone());
@@ -637,5 +669,79 @@ mod tests {
             "{s}"
         );
         assert!(!s.contains("safe to format"));
+    }
+
+    #[test]
+    fn recorded_hashes_are_reported_and_a_baseline_failure_never_blocks_safe_to_format() {
+        let mut r = CardCopyReport {
+            copied: 2,
+            destinations: vec![PathBuf::from("d")],
+            ingest: Some(Default::default()),
+            baseline_recorded: 2,
+            ..Default::default()
+        };
+        let s = summarize(&r);
+        assert!(
+            s.contains("2 verified hash(es) recorded") && s.contains("safe to format"),
+            "{s}"
+        );
+        r.baseline_recorded = 0;
+        r.baseline_error = Some("db busy".into());
+        let s = summarize(&r);
+        assert!(s.contains("db busy") && s.contains("safe to format"), "{s}");
+    }
+
+    #[test]
+    fn cancel_stops_the_running_job_and_the_report_still_arrives() {
+        use nicti_lair::pounce_jobs::CardCopyJob;
+        use nicti_lair::{CatalogStore, SqliteCatalog};
+        let tmp = tempfile::tempdir().unwrap();
+        let (card, dest) = (tmp.path().join("card"), tmp.path().join("dest"));
+        std::fs::create_dir_all(&card).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let plan: Vec<PlannedCopy> = (0..50)
+            .map(|i| {
+                let p = card.join(format!("{i}.NEF"));
+                std::fs::write(&p, vec![7u8; 4096]).unwrap();
+                PlannedCopy {
+                    file: CardFile {
+                        path: p,
+                        size: 4096,
+                    },
+                    dest_rel: PathBuf::from(format!("{i}.NEF")),
+                }
+            })
+            .collect();
+        let catalog = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+        let vol = catalog.upsert_volume("v", None, None, 0).unwrap();
+        let root = catalog.ensure_root(vol, &dest.to_string_lossy()).unwrap();
+        let store: Arc<dyn CatalogStore + Send + Sync> = catalog;
+        let pounce = Pounce::new(0, 1, 1, || {});
+        let (job, slot) = CardCopyJob::new(
+            store,
+            CardCopy::new(plan, Vec::new(), &dest, root),
+            "test".into(),
+        );
+        let mut ui = CardCopyUi {
+            job: Some(pounce.submit(Box::new(job))),
+            pending: Some(slot),
+            ..Default::default()
+        };
+        ui.cancel(&pounce);
+        assert!(ui
+            .status
+            .as_deref()
+            .is_some_and(|s| s.starts_with("Stopping")));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ui.is_busy() {
+            assert!(
+                Instant::now() < deadline,
+                "the cancelled job never reported"
+            );
+            ui.poll_result();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ui.job.is_none());
+        assert!(ui.status.is_some(), "the summary of what was done");
     }
 }

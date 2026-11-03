@@ -104,6 +104,38 @@ fn a_run_copies_verifies_registers_and_leaves_the_card_alone() {
 }
 
 #[test]
+fn the_copies_hash_becomes_the_assets_trusted_baseline_without_rehashing() {
+    let fx = Fx::new();
+    let (plan, problems) = fx.plan();
+    let report = fx.run(plan, problems);
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(report.baseline_recorded, 2, "{report:?}");
+    assert!(report.baseline_error.is_none());
+    for dest in &report.destinations {
+        let rel = dest.strip_prefix(&fx.dest).unwrap();
+        let rel = nicti_lair::scruff::normalize_rel_path(rel);
+        let asset = fx
+            .store
+            .find_asset_by_path(fx.root_id, &rel)
+            .unwrap()
+            .unwrap();
+        let want = blake3::hash(&std::fs::read(dest).unwrap())
+            .to_hex()
+            .to_string();
+        assert_eq!(
+            fx.store.content_hash(asset.id).unwrap().as_deref(),
+            Some(want.as_str()),
+            "{rel}"
+        );
+    }
+    // A second run finds the files already there and must not overwrite the baselines.
+    let (plan, problems) = fx.plan();
+    let again = fx.run(plan, problems);
+    assert_eq!(again.already_there, 2);
+    assert_eq!(again.baseline_recorded, 0, "existing baselines are kept");
+}
+
+#[test]
 fn running_it_again_reports_already_there_and_adds_no_duplicates() {
     let fx = Fx::new();
     let (plan, problems) = fx.plan();

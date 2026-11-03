@@ -46,6 +46,13 @@ pub struct CardCopyReport {
     pub ingest: Option<IngestReport>,
     /// A catalog error ended the registration step early.
     pub ingest_error: Option<String>,
+    /// Copies whose full-file BLAKE3 (already computed to verify the copy) was recorded as the
+    /// asset's trusted `content_hash` baseline, so the later bit-rot check (#304) needs no first
+    /// hashing pass over them (#659).
+    pub baseline_recorded: u64,
+    /// A catalog error while recording the baselines. Not a copy problem: the files are copied and
+    /// registered, they just keep no baseline until the baseline pass (#386) hashes them.
+    pub baseline_error: Option<String>,
 }
 
 impl CardCopyReport {
@@ -63,7 +70,27 @@ impl CardCopyReport {
 enum Phase {
     Copy,
     Ingest(Ingest),
+    /// Recording the verified hashes of the copies as content-hash baselines.
+    Baseline,
     Done,
+}
+
+/// What the verify read of one copy saw: the destination file's size and mtime right after it
+/// landed, with its BLAKE3. Registered as a baseline only if the catalog row still has this exact
+/// size and mtime (`record_baseline_hashes`), so a file changed since never gets a stale hash.
+struct VerifiedCopy {
+    dest: PathBuf,
+    size: u64,
+    mtime_unix: i64,
+    blake3: String,
+}
+
+fn mtime_unix(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub struct CardCopy {
@@ -75,6 +102,7 @@ pub struct CardCopy {
     dest_root: PathBuf,
     root_id: i64,
     phase: Phase,
+    verified: Vec<VerifiedCopy>,
     report: CardCopyReport,
 }
 
@@ -97,6 +125,7 @@ impl CardCopy {
             dest_root: dest_root.to_path_buf(),
             root_id,
             phase: Phase::Copy,
+            verified: Vec::new(),
             report: CardCopyReport {
                 listing_problems,
                 ..Default::default()
@@ -142,13 +171,15 @@ impl CardCopy {
                     return Ok(true);
                 }
                 match offer_file(&item.file.path, &self.dest_root, &item.dest_rel, cancelled) {
-                    Ok(Offered::Copied { dest, size, .. }) => {
+                    Ok(Offered::Copied { dest, size, blake3 }) => {
                         self.report.copied += 1;
                         self.report.bytes_copied += size;
+                        self.note_verified(&dest, blake3);
                         self.report.destinations.push(dest);
                     }
-                    Ok(Offered::AlreadyThere { dest, .. }) => {
+                    Ok(Offered::AlreadyThere { dest, blake3 }) => {
                         self.report.already_there += 1;
+                        self.note_verified(&dest, blake3);
                         self.report.destinations.push(dest);
                     }
                     Ok(Offered::Cancelled) => {
@@ -176,7 +207,8 @@ impl CardCopy {
                         unreachable!("matched Ingest above")
                     };
                     self.report.ingest = Some(ingest.into_report());
-                    Ok(false)
+                    self.phase = Phase::Baseline;
+                    Ok(true)
                 }
                 Err(e) => {
                     self.report.ingest_error = Some(e.to_string());
@@ -184,7 +216,48 @@ impl CardCopy {
                     Ok(false)
                 }
             },
+            Phase::Baseline => {
+                self.record_baselines(store);
+                self.phase = Phase::Done;
+                Ok(false)
+            }
             Phase::Done => Ok(false),
+        }
+    }
+
+    /// Remembers what the verified read of `dest` saw, for [`Self::record_baselines`]. A file that
+    /// can't be stat'ed now simply gets no baseline.
+    fn note_verified(&mut self, dest: &Path, blake3: String) {
+        if let Ok(meta) = std::fs::metadata(dest) {
+            self.verified.push(VerifiedCopy {
+                dest: dest.to_path_buf(),
+                size: meta.len(),
+                mtime_unix: mtime_unix(&meta),
+                blake3,
+            });
+        }
+    }
+
+    /// Records each verified copy's BLAKE3 as its asset's content-hash baseline (#659): the hash was
+    /// computed to prove the copy and is exactly the full-file hash the baseline needs, so the
+    /// first bit-rot check does not have to read these files again. Never fails the run.
+    fn record_baselines(&mut self, store: &dyn CatalogStore) {
+        let mut entries = Vec::with_capacity(self.verified.len());
+        for v in std::mem::take(&mut self.verified) {
+            let rel = v.dest.strip_prefix(&self.dest_root).unwrap_or(&v.dest);
+            let rel = crate::scruff::normalize_rel_path(rel);
+            match store.find_asset_by_path(self.root_id, &rel) {
+                Ok(Some(asset)) => entries.push((asset.id, v.size, v.mtime_unix, v.blake3)),
+                Ok(None) => {} // not registered (ingest skipped or failed it): nothing to attach to
+                Err(e) => {
+                    self.report.baseline_error = Some(e.to_string());
+                    return;
+                }
+            }
+        }
+        match store.record_baseline_hashes(self.root_id, &entries) {
+            Ok(written) => self.report.baseline_recorded = written,
+            Err(e) => self.report.baseline_error = Some(e.to_string()),
         }
     }
 
@@ -270,11 +343,56 @@ fn simplify_verbatim(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Whether `dest` is on the same volume as the card mounted at `card` (#659): the case a path
+/// prefix cannot see, a destination that reaches the card through a mount alias, junction or
+/// symlinked folder. Only a card that *is* a volume counts: a plain folder is on whatever volume
+/// holds it, which is no reason to refuse a sibling.
+///
+/// Unix compares the device of both and requires the card to be a mount point (its device differs
+/// from its parent's). Windows compares the volume identity keys ([`crate::volume::identify`]).
+/// `false` whenever either side can't be established, so a failed lookup never blocks a copy that
+/// the path check allowed.
+fn on_card_volume(dest: &Path, card: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(d), Ok(c)) = (std::fs::metadata(dest), std::fs::metadata(card)) else {
+            return false;
+        };
+        let card_is_mount_root = card
+            .parent()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .is_none_or(|p| p.dev() != c.dev());
+        card_is_mount_root && d.dev() == c.dev()
+    }
+    #[cfg(windows)]
+    {
+        match (crate::volume::identify(dest), crate::volume::identify(card)) {
+            (Some(d), Some(c)) => d.identity_key == c.identity_key,
+            _ => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (dest, card);
+        false
+    }
+}
+
 /// Resolves `dest` and refuses a destination on (or containing) any of the `cards`: copying onto
 /// the card would write to the volume the user is about to format, and break the promise that the
 /// card is only read. Returns the canonical destination, which is also the spelling to register as
-/// the catalog root (so `a/../b` and `b` are one root).
+/// the catalog root (so `a/../b` and `b` are one root). Besides the path-prefix test, a destination
+/// that reaches the card's volume through an alias is refused too ([`on_card_volume`]).
 pub fn check_destination(dest: &Path, cards: &[PathBuf]) -> Result<PathBuf, String> {
+    check_destination_with(dest, cards, &on_card_volume)
+}
+
+fn check_destination_with(
+    dest: &Path,
+    cards: &[PathBuf],
+    same_volume: &dyn Fn(&Path, &Path) -> bool,
+) -> Result<PathBuf, String> {
     let dest = simplify_verbatim(
         dest.canonicalize()
             .map_err(|e| format!("{} can't be used: {e}", dest.display()))?,
@@ -289,6 +407,14 @@ pub fn check_destination(dest: &Path, cards: &[PathBuf]) -> Result<PathBuf, Stri
         if dest.starts_with(&card) || card.starts_with(&dest) {
             return Err(format!(
                 "{} is on (or contains) the card {}; choose a folder on another drive.",
+                dest.display(),
+                card.display()
+            ));
+        }
+        if same_volume(&dest, &card) {
+            return Err(format!(
+                "{} is on the same drive as the card {} (reached through a link or mount); \
+                 choose a folder on another drive.",
                 dest.display(),
                 card.display()
             ));
@@ -401,5 +527,37 @@ mod tests {
         let ok = check_destination(&elsewhere.join("../photos"), &cards).unwrap();
         assert_eq!(ok, simplify_verbatim(elsewhere.canonicalize().unwrap()));
         assert!(check_destination(&tmp.path().join("missing"), &cards).is_err());
+    }
+
+    #[test]
+    fn a_destination_on_the_cards_volume_is_refused_even_without_a_path_relation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let card = tmp.path().join("card");
+        let alias = tmp.path().join("elsewhere");
+        let fine = tmp.path().join("fine");
+        for d in [&card, &alias, &fine] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let cards = vec![card];
+        // The comparator is injected: a real second volume can't be made in a unit test.
+        let same = |d: &Path, _: &Path| d.ends_with("elsewhere");
+        let err = check_destination_with(&alias, &cards, &same).unwrap_err();
+        assert!(err.contains("same drive"), "{err}");
+        assert!(check_destination_with(&fine, &cards, &same).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_card_volume_needs_a_card_that_is_a_mount_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (card, dest) = (tmp.path().join("card"), tmp.path().join("dest"));
+        std::fs::create_dir_all(&card).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        // A plain folder is not a volume: its sibling is not "on the card".
+        assert!(!on_card_volume(&dest, &card));
+        // The filesystem root is one, and anything on the same device is on it.
+        assert!(on_card_volume(Path::new("/"), Path::new("/")));
+        // A missing path can't be established, so it never blocks.
+        assert!(!on_card_volume(&tmp.path().join("missing"), Path::new("/")));
     }
 }

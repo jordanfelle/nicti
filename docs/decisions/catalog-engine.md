@@ -337,10 +337,21 @@ Wires #548's engine (`offering`, `cards`) into the app. Slice shipped: everythin
   when the run starts (the text field is disabled meanwhile). Move/Delete/Sync/Verify/Baseline guards (`job_active`) and
   Import/Sync (`submit_root_job`) also hold during the planning window, and the other-job check is repeated before submit.
   Detection runs only while the panel is open and a scan with no answer after 30 s is abandoned.
-- **Not done (follow-up):** a same-device check for the destination (a path on the card's volume reached through a mount
-  alias), verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename
-  path), a second card read / cache-bypassing read-back, reusing the returned blake3 in ingest instead of re-hashing, and a
-  cancel button (a job can be cancelled from the activity panel; the stepper polls per file).
+- **Follow-ups done (#659):** (1) *Hash reuse.* The full-file BLAKE3 `offer_file` computes to verify a copy is exactly the
+  `content_hash` baseline (#386) the bit-rot check (#304) needs, so after ingest a `Phase::Baseline` step looks each copy's
+  asset up by path and calls `record_baseline_hashes` with the size and mtime the destination file had right after it landed;
+  the store writes it only if the catalog row still has that exact size/mtime and no hash yet (a changed file never gets a stale
+  baseline, an existing baseline is never overwritten: a second run records 0). It never fails the run
+  (`CardCopyReport::baseline_recorded` / `baseline_error`; neither blocks `is_clean`). Ingest's own `partial_hash` (the
+  relink fingerprint) is a different, cheap head+tail hash and is unchanged. (2) *Cancel button.* The panel shows Cancel while
+  the job runs (`CardCopyUi::cancel` -> `Pounce::cancel`); honoured between files, so the file being copied is finished and
+  verified first and the report counts the rest as not attempted. (3) *Same-device check.* `check_destination` also refuses a
+  destination that reaches the card's volume through a link/junction/mount alias (`on_card_volume`: Unix compares `st_dev` and
+  requires the card to be a mount root, Windows compares `volume::identify` keys; either side unknown means "not the same", so
+  a failed lookup never blocks a copy the path test allowed). The Windows half is type-checked by reading only.
+- **Still not done:** verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename path),
+  a second card read / cache-bypassing read-back (both need hardware), and offering to copy the non-photo files the survey
+  reports (videos, other RAW formats) or revealing them: they are listed in the result line but not copied.
 
 ## #547: `{Num}`, `{Lens}`, `{ISO}` (ADR-0436 slices 1 and 2)
 
