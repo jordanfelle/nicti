@@ -344,7 +344,7 @@ Wires #548's engine (`offering`, `cards`) into the app. Slice shipped: everythin
   overwritten: a second run records 0). The size and mtime are read *before* the verify read (`Offered::{Copied,AlreadyThere}::mtime_unix`,
   test-pinned), so a file rewritten after that read mismatches; the one case this cannot see is a same-size rewrite within the
   same second as the recorded mtime (whole-second resolution, inherent to the baseline design). The destination path is
-  brought to the same spelling as the root (`relative_to_root`, verbatim `\\?\` prefixes stripped) before the lookup, since
+  brought to the same spelling as the root (`relative_to_root`: verbatim `\\?\` prefixes stripped, and the root canonicalized once so a short 8.3 name like `RUNNER~1` matches the canonical long one; Windows CI caught that second case) before the lookup, since
   `offer_file` canonicalizes and `check_destination` simplifies: without that no baseline would record on Windows (the unit test
   for it is `cfg(windows)`, so it runs only on the Windows CI job). A failed ingest records no baselines. It never fails the run
   (`CardCopyReport::baseline_recorded` / `baseline_error`; neither blocks `is_clean`). Ingest's own `partial_hash` (the

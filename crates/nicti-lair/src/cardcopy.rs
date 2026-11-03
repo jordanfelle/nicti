@@ -243,8 +243,13 @@ impl CardCopy {
     /// first bit-rot check does not have to read these files again. Never fails the run.
     fn record_baselines(&mut self, store: &dyn CatalogStore) {
         let mut entries = Vec::with_capacity(self.verified.len());
+        // `offer_file` canonicalizes (long names, verbatim prefix on Windows); the root as given may
+        // be a short 8.3 spelling (`RUNNER~1`) or otherwise not canonical, so bring it to the same
+        // form once. Falls back to the root as given.
+        let root =
+            std::fs::canonicalize(&self.dest_root).unwrap_or_else(|_| self.dest_root.clone());
         for v in std::mem::take(&mut self.verified) {
-            let Some(rel) = relative_to_root(&v.dest, &self.dest_root) else {
+            let Some(rel) = relative_to_root(&v.dest, &root) else {
                 continue; // not under the root as spelled: no baseline rather than a wrong path
             };
             match store.find_asset_by_path(self.root_id, &rel) {
