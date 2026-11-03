@@ -368,6 +368,133 @@ impl Tracklog {
     }
 }
 
+/// Parses an XMP GPS coordinate: `DDD,MM.mmmK` or `DDD,MM,SSK` (K = N/S/E/W).
+fn parse_xmp_coord(v: &str, pos: char, neg: char) -> Option<f64> {
+    let v = v.trim();
+    let hemi = v.chars().last()?;
+    let sign = if hemi == pos {
+        1.0
+    } else if hemi == neg {
+        -1.0
+    } else {
+        return None;
+    };
+    let body = &v[..v.len() - hemi.len_utf8()];
+    let mut it = body.split(',');
+    let deg: f64 = it.next()?.trim().parse().ok()?;
+    if deg < 0.0 {
+        return None; // the hemisphere letter carries the sign
+    }
+    let min: f64 = it.next().map_or(Some(0.0), |m| m.trim().parse().ok())?;
+    let sec: f64 = it.next().map_or(Some(0.0), |m| m.trim().parse().ok())?;
+    if it.next().is_some() || !(0.0..60.0).contains(&min) || !(0.0..60.0).contains(&sec) {
+        return None;
+    }
+    let out = sign * (deg + min / 60.0 + sec / 3600.0);
+    out.is_finite().then_some(out)
+}
+
+/// The `exif:GPS*` position in an XMP packet (attribute or element form, as
+/// [`crate::packet::Patch::gps`] replaces both), or `None` when it has none or an unreadable one.
+/// Never an error: the caller compares positions, and an unparseable one just reads as absent.
+pub fn read_gps(xmp: &str) -> Option<Gps> {
+    use quick_xml::events::{BytesStart, Event};
+    let mut reader = quick_xml::reader::Reader::from_str(xmp);
+    let (mut lat, mut lon, mut alt, mut alt_ref): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = (None, None, None, None);
+    // Only the `exif:` prefix (what `Patch.gps` writes and LRC uses); the first value of each
+    // property wins, so a stray duplicate can't override the one the writer owns.
+    fn exif_local(n: &str) -> Option<&str> {
+        n.strip_prefix("exif:").filter(|l| l.starts_with("GPS"))
+    }
+    fn slot<'a>(
+        name: &str,
+        lat: &'a mut Option<String>,
+        lon: &'a mut Option<String>,
+        alt: &'a mut Option<String>,
+        alt_ref: &'a mut Option<String>,
+    ) -> Option<&'a mut Option<String>> {
+        match name {
+            "GPSLatitude" => Some(lat),
+            "GPSLongitude" => Some(lon),
+            "GPSAltitude" => Some(alt),
+            "GPSAltitudeRef" => Some(alt_ref),
+            _ => None,
+        }
+    }
+    let mut open: Option<String> = None;
+    let mut text = String::new();
+    let attrs = |e: &BytesStart,
+                 lat: &mut Option<String>,
+                 lon: &mut Option<String>,
+                 alt: &mut Option<String>,
+                 alt_ref: &mut Option<String>| {
+        for a in e.attributes().flatten() {
+            let key = a.key.as_ref().to_owned();
+            let Some(name) = exif_local(&key) else {
+                continue;
+            };
+            if let (Some(sl), Ok(v)) = (
+                slot(name, lat, lon, alt, alt_ref),
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0),
+            ) {
+                sl.get_or_insert_with(|| v.into_owned());
+            }
+        }
+    };
+    loop {
+        match reader.read_event().ok()? {
+            Event::Eof => break,
+            Event::Empty(e) => attrs(&e, &mut lat, &mut lon, &mut alt, &mut alt_ref),
+            Event::Start(e) => {
+                let name = e.name().as_ref().to_owned();
+                if let Some(l) = exif_local(&name) {
+                    open = Some(l.to_owned());
+                    text.clear();
+                }
+                attrs(&e, &mut lat, &mut lon, &mut alt, &mut alt_ref);
+            }
+            Event::Text(t) => {
+                if open.is_some() {
+                    text.push_str(&t.xml_content(quick_xml::XmlVersion::Implicit1_0));
+                }
+            }
+            Event::End(_) => {
+                if let Some(name) = open.take() {
+                    if let Some(sl) = slot(&name, &mut lat, &mut lon, &mut alt, &mut alt_ref) {
+                        sl.get_or_insert_with(|| text.trim().to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let latitude = parse_xmp_coord(&lat?, 'N', 'S')?;
+    let longitude = parse_xmp_coord(&lon?, 'E', 'W')?;
+    // An altitude that doesn't parse or doesn't fit the XMP rational is dropped, not the position.
+    let altitude = alt.and_then(|a| {
+        let (n, d) = a.split_once('/').unwrap_or((a.as_str(), "1"));
+        let v = n.trim().parse::<f64>().ok()? / d.trim().parse::<f64>().ok()?;
+        (v.is_finite() && v.abs() <= 100_000.0).then(|| {
+            if alt_ref.as_deref() == Some("1") {
+                -v
+            } else {
+                v
+            }
+        })
+    });
+    let g = Gps {
+        latitude,
+        longitude,
+        altitude,
+    };
+    g.is_valid().then_some(g)
+}
+
 /// Camera-clock policy and matching limit for [`geotag`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeotagOptions {
@@ -668,5 +795,80 @@ mod tests {
         // non-finite elevation is dropped, not stored
         let s = r#"<gpx><trk><trkseg><trkpt lat="1" lon="1"><ele>inf</ele><time>2026-05-01T10:00:00Z</time></trkpt></trkseg></trk></gpx>"#;
         assert_eq!(parse_gpx(s).unwrap().points[0].elevation, None);
+    }
+
+    #[test]
+    fn read_gps_round_trips_what_geotag_writes() {
+        let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:exif=\"http://ns.adobe.com/exif/1.0/\"/></rdf:RDF></x:xmpmeta>";
+        for g in [
+            Gps {
+                latitude: 46.00123,
+                longitude: -7.5,
+                altitude: Some(-12.34),
+            },
+            Gps {
+                latitude: -33.8688,
+                longitude: 151.2093,
+                altitude: None,
+            },
+        ] {
+            let patch = crate::packet::Patch {
+                gps: Some(Some(g)),
+                ..Default::default()
+            };
+            let out = crate::packet::apply(xmp, &patch).unwrap();
+            let back = read_gps(&out).expect("position read back");
+            assert!((back.latitude - g.latitude).abs() < 1e-6, "{back:?}");
+            assert!((back.longitude - g.longitude).abs() < 1e-6, "{back:?}");
+            match (back.altitude, g.altitude) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 0.01),
+                (None, None) => {}
+                other => panic!("altitude {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_gps_accepts_element_form_and_seconds_and_rejects_garbage() {
+        let el = "<d xmlns:exif=\"e\"><exif:GPSLatitude>46,30,0N</exif:GPSLatitude><exif:GPSLongitude>7,0.0E</exif:GPSLongitude></d>";
+        let g = read_gps(el).unwrap();
+        assert!((g.latitude - 46.5).abs() < 1e-9 && g.longitude == 7.0);
+        assert_eq!(
+            read_gps("<d xmlns:exif=\"e\" exif:GPSLatitude=\"99,0N\" exif:GPSLongitude=\"1,0E\"/>"),
+            None
+        );
+        assert_eq!(
+            read_gps("<d xmlns:exif=\"e\" exif:GPSLatitude=\"x\" exif:GPSLongitude=\"1,0E\"/>"),
+            None
+        );
+        assert_eq!(read_gps("<d/>"), None);
+        assert_eq!(read_gps("<d"), None);
+    }
+
+    #[test]
+    fn read_gps_hardening() {
+        // Negative degrees are rejected (the hemisphere carries the sign).
+        assert_eq!(
+            read_gps(
+                "<d xmlns:exif=\"e\" exif:GPSLatitude=\"-5,30N\" exif:GPSLongitude=\"1,0E\"/>"
+            ),
+            None
+        );
+        // A foreign prefix is not the exif namespace the writer owns.
+        assert_eq!(
+            read_gps("<d xmlns:foo=\"e\" foo:GPSLatitude=\"5,30N\" foo:GPSLongitude=\"1,0E\"/>"),
+            None
+        );
+        // An empty sibling element doesn't clobber a valid latitude.
+        let g = read_gps("<d xmlns:exif=\"e\" exif:GPSLatitude=\"5,30N\" exif:GPSLongitude=\"1,0E\">junk<exif:GPSMapDatum/></d>").unwrap();
+        assert!((g.latitude - 5.5).abs() < 1e-9);
+        let g = read_gps("<d xmlns:exif=\"e\"><exif:GPSLatitude>5,30N</exif:GPSLatitude><exif:GPSVersionID/><exif:GPSLongitude>1,0E</exif:GPSLongitude></d>").unwrap();
+        assert!((g.latitude - 5.5).abs() < 1e-9 && g.longitude == 1.0);
+        // First value wins over a later duplicate.
+        let g = read_gps("<d xmlns:exif=\"e\" exif:GPSLatitude=\"5,30N\" exif:GPSLongitude=\"1,0E\"><exif:GPSLatitude>9,0N</exif:GPSLatitude></d>").unwrap();
+        assert!((g.latitude - 5.5).abs() < 1e-9);
+        // A silly altitude drops the altitude, not the position.
+        let g = read_gps("<d xmlns:exif=\"e\" exif:GPSLatitude=\"5,30N\" exif:GPSLongitude=\"1,0E\" exif:GPSAltitude=\"999999999/1\"/>").unwrap();
+        assert!(g.altitude.is_none());
     }
 }

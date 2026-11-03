@@ -39,6 +39,8 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
 
 - **#371 (JPEG embedded XMP sync, landed)**: `scent_sync::xmp_target(path)` = the JPEG itself, else the `.xmp` beside the RAW. `load` reads the APP1 packet (hash = packet text only, so pixel/EXIF changes aren't XMP changes; no packet = `NoSidecar`); `write_locked` splices via `embedded::write_xmp` + `atomic_write`, never creating the file. Same newer-wins/hold-for-review rules as sidecars; a JPEG never touches `IMG.xmp` (the RAW's, in a RAW+JPEG pair).
 
+- **#536 (geotag engine, landed)**: `asset_gps` (schema v12) holds one position per asset (`CatalogStore::get_gps`/`set_gps`); `trail::geotag_assets` matches `captured_at` against a `Tracklog` (offset/drift/max-gap, `overwrite` off keeps an existing position), stores it, then `write_sidecar` (or `mark_catalog_dirty` with auto-write off). `Markers.gps` rides along but is outside `==`/hash: a position never raises a conflict; it is written whenever the catalog has one, a file-only one is left alone and adopted when the catalog has none (or the sidecar wins), a file with none never clears the catalog's. `gpx::read_gps` reads attr/element `exif:GPS*`. Overlapping tracks are interpolated in global time order. UI/Info: #668.
+
 - **#373 (keyword tagging UI, landed)**: `nicti-pelt`'s `keyword_tag.rs` (Library toolbar row: text box + chips) writes only via `XmpMeta::tag_path`/`untag` (`xmp_sync.rs`), which tag the catalog then queue the sidecar write; `|` in the text is the hierarchy separator, segments go through `scent_sync::norm_segment`. Not verified by eye (no display here).
 
 ## Package contents
@@ -59,4 +61,4 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
 - #431 GPX geotagging (`nicti-scent::gpx`): `parse_gpx` (GPX 1.0/1.1 tracks only, interpolation within a
   segment never across one, depth/point limits), `camera_time_to_unix` (EXIF time has no zone: caller
   supplies camera UTC offset + drift), `geotag` writes `exif:GPS*` via `Patch.gps` (replaces attr- and
-  element-form, `Some(None)` clears). Not yet built: lair columns, apply-GPX UI, Info display.
+  element-form, `Some(None)` clears). Applied by #536 (`nicti-lair::trail::geotag_assets`, below); the apply-GPX UI and Info display are #668.

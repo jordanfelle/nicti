@@ -2067,6 +2067,64 @@ impl CatalogStore for SqliteCatalog {
         Ok(())
     }
 
+    fn get_gps(
+        &self,
+        asset_ids: &[i64],
+    ) -> Result<HashMap<i64, nicti_scent::gpx::Gps>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = HashMap::new();
+        for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT asset_id, latitude, longitude, altitude FROM asset_gps \
+                 WHERE asset_id IN ({ph})"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    nicti_scent::gpx::Gps {
+                        latitude: row.get(1)?,
+                        longitude: row.get(2)?,
+                        altitude: row.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, g) = row?;
+                out.insert(id, g);
+            }
+        }
+        Ok(out)
+    }
+
+    fn set_gps(
+        &self,
+        asset_id: i64,
+        gps: Option<nicti_scent::gpx::Gps>,
+    ) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        match gps {
+            None => {
+                conn.execute("DELETE FROM asset_gps WHERE asset_id = ?1", [asset_id])?;
+            }
+            Some(g) => {
+                if !(g.latitude.is_finite() && g.longitude.is_finite() && g.is_valid()) {
+                    return Err(CatalogError::Io(format!(
+                        "refusing an invalid GPS position for asset {asset_id}"
+                    )));
+                }
+                conn.execute(
+                    "INSERT INTO asset_gps (asset_id, latitude, longitude, altitude) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT(asset_id) DO UPDATE SET latitude = excluded.latitude, \
+                         longitude = excluded.longitude, altitude = excluded.altitude",
+                    params![asset_id, g.latitude, g.longitude, g.altitude],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn sidecar_review_assets(&self) -> Result<Vec<i64>, CatalogError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
