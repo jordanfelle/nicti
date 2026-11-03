@@ -610,6 +610,10 @@ fn ingest_one(
     // commit together in one transaction -- see `CatalogStore::insert_asset`'s own doc comment
     // for why that atomicity matters (found by CodeRabbit's review).
     let asset_id = store.insert_asset(root_id, &new_asset, preview.as_ref())?;
+    // Best effort: a file whose orientation can't be read stays NULL and the backfill retries.
+    if let Some(o) = crate::orient::file_orientation(path) {
+        let _ = store.set_orientation(asset_id, o);
+    }
     sync_sidecar(store, asset_id, path, report);
 
     if existing.is_some() {

@@ -484,6 +484,15 @@ CREATE TABLE lrc_provenance (
 CREATE INDEX lrc_provenance_asset ON lrc_provenance(asset_id);
 "#;
 
+/// #604 (v11): `asset.orientation`, the EXIF Orientation (1-8, 1 = upright or untagged) of the file,
+/// `NULL` until it has been read. `width`/`height` are not orientation-corrected (RAWs take the
+/// embedded preview's declared size, JPEGs the file's own size, both before EXIF rotation), so the
+/// justified grid needs this to know a portrait from a landscape. Ingest fills it for new and
+/// changed files; `orient::backfill_root` fills existing rows (ingest skips unchanged size+mtime).
+const MIGRATION_V11: &str = r#"
+ALTER TABLE asset ADD COLUMN orientation INTEGER;
+"#;
+
 /// Ordered migrations, one `user_version` step each. Add new migrations by appending to this
 /// slice — never edit an already-shipped entry in place, the same rule every other versioned
 /// schema in this codebase (den's candidate schemas, homing's) follows implicitly by never having
@@ -499,6 +508,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_V8,
     MIGRATION_V9,
     MIGRATION_V10,
+    MIGRATION_V11,
 ];
 
 /// Runs every migration past the database's current `PRAGMA user_version`, in order. Safe to call
@@ -613,7 +623,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, MIGRATIONS.len() as i64);
         let assets: i64 = conn
             .query_row("SELECT COUNT(*) FROM asset", [], |row| row.get(0))
             .unwrap();
@@ -852,5 +862,35 @@ mod tests {
             result.is_err(),
             "preview's FK into the rebuilt asset table must still be live, not dangling"
         );
+    }
+
+    #[test]
+    fn upgrading_from_v10_adds_a_null_orientation_and_keeps_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS[..10].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {}", i + 1))
+                .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO volume (identity_key, online, last_seen_at) VALUES ('v', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO root (volume_id, rel_path) VALUES (1, 'x')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO asset (root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
+             imported_at) VALUES (1, 'a.nef', 'a.nef', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let o: Option<i64> = conn
+            .query_row("SELECT orientation FROM asset WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(o, None);
     }
 }

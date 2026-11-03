@@ -28,6 +28,7 @@ pub mod hunt;
 pub mod larder;
 pub mod ninelives;
 pub mod offering;
+pub mod orient;
 pub mod patrol;
 pub mod pounce_jobs;
 pub mod righting;
@@ -361,6 +362,20 @@ pub trait CatalogStore: Module {
     /// to find rows whose file it needs to check for, since ingest only ever walks the disk and
     /// has no way to notice a path that used to be there and now isn't.
     fn list_assets_by_root(&self, root_id: i64) -> Result<Vec<Asset>, CatalogError>;
+
+    /// Records the file's EXIF Orientation (clamped to 1-8; 1 = upright or untagged) for an asset
+    /// (#604). Ingest calls this after `insert_asset`; `insert_asset` itself resets it to `NULL`
+    /// when the file's size or mtime changed.
+    fn set_orientation(&self, asset_id: i64, orientation: u8) -> Result<(), CatalogError>;
+
+    /// Up to `limit` assets under `root_id` whose orientation has not been read yet, with `id >
+    /// after_id`, in `id` order (#604): the backfill pass pages through these.
+    fn assets_missing_orientation(
+        &self,
+        root_id: i64,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Asset>, CatalogError>;
 
     /// `(asset_id, blake3_hex)` for every asset under `root_id` that has a recorded
     /// `content_hash` (#26), in `id` order. Assets that were never copy-moved have none and are

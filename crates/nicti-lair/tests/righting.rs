@@ -552,3 +552,102 @@ fn settle_does_not_abort_the_root_when_one_sidecar_cannot_be_refreshed() {
         "the blob stays until its sidecar can be refreshed"
     );
 }
+
+// ---- #604: asset.orientation (NULL until read; ingest + backfill) ----
+
+fn orientation_col(fx: &Fx, id: i64) -> Option<u8> {
+    fx.store
+        .list_assets_by_root(fx.root_id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == id)
+        .unwrap()
+        .orientation
+}
+
+#[test]
+fn backfill_fills_a_null_orientation_from_the_raws_ifd0_and_a_rerun_finds_nothing() {
+    let fx = Fx::new();
+    let rotated = fx.asset("a.NEF", Some(6), None);
+    let plain = fx.asset("b.NEF", None, None);
+    assert_eq!(orientation_col(&fx, rotated), None);
+
+    let r = nicti_lair::orient::backfill_root(&fx.store, fx.root_id, 1).unwrap();
+    assert_eq!((r.examined, r.filled, r.unreadable), (2, 2, 0), "{r:?}");
+    assert_eq!(orientation_col(&fx, rotated), Some(6));
+    assert_eq!(orientation_col(&fx, plain), Some(1));
+
+    let again = nicti_lair::orient::backfill_root(&fx.store, fx.root_id, 10).unwrap();
+    assert_eq!(again.examined, 0);
+}
+
+#[test]
+fn a_missing_file_stays_null_and_the_backfill_terminates() {
+    let fx = Fx::new();
+    let id = fx.asset("gone.NEF", Some(8), None);
+    std::fs::remove_file(fx.raw("gone.NEF")).unwrap();
+    let r = nicti_lair::orient::backfill_root(&fx.store, fx.root_id, 5).unwrap();
+    assert_eq!((r.examined, r.filled, r.unreadable), (1, 0, 1), "{r:?}");
+    assert_eq!(orientation_col(&fx, id), None);
+}
+
+#[test]
+fn ingest_records_the_orientation_and_a_changed_file_resets_it_until_reingested() {
+    let fx = Fx::new();
+    std::fs::write(fx.raw("c.NEF"), nef(Some(3), &real_jpeg(2))).unwrap();
+    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    let id = fx
+        .store
+        .find_asset_by_path(fx.root_id, "c.NEF")
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_eq!(orientation_col(&fx, id), Some(3));
+
+    // The upsert of a changed size/mtime clears it (the new content may rotate differently)...
+    let mut new = NewAsset {
+        rel_path: "c.NEF".into(),
+        rel_path_fold: "c.nef".into(),
+        size_bytes: 1,
+        mtime_unix: 1,
+        fingerprint: None,
+        natural_key: None,
+        make: None,
+        model: None,
+        captured_at: None,
+        width: None,
+        height: None,
+        imported_at: 0,
+    };
+    fx.store.insert_asset(fx.root_id, &new, None).unwrap();
+    assert_eq!(orientation_col(&fx, id), None);
+    // ...while an upsert of identical size/mtime keeps it.
+    fx.store.set_orientation(id, 8).unwrap();
+    new.imported_at = 5;
+    fx.store.insert_asset(fx.root_id, &new, None).unwrap();
+    assert_eq!(orientation_col(&fx, id), Some(8));
+}
+
+#[test]
+fn a_changed_raw_is_re_read_by_ingest() {
+    let fx = Fx::new();
+    std::fs::write(fx.raw("d.NEF"), nef(Some(6), &real_jpeg(3))).unwrap();
+    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    let id = |n: &str| {
+        fx.store
+            .find_asset_by_path(fx.root_id, n)
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    assert_eq!(orientation_col(&fx, id("d.NEF")), Some(6));
+
+    // The RAW is replaced by a different size with another rotation: the changed-file path
+    // of ingest must re-read it (the upsert reset it to NULL).
+    std::fs::write(fx.raw("d.NEF"), nef(Some(3), &real_jpeg(9))).unwrap();
+    let mut longer = std::fs::read(fx.raw("d.NEF")).unwrap();
+    longer.extend_from_slice(&[0; 1000]);
+    std::fs::write(fx.raw("d.NEF"), longer).unwrap();
+    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    assert_eq!(orientation_col(&fx, id("d.NEF")), Some(3));
+}
