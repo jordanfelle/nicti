@@ -226,7 +226,6 @@ impl KneadUi {
         }
     }
 
-    /// The checklist modal. Returns a command when the user confirmed a sync.
     /// The rotation-only prompt (#614): which way to apply the reference photo's angle.
     fn show_straighten_modal(&mut self, ctx: &egui::Context) -> Option<Command> {
         let Some(Modal::Straighten {
@@ -244,7 +243,7 @@ impl KneadUi {
         let response =
             egui::Modal::new(egui::Id::unique("nicti_straighten_prompt")).show(ctx, |ui| {
                 ui.heading(format!(
-                    "Straighten {count} photo{}",
+                    "Apply this angle to {count} other photo{}",
                     if count == 1 { "" } else { "s" }
                 ));
                 ui.label(format!(
@@ -317,6 +316,7 @@ impl KneadUi {
         None
     }
 
+    /// The checklist modal. Returns a command when the user confirmed a sync.
     pub fn show_modal(&mut self, ctx: &egui::Context) -> Option<Command> {
         if matches!(self.modal, Some(Modal::Straighten { .. })) {
             return self.show_straighten_modal(ctx);

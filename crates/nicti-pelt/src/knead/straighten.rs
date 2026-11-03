@@ -14,7 +14,7 @@
 //! known and equals the reference's; the rest are counted, not silently changed.
 
 use nicti_pawprint::{EditDocument, StageEntry};
-use nicti_tapetum::coat::{self, CropParams};
+use nicti_tapetum::coat::CropParams;
 use nicti_tapetum::stages::CROP;
 
 use super::{BatchPlan, Change};
@@ -84,7 +84,12 @@ fn rotated(doc: &EditDocument, mode: Mode, degrees: f32) -> Option<EditDocument>
         return None;
     }
     let entry = doc.stages.get(CROP);
-    let current: CropParams = entry.map_or_else(CropParams::default, |e| coat::parse(&e.params));
+    // An entry that doesn't parse as today's crop (wrong types, a layout from a newer version) is
+    // left exactly as it is: re-saving it as a default crop would lose its rectangle.
+    let current: CropParams = match entry {
+        None => CropParams::default(),
+        Some(e) => serde_json::from_value(e.params.clone()).ok()?,
+    };
     let mut crop = current;
     crop.set_rotation(match mode {
         Mode::Set => degrees,
@@ -112,6 +117,7 @@ fn rotated(doc: &EditDocument, mode: Mode, degrees: f32) -> Option<EditDocument>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nicti_tapetum::coat;
     use nicti_tapetum::geometry::MAX_STRAIGHTEN_DEGREES;
 
     fn doc_with(crop: Option<CropParams>) -> EditDocument {
@@ -264,6 +270,29 @@ mod tests {
             f32::INFINITY,
         );
         assert_eq!(p.plan.unchanged, 1);
+    }
+
+    #[test]
+    fn a_crop_entry_that_does_not_parse_is_left_alone_not_reset() {
+        let mut d = doc_with(None);
+        d.stages.insert(
+            CROP.to_string(),
+            StageEntry {
+                schema_version: 7,
+                params: serde_json::json!({ "x": "not a number", "future_field": [1, 2] }),
+            },
+        );
+        let p = plan_rotation(
+            vec![Target {
+                asset_id: 1,
+                doc: Some(d),
+                orientation: Some(1),
+            }],
+            Some(1),
+            Mode::Set,
+            3.0,
+        );
+        assert_eq!((p.plan.changes.len(), p.plan.unchanged), (0, 1));
     }
 
     #[test]

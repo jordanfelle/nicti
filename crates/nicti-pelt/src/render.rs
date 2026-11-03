@@ -665,8 +665,17 @@ impl DevelopDoc {
     /// it to the catalog, and the autosave must not write this view's older copy back over it.
     /// Drops the removals and AI alphas `doc` no longer references (the next frame re-bakes any AI
     /// mask it does), and reloads the camera profile, which `doc` may have changed.
-    pub fn replace_document(&mut self, doc: EditDocument) {
-        self.saved = doc.clone();
+    pub fn replace_document(&mut self, mut doc: EditDocument) {
+        // Fit a crop whose rotation changed under us (a rotation-only batch writes just the angle,
+        // #614), exactly as loading does, so the canvas size and overlays here agree with the render
+        // (which fits at resolve time). The catalog copy stays the saved baseline, so the fit reads
+        // as an edit and autosaves like any other.
+        let catalog_copy = doc.clone();
+        fit_loaded_crop(
+            &mut doc,
+            (self.extent.width as f32, self.extent.height as f32),
+        );
+        self.saved = catalog_copy;
         self.history = History::new(doc);
         self.prune_removals();
         self.prune_ai_alphas();
@@ -2300,6 +2309,46 @@ mod tests {
             reqs[0].key, key_a,
             "and its bake key differs from photo A's"
         );
+    }
+
+    /// #614: a rotation-only batch writes just the angle; replacing the loaded photo's document
+    /// fits the crop at its extent (like loading does), so the canvas and the render agree, and the
+    /// fit counts as an edit against the catalog's unfitted copy.
+    #[test]
+    fn replace_document_fits_a_rotation_that_arrived_without_a_fitted_crop() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(
+            view.frame_arc(),
+            blake3::hash(b"photo"),
+            EditDocument::default(),
+        );
+        let mut batch_doc = EditDocument::default();
+        batch_doc.stages.insert(
+            CROP.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "rotation_degrees": 10.0 }),
+            },
+        );
+        view.replace_document(batch_doc.clone());
+        let crop: CropParams = view.stage_params(CROP);
+        assert!(
+            crop.width > 0.0 && crop.height > 0.0,
+            "a rect was written: {crop:?}"
+        );
+        let (w, h) = (view.extent.width as f32, view.extent.height as f32);
+        assert!(
+            crop.width < w && crop.height < h,
+            "fitted inside the frame: {crop:?}"
+        );
+        assert!(
+            view.is_dirty(),
+            "the fit is an edit against the catalog's copy"
+        );
+        assert_ne!(view.document(), &batch_doc);
     }
 
     /// #52: a batch paste/sync/undo rewrites the loaded photo in the catalog, so the view must take
