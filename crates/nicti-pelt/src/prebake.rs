@@ -191,7 +191,7 @@ impl DecodeJob {
             return Err(CANCELLED.into());
         }
         let key = frame_key(&self.plan.identity);
-        let source: Arc<dyn PixelSource> = Arc::new(FramePixels(Arc::clone(&frame)));
+        let source: Arc<dyn PixelSource> = Arc::new(FramePixels::new(Arc::clone(&frame)));
         let mut slots = Vec::with_capacity(self.plan.requests.len());
         for request in &self.plan.requests {
             let (job, slot) = MaskBakeJob::new(

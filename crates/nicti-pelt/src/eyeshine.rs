@@ -54,7 +54,8 @@ use nicti_tapetum::stages::{HEAL, MASKS};
 /// rendered preview reads as stale and is regenerated.
 /// v2 (#321): a selected DCP now applies its tone curve (or the ACR default).
 /// v3 (#399): local adjustments (masks) are rendered.
-pub const EYESHINE_VERSION: u32 = 3;
+/// v4 (#552): decode neutralizes clipped highlights (clip-neutral), so blown areas render differently.
+pub const EYESHINE_VERSION: u32 = 4;
 
 /// Suffix on a render hash when the document holds adjustments the preview render cannot be sure
 /// to show: AI removal patches (not persisted, #324) and AI-mask alphas (rendered only if already

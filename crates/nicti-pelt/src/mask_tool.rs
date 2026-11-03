@@ -445,7 +445,7 @@ impl MaskBakeService {
             let backend = self.shared_backend();
             let (job, slot) = MaskBakeJob::new(
                 backend,
-                Arc::new(FramePixels(frame)),
+                Arc::new(FramePixels::new(frame)),
                 image_key,
                 cam_mul,
                 request.recipe,

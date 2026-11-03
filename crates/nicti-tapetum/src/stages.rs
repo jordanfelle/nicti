@@ -123,12 +123,39 @@ pub fn masks_stage() -> BasicStage {
         default_params: || json!({ "corrections": [] }),
     }
 }
-pub fn decode_stage() -> BasicStage {
-    BasicStage {
-        id: DECODE,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
+/// Decode's stage version. Bumped to 1 by #552: decode now limits clipped samples to the
+/// clip-neutral ceiling ([`ClipNeutral`]), which changes pixels for any frame with blown
+/// highlights, so every cache key chained from it (baked frames, AI bakes) must change with it.
+const DECODE_IMPL_VERSION: u32 = 1;
+
+pub struct DecodeStage;
+
+impl Module for DecodeStage {
+    fn id(&self) -> &str {
+        DECODE
     }
+    fn schema_version(&self) -> u32 {
+        1
+    }
+    fn migrate_params(&self, _from_version: u32, params: Value) -> Option<Value> {
+        Some(params)
+    }
+}
+
+impl RenderStage for DecodeStage {
+    fn kind(&self) -> StageKind {
+        StageKind::Baked
+    }
+    fn default_params(&self) -> Value {
+        json!({})
+    }
+    fn impl_version(&self) -> u32 {
+        DECODE_IMPL_VERSION
+    }
+}
+
+pub fn decode_stage() -> DecodeStage {
+    DecodeStage
 }
 pub fn demosaic_stage() -> BasicStage {
     BasicStage {
@@ -290,6 +317,80 @@ struct NormalizeParams {
     dims: [u32; 4],
     /// maximum, cblack.r, cblack.g, cblack.b
     limits: [u32; 4],
+    /// Clip-neutral: the clip level per channel (r, g, b, unused) and the ceiling a clipped pixel
+    /// is limited to; `f32::MAX` everywhere means "never clipped".
+    clip: [f32; 4],
+    ceiling: [f32; 4],
+}
+
+/// A normalized channel counts as clipped when it is within this of its clip level: float slack
+/// for a sample that really sat at `maximum`. It does **not** catch demosaic-interpolated edge
+/// pixels (a value averaged from clipped and unclipped neighbours lands far under the level, e.g.
+/// 0.975): the one-pixel ring around a blown area keeps its cast, and the step between a limited
+/// pixel and its neighbour is real. Slice 1 neutralizes fully clipped pixels only; the edge ring
+/// and a feathered transition belong to the reconstruct slice (#672). **Untuned.**
+const CLIP_MARGIN: f32 = 1e-3;
+
+/// Clip-neutral (#552, ADR-0438 slice 1): a pixel with a clipped channel is limited so that, after
+/// the as-shot white balance, it comes out neutral instead of magenta/cyan. A pixel with no
+/// clipped channel is never touched, so unclipped saturated colours and every pixel's headroom
+/// below the clip level survive for exposure recovery.
+///
+/// A sample at `frame.maximum` normalizes to `clip_c = (range - cblack_c) / range` (exactly 1.0
+/// when `cblack_c` is 0). The channels clip at different levels once multiplied by the as-shot WB
+/// gains, so the white-balanced white is the smallest `clip_c * gain_c`; a clipped pixel's
+/// channels are each limited to that white divided back by their own gain. `NONE` (no pixel ever
+/// counts as clipped) when the frame's metadata can't support the maths: a non-positive range, a
+/// `cblack` at or above the range, or non-finite or non-positive as-shot gains.
+///
+/// **Unverified on real frames**: `maximum` is LibRaw's white level; a body that saturates below
+/// it never reaches `clip`, which makes this a no-op rather than a wrong correction (a body whose
+/// `maximum` is above true saturation keeps a cast on clipped areas). The ceiling follows the
+/// *as-shot* gains: a manual WB edit changes the multipliers afterwards, so a clipped area then
+/// carries the tint of the difference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipNeutral {
+    /// Per-channel normalized value at (just under) which a sample counts as clipped.
+    pub clip: [f32; 3],
+    /// What a clipped pixel's channels are limited to.
+    pub ceiling: [f32; 3],
+}
+
+impl ClipNeutral {
+    /// Never clips anything.
+    pub const NONE: ClipNeutral = ClipNeutral {
+        clip: [f32::MAX; 3],
+        ceiling: [f32::MAX; 3],
+    };
+
+    pub fn for_frame(frame: &LinearFrame) -> Self {
+        let range = frame.maximum as f32 - frame.black as f32;
+        if range <= 0.0 {
+            return Self::NONE; // the u32 inputs can't make this NaN
+        }
+        let level: [f32; 3] = std::array::from_fn(|c| (range - frame.cblack[c] as f32) / range);
+        let gains = crate::color::wb_gains(frame.cam_mul);
+        let usable = |v: &f32| v.is_finite() && *v > 0.0;
+        if !level.iter().all(usable) || !gains.iter().all(usable) {
+            return Self::NONE;
+        }
+        let white = (0..3)
+            .map(|c| level[c] * gains[c])
+            .fold(f32::INFINITY, f32::min);
+        ClipNeutral {
+            clip: std::array::from_fn(|c| level[c] - CLIP_MARGIN),
+            ceiling: std::array::from_fn(|c| white / gains[c]),
+        }
+    }
+
+    /// The CPU twin of `normalize.wgsl`'s limit.
+    pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
+        if (0..3).any(|c| rgb[c] >= self.clip[c]) {
+            std::array::from_fn(|c| rgb[c].min(self.ceiling[c]))
+        } else {
+            rgb
+        }
+    }
 }
 
 pub struct DecodeKernel {
@@ -379,6 +480,7 @@ impl BakedExec for DecodeExec<'_> {
             gpu.limits.max_storage_buffer_binding_size,
         );
 
+        let clip = ClipNeutral::for_frame(frame);
         let bind_group_layout = self.kernel.pipeline.get_bind_group_layout(0);
         let mut row_offset = 0u32;
         while row_offset < frame.height {
@@ -404,6 +506,8 @@ impl BakedExec for DecodeExec<'_> {
                     frame.cblack[1],
                     frame.cblack[2],
                 ],
+                clip: [clip.clip[0], clip.clip[1], clip.clip[2], 0.0],
+                ceiling: [clip.ceiling[0], clip.ceiling[1], clip.ceiling[2], 0.0],
             };
             let params_buf = gpu
                 .device
@@ -452,11 +556,15 @@ impl BakedExec for DecodeExec<'_> {
 /// by `decode_gpu_matches_cpu_reference`, which checks the GPU decode against this function.
 pub fn normalize_pixels(frame: &LinearFrame) -> Vec<[f32; 4]> {
     let range = frame.maximum as f32 - frame.black as f32;
+    let clip = ClipNeutral::for_frame(frame);
     let sample = |i: usize, c: usize| {
         (frame.pixels[i * 3 + c] as f32 - frame.black as f32 - frame.cblack[c] as f32) / range
     };
     (0..(frame.width * frame.height) as usize)
-        .map(|i| [sample(i, 0), sample(i, 1), sample(i, 2), 1.0])
+        .map(|i| {
+            let [r, g, b] = clip.apply([sample(i, 0), sample(i, 1), sample(i, 2)]);
+            [r, g, b, 1.0]
+        })
         .collect()
 }
 
@@ -1879,6 +1987,252 @@ mod tests {
     /// removal path relies on.
     fn normalize_cpu_reference(frame: &LinearFrame) -> Vec<[f32; 4]> {
         normalize_pixels(frame)
+    }
+
+    fn clip_frame(cam_mul: [f32; 4], cblack: [u32; 4], pixels: Vec<u16>) -> LinearFrame {
+        LinearFrame {
+            width: pixels.len() as u32 / 3,
+            height: 1,
+            cam_mul,
+            pre_mul: cam_mul,
+            cblack,
+            pixels,
+            ..synthetic_linear_frame()
+        }
+    }
+
+    #[test]
+    fn a_clipped_pixel_is_neutral_at_exactly_one_after_the_as_shot_white_balance() {
+        // No cblack: a sample at `maximum` normalizes to exactly 1.0 per channel. Gains are
+        // R 2.0, G 1.0, B 1.5, so the white-balanced clip level is min(2, 1, 1.5) = 1.0.
+        let f = clip_frame(
+            [2.0, 1.0, 1.5, 1.0],
+            [0; 4],
+            vec![1100, 1100, 1100, 600, 500, 400],
+        );
+        let ceiling = ClipNeutral::for_frame(&f).ceiling;
+        assert!((ceiling[0] - 0.5).abs() < 1e-6);
+        assert!((ceiling[1] - 1.0).abs() < 1e-6);
+        assert!((ceiling[2] - 2.0 / 3.0).abs() < 1e-6);
+        let px = normalize_pixels(&f);
+        let g = crate::color::wb_gains(f.cam_mul);
+        let wb = [px[0][0] * g[0], px[0][1] * g[1], px[0][2] * g[2]];
+        for c in wb {
+            assert!(
+                (c - 1.0).abs() < 1e-6,
+                "clipped pixel must be neutral 1.0, got {wb:?}"
+            );
+        }
+        // A pixel below every ceiling is untouched.
+        let plain = [
+            (600.0 - 100.0) / 1000.0,
+            (500.0 - 100.0) / 1000.0,
+            (400.0 - 100.0) / 1000.0,
+        ];
+        for c in 0..3 {
+            assert!((px[1][c] - plain[c]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn channels_that_clip_at_different_levels_still_end_up_neutral() {
+        // cblack makes R's clip level 0.99 (not 1.0): white-balanced R = 1.98, G = 1.0, B = 1.5.
+        let f = clip_frame([2.0, 1.0, 1.5, 1.0], [10, 0, 0, 0], vec![1100, 1100, 1100]);
+        let px = normalize_pixels(&f)[0];
+        let g = crate::color::wb_gains(f.cam_mul);
+        let wb = [px[0] * g[0], px[1] * g[1], px[2] * g[2]];
+        assert!(
+            (wb[0] - wb[1]).abs() < 1e-6 && (wb[1] - wb[2]).abs() < 1e-6,
+            "{wb:?}"
+        );
+    }
+
+    #[test]
+    fn broken_metadata_means_no_limit_rather_than_a_wrong_one() {
+        let ok = clip_frame([2.0, 1.0, 1.5, 1.0], [0; 4], vec![1, 2, 3]);
+        for bad in [
+            LinearFrame {
+                maximum: ok.black,
+                ..ok.clone()
+            },
+            LinearFrame {
+                cblack: [2000, 0, 0, 0],
+                ..ok.clone()
+            },
+            LinearFrame {
+                cam_mul: [f32::NAN, 1.0, 1.0, 1.0],
+                ..ok.clone()
+            },
+            LinearFrame {
+                cam_mul: [-1.0, 1.0, 1.0, 1.0],
+                ..ok.clone()
+            },
+            LinearFrame {
+                cam_mul: [0.0, 1.0, 1.0, 1.0],
+                ..ok.clone()
+            },
+        ] {
+            assert_eq!(ClipNeutral::for_frame(&bad), ClipNeutral::NONE);
+        }
+    }
+
+    #[test]
+    fn an_unclipped_saturated_colour_keeps_its_value_and_headroom() {
+        // Gains R 2.0, G 1.0, B 1.5 -> ceilings R 0.5, B 0.667. A legitimate saturated red
+        // (raw 900/300/300 -> 0.8/0.2/0.2) and a blue sky (B 0.9) exceed those ceilings but no
+        // channel is clipped, so neither may be touched (review of #552: a global clamp crushed
+        // them and removed the headroom exposure recovery needs).
+        let f = clip_frame(
+            [2.0, 1.0, 1.5, 1.0],
+            [0; 4],
+            vec![900, 300, 300, 200, 400, 1000, 1100, 600, 300],
+        );
+        let px = normalize_pixels(&f);
+        assert!((px[0][0] - 0.8).abs() < 1e-6, "red kept: {:?}", px[0]);
+        assert!((px[1][2] - 0.9).abs() < 1e-6, "blue kept: {:?}", px[1]);
+        // The third pixel has R clipped, so it is limited (R to its ceiling), G/B stay below theirs.
+        assert!((px[2][0] - 0.5).abs() < 1e-6, "{:?}", px[2]);
+    }
+
+    #[test]
+    fn a_white_balance_gain_below_one_does_not_crush_unclipped_pixels() {
+        // R gain 0.5 makes the white-balanced white 0.5, so a clipped pixel's G is limited to
+        // 0.5 -- but an unclipped green (G 0.9, R 0.1) must come through whole.
+        let f = clip_frame(
+            [0.5, 1.0, 1.0, 1.0],
+            [0; 4],
+            vec![200, 1000, 150, 1100, 1100, 1100],
+        );
+        let px = normalize_pixels(&f);
+        assert!(
+            (px[0][1] - 0.9).abs() < 1e-6,
+            "unclipped green kept: {:?}",
+            px[0]
+        );
+        let g = crate::color::wb_gains(f.cam_mul);
+        let wb = [px[1][0] * g[0], px[1][1] * g[1], px[1][2] * g[2]];
+        assert!(
+            (wb[0] - wb[1]).abs() < 1e-6 && (wb[1] - wb[2]).abs() < 1e-6,
+            "{wb:?}"
+        );
+    }
+
+    #[test]
+    fn a_pixel_just_under_the_margin_is_not_clipped_and_one_inside_it_is() {
+        let f = clip_frame([1.0, 1.0, 1.0, 1.0], [0; 4], vec![1000, 1000, 1000]);
+        let c = ClipNeutral::for_frame(&f);
+        // Gains are all 1, so the ceiling equals the clip level (1.0) and an interpolated edge
+        // pixel at 0.9995 (inside the 1e-3 margin) is clipped but already at its ceiling.
+        assert_eq!(c.apply([0.9, 0.9, 0.9]), [0.9, 0.9, 0.9]);
+        assert_eq!(c.apply([0.9995, 0.2, 0.2]), [0.9995, 0.2, 0.2]);
+        let skewed = ClipNeutral {
+            clip: [0.999, 0.999, 0.999],
+            ceiling: [0.5, 1.0, 1.0],
+        };
+        assert_eq!(
+            skewed.apply([0.998, 0.9, 0.9]),
+            [0.998, 0.9, 0.9],
+            "under the margin: untouched"
+        );
+        assert_eq!(
+            skewed.apply([0.999, 0.9, 0.9]),
+            [0.5, 0.9, 0.9],
+            "at the margin: limited"
+        );
+    }
+
+    #[test]
+    fn the_clip_margin_is_pinned_through_the_frame_and_the_cpu_twin() {
+        // range 10000 (black 0), gains R 2 / G 1 / B 1.5 -> R ceiling 0.5, R clip level 0.999.
+        let f = LinearFrame {
+            black: 0,
+            maximum: 10_000,
+            ..clip_frame(
+                [2.0, 1.0, 1.5, 1.0],
+                [0; 4],
+                vec![9989, 3000, 3000, 9991, 3000, 3000, 10_000, 3000, 3000],
+            )
+        };
+        let px = normalize_pixels(&f);
+        assert!(
+            (px[0][0] - 0.9989).abs() < 1e-6,
+            "just under the margin: untouched {:?}",
+            px[0]
+        );
+        assert!(
+            (px[1][0] - 0.5).abs() < 1e-6,
+            "inside the margin: limited {:?}",
+            px[1]
+        );
+        assert!(
+            (px[2][0] - 0.5).abs() < 1e-6,
+            "at the level: limited {:?}",
+            px[2]
+        );
+    }
+
+    #[test]
+    fn a_frame_nothing_clips_in_is_unchanged_by_the_limit() {
+        let f = clip_frame([1.0, 1.0, 1.0, 1.0], [0; 4], vec![100, 600, 1099]);
+        let px = normalize_pixels(&f)[0];
+        assert!(
+            (px[0] - 0.0).abs() < 1e-6
+                && (px[1] - 0.5).abs() < 1e-6
+                && (px[2] - 0.999).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn decode_changes_its_cache_key_because_its_pixels_changed() {
+        assert_eq!(decode_stage().impl_version(), 1);
+        assert_ne!(
+            decode_stage().impl_version(),
+            demosaic_stage().impl_version(),
+            "decode's versioned key must differ from an unversioned stage's"
+        );
+    }
+
+    #[test]
+    fn decode_gpu_matches_cpu_reference_on_a_clipped_frame_with_a_cblack() {
+        let Some(gpu) = test_gpu() else { return };
+        let frame = clip_frame(
+            [2.0, 1.0, 1.5, 1.0],
+            [10, 0, 5, 0],
+            // The last pixel is unclipped but above its R ceiling: it must come through whole.
+            vec![
+                1100, 1100, 1100, 1200, 900, 1100, 600, 500, 400, 900, 300, 300,
+            ],
+        );
+        let kernel = DecodeKernel::new(&gpu);
+        let exec = DecodeExec {
+            kernel: &kernel,
+            frame: &frame,
+        };
+        let extent = crate::frame::Extent {
+            width: frame.width,
+            height: frame.height,
+        };
+        let output = FrameTexture::new(&gpu, extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        exec.encode(&gpu, &mut encoder, None, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let actual = crate::test_util::read_frame(&gpu, &output);
+        for (i, (a, e)) in actual
+            .iter()
+            .zip(normalize_pixels(&frame).iter())
+            .enumerate()
+        {
+            for c in 0..4 {
+                assert!(
+                    (a[c] - e[c]).abs() < 0.01,
+                    "pixel {i} c{c}: gpu={} cpu={}",
+                    a[c],
+                    e[c]
+                );
+            }
+        }
     }
 
     #[test]

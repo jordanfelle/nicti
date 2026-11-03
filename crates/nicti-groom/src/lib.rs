@@ -59,22 +59,36 @@ pub trait PixelSource: Send + Sync {
 }
 
 /// [`PixelSource`] over a decoded RAW frame, using `normalize.wgsl`'s formula.
-pub struct FramePixels(pub Arc<LinearFrame>);
+pub struct FramePixels {
+    frame: Arc<LinearFrame>,
+    clip: nicti_tapetum::stages::ClipNeutral,
+}
+
+impl FramePixels {
+    pub fn new(frame: Arc<LinearFrame>) -> Self {
+        let clip = nicti_tapetum::stages::ClipNeutral::for_frame(&frame);
+        Self { frame, clip }
+    }
+
+    pub fn frame(&self) -> &Arc<LinearFrame> {
+        &self.frame
+    }
+}
 
 impl PixelSource for FramePixels {
     fn width(&self) -> u32 {
-        self.0.width
+        self.frame.width
     }
     fn height(&self) -> u32 {
-        self.0.height
+        self.frame.height
     }
     fn pixel(&self, x: u32, y: u32) -> [f32; 3] {
-        let f = &*self.0;
+        let f = &*self.frame;
         let range = f.maximum as f32 - f.black as f32;
         let base = (y as usize * f.width as usize + x as usize) * 3;
         let sample =
             |c: usize| (f.pixels[base + c] as f32 - f.black as f32 - f.cblack[c] as f32) / range;
-        [sample(0), sample(1), sample(2)]
+        self.clip.apply([sample(0), sample(1), sample(2)])
     }
 }
 
@@ -121,7 +135,7 @@ mod tests {
             orientation: 0,
         };
         let expected = normalize_pixels(&frame);
-        let src = FramePixels(Arc::new(frame));
+        let src = FramePixels::new(Arc::new(frame));
         for y in 0..2u32 {
             for x in 0..3u32 {
                 let e = expected[(y * 3 + x) as usize];
@@ -131,5 +145,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn frame_pixels_apply_the_same_clip_neutral_ceiling() {
+        let frame = LinearFrame {
+            make: "T".into(),
+            model: "S".into(),
+            width: 3,
+            height: 1,
+            black: 100,
+            maximum: 1100,
+            cam_mul: [2.0, 1.0, 1.5, 1.0],
+            pre_mul: [2.0, 1.0, 1.5, 1.0],
+            cam_xyz: [0.0; 12],
+            cblack: [0; 4],
+            pixels: vec![1100, 1100, 1100, 500, 400, 300, 900, 300, 300],
+            dng_opcode_list3: None,
+            nikon_lens_info: None,
+            orientation: 0,
+        };
+        let expected = normalize_pixels(&frame);
+        let src = FramePixels::new(Arc::new(frame));
+        for x in 0..3u32 {
+            let a = src.pixel(x, 0);
+            for c in 0..3 {
+                assert!((a[c] - expected[x as usize][c]).abs() < 1e-6, "x{x} c{c}");
+            }
+        }
+        // The clipped pixel really is limited (not left at 1.0 in R).
+        assert!(src.pixel(0, 0)[0] < 0.51);
+        // ...while an unclipped red above that ceiling (0.8 > 0.5) is left whole.
+        assert!((src.pixel(2, 0)[0] - 0.8).abs() < 1e-6);
     }
 }

@@ -391,7 +391,7 @@ impl RemovalService {
         let cam_mul = frame.cam_mul;
         let (job, slot) = RemoveJob::new(
             backend,
-            Arc::new(FramePixels(frame)),
+            Arc::new(FramePixels::new(frame)),
             develop.frame_key(),
             cam_mul,
             prompt,
@@ -862,7 +862,7 @@ fn place_spot(
     let spot = match heal.kind {
         SpotKind::Clone | SpotKind::Heal => {
             let offset = auto_source_pick(
-                &FramePixels(develop.frame_arc()),
+                &FramePixels::new(develop.frame_arc()),
                 (p.0.round() as i32, p.1.round() as i32),
                 radius,
             )
