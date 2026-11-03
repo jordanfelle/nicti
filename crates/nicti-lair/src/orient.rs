@@ -138,6 +138,54 @@ pub fn backfill_root(
 mod tests {
     use super::*;
 
+    /// A tiny real JPEG with an APP1/EXIF segment holding only `Orientation = value`.
+    fn tagged_jpeg(value: u16) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .write_image(&[90u8; 8 * 8 * 3], 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&value.to_le_bytes());
+        tiff.extend_from_slice(&[0, 0]);
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+        out.extend_from_slice(b"Exif\0\0");
+        out.extend_from_slice(&tiff);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    /// #652: the catalog column (kamadak-exif, 1-8) and the decoder's frame orientation (the
+    /// `image` crate, 0 or 2-8) read the same tag; they may differ only by 1 <-> 0.
+    #[test]
+    fn catalog_and_decoder_agree_on_every_orientation_tag() {
+        use nicti_cornea::RawDecoder;
+        let dir = tempfile::tempdir().unwrap();
+        for tag in 1u16..=9 {
+            let p = dir.path().join(format!("o{tag}.jpg"));
+            std::fs::write(&p, tagged_jpeg(tag)).unwrap();
+            let catalog = file_orientation(&p).unwrap();
+            let frame = nicti_cornea::JpegDecoder
+                .decode_linear(&p)
+                .unwrap()
+                .orientation;
+            assert_eq!(
+                catalog.saturating_sub(1).min(7) + 1,
+                catalog,
+                "catalog is 1-8"
+            );
+            let want = if catalog == 1 { 0 } else { catalog };
+            assert_eq!(frame, want, "EXIF tag {tag}");
+        }
+    }
+
     #[test]
     fn an_unreadable_file_has_no_orientation() {
         assert_eq!(file_orientation(Path::new("/nonexistent/x.jpg")), None);

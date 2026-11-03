@@ -31,7 +31,7 @@ pub mod jpeg;
 
 #[cfg(feature = "libraw")]
 pub use jpeg::SourceDecoder;
-pub use jpeg::{is_jpeg, JpegDecoder};
+pub use jpeg::{is_jpeg, JpegDecoder, JPEG_EXTENSIONS};
 
 /// A RAW decoder backend.
 pub trait RawDecoder: Module {
