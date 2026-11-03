@@ -13,6 +13,7 @@ mod app;
 mod archive_drives;
 mod cache_settings;
 mod camera_profiles;
+mod card_copy_ui;
 mod catalog;
 mod catalog_problem;
 mod catseye;

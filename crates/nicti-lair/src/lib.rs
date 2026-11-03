@@ -21,6 +21,7 @@ pub mod schema;
 mod sqlite;
 
 pub mod backup;
+pub mod cardcopy;
 pub mod cards;
 pub mod carry;
 pub mod clowder;

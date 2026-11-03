@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
+use crate::cardcopy::{CardCopy, CardCopyReport};
 use crate::carry::{Carry, CarryOptions, CarryOutcome, ResumeMoves, Resumed};
 use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
@@ -840,6 +841,98 @@ impl Drop for RightingJob {
                 self.righting
                     .take()
                     .map(|r| r.into_run())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+}
+
+/// Copy from a camera card (#602): steps [`CardCopy`] one file (then one registration chunk) per
+/// call. Reports under [`JobKind::Import`], so the import/sync/move guards and the grid's busy ->
+/// idle refresh cover it. The card is read-only to it. Never returns `Err`; a cancelled job is
+/// dropped and `Drop` hands over what was done (the unattempted files are counted).
+pub struct CardCopyJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    copy: Option<CardCopy>,
+    label: String,
+    progress: Progress,
+    result: ReportSlot<CardCopyReport>,
+}
+
+impl CardCopyJob {
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        copy: CardCopy,
+        label: String,
+    ) -> (Self, ReportSlot<CardCopyReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = CardCopyJob {
+            store,
+            copy: Some(copy),
+            label,
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for CardCopyJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Foreground,
+            kind: JobKind::Import,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let copy = self
+            .copy
+            .as_mut()
+            .expect("CardCopyJob::step called again after it already reported Done");
+        let more = match copy.step(self.store.as_ref(), &|| false) {
+            Ok(more) => more,
+            Err(e) => {
+                let mut report = self.copy.take().unwrap().into_report();
+                report.ingest_error = Some(e.to_string());
+                *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+                return Ok(Step::Done);
+            }
+        };
+        let (done, total) = copy.progress();
+        self.progress = Progress {
+            done,
+            total: Some(total),
+        };
+        if more {
+            Ok(Step::Yield)
+        } else {
+            let report = self.copy.take().unwrap().into_report();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+            Ok(Step::Done)
+        }
+    }
+}
+
+impl Drop for CardCopyJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(
+                self.copy
+                    .take()
+                    .map(|c| c.into_report())
                     .unwrap_or_default(),
             );
         }
