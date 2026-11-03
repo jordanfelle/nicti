@@ -25,6 +25,8 @@ pub enum SpecError {
     JpegQuality(u8),
     #[error("AVIF quality must be 1..=100, got {0}")]
     AvifQuality(u8),
+    #[error("WebP quality must be 1..=100, got {0}")]
+    WebpQuality(u8),
     #[error("AVIF export supports the sRGB color space only")]
     AvifColorSpace,
     #[error("DPI must be 1..=10000, got {0}")]
@@ -119,6 +121,11 @@ impl ExportSpec {
         if let FormatSpec::Jpeg { quality, .. } = self.format {
             if !(1..=100).contains(&quality) {
                 return Err(SpecError::JpegQuality(quality));
+            }
+        }
+        if let FormatSpec::WebpLossy { quality } = self.format {
+            if !(1..=100).contains(&quality) {
+                return Err(SpecError::WebpQuality(quality));
             }
         }
         if let FormatSpec::Avif { quality, .. } = self.format {
@@ -239,8 +246,13 @@ pub enum FormatSpec {
         #[serde(default = "default_depth")]
         depth: BitDepth,
     },
-    /// Lossless WebP (8-bit); no quality knob until a lossy encoder exists (#361).
+    /// Lossless WebP (8-bit).
     Webp,
+    /// Lossy WebP (8-bit, libwebp) at `quality` 1..=100 (#639).
+    WebpLossy {
+        #[serde(default = "default_webp_quality")]
+        quality: u8,
+    },
 }
 
 fn default_quality() -> u8 {
@@ -248,6 +260,10 @@ fn default_quality() -> u8 {
 }
 
 fn default_avif_quality() -> u8 {
+    80
+}
+
+fn default_webp_quality() -> u8 {
     80
 }
 
@@ -271,13 +287,15 @@ impl FormatSpec {
             FormatSpec::Png { .. } => ExportFormat::Png,
             FormatSpec::Tiff { .. } => ExportFormat::Tiff,
             FormatSpec::Avif { .. } => ExportFormat::Avif,
-            FormatSpec::Webp => ExportFormat::Webp,
+            FormatSpec::Webp | FormatSpec::WebpLossy { .. } => ExportFormat::Webp,
         }
     }
 
     pub fn depth(&self) -> BitDepth {
         match self {
-            FormatSpec::Jpeg { .. } | FormatSpec::Webp => BitDepth::Eight,
+            FormatSpec::Jpeg { .. } | FormatSpec::Webp | FormatSpec::WebpLossy { .. } => {
+                BitDepth::Eight
+            }
             FormatSpec::Png { depth }
             | FormatSpec::Tiff { depth, .. }
             | FormatSpec::Avif { depth, .. } => *depth,
@@ -551,6 +569,16 @@ mod tests {
     }
 
     #[test]
+    fn webp_unit_variant_and_lossy_both_deserialise() {
+        let old: ExportSpec = serde_json::from_str(r#"{"format":{"kind":"webp"}}"#).unwrap();
+        assert_eq!(old.format, FormatSpec::Webp);
+        let lossy: ExportSpec =
+            serde_json::from_str(r#"{"format":{"kind":"webp_lossy"}}"#).unwrap();
+        assert_eq!(lossy.format, FormatSpec::WebpLossy { quality: 80 });
+        assert_eq!(lossy.format.format(), ExportFormat::Webp);
+    }
+
+    #[test]
     fn validate_rejects_out_of_range_values() {
         let good = ExportSpec::default();
         let mut s = good.clone();
@@ -572,6 +600,13 @@ mod tests {
         assert_eq!(s.validate(), Ok(()));
         s.color_space = ExportSpace::DisplayP3;
         assert_eq!(s.validate(), Err(SpecError::AvifColorSpace));
+        let mut s = good.clone();
+        s.format = FormatSpec::WebpLossy { quality: 0 };
+        assert_eq!(s.validate(), Err(SpecError::WebpQuality(0)));
+        s.format = FormatSpec::WebpLossy { quality: 101 };
+        assert_eq!(s.validate(), Err(SpecError::WebpQuality(101)));
+        s.format = FormatSpec::WebpLossy { quality: 1 };
+        assert_eq!(s.validate(), Ok(()));
         let mut s = good.clone();
         s.dpi = 0;
         assert_eq!(s.validate(), Err(SpecError::Dpi(0)));

@@ -423,7 +423,7 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                 ui.selectable_value(&mut kind, ExportFormat::Jpeg, "JPEG");
                 ui.selectable_value(&mut kind, ExportFormat::Png, "PNG");
                 ui.selectable_value(&mut kind, ExportFormat::Tiff, "TIFF");
-                ui.selectable_value(&mut kind, ExportFormat::Webp, "WebP (lossless)");
+                ui.selectable_value(&mut kind, ExportFormat::Webp, "WebP");
                 #[cfg(feature = "avif-export")]
                 ui.selectable_value(&mut kind, ExportFormat::Avif, "AVIF");
             });
@@ -437,7 +437,7 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                     depth: BitDepth::Sixteen,
                     compression: TiffCompression::Deflate,
                 },
-                ExportFormat::Webp => FormatSpec::Webp,
+                ExportFormat::Webp => FormatSpec::WebpLossy { quality: 80 },
                 ExportFormat::Avif => {
                     // The AVIF encoder labels sRGB only (`ExportSpec::validate`).
                     spec.color_space = ExportSpace::Srgb;
@@ -465,7 +465,16 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                     });
             }
             FormatSpec::Png { depth } => depth_picker(ui, depth),
-            FormatSpec::Webp => {}
+            FormatSpec::Webp | FormatSpec::WebpLossy { .. } => {
+                let mut lossless = matches!(spec.format, FormatSpec::Webp);
+                if ui.checkbox(&mut lossless, "Lossless").changed() {
+                    spec.format = if lossless {
+                        FormatSpec::Webp
+                    } else {
+                        FormatSpec::WebpLossy { quality: 80 }
+                    };
+                }
+            }
             FormatSpec::Avif { depth, .. } => {
                 ui.selectable_value(depth, BitDepth::Eight, "8-bit");
                 ui.selectable_value(depth, BitDepth::Sixteen, "10-bit");
@@ -490,6 +499,14 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
     if let FormatSpec::Jpeg { quality, .. } = &mut spec.format {
         const QUALITY: SliderSpec =
             SliderSpec::new("export-quality", "Quality", 1.0, 100.0, 90.0).step(1.0, 0);
+        let mut q = f32::from(*quality);
+        if fur::slider(ui, &QUALITY, &mut q, true).changed {
+            *quality = q.round() as u8;
+        }
+    }
+    if let FormatSpec::WebpLossy { quality } = &mut spec.format {
+        const QUALITY: SliderSpec =
+            SliderSpec::new("export-webp-quality", "Quality", 1.0, 100.0, 80.0).step(1.0, 0);
         let mut q = f32::from(*quality);
         if fur::slider(ui, &QUALITY, &mut q, true).changed {
             *quality = q.round() as u8;

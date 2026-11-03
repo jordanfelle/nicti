@@ -314,29 +314,89 @@ impl Exporter for WebpExporter {
         fmt: &FormatSpec,
         embed: &Embed<'_>,
     ) -> Result<Vec<u8>, ExportError> {
-        if !matches!(fmt, FormatSpec::Webp) {
-            return Err(wrong_format("WebpExporter", fmt));
-        }
+        let quality = match fmt {
+            FormatSpec::Webp => None,
+            FormatSpec::WebpLossy { quality } => Some(*quality),
+            _ => return Err(wrong_format("WebpExporter", fmt)),
+        };
         let OutputPixels::Rgb8(px) = img.pixels else {
             return Err(ExportError::Encode(
-                "lossless WebP is 8-bit only; got 16-bit pixels".into(),
+                "WebP is 8-bit only; got 16-bit pixels".into(),
             ));
         };
-        let mut buf = Vec::new();
-        let mut enc = image_webp::WebPEncoder::new(&mut buf);
-        if !embed.icc.is_empty() {
-            enc.set_icc_profile(embed.icc.to_vec());
+        match quality {
+            None => {
+                let mut buf = Vec::new();
+                let mut enc = image_webp::WebPEncoder::new(&mut buf);
+                if !embed.icc.is_empty() {
+                    enc.set_icc_profile(embed.icc.to_vec());
+                }
+                if let Some(exif) = embed.exif {
+                    enc.set_exif_metadata(exif_tiff_bytes(exif)?);
+                }
+                if let Some(xmp) = embed.xmp {
+                    enc.set_xmp_metadata(xmp.as_bytes().to_vec());
+                }
+                enc.encode(px, img.width, img.height, image_webp::ColorType::Rgb8)
+                    .map_err(|e| encode_err("WebP encode", e))?;
+                Ok(buf)
+            }
+            Some(q) => encode_lossy_webp(px, img.width, img.height, q, embed),
         }
-        if let Some(exif) = embed.exif {
-            enc.set_exif_metadata(exif_tiff_bytes(exif)?);
-        }
-        if let Some(xmp) = embed.xmp {
-            enc.set_xmp_metadata(xmp.as_bytes().to_vec());
-        }
-        enc.encode(px, img.width, img.height, image_webp::ColorType::Rgb8)
-            .map_err(|e| encode_err("WebP encode", e))?;
-        Ok(buf)
     }
+}
+
+/// Lossy WebP through libwebp (#639), then ICC/EXIF/XMP chunks added with `img-parts` (libwebp's
+/// simple encoder writes none). `img-parts` upgrades the file to VP8X and keeps its flag byte in
+/// step with the chunks, so the XMP chunk is pushed first and `set_exif` runs last.
+fn encode_lossy_webp(
+    px: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+    embed: &Embed<'_>,
+) -> Result<Vec<u8>, ExportError> {
+    use img_parts::riff::{RiffChunk, RiffContent};
+    use img_parts::webp::{WebP, CHUNK_XMP};
+    use img_parts::{ImageEXIF, ImageICC};
+
+    let need = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(3));
+    if need != Some(px.len()) {
+        return Err(ExportError::Encode(format!(
+            "WebP pixel buffer is {} bytes, expected {width}x{height}x3",
+            px.len()
+        )));
+    }
+    let mut config =
+        webp::WebPConfig::new().map_err(|()| ExportError::Encode("WebP encoder config".into()))?;
+    config.lossless = 0;
+    config.quality = f32::from(quality);
+    let mem = webp::Encoder::from_rgb(px, width, height)
+        .encode_advanced(&config)
+        .map_err(|e| encode_err("WebP encode", format!("{e:?}")))?;
+    if embed.icc.is_empty() && embed.exif.is_none() && embed.xmp.is_none() {
+        return Ok(mem.to_vec());
+    }
+    let mut file = WebP::from_bytes(bytes::Bytes::copy_from_slice(&mem))
+        .map_err(|e| encode_err("WebP container", e))?;
+    if let Some(xmp) = embed.xmp {
+        file.chunks_mut().push(RiffChunk::new(
+            CHUNK_XMP,
+            RiffContent::Data(bytes::Bytes::from(xmp.as_bytes().to_vec())),
+        ));
+    }
+    if !embed.icc.is_empty() {
+        file.set_icc_profile(Some(bytes::Bytes::copy_from_slice(embed.icc)));
+    }
+    let exif = embed.exif.map(exif_tiff_bytes).transpose()?;
+    file.set_exif(exif.map(bytes::Bytes::from));
+    let mut out = Vec::new();
+    file.encoder()
+        .write_to(&mut out)
+        .map_err(|e| encode_err("WebP write", e))?;
+    Ok(out)
 }
 
 // --- AVIF -------------------------------------------------------------------------------------
@@ -778,6 +838,75 @@ mod tests {
         let mut dec = image_webp::WebPDecoder::new(Cursor::new(&out)).unwrap();
         assert_eq!(dec.icc_profile().unwrap().unwrap(), f.icc);
         assert!(dec.exif_metadata().unwrap().is_some());
+    }
+
+    #[test]
+    fn lossy_webp_is_vp8_with_icc_exif_xmp_and_quality_changes_size() {
+        let f = fixture(OutputSpace::Srgb, 64, 48);
+        let px = gradient8(64, 48);
+        let img = OutputImage {
+            width: 64,
+            height: 48,
+            pixels: &px,
+        };
+        let enc = |q| {
+            WebpExporter
+                .encode(&img, &FormatSpec::WebpLossy { quality: q }, &embed(&f, 300))
+                .unwrap()
+        };
+        let (lo, hi) = (enc(10), enc(95));
+        assert!(lo.len() < hi.len(), "{} !< {}", lo.len(), hi.len());
+        assert!(hi.windows(4).any(|w| w == b"VP8 "), "lossy stream is VP8");
+        assert!(!hi.windows(4).any(|w| w == b"VP8L"));
+        for chunk in [&b"VP8X"[..], b"ICCP", b"EXIF", b"XMP "] {
+            assert!(hi.windows(4).any(|w| w == chunk), "{chunk:?}");
+        }
+        // The VP8X flag byte must advertise exactly ICC (0x20) + EXIF (0x08) + XMP (0x04).
+        let at = hi.windows(4).position(|w| w == b"VP8X").unwrap();
+        assert_eq!(hi[at + 8], 0x20 | 0x08 | 0x04);
+        let mut dec = image_webp::WebPDecoder::new(Cursor::new(&hi)).unwrap();
+        assert_eq!(dec.icc_profile().unwrap().unwrap(), f.icc);
+        assert!(dec.exif_metadata().unwrap().is_some());
+        assert!(dec.xmp_metadata().unwrap().is_some());
+        let back = image::load_from_memory(&hi).unwrap().to_rgb8();
+        assert_eq!(back.dimensions(), (64, 48));
+    }
+
+    #[test]
+    fn lossy_webp_without_metadata_stays_a_simple_file() {
+        let px = gradient8(16, 16);
+        let img = OutputImage {
+            width: 16,
+            height: 16,
+            pixels: &px,
+        };
+        let bare = Embed {
+            icc: &[],
+            dpi: 72,
+            exif: None,
+            xmp: None,
+        };
+        let out = WebpExporter
+            .encode(&img, &FormatSpec::WebpLossy { quality: 80 }, &bare)
+            .unwrap();
+        assert!(!out.windows(4).any(|w| w == b"VP8X"));
+        assert!(WebpExporter
+            .encode(
+                &gradient16_img(),
+                &FormatSpec::WebpLossy { quality: 80 },
+                &bare
+            )
+            .is_err());
+    }
+
+    fn gradient16_img() -> OutputImage<'static> {
+        // Leaked once per call: tiny and test-only, keeps the borrow 'static.
+        let px: &'static OutputPixels = Box::leak(Box::new(gradient16(8, 8)));
+        OutputImage {
+            width: 8,
+            height: 8,
+            pixels: px,
+        }
     }
 
     #[test]

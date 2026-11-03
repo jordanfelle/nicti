@@ -354,6 +354,7 @@ mod tests {
                 compression: TiffCompression::Deflate,
             },
             FormatSpec::Webp,
+            FormatSpec::WebpLossy { quality: 70 },
         ] {
             let spec = ExportSpec {
                 format,
