@@ -111,13 +111,15 @@ impl MaskUi {
 
     /// The photo thumbnail for colour sampling, rebuilt only when the photo changes.
     fn thumb_for(&mut self, develop: &DevelopDoc) -> Arc<Thumb> {
-        let key = develop.frame_key();
+        // Keyed with the lens options: the thumbnail is sampled in the rendered (post-lens) frame's
+        // coordinates, so toggling the lens must rebuild it (#358).
+        let key = develop.lensed_frame_key();
         if let Some((k, t)) = &self.thumb {
             if *k == key {
                 return Arc::clone(t);
             }
         }
-        let t = Arc::new(Thumb::build(develop.frame_arc()));
+        let t = Arc::new(Thumb::build(develop.frame_arc(), develop.lens_params()));
         self.thumb = Some((key, Arc::clone(&t)));
         t
     }

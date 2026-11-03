@@ -109,12 +109,41 @@ impl RenderStage for BasicStage {
     }
 }
 
-pub fn neutral_stage() -> BasicStage {
-    BasicStage {
-        id: NEUTRAL,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
+/// The neutral render's stage version. Bumped to 1 by #358: the pixels AI masks and removal are
+/// inferred from are now the post-lens frame, so an alpha stored (Larder, #353) under a key from
+/// before that was inferred on pre-lens pixels and must not be served for it. `LENS`'s own version
+/// stays 0 on purpose (it keeps old documents' lens keys valid); this is the knob for the neutral
+/// node alone.
+const NEUTRAL_IMPL_VERSION: u32 = 1;
+
+pub struct NeutralStage;
+
+impl Module for NeutralStage {
+    fn id(&self) -> &str {
+        NEUTRAL
     }
+    fn schema_version(&self) -> u32 {
+        1
+    }
+    fn migrate_params(&self, _from_version: u32, params: Value) -> Option<Value> {
+        Some(params)
+    }
+}
+
+impl RenderStage for NeutralStage {
+    fn kind(&self) -> StageKind {
+        StageKind::Baked
+    }
+    fn default_params(&self) -> Value {
+        json!({})
+    }
+    fn impl_version(&self) -> u32 {
+        NEUTRAL_IMPL_VERSION
+    }
+}
+
+pub fn neutral_stage() -> NeutralStage {
+    NeutralStage
 }
 pub fn masks_stage() -> BasicStage {
     BasicStage {
@@ -2180,6 +2209,16 @@ mod tests {
                 && (px[1] - 0.5).abs() < 1e-6
                 && (px[2] - 0.999).abs() < 1e-6
         );
+    }
+
+    #[test]
+    fn the_neutral_node_is_versioned_so_pre_lens_ai_alphas_are_not_served() {
+        // #358: AI alphas stored before the CPU inputs became post-lens were inferred on pre-lens
+        // pixels, under keys that chain from this node.
+        assert_eq!(neutral_stage().impl_version(), 1);
+        assert_eq!(neutral_stage().kind(), StageKind::Baked);
+        assert_eq!(neutral_stage().id(), NEUTRAL);
+        assert_eq!(lens_stage().impl_version(), 0, "lens keys stay valid");
     }
 
     #[test]

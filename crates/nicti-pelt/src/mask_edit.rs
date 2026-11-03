@@ -526,13 +526,13 @@ impl Thumb {
     /// Averages an evenly strided grid of source pixels per thumbnail pixel (about 7x7 taps for a
     /// 45 MP frame, where a block is ~86 px and the stride 14), so the build costs a few hundred
     /// thousand reads -- built once per photo, only when a colour/range mask needs it.
-    pub fn build(frame: Arc<LinearFrame>) -> Self {
+    pub fn build(frame: Arc<LinearFrame>, lens: nicti_tapetum::coat::LensParams) -> Self {
         let matrix = color::camera_to_working_space_matrix(
             frame.cam_mul,
             &frame.cam_xyz,
             &WbParams::default(),
         );
-        let source = FramePixels::new(frame);
+        let source = FramePixels::lensed(frame, lens);
         let (w, h) = (source.width() as usize, source.height() as usize);
         // Never larger than the source: a tiny frame is its own thumbnail.
         let scale = (THUMB_LONG_EDGE as f32 / w.max(h).max(1) as f32).min(1.0);
@@ -988,7 +988,7 @@ mod tests {
 
     #[test]
     fn a_thumbnail_downsamples_a_big_frame_and_samples_distinct_colours() {
-        let t = Thumb::build(Arc::new(frame(600, 400)));
+        let t = Thumb::build(Arc::new(frame(600, 400)), Default::default());
         assert_eq!((t.width, t.height), (THUMB_LONG_EDGE, 64));
         let left = t.sample_lab(0.2, 0.5);
         let right = t.sample_lab(0.8, 0.5);
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn a_tiny_frame_still_makes_a_thumbnail() {
-        let t = Thumb::build(Arc::new(frame(2, 2)));
+        let t = Thumb::build(Arc::new(frame(2, 2)), Default::default());
         assert_eq!((t.width, t.height), (2, 2));
     }
 }

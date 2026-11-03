@@ -116,6 +116,11 @@ pub struct DevelopDoc {
     frame: Arc<LinearFrame>,
     extent: Extent,
     graph: RenderGraph,
+    /// The lens options `graph` was last built from (the render's, so "Before" is the default).
+    /// The CPU consumers of the post-lens frame (#358) take their pixels from this, never from the
+    /// live document: `neutral_key()` comes from `graph`, so pixels from a newer document would be
+    /// stored under an older key.
+    graph_lens: coat::LensParams,
     registry: StageRegistry,
     /// The user's actual edits and their undo/redo log (#324). The document is persisted to the
     /// catalog by the app (`PeltApp::save_develop_edits`, #57) whenever [`Self::is_dirty`]; the log
@@ -302,6 +307,7 @@ impl DevelopDoc {
             frame,
             extent,
             graph: build_graph(),
+            graph_lens: coat::LensParams::default(),
             registry: build_registry(),
             history: History::new(EditDocument::default()),
             gesture_window_ms: GESTURE_WINDOW_MS,
@@ -421,6 +427,29 @@ impl DevelopDoc {
     /// registered stage's own `default_params()`. Never affected by `show_before` (that only
     /// changes what `render()` itself uses); a UI slider always reflects the real edit, not
     /// whatever the before/after toggle happens to show right now.
+    /// The lens correction the render (and so [`Self::neutral_key`]) was last built from: the
+    /// document's lens options as of the last render, and the default straight after a load or
+    /// while the "before" view shows the unedited photo.
+    pub fn lens_params(&self) -> coat::LensParams {
+        self.graph_lens
+    }
+
+    /// [`Self::frame_key`] folded with the lens options, for caches of lens-dependent CPU data (the
+    /// colour-sampling thumbnail): a lens toggle changes the pixels, so it must change the key.
+    pub fn lensed_frame_key(&self) -> u64 {
+        let l = self.lens_params();
+        let bits = u64::from(l.remove_ca)
+            | u64::from(l.embedded_profile) << 1
+            | u64::from(l.nikon_profile) << 2;
+        self.frame_key() ^ (bits << 56)
+    }
+
+    /// The open photo's pixels as the baked frame holds them after lens correction (#358), for the
+    /// CPU consumers that must line up with the render: AI masks, AI removal, the source pick.
+    pub fn lensed_pixels(&self) -> nicti_groom::FramePixels {
+        nicti_groom::FramePixels::lensed(self.frame_arc(), self.lens_params())
+    }
+
     pub fn stage_params<T: serde::de::DeserializeOwned + Default>(&self, stage_id: &str) -> T {
         match self.history.document().stages.get(stage_id) {
             Some(entry) => coat::parse(&entry.params),
@@ -741,6 +770,7 @@ impl DevelopDoc {
         self.graph
             .apply_document(&identity_only, &self.registry)
             .expect("build_registry covers every id build_graph adds");
+        self.graph_lens = coat::LensParams::default();
     }
 
     /// How the loaded photo's EXIF orientation turns the on-screen image (#341). The frame, the edit
@@ -980,6 +1010,7 @@ impl DevelopEngine {
         dv.graph
             .apply_document(&doc, &dv.registry)
             .expect("build_registry covers every id build_graph adds");
+        dv.graph_lens = spine::resolve(&doc, LENS);
         if !dv.show_before {
             // The masks entry is stamped with which AI alphas are ready, so one arriving (or being
             // replaced) recomposes only the corrections that use it. The stamp needs the neutral
@@ -1349,6 +1380,49 @@ const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
 
 #[cfg(test)]
 mod tests {
+    /// #358: the pixels the CPU consumers (AI mask bakes, removal) read and the neutral key a bake
+    /// is stored under must come from the same moment: both follow the last *render*, never the live
+    /// document, so a lens change in the document cannot pair an old key with new-lens pixels.
+    #[test]
+    fn the_cpu_frames_lens_options_and_the_neutral_key_change_together_at_the_render() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        view.load_real_frame(
+            view.frame_arc(),
+            blake3::hash(b"photo"),
+            EditDocument::default(),
+        );
+        view.render();
+        let (key0, lens0, thumb0) = (
+            view.neutral_key(),
+            view.lens_params(),
+            view.lensed_frame_key(),
+        );
+        view.set_stage_params(
+            LENS,
+            &coat::LensParams {
+                remove_ca: true,
+                ..Default::default()
+            },
+        );
+        // Edited but not rendered: key, options and thumbnail key all still describe the old render.
+        assert_eq!(
+            (
+                view.neutral_key(),
+                view.lens_params(),
+                view.lensed_frame_key()
+            ),
+            (key0, lens0, thumb0)
+        );
+        view.render();
+        assert!(view.lens_params().remove_ca);
+        assert_ne!(view.neutral_key(), key0, "the neutral key follows the lens");
+        assert_ne!(view.lensed_frame_key(), thumb0);
+        let _ = view.lensed_pixels(); // lazy: no plan is resolved until a pixel is read
+    }
+
     #[test]
     fn the_loaded_frames_exif_orientation_becomes_the_views_orientation() {
         use crate::view_orient::ViewOrient;

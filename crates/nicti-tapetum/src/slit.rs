@@ -77,10 +77,27 @@ fn ca_key(frame: &LinearFrame, center: Option<[f64; 2]>) -> u64 {
     u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
 }
 
+/// Serialises estimator runs so several workers hitting a cold memo for the same frame (AI mask
+/// bakes, a removal, the thumbnail, #358) compute it once: the others wait and then hit the memo.
+static CA_COMPUTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn memo_lookup(key: u64) -> Option<[f64; 2]> {
+    CA_MEMO
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| *v)
+}
+
 fn estimate_ca_memoised(frame: &LinearFrame, center: Option<[f64; 2]>) -> [f64; 2] {
     let key = ca_key(frame, center);
-    if let Some((_, v)) = CA_MEMO.lock().unwrap().iter().find(|(k, _)| *k == key) {
-        return *v;
+    if let Some(v) = memo_lookup(key) {
+        return v;
+    }
+    let _single_flight = CA_COMPUTE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(v) = memo_lookup(key) {
+        return v; // another thread computed it while this one waited
     }
     #[cfg(test)]
     CA_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -244,6 +261,69 @@ impl LensPlan {
             ([0.0; 2], None)
         };
         Self::new(model.as_ref(), alpha, center, extent)
+    }
+
+    /// The lens-corrected value of the output pixel centred at `p` (pixel units, so a pixel `x` is
+    /// centred at `x + 0.5`): each channel is read from its own warped, CA-scaled source position
+    /// by bilinear interpolation over `load` (which must clamp to the frame), then the vignette
+    /// gain at the green source position is applied. The same f32 arithmetic as `slit.wgsl`, so a
+    /// CPU consumer (AI masks, AI removal, #358) sees the pixels the baked frame holds.
+    pub fn sample(&self, p: [f32; 2], load: impl Fn(i32, i32) -> [f32; 3]) -> [f32; 3] {
+        let bilinear = |q: [f32; 2]| -> [f32; 3] {
+            let (qx, qy) = (q[0] - 0.5, q[1] - 0.5);
+            let (fx, fy) = (qx.floor(), qy.floor());
+            let (tx, ty) = (qx - fx, qy - fy);
+            let (ix, iy) = (fx as i32, fy as i32);
+            let a = load(ix, iy);
+            let b = load(ix + 1, iy);
+            let c = load(ix, iy + 1);
+            let d = load(ix + 1, iy + 1);
+            std::array::from_fn(|i| {
+                let top = a[i] + (b[i] - a[i]) * tx;
+                let bot = c[i] + (d[i] - c[i]) * tx;
+                top + (bot - top) * ty
+            })
+        };
+        let warp_source = |ch: usize, p: [f32; 2]| -> [f32; 2] {
+            let Some(w) = &self.warp else { return p };
+            let (dx, dy) = (
+                (p[0] - w.center[0]) / w.radius,
+                (p[1] - w.center[1]) / w.radius,
+            );
+            let [k0, k1, k2, k3, t0, t1] = w.planes[ch];
+            let r2 = dx * dx + dy * dy;
+            let f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+            let sx = f * dx + 2.0 * t0 * dx * dy + t1 * (r2 + 2.0 * dx * dx);
+            let sy = f * dy + t0 * (r2 + 2.0 * dy * dy) + 2.0 * t1 * dx * dy;
+            [w.center[0] + sx * w.radius, w.center[1] + sy * w.radius]
+        };
+        let ca_source = |which: usize, s: [f32; 2]| -> [f32; 2] {
+            let Some(c) = &self.ca else { return s };
+            let k = 1.0 + c.alpha[which];
+            [
+                c.center[0] + (s[0] - c.center[0]) * k,
+                c.center[1] + (s[1] - c.center[1]) * k,
+            ]
+        };
+        let vignette_gain = |s: [f32; 2]| -> f32 {
+            let Some(v) = &self.vignette else { return 1.0 };
+            let (dx, dy) = (
+                (s[0] - v.center[0]) / v.radius,
+                (s[1] - v.center[1]) / v.radius,
+            );
+            let r2 = dx * dx + dy * dy;
+            (1.0 + r2 * (v.k[0] + r2 * (v.k[1] + r2 * (v.k[2] + r2 * (v.k[3] + r2 * v.k[4])))))
+                .clamp(0.0, MAX_VIGNETTE_GAIN)
+        };
+        let sr = ca_source(0, warp_source(0, p));
+        let sg = warp_source(1, p);
+        let sb = ca_source(1, warp_source(2, p));
+        let gain = vignette_gain(sg);
+        [
+            bilinear(sr)[0] * gain,
+            bilinear(sg)[1] * gain,
+            bilinear(sb)[2] * gain,
+        ]
     }
 
     fn uniforms(&self, extent: Extent) -> Uniforms {
@@ -424,71 +504,14 @@ pub(crate) mod reference {
         [p[0], p[1], p[2]]
     }
 
-    fn bilinear(img: &[[f32; 4]], e: Extent, p: [f32; 2]) -> [f32; 3] {
-        let (qx, qy) = (p[0] - 0.5, p[1] - 0.5);
-        let (fx, fy) = (qx.floor(), qy.floor());
-        let (tx, ty) = (qx - fx, qy - fy);
-        let (ix, iy) = (fx as i32, fy as i32);
-        let a = load(img, e, ix, iy);
-        let b = load(img, e, ix + 1, iy);
-        let c = load(img, e, ix, iy + 1);
-        let d = load(img, e, ix + 1, iy + 1);
-        std::array::from_fn(|i| {
-            let top = a[i] + (b[i] - a[i]) * tx;
-            let bot = c[i] + (d[i] - c[i]) * tx;
-            top + (bot - top) * ty
-        })
-    }
-
-    fn warp_source(plan: &LensPlan, ch: usize, p: [f32; 2]) -> [f32; 2] {
-        let Some(w) = &plan.warp else { return p };
-        let (dx, dy) = (
-            (p[0] - w.center[0]) / w.radius,
-            (p[1] - w.center[1]) / w.radius,
-        );
-        let [k0, k1, k2, k3, t0, t1] = w.planes[ch];
-        let r2 = dx * dx + dy * dy;
-        let f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3));
-        let sx = f * dx + 2.0 * t0 * dx * dy + t1 * (r2 + 2.0 * dx * dx);
-        let sy = f * dy + t0 * (r2 + 2.0 * dy * dy) + 2.0 * t1 * dx * dy;
-        [w.center[0] + sx * w.radius, w.center[1] + sy * w.radius]
-    }
-
-    fn ca_source(plan: &LensPlan, which: usize, s: [f32; 2]) -> [f32; 2] {
-        let Some(c) = &plan.ca else { return s };
-        let k = 1.0 + c.alpha[which];
-        [
-            c.center[0] + (s[0] - c.center[0]) * k,
-            c.center[1] + (s[1] - c.center[1]) * k,
-        ]
-    }
-
-    fn vignette_gain(plan: &LensPlan, s: [f32; 2]) -> f32 {
-        let Some(v) = &plan.vignette else { return 1.0 };
-        let (dx, dy) = (
-            (s[0] - v.center[0]) / v.radius,
-            (s[1] - v.center[1]) / v.radius,
-        );
-        let r2 = dx * dx + dy * dy;
-        (1.0 + r2 * (v.k[0] + r2 * (v.k[1] + r2 * (v.k[2] + r2 * (v.k[3] + r2 * v.k[4])))))
-            .clamp(0.0, super::MAX_VIGNETTE_GAIN)
-    }
-
     pub(crate) fn apply(img: &[[f32; 4]], e: Extent, plan: &LensPlan) -> Vec<[f32; 4]> {
         let mut out = Vec::with_capacity(img.len());
         for y in 0..e.height {
             for x in 0..e.width {
-                let p = [x as f32 + 0.5, y as f32 + 0.5];
-                let sr = ca_source(plan, 0, warp_source(plan, 0, p));
-                let sg = warp_source(plan, 1, p);
-                let sb = ca_source(plan, 1, warp_source(plan, 2, p));
-                let gain = vignette_gain(plan, sg);
-                out.push([
-                    bilinear(img, e, sr)[0] * gain,
-                    bilinear(img, e, sg)[1] * gain,
-                    bilinear(img, e, sb)[2] * gain,
-                    1.0,
-                ]);
+                let [r, g, b] = plan.sample([x as f32 + 0.5, y as f32 + 0.5], |ix, iy| {
+                    load(img, e, ix, iy)
+                });
+                out.push([r, g, b, 1.0]);
             }
         }
         out
