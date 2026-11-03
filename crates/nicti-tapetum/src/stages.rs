@@ -124,7 +124,7 @@ pub fn masks_stage() -> BasicStage {
     }
 }
 /// Decode's stage version. Bumped to 1 by #552: decode now limits clipped samples to the
-/// clip-neutral ceiling ([`clip_neutral_ceiling`]), which changes pixels for any frame with blown
+/// clip-neutral ceiling ([`ClipNeutral`]), which changes pixels for any frame with blown
 /// highlights, so every cache key chained from it (baked frames, AI bakes) must change with it.
 const DECODE_IMPL_VERSION: u32 = 1;
 
@@ -323,9 +323,12 @@ struct NormalizeParams {
     ceiling: [f32; 4],
 }
 
-/// A normalized channel counts as clipped when it is within this of its clip level. Interpolating
-/// demosaic leaves edge pixels a hair under the level; this catches them. **Untuned**: needs real
-/// frames (the gate for the reconstruct slice, #552 follow-up).
+/// A normalized channel counts as clipped when it is within this of its clip level: float slack
+/// for a sample that really sat at `maximum`. It does **not** catch demosaic-interpolated edge
+/// pixels (a value averaged from clipped and unclipped neighbours lands far under the level, e.g.
+/// 0.975): the one-pixel ring around a blown area keeps its cast, and the step between a limited
+/// pixel and its neighbour is real. Slice 1 neutralizes fully clipped pixels only; the edge ring
+/// and a feathered transition belong to the reconstruct slice (#672). **Untuned.**
 const CLIP_MARGIN: f32 = 1e-3;
 
 /// Clip-neutral (#552, ADR-0438 slice 1): a pixel with a clipped channel is limited so that, after
@@ -2139,6 +2142,36 @@ mod tests {
     }
 
     #[test]
+    fn the_clip_margin_is_pinned_through_the_frame_and_the_cpu_twin() {
+        // range 10000 (black 0), gains R 2 / G 1 / B 1.5 -> R ceiling 0.5, R clip level 0.999.
+        let f = LinearFrame {
+            black: 0,
+            maximum: 10_000,
+            ..clip_frame(
+                [2.0, 1.0, 1.5, 1.0],
+                [0; 4],
+                vec![9989, 3000, 3000, 9991, 3000, 3000, 10_000, 3000, 3000],
+            )
+        };
+        let px = normalize_pixels(&f);
+        assert!(
+            (px[0][0] - 0.9989).abs() < 1e-6,
+            "just under the margin: untouched {:?}",
+            px[0]
+        );
+        assert!(
+            (px[1][0] - 0.5).abs() < 1e-6,
+            "inside the margin: limited {:?}",
+            px[1]
+        );
+        assert!(
+            (px[2][0] - 0.5).abs() < 1e-6,
+            "at the level: limited {:?}",
+            px[2]
+        );
+    }
+
+    #[test]
     fn a_frame_nothing_clips_in_is_unchanged_by_the_limit() {
         let f = clip_frame([1.0, 1.0, 1.0, 1.0], [0; 4], vec![100, 600, 1099]);
         let px = normalize_pixels(&f)[0];
@@ -2165,7 +2198,10 @@ mod tests {
         let frame = clip_frame(
             [2.0, 1.0, 1.5, 1.0],
             [10, 0, 5, 0],
-            vec![1100, 1100, 1100, 1200, 900, 1100, 600, 500, 400],
+            // The last pixel is unclipped but above its R ceiling: it must come through whole.
+            vec![
+                1100, 1100, 1100, 1200, 900, 1100, 600, 500, 400, 900, 300, 300,
+            ],
         );
         let kernel = DecodeKernel::new(&gpu);
         let exec = DecodeExec {

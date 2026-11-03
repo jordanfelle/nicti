@@ -152,7 +152,7 @@ mod tests {
         let frame = LinearFrame {
             make: "T".into(),
             model: "S".into(),
-            width: 2,
+            width: 3,
             height: 1,
             black: 100,
             maximum: 1100,
@@ -160,14 +160,14 @@ mod tests {
             pre_mul: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: [0.0; 12],
             cblack: [0; 4],
-            pixels: vec![1100, 1100, 1100, 500, 400, 300],
+            pixels: vec![1100, 1100, 1100, 500, 400, 300, 900, 300, 300],
             dng_opcode_list3: None,
             nikon_lens_info: None,
             orientation: 0,
         };
         let expected = normalize_pixels(&frame);
         let src = FramePixels::new(Arc::new(frame));
-        for x in 0..2u32 {
+        for x in 0..3u32 {
             let a = src.pixel(x, 0);
             for c in 0..3 {
                 assert!((a[c] - expected[x as usize][c]).abs() < 1e-6, "x{x} c{c}");
@@ -175,5 +175,7 @@ mod tests {
         }
         // The clipped pixel really is limited (not left at 1.0 in R).
         assert!(src.pixel(0, 0)[0] < 0.51);
+        // ...while an unclipped red above that ceiling (0.8 > 0.5) is left whole.
+        assert!((src.pixel(2, 0)[0] - 0.8).abs() < 1e-6);
     }
 }
