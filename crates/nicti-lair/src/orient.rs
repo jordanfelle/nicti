@@ -16,10 +16,43 @@ use crate::scruff::{is_jpeg, jpeg_orientation};
 use crate::{Asset, CatalogError, CatalogStore};
 
 /// How much of a JPEG is read to find its EXIF APP1 segment (it sits right after SOI).
-const JPEG_HEAD_BYTES: u64 = 128 * 1024;
+const JPEG_HEAD_BYTES: u64 = 1024 * 1024;
+
+/// True when the JPEG segment walk reaches the start of scan (SOS) inside `head`, i.e. every header
+/// segment (where EXIF lives) was fully read. False when `head` ends first (a truncated read).
+fn headers_fully_read(head: &[u8]) -> bool {
+    if head.get(..2) != Some(&[0xFF, 0xD8]) {
+        return false;
+    }
+    let mut pos = 2usize;
+    loop {
+        if head.get(pos) != Some(&0xFF) {
+            return false;
+        }
+        // Fill bytes: any number of 0xFF may precede the marker code.
+        while head.get(pos + 1) == Some(&0xFF) {
+            pos += 1;
+        }
+        let Some(&marker) = head.get(pos + 1) else {
+            return false;
+        };
+        match marker {
+            0xDA => return true,
+            0x01 | 0xD0..=0xD9 => pos += 2,
+            _ => {
+                let (Some(&hi), Some(&lo)) = (head.get(pos + 2), head.get(pos + 3)) else {
+                    return false;
+                };
+                pos += 2 + usize::from(u16::from_be_bytes([hi, lo]));
+            }
+        }
+    }
+}
 
 /// The EXIF Orientation of the file at `path`, 1-8 (1 for upright, untagged or out-of-range), or
-/// `None` when the file can't be read at all.
+/// `None` when it could not be established: the file is unreadable, or (JPEG) its header segments
+/// were not fully read, or (RAW) its IFD0 could not be parsed. `None` is stored as NULL so the
+/// backfill retries; a wrong 1 would be permanent.
 pub fn file_orientation(path: &Path) -> Option<u8> {
     let raw = if is_jpeg(path) {
         let mut head = Vec::new();
@@ -28,10 +61,15 @@ pub fn file_orientation(path: &Path) -> Option<u8> {
             .take(JPEG_HEAD_BYTES)
             .read_to_end(&mut head)
             .ok()?;
-        jpeg_orientation(&head)
+        match jpeg_orientation(&head) {
+            Some(o) => Some(o),
+            // No readable tag: only "untagged" if the walk proves nothing was cut off.
+            None if headers_fully_read(&head) => None,
+            None => return None,
+        }
     } else {
         let mut walker = Walker::new(FileSource::open(path).ok()?).ok()?;
-        walker.ifd0_orientation().ok().flatten()
+        walker.ifd0_orientation().ok()?
     };
     Some(raw.filter(|o| (2..=8).contains(o)).unwrap_or(1))
 }
@@ -113,6 +151,57 @@ mod tests {
         let img = image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
         img.save(&p).unwrap();
         assert_eq!(file_orientation(&p), Some(1));
+    }
+
+    #[test]
+    fn a_truncated_jpeg_is_unknown_not_upright() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jpg");
+        let img = image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode(img.as_raw(), 4, 4, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        // Cut inside the header segments: nothing proves the file is untagged.
+        std::fs::write(&p, &bytes[..12]).unwrap();
+        assert_eq!(file_orientation(&p), None);
+        // Not a JPEG at all.
+        std::fs::write(&p, b"garbage").unwrap();
+        assert_eq!(file_orientation(&p), None);
+    }
+
+    #[test]
+    fn the_segment_walk_distinguishes_complete_headers_from_a_cut() {
+        let full = [
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xDA, 0x00,
+        ];
+        assert!(headers_fully_read(&full));
+        assert!(!headers_fully_read(&full[..7]));
+        assert!(!headers_fully_read(&[0x00, 0x01]));
+    }
+
+    #[test]
+    fn ingest_records_a_jpeg_assets_orientation() {
+        use crate::CatalogStore;
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]));
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode(img.as_raw(), 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(
+            dir.path().join("p.jpg"),
+            crate::scruff::tag_orientation(bytes, 8),
+        )
+        .unwrap();
+        let store = crate::SqliteCatalog::open_in_memory().unwrap();
+        let vol = store.upsert_volume("v", None, None, 0).unwrap();
+        let root = store
+            .ensure_root(vol, &dir.path().to_string_lossy())
+            .unwrap();
+        crate::scruff::ingest_root(&store, root, dir.path()).unwrap();
+        let a = store.find_asset_by_path(root, "p.jpg").unwrap().unwrap();
+        assert_eq!(a.orientation, Some(8));
     }
 
     #[test]

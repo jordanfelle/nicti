@@ -627,3 +627,27 @@ fn ingest_records_the_orientation_and_a_changed_file_resets_it_until_reingested(
     fx.store.insert_asset(fx.root_id, &new, None).unwrap();
     assert_eq!(orientation_col(&fx, id), Some(8));
 }
+
+#[test]
+fn a_changed_raw_is_re_read_by_ingest() {
+    let fx = Fx::new();
+    std::fs::write(fx.raw("d.NEF"), nef(Some(6), &real_jpeg(3))).unwrap();
+    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    let id = |n: &str| {
+        fx.store
+            .find_asset_by_path(fx.root_id, n)
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    assert_eq!(orientation_col(&fx, id("d.NEF")), Some(6));
+
+    // The RAW is replaced by a different size with another rotation: the changed-file path
+    // of ingest must re-read it (the upsert reset it to NULL).
+    std::fs::write(fx.raw("d.NEF"), nef(Some(3), &real_jpeg(9))).unwrap();
+    let mut longer = std::fs::read(fx.raw("d.NEF")).unwrap();
+    longer.extend_from_slice(&[0; 1000]);
+    std::fs::write(fx.raw("d.NEF"), longer).unwrap();
+    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    assert_eq!(orientation_col(&fx, id("d.NEF")), Some(3));
+}

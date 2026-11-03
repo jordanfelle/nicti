@@ -1622,6 +1622,8 @@ impl CatalogStore for SqliteCatalog {
             "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3, \
                 content_hash = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
                     THEN content_hash ELSE NULL END, \
+                orientation = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN orientation ELSE NULL END, \
                 size_bytes = ?4, mtime_unix = ?5, missing_since = NULL WHERE id = ?6",
             params![
                 new_root_id,

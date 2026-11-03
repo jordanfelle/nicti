@@ -301,10 +301,12 @@ The justified grid (#550) lays rows out by oriented aspect, but `asset.width/hei
 `asset.orientation INTEGER` (EXIF Orientation 1-8, 1 = upright or untagged, **NULL = not read yet**) and `Asset.orientation`.
 
 - **Write paths:** `scruff::ingest_one` records it after `insert_asset` (`orient::file_orientation`: a JPEG's EXIF from the
-  first 128 KB, a RAW's IFD0 via the container walker; best effort, an unreadable file stays NULL). `insert_asset`'s upsert
+  first 1 MB, trusted as "untagged" only when the header-segment walk reached the scan; a RAW's IFD0 via the container walker; anything that cannot be established stays NULL, never a guessed 1). `insert_asset`'s upsert
   resets it to NULL when size or mtime changed (the new content may rotate differently), keeps it otherwise.
 - **Backfill:** ingest skips unchanged size+mtime, so rows from before v11 stay NULL. `orient::backfill_root(store, root, chunk)`
   (and the per-asset `orient_asset`, with `CatalogStore::assets_missing_orientation(root, after_id, limit)` for paging)
   fills them; an offline root is skipped, a missing/unreadable file stays NULL, a rerun finds nothing left.
 - **Not done here (follow-up):** the trigger for the backfill (shared with #606's righting trigger: both read the same IFD0),
   the layout build job, the `show_viewport` view and the benchmark.
+- **NULL means unknown, not upright.** Until the backfill is wired (follow-up), every pre-v11 row is NULL, and the grid must lay
+  such a photo out as unknown rather than assume 1. `relink_asset` resets it on a size/mtime change like `content_hash`.
