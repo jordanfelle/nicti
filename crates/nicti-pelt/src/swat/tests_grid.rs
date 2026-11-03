@@ -400,3 +400,48 @@ fn switching_back_to_square_keeps_the_square_grid() {
         .collect();
     assert!(cells.iter().all(|r| r.size() == egui::Vec2::splat(CELL)));
 }
+
+#[test]
+fn a_list_change_rebuilds_the_layout_for_the_new_list_and_never_indexes_the_old_one() {
+    let mut h = justified_harness(300);
+    let builds = h.state().view.stats.layout_builds;
+    let generation = h.state().session.generation();
+    // A refresh re-reads the list (same ids): a new generation, so the old layout must not be used.
+    {
+        let rig = h.state_mut();
+        rig.session.refresh(&rig.pounce);
+    }
+    assert_ne!(h.state().session.generation(), generation);
+    // Whatever frames run before the new layout lands, nothing panics and the square grid or the
+    // new layout is drawn; then the justified view is ready again, for the new generation.
+    wait_until(&mut h, "the rebuilt layout", Duration::from_secs(20), |r| {
+        r.view.justified_ready(&r.session)
+    });
+    assert_eq!(h.state().view.stats.layout_builds, builds + 1);
+    h.run_steps(3);
+    assert!(h.query_all_by_label_contains("Photo ").count() > 0);
+}
+
+#[test]
+fn a_justified_scroll_position_survives_a_trip_through_the_square_fallback() {
+    let mut h = justified_harness(1500);
+    let first = h.state().session.ids()[0];
+    let rect = h.get_by_label(&format!("Photo {first}")).rect();
+    click_at(&mut h, rect.center());
+    h.key_press(egui::Key::End);
+    h.run_steps(5);
+    let offset = h.state().view.justified_scroll_y;
+    assert!(offset > 1000.0, "scrolled to the end: {offset}");
+    // The list changes: the square fallback draws while the layout rebuilds ...
+    {
+        let rig = h.state_mut();
+        rig.session.refresh(&rig.pounce);
+    }
+    wait_until(&mut h, "the rebuilt layout", Duration::from_secs(20), |r| {
+        r.view.justified_ready(&r.session)
+    });
+    h.run_steps(3);
+    // ... and the justified position is still where it was, not the square grid's.
+    let after = h.state().view.justified_scroll_y;
+    assert!((after - offset).abs() < 1.0, "{after} vs {offset}");
+}

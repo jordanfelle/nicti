@@ -31,7 +31,11 @@ const JUSTIFIED_HEADER_HEIGHT: f32 = 28.0;
 
 /// Per-view scroll bookkeeping the UI keeps between frames (the session itself is UI-agnostic).
 pub struct ViewState {
-    scroll_y: f32,
+    /// The last scroll offset of each body. They are separate scroll areas (own `id_salt`), so
+    /// falling back to the square grid while a layout rebuilds does not lose the justified
+    /// position.
+    square_scroll_y: f32,
+    pub(crate) justified_scroll_y: f32,
     viewport_h: f32,
     /// Set when the cursor moved by keyboard (or from the loupe): the next frame scrolls just far
     /// enough to bring its row into view.
@@ -48,7 +52,8 @@ pub struct ViewState {
 impl Default for ViewState {
     fn default() -> Self {
         ViewState {
-            scroll_y: 0.0,
+            square_scroll_y: 0.0,
+            justified_scroll_y: 0.0,
             viewport_h: 0.0,
             reveal_cursor: false,
             justified: false,
@@ -79,6 +84,8 @@ struct LayoutState {
     pending: Option<(JobId, ReportSlot<LayoutResult>)>,
     built: Option<Arc<BuiltLayout>>,
     error: Option<String>,
+    /// The session generation the error happened in (a new list clears it and retries).
+    error_generation: u64,
 }
 
 impl LayoutState {
@@ -260,8 +267,14 @@ pub fn show(
         .then(|| state.layout.usable(session.generation()))
         .flatten();
     if state.justified && justified.is_none() {
-        if let Some(err) = &state.layout.error {
-            ui.colored_label(Color32::RED, format!("Couldn't lay out the grid: {err}"));
+        if let Some(err) = state.layout.error.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::RED, format!("Couldn't lay out the grid: {err}"));
+                if ui.button("Retry").clicked() {
+                    state.layout.error = None;
+                    state.layout.gate.invalidate();
+                }
+            });
         } else {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -294,7 +307,7 @@ fn layout_toolbar(ui: &mut egui::Ui, session: &GridSession, state: &mut ViewStat
         ui.selectable_value(&mut state.justified, true, "Justified");
         if state.justified {
             // Headers are capture days, so they only make sense in capture order.
-            let by_date = session.sort().field == SortField::Captured;
+            let by_date = session.applied_sort().field == SortField::Captured;
             ui.add_enabled(
                 by_date,
                 egui::Checkbox::new(&mut state.grouped, "Date headers"),
@@ -310,7 +323,9 @@ fn layout_toolbar(ui: &mut egui::Ui, session: &GridSession, state: &mut ViewStat
 }
 
 /// Starts a layout build when the key (list generation, width bucket, row height, headers)
-/// changed, lands a finished one, and keeps the previous layout showing until then.
+/// changed and lands a finished one. The build runs over the session's own id list, so a finished
+/// layout always describes the list of its generation; it is shown only while that generation is
+/// still current (a list change falls back to the square grid until the new layout lands).
 fn layout_tick(
     ui: &egui::Ui,
     session: &mut GridSession,
@@ -318,7 +333,8 @@ fn layout_tick(
     pounce: &Pounce,
     width: f32,
 ) {
-    let grouped = state.grouped && session.sort().field == SortField::Captured;
+    // Headers follow the sort the ids are *in*, not the one just asked for.
+    let grouped = state.grouped && session.applied_sort().field == SortField::Captured;
     let params = RowParams {
         width,
         target_height: JUSTIFIED_ROW_HEIGHT,
@@ -335,33 +351,28 @@ fn layout_tick(
         if let Some(result) = landed {
             layout.pending = None;
             match result {
-                // The scan ran after the session's snapshot: only a layout over exactly the
-                // session's list may be indexed by the session's cell numbers.
-                Ok(built) if built.index.is_complete() && built.ids == session.ids() => {
+                Ok(built) if built.index.is_complete() => {
                     layout.error = None;
                     layout.built = Some(Arc::new(built));
                 }
-                Ok(_) => {
-                    // The catalog moved between the two reads: take a fresh snapshot, then build again.
-                    session.reload(pounce);
-                    layout.gate.invalidate();
-                }
+                Ok(_) => layout.error = Some("the layout build did not finish".to_string()),
                 Err(msg) => layout.error = Some(msg),
             }
+            if layout.error.is_some() {
+                layout.error_generation = session.generation();
+            }
         }
+    }
+    // A failure is retried once the list changes (or on request), not on every frame.
+    if layout.error.is_some() && layout.error_generation != session.generation() {
+        layout.error = None;
     }
     let key = IndexKey::new(session.generation(), grouped, params);
     if layout.error.is_none() && layout.gate.request(key) {
         if let Some((old, _)) = layout.pending.take() {
             pounce.cancel(old);
         }
-        let (job, slot) = LayoutJob::new(
-            session.store(),
-            session.filter().clone(),
-            session.sort(),
-            key,
-            params,
-        );
+        let (job, slot) = LayoutJob::new(session.store(), session.ids().to_vec(), key, params);
         layout.pending = Some((pounce.submit(Box::new(job)), slot));
     }
     state.stats.layout_builds = state.layout.gate.layout_builds;
@@ -490,14 +501,16 @@ fn show_square(
         navigate(key, cursor, total, layout.cols, rows_per_page)
     });
 
-    let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    let mut scroll = egui::ScrollArea::vertical()
+        .id_salt("nicti_grid_square")
+        .auto_shrink([false, false]);
     if state.reveal_cursor {
         state.reveal_cursor = false;
         if let Some(cursor) = session.cursor() {
             scroll = scroll.vertical_scroll_offset(scroll_to_reveal(
                 layout.row_of(cursor),
                 CELL,
-                state.scroll_y,
+                state.square_scroll_y,
                 state.viewport_h,
             ));
         }
@@ -522,7 +535,7 @@ fn show_square(
         }
     });
     state.stats.cells_built += cells_built; // ADR-0437: asserted <30/frame in swat/tests_grid.rs
-    state.scroll_y = output.state.clamped_offset().y;
+    state.square_scroll_y = output.state.clamped_offset().y;
     state.viewport_h = output.inner_rect.height();
     layout.indices_for_rows(visible_rows, total)
 }
@@ -544,7 +557,9 @@ fn show_justified(
         navigate_justified(key, cursor, index, aspects, page_h)
     });
 
-    let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    let mut scroll = egui::ScrollArea::vertical()
+        .id_salt("nicti_grid_justified")
+        .auto_shrink([false, false]);
     if state.reveal_cursor {
         state.reveal_cursor = false;
         if let Some(row) = session.cursor().and_then(|c| index.row_of(c)) {
@@ -559,7 +574,7 @@ fn show_justified(
             scroll = scroll.vertical_scroll_offset(scroll_to_reveal_span(
                 top,
                 bottom,
-                state.scroll_y,
+                state.justified_scroll_y,
                 state.viewport_h,
             ));
         }
@@ -604,7 +619,7 @@ fn show_justified(
     });
     state.stats.cells_built += cells_built;
     state.stats.justified_frames += 1;
-    state.scroll_y = output.state.clamped_offset().y;
+    state.justified_scroll_y = output.state.clamped_offset().y;
     state.viewport_h = output.inner_rect.height();
     index.indices_for_rows(visible_rows)
 }

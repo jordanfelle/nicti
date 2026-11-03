@@ -13,7 +13,7 @@
 //! No egui, no catalog: aspects come from the caller. **Catalog `width`/`height` are not
 //! orientation-corrected** (a portrait NEF's preview is stored landscape with an EXIF rotation;
 //! JPEG assets carry the file's own size), so the caller must feed [`oriented_aspect`], not raw
-//! width/height; the orientation comes from `asset.orientation` (#604) via `CatalogStore::hunt_layout` (#656).
+//! width/height; the orientation comes from `asset.orientation` (#604) via `CatalogStore::layout_items` (#656).
 
 use std::ops::Range;
 

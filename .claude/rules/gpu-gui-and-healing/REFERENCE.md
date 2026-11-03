@@ -32,7 +32,7 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #437: justified grid / GridStats (ADR-0437)
 
-- `ViewState.stats` (`GridStats { frames, cells_built }`) pins grid frame cost to the viewport: swat test seeds 5000 photos, asserts <30 cells/frame at top and end (mutation-proved). Justified rows + date headers decided go (#550): pure core `grid/justified.rs` landed (`RowIndex` streamed row table, `oriented_aspect`, `width_bucket`, `LayoutGate`/`layout_builds`); catalog width/height are NOT orientation-corrected (needs an orientation column + backfill); view wiring landed in #656 (`CatalogStore::hunt_layout`, `layout_build::LayoutJob`, `view::show_justified`, Square|Justified switch, square stays default; 1M `RowIndex` build 3.9 ms, scan ~1.4 s extrapolated; real display/ref-machine unverified). Detail: `docs/decisions/gpu-gui-and-healing.md`.
+- `ViewState.stats` (`GridStats { frames, cells_built }`) pins grid frame cost to the viewport: swat test seeds 5000 photos, asserts <30 cells/frame at top and end (mutation-proved). Justified rows + date headers decided go (#550): pure core `grid/justified.rs` landed (`RowIndex` streamed row table, `oriented_aspect`, `width_bucket`, `LayoutGate`/`layout_builds`); catalog width/height are NOT orientation-corrected (needs an orientation column + backfill); view wiring landed in #656 (`CatalogStore::layout_items`, `layout_build::LayoutJob` over the session's own ids, `view::show_justified`, Square|Justified switch, square stays default; 1M `RowIndex` build 3.9 ms, lookup ~1.5-2 s at 1M extrapolated, a list change falls back to square until rebuilt; real display/ref-machine unverified). Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #512: idle repaint rate
 

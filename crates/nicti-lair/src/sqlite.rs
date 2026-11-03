@@ -424,8 +424,8 @@ const BULK_META_CACHE_KIB: i64 = 256 * 1024;
 
 impl SqliteCatalog {
     /// One index-ordered scan of every asset a `hunt` with this `Filter`/`Sort` would return, in the
-    /// same order, mapping each row from `columns`. Shared by `hunt_ids` and `hunt_layout` so the
-    /// two can never disagree about order or scoping.
+    /// same order, mapping each row from `columns`. Kept generic so a second scan shape can share
+    /// `hunt_ids`' order and scoping.
     fn scan_ordered<T>(
         &self,
         filter: &Filter,
@@ -2649,25 +2649,51 @@ impl CatalogStore for SqliteCatalog {
         self.scan_ordered(filter, sort, "a.id", |row| row.get::<_, i64>(0))
     }
 
-    fn hunt_layout(&self, filter: &Filter, sort: Sort) -> Result<Vec<LayoutItem>, CatalogError> {
-        self.scan_ordered(
-            filter,
-            sort,
-            "a.id, a.width, a.height, a.orientation, substr(a.captured_at, 1, 10)",
-            |row| {
-                Ok(LayoutItem {
-                    id: row.get(0)?,
-                    width: row.get(1)?,
-                    height: row.get(2)?,
-                    orientation: row.get(3)?,
-                    // EXIF text is `YYYY:MM:DD`, other sources `YYYY-MM-DD`: one spelling for grouping.
-                    day: row
-                        .get::<_, Option<String>>(4)?
-                        .filter(|d| !d.is_empty())
-                        .map(|d| d.replace(':', "-")),
+    fn layout_items(&self, ids: &[i64]) -> Result<Vec<LayoutItem>, CatalogError> {
+        // SQLite's default variable limit is 999 (32766 on newer builds): stay under the old one.
+        const IN_LIMIT: usize = 900;
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(IN_LIMIT) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, width, height, orientation, substr(captured_at, 1, 10) \
+                 FROM asset WHERE id IN ({marks})"
+            ))?;
+            let mut found: std::collections::HashMap<i64, LayoutItem> = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    // Wrong-typed or out-of-range values are "unknown", not a failed layout.
+                    let num = |i: usize| row.get::<_, Option<i64>>(i).ok().flatten();
+                    let id: i64 = row.get(0)?;
+                    Ok(LayoutItem {
+                        id,
+                        width: num(1).and_then(|v| u32::try_from(v).ok()),
+                        height: num(2).and_then(|v| u32::try_from(v).ok()),
+                        orientation: num(3).and_then(|v| u8::try_from(v).ok()),
+                        // EXIF text is `YYYY:MM:DD`, other sources `YYYY-MM-DD`: one spelling.
+                        day: row
+                            .get::<_, Option<String>>(4)
+                            .ok()
+                            .flatten()
+                            .filter(|d| !d.is_empty())
+                            .map(|d| d.replace(':', "-")),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|item| (item.id, item))
+                .collect();
+            out.extend(chunk.iter().map(|&id| {
+                found.remove(&id).unwrap_or(LayoutItem {
+                    id,
+                    width: None,
+                    height: None,
+                    orientation: None,
+                    day: None,
                 })
-            },
-        )
+            }));
+        }
+        Ok(out)
     }
 
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError> {
@@ -3893,43 +3919,65 @@ mod tests {
     }
 
     #[test]
-    fn hunt_layout_is_hunt_ids_with_size_orientation_and_day() {
+    fn layout_items_follow_the_ids_given_with_size_orientation_and_day() {
         let store = SqliteCatalog::open_in_memory().unwrap();
         seed_for_sorting(&store, 40);
-        let any = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
-        store.set_orientation(any[3], 6).unwrap();
-        for field in ALL_SORT_FIELDS {
-            for direction in BOTH_DIRECTIONS {
-                let sort = Sort { field, direction };
-                let ids = store.hunt_ids(&Filter::default(), sort).unwrap();
-                let layout = store.hunt_layout(&Filter::default(), sort).unwrap();
-                assert_eq!(
-                    layout.iter().map(|l| l.id).collect::<Vec<_>>(),
-                    ids,
-                    "{field:?} {direction:?}"
-                );
-            }
-        }
-        let layout = store
-            .hunt_layout(&Filter::default(), default_sort())
-            .unwrap();
-        let rotated = layout.iter().find(|l| l.id == any[3]).unwrap();
+        let mut ids = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+        store.set_orientation(ids[3], 6).unwrap();
+        // The caller's order wins (reversed here), and ids past the 900-per-statement chunk too.
+        ids.reverse();
+        let mut many = ids.clone();
+        many.extend(std::iter::repeat_n(ids[0], 1000));
+        let items = store.layout_items(&many).unwrap();
+        assert_eq!(items.iter().map(|l| l.id).collect::<Vec<_>>(), many);
+        let rotated = items.iter().find(|l| l.id == ids[ids.len() - 4]).unwrap();
         assert_eq!(rotated.orientation, Some(6));
         // Seeded capture times are "2026:01:01 ..." (or none): normalised to a dashed day.
-        assert!(layout
+        assert!(items
             .iter()
             .all(|l| l.day.as_deref().is_none_or(|d| d == "2026-01-01")));
-        assert!(layout.iter().any(|l| l.day.is_none()));
-        assert!(layout.iter().any(|l| l.day.is_some()));
+        assert!(items.iter().any(|l| l.day.is_none()));
+        assert!(items.iter().any(|l| l.day.is_some()));
+    }
+
+    #[test]
+    fn layout_items_blank_a_missing_id_and_survive_corrupt_values() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 3);
+        let ids = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // A negative width and an orientation outside 0..=255 are unknown, not a failure.
+            conn.execute(
+                "UPDATE asset SET width = -5, orientation = 9999 WHERE id = ?1",
+                [ids[0]],
+            )
+            .unwrap();
+        }
+        let items = store.layout_items(&[ids[0], 9_999_999, ids[1]]).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!((items[0].width, items[0].orientation), (None, None));
+        assert_eq!(
+            items[1],
+            LayoutItem {
+                id: 9_999_999,
+                width: None,
+                height: None,
+                orientation: None,
+                day: None
+            }
+        );
+        assert_eq!(items[2].id, ids[1]);
+        assert!(store.layout_items(&[]).unwrap().is_empty());
     }
 
     /// Measurement for #656 (`cargo test -p nicti-lair --release -- --ignored --nocapture
-    /// hunt_layout_cost`): the cost of the justified grid's catalog scan next to `hunt_ids`, on a
+    /// layout_items_cost`): the cost of the justified grid's per-chunk lookups next to `hunt_ids`, on a
     /// file-backed catalog (the snapshot-reader path the app uses). Set `NICTI_SCALE_N` (default
     /// 200000).
     #[test]
     #[ignore = "measurement, minutes at 1M"]
-    fn hunt_layout_cost_at_scale() {
+    fn layout_items_cost_at_scale() {
         let n: usize = std::env::var("NICTI_SCALE_N")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -3967,13 +4015,15 @@ mod tests {
             let ids = store.hunt_ids(&Filter::default(), sort).unwrap();
             let ids_time = t.elapsed();
             let t = std::time::Instant::now();
-            let layout = store.hunt_layout(&Filter::default(), sort).unwrap();
+            let mut count = 0;
+            for chunk in ids.chunks(4096) {
+                count += store.layout_items(chunk).unwrap().len();
+            }
             eprintln!(
-                "n={n}: hunt_ids {ids_time:?}, hunt_layout {:?} ({} items)",
+                "n={n}: hunt_ids {ids_time:?}, layout_items over every id in 4096-id chunks {:?} ({count} items)",
                 t.elapsed(),
-                layout.len()
             );
-            assert_eq!(ids.len(), layout.len());
+            assert_eq!(ids.len(), count);
         }
     }
 

@@ -538,10 +538,13 @@ pub trait CatalogStore: Module {
     /// scoping as `hunt`.
     fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError>;
 
-    /// [`Self::hunt_ids`] with what the justified grid needs to size each photo (#656): stored
-    /// width/height, EXIF orientation and capture day, in the identical order, from the same scan
-    /// shape (so ~1 s at 1M rows, off the shared mutex on a file-backed catalog).
-    fn hunt_layout(&self, filter: &Filter, sort: Sort) -> Result<Vec<LayoutItem>, CatalogError>;
+    /// What the justified grid needs to size each of `ids` (#656): stored width/height, EXIF
+    /// orientation and capture day, one item per id **in the order given** (so the layout always
+    /// describes exactly the caller's list, whatever sort or import happened since). An id that no
+    /// longer exists gets a blank item (square, no day). Unreadable values become `None`, never an
+    /// error: one corrupt row must not lose the whole layout. Cheap enough to call per chunk of a few
+    /// thousand ids from a cancellable job.
+    fn layout_items(&self, ids: &[i64]) -> Result<Vec<LayoutItem>, CatalogError>;
 
     /// The total row count a `hunt` call with this `Filter` would match, ignoring `Page`.
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError>;

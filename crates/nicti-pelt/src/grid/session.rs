@@ -55,6 +55,8 @@ pub const DEFAULT_SORT: Sort = Sort {
 struct PendingSnapshot {
     job_id: JobId,
     slot: ReportSlot<SnapshotResult>,
+    /// The sort the snapshot was requested with (becomes [`GridSession::applied_sort`] when it lands).
+    sort: Sort,
 }
 
 struct InflightBatch {
@@ -70,6 +72,9 @@ pub struct GridSession {
     filter: Filter,
     sort: Sort,
     ids: Vec<i64>,
+    /// The sort `ids` is in (`sort` is what was last *asked for*, which runs ahead of it while a
+    /// snapshot is in flight): what the justified layout's headers must follow.
+    applied_sort: Sort,
     /// Bumped whenever `ids` changes or [`Self::refresh`] may have changed what the photos look
     /// like (their sizes, orientations or dates): the justified layout is built per generation.
     generation: u64,
@@ -141,6 +146,7 @@ impl GridSession {
             filter: Filter::default(),
             sort: DEFAULT_SORT,
             ids: Vec::new(),
+            applied_sort: DEFAULT_SORT,
             generation: 0,
             loaded: false,
             requested: false,
@@ -239,12 +245,9 @@ impl GridSession {
         self.store.clone()
     }
 
-    pub fn filter(&self) -> &Filter {
-        &self.filter
-    }
-
-    pub fn sort(&self) -> Sort {
-        self.sort
+    /// The sort the current [`Self::ids`] are in.
+    pub fn applied_sort(&self) -> Sort {
+        self.applied_sort
     }
 
     pub fn len(&self) -> usize {
@@ -460,7 +463,11 @@ impl GridSession {
         }
         let (job, slot) = SnapshotJob::new(self.store.clone(), self.filter.clone(), self.sort);
         let job_id = pounce.submit(Box::new(job));
-        self.pending_snapshot = Some(PendingSnapshot { job_id, slot });
+        self.pending_snapshot = Some(PendingSnapshot {
+            job_id,
+            slot,
+            sort: self.sort,
+        });
     }
 
     /// Cancels every in-flight batch and forgets them. Batch indices refer to positions in the
@@ -489,6 +496,7 @@ impl GridSession {
         let Some(result) = pending.slot.lock().unwrap().take() else {
             return;
         };
+        let landed_sort = pending.sort;
         self.pending_snapshot = None;
         match result {
             Ok(ids) => {
@@ -497,11 +505,13 @@ impl GridSession {
                 // cancelling the in-flight batches would throw away the on-screen cells' work
                 // every couple of seconds for an import's whole duration.
                 if self.loaded && ids == self.ids {
+                    self.applied_sort = landed_sort;
                     return;
                 }
                 self.cancel_batches(pounce);
                 let old_ids = std::mem::replace(&mut self.ids, ids);
                 self.generation += 1;
+                self.applied_sort = landed_sort;
                 self.selection.remap(&old_ids, &self.ids);
                 self.loaded = true;
                 // Keep the selection on the same photo, wherever it landed (or drop it if the
@@ -1321,6 +1331,7 @@ mod tests {
         session.pending_snapshot = Some(PendingSnapshot {
             job_id,
             slot: failed,
+            sort: DEFAULT_SORT,
         });
 
         session.poll(&ctx, &pounce);
