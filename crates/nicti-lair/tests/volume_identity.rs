@@ -21,7 +21,8 @@ fn ident(key: &str, label: &str, marker: Option<&str>) -> VolumeIdentity {
 
 /// A fake `identify`: folders under /photos are volume A, under /archive volume B, else unknown.
 fn probe(path: &Path) -> Option<VolumeIdentity> {
-    let p = path.to_string_lossy();
+    // Roots are stored under `canonical_root_string`, which uses `\\` on Windows.
+    let p = path.to_string_lossy().replace('\\', "/");
     if p.starts_with("/photos") {
         Some(ident("ntfs64:a+gpt:a", "Photos", Some("marker-a")))
     } else if p.starts_with("/archive") {
@@ -145,8 +146,10 @@ fn a_collision_on_the_real_volume_is_left_alone_not_merged() {
     let ph_vol = store
         .upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, 0)
         .unwrap();
-    let real = store.ensure_root(real_vol, "/photos/2026").unwrap();
-    let ph = store.ensure_root(ph_vol, "/photos/2026").unwrap();
+    // The spelling registration files a root under (`\\` separators on Windows).
+    let path = nicti_lair::scruff::canonical_root_string(Path::new("/photos/2026"));
+    let real = store.ensure_root(real_vol, &path).unwrap();
+    let ph = store.ensure_root(ph_vol, &path).unwrap();
     assert_ne!(real, ph);
     // Migration can't move the placeholder one onto the real volume's identical path: skipped.
     assert_eq!(migrate_placeholder_roots_with(&store, &probe).unwrap(), 0);
