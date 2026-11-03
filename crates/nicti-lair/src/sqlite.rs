@@ -12,9 +12,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     Asset, AssetMeta, CatalogError, CatalogStore, Collection, CollectionKind, Cursor, DeleteItem,
-    DeleteState, FacetCounts, Filter, Keyword, LrcChunkOutcome, LrcItem, LrcProvenance, MoveState,
-    NewAsset, Page, Preview, PreviewTier, Root, RootMove, SidecarState, Sort, SortDirection,
-    SortField,
+    DeleteState, FacetCounts, Filter, Keyword, LayoutItem, LrcChunkOutcome, LrcItem, LrcProvenance,
+    MoveState, NewAsset, Page, Preview, PreviewTier, Root, RootMove, SidecarState, Sort,
+    SortDirection, SortField,
 };
 use nicti_claw::Module;
 
@@ -423,6 +423,55 @@ const BULK_META_ROWS: usize = 1000;
 const BULK_META_CACHE_KIB: i64 = 256 * 1024;
 
 impl SqliteCatalog {
+    /// One index-ordered scan of every asset a `hunt` with this `Filter`/`Sort` would return, in the
+    /// same order, mapping each row from `columns`. Kept generic so a second scan shape can share
+    /// `hunt_ids`' order and scoping.
+    fn scan_ordered<T>(
+        &self,
+        filter: &Filter,
+        sort: Sort,
+        columns: &str,
+        map: impl Fn(&rusqlite::Row) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, CatalogError> {
+        // A file-backed catalog scans on its own read-only connection (WAL: a consistent snapshot,
+        // never blocking a writer): this runs for ~0.2-1 s at 1M rows, and holding the shared
+        // mutex that long would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
+        // for the duration. An in-memory catalog (tests) has no second connection to open.
+        let reader = if self.path.is_some() {
+            Some(self.open_snapshot_reader()?)
+        } else {
+            None
+        };
+        let guard;
+        let conn: &Connection = match &reader {
+            Some(reader) => reader,
+            None => {
+                guard = self.conn.lock().unwrap();
+                &guard
+            }
+        };
+        let filter_sql = build_filter_sql(conn, filter)?;
+        let sort_column = sort_column_sql(sort.field);
+        let order = match sort.direction {
+            SortDirection::Asc => "ASC",
+            SortDirection::Desc => "DESC",
+        };
+        let sql = format!(
+            "SELECT {columns} FROM asset a \
+             JOIN root r ON r.id = a.root_id \
+             JOIN volume v ON v.id = r.volume_id \
+             WHERE {} \
+             ORDER BY {sort_column} {order}, a.id {order}",
+            filter_sql.where_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| map(row))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Runs a long read-only scan on its own snapshot connection when the catalog is file-backed
     /// (WAL: consistent, never blocks a writer), else on the shared one. Holding the shared mutex
     /// for a full-table scan would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
@@ -2597,43 +2646,54 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError> {
-        // A file-backed catalog scans on its own read-only connection (WAL: a consistent snapshot,
-        // never blocking a writer): this runs for ~0.2-1 s at 1M rows, and holding the shared
-        // mutex that long would freeze every UI-thread catalog call (`list_roots`, `get_asset`)
-        // for the duration. An in-memory catalog (tests) has no second connection to open.
-        let reader = if self.path.is_some() {
-            Some(self.open_snapshot_reader()?)
-        } else {
-            None
-        };
-        let guard;
-        let conn: &Connection = match &reader {
-            Some(reader) => reader,
-            None => {
-                guard = self.conn.lock().unwrap();
-                &guard
-            }
-        };
-        let filter_sql = build_filter_sql(conn, filter)?;
-        let sort_column = sort_column_sql(sort.field);
-        let order = match sort.direction {
-            SortDirection::Asc => "ASC",
-            SortDirection::Desc => "DESC",
-        };
-        let sql = format!(
-            "SELECT a.id FROM asset a \
-             JOIN root r ON r.id = a.root_id \
-             JOIN volume v ON v.id = r.volume_id \
-             WHERE {} \
-             ORDER BY {sort_column} {order}, a.id {order}",
-            filter_sql.where_clause
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn ToSql> = filter_sql.params.iter().map(|p| p.as_ref()).collect();
-        let ids = stmt
-            .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ids)
+        self.scan_ordered(filter, sort, "a.id", |row| row.get::<_, i64>(0))
+    }
+
+    fn layout_items(&self, ids: &[i64]) -> Result<Vec<LayoutItem>, CatalogError> {
+        // SQLite's default variable limit is 999 (32766 on newer builds): stay under the old one.
+        const IN_LIMIT: usize = 900;
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(IN_LIMIT) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, width, height, orientation, substr(captured_at, 1, 10) \
+                 FROM asset WHERE id IN ({marks})"
+            ))?;
+            let found: std::collections::HashMap<i64, LayoutItem> = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    // Wrong-typed or out-of-range values are "unknown", not a failed layout.
+                    let num = |i: usize| row.get::<_, Option<i64>>(i).ok().flatten();
+                    let id: i64 = row.get(0)?;
+                    Ok(LayoutItem {
+                        id,
+                        width: num(1).and_then(|v| u32::try_from(v).ok()),
+                        height: num(2).and_then(|v| u32::try_from(v).ok()),
+                        orientation: num(3).and_then(|v| u8::try_from(v).ok()),
+                        // EXIF text is `YYYY:MM:DD`, other sources `YYYY-MM-DD`: one spelling.
+                        day: row
+                            .get::<_, Option<String>>(4)
+                            .ok()
+                            .flatten()
+                            .filter(|d| !d.is_empty())
+                            .map(|d| d.replace(':', "-")),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|item| (item.id, item))
+                .collect();
+            out.extend(chunk.iter().map(|&id| {
+                found.get(&id).cloned().unwrap_or(LayoutItem {
+                    id,
+                    width: None,
+                    height: None,
+                    orientation: None,
+                    day: None,
+                })
+            }));
+        }
+        Ok(out)
     }
 
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError> {
@@ -3856,6 +3916,121 @@ mod tests {
             }
         }
         root_id
+    }
+
+    #[test]
+    fn layout_items_follow_the_ids_given_with_size_orientation_and_day() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 40);
+        let mut ids = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+        store.set_orientation(ids[3], 6).unwrap();
+        // The caller's order wins (reversed here), and ids past the 900-per-statement chunk too.
+        ids.reverse();
+        let mut many = ids.clone();
+        many.extend(std::iter::repeat_n(ids[ids.len() - 4], 1000));
+        let items = store.layout_items(&many).unwrap();
+        assert_eq!(items.iter().map(|l| l.id).collect::<Vec<_>>(), many);
+        // A repeated id yields the real item every time, not just the first.
+        let rotated_id = ids[ids.len() - 4];
+        many.iter()
+            .zip(&items)
+            .filter(|(id, _)| **id == rotated_id)
+            .for_each(|(_, l)| assert_eq!(l.orientation, Some(6)));
+        let rotated = items.iter().find(|l| l.id == ids[ids.len() - 4]).unwrap();
+        assert_eq!(rotated.orientation, Some(6));
+        // Seeded capture times are "2026:01:01 ..." (or none): normalised to a dashed day.
+        assert!(items
+            .iter()
+            .all(|l| l.day.as_deref().is_none_or(|d| d == "2026-01-01")));
+        assert!(items.iter().any(|l| l.day.is_none()));
+        assert!(items.iter().any(|l| l.day.is_some()));
+    }
+
+    #[test]
+    fn layout_items_blank_a_missing_id_and_survive_corrupt_values() {
+        let store = SqliteCatalog::open_in_memory().unwrap();
+        seed_for_sorting(&store, 3);
+        let ids = store.hunt_ids(&Filter::default(), default_sort()).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // A negative width and an orientation outside 0..=255 are unknown, not a failure.
+            conn.execute(
+                "UPDATE asset SET width = -5, orientation = 9999 WHERE id = ?1",
+                [ids[0]],
+            )
+            .unwrap();
+        }
+        let items = store.layout_items(&[ids[0], 9_999_999, ids[1]]).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!((items[0].width, items[0].orientation), (None, None));
+        assert_eq!(
+            items[1],
+            LayoutItem {
+                id: 9_999_999,
+                width: None,
+                height: None,
+                orientation: None,
+                day: None
+            }
+        );
+        assert_eq!(items[2].id, ids[1]);
+        assert!(store.layout_items(&[]).unwrap().is_empty());
+    }
+
+    /// Measurement for #656 (`cargo test -p nicti-lair --release -- --ignored --nocapture
+    /// layout_items_cost`): the cost of the justified grid's per-chunk lookups next to `hunt_ids`, on a
+    /// file-backed catalog (the snapshot-reader path the app uses). Set `NICTI_SCALE_N` (default
+    /// 200000).
+    #[test]
+    #[ignore = "measurement, minutes at 1M"]
+    fn layout_items_cost_at_scale() {
+        let n: usize = std::env::var("NICTI_SCALE_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200_000);
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteCatalog::open(&dir.path().join("scale.db")).unwrap();
+        let volume = store.upsert_volume("v", None, None, 0).unwrap();
+        let root = store.ensure_root(volume, "").unwrap();
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let path = format!("{i:07}.NEF");
+            let asset = NewAsset {
+                rel_path_fold: path.to_lowercase(),
+                rel_path: path,
+                size_bytes: 1,
+                mtime_unix: 0,
+                fingerprint: None,
+                natural_key: None,
+                make: None,
+                model: None,
+                captured_at: Some(format!("2026:{:02}:{:02} 10:00:00", 1 + i % 12, 1 + i % 28)),
+                width: Some(6048),
+                height: Some(4024),
+                imported_at: 0,
+            };
+            store.insert_asset(root, &asset, None).unwrap();
+        }
+        eprintln!("seeded {n} assets in {:?}", t.elapsed());
+        let sort = Sort {
+            field: SortField::Captured,
+            direction: SortDirection::Asc,
+        };
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let ids = store.hunt_ids(&Filter::default(), sort).unwrap();
+            let ids_time = t.elapsed();
+            let t = std::time::Instant::now();
+            let mut count = 0;
+            for chunk in ids.chunks(4096) {
+                count += store.layout_items(chunk).unwrap().len();
+            }
+            eprintln!(
+                "n={n}: hunt_ids {ids_time:?}, layout_items over every id in 4096-id chunks {:?} ({count} items)",
+                t.elapsed(),
+            );
+            assert_eq!(ids.len(), count);
+        }
     }
 
     #[test]

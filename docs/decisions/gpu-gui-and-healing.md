@@ -134,6 +134,40 @@ JPEG asset's is the file's own size, both before EXIF rotation, so `oriented_asp
 orientations 5-8 and the catalog needs an orientation column and a backfill (ingest skips unchanged files). All of that
 and the view wiring (build job, `show_viewport` loop, toggle, swat assertion, 1M measurement) is #604.
 
+2026-11-03 (#656): the view is wired. `CatalogStore::layout_items(ids)` returns width/height/orientation and the capture
+day (first ten characters of `captured_at`, `:` normalised to `-`) for exactly the ids given, in the order given (a missing
+id gets a blank, square item; a corrupt value is "unknown", never an error), 900 ids per `IN` statement. The first design
+ran its own `hunt`-shaped scan; the adversarial review showed that a second query races the session's snapshot (a new
+sort/filter built the layout for the *requested* list while the session still held the old ids, so a build was rejected and
+repeated, and an import never settled), so the job now runs over the session's own id list and cannot disagree with it.
+`LayoutJob` (`grid/layout_build.rs`, Pounce CPU lane, `JobKind::Snapshot` so it sorts ahead of thumbnail batches) looks up
+4096 ids per step and streams them into the `RowIndex` (cancel lands within a chunk; the build holds no more than the
+aspects and the index); days become groups ("No date" for undated photos; headers only while the *applied* sort, the one the
+ids are in, is capture time). The layout is keyed on `GridSession::generation()` (bumped when the id list changes or on
+`refresh`) plus width bucket, row height and headers, and is drawn only while its generation is current: a width, height
+or header change keeps the previous layout on screen until the new one lands, but **a list change falls back to the
+square grid with a spinner until the new layout lands** (a stale layout would index the wrong photos). Each body has its
+own scroll area, so that fallback does not lose the justified position (test-pinned). A failed build shows the error with
+a Retry button and retries by itself when the list changes. `view.rs` has two bodies, `show_square` and `show_justified`
+(`ScrollArea::show_viewport` over `rows_between`, f64 row tops, header text per group, navigation through
+`RowIndex::navigate`/`navigate_page`, reveal by row span), behind a Square | Justified switch and a Date headers checkbox
+above the grid (session-only, **square stays the default**; the snapshot `library_grid` gained that toolbar row). Rows
+are laid out at the width bucket (floored to 16 px), so the right edge can fall up to 15 px short of the pane.
+`GridStats` gained `layout_builds` and `justified_frames`; swat tests assert one height per row, varied widths, <60
+cells/frame at 5000 photos, **no layout build across unchanged frames** (mutation-proved: invalidating the gate every
+frame fails it), End/arrow-down on 1500 photos, a list change rebuilding for the new generation, the justified scroll
+offset surviving the square fallback (mutation-proved: sharing the scroll id fails it), and switching back to square.
+Measured here (release, Linux CPU, **not** the reference machine, no real ref-10k): `layout_items` over every id in
+4096-id chunks 0.45-0.70 s at 300k photos on a file-backed catalog (about 1.5x `hunt_ids`' 0.32-0.64 s, so ~1.5-2 s at 1M
+by linear extrapolation, in the background); `RowIndex` build over 1M cells in 40-photo groups 3.9 ms (150k rows, ~3 MB;
+8 ms at 2M), a viewport query ~40 ns. f32 scroll offsets lose exactness past ~1.6x10^7 points (about 100k rows), the
+same limit `show_rows` has; rows are positioned from f64 tops. Known limits: during a long import the list changes every
+reload, so the justified view shows the square fallback while each rebuild runs (a layout older than the list is never
+shown); a catalog mixing EXIF-style and ISO-style `captured_at` text can split one day into two headers (the sort is on
+the raw text). Not verified: the look on a real display, scrolling feel at 1M, and the reference-machine numbers
+`docs/benchmarks.md` asks for. `cargo test -p nicti-lair --release -- --ignored --nocapture layout_items_cost` repeats the
+lookup measurement (`NICTI_SCALE_N`).
+
 ## #512: idle repaint rate
 
 An idle, empty Nicti repainted about 4.5 times a second (#409). `NICTI_REPAINT_TRACE=1` now prints, once a second to

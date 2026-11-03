@@ -46,8 +46,8 @@ pub mod volume;
 pub use clowder::{Collection, CollectionKind};
 pub use hunt::{Cursor, FacetCounts, Filter, Page, Sort, SortDirection, SortField};
 pub use model::{
-    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, LrcChunkOutcome, LrcItem, LrcProvenance,
-    MoveState, NewAsset, Preview, PreviewTier, Root, RootMove, SidecarState,
+    Asset, AssetMeta, DeleteItem, DeleteState, Keyword, LayoutItem, LrcChunkOutcome, LrcItem,
+    LrcProvenance, MoveState, NewAsset, Preview, PreviewTier, Root, RootMove, SidecarState,
 };
 pub use sqlite::SqliteCatalog;
 
@@ -537,6 +537,14 @@ pub trait CatalogStore: Module {
     /// for a scrollbar drag. Ids only: 8 bytes each, ~8 MB at 1M assets. Same online-volume
     /// scoping as `hunt`.
     fn hunt_ids(&self, filter: &Filter, sort: Sort) -> Result<Vec<i64>, CatalogError>;
+
+    /// What the justified grid needs to size each of `ids` (#656): stored width/height, EXIF
+    /// orientation and capture day, one item per id **in the order given** (so the layout always
+    /// describes exactly the caller's list, whatever sort or import happened since). An id that no
+    /// longer exists gets a blank item (square, no day). Unreadable values become `None`, never an
+    /// error: one corrupt row must not lose the whole layout. Cheap enough to call per chunk of a few
+    /// thousand ids from a cancellable job.
+    fn layout_items(&self, ids: &[i64]) -> Result<Vec<LayoutItem>, CatalogError>;
 
     /// The total row count a `hunt` call with this `Filter` would match, ignoring `Page`.
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError>;

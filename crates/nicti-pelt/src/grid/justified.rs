@@ -13,11 +13,7 @@
 //! No egui, no catalog: aspects come from the caller. **Catalog `width`/`height` are not
 //! orientation-corrected** (a portrait NEF's preview is stored landscape with an EXIF rotation;
 //! JPEG assets carry the file's own size), so the caller must feed [`oriented_aspect`], not raw
-//! width/height; where the orientation comes from is the open follow-up (#604).
-
-// Nothing calls this yet: `view.rs` still draws the square grid, and wiring this in (a custom viewport
-// loop, the Pounce build job, the view toggle) is #604. The module is complete and tested on its own.
-#![allow(dead_code)]
+//! width/height; the orientation comes from `asset.orientation` (#604) via `CatalogStore::layout_items` (#656).
 
 use std::ops::Range;
 

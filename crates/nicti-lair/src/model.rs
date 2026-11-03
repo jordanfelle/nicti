@@ -37,6 +37,20 @@ pub struct Asset {
     pub orientation: Option<u8>,
 }
 
+/// What the justified grid needs to lay one photo out (#656), in `hunt_ids` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutItem {
+    pub id: i64,
+    /// Stored pixel size (not orientation-corrected), `None` when unknown.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// EXIF Orientation 1-8; `None` = not read yet (treated as upright).
+    pub orientation: Option<u8>,
+    /// The capture day, `YYYY-MM-DD` (the first ten characters of `captured_at`), `None` when the
+    /// photo has no capture time.
+    pub day: Option<String>,
+}
+
 /// A new (or re-scanned) asset, as ingest builds it. Passed to
 /// [`crate::CatalogStore::insert_asset`], which upserts on `(root_id, rel_path)` — a re-scan of a
 /// path whose stat/fingerprint/EXIF changed updates the existing row in place rather than

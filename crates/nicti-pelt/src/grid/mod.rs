@@ -5,7 +5,9 @@
 //!
 //! - `layout`: pure geometry (columns, rows, visible index range, batching) -- unit-tested alone.
 //! - `justified`: the pure core of justified rows with date-group headers (#550, ADR-0437 section 3):
-//!   a streamed row-offset index, lookups, navigation and the rebuild gate. Not yet wired into `view`.
+//!   a streamed row-offset index, lookups, navigation and the rebuild gate.
+//! - `layout_build`: `LayoutJob`, the Pounce job that streams the catalog's sizes/orientations/days
+//!   into a `RowIndex` (#656); `view` draws it when the justified layout is on.
 //! - `jobs`: `SnapshotJob` (one index-ordered `hunt_ids` scan) and `ThumbBatchJob` (batched T0
 //!   decode + downsize).
 //! - `selection`: the multi-selection (sorted index ranges), for culling's select-all-then-delete.
@@ -15,6 +17,7 @@
 pub mod jobs;
 pub mod justified;
 pub mod layout;
+pub mod layout_build;
 pub mod selection;
 pub mod session;
 pub mod view;
