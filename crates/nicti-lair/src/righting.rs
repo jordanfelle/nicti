@@ -52,6 +52,9 @@ pub struct RightingReport {
     pub raced: u64,
     /// Rows whose `asset.orientation` was NULL and got filled in the same pass (#604/#606).
     pub orientation_filled: u64,
+    /// Rows whose orientation is still NULL because the file could not be read: a reason to try
+    /// the root again.
+    pub orientation_unread: u64,
     /// The root's folder is not there (an unmounted drive): nothing was examined or touched, and
     /// every asset would otherwise look like a deleted file.
     pub root_offline: bool,
@@ -72,6 +75,7 @@ impl RightingReport {
         self.stale_file += other.stale_file;
         self.raced += other.raced;
         self.orientation_filled += other.orientation_filled;
+        self.orientation_unread += other.orientation_unread;
         self.root_offline |= other.root_offline;
         self.failed.extend(other.failed);
     }
@@ -80,7 +84,11 @@ impl RightingReport {
     /// root was reachable and nothing was left undone. Deleted files (`missing_file`) and RAWs
     /// that need no rotation are not leftovers.
     pub fn can_mark_done(&self) -> bool {
-        !self.root_offline && self.failed.is_empty() && self.stale_file == 0 && self.raced == 0
+        !self.root_offline
+            && self.failed.is_empty()
+            && self.stale_file == 0
+            && self.raced == 0
+            && self.orientation_unread == 0
     }
 }
 
@@ -265,6 +273,9 @@ pub struct RightingRun {
     /// caller records these so the next start skips them. An offline or partly failed root is not
     /// listed and is tried again next time.
     pub done_roots: Vec<i64>,
+    /// Roots that were reachable and fully walked, whether or not they came out clean: the caller
+    /// counts an attempt against each so a permanent failure stops being retried at every launch.
+    pub visited_roots: Vec<i64>,
     /// The run was dropped before it finished (a cancelled job): `done_roots` only has the roots
     /// that did finish.
     pub cancelled: bool,
@@ -341,6 +352,7 @@ impl Righting {
         for _ in 0..STEP_ASSETS {
             let Some(asset) = cur.assets.next() else {
                 let finished = self.current.take().expect("current");
+                self.run.visited_roots.push(finished.root_id);
                 if finished.report.can_mark_done() {
                     self.run.done_roots.push(finished.root_id);
                 }
@@ -348,9 +360,12 @@ impl Righting {
                 return Ok(true);
             };
             righting_asset(store, &cur.path, &asset, &mut cur.report)?;
-            if asset.orientation.is_none() && crate::orient::orient_asset(store, &cur.path, &asset)?
-            {
-                cur.report.orientation_filled += 1;
+            if asset.orientation.is_none() {
+                if crate::orient::orient_asset(store, &cur.path, &asset)? {
+                    cur.report.orientation_filled += 1;
+                } else {
+                    cur.report.orientation_unread += 1;
+                }
             }
             self.done += 1;
         }

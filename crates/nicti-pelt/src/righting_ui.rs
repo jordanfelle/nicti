@@ -29,7 +29,15 @@ struct Markers {
     /// Root ids whose thumbnails were righted and orientations read with nothing left undone.
     #[serde(default)]
     righted_roots: BTreeSet<i64>,
+    /// Finished-but-unclean passes per root. After [`MAX_ATTEMPTS`] the root is treated as done so a
+    /// permanent failure (a read-only sidecar folder, one corrupt RAW) does not re-read every file at
+    /// every launch; the Library's "Repair thumbnails" still retries it on demand.
+    #[serde(default)]
+    attempts: std::collections::BTreeMap<i64, u32>,
 }
+
+/// Unclean passes after which a root stops being retried automatically.
+const MAX_ATTEMPTS: u32 = 3;
 
 fn load_markers(catalog_path: &Path) -> Markers {
     std::fs::read_to_string(marker_file_for(catalog_path))
@@ -47,13 +55,21 @@ pub fn righted_roots(catalog_path: &Path) -> std::collections::HashSet<i64> {
         .collect()
 }
 
-/// Adds `roots` to the marker, atomically (temp file + rename).
-pub fn mark_righted(catalog_path: &Path, roots: &[i64]) -> std::io::Result<()> {
-    if roots.is_empty() {
+/// Records a finished pass: `done` roots are marked righted; every other `visited` root counts one
+/// attempt and is marked once it reaches [`MAX_ATTEMPTS`]. Atomic (temp file + rename).
+pub fn mark_righted(catalog_path: &Path, done: &[i64], visited: &[i64]) -> std::io::Result<()> {
+    if done.is_empty() && visited.is_empty() {
         return Ok(());
     }
     let mut markers = load_markers(catalog_path);
-    markers.righted_roots.extend(roots.iter().copied());
+    markers.righted_roots.extend(done.iter().copied());
+    for root in visited.iter().filter(|r| !done.contains(r)) {
+        let n = markers.attempts.entry(*root).or_insert(0);
+        *n += 1;
+        if *n >= MAX_ATTEMPTS {
+            markers.righted_roots.insert(*root);
+        }
+    }
     let path = marker_file_for(catalog_path);
     let tmp = path.with_extension("json.tmp");
     std::fs::write(
@@ -147,7 +163,7 @@ impl RightingUi {
         };
         self.pending = None;
         let mut note = status_after(&run, self.quiet);
-        if let Err(e) = mark_righted(catalog_path, &run.done_roots) {
+        if let Err(e) = mark_righted(catalog_path, &run.done_roots, &run.visited_roots) {
             let msg = format!("could not save thumbnail repair progress: {e}");
             note = Some(match note {
                 Some(n) => format!("{n} ({msg})"),
@@ -174,13 +190,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cat = dir.path().join("cat.db");
         assert!(righted_roots(&cat).is_empty());
-        mark_righted(&cat, &[1, 2]).unwrap();
-        mark_righted(&cat, &[2, 5]).unwrap();
-        mark_righted(&cat, &[]).unwrap();
+        mark_righted(&cat, &[1, 2], &[1, 2]).unwrap();
+        mark_righted(&cat, &[2, 5], &[2, 5]).unwrap();
+        mark_righted(&cat, &[], &[]).unwrap();
         let got: BTreeSet<i64> = righted_roots(&cat).into_iter().collect();
         assert_eq!(got, BTreeSet::from([1, 2, 5]));
         std::fs::write(marker_file_for(&cat), "not json").unwrap();
         assert!(righted_roots(&cat).is_empty());
+    }
+
+    #[test]
+    fn a_root_that_keeps_failing_is_retried_a_few_times_then_left_to_the_button() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("cat.db");
+        for _ in 0..MAX_ATTEMPTS - 1 {
+            mark_righted(&cat, &[], &[7]).unwrap();
+            assert!(!righted_roots(&cat).contains(&7));
+        }
+        mark_righted(&cat, &[], &[7]).unwrap();
+        assert!(righted_roots(&cat).contains(&7));
+        // An offline root is never "visited", so it is never counted.
+        mark_righted(&cat, &[], &[]).unwrap();
+        assert!(!righted_roots(&cat).contains(&8));
     }
 
     #[test]

@@ -1306,11 +1306,8 @@ impl eframe::App for PeltApp {
         self.poll_backup();
         self.poll_move();
         self.poll_recovery();
-        if self.righting.poll(&self.catalog_path) {
-            // The pass changed thumbnails and orientation rows: re-read the grid like any other
-            // catalog-changing job (it ran under `JobKind::Sync`, so the busy -> idle edge also
-            // refreshes).
-        }
+        // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
+        self.righting.poll(&self.catalog_path);
         self.poll_cull();
         self.poll_eyeshine(ui.ctx());
         self.poll_prebake(ui.ctx());
@@ -2217,6 +2214,9 @@ impl PeltApp {
                                     JobKind::Sync,
                                     JobKind::Move,
                                     JobKind::Delete,
+                                    JobKind::Export,
+                                    JobKind::Verify,
+                                    JobKind::Baseline,
                                 ]),
                             egui::Button::new("Repair thumbnails"),
                         )
@@ -2372,6 +2372,11 @@ impl PeltApp {
         let Some(path) = self.checked_import_path(true) else {
             return;
         };
+        if self.righting.is_running() {
+            self.import_status =
+                Some("Thumbnail repair is running; import/sync waits until it finishes.".into());
+            return;
+        }
         if self.job_active(&[
             JobKind::Move,
             JobKind::Delete,

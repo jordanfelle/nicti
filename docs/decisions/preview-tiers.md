@@ -127,7 +127,9 @@ which is the cache invalidation (a re-tagged blob replaces what is on screen).
 - **Trigger:** at launch (silent when there is nothing to do) for roots not in `<catalog>.migrations.json`
   (`righted_roots`), skipped while a move recovery holds the `Move` guards; and the Library's "Repair thumbnails" button,
   which ignores the marker. A root is recorded only when `RightingReport::can_mark_done()` (reachable, nothing failed,
-  stale or raced), so an unmounted drive or a changed file is retried next start, per root.
+  stale or raced, no orientation left unread), so an unmounted drive or a changed file is retried next start, per root. A
+  reachable root that keeps ending unclean counts an attempt in the marker and is treated as done after 3, so one permanent
+  failure cannot re-read every file at every launch (the button still retries it). Import/Sync are refused while the pass runs.
 - **Cancel:** a dropped job hands over a partial `RightingRun { cancelled: true }`; only roots that finished are recorded.
 - **Not verified here:** a real library (RAW with Orientation 6/8, an archived folder with legacy AVIF sidecars) and the
   per-start cost on a NAS for roots that keep failing; both need the operator's library.

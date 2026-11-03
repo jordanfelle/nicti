@@ -720,3 +720,77 @@ fn a_cancelled_job_hands_over_a_partial_run_marked_cancelled() {
     assert!(run.cancelled);
     assert!(run.done_roots.is_empty());
 }
+
+#[test]
+fn a_mixed_run_marks_only_the_clean_root_and_counts_the_other_as_visited() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    fx.asset("ok.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    // A second root whose only RAW changed on disk since cataloguing (stale).
+    let dir2 = fx._tmp.path().join("other");
+    std::fs::create_dir_all(&dir2).unwrap();
+    let vol = fx.store.upsert_volume("vol2", None, None, 0).unwrap();
+    let root2 = fx.store.ensure_root(vol, &dir2.to_string_lossy()).unwrap();
+    std::fs::write(dir2.join("s.NEF"), nef(Some(6), &real_jpeg(4))).unwrap();
+    let new = NewAsset {
+        rel_path: "s.NEF".into(),
+        rel_path_fold: "s.nef".into(),
+        size_bytes: 1, // not the real size: stale
+        mtime_unix: 1,
+        fingerprint: None,
+        natural_key: None,
+        make: None,
+        model: None,
+        captured_at: None,
+        width: None,
+        height: None,
+        imported_at: 0,
+    };
+    fx.store
+        .insert_asset(root2, &new, Some(&pv(real_jpeg(4))))
+        .unwrap();
+
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(fx.store.clone(), &HashSet::new()).unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert_eq!(run.done_roots, vec![fx.root_id]);
+    let mut visited = run.visited_roots.clone();
+    visited.sort();
+    assert_eq!(visited, vec![fx.root_id, root2]);
+    assert_eq!(run.total.stale_file, 1);
+}
+
+#[test]
+fn an_unreadable_file_keeps_its_root_from_being_marked_done() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    fx.asset("gone.NEF", Some(8), None);
+    std::fs::remove_file(fx.raw("gone.NEF")).unwrap();
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(fx.store.clone(), &HashSet::new()).unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert_eq!(run.total.orientation_unread, 1);
+    assert!(run.done_roots.is_empty());
+    assert_eq!(run.visited_roots, vec![fx.root_id]);
+}
+
+#[test]
+fn a_job_dropped_mid_root_reports_partial_totals_and_no_finished_root() {
+    use nicti_pounce::ChunkedJob;
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    for i in 0..20 {
+        fx.asset(&format!("{i}.NEF"), Some(6), Some(&pv(real_jpeg(i as u8))));
+    }
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(fx.store.clone(), &HashSet::new()).unwrap();
+    let _ = job.step().unwrap(); // 16 of 20 assets
+    drop(job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert!(run.cancelled);
+    assert!(run.done_roots.is_empty());
+    assert!(run.visited_roots.is_empty());
+    assert_eq!(run.total.examined, 16);
+}
