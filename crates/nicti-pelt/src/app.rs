@@ -46,7 +46,7 @@ use crate::filter_bar::FilterBar;
 use crate::grid::{self, GridSession};
 use crate::heal_tool::HealUi;
 use crate::keyword_tag::KeywordUi;
-use crate::knead::batch::run_batch;
+use crate::knead::batch::{run_batch, run_rotation_batch};
 use crate::knead::ui::{Command as KneadCommand, KneadUi, PanelAction};
 use crate::knead::Clipboard;
 use crate::loupe::{asset_cache_key, LoupeSession};
@@ -1892,6 +1892,19 @@ impl PeltApp {
             {
                 knead_action = Some(PanelAction::Sync);
             }
+            if ui
+                .add_enabled(
+                    can_edit && targets >= 2,
+                    egui::Button::new(format!("Straighten {targets}\u{2026}")),
+                )
+                .on_hover_text(
+                    "Set or add the straighten angle of the cursor photo on the rest of the \
+                     selection. Only the angle changes; crops are fitted when rendered.",
+                )
+                .clicked()
+            {
+                knead_action = Some(PanelAction::Straighten);
+            }
             if let Some(picked) = self.knead.preset_menu(ui, can_edit) {
                 knead_action = Some(picked);
             }
@@ -2683,7 +2696,10 @@ impl PeltApp {
         if self.delete.is_confirming()
             && matches!(
                 action,
-                PanelAction::Copy | PanelAction::Sync | PanelAction::SavePreset
+                PanelAction::Copy
+                    | PanelAction::Sync
+                    | PanelAction::SavePreset
+                    | PanelAction::Straighten
             )
         {
             return;
@@ -2720,6 +2736,38 @@ impl PeltApp {
                     return;
                 }
                 self.knead.ask_sync(doc, ids);
+            }
+            PanelAction::Straighten => {
+                let Some((source, doc)) = self.knead_source_doc() else {
+                    self.knead
+                        .set_status("Put the cursor on the photo whose angle to apply.".into());
+                    return;
+                };
+                let ids: Vec<i64> = self
+                    .knead_targets()
+                    .into_iter()
+                    .filter(|id| *id != source)
+                    .collect();
+                if ids.is_empty() {
+                    self.knead.set_status(
+                        "Select the photos to straighten. The photo under the cursor is the \
+                         reference."
+                            .into(),
+                    );
+                    return;
+                }
+                let degrees = nicti_tapetum::spine::resolve::<nicti_tapetum::coat::CropParams>(
+                    &doc,
+                    nicti_tapetum::stages::CROP,
+                )
+                .rotation_degrees;
+                let orientation = self
+                    .catalog
+                    .get_asset(source)
+                    .ok()
+                    .flatten()
+                    .and_then(|a| a.orientation);
+                self.knead.ask_straighten(ids, orientation, degrees);
             }
             PanelAction::Paste => match self.knead.clipboard().cloned() {
                 Some(clip) => self.run_knead_paste(clip, "Paste"),
@@ -2775,6 +2823,28 @@ impl PeltApp {
             KneadCommand::Run { clip, ids, label } => {
                 match run_batch(store.as_ref(), &clip, &ids, &label) {
                     Ok((outcome, last)) => self.knead.finish_batch(&label, &outcome, last),
+                    Err(e) => self.knead.set_status(format!("{label} failed: {e}")),
+                }
+                ids
+            }
+            KneadCommand::Straighten {
+                ids,
+                reference_orientation,
+                mode,
+                degrees,
+                label,
+            } => {
+                match run_rotation_batch(
+                    store.as_ref(),
+                    &ids,
+                    reference_orientation,
+                    mode,
+                    degrees,
+                    &label,
+                ) {
+                    Ok((outcome, skipped, last)) => self
+                        .knead
+                        .finish_straighten(&label, &outcome, skipped, last),
                     Err(e) => self.knead.set_status(format!("{label} failed: {e}")),
                 }
                 ids

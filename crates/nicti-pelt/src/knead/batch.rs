@@ -6,7 +6,8 @@
 use nicti_lair::{CatalogError, CatalogStore};
 use nicti_pawprint::EditDocument;
 
-use super::{plan, Change, Clipboard};
+use super::straighten::{plan_rotation, Mode, Target};
+use super::{plan, BatchPlan, Change, Clipboard};
 
 /// What a batch did, for the one summary line (ADR-0101 rule 5: no per-photo prompts).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -86,7 +87,16 @@ pub fn run_batch(
     // A photo listed twice would get two changes and two undo entries.
     let mut seen = std::collections::HashSet::new();
     let ids: Vec<i64> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
-    let batch = plan(clip, store.get_master_edits(&ids)?);
+    commit(store, plan(clip, store.get_master_edits(&ids)?), label)
+}
+
+/// Writes a plan's changes in one transaction and builds the undo handle (`None` when nothing
+/// changed). Nothing is written if the write fails.
+fn commit(
+    store: &dyn CatalogStore,
+    batch: BatchPlan,
+    label: &str,
+) -> Result<(BatchOutcome, Option<LastBatch>), CatalogError> {
     let writes: Vec<(i64, EditDocument)> = batch
         .changes
         .iter()
@@ -117,6 +127,37 @@ pub fn run_batch(
             entries,
         }),
     ))
+}
+
+/// The rotation-only batch (#614): sets or adds `degrees` to each target's straighten angle, for
+/// photos whose EXIF Orientation matches `reference_orientation`. Returns how many were skipped
+/// for an unknown or different orientation alongside the usual outcome and undo handle.
+pub fn run_rotation_batch(
+    store: &dyn CatalogStore,
+    ids: &[i64],
+    reference_orientation: Option<u8>,
+    mode: Mode,
+    degrees: f32,
+    label: &str,
+) -> Result<(BatchOutcome, usize, Option<LastBatch>), CatalogError> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<i64> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    let targets: Vec<Target> = store
+        .get_master_edits(&ids)?
+        .into_iter()
+        .map(|(asset_id, doc)| {
+            let orientation = store.get_asset(asset_id)?.and_then(|a| a.orientation);
+            Ok(Target {
+                asset_id,
+                doc,
+                orientation,
+            })
+        })
+        .collect::<Result<_, CatalogError>>()?;
+    let rotation = plan_rotation(targets, reference_orientation, mode, degrees);
+    let skipped = rotation.orientation_skipped;
+    let (outcome, last) = commit(store, rotation.plan, label)?;
+    Ok((outcome, skipped, last))
 }
 
 #[cfg(test)]
@@ -248,5 +289,55 @@ mod tests {
         let (out, last) = run_batch(&store, &clip(2.0), &doubled, "Paste").unwrap();
         assert_eq!(out.applied, 2);
         assert_eq!(last.unwrap().len(), 2);
+    }
+
+    fn rotation(store: &SqliteCatalog, id: i64) -> f32 {
+        use nicti_tapetum::coat::{self, CropParams};
+        store
+            .get_master_edit(id)
+            .unwrap()
+            .and_then(|d| d.stages.get(nicti_tapetum::stages::CROP).cloned())
+            .map_or(0.0, |e| {
+                coat::parse::<CropParams>(&e.params).rotation_degrees
+            })
+    }
+
+    #[test]
+    fn a_rotation_batch_sets_the_angle_skips_other_orientations_and_undoes_as_one() {
+        let (store, ids) = catalog(4);
+        for (id, o) in [(ids[0], 1), (ids[1], 1), (ids[2], 6)] {
+            store.set_orientation(id, o).unwrap();
+        } // ids[3] was never read
+        let (out, skipped, last) =
+            run_rotation_batch(&store, &ids, Some(1), Mode::Set, 2.5, "Straighten").unwrap();
+        assert_eq!((out.applied, out.unchanged, out.missing), (2, 0, 0));
+        assert_eq!(
+            skipped, 2,
+            "a sideways photo and an unread one are left alone"
+        );
+        assert!((rotation(&store, ids[0]) - 2.5).abs() < 1e-6);
+        assert!((rotation(&store, ids[1]) - 2.5).abs() < 1e-6);
+        assert_eq!(rotation(&store, ids[2]), 0.0);
+        assert_eq!(rotation(&store, ids[3]), 0.0);
+
+        let undo = last.unwrap().undo(&store).unwrap();
+        assert_eq!(undo.restored, 2);
+        assert_eq!(rotation(&store, ids[0]), 0.0);
+        assert_eq!(store.get_master_edit(ids[0]).unwrap(), Some(doc(0.0)));
+    }
+
+    #[test]
+    fn running_the_same_rotation_again_changes_nothing_and_keeps_the_old_undo_valid() {
+        let (store, ids) = catalog(2);
+        for id in &ids {
+            store.set_orientation(*id, 1).unwrap();
+        }
+        let (_, _, first) =
+            run_rotation_batch(&store, &ids, Some(1), Mode::Set, 1.0, "Straighten").unwrap();
+        assert!(first.is_some());
+        let (out, _, second) =
+            run_rotation_batch(&store, &ids, Some(1), Mode::Set, 1.0, "Straighten").unwrap();
+        assert_eq!((out.applied, out.unchanged), (0, 2));
+        assert!(second.is_none());
     }
 }
