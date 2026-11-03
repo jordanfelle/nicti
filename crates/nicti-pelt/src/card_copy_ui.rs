@@ -156,7 +156,7 @@ pub fn summarize(r: &CardCopyReport) -> String {
     }
     if !r.not_considered.is_empty() {
         s.push_str(&format!(
-            "; NOT copied (this tool copies .nef/.nrw/.dng/.jpg from the card): {}",
+            "; NOT copied (this tool copies .nef/.nrw/.dng/.jpg/.jpeg/.jpe/.jfif from the card): {}",
             r.not_considered.join(", ")
         ));
     }

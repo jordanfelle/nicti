@@ -91,9 +91,7 @@ pub fn open_larder(catalog_path: &Path) -> Option<SharedLarder> {
 }
 
 fn is_plain_jpeg(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+    nicti_cornea::is_jpeg(path)
 }
 
 /// The best embedded JPEG to derive T2 from: Nikon's PreviewIFD (`JpgFromRaw`) when present,

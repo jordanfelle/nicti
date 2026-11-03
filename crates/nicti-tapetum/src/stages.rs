@@ -155,7 +155,9 @@ pub fn masks_stage() -> BasicStage {
 /// Decode's stage version. Bumped to 1 by #552: decode now limits clipped samples to the
 /// clip-neutral ceiling ([`ClipNeutral`]), which changes pixels for any frame with blown
 /// highlights, so every cache key chained from it (baked frames, AI bakes) must change with it.
-const DECODE_IMPL_VERSION: u32 = 1;
+/// Bumped to 2 by #652: a JPEG with a non-sRGB ICC profile now decodes to linear ProPhoto instead
+/// of clipped sRGB, so its pixels (and the baked frames/AI masks keyed on them) change.
+const DECODE_IMPL_VERSION: u32 = 2;
 
 pub struct DecodeStage;
 
@@ -2223,7 +2225,7 @@ mod tests {
 
     #[test]
     fn decode_changes_its_cache_key_because_its_pixels_changed() {
-        assert_eq!(decode_stage().impl_version(), 1);
+        assert_eq!(decode_stage().impl_version(), 2);
         assert_ne!(
             decode_stage().impl_version(),
             demosaic_stage().impl_version(),

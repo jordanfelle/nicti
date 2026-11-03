@@ -31,6 +31,13 @@ pub(crate) fn working_from_xyz_d50() -> Mat3 {
     mat_invert(&working_to_xyz_d50())
 }
 
+/// XYZ(D50) -> linear ProPhoto (D50), row-major f32: what a decoder declares in `cam_xyz` when its
+/// pixels are already linear working-space RGB (#652).
+pub fn xyz_d50_to_working_f32() -> [f32; 9] {
+    let m = working_from_xyz_d50();
+    std::array::from_fn(|i| m[i / 3][i % 3] as f32)
+}
+
 /// A delivery/proofing color space the pipeline can convert to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputSpace {

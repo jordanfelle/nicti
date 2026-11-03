@@ -3803,6 +3803,8 @@ dependencies = [
  "cc",
  "clap",
  "image",
+ "jpeg-encoder 0.7.1",
+ "moxcms 0.9.1",
  "nicti-calico",
  "nicti-claw",
  "nicti-iris",

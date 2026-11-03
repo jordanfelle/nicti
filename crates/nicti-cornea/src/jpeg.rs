@@ -8,8 +8,9 @@
 //! balanced; the Temperature slider still works through `cam_xyz`), `black` is 0 and `maximum`
 //! 65535. As with a RAW, the pixels are **not** rotated: `orientation` carries the EXIF value.
 //!
-//! The ICC conversion is 8-bit and relative colorimetric, so colours outside sRGB clip (follow-up).
-//! An 8-bit source cannot gain range: highlights stay clipped at 1.0 and shadows keep their 8-bit
+//! A JPEG tagged with a wide-gamut profile (Adobe RGB, Display P3, ...) is instead converted to
+//! 16-bit linear ProPhoto (the working space) and declares the working-space matrix, so colours
+//! outside sRGB survive (#652). An 8-bit source cannot gain range: highlights stay clipped at 1.0 and shadows keep their 8-bit
 //! steps, however far the edit pushes them.
 
 use std::io::Cursor;
@@ -56,11 +57,53 @@ const XYZ_D50_TO_SRGB: [f32; 9] = [
     1.405_242_7,
 ];
 
-/// True for the extensions [`JpegDecoder`] reads.
+/// The extensions [`JpegDecoder`] reads: the one list ingest, T0/T2 previews and decode all share
+/// (#652; `.jpe` and `.jfif` are real JPEG extensions the three former copies missed).
+pub const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "jfif"];
+
+/// True for the extensions [`JpegDecoder`] reads (case-insensitive).
 pub fn is_jpeg(path: &Path) -> bool {
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+        .is_some_and(|e| JPEG_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// True for a 4-component (CMYK/YCCK) JPEG carrying Adobe's APP14 marker, which is how Photoshop
+/// and friends write them -- with *inverted* ink values. `image`'s decoder converts those as if
+/// they were plain CMYK, so the colours come out wrong; refuse them rather than show that (#652).
+fn is_adobe_cmyk(data: &[u8]) -> bool {
+    let (mut adobe, mut four) = (false, false);
+    let mut i = 2;
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            i += 1; // padding between segments
+            continue;
+        }
+        let marker = data[i + 1];
+        if marker == 0xFF {
+            i += 1; // fill byte
+            continue;
+        }
+        if marker == 0x00 || (0xD0..=0xD8).contains(&marker) || marker == 0x01 {
+            i += 2; // stuffed zero, RSTn, SOI, TEM: no length field
+            continue;
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            break; // start of scan / end of image: no more headers
+        }
+        let len = usize::from(u16::from_be_bytes([data[i + 2], data[i + 3]]));
+        let body = data.get(i + 4..i + 2 + len).unwrap_or(&[]);
+        match marker {
+            0xEE if body.starts_with(b"Adobe") => adobe = true,
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                // precision(1) height(2) width(2) components(1)
+                four = body.get(5) == Some(&4);
+            }
+            _ => {}
+        }
+        i += 2 + len;
+    }
+    adobe && four
 }
 
 pub struct JpegDecoder;
@@ -119,6 +162,11 @@ impl RawDecoder for JpegDecoder {
             message,
         };
 
+        if is_adobe_cmyk(&data) {
+            return Err(fail(
+                "CMYK/YCCK JPEGs are not supported yet (Adobe-inverted ink values)".to_string(),
+            ));
+        }
         let mut decoder = ImageReader::new(Cursor::new(&data))
             .with_guessed_format()
             .map_err(|e| fail(e.to_string()))?
@@ -133,21 +181,34 @@ impl RawDecoder for JpegDecoder {
         let (width, height) = (image.width(), image.height());
         let mut rgba = image.into_rgba8().into_raw();
 
-        if icc.is_some() {
-            // Source -> sRGB. Panic-guarded inside calico (moxcms parses untrusted profiles).
-            static TO_SRGB: OnceLock<SourceTransforms> = OnceLock::new();
-            TO_SRGB
-                .get_or_init(|| SourceTransforms::new(&DisplayProfile::Space(OutputSpace::Srgb)))
-                .convert_rgba8(icc.as_deref(), &mut rgba);
-        }
-
-        let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
-        for px in rgba.as_chunks::<4>().0 {
-            pixels.extend(px[..3].iter().map(|&v| srgb_to_linear_u16(v)));
-        }
+        // A tagged wide-gamut profile (Adobe RGB, Display P3, ...) goes straight to 16-bit linear
+        // ProPhoto, the working space, so nothing outside sRGB clips and nothing is rounded to
+        // 8 bits twice (#652). Everything else (untagged, sRGB, unusable profiles) takes the sRGB path.
+        let wide = icc
+            .as_deref()
+            .and_then(|icc| nicti_calico::source_transform::rgba8_to_linear_prophoto16(icc, &rgba));
+        let (pixels, matrix) = if let Some(pixels) = wide {
+            (pixels, nicti_calico::space::xyz_d50_to_working_f32())
+        } else {
+            if icc.is_some() {
+                // Source -> sRGB. Panic-guarded inside calico (moxcms parses untrusted profiles).
+                static TO_SRGB: OnceLock<SourceTransforms> = OnceLock::new();
+                TO_SRGB
+                    .get_or_init(|| {
+                        SourceTransforms::new(&DisplayProfile::Space(OutputSpace::Srgb))
+                    })
+                    .convert_rgba8(icc.as_deref(), &mut rgba);
+            }
+            let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+            for px in rgba.as_chunks::<4>().0 {
+                pixels.extend(px[..3].iter().map(|&v| srgb_to_linear_u16(v)));
+            }
+            (pixels, XYZ_D50_TO_SRGB)
+        };
+        drop(rgba);
 
         let mut cam_xyz = [0.0f32; 12];
-        cam_xyz[..9].copy_from_slice(&XYZ_D50_TO_SRGB);
+        cam_xyz[..9].copy_from_slice(&matrix);
         Ok(LinearFrame {
             make: String::new(),
             model: "JPEG".to_string(),
@@ -228,6 +289,8 @@ mod tests {
     fn extension_match_is_case_insensitive_and_jpeg_only() {
         assert!(is_jpeg(Path::new("a.JPG")));
         assert!(is_jpeg(Path::new("a.jpeg")));
+        assert!(is_jpeg(Path::new("a.JPE")));
+        assert!(is_jpeg(Path::new("a.jfif")));
         assert!(!is_jpeg(Path::new("a.nef")));
         assert!(!is_jpeg(Path::new("a")));
     }
@@ -332,37 +395,107 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_embedded_wide_gamut_profile_is_converted_to_srgb() {
-        let d = tempfile::tempdir().unwrap();
-        let icc = nicti_calico::icc::profile_bytes(OutputSpace::AdobeRgb).unwrap();
-        let img = RgbImage::from_pixel(8, 8, Rgb([40, 200, 60]));
+    /// Linear sRGB of the first pixel, from whatever space the frame declares (`cam_xyz` is
+    /// XYZ(D50) -> frame RGB, so invert it back to XYZ and on to sRGB).
+    fn first_pixel_linear_srgb(f: &LinearFrame) -> [f64; 3] {
+        let m: Vec<f64> = f.cam_xyz[..9].iter().map(|&v| f64::from(v)).collect();
+        let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
+            + m[2] * (m[3] * m[7] - m[4] * m[6]);
+        let inv = [
+            (m[4] * m[8] - m[5] * m[7]) / det,
+            (m[2] * m[7] - m[1] * m[8]) / det,
+            (m[1] * m[5] - m[2] * m[4]) / det,
+            (m[5] * m[6] - m[3] * m[8]) / det,
+            (m[0] * m[8] - m[2] * m[6]) / det,
+            (m[2] * m[3] - m[0] * m[5]) / det,
+            (m[3] * m[7] - m[4] * m[6]) / det,
+            (m[1] * m[6] - m[0] * m[7]) / det,
+            (m[0] * m[4] - m[1] * m[3]) / det,
+        ];
+        let v: Vec<f64> = f.pixels[..3]
+            .iter()
+            .map(|&p| f64::from(p) / 65535.0)
+            .collect();
+        let xyz: Vec<f64> = (0..3)
+            .map(|r| inv[r * 3] * v[0] + inv[r * 3 + 1] * v[1] + inv[r * 3 + 2] * v[2])
+            .collect();
+        let s: Vec<f64> = XYZ_D50_TO_SRGB.iter().map(|&x| f64::from(x)).collect();
+        std::array::from_fn(|r| s[r * 3] * xyz[0] + s[r * 3 + 1] * xyz[1] + s[r * 3 + 2] * xyz[2])
+    }
+
+    fn tagged_jpeg(dir: &Path, name: &str, space: OutputSpace, px: [u8; 3]) -> std::path::PathBuf {
+        let icc = nicti_calico::icc::profile_bytes(space).unwrap();
+        let img = RgbImage::from_pixel(8, 8, Rgb(px));
         let mut bytes = Vec::new();
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
         enc.set_icc_profile(icc).unwrap();
         enc.write_image(img.as_raw(), 8, 8, image::ExtendedColorType::Rgb8)
             .unwrap();
-        let tagged = d.path().join("adobe.jpg");
-        std::fs::write(&tagged, bytes).unwrap();
-        let plain = write_jpeg(d.path(), "plain.jpg", 8, 8, [40, 200, 60]);
-        let (t, p) = (
-            JpegDecoder.decode_linear(&tagged).unwrap(),
-            JpegDecoder.decode_linear(&plain).unwrap(),
-        );
-        // Adobe RGB green is more saturated than sRGB green: in sRGB it needs a larger G and a
-        // smaller R/B than the same bytes read as sRGB.
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn an_embedded_wide_gamut_profile_is_kept_wide_not_clipped_to_srgb() {
+        let d = tempfile::tempdir().unwrap();
+        // Saturated Display P3 green lies outside sRGB. JPEG chroma subsampling/quantisation
+        // softens it a little, so only require it to stay clearly out of gamut.
+        let f = JpegDecoder
+            .decode_linear(&tagged_jpeg(
+                d.path(),
+                "p3.jpg",
+                OutputSpace::DisplayP3,
+                [0, 255, 0],
+            ))
+            .unwrap();
+        let rgb = first_pixel_linear_srgb(&f);
         assert!(
-            t.pixels[1] > p.pixels[1],
-            "{:?} vs {:?}",
-            &t.pixels[..3],
-            &p.pixels[..3]
+            rgb[0] < -0.05,
+            "red must go negative in sRGB terms: {rgb:?}"
         );
-        assert!(
-            t.pixels[0] < p.pixels[0],
-            "{:?} vs {:?}",
-            &t.pixels[..3],
-            &p.pixels[..3]
-        );
+        assert!(rgb[1] > 1.0, "green must exceed sRGB white: {rgb:?}");
+        // The frame declares the working-space matrix, not sRGB's.
+        assert_ne!(f.cam_xyz[..9], XYZ_D50_TO_SRGB);
+    }
+
+    #[test]
+    fn an_embedded_wide_gamut_profile_keeps_in_gamut_colours_where_srgb_would_put_them() {
+        let d = tempfile::tempdir().unwrap();
+        // Adobe RGB (40, 200, 60) in sRGB terms: a larger G and smaller R/B than the same bytes
+        // read as sRGB (the old assertion, now through the declared matrix).
+        let t = JpegDecoder
+            .decode_linear(&tagged_jpeg(
+                d.path(),
+                "adobe.jpg",
+                OutputSpace::AdobeRgb,
+                [40, 200, 60],
+            ))
+            .unwrap();
+        let p = JpegDecoder
+            .decode_linear(&write_jpeg(d.path(), "plain.jpg", 8, 8, [40, 200, 60]))
+            .unwrap();
+        let (tr, pr) = (first_pixel_linear_srgb(&t), first_pixel_linear_srgb(&p));
+        assert!(tr[1] > pr[1], "{tr:?} vs {pr:?}");
+        assert!(tr[0] < pr[0], "{tr:?} vs {pr:?}");
+    }
+
+    #[test]
+    fn an_srgb_tagged_jpeg_keeps_the_srgb_fast_path() {
+        let d = tempfile::tempdir().unwrap();
+        let tagged = JpegDecoder
+            .decode_linear(&tagged_jpeg(
+                d.path(),
+                "s.jpg",
+                OutputSpace::Srgb,
+                [40, 200, 60],
+            ))
+            .unwrap();
+        let plain = JpegDecoder
+            .decode_linear(&write_jpeg(d.path(), "plain.jpg", 8, 8, [40, 200, 60]))
+            .unwrap();
+        assert_eq!(tagged.pixels[..3], plain.pixels[..3]);
+        assert_eq!(tagged.cam_xyz, plain.cam_xyz);
     }
 
     #[cfg(feature = "libraw")]
@@ -378,5 +511,151 @@ mod tests {
             SourceDecoder.decode_linear(&d.path().join("none.nef")),
             Err(DecodeError::Io { .. })
         ));
+    }
+
+    /// Inserts an APP1/EXIF segment holding only `Orientation = value` after SOI.
+    fn with_exif_orientation(jpeg: &[u8], value: u16) -> Vec<u8> {
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // one IFD entry
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&value.to_le_bytes());
+        tiff.extend_from_slice(&[0, 0]);
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+        let mut seg = vec![0xFF, 0xE1];
+        seg.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+        seg.extend_from_slice(b"Exif\0\0");
+        seg.extend_from_slice(&tiff);
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&seg);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn exif_orientation_1_is_upright_and_2_to_8_are_carried_on_a_real_tagged_jpeg() {
+        let d = tempfile::tempdir().unwrap();
+        let plain = std::fs::read(write_jpeg(d.path(), "p.jpg", 8, 8, [90, 60, 30])).unwrap();
+        for (tag, want) in [
+            (1u16, 0u8),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (7, 7),
+            (8, 8),
+        ] {
+            let p = d.path().join(format!("o{tag}.jpg"));
+            std::fs::write(&p, with_exif_orientation(&plain, tag)).unwrap();
+            let f = JpegDecoder.decode_linear(&p).unwrap();
+            assert_eq!(f.orientation, want, "EXIF {tag}");
+            // Pixels are never rotated, whatever the tag says.
+            assert_eq!((f.width, f.height), (8, 8));
+        }
+        // An out-of-range tag is "no rotation", not a bogus value downstream.
+        let p = d.path().join("o9.jpg");
+        std::fs::write(&p, with_exif_orientation(&plain, 9)).unwrap();
+        assert_eq!(JpegDecoder.decode_linear(&p).unwrap().orientation, 0);
+    }
+
+    fn cmyk_jpeg(adobe: bool, ycck: bool) -> Vec<u8> {
+        let ink: Vec<u8> = (0..64).flat_map(|_| [255u8, 255, 255, 255]).collect();
+        let mut bytes = Vec::new();
+        let ct = if ycck {
+            jpeg_encoder::ColorType::Ycck
+        } else {
+            jpeg_encoder::ColorType::Cmyk
+        };
+        jpeg_encoder::Encoder::new(&mut bytes, 100)
+            .encode(&ink, 8, 8, ct)
+            .unwrap();
+        if !adobe {
+            return bytes;
+        }
+        let mut seg = vec![0xFF, 0xEE, 0, 14];
+        seg.extend_from_slice(b"Adobe");
+        seg.extend_from_slice(&[0, 100, 0, 0, 0, 0, if ycck { 2 } else { 0 }]);
+        let mut out = bytes[..2].to_vec();
+        out.extend_from_slice(&seg);
+        out.extend_from_slice(&bytes[2..]);
+        out
+    }
+
+    #[test]
+    fn adobe_cmyk_and_ycck_are_refused_not_shown_with_inverted_colours() {
+        let d = tempfile::tempdir().unwrap();
+        for ycck in [false, true] {
+            let p = d.path().join(format!("c{ycck}.jpg"));
+            std::fs::write(&p, cmyk_jpeg(true, ycck)).unwrap();
+            let err = JpegDecoder.decode_linear(&p).unwrap_err().to_string();
+            assert!(err.contains("CMYK"), "{err}");
+        }
+        // A 3-component JPEG that merely has an Adobe marker still decodes.
+        let plain = std::fs::read(write_jpeg(d.path(), "p.jpg", 8, 8, [1, 2, 3])).unwrap();
+        let mut seg = vec![0xFF, 0xEE, 0, 14];
+        seg.extend_from_slice(b"Adobe");
+        seg.extend_from_slice(&[0, 100, 0, 0, 0, 0, 1]);
+        let mut with = plain[..2].to_vec();
+        with.extend_from_slice(&seg);
+        with.extend_from_slice(&plain[2..]);
+        let p = d.path().join("a.jpg");
+        std::fs::write(&p, with).unwrap();
+        assert!(JpegDecoder.decode_linear(&p).is_ok());
+    }
+
+    #[test]
+    fn a_gray_icc_profile_on_a_gray_jpeg_decodes_to_equal_channels() {
+        let d = tempfile::tempdir().unwrap();
+        let icc = moxcms::ColorProfile::new_gray_with_gamma(2.2)
+            .encode()
+            .unwrap();
+        let img = image::GrayImage::from_pixel(8, 8, image::Luma([128]));
+        let mut bytes = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
+        enc.set_icc_profile(icc).unwrap();
+        enc.write_image(img.as_raw(), 8, 8, image::ExtendedColorType::L8)
+            .unwrap();
+        let p = d.path().join("gray_icc.jpg");
+        std::fs::write(&p, bytes).unwrap();
+        let f = JpegDecoder.decode_linear(&p).unwrap();
+        assert_eq!(f.pixels[0], f.pixels[1]);
+        assert_eq!(f.pixels[1], f.pixels[2]);
+        // Treated as sRGB (a gray profile is not an RGB source), so the usual matrix applies.
+        assert_eq!(f.cam_xyz[..9], XYZ_D50_TO_SRGB);
+    }
+
+    #[test]
+    fn the_wide_gamut_frame_declares_a_matrix_that_keeps_d50_white_neutral() {
+        let d = tempfile::tempdir().unwrap();
+        let f = JpegDecoder
+            .decode_linear(&tagged_jpeg(
+                d.path(),
+                "w.jpg",
+                OutputSpace::AdobeRgb,
+                [128, 128, 128],
+            ))
+            .unwrap();
+        // Working space is ProPhoto: D50 white -> (1, 1, 1), and a grey pixel has equal channels.
+        let (w, m) = ([0.9642f32, 1.0, 0.8249], &f.cam_xyz);
+        for r in 0..3 {
+            let v = m[r * 3] * w[0] + m[r * 3 + 1] * w[1] + m[r * 3 + 2] * w[2];
+            assert!((v - 1.0).abs() < 0.002, "row {r}: {v}");
+        }
+        let px = &f.pixels[..3];
+        assert!((i32::from(px[0]) - i32::from(px[1])).abs() < 60, "{px:?}");
+        assert!((i32::from(px[1]) - i32::from(px[2])).abs() < 60, "{px:?}");
+    }
+
+    #[test]
+    fn adobe_cmyk_is_still_refused_with_padding_between_segments() {
+        let mut jpeg = cmyk_jpeg(true, false);
+        // A stray zero pad right after the APP14 segment (offset 2 + 2 + 14 = 18).
+        jpeg.insert(18, 0x00);
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("pad.jpg");
+        std::fs::write(&p, jpeg).unwrap();
+        assert!(JpegDecoder.decode_linear(&p).is_err());
     }
 }

@@ -28,10 +28,10 @@ use crate::{CatalogError, CatalogStore, NewAsset, Preview, Root};
 /// a future-camera-support concern.
 const RAW_EXTENSIONS: &[&str] = &["nef", "nrw", "dng"];
 
-/// JPEG files are catalogued as assets in their own right (#489). A RAW+JPEG pair (same stem, e.g.
-/// `DSC_1.NEF` + `DSC_1.JPG`) is two independent assets: they have distinct `rel_path`s and
-/// fingerprints, and stacking them is a grouping feature layered on later, not an ingest concern.
-const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg"];
+// JPEG files are catalogued as assets in their own right (#489). A RAW+JPEG pair (same stem, e.g.
+// `DSC_1.NEF` + `DSC_1.JPG`) is two independent assets: they have distinct `rel_path`s and
+// fingerprints, and stacking them is a grouping feature layered on later, not an ingest concern.
+// The extension list lives in `nicti_cornea::JPEG_EXTENSIONS` (#652), shared with decode.
 
 /// A JPEG asset's T0 is the file itself when it is already grid-sized, else a downscale to this
 /// long edge (ADR-0029's "resize master to 512px long edge" rule for assets with no embedded
@@ -51,7 +51,7 @@ fn has_extension(path: &Path, list: &[&str]) -> bool {
 }
 
 pub(crate) fn is_jpeg(path: &Path) -> bool {
-    has_extension(path, JPEG_EXTENSIONS)
+    nicti_cornea::is_jpeg(path)
 }
 
 const PARTIAL_HASH_WINDOW: u64 = 64 * 1024;
