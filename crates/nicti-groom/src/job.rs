@@ -182,6 +182,9 @@ mod tests {
 
     #[test]
     fn runs_on_the_gpu_lane_as_a_foreground_bake() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (job, _, _) = job_with(Fake {
             result: Ok(()),
             calls: 0,

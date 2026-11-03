@@ -6,6 +6,8 @@
 //! [`crate::job::RemoveJob`] on Pounce's GPU-lane worker thread. A failed load is retried on the
 //! next removal (the user may have fixed the install) rather than cached as a permanent failure.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nicti_haw::ExecutionProvider;
@@ -104,25 +106,94 @@ impl Demotion {
 /// A check run before the sessions are loaded (see [`LazyBackend::verified_by`]).
 pub type Verifier = Box<dyn Fn() -> Result<(), String> + Send>;
 
+/// Builds the removal engine on a requested provider. The seam that lets the fallback/retry logic
+/// in [`LazyBackend`] be tested without ONNX models: production uses [`RealLoader`].
+pub trait EngineLoader: Send {
+    /// The provider a load should ask for first (the runtime's, unless `NICTI_ORT_EP` overrides).
+    fn requested(&self, models: &RemovalModels) -> ExecutionProvider;
+
+    /// Loads an engine on `requested` and reports the provider it actually came up on (a session
+    /// can quietly fall back to the CPU).
+    fn load(
+        &mut self,
+        models: &RemovalModels,
+        requested: ExecutionProvider,
+    ) -> Result<(Box<dyn RemovalBackend + Send>, ExecutionProvider), RemovalError>;
+}
+
+/// The production loader: MobileSAM + LaMa over ONNX Runtime.
+pub struct RealLoader;
+
+impl EngineLoader for RealLoader {
+    fn requested(&self, models: &RemovalModels) -> ExecutionProvider {
+        provider::requested_for(&models.ort_dylib)
+    }
+
+    fn load(
+        &mut self,
+        models: &RemovalModels,
+        requested: ExecutionProvider,
+    ) -> Result<(Box<dyn RemovalBackend + Send>, ExecutionProvider), RemovalError> {
+        let mut sam = MobileSam::load_on(
+            &models.sam_encoder,
+            &models.sam_decoder,
+            &models.ort_dylib,
+            requested,
+        )?;
+        let mut lama = Lama::load_on(&models.lama, &models.ort_dylib, requested)?;
+        if sam.active_provider() != lama.active_provider() {
+            // One fell back to the CPU on its own (a model that won't load on the GPU provider):
+            // run the pair on the CPU so the retry guard and the VRAM claim describe reality.
+            drop((sam, lama));
+            sam = MobileSam::load_on(
+                &models.sam_encoder,
+                &models.sam_decoder,
+                &models.ort_dylib,
+                ExecutionProvider::Cpu,
+            )?;
+            lama = Lama::load_on(&models.lama, &models.ort_dylib, ExecutionProvider::Cpu)?;
+        }
+        let active = sam.active_provider();
+        Ok((Box::new(RemovalEngine::new(sam, lama)), active))
+    }
+}
+
 pub struct LazyBackend {
     models: RemovalModels,
     verify: Option<Verifier>,
-    engine: Option<RemovalEngine<MobileSam, Lama>>,
+    loader: Box<dyn EngineLoader>,
+    engine: Option<Box<dyn RemovalBackend + Send>>,
     /// The provider the loaded sessions run on (CPU until loaded).
     active: ExecutionProvider,
     /// While the backend runs on the CPU after a GPU failure: when to try the GPU provider again.
     demotion: Demotion,
+    /// Mirrors `demotion.is_demoted()` for the UI, which cannot lock the backend while a removal
+    /// holds it. Updated at the end of every `remove`.
+    demoted_flag: Arc<AtomicBool>,
 }
 
 impl LazyBackend {
     pub fn new(models: RemovalModels) -> Self {
+        Self::with_loader(models, Box::new(RealLoader))
+    }
+
+    /// A backend that builds its engines with `loader` (tests use a stub).
+    pub fn with_loader(models: RemovalModels, loader: Box<dyn EngineLoader>) -> Self {
         Self {
             models,
             verify: None,
+            loader,
             engine: None,
             active: ExecutionProvider::Cpu,
             demotion: Demotion::default(),
+            demoted_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// A handle the UI polls to show "running on the CPU after a GPU error" (#599): `true` while
+    /// the backend is demoted and waiting out its cool-down. Safe to read while a removal runs.
+    pub fn demoted_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.demoted_flag)
     }
 
     /// Runs `verify` before the sessions are first loaded -- on the job's worker thread, so
@@ -154,29 +225,10 @@ impl LazyBackend {
         self.engine = None;
         self.active = ExecutionProvider::Cpu;
         provider::declare(ExecutionProvider::Cpu);
-        let models = &self.models;
-        let mut sam = MobileSam::load_on(
-            &models.sam_encoder,
-            &models.sam_decoder,
-            &models.ort_dylib,
-            requested,
-        )?;
-        let mut lama = Lama::load_on(&models.lama, &models.ort_dylib, requested)?;
-        if sam.active_provider() != lama.active_provider() {
-            // One fell back to the CPU on its own (a model that won't load on the GPU provider):
-            // run the pair on the CPU so the retry guard and the VRAM claim describe reality.
-            drop((sam, lama));
-            sam = MobileSam::load_on(
-                &models.sam_encoder,
-                &models.sam_decoder,
-                &models.ort_dylib,
-                ExecutionProvider::Cpu,
-            )?;
-            lama = Lama::load_on(&models.lama, &models.ort_dylib, ExecutionProvider::Cpu)?;
-        }
-        self.active = sam.active_provider();
+        let (engine, active) = self.loader.load(&self.models, requested)?;
+        self.active = active;
         provider::declare(self.active);
-        self.engine = Some(RemovalEngine::new(sam, lama));
+        self.engine = Some(engine);
         Ok(())
     }
 }
@@ -216,14 +268,23 @@ impl Drop for LazyBackend {
 
 impl RemovalBackend for LazyBackend {
     fn remove(&mut self, req: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
+        let result = self.remove_inner(req);
+        self.demoted_flag
+            .store(self.demotion.is_demoted(), Ordering::Relaxed);
+        result
+    }
+}
+
+impl LazyBackend {
+    fn remove_inner(&mut self, req: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
         if self.engine.is_none() {
             if let Some(verify) = &self.verify {
                 verify().map_err(RemovalError::Integrity)?;
             }
-            let requested = provider::requested_for(&self.models.ort_dylib);
+            let requested = self.loader.requested(&self.models);
             self.load_preferred(requested)?;
         } else if self.demotion.take_due(Instant::now()) {
-            let requested = provider::requested_for(&self.models.ort_dylib);
+            let requested = self.loader.requested(&self.models);
             self.load_preferred(requested)?;
         }
         let result = match self.engine.as_mut().expect("just loaded").remove(req) {
@@ -415,5 +476,146 @@ mod tests {
             ));
             assert!(!backend.is_loaded());
         }
+    }
+
+    /// A scripted engine: fails with `error` (an ORT message) or returns a 1x1 patch.
+    struct StubEngine {
+        error: Option<&'static str>,
+    }
+
+    impl RemovalBackend for StubEngine {
+        fn remove(&mut self, _req: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
+            match self.error {
+                Some(e) => Err(RemovalError::Ort(e.to_string())),
+                None => Ok(RemovalPatch::new((0, 0), 1, vec![[0.0; 4]]).unwrap()),
+            }
+        }
+    }
+
+    /// Asks for CUDA; its GPU engines fail with `gpu_error`, its CPU engines always work.
+    /// `loads` records every provider a load was made on.
+    struct StubLoader {
+        gpu_error: Option<&'static str>,
+        /// GPU loads themselves fail (as a missing provider DLL would).
+        gpu_load_fails: bool,
+        loads: Arc<std::sync::Mutex<Vec<ExecutionProvider>>>,
+    }
+
+    impl EngineLoader for StubLoader {
+        fn requested(&self, _models: &RemovalModels) -> ExecutionProvider {
+            ExecutionProvider::Cuda
+        }
+
+        fn load(
+            &mut self,
+            _models: &RemovalModels,
+            requested: ExecutionProvider,
+        ) -> Result<(Box<dyn RemovalBackend + Send>, ExecutionProvider), RemovalError> {
+            self.loads.lock().unwrap().push(requested);
+            if requested != ExecutionProvider::Cpu && self.gpu_load_fails {
+                return Err(RemovalError::Ort("cuda provider failed to load".into()));
+            }
+            let error = if requested == ExecutionProvider::Cpu {
+                None
+            } else {
+                self.gpu_error
+            };
+            Ok((Box::new(StubEngine { error }), requested))
+        }
+    }
+
+    fn stub_backend(
+        gpu_error: Option<&'static str>,
+    ) -> (LazyBackend, Arc<std::sync::Mutex<Vec<ExecutionProvider>>>) {
+        let loads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let backend = LazyBackend::with_loader(
+            fake_models(),
+            Box::new(StubLoader {
+                gpu_error,
+                gpu_load_fails: false,
+                loads: Arc::clone(&loads),
+            }),
+        );
+        (backend, loads)
+    }
+
+    #[test]
+    fn a_provider_failure_redoes_the_removal_on_the_cpu_and_raises_the_demoted_flag() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut backend, loads) = stub_backend(Some("CUDA failure 35: cudnn64_9.dll not found"));
+        let flag = backend.demoted_flag();
+        let img = tiny();
+        assert!(!flag.load(Ordering::Relaxed));
+        assert!(backend.remove(&request(&img)).is_ok());
+        assert_eq!(
+            *loads.lock().unwrap(),
+            vec![ExecutionProvider::Cuda, ExecutionProvider::Cpu]
+        );
+        assert!(backend.is_demoted());
+        assert!(flag.load(Ordering::Relaxed));
+        // Within the cool-down it stays on the CPU engine: no further load.
+        assert!(backend.remove(&request(&img)).is_ok());
+        assert_eq!(loads.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_deterministic_error_leaves_the_gpu_engine_alone() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut backend, loads) = stub_backend(Some(
+            "Got invalid dimensions for input: image for the following indices",
+        ));
+        let img = tiny();
+        assert!(matches!(
+            backend.remove(&request(&img)),
+            Err(RemovalError::Ort(_))
+        ));
+        assert_eq!(*loads.lock().unwrap(), vec![ExecutionProvider::Cuda]);
+        assert!(!backend.is_demoted());
+        assert!(!backend.demoted_flag().load(Ordering::Relaxed));
+        assert_eq!(backend.active, ExecutionProvider::Cuda);
+        assert!(backend.is_loaded());
+        // The same engine serves the next call: no reload.
+        let _ = backend.remove(&request(&img));
+        assert_eq!(loads.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_gpu_load_failure_runs_the_removal_on_the_cpu_and_demotes() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let loads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = LazyBackend::with_loader(
+            fake_models(),
+            Box::new(StubLoader {
+                gpu_error: None,
+                gpu_load_fails: true,
+                loads: Arc::clone(&loads),
+            }),
+        );
+        let img = tiny();
+        assert!(backend.remove(&request(&img)).is_ok());
+        assert_eq!(
+            *loads.lock().unwrap(),
+            vec![ExecutionProvider::Cuda, ExecutionProvider::Cpu]
+        );
+        assert_eq!(backend.active, ExecutionProvider::Cpu);
+        assert!(backend.demoted_flag().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_working_gpu_never_demotes() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut backend, loads) = stub_backend(None);
+        let img = tiny();
+        assert!(backend.remove(&request(&img)).is_ok());
+        assert_eq!(*loads.lock().unwrap(), vec![ExecutionProvider::Cuda]);
+        assert!(!backend.demoted_flag().load(Ordering::Relaxed));
     }
 }
