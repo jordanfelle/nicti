@@ -18,7 +18,7 @@ use walkdir::WalkDir;
 
 use nicti_cornea::embedded::{EmbeddedJpeg, FileSource, PreviewSource, Walker};
 
-use crate::{CatalogError, CatalogStore, NewAsset, Preview};
+use crate::{CatalogError, CatalogStore, NewAsset, Preview, Root};
 
 /// v1 targets Nikon NEF (ADR-0015's language-and-stack topic) -- NRW is Nikon's compact-body
 /// variant of the same format. DNG joined in #428: it is the one format whose files carry their
@@ -451,8 +451,19 @@ pub fn register_root_with(
     let canonical = canonical_root_string(path);
     let placeholder =
         store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now_unix())?;
+    // Roots already registered for this very folder, on whichever volume. Whether the folder can be
+    // identified right now varies (a junction target that is unplugged, a volume that is asleep),
+    // so identification flipping must never register a second root for the same folder.
+    let same_path: Vec<Root> = store
+        .list_roots()?
+        .into_iter()
+        .filter(|r| r.path == canonical)
+        .collect();
     let Some(id) = identify(path) else {
-        return store.ensure_root(placeholder, &canonical);
+        return match same_path.first() {
+            Some(root) => Ok(root.id),
+            None => store.ensure_root(placeholder, &canonical),
+        };
     };
     // A `VolumeIdentityConflict` (the marker disagrees with the volume already on file under this
     // identity key) propagates: nothing is merged and nothing is registered.
@@ -462,16 +473,17 @@ pub fn register_root_with(
         id.marker_uuid.as_deref(),
         now_unix(),
     )?;
-    let existing = store
-        .list_roots()?
-        .into_iter()
-        .find(|r| r.volume_id == placeholder && r.path == canonical);
-    if let Some(root) = existing {
-        // Adopt it. If the real volume already holds a root for this very path the move is refused
-        // (never merged), and the real volume's own root is the one to use.
-        if store.reassign_root_volume(root.id, volume_id).is_ok() {
-            return Ok(root.id);
-        }
+    if let Some(root) = same_path.iter().find(|r| r.volume_id == volume_id) {
+        return Ok(root.id);
+    }
+    if let Some(root) = same_path.iter().find(|r| r.volume_id == placeholder) {
+        // Adopt it. If that is refused (a folder move in flight on it), keep using the root as it
+        // is: it is still this folder's root and a duplicate is worse.
+        let _ = store.reassign_root_volume(root.id, volume_id);
+        return Ok(root.id);
+    }
+    if let Some(root) = same_path.first() {
+        return Ok(root.id); // filed under another real volume; never duplicated
     }
     store.ensure_root(volume_id, &canonical)
 }
@@ -482,7 +494,8 @@ pub fn register_root_with(
 /// Returns how many moved. A root that fails to move (a collision, a catalog error) is skipped, not
 /// fatal.
 pub fn migrate_placeholder_roots(store: &dyn CatalogStore) -> Result<usize, CatalogError> {
-    migrate_placeholder_roots_with(store, &crate::volume::identify)
+    // One volume enumeration for the whole loop, not one per root.
+    migrate_placeholder_roots_with(store, &*crate::volume::identifier())
 }
 
 pub fn migrate_placeholder_roots_with(

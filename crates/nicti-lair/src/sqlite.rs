@@ -954,15 +954,63 @@ impl CatalogStore for SqliteCatalog {
 
     fn reassign_root_volume(&self, root_id: i64, volume_id: i64) -> Result<(), CatalogError> {
         let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        let old_volume: i64 = tx
+            .query_row("SELECT volume_id FROM root WHERE id = ?1", [root_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| CatalogError::Io(format!("no root {root_id}")))?;
+        if old_volume == volume_id {
+            return Ok(());
+        }
+        // A folder move in flight is keyed to this root's volume; moving the root under it would
+        // leave the journal pointing at the wrong one.
+        let moving: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM root_move WHERE root_id = ?1",
+            [root_id],
+            |r| r.get(0),
+        )?;
+        if moving > 0 {
+            return Err(CatalogError::Io(format!(
+                "root {root_id} has a folder move in flight"
+            )));
+        }
         // The (volume_id, rel_path) uniqueness and the volume foreign key make a collision or a
-        // missing volume an error; a missing root changes no row and is reported the same way.
-        let changed = conn.execute(
+        // missing volume an error.
+        tx.execute(
             "UPDATE root SET volume_id = ?1 WHERE id = ?2",
             params![volume_id, root_id],
         )?;
-        if changed == 0 {
-            return Err(CatalogError::Io(format!("no root {root_id}")));
+        // `facet_counts` is keyed by volume and its triggers fire on asset changes, not on this
+        // update, so move this root's assets' counts from the old volume to the new one here, or
+        // the unfiltered facets keep ghost counts under the old volume and drift afterwards.
+        let groups: Vec<(String, i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT COALESCE(model, ''), COALESCE(rating, -128), COUNT(*) \
+                 FROM asset WHERE root_id = ?1 GROUP BY 1, 2",
+            )?;
+            let rows = stmt.query_map([root_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (model, rating, cnt) in groups {
+            tx.execute(
+                "UPDATE facet_counts SET cnt = cnt - ?4 \
+                 WHERE volume_id = ?1 AND model = ?2 AND rating = ?3",
+                params![old_volume, model, rating, cnt],
+            )?;
+            tx.execute(
+                "DELETE FROM facet_counts \
+                 WHERE cnt <= 0 AND volume_id = ?1 AND model = ?2 AND rating = ?3",
+                params![old_volume, model, rating],
+            )?;
+            tx.execute(
+                "INSERT INTO facet_counts (volume_id, model, rating, cnt) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(volume_id, model, rating) DO UPDATE SET cnt = cnt + excluded.cnt",
+                params![volume_id, model, rating, cnt],
+            )?;
         }
+        tx.commit()?;
         Ok(())
     }
 

@@ -88,6 +88,27 @@ pub fn identity_of(v: &VolumeInfo) -> Option<VolumeIdentity> {
     })
 }
 
+/// A reusable folder-to-volume lookup (see [`identifier`]).
+pub type Identify = Box<dyn Fn(&Path) -> Option<VolumeIdentity> + Send + Sync>;
+
+/// An `identify` that enumerates the volumes once and answers every path from that one snapshot
+/// (a startup migration over many roots). Always `None` off Windows.
+pub fn identifier() -> Identify {
+    #[cfg(windows)]
+    {
+        let volumes = windows_impl::enumerate().ok();
+        Box::new(move |path| {
+            let volumes = volumes.as_ref()?;
+            let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            volume_containing(volumes, &canon.to_string_lossy()).and_then(identity_of)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(|_| None)
+    }
+}
+
 /// The volume identity of the folder `path`, or `None` when it can't be established (not Windows,
 /// the volume isn't mounted, or its partition info can't be read: the caller keeps the placeholder).
 pub fn identify(path: &Path) -> Option<VolumeIdentity> {
@@ -123,6 +144,43 @@ pub mod windows_impl {
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
+    /// A handle for metadata IOCTLs only: access 0 and full sharing. `File::open` asks for
+    /// GENERIC_READ, which Windows refuses on a raw volume or physical drive for a non-elevated
+    /// user; every query below (`FSCTL_GET_NTFS_VOLUME_DATA`, the partition/layout/device-number
+    /// IOCTLs) is `FILE_ANY_ACCESS`, so a zero-access handle is enough and works as a standard user.
+    fn open_query(path: &str) -> io::Result<fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // FILE_SHARE_READ | WRITE | DELETE
+        fs::OpenOptions::new()
+            .access_mode(0)
+            .share_mode(SHARE_ALL)
+            .open(path)
+    }
+
+    /// Keeps Windows from raising its "there is no disk in the drive" box for an unready
+    /// removable drive while volumes are probed (thread-scoped; restored on drop).
+    struct NoCriticalErrorBox(u32);
+
+    impl NoCriticalErrorBox {
+        fn new() -> Self {
+            use windows_sys::Win32::System::Diagnostics::Debug::{
+                SetThreadErrorMode, SEM_FAILCRITICALERRORS,
+            };
+            let mut old = 0u32;
+            // SAFETY: `old` is a valid out pointer; failure just leaves the previous mode in place.
+            unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut old) };
+            Self(old)
+        }
+    }
+
+    impl Drop for NoCriticalErrorBox {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Diagnostics::Debug::SetThreadErrorMode;
+            // SAFETY: restores the mode saved in `new`.
+            unsafe { SetThreadErrorMode(self.0, std::ptr::null_mut()) };
+        }
+    }
+
     fn wide(s: &str) -> Vec<u16> {
         std::ffi::OsStr::new(s)
             .encode_wide()
@@ -135,6 +193,7 @@ pub mod windows_impl {
     /// `None` fields rather than aborting the whole enumeration -- a locked/offline volume
     /// shouldn't hide every other volume's data.
     pub fn enumerate() -> io::Result<Vec<VolumeInfo>> {
+        let _no_dialogs = NoCriticalErrorBox::new();
         let mut out = Vec::new();
         let mut buf = [0u16; MAX_PATH as usize];
         // SAFETY: buf is a valid, correctly-sized wide-char buffer; FindFirstVolumeW/
@@ -255,7 +314,7 @@ pub mod windows_impl {
         // the trimmed GUID path instead (same pattern `partition_info` below already uses
         // successfully) sidesteps both problems in one fix.
         let path = guid_path.trim_end_matches('\\');
-        let file = fs::File::open(path).ok()?;
+        let file = open_query(path).ok()?;
         let handle: HANDLE = file.as_raw_handle() as HANDLE;
         let mut out = NTFS_VOLUME_DATA_BUFFER::default();
         let mut returned: u32 = 0;
@@ -281,7 +340,7 @@ pub mod windows_impl {
 
     fn partition_info(guid_path: &str) -> Option<(Option<String>, Option<u32>, Option<u64>)> {
         let path = guid_path.trim_end_matches('\\');
-        let file = fs::File::open(path).ok()?;
+        let file = open_query(path).ok()?;
         let handle: HANDLE = file.as_raw_handle() as HANDLE;
         let mut out = PARTITION_INFORMATION_EX::default();
         let mut returned: u32 = 0;
@@ -326,7 +385,7 @@ pub mod windows_impl {
 
     fn disk_number_for(guid_path: &str) -> Option<u32> {
         let path = guid_path.trim_end_matches('\\');
-        let file = fs::File::open(path).ok()?;
+        let file = open_query(path).ok()?;
         let handle: HANDLE = file.as_raw_handle() as HANDLE;
         let mut out = STORAGE_DEVICE_NUMBER {
             DeviceType: 0,
@@ -354,7 +413,7 @@ pub mod windows_impl {
 
     fn mbr_disk_signature(disk_number: u32) -> Option<u32> {
         let device_path = format!(r"\\.\PhysicalDrive{disk_number}");
-        let file = fs::File::open(&device_path).ok()?;
+        let file = open_query(&device_path).ok()?;
         let handle: HANDLE = file.as_raw_handle() as HANDLE;
 
         // `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`'s response is variable-length (a fixed header
@@ -432,8 +491,19 @@ pub mod windows_impl {
         )
     }
 
+    /// The marker file's content, trimmed. Read at most 256 bytes (a real marker is a short id): a
+    /// huge or hostile file must not be pulled into memory and stored. Not UTF-8 or empty is `None`.
     fn read_or_none(path: &str) -> Option<String> {
-        fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+        use std::io::Read;
+        let mut buf = Vec::new();
+        fs::File::open(path)
+            .ok()?
+            .take(256)
+            .read_to_end(&mut buf)
+            .ok()?;
+        let text = String::from_utf8(buf).ok()?;
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
     }
 
     fn drive_type_is_removable(mount_point: &str) -> bool {

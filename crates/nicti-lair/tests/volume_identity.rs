@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use nicti_lair::hunt::Filter;
 use nicti_lair::scruff::{
     migrate_placeholder_roots_with, register_root_with, PLACEHOLDER_VOLUME_IDENTITY_KEY,
 };
@@ -136,9 +137,16 @@ fn a_clone_with_a_different_marker_is_refused_not_merged() {
 #[test]
 fn a_collision_on_the_real_volume_is_left_alone_not_merged() {
     let store = SqliteCatalog::open_in_memory().unwrap();
-    // The folder is already a root on the real volume AND on the placeholder (two rows).
-    let real = register_root_with(&store, Path::new("/photos/2026"), &probe).unwrap();
-    let ph = register_root_with(&store, Path::new("/photos/2026"), &|_| None).unwrap();
+    // A catalog that already has the folder as a root on the real volume AND on the placeholder
+    // (two rows; registration itself can no longer create this, so build it through the store).
+    let real_vol = store
+        .upsert_volume("ntfs64:a+gpt:a", Some("Photos"), Some("marker-a"), 0)
+        .unwrap();
+    let ph_vol = store
+        .upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, 0)
+        .unwrap();
+    let real = store.ensure_root(real_vol, "/photos/2026").unwrap();
+    let ph = store.ensure_root(ph_vol, "/photos/2026").unwrap();
     assert_ne!(real, ph);
     // Migration can't move the placeholder one onto the real volume's identical path: skipped.
     assert_eq!(migrate_placeholder_roots_with(&store, &probe).unwrap(), 0);
@@ -148,4 +156,98 @@ fn a_collision_on_the_real_volume_is_left_alone_not_merged() {
         register_root_with(&store, Path::new("/photos/2026"), &probe).unwrap(),
         real
     );
+    assert_eq!(
+        store.list_roots().unwrap().len(),
+        2,
+        "nothing merged or added"
+    );
+}
+
+fn model_asset(rel: &str, model: &str) -> NewAsset {
+    NewAsset {
+        model: Some(model.into()),
+        ..asset(rel)
+    }
+}
+
+/// The unfiltered facets must equal what the asset rows say (the cache is trigger-maintained, keyed
+/// by volume, and reassigning a root fires none of those triggers).
+fn assert_facets_match_the_rows(store: &SqliteCatalog, expected_total: u64) {
+    let f = store.facets(&Filter::default()).unwrap();
+    assert_eq!(f.total, expected_total, "{f:?}");
+    let by_model: u64 = f.by_model.iter().map(|(_, n)| n).sum();
+    let by_rating: u64 = f.by_rating.iter().map(|(_, n)| n).sum();
+    assert_eq!(
+        (by_model, by_rating),
+        (expected_total, expected_total),
+        "{f:?}"
+    );
+}
+
+#[test]
+fn adopting_a_root_moves_its_assets_facet_counts_with_it() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let old = register_root_with(&store, Path::new("/photos/2026"), &|_| None).unwrap();
+    let ids: Vec<i64> = (0..3)
+        .map(|i| {
+            store
+                .insert_asset(old, &model_asset(&format!("{i}.NEF"), "Z8"), None)
+                .unwrap()
+        })
+        .collect();
+    store.set_rating(&ids[..2], Some(4)).unwrap();
+    assert_facets_match_the_rows(&store, 3);
+
+    register_root_with(&store, Path::new("/photos/2026"), &probe).unwrap();
+    assert_facets_match_the_rows(&store, 3);
+    // Changes after adoption are booked against the new volume and stay exact.
+    store.set_rating(&ids[2..], Some(1)).unwrap();
+    assert_facets_match_the_rows(&store, 3);
+    store.remove_assets(&ids[..2]).unwrap();
+    assert_facets_match_the_rows(&store, 1);
+    store.remove_assets(&ids[2..]).unwrap();
+    let f = store.facets(&Filter::default()).unwrap();
+    assert_eq!(f.total, 0);
+    assert!(f.by_model.is_empty(), "no ghost counts left behind: {f:?}");
+}
+
+#[test]
+fn identification_flipping_never_registers_a_second_root_for_the_same_folder() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    // Identified first (a junction target is present), then not (it is unplugged), then again.
+    let first = register_root_with(&store, Path::new("/photos/2026"), &probe).unwrap();
+    let second = register_root_with(&store, Path::new("/photos/2026"), &|_| None).unwrap();
+    let third = register_root_with(&store, Path::new("/photos/2026"), &probe).unwrap();
+    assert_eq!((first, second), (first, first));
+    assert_eq!(third, first);
+    assert_eq!(store.list_roots().unwrap().len(), 1);
+    // The same, the other way round, and when the folder is later found on a *different* volume.
+    let a = register_root_with(&store, Path::new("/elsewhere/x"), &|_| None).unwrap();
+    let other = |_: &Path| Some(ident("ntfs64:z+gpt:z", "Z", None));
+    assert_eq!(
+        register_root_with(&store, Path::new("/elsewhere/x"), &other).unwrap(),
+        a
+    );
+    assert_eq!(
+        register_root_with(&store, Path::new("/photos/2026"), &other).unwrap(),
+        first,
+        "filed under another real volume: reused, not duplicated"
+    );
+    assert_eq!(store.list_roots().unwrap().len(), 2);
+}
+
+#[test]
+fn a_root_with_a_folder_move_in_flight_is_not_re_filed_and_not_duplicated() {
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let old = register_root_with(&store, Path::new("/photos/2026"), &|_| None).unwrap();
+    store.insert_asset(old, &asset("a.NEF"), None).unwrap();
+    store.begin_root_move(old, "/photos/2027", 1).unwrap();
+    // Registering (or migrating) while the move is open must leave the root where it is.
+    assert_eq!(
+        register_root_with(&store, Path::new("/photos/2026"), &probe).unwrap(),
+        old
+    );
+    assert_eq!(volume_key_of(&store, old), PLACEHOLDER_VOLUME_IDENTITY_KEY);
+    assert_eq!(migrate_placeholder_roots_with(&store, &probe).unwrap(), 0);
+    assert_eq!(store.list_roots().unwrap().len(), 1);
 }
