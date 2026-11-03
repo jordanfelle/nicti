@@ -147,6 +147,8 @@ pub struct PeltApp {
     import_status: Option<String>,
     /// Thumbnail-rotation repair / orientation backfill (#606).
     righting: crate::righting_ui::RightingUi,
+    /// Copy from a camera card (#602).
+    card_copy: crate::card_copy_ui::CardCopyUi,
     update: UpdateChecker,
     /// Nine Lives' (#25) own scheduler. See `poll_backup`'s own doc comment for how this gets checked and acted on.
     nine_lives: NineLives,
@@ -471,6 +473,7 @@ impl PeltApp {
             move_picker: FolderPicker::default(),
             import_status: None,
             righting,
+            card_copy: crate::card_copy_ui::CardCopyUi::default(),
             update,
             nine_lives,
             last_backup_poll: None,
@@ -702,6 +705,26 @@ impl PeltApp {
     }
 
     fn job_active(&self, kinds: &[JobKind]) -> bool {
+        // A card copy being planned has no job yet, but must still hold the same guards.
+        if self.card_copy.is_busy()
+            && kinds.iter().any(|k| {
+                matches!(
+                    k,
+                    JobKind::Move
+                        | JobKind::Delete
+                        | JobKind::Sync
+                        | JobKind::Verify
+                        | JobKind::Baseline
+                )
+            })
+        {
+            return true;
+        }
+        self.pounce_job_active(kinds)
+    }
+
+    /// Like [`Self::job_active`] but only looks at Pounce's queue (not a card copy being planned).
+    fn pounce_job_active(&self, kinds: &[JobKind]) -> bool {
         self.pounce.snapshot().into_iter().any(|s| {
             kinds.contains(&s.kind) && matches!(s.state, JobState::Queued | JobState::Running)
         })
@@ -2248,6 +2271,18 @@ impl PeltApp {
                     ui.label(msg.clone());
                 }
 
+                // #602: copy a camera card into a folder (verified copy, then registered).
+                let other_running = self.righting.is_running()
+                    || self.pounce_job_active(&[
+                        JobKind::Import,
+                        JobKind::Sync,
+                        JobKind::Move,
+                        JobKind::Delete,
+                        JobKind::Verify,
+                        JobKind::Baseline,
+                    ]);
+                self.card_copy.show(ui, &self.pounce, &store, other_running);
+
                 // #26: verified folder move. Copies and hash-verifies every file, re-points the
                 // catalog, then removes the original -- edits/ratings/keywords follow the folder.
                 ui.separator();
@@ -2372,9 +2407,11 @@ impl PeltApp {
         let Some(path) = self.checked_import_path(true) else {
             return;
         };
-        if self.righting.is_running() {
-            self.import_status =
-                Some("Thumbnail repair is running; import/sync waits until it finishes.".into());
+        if self.righting.is_running() || self.card_copy.is_busy() {
+            self.import_status = Some(
+                "Thumbnail repair or a card copy is running; import/sync waits until it finishes."
+                    .into(),
+            );
             return;
         }
         if self.job_active(&[

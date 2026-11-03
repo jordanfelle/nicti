@@ -310,3 +310,34 @@ The justified grid (#550) lays rows out by oriented aspect, but `asset.width/hei
   the layout build job, the `show_viewport` view and the benchmark.
 - **NULL means unknown, not upright.** Until the backfill is wired (follow-up), every pre-v11 row is NULL, and the grid must lay
   such a photo out as unknown rather than assume 1. `relink_asset` resets it on a size/mtime change like `content_hash`.
+
+## Copy from card: UI and job wiring (#602)
+
+Wires #548's engine (`offering`, `cards`) into the app. Slice shipped: everything except the Windows verification.
+
+- **Run:** `cardcopy::CardCopy` (steppable: one `offer_file` per step, then a `scruff::Ingest` over the destination root) and
+  `pounce_jobs::CardCopyJob` (CPU lane, `JobKind::Import`, so the import/sync/move guards and the grid's busy -> idle refresh
+  cover it). `CardCopyReport` keeps `failed` (with why), `verify_failed` separately (destination disk misbehaving),
+  `listing_problems`, `not_attempted` (cancelled) and the ingest report; `is_clean()` is the only thing the UI uses to say
+  "safe to format". The card is only read.
+- **Names:** `pelt::card_copy_ui::build_plan` renders the filename and `{Date:..}` subfolder templates with `nicti-preen`'s
+  `naming.rs` (original extension kept, sequence = position, `sanitize_component` so a hostile card name cannot climb out),
+  reading capture time and camera from the card file's EXIF. Name collisions get the engine's `-N` suffix.
+- **Off the UI thread:** card detection (`default_mount_roots` + `scan_cards`, re-run at most every 10 s, "Rescan" button),
+  the card listing and the EXIF reads each run on a worker thread; only registering the destination root and submitting
+  the job happen on the UI thread.
+- **Panel:** Library > Folders > "Copy from card": detected cards, destination (text + Browse), the two templates, progress in
+  the activity panel, a result line that says the card was not modified, or "Do not format the card yet" when anything failed.
+- **"Safe to format" honesty:** the engine copies only .nef/.nrw/.dng/.jpg under `DCIM`. `cardcopy::survey_card` lists
+  everything else on the card (videos, other RAW formats, files outside DCIM, links, unreadable folders; OS housekeeping
+  ignored) into `CardCopyReport::not_considered`, which blocks `is_clean` and is named in the result line, so a card with
+  .MOV clips never gets the "safe to format" line. An ingest that never ran/finished is also unclean and says so.
+- **Destination checks:** `check_destination` canonicalizes the destination (that spelling is registered as the root, so
+  `a/../b` and `b` are one root) and refuses one on, or containing, any detected card. The checked destination is captured
+  when the run starts (the text field is disabled meanwhile). Move/Delete/Sync/Verify/Baseline guards (`job_active`) and
+  Import/Sync (`submit_root_job`) also hold during the planning window, and the other-job check is repeated before submit.
+  Detection runs only while the panel is open and a scan with no answer after 30 s is abandoned.
+- **Not done (follow-up):** a same-device check for the destination (a path on the card's volume reached through a mount
+  alias), verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename
+  path), a second card read / cache-bypassing read-back, reusing the returned blake3 in ingest instead of re-hashing, and a
+  cancel button (a job can be cancelled from the activity panel; the stepper polls per file).
