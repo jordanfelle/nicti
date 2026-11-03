@@ -300,7 +300,6 @@ impl RemovalService {
         Ok(())
     }
 
-    /// Polls the install; `Some` exactly once, when it finishes.
     /// True while AI removal runs on the CPU because the GPU provider failed; it retries the GPU
     /// after a cool-down.
     pub fn gpu_demoted(&self) -> bool {
@@ -311,6 +310,7 @@ impl RemovalService {
                 .is_some_and(|f| f.load(Ordering::Relaxed))
     }
 
+    /// Polls the install; `Some` exactly once, when it finishes.
     pub fn poll_install(&mut self) -> Option<Result<(), String>> {
         let done = self
             .install

@@ -496,6 +496,8 @@ mod tests {
     /// `loads` records every provider a load was made on.
     struct StubLoader {
         gpu_error: Option<&'static str>,
+        /// GPU loads themselves fail (as a missing provider DLL would).
+        gpu_load_fails: bool,
         loads: Arc<std::sync::Mutex<Vec<ExecutionProvider>>>,
     }
 
@@ -510,6 +512,9 @@ mod tests {
             requested: ExecutionProvider,
         ) -> Result<(Box<dyn RemovalBackend + Send>, ExecutionProvider), RemovalError> {
             self.loads.lock().unwrap().push(requested);
+            if requested != ExecutionProvider::Cpu && self.gpu_load_fails {
+                return Err(RemovalError::Ort("cuda provider failed to load".into()));
+            }
             let error = if requested == ExecutionProvider::Cpu {
                 None
             } else {
@@ -527,6 +532,7 @@ mod tests {
             fake_models(),
             Box::new(StubLoader {
                 gpu_error,
+                gpu_load_fails: false,
                 loads: Arc::clone(&loads),
             }),
         );
@@ -535,6 +541,9 @@ mod tests {
 
     #[test]
     fn a_provider_failure_redoes_the_removal_on_the_cpu_and_raises_the_demoted_flag() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (mut backend, loads) = stub_backend(Some("CUDA failure 35: cudnn64_9.dll not found"));
         let flag = backend.demoted_flag();
         let img = tiny();
@@ -553,6 +562,9 @@ mod tests {
 
     #[test]
     fn a_deterministic_error_leaves_the_gpu_engine_alone() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (mut backend, loads) = stub_backend(Some(
             "Got invalid dimensions for input: image for the following indices",
         ));
@@ -565,10 +577,41 @@ mod tests {
         assert!(!backend.is_demoted());
         assert!(!backend.demoted_flag().load(Ordering::Relaxed));
         assert_eq!(backend.active, ExecutionProvider::Cuda);
+        assert!(backend.is_loaded());
+        // The same engine serves the next call: no reload.
+        let _ = backend.remove(&request(&img));
+        assert_eq!(loads.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_gpu_load_failure_runs_the_removal_on_the_cpu_and_demotes() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let loads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = LazyBackend::with_loader(
+            fake_models(),
+            Box::new(StubLoader {
+                gpu_error: None,
+                gpu_load_fails: true,
+                loads: Arc::clone(&loads),
+            }),
+        );
+        let img = tiny();
+        assert!(backend.remove(&request(&img)).is_ok());
+        assert_eq!(
+            *loads.lock().unwrap(),
+            vec![ExecutionProvider::Cuda, ExecutionProvider::Cpu]
+        );
+        assert_eq!(backend.active, ExecutionProvider::Cpu);
+        assert!(backend.demoted_flag().load(Ordering::Relaxed));
     }
 
     #[test]
     fn a_working_gpu_never_demotes() {
+        let _claim = crate::provider::CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (mut backend, loads) = stub_backend(None);
         let img = tiny();
         assert!(backend.remove(&request(&img)).is_ok());

@@ -39,6 +39,11 @@ pub(crate) fn vram_for(active: ExecutionProvider) -> u64 {
     }
 }
 
+/// Serialises tests that load a stub on a GPU provider (which writes the process-wide claim) with
+/// tests that read it.
+#[cfg(test)]
+pub(crate) static CLAIM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn declare(active: ExecutionProvider) {
     DECLARED_VRAM.store(vram_for(active), Ordering::Relaxed);
 }

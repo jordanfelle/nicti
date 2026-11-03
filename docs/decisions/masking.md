@@ -101,4 +101,4 @@ the next check so the otherwise-idle window can ask egui for a repaint then.
   demotes, that a deterministic ORT error leaves the GPU engine in place, and that a working GPU never demotes.
 - **UI:** `LazyBackend::demoted_flag()` is an `Arc<AtomicBool>` updated at the end of every `remove`, so the develop
   panel (`RemovalService::gpu_demoted`) shows a one-line "running on the CPU after a GPU error" notice without locking the
-  backend (a removal holds that lock for seconds). It clears when a retry succeeds on the GPU.
+  backend (a removal holds that lock for seconds). It clears when a retry succeeds on the GPU (the timed retry path is covered only by `Demotion`'s own unit tests, not end to end).
