@@ -504,7 +504,7 @@ fn sync_sidecar(
         Ok(_) => {}
         Err(e) => report
             .sidecar_errors
-            .push((crate::scent_sync::sidecar_path(raw_path), e.to_string())),
+            .push((crate::scent_sync::xmp_target(raw_path), e.to_string())),
     }
 }
 

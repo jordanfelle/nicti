@@ -41,3 +41,12 @@ trail.
   "Implemented in #60" section for the conflict/hold-for-review rules, the schema v9
   `asset_sidecar` state, and the known limits. ADR-0059 is still Proposed pending #187.
 
+
+## #371: JPEG assets sync through their embedded XMP
+
+Once JPEG ingest (#489) landed, `nicti-lair`'s `scent_sync` routes JPEG assets to the APP1 packet
+inside the file instead of a sidecar (`xmp_target`). The conflict hash covers the XMP packet text
+only, so re-encoding pixels or touching EXIF is never read as an XMP change. A JPEG with no packet
+imports as `NoSidecar`; a write splices a new packet in (atomic temp-file + rename, everything
+outside the APP1-XMP segment byte-identical) and never creates the file. `IMG.xmp` stays the RAW's
+in a RAW+JPEG pair. DNG remains read-only for embedded XMP (writes go to a sidecar).

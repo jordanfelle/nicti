@@ -558,13 +558,15 @@ fn our_own_thumb_sidecars_are_not_ingested_as_assets() {
 }
 
 #[test]
-fn a_jpeg_asset_never_reads_or_writes_the_raws_xmp_sidecar() {
+fn a_jpeg_asset_syncs_through_its_embedded_xmp_and_never_touches_the_raws_sidecar() {
     use nicti_lair::scent_sync::{import_sidecar, write_sidecar, SyncOutcome};
+    use nicti_lair::AssetMeta;
     let store = SqliteCatalog::open_in_memory().unwrap();
     let dir = tempfile::tempdir().unwrap();
     write_synthetic_nef(dir.path(), "DSC_1.NEF");
     let jpg = dir.path().join("DSC_1.JPG");
-    std::fs::write(&jpg, encode_jpeg(64, 48)).unwrap();
+    let original = encode_jpeg(64, 48);
+    std::fs::write(&jpg, &original).unwrap();
     let xmp = dir.path().join("DSC_1.xmp");
     std::fs::write(&xmp, b"raw's sidecar").unwrap();
     let root_id = fresh_root(&store);
@@ -574,16 +576,59 @@ fn a_jpeg_asset_never_reads_or_writes_the_raws_xmp_sidecar() {
         .unwrap()
         .unwrap();
 
-    assert!(matches!(
-        write_sidecar(&store, asset.id, &jpg, 1).unwrap(),
-        SyncOutcome::NoSidecar
-    ));
+    // No packet yet: nothing to import.
     assert!(matches!(
         import_sidecar(&store, asset.id, &jpg, 1).unwrap(),
         SyncOutcome::NoSidecar
     ));
+
+    // catalog -> JPEG: the rating lands in an embedded packet, the RAW's sidecar is untouched.
+    store
+        .replace_asset_markers(
+            asset.id,
+            &AssetMeta {
+                rating: Some(4),
+                flag: None,
+                label: None,
+            },
+            &[],
+        )
+        .unwrap();
+    assert!(matches!(
+        write_sidecar(&store, asset.id, &jpg, 1).unwrap(),
+        SyncOutcome::WroteSidecar
+    ));
     assert_eq!(std::fs::read(&xmp).unwrap(), b"raw's sidecar");
-    assert!(store.sidecar_state(asset.id).unwrap().is_none());
+    let written = std::fs::read(&jpg).unwrap();
+    let packet = nicti_scent::embedded::read_xmp(&written).unwrap().unwrap();
+    assert!(packet.contains("Rating"), "{packet}");
+    assert!(!dir.path().join(".DSC_1.JPG.scent-tmp").exists());
+    // The JPEG still decodes and only gained the packet.
+    image::load_from_memory(&written).unwrap();
+    assert!(written.len() > original.len());
+
+    // Writing again with nothing changed is a no-op.
+    assert!(matches!(
+        write_sidecar(&store, asset.id, &jpg, 2).unwrap(),
+        SyncOutcome::InSync
+    ));
+
+    // JPEG -> catalog: an external edit of the embedded packet is picked up.
+    let edited = packet.replace("xmp:Rating=\"4\"", "xmp:Rating=\"2\"");
+    assert_ne!(edited, packet, "fixture assumption: {packet}");
+    std::fs::write(
+        &jpg,
+        nicti_scent::embedded::write_xmp(&written, &edited).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        import_sidecar(&store, asset.id, &jpg, 1_000_000_000).unwrap(),
+        SyncOutcome::AppliedSidecar
+    ));
+    assert_eq!(
+        store.get_meta(&[asset.id]).unwrap()[&asset.id].rating,
+        Some(2)
+    );
 }
 
 #[test]

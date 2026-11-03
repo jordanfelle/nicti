@@ -283,6 +283,9 @@ struct Loaded {
     hash: blake3::Hash,
     mtime_ms: u128,
     markers: Markers,
+    /// The whole JPEG as read, when the XMP is embedded; the write splices the new packet into
+    /// these bytes. `None` for a `.xmp` sidecar.
+    file: Option<Vec<u8>>,
 }
 
 /// Reads and parses the sidecar; `Ok(None)` only when the file genuinely doesn't exist. A read or
@@ -298,19 +301,31 @@ fn load(path: &Path) -> Result<Option<Loaded>, ScentSyncError> {
             })
         }
     };
-    let text = String::from_utf8(bytes).map_err(|e| ScentSyncError::Xmp {
+    let xmp_err = |message: String| ScentSyncError::Xmp {
         path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
-    let meta = lrc_fields::read(&text).map_err(|e| ScentSyncError::Xmp {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+        message,
+    };
+    let (text, hash, file) = if crate::scruff::is_jpeg(path) {
+        // Embedded: the hash covers the XMP packet only, so re-encoding the pixels or touching
+        // EXIF never reads as an XMP change. A JPEG with no packet has nothing to import.
+        let Some(text) =
+            nicti_scent::embedded::read_xmp(&bytes).map_err(|e| xmp_err(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let hash = blake3::hash(text.as_bytes());
+        (text, hash, Some(bytes))
+    } else {
+        let text = String::from_utf8(bytes).map_err(|e| xmp_err(e.to_string()))?;
+        (text, hash, None)
+    };
+    let meta = lrc_fields::read(&text).map_err(|e| xmp_err(e.to_string()))?;
     Ok(Some(Loaded {
         text,
         hash,
         mtime_ms,
         markers: Markers::from_lrc(&meta),
+        file,
     }))
 }
 
@@ -350,11 +365,8 @@ pub fn import_sidecar(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
-    if !owns_sidecar(raw_path) {
-        return Ok(SyncOutcome::NoSidecar);
-    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let path = sidecar_path(raw_path);
+    let path = xmp_target(raw_path);
     let prior = store.sidecar_state(asset_id)?;
     // Cheap precheck for rescans of a large library: a stat, not a read + hash, when the sidecar's
     // mtime is exactly what nicti last recorded and nothing is pending.
@@ -456,11 +468,14 @@ pub fn import_sidecar(
     }
 }
 
-/// `false` for a JPEG asset (#489). `IMG.xmp` belongs to the RAW of a RAW+JPEG pair, and a JPEG's
-/// XMP is embedded (#371), so every sidecar entry point below treats a JPEG as having no sidecar
-/// rather than reading or overwriting the RAW's.
-fn owns_sidecar(raw_path: &Path) -> bool {
-    !crate::scruff::is_jpeg(raw_path)
+/// Where an asset's XMP lives: the JPEG itself (embedded APP1 packet, #371 / ADR-0059) or the
+/// `.xmp` beside a RAW. `IMG.xmp` belongs to the RAW of a RAW+JPEG pair, so a JPEG never maps to it.
+pub fn xmp_target(raw_path: &Path) -> PathBuf {
+    if crate::scruff::is_jpeg(raw_path) {
+        raw_path.to_path_buf()
+    } else {
+        sidecar_path(raw_path)
+    }
 }
 
 /// catalog -> sidecar. Call after every marker change when auto-write is on.
@@ -470,9 +485,6 @@ pub fn write_sidecar(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
-    if !owns_sidecar(raw_path) {
-        return Ok(SyncOutcome::NoSidecar);
-    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     write_locked(store, asset_id, raw_path, now_ms, false)
 }
@@ -485,11 +497,8 @@ pub fn mark_catalog_dirty(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<(), ScentSyncError> {
-    if !owns_sidecar(raw_path) {
-        return Ok(());
-    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let path = sidecar_path(raw_path);
+    let path = xmp_target(raw_path);
     let mut state = state_for(&path, store.sidecar_state(asset_id)?);
     state.catalog_dirty_since_ms = Some(now_ms);
     store.record_sidecar(asset_id, &state)?;
@@ -505,10 +514,7 @@ pub fn mark_catalog_dirty_many(
 ) -> Result<(), ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     for (asset_id, raw_path) in items {
-        if !owns_sidecar(raw_path) {
-            continue;
-        }
-        let path = sidecar_path(raw_path);
+        let path = xmp_target(raw_path);
         let mut state = state_for(&path, store.sidecar_state(*asset_id)?);
         state.catalog_dirty_since_ms = Some(now_ms);
         store.record_sidecar(*asset_id, &state)?;
@@ -525,14 +531,11 @@ pub fn resolve_review(
     use_catalog: bool,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
-    if !owns_sidecar(raw_path) {
-        return Ok(SyncOutcome::NoSidecar);
-    }
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if use_catalog {
         return write_locked(store, asset_id, raw_path, now_ms, true);
     }
-    let path = sidecar_path(raw_path);
+    let path = xmp_target(raw_path);
     let Some(loaded) = load(&path)? else {
         return Ok(SyncOutcome::NoSidecar);
     };
@@ -552,7 +555,7 @@ fn write_locked(
     now_ms: i64,
     force: bool,
 ) -> Result<SyncOutcome, ScentSyncError> {
-    let path = sidecar_path(raw_path);
+    let path = xmp_target(raw_path);
     let prior = store.sidecar_state(asset_id)?;
     let mut state = state_for(&path, prior.clone());
     let catalog = catalog_markers(store, asset_id)?;
@@ -586,10 +589,27 @@ fn write_locked(
         path: path.clone(),
         message: e.to_string(),
     })?;
-    atomic_write(&path, patched.as_bytes()).map_err(|source| ScentSyncError::Io {
+    let io_err = |source| ScentSyncError::Io {
         path: path.clone(),
         source,
-    })?;
+    };
+    if crate::scruff::is_jpeg(&path) {
+        // Splice the packet into the JPEG, never creating the file: re-read it when the load saw
+        // no packet. Everything outside the APP1-XMP segment is copied byte for byte.
+        let original = match loaded.as_ref().and_then(|l| l.file.as_ref()) {
+            Some(b) => b.clone(),
+            None => fs::read(&path).map_err(io_err)?,
+        };
+        let rewritten = nicti_scent::embedded::write_xmp(&original, &patched).map_err(|e| {
+            ScentSyncError::Xmp {
+                path: path.clone(),
+                message: e.to_string(),
+            }
+        })?;
+        atomic_write(&path, &rewritten).map_err(io_err)?;
+    } else {
+        atomic_write(&path, patched.as_bytes()).map_err(io_err)?;
+    }
     // Hash of the bytes just written -- never a re-read of the file (ADR-0059).
     let written = blake3::hash(patched.as_bytes());
     state.last_written_hash = Some(written.as_bytes().to_vec());
