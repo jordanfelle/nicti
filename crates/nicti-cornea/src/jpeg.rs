@@ -74,10 +74,18 @@ pub fn is_jpeg(path: &Path) -> bool {
 fn is_adobe_cmyk(data: &[u8]) -> bool {
     let (mut adobe, mut four) = (false, false);
     let mut i = 2;
-    while i + 4 <= data.len() && data[i] == 0xFF {
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            i += 1; // padding between segments
+            continue;
+        }
         let marker = data[i + 1];
         if marker == 0xFF {
             i += 1; // fill byte
+            continue;
+        }
+        if marker == 0x00 || (0xD0..=0xD8).contains(&marker) || marker == 0x01 {
+            i += 2; // stuffed zero, RSTn, SOI, TEM: no length field
             continue;
         }
         if marker == 0xDA || marker == 0xD9 {
@@ -638,5 +646,16 @@ mod tests {
         let px = &f.pixels[..3];
         assert!((i32::from(px[0]) - i32::from(px[1])).abs() < 60, "{px:?}");
         assert!((i32::from(px[1]) - i32::from(px[2])).abs() < 60, "{px:?}");
+    }
+
+    #[test]
+    fn adobe_cmyk_is_still_refused_with_padding_between_segments() {
+        let mut jpeg = cmyk_jpeg(true, false);
+        // A stray zero pad right after the APP14 segment (offset 2 + 2 + 14 = 18).
+        jpeg.insert(18, 0x00);
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("pad.jpg");
+        std::fs::write(&p, jpeg).unwrap();
+        assert!(JpegDecoder.decode_linear(&p).is_err());
     }
 }
