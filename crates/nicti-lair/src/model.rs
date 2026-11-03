@@ -29,6 +29,8 @@ pub struct Asset {
     /// path on a later sync, or if `relink_asset` re-points this row to a moved file. `None` means
     /// present — ingest never sets this field itself, only `patrol` reads/writes it.
     pub missing_since: Option<i64>,
+    /// The file's EXIF Orientation, 1-8 (1 = upright or untagged); `None` until read (#604).
+    pub orientation: Option<u8>,
 }
 
 /// A new (or re-scanned) asset, as ingest builds it. Passed to

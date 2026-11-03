@@ -807,13 +807,16 @@ impl SqliteCatalog {
             height: row.get::<_, Option<i64>>(15)?.map(|h| h as u32),
             imported_at: row.get(16)?,
             missing_since: row.get(17)?,
+            orientation: row
+                .get::<_, Option<i64>>(18)?
+                .and_then(|o| u8::try_from(o).ok()),
         })
     }
 }
 
 const ASSET_COLUMNS: &str = "id, root_id, rel_path, rel_path_fold, size_bytes, mtime_unix, \
     fingerprint, natural_key, make, model, captured_at, rating, flag, label, width, height, \
-    imported_at, missing_since";
+    imported_at, missing_since, orientation";
 
 impl Module for SqliteCatalog {
     fn id(&self) -> &str {
@@ -1536,6 +1539,9 @@ impl CatalogStore for SqliteCatalog {
                 content_hash = CASE WHEN asset.size_bytes IS excluded.size_bytes \
                     AND asset.mtime_unix IS excluded.mtime_unix \
                     THEN asset.content_hash ELSE NULL END, \
+                orientation = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.orientation ELSE NULL END, \
                 rel_path_fold = excluded.rel_path_fold, \
                 size_bytes = excluded.size_bytes, \
                 mtime_unix = excluded.mtime_unix, \
@@ -1756,6 +1762,32 @@ impl CatalogStore for SqliteCatalog {
         ))?;
         let rows = stmt
             .query_map([root_id], Self::row_to_asset)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn set_orientation(&self, asset_id: i64, orientation: u8) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE asset SET orientation = ?1 WHERE id = ?2",
+            params![i64::from(orientation.clamp(1, 8)), asset_id],
+        )?;
+        Ok(())
+    }
+
+    fn assets_missing_orientation(
+        &self,
+        root_id: i64,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Asset>, CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS} FROM asset \
+             WHERE root_id = ?1 AND orientation IS NULL AND id > ?2 ORDER BY id ASC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![root_id, after_id, limit as i64], Self::row_to_asset)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }

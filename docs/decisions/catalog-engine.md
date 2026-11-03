@@ -294,3 +294,17 @@ own Orientation (even a different one) is left alone, exactly as ingest does. Th
 Pounce job, cache invalidation) is #606.
 
 - **2026-10-28 (#305), additive backup copy target: decided go; local-drive engine built.** `nicti_lair::backup` layers on `offering::offer_file`'s verified copy (streamed once while hashed, synced, re-read, published without overwriting). Policy: additive only, so a file deleted from the library stays in the backup, and a file whose backed-up copy differs from the source is reported and left alone (never replaced, never given a `-N` duplicate each run, which would grow the backup without bound). An existing same-size file is hashed on both sides before being called unchanged, so a re-run reads but does not write. Target identity is a random-id marker file written once by `init_target` and checked by `open_target` against the id the caller saved, so a remapped drive letter cannot receive a backup (ADR-0071's secondary signal; a cloned drive carries the same marker, undetectable here). Source and target may not overlap. Known limits: the read-back is the OS-served read, not cache-bypassing; hard links and a user swapping the target mid-run are not defended; cloud targets (credentials, dependency/licence audit) and the UI/schedule are separate work.
+
+## `asset.orientation` (#604 slice 1)
+
+The justified grid (#550) lays rows out by oriented aspect, but `asset.width/height` are pre-rotation. Schema v11 adds
+`asset.orientation INTEGER` (EXIF Orientation 1-8, 1 = upright or untagged, **NULL = not read yet**) and `Asset.orientation`.
+
+- **Write paths:** `scruff::ingest_one` records it after `insert_asset` (`orient::file_orientation`: a JPEG's EXIF from the
+  first 128 KB, a RAW's IFD0 via the container walker; best effort, an unreadable file stays NULL). `insert_asset`'s upsert
+  resets it to NULL when size or mtime changed (the new content may rotate differently), keeps it otherwise.
+- **Backfill:** ingest skips unchanged size+mtime, so rows from before v11 stay NULL. `orient::backfill_root(store, root, chunk)`
+  (and the per-asset `orient_asset`, with `CatalogStore::assets_missing_orientation(root, after_id, limit)` for paging)
+  fills them; an offline root is skipped, a missing/unreadable file stays NULL, a rerun finds nothing left.
+- **Not done here (follow-up):** the trigger for the backfill (shared with #606's righting trigger: both read the same IFD0),
+  the layout build job, the `show_viewport` view and the benchmark.
