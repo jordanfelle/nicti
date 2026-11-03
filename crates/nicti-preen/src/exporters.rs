@@ -392,6 +392,13 @@ fn encode_lossy_webp(
     }
     let exif = embed.exif.map(exif_tiff_bytes).transpose()?;
     file.set_exif(exif.map(bytes::Bytes::from));
+    // The WebP container spec orders the trailing chunks EXIF then XMP; `set_exif` appended after
+    // the XMP chunk, so move XMP last (the VP8X flags are already in step).
+    let chunks = file.chunks_mut();
+    if let Some(i) = chunks.iter().position(|c| c.id() == CHUNK_XMP) {
+        let xmp = chunks.remove(i);
+        chunks.push(xmp);
+    }
     let mut out = Vec::new();
     file.encoder()
         .write_to(&mut out)
@@ -858,9 +865,15 @@ mod tests {
         assert!(lo.len() < hi.len(), "{} !< {}", lo.len(), hi.len());
         assert!(hi.windows(4).any(|w| w == b"VP8 "), "lossy stream is VP8");
         assert!(!hi.windows(4).any(|w| w == b"VP8L"));
-        for chunk in [&b"VP8X"[..], b"ICCP", b"EXIF", b"XMP "] {
-            assert!(hi.windows(4).any(|w| w == chunk), "{chunk:?}");
-        }
+        let pos = |id: &[u8]| hi.windows(4).position(|w| w == id).expect("chunk present");
+        let order: Vec<usize> = [&b"VP8X"[..], b"ICCP", b"VP8 ", b"EXIF", b"XMP "]
+            .iter()
+            .map(|id| pos(id))
+            .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "spec chunk order: {order:?}"
+        );
         // The VP8X flag byte must advertise exactly ICC (0x20) + EXIF (0x08) + XMP (0x04).
         let at = hi.windows(4).position(|w| w == b"VP8X").unwrap();
         assert_eq!(hi[at + 8], 0x20 | 0x08 | 0x04);

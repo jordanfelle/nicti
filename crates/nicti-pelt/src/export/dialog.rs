@@ -416,7 +416,7 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                 ExportFormat::Jpeg => "JPEG",
                 ExportFormat::Png => "PNG",
                 ExportFormat::Tiff => "TIFF",
-                ExportFormat::Webp => "WebP (lossless)",
+                ExportFormat::Webp => "WebP",
                 ExportFormat::Avif => "AVIF",
             })
             .show_ui(ui, |ui| {
