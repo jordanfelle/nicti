@@ -425,17 +425,93 @@ pub(crate) fn candidate_files(
     })
 }
 
-/// This shell has no real volume-identity system wired in yet (ADR-0071 is Proposed) -- every
-/// Import/Sync root registers under one fixed placeholder volume, with the folder's own full path
-/// as its `rel_path`, rather than inventing volume-mount detection prematurely.
+/// The volume a root is filed under when its real identity can't be established: every root
+/// before #510, and on any platform where [`crate::volume::identify`] has no answer (non-Windows,
+/// until #73; an unmounted or unreadable volume). The folder's own full path is the root's
+/// `rel_path` either way (a volume-relative path needs mount tracking, #73).
 pub const PLACEHOLDER_VOLUME_IDENTITY_KEY: &str = "nicti-pelt-local-placeholder";
 
-/// Registers `path` as a root under the fixed placeholder volume (see
-/// [`PLACEHOLDER_VOLUME_IDENTITY_KEY`]) and returns its root id. Shared by `nicti-pelt`'s Import
-/// and the LRC catalog import (#62) so both land on the same `root` row for the same folder.
+/// Registers `path` as a root and returns its root id: under the folder's real volume
+/// (ADR-0071's identity key, label and `.nicti-volume` marker) when [`crate::volume::identify`]
+/// can establish it, else under the placeholder volume. A root the placeholder volume already
+/// holds for this folder is *adopted* (re-filed under the real volume, same id), never duplicated.
+/// Shared by `nicti-pelt`'s Import and the LRC catalog import (#62) so both land on the same
+/// `root` row for the same folder.
 pub fn register_root(store: &dyn CatalogStore, path: &Path) -> Result<i64, CatalogError> {
-    let volume_id = store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now_unix())?;
-    store.ensure_root(volume_id, &canonical_root_string(path))
+    register_root_with(store, path, &crate::volume::identify)
+}
+
+/// [`register_root`] with the volume lookup supplied by the caller (tests; any caller that already
+/// resolved the volume).
+pub fn register_root_with(
+    store: &dyn CatalogStore,
+    path: &Path,
+    identify: &dyn Fn(&Path) -> Option<crate::volume::VolumeIdentity>,
+) -> Result<i64, CatalogError> {
+    let canonical = canonical_root_string(path);
+    let placeholder =
+        store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now_unix())?;
+    let Some(id) = identify(path) else {
+        return store.ensure_root(placeholder, &canonical);
+    };
+    // A `VolumeIdentityConflict` (the marker disagrees with the volume already on file under this
+    // identity key) propagates: nothing is merged and nothing is registered.
+    let volume_id = store.upsert_volume(
+        &id.identity_key,
+        id.label.as_deref(),
+        id.marker_uuid.as_deref(),
+        now_unix(),
+    )?;
+    let existing = store
+        .list_roots()?
+        .into_iter()
+        .find(|r| r.volume_id == placeholder && r.path == canonical);
+    if let Some(root) = existing {
+        // Adopt it. If the real volume already holds a root for this very path the move is refused
+        // (never merged), and the real volume's own root is the one to use.
+        if store.reassign_root_volume(root.id, volume_id).is_ok() {
+            return Ok(root.id);
+        }
+    }
+    store.ensure_root(volume_id, &canonical)
+}
+
+/// Moves every root still filed under the placeholder volume to its real volume where that can
+/// be established now ([`register_root_with`]'s adoption, for every root at once; #510). Roots whose
+/// volume can't be identified (offline, non-Windows) are left alone and tried again next time.
+/// Returns how many moved. A root that fails to move (a collision, a catalog error) is skipped, not
+/// fatal.
+pub fn migrate_placeholder_roots(store: &dyn CatalogStore) -> Result<usize, CatalogError> {
+    migrate_placeholder_roots_with(store, &crate::volume::identify)
+}
+
+pub fn migrate_placeholder_roots_with(
+    store: &dyn CatalogStore,
+    identify: &dyn Fn(&Path) -> Option<crate::volume::VolumeIdentity>,
+) -> Result<usize, CatalogError> {
+    let placeholder =
+        store.upsert_volume(PLACEHOLDER_VOLUME_IDENTITY_KEY, None, None, now_unix())?;
+    let mut moved = 0;
+    for root in store.list_roots()? {
+        if root.volume_id != placeholder {
+            continue;
+        }
+        let Some(id) = identify(Path::new(&root.path)) else {
+            continue;
+        };
+        let Ok(volume_id) = store.upsert_volume(
+            &id.identity_key,
+            id.label.as_deref(),
+            id.marker_uuid.as_deref(),
+            now_unix(),
+        ) else {
+            continue;
+        };
+        if store.reassign_root_volume(root.id, volume_id).is_ok() {
+            moved += 1;
+        }
+    }
+    Ok(moved)
 }
 
 /// The one spelling a root is registered under. `ensure_root` matches the exact string, so the

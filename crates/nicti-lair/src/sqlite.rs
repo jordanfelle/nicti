@@ -952,6 +952,20 @@ impl CatalogStore for SqliteCatalog {
         )?)
     }
 
+    fn reassign_root_volume(&self, root_id: i64, volume_id: i64) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        // The (volume_id, rel_path) uniqueness and the volume foreign key make a collision or a
+        // missing volume an error; a missing root changes no row and is reported the same way.
+        let changed = conn.execute(
+            "UPDATE root SET volume_id = ?1 WHERE id = ?2",
+            params![volume_id, root_id],
+        )?;
+        if changed == 0 {
+            return Err(CatalogError::Io(format!("no root {root_id}")));
+        }
+        Ok(())
+    }
+
     fn list_roots(&self) -> Result<Vec<Root>, CatalogError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =

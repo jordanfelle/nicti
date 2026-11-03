@@ -318,6 +318,15 @@ impl PeltApp {
 
         let policy = BackupPolicy::for_catalog(&catalog_path);
         let catalog = Arc::new(store);
+        // #510: roots filed under the placeholder volume move to their real volume once it can be
+        // identified. On its own thread: identifying a root canonicalises its path, which can block
+        // on an unreachable network share, and startup must not wait for that.
+        {
+            let catalog = Arc::clone(&catalog);
+            std::thread::spawn(move || {
+                let _ = nicti_lair::scruff::migrate_placeholder_roots(catalog.as_ref());
+            });
+        }
         let nine_lives = NineLives::new(policy);
 
         // The T2 preview cache (#301) lives beside the catalog. Failing to open it (read-only
