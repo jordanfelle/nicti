@@ -89,6 +89,12 @@ pub fn summarize(run: &RightingRun) -> String {
         t.fixed_blobs + t.fixed_sidecars,
         t.orientation_filled,
     );
+    if t.orientation_unread > 0 {
+        s.push_str(&format!(
+            "; {} file(s) could not be read for orientation",
+            t.orientation_unread
+        ));
+    }
     if t.root_offline {
         s.push_str("; a folder was offline and will be retried");
     }

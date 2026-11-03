@@ -814,7 +814,7 @@ impl ChunkedJob for RightingJob {
                 run.total
                     .failed
                     .push((PathBuf::new(), format!("catalog error: {e}")));
-                *self.result.lock().unwrap() = Some(run);
+                *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
                 return Ok(Step::Done);
             }
         };
@@ -826,7 +826,7 @@ impl ChunkedJob for RightingJob {
             Ok(Step::Yield)
         } else {
             let run = self.righting.take().unwrap().into_run();
-            *self.result.lock().unwrap() = Some(run);
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
             Ok(Step::Done)
         }
     }
