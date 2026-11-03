@@ -96,14 +96,40 @@ impl ViewOrient {
         }
     }
 
-    /// Screen pixels per displayed pixel along the screen's horizontal and vertical axes, for a
-    /// `rect` the displayed image fills. A circle of radius `r` in the sensor frame is still a
-    /// circle of radius `r` once displayed (turns and flips preserve circles), so on screen it is an
-    /// ellipse with half-axes `r * scale.0` (horizontal) and `r * scale.1` (vertical); this is
-    /// also how many source pixels one screen pixel covers, inverted, along the screen axes.
-    pub fn display_scale(self, rect: egui::Rect, source: (f32, f32)) -> (f32, f32) {
-        let (dw, dh) = self.display_size(source);
-        (rect.width() / dw.max(1.0), rect.height() / dh.max(1.0))
+    /// The sensor-space texture coordinates of the four corners of the displayed image, in screen
+    /// order top-left, top-right, bottom-right, bottom-left. A sensor-oriented texture (a mask
+    /// overlay built in frame space) painted into the displayed rect samples these.
+    pub fn uv_corners(self) -> [(f32, f32); 4] {
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|c| self.to_sensor(c))
+    }
+
+    /// Paints a sensor-oriented `texture` into `rect` (the rect the *displayed* image fills),
+    /// turned and flipped as the photo is. `Painter::image` can only take an axis-aligned UV
+    /// rectangle, so a quarter turn needs a mesh with per-corner UVs. For [`Self::normal`] the
+    /// corners are exactly `image`'s.
+    pub fn paint_texture(
+        self,
+        painter: &egui::Painter,
+        texture: egui::TextureId,
+        rect: egui::Rect,
+        tint: egui::Color32,
+    ) {
+        let corners = [
+            rect.left_top(),
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+        ];
+        let mut mesh = egui::Mesh::with_texture(texture);
+        for (pos, (u, v)) in corners.into_iter().zip(self.uv_corners()) {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos,
+                uv: egui::pos2(u, v),
+                color: tint,
+            });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+        painter.add(egui::Shape::mesh(mesh));
     }
 
     /// Screen point inside `rect` (the rect the *displayed* image fills) -> source-image pixels.
@@ -334,25 +360,35 @@ mod tests {
         }
     }
 
+    /// #634: a sensor-oriented texture is painted into the displayed rect through these corners.
     #[test]
-    fn display_scale_is_screen_px_per_displayed_px_and_swaps_axes_under_a_quarter_turn() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
-        let source = (600.0f32, 400.0);
-        // Normal: displayed size is the source's.
+    fn the_overlay_texture_corners_are_the_sensor_points_each_displayed_corner_shows() {
+        // Normal is exactly `Painter::image`'s full-texture UVs.
         assert_eq!(
-            ViewOrient::normal().display_scale(rect, source),
-            (200.0 / 600.0, 600.0 / 400.0)
+            ViewOrient::normal().uv_corners(),
+            [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
         );
-        // A quarter turn displays 400 x 600.
+        // A quarter turn clockwise (EXIF 6): the displayed top-left shows the sensor's bottom-left.
         assert_eq!(
-            ViewOrient(Orientation::Rotate90Cw).display_scale(rect, source),
-            (200.0 / 400.0, 600.0 / 600.0)
+            ViewOrient(Orientation::Rotate90Cw).uv_corners(),
+            [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
         );
-        // Flips keep the size.
-        assert_eq!(
-            ViewOrient(Orientation::FlipH).display_scale(rect, source),
-            ViewOrient::normal().display_scale(rect, source)
-        );
+        // Every orientation: the corners are `to_sensor` of the displayed corners, and they are
+        // four distinct unit-square corners (a turn or flip permutes them).
+        for o in ALL {
+            let v = ViewOrient(o);
+            let uv = v.uv_corners();
+            for (c, d) in uv
+                .iter()
+                .zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+            {
+                assert_eq!(*c, v.to_sensor(d), "{o:?}");
+            }
+            let mut sorted: Vec<_> = uv.iter().map(|c| (c.0 as i32, c.1 as i32)).collect();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), 4, "{o:?}: {uv:?}");
+        }
     }
 
     #[test]

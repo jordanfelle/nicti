@@ -1157,12 +1157,8 @@ fn draw_overlay(
             mask.overlay = Some(Overlay { key, texture });
         }
         if let Some(o) = &mask.overlay {
-            painter.image(
-                o.texture.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+            // The overlay is built in frame (sensor) space; paint it turned like the photo (#634).
+            orient.paint_texture(&painter, o.texture.id(), rect, egui::Color32::WHITE);
         }
     }
 
@@ -1210,7 +1206,9 @@ fn draw_overlay(
         Arm::Brush => {
             if let Some(p) = response.hover_pos() {
                 let long = source.0.max(source.1).max(1.0);
-                let scale = long * orient.display_scale(rect, source).0;
+                // Screen px per displayed px (horizontal): the displayed width is the source's own
+                // unless a quarter turn trades it for the height (#634).
+                let scale = long * rect.width() / orient.display_size(source).0.max(1.0);
                 painter.circle_stroke(p, mask.brush.radius * scale, white);
                 painter.circle_stroke(
                     p,

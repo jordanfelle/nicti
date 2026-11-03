@@ -714,7 +714,7 @@ pub fn handle_viewport(
     // orientation (#634), so the screen's horizontal axis is the sensor's *vertical* one under a
     // 90-degree turn; the displayed size gives the screen px per source px either way (the stretch
     // may be anisotropic, so this uses the horizontal axis as before).
-    let handle_tol = HANDLE_RADIUS_PX / orient.display_scale(rect, source).0.max(1e-6);
+    let handle_tol = HANDLE_RADIUS_PX * orient.display_size(source).0 / rect.width().max(1.0);
 
     // Keys act only while the pointer is over the photo, so typing in a panel text field never
     // deletes a spot.
@@ -926,10 +926,13 @@ fn ellipse(
     center: (f32, f32),
     radius: f32,
 ) -> (egui::Pos2, egui::Vec2) {
-    let (kx, ky) = orient.display_scale(rect, source);
+    let (dw, dh) = orient.display_size(source);
     (
         orient.image_to_screen(rect, source, center),
-        egui::vec2(radius * kx, radius * ky),
+        egui::vec2(
+            radius * rect.width() / dw.max(1.0),
+            radius * rect.height() / dh.max(1.0),
+        ),
     )
 }
 
@@ -1755,8 +1758,8 @@ mod tests {
         }
         // Normal is exactly the old ratio.
         let (_, r) = ellipse(ViewOrient::normal(), rect, source, (0.0, 0.0), 10.0);
-        assert!((r.x - 10.0 * 200.0 / 600.0).abs() < 1e-4);
-        assert!((r.y - 10.0 * 600.0 / 400.0).abs() < 1e-4);
+        // Bit for bit the old `radius * rect.width() / source.0` (same operation order).
+        assert_eq!(r, vec2(10.0 * 200.0 / 600.0, 10.0 * 600.0 / 400.0));
     }
 
     #[test]
