@@ -246,7 +246,9 @@ pub fn back_up_file(
         Offered::Copied { dest, .. } if dest != existing => {
             Ok(BackedUp::Differs { dest: existing })
         }
-        Offered::Copied { dest, blake3, size } => Ok(BackedUp::Copied { dest, blake3, size }),
+        Offered::Copied {
+            dest, blake3, size, ..
+        } => Ok(BackedUp::Copied { dest, blake3, size }),
         // Raced into existence between the check and the copy, with the same bytes.
         Offered::AlreadyThere { dest, .. } => Ok(BackedUp::Unchanged { dest }),
         Offered::Cancelled => Ok(BackedUp::Cancelled),

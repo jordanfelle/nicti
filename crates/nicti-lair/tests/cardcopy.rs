@@ -104,6 +104,37 @@ fn a_run_copies_verifies_registers_and_leaves_the_card_alone() {
 }
 
 #[test]
+fn the_copies_hash_becomes_the_assets_trusted_baseline_without_rehashing() {
+    let fx = Fx::new();
+    let (plan, problems) = fx.plan();
+    let report = fx.run(plan, problems);
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(report.baseline_recorded, 2, "{report:?}");
+    assert!(report.baseline_error.is_none());
+    // Compare through the catalog's own paths (not by stripping the reported destinations, whose
+    // spelling differs from `fx.dest` on Windows: verbatim prefix, long vs 8.3 names).
+    let assets = fx.store.list_assets_by_root(fx.root_id).unwrap();
+    assert_eq!(assets.len(), 2);
+    for asset in assets {
+        let file = fx.dest.join(&asset.rel_path);
+        let want = blake3::hash(&std::fs::read(&file).unwrap())
+            .to_hex()
+            .to_string();
+        assert_eq!(
+            fx.store.content_hash(asset.id).unwrap().as_deref(),
+            Some(want.as_str()),
+            "{}",
+            asset.rel_path
+        );
+    }
+    // A second run finds the files already there and must not overwrite the baselines.
+    let (plan, problems) = fx.plan();
+    let again = fx.run(plan, problems);
+    assert_eq!(again.already_there, 2);
+    assert_eq!(again.baseline_recorded, 0, "existing baselines are kept");
+}
+
+#[test]
 fn running_it_again_reports_already_there_and_adds_no_duplicates() {
     let fx = Fx::new();
     let (plan, problems) = fx.plan();

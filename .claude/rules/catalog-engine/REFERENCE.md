@@ -77,4 +77,4 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 - `asset.orientation` (#604, schema v11): EXIF 1-8, NULL = unread; `orient::{file_orientation, backfill_root}`; ingest fills it,
   upsert resets on size/mtime change. Detail: `docs/decisions/catalog-engine.md`.
 - Copy from card (#602): `cardcopy::CardCopy` + `pounce_jobs::CardCopyJob` (Import kind), pelt `card_copy_ui` (plan via preen
-  naming, worker-thread detection/listing). Windows/real-card verification open. Detail: `docs/decisions/catalog-engine.md`.
+  naming, worker-thread detection/listing). verified-copy BLAKE3 reused as the content-hash baseline, Cancel button, same-volume destination check (#659); Windows/real-card verification open. Detail: `docs/decisions/catalog-engine.md`.
