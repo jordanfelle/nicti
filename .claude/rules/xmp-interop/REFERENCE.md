@@ -37,6 +37,8 @@ Full reasoning/history: `docs/decisions/xmp-interop.md`.
   write path is stricter: an un-ingested external sidecar edit is *held for review*, never
   clobbered. ADR-0059 stays Proposed until #187 (Reject/Pick/label mappings unverified).
 
+- **#371 (JPEG embedded XMP sync, landed)**: `scent_sync::xmp_target(path)` = the JPEG itself, else the `.xmp` beside the RAW. `load` reads the APP1 packet (hash = packet text only, so pixel/EXIF changes aren't XMP changes; no packet = `NoSidecar`); `write_locked` splices via `embedded::write_xmp` + `atomic_write`, never creating the file. Same newer-wins/hold-for-review rules as sidecars; a JPEG never touches `IMG.xmp` (the RAW's, in a RAW+JPEG pair).
+
 - **#373 (keyword tagging UI, landed)**: `nicti-pelt`'s `keyword_tag.rs` (Library toolbar row: text box + chips) writes only via `XmpMeta::tag_path`/`untag` (`xmp_sync.rs`), which tag the catalog then queue the sidecar write; `|` in the text is the hierarchy separator, segments go through `scent_sync::norm_segment`. Not verified by eye (no display here).
 
 ## Package contents

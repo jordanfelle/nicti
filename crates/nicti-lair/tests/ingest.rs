@@ -558,13 +558,15 @@ fn our_own_thumb_sidecars_are_not_ingested_as_assets() {
 }
 
 #[test]
-fn a_jpeg_asset_never_reads_or_writes_the_raws_xmp_sidecar() {
+fn a_jpeg_asset_syncs_through_its_embedded_xmp_and_never_touches_the_raws_sidecar() {
     use nicti_lair::scent_sync::{import_sidecar, write_sidecar, SyncOutcome};
+    use nicti_lair::AssetMeta;
     let store = SqliteCatalog::open_in_memory().unwrap();
     let dir = tempfile::tempdir().unwrap();
     write_synthetic_nef(dir.path(), "DSC_1.NEF");
     let jpg = dir.path().join("DSC_1.JPG");
-    std::fs::write(&jpg, encode_jpeg(64, 48)).unwrap();
+    let original = encode_jpeg(64, 48);
+    std::fs::write(&jpg, &original).unwrap();
     let xmp = dir.path().join("DSC_1.xmp");
     std::fs::write(&xmp, b"raw's sidecar").unwrap();
     let root_id = fresh_root(&store);
@@ -574,16 +576,158 @@ fn a_jpeg_asset_never_reads_or_writes_the_raws_xmp_sidecar() {
         .unwrap()
         .unwrap();
 
-    assert!(matches!(
-        write_sidecar(&store, asset.id, &jpg, 1).unwrap(),
-        SyncOutcome::NoSidecar
-    ));
+    // No packet yet: nothing to import.
     assert!(matches!(
         import_sidecar(&store, asset.id, &jpg, 1).unwrap(),
         SyncOutcome::NoSidecar
     ));
+
+    // catalog -> JPEG: the rating lands in an embedded packet, the RAW's sidecar is untouched.
+    store
+        .replace_asset_markers(
+            asset.id,
+            &AssetMeta {
+                rating: Some(4),
+                flag: None,
+                label: None,
+            },
+            &[],
+        )
+        .unwrap();
+    assert!(matches!(
+        write_sidecar(&store, asset.id, &jpg, 1).unwrap(),
+        SyncOutcome::WroteSidecar
+    ));
     assert_eq!(std::fs::read(&xmp).unwrap(), b"raw's sidecar");
-    assert!(store.sidecar_state(asset.id).unwrap().is_none());
+    let written = std::fs::read(&jpg).unwrap();
+    let packet = nicti_scent::embedded::read_xmp(&written).unwrap().unwrap();
+    assert!(packet.contains("Rating"), "{packet}");
+    assert!(!dir.path().join(".DSC_1.JPG.scent-tmp").exists());
+    // The JPEG still decodes and only gained the packet.
+    image::load_from_memory(&written).unwrap();
+    assert!(written.len() > original.len());
+
+    // Writing again with nothing changed is a no-op.
+    assert!(matches!(
+        write_sidecar(&store, asset.id, &jpg, 2).unwrap(),
+        SyncOutcome::InSync
+    ));
+
+    // JPEG -> catalog: an external edit of the embedded packet is picked up.
+    let edited = packet.replace("xmp:Rating=\"4\"", "xmp:Rating=\"2\"");
+    assert_ne!(edited, packet, "fixture assumption: {packet}");
+    std::fs::write(
+        &jpg,
+        nicti_scent::embedded::write_xmp(&written, &edited).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        import_sidecar(&store, asset.id, &jpg, 1_000_000_000).unwrap(),
+        SyncOutcome::AppliedSidecar
+    ));
+    assert_eq!(
+        store.get_meta(&[asset.id]).unwrap()[&asset.id].rating,
+        Some(2)
+    );
+}
+
+fn rated_jpeg_fixture() -> (
+    SqliteCatalog,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    i64,
+    Vec<u8>,
+) {
+    use nicti_lair::AssetMeta;
+    let store = SqliteCatalog::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let jpg = dir.path().join("a.jpg");
+    let original = encode_jpeg(64, 48);
+    std::fs::write(&jpg, &original).unwrap();
+    let root_id = fresh_root(&store);
+    ingest_root(&store, root_id, dir.path()).unwrap();
+    let id = store
+        .find_asset_by_path(root_id, "a.jpg")
+        .unwrap()
+        .unwrap()
+        .id;
+    store
+        .replace_asset_markers(
+            id,
+            &AssetMeta {
+                rating: Some(3),
+                flag: None,
+                label: None,
+            },
+            &[],
+        )
+        .unwrap();
+    (store, dir, jpg, id, original)
+}
+
+#[test]
+fn a_read_only_jpeg_is_never_rewritten() {
+    use nicti_lair::scent_sync::write_sidecar;
+    let (store, _dir, jpg, id, original) = rated_jpeg_fixture();
+    let mut perms = std::fs::metadata(&jpg).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&jpg, perms).unwrap();
+    assert!(write_sidecar(&store, id, &jpg, 1).is_err());
+    assert_eq!(std::fs::read(&jpg).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_jpeg_write_keeps_permissions_and_updates_a_symlinks_target() {
+    use nicti_lair::scent_sync::{write_sidecar, SyncOutcome};
+    use std::os::unix::fs::PermissionsExt;
+    let (store, dir, jpg, id, original) = rated_jpeg_fixture();
+    std::fs::set_permissions(&jpg, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = dir.path().join("link.jpg");
+    std::os::unix::fs::symlink(&jpg, &link).unwrap();
+    assert!(matches!(
+        write_sidecar(&store, id, &link, 1).unwrap(),
+        SyncOutcome::WroteSidecar
+    ));
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let written = std::fs::read(&jpg).unwrap();
+    assert!(written.len() > original.len());
+    assert_eq!(
+        std::fs::metadata(&jpg).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn a_pixel_only_change_to_a_jpeg_does_not_beat_a_pending_catalog_edit() {
+    use nicti_lair::scent_sync::{import_sidecar, mark_catalog_dirty, write_sidecar, SyncOutcome};
+    use nicti_lair::AssetMeta;
+    let (store, _dir, jpg, id, _) = rated_jpeg_fixture();
+    write_sidecar(&store, id, &jpg, 1).unwrap();
+    // Catalog edit with auto-write off: dirty, packet still says 3.
+    store
+        .replace_asset_markers(
+            id,
+            &AssetMeta {
+                rating: Some(5),
+                flag: None,
+                label: None,
+            },
+            &[],
+        )
+        .unwrap();
+    mark_catalog_dirty(&store, id, &jpg, 10).unwrap();
+    // Another program re-saves the pixels (packet bytes untouched) much later.
+    let mut bytes = std::fs::read(&jpg).unwrap();
+    let n = bytes.len();
+    bytes.insert(n - 2, 0x00);
+    std::fs::write(&jpg, &bytes).unwrap();
+    let out = import_sidecar(&store, id, &jpg, 10_000_000_000).unwrap();
+    assert!(matches!(out, SyncOutcome::WroteSidecar), "{out:?}");
+    assert_eq!(store.get_meta(&[id]).unwrap()[&id].rating, Some(5));
 }
 
 #[test]
