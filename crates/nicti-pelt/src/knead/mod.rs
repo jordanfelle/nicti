@@ -11,6 +11,7 @@
 
 pub mod batch;
 pub mod presets;
+pub mod straighten;
 pub mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};

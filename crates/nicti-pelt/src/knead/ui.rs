@@ -8,6 +8,7 @@ use nicti_pawprint::EditDocument;
 
 use super::batch::{BatchOutcome, LastBatch, UndoOutcome};
 use super::presets::{presets_file_for, PresetStore};
+use super::straighten::Mode;
 use super::{Clipboard, StageSet, GROUPS};
 
 /// What the user asked the app to do.
@@ -16,6 +17,14 @@ pub enum Command {
     Run {
         clip: Clipboard,
         ids: Vec<i64>,
+        label: String,
+    },
+    /// Set or add a straighten angle on `ids` (#614), for photos with `reference_orientation`.
+    Straighten {
+        ids: Vec<i64>,
+        reference_orientation: Option<u8>,
+        mode: Mode,
+        degrees: f32,
         label: String,
     },
     Undo,
@@ -29,12 +38,28 @@ pub enum PanelAction {
     Sync,
     SavePreset,
     Apply(String),
+    /// Open the rotation-only batch prompt (#614).
+    Straighten,
 }
 
 enum Modal {
-    Copy { doc: EditDocument },
-    Sync { doc: EditDocument, ids: Vec<i64> },
-    SavePreset { doc: EditDocument },
+    Copy {
+        doc: EditDocument,
+    },
+    Sync {
+        doc: EditDocument,
+        ids: Vec<i64>,
+    },
+    SavePreset {
+        doc: EditDocument,
+    },
+    /// #614: the reference photo's angle, applied to `ids`.
+    Straighten {
+        ids: Vec<i64>,
+        reference_orientation: Option<u8>,
+        degrees: f32,
+        mode: Mode,
+    },
 }
 
 pub struct KneadUi {
@@ -114,6 +139,20 @@ impl KneadUi {
         self.open(Modal::Sync { doc, ids });
     }
 
+    pub fn ask_straighten(
+        &mut self,
+        ids: Vec<i64>,
+        reference_orientation: Option<u8>,
+        degrees: f32,
+    ) {
+        self.open(Modal::Straighten {
+            ids,
+            reference_orientation,
+            degrees,
+            mode: Mode::Set,
+        });
+    }
+
     pub fn ask_save_preset(&mut self, doc: EditDocument) {
         self.name_input.clear();
         self.open(Modal::SavePreset { doc });
@@ -134,6 +173,26 @@ impl KneadUi {
             self.last = last;
         }
         self.status = Some(summary(label, out));
+    }
+
+    /// Like [`Self::finish_batch`] for the rotation-only batch, naming the photos skipped for a
+    /// different or unread camera orientation.
+    pub fn finish_straighten(
+        &mut self,
+        label: &str,
+        out: &BatchOutcome,
+        orientation_skipped: usize,
+        last: Option<LastBatch>,
+    ) {
+        if last.is_some() {
+            self.last = last;
+        }
+        let mut line = summary(label, out);
+        if orientation_skipped > 0 {
+            line +=
+                &format!(" \u{b7} {orientation_skipped} skipped (different or unread orientation)");
+        }
+        self.status = Some(line);
     }
 
     pub fn take_undo(&mut self) -> Option<LastBatch> {
@@ -168,7 +227,100 @@ impl KneadUi {
     }
 
     /// The checklist modal. Returns a command when the user confirmed a sync.
+    /// The rotation-only prompt (#614): which way to apply the reference photo's angle.
+    fn show_straighten_modal(&mut self, ctx: &egui::Context) -> Option<Command> {
+        let Some(Modal::Straighten {
+            ids,
+            reference_orientation,
+            degrees,
+            mode,
+        }) = self.modal.as_mut()
+        else {
+            return None;
+        };
+        let mut confirmed = false;
+        let mut close = false;
+        let count = ids.len();
+        let response =
+            egui::Modal::new(egui::Id::unique("nicti_straighten_prompt")).show(ctx, |ui| {
+                ui.heading(format!(
+                    "Straighten {count} photo{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+                ui.label(format!(
+                    "Angle of the photo under the cursor: {:+.2}\u{b0}",
+                    *degrees
+                ));
+                ui.radio_value(
+                    mode,
+                    Mode::Set,
+                    format!("Set each photo to {:+.2}\u{b0}", *degrees),
+                );
+                ui.radio_value(
+                    mode,
+                    Mode::Add,
+                    format!("Add {:+.2}\u{b0} to each photo's own angle", *degrees),
+                );
+                ui.add_space(4.0);
+                ui.weak(
+                "Only the angle changes; each crop is fitted inside the straightened frame when \
+                 the photo is rendered. Only photos with the same camera orientation as the \
+                 reference are changed (Develop does not yet turn sideways photos upright).",
+            );
+                if reference_orientation.is_none() {
+                    ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "The reference photo's orientation hasn't been read yet, so nothing can be \
+                     changed. Run Synchronize Folder first.",
+                );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            reference_orientation.is_some(),
+                            egui::Button::new("Straighten"),
+                        )
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if response.should_close() {
+            close = true;
+        }
+        if confirmed {
+            let Some(Modal::Straighten {
+                ids,
+                reference_orientation,
+                degrees,
+                mode,
+            }) = self.modal.take()
+            else {
+                return None;
+            };
+            return Some(Command::Straighten {
+                ids,
+                reference_orientation,
+                mode,
+                degrees,
+                label: "Straighten".into(),
+            });
+        }
+        if close {
+            self.modal = None;
+        }
+        None
+    }
+
     pub fn show_modal(&mut self, ctx: &egui::Context) -> Option<Command> {
+        if matches!(self.modal, Some(Modal::Straighten { .. })) {
+            return self.show_straighten_modal(ctx);
+        }
         let modal = self.modal.as_ref()?;
         let (title, verb, wants_name) = match modal {
             Modal::Copy { .. } => ("Copy settings".to_string(), "Copy", false),
@@ -182,6 +334,7 @@ impl KneadUi {
                 false,
             ),
             Modal::SavePreset { .. } => ("Save as preset".to_string(), "Save", true),
+            Modal::Straighten { .. } => unreachable!("handled by show_straighten_modal"),
         };
         let mut confirmed = false;
         let mut close = false;
@@ -259,6 +412,7 @@ impl KneadUi {
                 ids,
                 label: "Sync".into(),
             }),
+            Modal::Straighten { .. } => None,
             Modal::SavePreset { doc } => {
                 let stages = Clipboard::from_document(&doc, &self.set).entries();
                 match self.presets.add(&self.name_input, stages) {
@@ -485,5 +639,24 @@ mod tests {
         assert!(ui.confirm().is_none());
         assert!(ui.is_asking(), "duplicate name: dialog stays open");
         assert!(ui.modal_error.is_some());
+    }
+
+    #[test]
+    fn a_straighten_summary_names_the_orientation_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = KneadUi::new(&dir.path().join("c.db"));
+        let out = BatchOutcome {
+            applied: 3,
+            unchanged: 1,
+            missing: 0,
+        };
+        ui.finish_straighten("Straighten", &out, 2, None);
+        let line = ui.status.clone().unwrap();
+        assert!(
+            line.contains("3 changed") && line.contains("2 skipped"),
+            "{line}"
+        );
+        ui.finish_straighten("Straighten", &out, 0, None);
+        assert!(!ui.status.clone().unwrap().contains("skipped"));
     }
 }

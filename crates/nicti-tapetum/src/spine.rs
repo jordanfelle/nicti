@@ -298,7 +298,15 @@ pub fn resolve_inputs(
     pixel_scale: f32,
 ) -> RenderInputs {
     let wb: WbParams = resolve(doc, WB);
-    let crop: CropParams = resolve(doc, CROP);
+    let mut crop: CropParams = resolve(doc, CROP);
+    // Fit the crop inside the straightened frame at the *true* source extent (#614): a document
+    // can carry a rotation whose crop was never fitted (a rotation-only batch writes just the
+    // angle, since a RAW's real extent isn't in the catalog). Fitting here, where every consumer
+    // resolves its crop (Develop, export, the grid's rendered tier, prebake), means they all see
+    // the same rectangle (#589's single-consumer-fit bug class). A no-op at zero rotation and for a
+    // crop that already fits, so an already-fitted document renders as before; Upright needs no
+    // extra fit (its homography is zoomed to sample inside the source, #589).
+    crop.fit_to_rotated((extent.width as f32, extent.height as f32));
     let crop_rect = crop.effective_rect((extent.width as f32, extent.height as f32));
     let crop_transform = geometry::affine_for_crop(crop_rect, crop.rotation_degrees);
     let upright = crop
@@ -427,6 +435,56 @@ mod tests {
         width: 2,
         height: 2,
     };
+
+    /// #614: a rotation with no fitted crop (what a rotation-only batch writes) resolves to the
+    /// crop fitted inside the straightened frame at the true extent, an already-fitted crop and an
+    /// unrotated one are untouched, and a re-resolve of the fitted result is stable.
+    #[test]
+    fn a_rotation_without_a_fitted_crop_is_fitted_at_resolve_time() {
+        let f = frame();
+        let wide = Extent {
+            width: 1000,
+            height: 600,
+        };
+        let rotated = |crop: serde_json::Value| {
+            resolve_inputs(&doc_with(CROP, crop), &f, wide, None, None, 1.0).crop_rect
+        };
+        let full = rotated(serde_json::json!({}));
+        assert_eq!(
+            (full.x, full.y, full.width, full.height),
+            (0.0, 0.0, 1000.0, 600.0)
+        );
+
+        let fitted = rotated(serde_json::json!({ "rotation_degrees": 10.0 }));
+        assert!(fitted.width < 1000.0 && fitted.height < 600.0, "{fitted:?}");
+        // Aspect kept, and inside the frame (about its own centre).
+        assert!((fitted.width / fitted.height - 1000.0 / 600.0).abs() < 1e-3);
+        assert!(fitted.x >= 0.0 && fitted.y >= 0.0);
+        assert!(
+            fitted.x + fitted.width <= 1000.0 + 1e-3 && fitted.y + fitted.height <= 600.0 + 1e-3
+        );
+
+        // Feeding the fitted rect back in changes nothing (stable, not shrinking each time).
+        let again = rotated(serde_json::json!({
+            "x": fitted.x, "y": fitted.y, "width": fitted.width, "height": fitted.height,
+            "rotation_degrees": 10.0
+        }));
+        for (a, b) in [
+            (again.x, fitted.x),
+            (again.y, fitted.y),
+            (again.width, fitted.width),
+            (again.height, fitted.height),
+        ] {
+            assert!((a - b).abs() < 0.05, "{again:?} vs {fitted:?}");
+        }
+        // An unrotated crop is never touched, even off-centre.
+        let plain =
+            rotated(serde_json::json!({ "x": 5.0, "y": 6.0, "width": 100.0, "height": 50.0 }));
+        assert_eq!(
+            (plain.x, plain.y, plain.width, plain.height),
+            (5.0, 6.0, 100.0, 50.0)
+        );
+    }
 
     /// #381: calibration primaries change the working-space matrix (and only that), keep camera
     /// white fixed, and an empty document is untouched.

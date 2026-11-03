@@ -38,6 +38,8 @@ Full reasoning/history: `docs/decisions/develop.md`.
 - **#46 shipped Auto with candidate A, ...
 - **ControlSpec model (#440, ADR-0440)** — no-go on a panel/preset/LRC table; conditional small typed-accessor registry with ADR-0434's `develop.get/set`. Full: `grep -nF '#440' .claude/docs/develop/REFERENCE-full.md`.
 
+- **Rotation-only batch (#614)**: `knead/straighten.rs` (`plan_rotation`, `Mode::{Set,Add}`) + `batch::run_rotation_batch` (one undo, like a paste) + the Library toolbar's "Straighten N" prompt. Writes only the angle (clamped), only on photos whose EXIF Orientation equals the reference's; the crop is fitted at resolve time (`spine::resolve_inputs`). Detail: `docs/decisions/develop.md`.
+
 ## Package contents
 
 - **`crates/nicti-pelt/src/knead/`** (#52/ADR-0052) — `mod.rs` (`GROUPS` checklist, `StageSet`,
