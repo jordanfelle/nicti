@@ -252,19 +252,38 @@ pub fn survey_card(mount: &Path, copied: &HashSet<PathBuf>) -> Vec<String> {
     out
 }
 
+/// Windows' `canonicalize` returns verbatim paths (`\\?\C:\x`, `\\?\UNC\srv\share`). They must not
+/// become the registered root: the catalog matches root strings exactly, so it would not match the
+/// same folder typed as `C:\x` (a duplicate root, duplicate assets). Strips the prefix when the rest
+/// is an ordinary drive or UNC path; anything else is returned unchanged.
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
 /// Resolves `dest` and refuses a destination on (or containing) any of the `cards`: copying onto
 /// the card would write to the volume the user is about to format, and break the promise that the
 /// card is only read. Returns the canonical destination, which is also the spelling to register as
 /// the catalog root (so `a/../b` and `b` are one root).
 pub fn check_destination(dest: &Path, cards: &[PathBuf]) -> Result<PathBuf, String> {
-    let dest = dest
-        .canonicalize()
-        .map_err(|e| format!("{} can't be used: {e}", dest.display()))?;
+    let dest = simplify_verbatim(
+        dest.canonicalize()
+            .map_err(|e| format!("{} can't be used: {e}", dest.display()))?,
+    );
     if !dest.is_dir() {
         return Err(format!("{} is not a folder.", dest.display()));
     }
     for card in cards {
-        let Ok(card) = card.canonicalize() else {
+        let Ok(card) = card.canonicalize().map(simplify_verbatim) else {
             continue;
         };
         if dest.starts_with(&card) || card.starts_with(&dest) {
@@ -352,6 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn verbatim_prefixes_are_stripped_only_for_plain_drive_and_unc_paths() {
+        let f = |s: &str| simplify_verbatim(PathBuf::from(s));
+        assert_eq!(f(r"\\?\C:\Users\x"), PathBuf::from(r"C:\Users\x"));
+        assert_eq!(f(r"\\?\UNC\srv\share\x"), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(
+            f(r"\\?\Volume{1234}\x"),
+            PathBuf::from(r"\\?\Volume{1234}\x")
+        );
+        assert_eq!(f("/plain/path"), PathBuf::from("/plain/path"));
+    }
+
+    #[test]
     fn a_destination_on_the_card_or_containing_it_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let card = tmp.path().join("card");
@@ -368,7 +399,7 @@ mod tests {
             "contains the card"
         );
         let ok = check_destination(&elsewhere.join("../photos"), &cards).unwrap();
-        assert_eq!(ok, elsewhere.canonicalize().unwrap());
+        assert_eq!(ok, simplify_verbatim(elsewhere.canonicalize().unwrap()));
         assert!(check_destination(&tmp.path().join("missing"), &cards).is_err());
     }
 }

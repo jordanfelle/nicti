@@ -90,8 +90,10 @@ fn a_run_copies_verifies_registers_and_leaves_the_card_alone() {
     assert!(report.is_clean(), "{report:?}");
     assert_eq!((report.copied, report.already_there), (2, 0));
     assert_eq!(report.destinations.len(), 2);
+    // The engine reports canonical paths (verbatim `\\?\` ones on Windows).
+    let dest_dir = fx.dest.join("2026-11-03").canonicalize().unwrap();
     for d in &report.destinations {
-        assert!(d.starts_with(fx.dest.join("2026-11-03")), "{d:?}");
+        assert!(d.canonicalize().unwrap().starts_with(&dest_dir), "{d:?}");
     }
     assert_eq!(fx.asset_count(), 2);
     // The card is byte-for-byte what it was.
