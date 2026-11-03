@@ -28,6 +28,8 @@ tiff = "0.11"
 skrifa = "0.49"
 # Lossless WebP (pure Rust; lossy isn't available in it, #361).
 image-webp = "0.2"
+# Lossy WebP (#639): libwebp via `libwebp-sys` (C, built with `cc`); vetted in docs/licensing.md.
+webp = { version = "0.3", default-features = false }
 # AVIF (rav1e, slow to compile -- #286), so opt-in via the `avif` feature.
 ravif = { version = "0.13", optional = true }
 little_exif = "0.6.23"

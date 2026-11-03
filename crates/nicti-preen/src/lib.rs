@@ -118,8 +118,11 @@ pub enum ExportError {
 /// on OOM and lose unsaved edits. 250 MP (~3 GB of f32) is far past any real print.
 pub const MAX_OUTPUT_PIXELS: u64 = 250_000_000;
 
-/// WebP's per-side limit (14-bit dimensions), checked before the expensive resize.
+/// Lossless WebP's per-side limit, checked before the expensive resize.
 pub const WEBP_MAX_DIMENSION: u32 = 16_384;
+
+/// libwebp's lossy per-side limit (`VP8_ENC_ERROR_BAD_DIMENSION` above it), one less than lossless.
+pub const WEBP_LOSSY_MAX_DIMENSION: u32 = 16_383;
 
 /// A rendered frame in host memory: interleaved **linear ProPhoto (D50)** RGB f32, unclamped --
 /// what Tapetum's readback produces, alpha dropped.
@@ -188,9 +191,13 @@ pub fn export_frame(
             MAX_OUTPUT_PIXELS / 1_000_000
         )));
     }
-    if format == ExportFormat::Webp && tw.max(th) > WEBP_MAX_DIMENSION {
+    let webp_max = match spec.format {
+        FormatSpec::WebpLossy { .. } => WEBP_LOSSY_MAX_DIMENSION,
+        _ => WEBP_MAX_DIMENSION,
+    };
+    if format == ExportFormat::Webp && tw.max(th) > webp_max {
         return Err(ExportError::Frame(format!(
-            "WebP is limited to {WEBP_MAX_DIMENSION} px per side; the export would be {tw}x{th} -- lower the size setting"
+            "WebP is limited to {webp_max} px per side; the export would be {tw}x{th} -- lower the size setting"
         )));
     }
     let (rw, rh) = orientation.oriented_size(tw, th); // swap back if the orientation swaps
@@ -338,6 +345,28 @@ mod tests {
     }
 
     #[test]
+    fn lossy_webp_limit_is_16383_and_checked_before_resizing() {
+        let spec = ExportSpec {
+            format: FormatSpec::WebpLossy { quality: 80 },
+            resize: ResizeSpec {
+                mode: ResizeMode::LongEdge(16_384),
+                dont_enlarge: false,
+            },
+            ..ExportSpec::default()
+        };
+        let err = export_frame(
+            split_frame(80, 60),
+            &ctx(&spec, &SourceMetadata::default()),
+            &builtin_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ExportError::Frame(ref m) if m.contains("16383")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn full_pipeline_resizes_to_the_long_edge_for_every_format() {
         let reg = builtin_registry();
         let src = SourceMetadata::default();
@@ -354,6 +383,7 @@ mod tests {
                 compression: TiffCompression::Deflate,
             },
             FormatSpec::Webp,
+            FormatSpec::WebpLossy { quality: 70 },
         ] {
             let spec = ExportSpec {
                 format,

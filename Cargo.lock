@@ -3955,6 +3955,7 @@ dependencies = [
  "tiff",
  "tiny-skia",
  "usvg 0.49.0",
+ "webp",
 ]
 
 [[package]]

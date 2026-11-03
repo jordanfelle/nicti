@@ -106,6 +106,11 @@ fn every_format_passes_exiftool_validate_with_no_warnings() {
             ExportSpace::Srgb,
         ),
         ("webp", FormatSpec::Webp, ExportSpace::Srgb),
+        (
+            "webp-lossy",
+            FormatSpec::WebpLossy { quality: 80 },
+            ExportSpace::Srgb,
+        ),
     ];
     #[cfg(feature = "avif")]
     cases.push((
