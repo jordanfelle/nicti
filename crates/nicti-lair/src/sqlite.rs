@@ -1549,6 +1549,12 @@ impl CatalogStore for SqliteCatalog {
                 exif_extra_read = CASE WHEN asset.size_bytes IS excluded.size_bytes \
                     AND asset.mtime_unix IS excluded.mtime_unix \
                     THEN asset.exif_extra_read ELSE 0 END, \
+                lens = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.lens ELSE NULL END, \
+                iso = CASE WHEN asset.size_bytes IS excluded.size_bytes \
+                    AND asset.mtime_unix IS excluded.mtime_unix \
+                    THEN asset.iso ELSE NULL END, \
                 rel_path_fold = excluded.rel_path_fold, \
                 size_bytes = excluded.size_bytes, \
                 mtime_unix = excluded.mtime_unix, \
@@ -1633,6 +1639,10 @@ impl CatalogStore for SqliteCatalog {
                     THEN orientation ELSE NULL END, \
                 exif_extra_read = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
                     THEN exif_extra_read ELSE 0 END, \
+                lens = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN lens ELSE NULL END, \
+                iso = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
+                    THEN iso ELSE NULL END, \
                 size_bytes = ?4, mtime_unix = ?5, missing_since = NULL WHERE id = ?6",
             params![
                 new_root_id,
@@ -1809,7 +1819,8 @@ impl CatalogStore for SqliteCatalog {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {ASSET_COLUMNS} FROM asset \
-             WHERE root_id = ?1 AND exif_extra_read = 0 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+             WHERE root_id = ?1 AND exif_extra_read = 0 AND missing_since IS NULL \
+             AND id > ?2 ORDER BY id ASC LIMIT ?3"
         ))?;
         let rows = stmt
             .query_map(params![root_id, after_id, limit as i64], Self::row_to_asset)?

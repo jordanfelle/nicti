@@ -166,14 +166,14 @@ fn lens_and_iso(exif: &exif::Exif) -> (Option<String>, Option<u32>) {
             .and_then(|f| f.value.get_uint(0))
     };
     let iso = uint(exif::Tag::PhotographicSensitivity)
-        .filter(|&i| i != 65535)
+        .filter(|&i| i != 0 && i != 65535)
         .or_else(|| uint(exif::Tag(exif::Context::Exif, 0x8833)))
         .filter(|&i| i >= 1);
     (lens, iso)
 }
 
 /// Lens model and ISO of the file at `path`, or `None` when its EXIF can't be read at all (#547).
-pub(crate) fn read_exif_extra(path: &Path) -> Option<(Option<String>, Option<u32>)> {
+pub fn read_exif_extra(path: &Path) -> Option<(Option<String>, Option<u32>)> {
     let file = File::open(path).ok()?;
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::BufReader::new(file))

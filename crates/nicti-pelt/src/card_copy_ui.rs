@@ -108,19 +108,15 @@ fn read_capture(path: &Path) -> Capture {
         .date_time_original
         .as_deref()
         .and_then(DateParts::parse);
+    // Lens/ISO come from the same extractor ingest uses, so a card file is named exactly as the
+    // catalog will later describe it (a different reader disagreed on high-ISO bodies).
+    let (lens, iso) = nicti_lair::scruff::read_exif_extra(path).unwrap_or((None, None));
     let mtime = std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs() as i64);
-    (
-        captured,
-        mtime,
-        exif.make,
-        exif.model,
-        exif.lens_model,
-        exif.iso,
-    )
+    (captured, mtime, exif.make, exif.model, lens, iso)
 }
 
 /// One line for a finished run.

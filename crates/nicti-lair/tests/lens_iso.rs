@@ -200,3 +200,43 @@ fn an_offline_root_is_left_alone_and_a_changed_file_is_read_again() {
     let a = store.find_asset_by_path(root, "c.jpg").unwrap().unwrap();
     assert_eq!((a.lens.as_deref(), a.iso), (Some("New lens"), Some(400)));
 }
+
+#[test]
+fn a_changed_file_whose_exif_is_now_unreadable_does_not_keep_the_old_lens_and_iso() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("c.jpg");
+    std::fs::write(&p, jpeg_with_exif(&exif_tiff(Some("Old lens"), 100, None))).unwrap();
+    let (store, root) = catalog(dir.path());
+    ingest_root(&store, root, dir.path()).unwrap();
+    let before = store.find_asset_by_path(root, "c.jpg").unwrap().unwrap();
+    assert_eq!(before.lens.as_deref(), Some("Old lens"));
+
+    // Replaced by something whose EXIF can't be read (different size, so ingest re-reads it).
+    std::fs::write(&p, b"definitely not a jpeg, but a different length").unwrap();
+    ingest_root(&store, root, dir.path()).unwrap();
+    let after = store.find_asset_by_path(root, "c.jpg").unwrap().unwrap();
+    assert_eq!(
+        (after.lens, after.iso),
+        (None, None),
+        "stale values must not feed names"
+    );
+    // And it is back in the backfill's queue.
+    assert_eq!(
+        store.assets_missing_exif_extra(root, 0, 10).unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn an_iso_of_zero_falls_back_to_the_isospeed_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("z.jpg"),
+        jpeg_with_exif(&exif_tiff(None, 0, Some(8000))),
+    )
+    .unwrap();
+    let (store, root) = catalog(dir.path());
+    ingest_root(&store, root, dir.path()).unwrap();
+    let a = store.find_asset_by_path(root, "z.jpg").unwrap().unwrap();
+    assert_eq!(a.iso, Some(8000));
+}
