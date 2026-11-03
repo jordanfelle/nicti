@@ -532,7 +532,7 @@ impl Thumb {
             &frame.cam_xyz,
             &WbParams::default(),
         );
-        let source = FramePixels(frame);
+        let source = FramePixels::new(frame);
         let (w, h) = (source.width() as usize, source.height() as usize);
         // Never larger than the source: a tiny frame is its own thumbnail.
         let scale = (THUMB_LONG_EDGE as f32 / w.max(h).max(1) as f32).min(1.0);

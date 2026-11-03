@@ -59,25 +59,36 @@ pub trait PixelSource: Send + Sync {
 }
 
 /// [`PixelSource`] over a decoded RAW frame, using `normalize.wgsl`'s formula.
-pub struct FramePixels(pub Arc<LinearFrame>);
+pub struct FramePixels {
+    frame: Arc<LinearFrame>,
+    clip: nicti_tapetum::stages::ClipNeutral,
+}
+
+impl FramePixels {
+    pub fn new(frame: Arc<LinearFrame>) -> Self {
+        let clip = nicti_tapetum::stages::ClipNeutral::for_frame(&frame);
+        Self { frame, clip }
+    }
+
+    pub fn frame(&self) -> &Arc<LinearFrame> {
+        &self.frame
+    }
+}
 
 impl PixelSource for FramePixels {
     fn width(&self) -> u32 {
-        self.0.width
+        self.frame.width
     }
     fn height(&self) -> u32 {
-        self.0.height
+        self.frame.height
     }
     fn pixel(&self, x: u32, y: u32) -> [f32; 3] {
-        let f = &*self.0;
+        let f = &*self.frame;
         let range = f.maximum as f32 - f.black as f32;
         let base = (y as usize * f.width as usize + x as usize) * 3;
-        let ceiling = nicti_tapetum::stages::clip_neutral_ceiling(f);
-        let sample = |c: usize| {
-            ((f.pixels[base + c] as f32 - f.black as f32 - f.cblack[c] as f32) / range)
-                .min(ceiling[c])
-        };
-        [sample(0), sample(1), sample(2)]
+        let sample =
+            |c: usize| (f.pixels[base + c] as f32 - f.black as f32 - f.cblack[c] as f32) / range;
+        self.clip.apply([sample(0), sample(1), sample(2)])
     }
 }
 
@@ -124,7 +135,7 @@ mod tests {
             orientation: 0,
         };
         let expected = normalize_pixels(&frame);
-        let src = FramePixels(Arc::new(frame));
+        let src = FramePixels::new(Arc::new(frame));
         for y in 0..2u32 {
             for x in 0..3u32 {
                 let e = expected[(y * 3 + x) as usize];
@@ -155,7 +166,7 @@ mod tests {
             orientation: 0,
         };
         let expected = normalize_pixels(&frame);
-        let src = FramePixels(Arc::new(frame));
+        let src = FramePixels::new(Arc::new(frame));
         for x in 0..2u32 {
             let a = src.pixel(x, 0);
             for c in 0..3 {

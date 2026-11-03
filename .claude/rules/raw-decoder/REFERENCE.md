@@ -41,7 +41,7 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
 
 - Research outcome, nothing lifted. Go: highlight reconstruction (real gap: shim sets `highlight=0` and no stage exists; LightCraft's input contract = Nicti's camera RGB pre-WB; `clip_neutral` first, `reconstruct` after validation on real Z8 frames). Conditional: DNG GainMap after demosaic, only with a real fixture (LibRaw applies no opcodes, DNG SDK glue not enabled). No-go: OpcodeList1, LJPEG encoder/DNG writer (no DNG-export goal), binned preview (measure demosaic share of T2 first). HE-vs-lossless same-frame PSNR oracle goes on #137. Detail: `docs/decisions/raw-decoder.md`.
 
-- **Clip-neutral (#552, slice 1)**: `nicti_tapetum::stages::clip_neutral_ceiling` limits each camera channel (decode shader, `normalize_pixels`, groom `FramePixels` all apply it) so a clipped pixel is neutral after the as-shot WB; decode's `impl_version` is 1 so downstream keys changed. Unverified on real frames; reconstruct is #672. Detail: `docs/decisions/raw-decoder.md`.
+- **Clip-neutral (#552, slice 1)**: `nicti_tapetum::stages::ClipNeutral` (decode shader, `normalize_pixels`, groom `FramePixels::new`) limits only a pixel with a clipped channel so it is neutral after the as-shot WB; unclipped pixels untouched. Decode `impl_version` 1 + `EYESHINE_VERSION` 4. Unverified on real frames; reconstruct #672. Detail: `docs/decisions/raw-decoder.md`.
 
 ## Package contents
 

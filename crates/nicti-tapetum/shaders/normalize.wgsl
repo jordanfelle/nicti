@@ -14,7 +14,8 @@
 struct Params {
     dims: vec4<u32>,   // width, strip_rows, row_offset, black
     limits: vec4<u32>, // maximum, cblack.r, cblack.g, cblack.b
-    ceiling: vec4<f32>, // clip-neutral ceiling r, g, b (f32 max = no limit), unused
+    clip: vec4<f32>,    // clip-neutral: clip level r, g, b (f32 max = never clipped), unused
+    ceiling: vec4<f32>, // what a clipped pixel is limited to r, g, b, unused
 }
 
 @group(0) @binding(0) var<storage, read> packed_pixels: array<u32>;
@@ -43,9 +44,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r = (f32(unpack_sample(idx)) - f32(black) - f32(cblack.x)) / range;
     let g = (f32(unpack_sample(idx + 1u)) - f32(black) - f32(cblack.y)) / range;
     let b = (f32(unpack_sample(idx + 2u)) - f32(black) - f32(cblack.z)) / range;
-    // Clip-neutral (#552): no channel keeps more than the white-balanced clip level allows, so a
-    // blown pixel is neutral after WB. `clip_neutral_ceiling` computes the ceiling on the CPU.
-    let c = min(vec3<f32>(r, g, b), p.ceiling.xyz);
+    // Clip-neutral (#552): a pixel with a clipped channel is limited to the white-balanced clip
+    // level so it is neutral after WB; any other pixel is untouched. `ClipNeutral::for_frame`
+    // computes `clip` and `ceiling` on the CPU.
+    let rgb = vec3<f32>(r, g, b);
+    let clipped = any(rgb >= p.clip.xyz);
+    let c = select(rgb, min(rgb, p.ceiling.xyz), clipped);
     textureStore(
         output_tex,
         vec2<i32>(i32(gid.x), i32(gid.y + row_offset)),
