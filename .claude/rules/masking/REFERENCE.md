@@ -81,3 +81,5 @@ Full reasoning/history: `docs/decisions/masking.md`; the build is `docs/adr/0049
 - **`crates/nicti-pelt`** -- `mask_panel.rs`, `mask_edit.rs`, `mask_tool.rs`; `render.rs`'s mask API
   (`mask_bake_requests`, `set_ai_alpha`, `prune_ai_alphas`, `neutral_key`); `stash.rs` (#353: `AlphaFetchJob`/
   `AlphaStoreJob`), `prebake.rs` (#353: `PrebakeService`, `nearest_first`).
+- AI removal GPU fallback (#599): `groom::real::EngineLoader` seam (`RealLoader`; stub via `LazyBackend::with_loader`);
+  `demoted_flag()` -> `RemovalService::gpu_demoted` -> develop-panel notice. Detail: `docs/decisions/masking.md`.

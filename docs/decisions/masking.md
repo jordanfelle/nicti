@@ -90,3 +90,15 @@ the next check so the otherwise-idle window can ask egui for a repaint then.
 - **Local Moire + Defringe (#351)** — `LocalAdjust` gained `defringe` and `moire` (-1..1). Defringe is additive on the global amount (both purple and green, global hue windows); Moire is a chroma low-pass over the pixel and the 8 defringe compass taps at the resolution-scaled radius, keeping luminance (negative does nothing). The per-correction uniform grew to 6 `vec4`s (`d5`); the live shader applies both right after the camera->working matrix, so the call moved below `accumulate_locals` (the sums are needed first). GPU/CPU parity and "zero amount is bit-identical" are tested; thresholds and the Moire footprint are untuned on real photos, and the LRC import maps `LocalDefringe`/`LocalMoire` without a real-file check.
 
 - **Brush pressure + build-up (#357)** — `Stroke` gained `pressure` (per point, optional) and `buildup`. Pressure scales dab radius (to 20%) and flow along the path; build-up accumulates dabs and carries on across strokes so a second pass darkens, with the per-dab flow corrected for the spacing actually used. Schema-compatible (omitted when default, so old documents and their hashes are unchanged). Pressure is captured from egui touch force only; Auto Mask (guided-filter-refined strokes) is split out to a follow-up because it needs a per-stroke guide refine in the engine.
+
+## AI removal: GPU-failure fallback is observable and testable (#599)
+
+`nicti_groom::real::LazyBackend` falls back to the CPU on a GPU provider failure and retries the GPU with backoff
+(#496). Two follow-ups from #599:
+
+- **Seam:** engine construction sits behind `EngineLoader` (`requested` + `load`); `RealLoader` is the MobileSAM+LaMa
+  loader, `LazyBackend::with_loader` takes a stub. Tests assert that a provider error redoes the removal on the CPU and
+  demotes, that a deterministic ORT error leaves the GPU engine in place, and that a working GPU never demotes.
+- **UI:** `LazyBackend::demoted_flag()` is an `Arc<AtomicBool>` updated at the end of every `remove`, so the develop
+  panel (`RemovalService::gpu_demoted`) shows a one-line "running on the CPU after a GPU error" notice without locking the
+  backend (a removal holds that lock for seconds). It clears when a retry succeeds on the GPU.

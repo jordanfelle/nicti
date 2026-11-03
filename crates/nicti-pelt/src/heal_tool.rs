@@ -17,7 +17,7 @@
 //! in-flight removal jobs) is kept apart from the egui code so it can be tested without a window.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nicti_groom::install::{InstallHandle, InstallModelsJob};
@@ -159,6 +159,9 @@ pub struct RemovalEvent {
 pub struct RemovalService {
     store: Option<ModelStore>,
     backend: Option<(RemovalModels, SharedBackend)>,
+    /// The backend's "running on the CPU after a GPU failure" flag (#599), read without locking
+    /// the backend (a removal holds that lock for seconds).
+    gpu_demoted: Option<Arc<AtomicBool>>,
     install: Option<InstallHandle>,
     pending: Vec<Slot<RemoveOutcome>>,
     /// (photo, spot) pairs with a job in flight. Keyed by photo too: the same spot at the same
@@ -206,6 +209,7 @@ impl RemovalService {
         Self {
             store,
             backend: None,
+            gpu_demoted: None,
             install: None,
             pending: Vec::new(),
             pending_keys: HashSet::new(),
@@ -297,6 +301,16 @@ impl RemovalService {
     }
 
     /// Polls the install; `Some` exactly once, when it finishes.
+    /// True while AI removal runs on the CPU because the GPU provider failed; it retries the GPU
+    /// after a cool-down.
+    pub fn gpu_demoted(&self) -> bool {
+        self.backend.is_some()
+            && self
+                .gpu_demoted
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+
     pub fn poll_install(&mut self) -> Option<Result<(), String>> {
         let done = self
             .install
@@ -333,6 +347,7 @@ impl RemovalService {
             lazy = lazy
                 .verified_by(move || models::verify_artifacts(&store, &artifacts, ort_from_store));
         }
+        self.gpu_demoted = Some(lazy.demoted_flag());
         let backend: SharedBackend = Arc::new(Mutex::new(lazy));
         self.backend = Some((models, Arc::clone(&backend)));
         backend
@@ -1136,6 +1151,10 @@ pub fn show_panel(ui: &mut egui::Ui, develop: &mut DevelopDoc, heal: &mut HealUi
         develop.set_stage_params(HEAL, &params);
         develop.prune_removals();
         heal.selected = None;
+    }
+
+    if heal.service.gpu_demoted() {
+        ui.weak("AI removal is running on the CPU after a GPU error (slower). It will try the GPU again later.");
     }
 
     if let Some(status) = &heal.status {
@@ -2407,5 +2426,20 @@ mod tests {
         heal.tool = Tool::Heal;
         press(&ctx, &mut heal, egui::Key::Escape);
         assert_eq!(heal.tool, Tool::Heal);
+    }
+
+    #[test]
+    fn the_cpu_fallback_notice_follows_the_backends_flag() {
+        let mut svc = RemovalService::with_store(None);
+        assert!(!svc.gpu_demoted());
+        let flag = Arc::new(AtomicBool::new(true));
+        svc.gpu_demoted = Some(Arc::clone(&flag));
+        // No backend built yet: a stale flag must not show.
+        assert!(!svc.gpu_demoted());
+        let backend: SharedBackend = Arc::new(Mutex::new(Fake { fail: false }));
+        svc.backend = Some((fake_models(), backend));
+        assert!(svc.gpu_demoted());
+        flag.store(false, Ordering::Relaxed);
+        assert!(!svc.gpu_demoted());
     }
 }
