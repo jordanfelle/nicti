@@ -171,7 +171,12 @@ pub fn handle_viewport(
         let Some(p) = response.interact_pointer_pos() else {
             return;
         };
-        let n = develop.display_to_source_norm(to_norm(rect, develop.display_extent(), p));
+        let n = develop.display_to_source_norm(to_norm(
+            develop.view_orient(),
+            rect,
+            develop.display_extent(),
+            p,
+        ));
         let working = thumb_for(ui.ctx(), develop).sample_working(n[0], n[1]);
         let grab = match mode {
             Mode::Curve => {

@@ -168,7 +168,7 @@ pub fn handle_viewport(
         return;
     };
     // The frame on screen is the one sampled, so the click's position on it is the position in it.
-    let n = to_norm(rect, develop.display_extent(), p);
+    let n = to_norm(develop.view_orient(), rect, develop.display_extent(), p);
     let working = sample_rendered(gpu, frame, n[0], n[1]);
     let mut params: PointColorParams = develop.stage_params(POINT_COLOR);
     match add_sample(&mut params, sample_from_working(working)) {

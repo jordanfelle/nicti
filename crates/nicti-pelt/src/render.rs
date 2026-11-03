@@ -773,6 +773,15 @@ impl DevelopDoc {
         self.graph_lens = coat::LensParams::default();
     }
 
+    /// Test-only: pretends the loaded frame carries EXIF orientation `exif` (1-8).
+    #[cfg(test)]
+    pub(crate) fn set_orientation_for_test(&mut self, exif: u8) {
+        self.frame = Arc::new(LinearFrame {
+            orientation: exif,
+            ..(*self.frame).clone()
+        });
+    }
+
     /// How the loaded photo's EXIF orientation turns the on-screen image (#341). The frame, the edit
     /// document and every render stage stay in sensor orientation; only the display turns.
     pub fn view_orient(&self) -> crate::view_orient::ViewOrient {

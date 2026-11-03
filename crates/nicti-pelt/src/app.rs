@@ -59,6 +59,7 @@ use crate::section_state;
 use crate::t2::{self, SharedLarder};
 use crate::update::UpdateChecker;
 use crate::verify_ui::{self, VerifyUi};
+use crate::view_orient::ViewOrient;
 use crate::viewport::{fit_rect, fit_scale, one_to_one_scale, ViewportCallback, ViewportResources};
 use crate::xmp_sync::{self, XmpMeta, XmpUi, XmpWriter};
 
@@ -1640,12 +1641,19 @@ impl eframe::App for PeltApp {
                     // The frame is the crop rect while idle and the whole image under a tool (#272):
                     // letterbox it at its own aspect ratio, and give every tool that fitted rect.
                     let (area, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+                    // The photo's EXIF orientation turns the *displayed* image (#341/#634): fit
+                    // the turned size, and every tool below maps points through the same turn.
+                    let orient = self
+                        .develop
+                        .as_ref()
+                        .map_or_else(ViewOrient::normal, |d| d.view_orient());
                     let rect = fit_rect(
                         area,
-                        (frame.extent.width as f32, frame.extent.height as f32),
+                        orient
+                            .display_size((frame.extent.width as f32, frame.extent.height as f32)),
                     );
                     // The grain is averaged over how many rendered pixels one screen pixel covers.
-                    let px_width = rect.width() * ui.ctx().pixels_per_point();
+                    let px_width = orient.frame_width_on_screen(rect) * ui.ctx().pixels_per_point();
                     if (px_width - self.develop_canvas_px_width).abs() > 0.5 {
                         self.develop_canvas_px_width = px_width;
                         ui.ctx().request_repaint();
@@ -1653,7 +1661,10 @@ impl eframe::App for PeltApp {
                     let response = ui.interact(rect, ui.scope_id().with("develop_viewport"), sense);
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                         rect,
-                        ViewportCallback::identity(Arc::clone(&frame)),
+                        ViewportCallback {
+                            orient,
+                            ..ViewportCallback::identity(Arc::clone(&frame))
+                        },
                     ));
                     if let Some(develop) = self.develop.as_mut() {
                         if self.heal_ui.heal_active() {

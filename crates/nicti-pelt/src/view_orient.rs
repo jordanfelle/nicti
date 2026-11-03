@@ -28,7 +28,7 @@ impl ViewOrient {
         Self(Orientation::from_exif(u32::from(value)))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
+    #[cfg_attr(not(test), allow(dead_code))] // a test/helper predicate; the paint path calls `index`
     pub fn is_normal(self) -> bool {
         self.0 == Orientation::Normal
     }
@@ -58,7 +58,6 @@ impl ViewOrient {
     }
 
     /// A display-space point (normalised) -> the sensor-space point it shows.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn to_sensor(self, (u, v): (f32, f32)) -> (f32, f32) {
         match self.0 {
             Orientation::Normal => (u, v),
@@ -73,7 +72,6 @@ impl ViewOrient {
     }
 
     /// A sensor-space point (normalised) -> where it appears in the displayed image.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn to_display(self, (su, sv): (f32, f32)) -> (f32, f32) {
         match self.0 {
             Orientation::Normal => (su, sv),
@@ -87,10 +85,56 @@ impl ViewOrient {
         }
     }
 
+    /// How many screen points the *frame's own width* spans on a `rect` the displayed image fills:
+    /// the rect's width normally, its height when a quarter turn runs the frame's width down the
+    /// screen. What the grain's canvas-minification scale needs (#421/#634).
+    pub fn frame_width_on_screen(self, rect: egui::Rect) -> f32 {
+        if self.0.swaps_dimensions() {
+            rect.height()
+        } else {
+            rect.width()
+        }
+    }
+
+    /// The sensor-space texture coordinates of the four corners of the displayed image, in screen
+    /// order top-left, top-right, bottom-right, bottom-left. A sensor-oriented texture (a mask
+    /// overlay built in frame space) painted into the displayed rect samples these.
+    pub fn uv_corners(self) -> [(f32, f32); 4] {
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|c| self.to_sensor(c))
+    }
+
+    /// Paints a sensor-oriented `texture` into `rect` (the rect the *displayed* image fills),
+    /// turned and flipped as the photo is. `Painter::image` can only take an axis-aligned UV
+    /// rectangle, so a quarter turn needs a mesh with per-corner UVs. For [`Self::normal`] the
+    /// corners are exactly `image`'s.
+    pub fn paint_texture(
+        self,
+        painter: &egui::Painter,
+        texture: egui::TextureId,
+        rect: egui::Rect,
+        tint: egui::Color32,
+    ) {
+        let corners = [
+            rect.left_top(),
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+        ];
+        let mut mesh = egui::Mesh::with_texture(texture);
+        for (pos, (u, v)) in corners.into_iter().zip(self.uv_corners()) {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos,
+                uv: egui::pos2(u, v),
+                color: tint,
+            });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+        painter.add(egui::Shape::mesh(mesh));
+    }
+
     /// Screen point inside `rect` (the rect the *displayed* image fills) -> source-image pixels.
     /// `source` is the sensor-orientation frame size. For [`Self::normal`] this is exactly the
     /// plain stretch `screen_to_image` always did.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn screen_to_image(
         self,
         rect: egui::Rect,
@@ -104,7 +148,6 @@ impl ViewOrient {
     }
 
     /// The inverse of [`Self::screen_to_image`].
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn image_to_screen(
         self,
         rect: egui::Rect,
@@ -249,5 +292,118 @@ mod tests {
             (one[0] - 0.2).abs() < 1e-6 && (one[1] - 0.1).abs() < 1e-6,
             "{one:?}"
         );
+    }
+
+    /// A minimal TIFF whose IFD0 holds only an Orientation entry of `field_type` (3 SHORT, 4 LONG).
+    fn tiff(big_endian: bool, field_type: u16, value: u32) -> Vec<u8> {
+        let u16b = |v: u16| {
+            if big_endian {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let u32b = |v: u32| {
+            if big_endian {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let mut t = if big_endian {
+            vec![b'M', b'M']
+        } else {
+            vec![b'I', b'I']
+        };
+        t.extend_from_slice(&u16b(42));
+        t.extend_from_slice(&u32b(8));
+        t.extend_from_slice(&u16b(1)); // one entry
+        t.extend_from_slice(&u16b(0x0112));
+        t.extend_from_slice(&u16b(field_type));
+        t.extend_from_slice(&u32b(1));
+        if field_type == 3 {
+            t.extend_from_slice(&u16b(value as u16));
+            t.extend_from_slice(&[0, 0]);
+        } else {
+            t.extend_from_slice(&u32b(value));
+        }
+        t.extend_from_slice(&u32b(0)); // no next IFD
+        t
+    }
+
+    /// #634: the screen reads the orientation with the embedded-JPEG walker, export with kamadak
+    /// (`SourceExif`). Whatever the byte order, SHORT or LONG, in range or not, they must land on
+    /// the same turn, or the Develop canvas and the exported file would disagree.
+    #[test]
+    fn the_screens_orientation_reader_agrees_with_exports_on_every_value() {
+        use nicti_cornea::embedded::{SliceSource, Walker};
+        for big_endian in [false, true] {
+            for field_type in [3u16, 4] {
+                for value in 0..=9u32 {
+                    let data = tiff(big_endian, field_type, value);
+                    let walked = Walker::new(SliceSource::new(&data))
+                        .unwrap()
+                        .ifd0_orientation()
+                        .unwrap()
+                        .unwrap_or(0);
+                    let screen = ViewOrient::from_exif(walked).0;
+                    let export = nicti_preen::metadata::SourceExif::from_reader(
+                        &mut std::io::Cursor::new(data.clone()),
+                    )
+                    .orientation;
+                    assert_eq!(
+                        screen, export,
+                        "big_endian={big_endian} type={field_type} value={value}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #634: a sensor-oriented texture is painted into the displayed rect through these corners.
+    #[test]
+    fn the_overlay_texture_corners_are_the_sensor_points_each_displayed_corner_shows() {
+        // Normal is exactly `Painter::image`'s full-texture UVs.
+        assert_eq!(
+            ViewOrient::normal().uv_corners(),
+            [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        );
+        // A quarter turn clockwise (EXIF 6): the displayed top-left shows the sensor's bottom-left.
+        assert_eq!(
+            ViewOrient(Orientation::Rotate90Cw).uv_corners(),
+            [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
+        );
+        // Every orientation: the corners are `to_sensor` of the displayed corners, and they are
+        // four distinct unit-square corners (a turn or flip permutes them).
+        for o in ALL {
+            let v = ViewOrient(o);
+            let uv = v.uv_corners();
+            for (c, d) in uv
+                .iter()
+                .zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+            {
+                assert_eq!(*c, v.to_sensor(d), "{o:?}");
+            }
+            let mut sorted: Vec<_> = uv.iter().map(|c| (c.0 as i32, c.1 as i32)).collect();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), 4, "{o:?}: {uv:?}");
+        }
+    }
+
+    #[test]
+    fn the_frames_width_runs_down_the_screen_under_a_quarter_turn() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
+        for (o, want) in [
+            (Orientation::Normal, 200.0),
+            (Orientation::FlipH, 200.0),
+            (Orientation::Rotate180, 200.0),
+            (Orientation::Rotate90Cw, 600.0),
+            (Orientation::Rotate270Cw, 600.0),
+            (Orientation::Transpose, 600.0),
+            (Orientation::Transverse, 600.0),
+        ] {
+            assert_eq!(ViewOrient(o).frame_width_on_screen(rect), want, "{o:?}");
+        }
     }
 }
