@@ -105,14 +105,21 @@ fn geotag_one(
     let Some((pos, _how)) = log.locate(t, opts.max_gap_seconds) else {
         return Ok(Outcome::NoPosition);
     };
+    // Never create a sidecar for (or write into) a file that isn't there: an offline volume or a
+    // moved file is a failure, not something to half-apply.
+    if !path.is_file() {
+        return Err(format!("{} is not reachable", path.display()));
+    }
     store.set_gps(id, Some(pos)).map_err(|e| e.to_string())?;
+    // Mark the catalog newer *before* the write, so a write that fails or is held leaves the
+    // position pending (a later sync pushes it) instead of stranded; a successful write clears it.
+    scent_sync::mark_catalog_dirty(store, id, path, now_ms).map_err(|e| e.to_string())?;
     if auto_write {
         let out = scent_sync::write_sidecar(store, id, path, now_ms).map_err(|e| e.to_string())?;
         Ok(Outcome::Tagged {
             held: out == SyncOutcome::NeedsReview,
         })
     } else {
-        scent_sync::mark_catalog_dirty(store, id, path, now_ms).map_err(|e| e.to_string())?;
         Ok(Outcome::Tagged { held: false })
     }
 }

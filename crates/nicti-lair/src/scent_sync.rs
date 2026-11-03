@@ -505,18 +505,36 @@ pub fn import_sidecar(
     seen(&mut state, &loaded, now_ms);
 
     if catalog == loaded.markers {
-        // Markers agree, but the file may carry a position the catalog lacks (an LRC sidecar of
-        // an already-geotagged photo): adopt it. Never overwrites a catalog position here.
-        // A catalog position the file doesn't show yet, with the catalog marked newer, is a
-        // pending write (a geotag with auto-write off): push it, don't clear the dirty flag.
-        let gps_pending = catalog
-            .gps
-            .is_some_and(|c| loaded.markers.gps.is_none_or(|l| !gps_close(&l, &c)));
-        if gps_pending && state.catalog_dirty_since_ms.is_some() {
+        // Markers agree; positions are settled separately (they are outside `==`). The catalog is
+        // "newer" exactly when it is marked dirty; otherwise the file is, so its position wins.
+        let file_gps = loaded.markers.gps;
+        let differs = match (catalog.gps, file_gps) {
+            (Some(c), Some(f)) => !gps_close(&c, &f),
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if differs && state.catalog_dirty_since_ms.is_some() {
+            // A pending catalog position (a geotag with auto-write off or a held write). Push it,
+            // unless the review hold is up or the file's own position changed since nicti last saw
+            // the file: then neither side is safe to prefer.
+            let file_changed_under_us = file_gps.is_some()
+                && !prior.as_ref().is_some_and(|p| {
+                    hash_is(&p.last_seen_hash, &loaded.hash)
+                        || hash_is(&p.last_written_hash, &loaded.hash)
+                });
+            if prior.as_ref().is_some_and(|p| p.needs_review) || file_changed_under_us {
+                state.needs_review = true;
+                store.record_sidecar(asset_id, &state)?;
+                return Ok(SyncOutcome::NeedsReview);
+            }
             return write_locked(store, asset_id, raw_path, now_ms, true);
         }
-        if let (None, Some(g)) = (catalog.gps, loaded.markers.gps) {
-            store.set_gps(asset_id, Some(g))?;
+        if let Some(g) = file_gps {
+            // Catalog has none, or is not newer and the file's differs: adopt the file's. (A file
+            // with no position never clears the catalog's.)
+            if catalog.gps.is_none() || differs {
+                store.set_gps(asset_id, Some(g))?;
+            }
         }
         state.catalog_dirty_since_ms = None;
         state.needs_review = false;

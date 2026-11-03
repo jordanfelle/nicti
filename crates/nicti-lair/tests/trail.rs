@@ -240,3 +240,80 @@ fn an_invalid_position_is_refused_by_the_store() {
     assert!(f.store.set_gps(a.0, Some(bad)).is_err());
     assert!(f.store.get_gps(&[a.0]).unwrap().is_empty());
 }
+
+const GPS_PACKET: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:exif=\"http://ns.adobe.com/exif/1.0/\" exif:GPSLatitude=\"LAT\" exif:GPSLongitude=\"7,0.000000E\"/></rdf:RDF></x:xmpmeta>";
+
+fn packet_at(lat: &str) -> String {
+    GPS_PACKET.replace("LAT", lat)
+}
+
+#[test]
+fn an_external_position_change_wins_when_the_catalog_has_no_pending_edit() {
+    let f = fx();
+    let a = f.add("a.NEF", None);
+    std::fs::write(a.1.with_extension("xmp"), packet_at("46,0.300000N")).unwrap();
+    import_sidecar(&f.store, a.0, &a.1, 100_000).unwrap();
+    // Another tool moves the position in the file; the catalog has nothing pending.
+    std::fs::write(a.1.with_extension("xmp"), packet_at("10,0.000000N")).unwrap();
+    import_sidecar(&f.store, a.0, &a.1, 200_000).unwrap();
+    let g = f.store.get_gps(&[a.0]).unwrap()[&a.0];
+    assert!((g.latitude - 10.0).abs() < 1e-6, "{g:?}");
+    // A later rating write must not put the old position back.
+    f.store.set_rating(&[a.0], Some(2)).unwrap();
+    nicti_lair::scent_sync::write_sidecar(&f.store, a.0, &a.1, 300_000).unwrap();
+    assert!((read_gps(&sidecar(&a.1)).unwrap().latitude - 10.0).abs() < 1e-5);
+}
+
+#[test]
+fn a_held_geotag_is_not_forced_over_a_position_the_file_changed_under_us() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let a = f.add("a.NEF", Some("2026:05:01 10:00:30"));
+    f.store.set_rating(&[a.0], Some(3)).unwrap();
+    nicti_lair::scent_sync::write_sidecar(&f.store, a.0, &a.1, 1).unwrap();
+    // Another tool rewrites the sidecar with its own position, which nicti has not ingested.
+    let mut theirs = sidecar(&a.1);
+    theirs = theirs.replacen(
+        "<rdf:Description ",
+        "<rdf:Description exif:GPSLatitude=\"10,0.000000N\" exif:GPSLongitude=\"20,0.000000E\" xmlns:exif=\"http://ns.adobe.com/exif/1.0/\" ",
+        1,
+    );
+    std::fs::write(a.1.with_extension("xmp"), theirs).unwrap();
+
+    let r = geotag_assets(
+        &f.store,
+        std::slice::from_ref(&a),
+        &log,
+        &GeotagOptions::default(),
+        false,
+        true,
+        100_000,
+    );
+    assert_eq!((r.tagged, r.held_for_review), (1, 1), "{r:?}");
+    // Rescanning must keep it held and leave the other tool's position in the file.
+    let out = import_sidecar(&f.store, a.0, &a.1, 200_000).unwrap();
+    assert_eq!(out, SyncOutcome::NeedsReview);
+    let file = read_gps(&sidecar(&a.1)).unwrap();
+    assert!((file.latitude - 10.0).abs() < 1e-5, "{file:?}");
+    assert_eq!(f.store.sidecar_review_assets().unwrap(), vec![a.0]);
+}
+
+#[test]
+fn an_unreachable_file_is_a_failure_and_stores_no_position() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let a = f.add("a.NEF", Some("2026:05:01 10:00:30"));
+    std::fs::remove_file(&a.1).unwrap();
+    let r = geotag_assets(
+        &f.store,
+        std::slice::from_ref(&a),
+        &log,
+        &GeotagOptions::default(),
+        false,
+        true,
+        1,
+    );
+    assert_eq!((r.tagged, r.failed.len()), (0, 1), "{r:?}");
+    assert!(f.store.get_gps(&[a.0]).unwrap().is_empty());
+    assert!(!a.1.with_extension("xmp").exists(), "no orphan sidecar");
+}
