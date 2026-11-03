@@ -61,8 +61,12 @@ so no caller needs a JPEG branch. `SourceDecoder` (libraw feature) dispatches on
 - **Frame contract:** `black` 0, `maximum` 65535, `cam_mul`/`pre_mul` neutral (a JPEG is already white balanced),
   `cam_xyz` = Bradford-adapted XYZ(D50) -> linear sRGB (the matrix is XYZ -> "camera", so it is the sRGB matrix itself),
   `model` "JPEG". Pixels are not rotated; `orientation` carries the EXIF value 2-8 (1 and "no tag" both give 0).
-- **Limits:** 8-bit source, so no highlight recovery and visible banding when shadows are pushed hard; CMYK/other
-  non-RGB JPEGs return `DecodeError::Jpeg`; files over 512 MB are refused. Not validated against a wide-gamut
+- **Limits:** 8-bit source, so no highlight recovery and visible banding when shadows are pushed hard; images over 150 MP
+  or files over 512 MB return `DecodeError::Jpeg` (the `image` JPEG decoder has no allocation limit of its own); CMYK/YCCK
+  JPEGs go through the `image` crate's naive conversion (unverified, a CMYK ICC profile is ignored); a gray ICC is
+  treated as sRGB.
+- **Known limitation (follow-up):** the ICC step is 8-bit sRGB, so Adobe RGB / P3 colours outside sRGB clip and get a
+  second 8-bit rounding before the curve is undone, although the working space is ProPhoto. Not validated against a wide-gamut
   (Adobe RGB / Display P3) real file in this sandbox; the unit tests cover linearisation, neutral stays neutral,
   routing and errors.
 - **T2:** already handled before this change (`t2.rs` `is_plain_jpeg` derives T2 from the file itself).

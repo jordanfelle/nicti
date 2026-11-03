@@ -8,6 +8,7 @@
 //! balanced; the Temperature slider still works through `cam_xyz`), `black` is 0 and `maximum`
 //! 65535. As with a RAW, the pixels are **not** rotated: `orientation` carries the EXIF value.
 //!
+//! The ICC conversion is 8-bit and relative colorimetric, so colours outside sRGB clip (follow-up).
 //! An 8-bit source cannot gain range: highlights stay clipped at 1.0 and shadows keep their 8-bit
 //! steps, however far the edit pushes them.
 
@@ -24,8 +25,22 @@ use nicti_claw::Module;
 
 use crate::{DecodeError, LinearFrame, RawDecoder};
 
-/// Largest JPEG read (matches nothing in the catalog; a bound against a hostile or runaway file).
+/// Largest JPEG file read: a bound against a hostile or runaway file.
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// Largest decoded image: the `image` JPEG decoder enforces no allocation limit of its own, and a
+/// few-MB flat-colour file can advertise 65535 x 65535. Peak memory here is ~13 bytes/pixel (RGB8
+/// decode, RGBA copy, u16 output), so 150 MP is ~2 GB.
+const MAX_PIXELS: u64 = 150_000_000;
+
+fn check_dimensions(width: u32, height: u32) -> Result<(), String> {
+    let px = u64::from(width) * u64::from(height);
+    if width == 0 || height == 0 || px > MAX_PIXELS {
+        return Err(format!(
+            "{width}x{height} is outside the supported 1..={MAX_PIXELS} pixel range"
+        ));
+    }
+    Ok(())
+}
 
 /// Bradford-adapted XYZ(D50) -> linear sRGB, row-major (Lindbloom). `LinearFrame::cam_xyz` is
 /// XYZ -> camera, so for an sRGB "camera" this is the matrix itself.
@@ -112,6 +127,8 @@ impl RawDecoder for JpegDecoder {
         // A profile that cannot be read is the same as none: sRGB.
         let icc = decoder.icc_profile().ok().flatten();
         let orientation = decoder.orientation().map(Orientation::to_exif).unwrap_or(0);
+        let (dw, dh) = decoder.dimensions();
+        check_dimensions(dw, dh).map_err(fail)?;
         let image = image::DynamicImage::from_decoder(decoder).map_err(|e| fail(e.to_string()))?;
         let (width, height) = (image.width(), image.height());
         let mut rgba = image.into_rgba8().into_raw();
@@ -258,6 +275,46 @@ mod tests {
             assert!((c - 1.0).abs() < 0.002, "{rgb:?}");
         }
         assert_eq!(f.orientation, 0);
+    }
+
+    #[test]
+    fn oversized_dimensions_are_refused_before_any_allocation() {
+        assert!(check_dimensions(65535, 65535).is_err());
+        assert!(check_dimensions(0, 10).is_err());
+        assert!(check_dimensions(12000, 12000).is_ok());
+    }
+
+    #[test]
+    fn grayscale_decodes_to_equal_channels() {
+        let d = tempfile::tempdir().unwrap();
+        let img = image::GrayImage::from_pixel(8, 8, image::Luma([128]));
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100)
+            .write_image(img.as_raw(), 8, 8, image::ExtendedColorType::L8)
+            .unwrap();
+        let p = d.path().join("g.jpg");
+        std::fs::write(&p, bytes).unwrap();
+        let f = JpegDecoder.decode_linear(&p).unwrap();
+        assert_eq!(f.pixels[0], f.pixels[1]);
+        assert_eq!(f.pixels[1], f.pixels[2]);
+    }
+
+    #[test]
+    fn a_garbage_icc_profile_degrades_to_srgb_instead_of_failing() {
+        let d = tempfile::tempdir().unwrap();
+        let img = RgbImage::from_pixel(8, 8, Rgb([40, 200, 60]));
+        let mut bytes = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
+        enc.set_icc_profile(vec![0xAB; 300]).unwrap();
+        enc.write_image(img.as_raw(), 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let bad = d.path().join("bad_icc.jpg");
+        std::fs::write(&bad, bytes).unwrap();
+        let plain = write_jpeg(d.path(), "plain.jpg", 8, 8, [40, 200, 60]);
+        assert_eq!(
+            JpegDecoder.decode_linear(&bad).unwrap().pixels[..3],
+            JpegDecoder.decode_linear(&plain).unwrap().pixels[..3]
+        );
     }
 
     #[test]
