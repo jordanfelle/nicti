@@ -73,3 +73,7 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
   `nicti-cornea`'s FFI/submodule directly), and `dump-classic`/`dump-cfa` (#40/ADR-0040's
   classic-pipeline and Bayer-plane dumps for `spikes/rods` — see the `denoise` topic's
   REFERENCE.md). See `docs/research/retina-raw-decoder.md`.
+- JPEG assets (#576): `nicti_cornea::jpeg::JpegDecoder` is a `RawDecoder` returning a `LinearFrame` (ICC -> sRGB via
+  calico `SourceTransforms`, sRGB curve -> 16-bit linear, `cam_xyz` = D50-adapted XYZ->sRGB, neutral `cam_mul`,
+  maximum 65535, orientation 2-8 or 0); `SourceDecoder` (libraw) routes by extension and is what `app.rs` uses.
+  Detail: `docs/decisions/raw-decoder.md`.

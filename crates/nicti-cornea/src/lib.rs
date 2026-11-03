@@ -27,6 +27,11 @@ pub use libraw_ffi::{
 };
 
 pub mod embedded;
+pub mod jpeg;
+
+#[cfg(feature = "libraw")]
+pub use jpeg::SourceDecoder;
+pub use jpeg::{is_jpeg, JpegDecoder};
 
 /// A RAW decoder backend.
 pub trait RawDecoder: Module {
@@ -55,6 +60,8 @@ pub enum DecodeError {
         #[source]
         source: FfiError,
     },
+    #[error("decoding JPEG {path:?}: {message}")]
+    Jpeg { path: PathBuf, message: String },
     #[error(
         "linear_image length {actual} != iwidth*iheight*4 ({expected}) for {path:?} -- \
          LibRaw's imgdata.image allocation didn't match its own reported dimensions"
