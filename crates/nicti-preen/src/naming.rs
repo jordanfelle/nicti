@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! template := (literal | "{{" | "}}" | token)*        token := "{" NAME (":" ARG)? "}"
-//! NAME (case-insensitive): Filename | Sequence | Date | Rating | Make | Model | Folder
+//! NAME (case-insensitive): Filename | Num | Sequence | Date | Rating | Make | Model | Folder
+//! Num: the trailing digits of the source file name ({Num} of DSC_0042 -> 0042; empty if none)
 //! Sequence ARG: zero-pad width 1..=9         {Sequence:4} -> 0007
 //! Date ARG: YYYY YY MM DD hh mm ss, plus literal - _ . and space      (default YYYYMMDD)
 //! ```
@@ -147,6 +148,7 @@ enum DateTok {
 enum Part {
     Lit(String),
     Filename,
+    Num,
     Sequence(u8),
     Date(Vec<DateTok>),
     Rating,
@@ -189,6 +191,15 @@ fn parse_date_arg(arg: &str) -> Option<Vec<DateTok>> {
         rest = &rest[n..];
     }
     (!toks.is_empty()).then_some(toks)
+}
+
+/// The run of ASCII digits at the end of `stem` (`DSC_0042` -> `0042`), empty when it doesn't end
+/// in one. Leading zeros are kept: the digits are the camera's own file number, not a quantity.
+fn trailing_digits(stem: &str) -> &str {
+    let start = stem.rfind(|c: char| !c.is_ascii_digit()).map_or(0, |i| {
+        i + stem[i..].chars().next().map_or(1, char::len_utf8)
+    });
+    &stem[start..]
 }
 
 impl Template {
@@ -262,6 +273,7 @@ impl Template {
         };
         match name.to_ascii_lowercase().as_str() {
             "filename" => no_arg("Filename", Part::Filename),
+            "num" => no_arg("Num", Part::Num),
             "rating" => no_arg("Rating", Part::Rating),
             "make" => no_arg("Make", Part::Make),
             "model" => no_arg("Model", Part::Model),
@@ -290,6 +302,7 @@ impl Template {
             match part {
                 Part::Lit(s) => out.push_str(s),
                 Part::Filename => out.push_str(&facts.stem),
+                Part::Num => out.push_str(trailing_digits(&facts.stem)),
                 Part::Folder => out.push_str(&facts.folder),
                 Part::Make => out.push_str(facts.make.as_deref().unwrap_or("")),
                 Part::Model => out.push_str(facts.model.as_deref().unwrap_or("")),
@@ -606,5 +619,23 @@ mod tests {
             (before.year, before.month, before.day, before.second),
             (1969, 12, 31, 59)
         );
+    }
+
+    #[test]
+    fn num_is_the_trailing_digits_of_the_stem() {
+        assert_eq!(render("{Num}", 1), "0042");
+        assert_eq!(render("{num}-{Sequence}", 3), "0042-3");
+        assert_eq!(trailing_digits("DSC_0042"), "0042");
+        assert_eq!(trailing_digits("IMG1234_5678"), "5678");
+        assert_eq!(trailing_digits("1234"), "1234");
+        assert_eq!(trailing_digits("photo"), "");
+        assert_eq!(trailing_digits(""), "");
+        assert_eq!(trailing_digits("DSC_0042 copy"), "");
+        // Non-ASCII before the digits: the slice must land on a char boundary.
+        assert_eq!(trailing_digits("日本語_007"), "007");
+        assert_eq!(trailing_digits("é9"), "9");
+        // Non-ASCII digits are not file numbers.
+        assert_eq!(trailing_digits("a٣"), "");
+        assert!(Template::parse("{Num:3}").is_err());
     }
 }

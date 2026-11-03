@@ -49,7 +49,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   so `set_own_hash(DECODE, identity)` is undone on the next render and two same-size photos share
   cache keys. Always `spine::stamp_source_identity` on the render-time document copy (Develop and
   export both do; regression tests in `nicti-pelt` `render.rs` and `export/jobs.rs`).
-- **Names/collisions (#57)**: tokens `{Filename} {Sequence[:N]} {Date[:fmt]} {Rating} {Make} {Model}
+- **Names/collisions (#57)**: tokens `{Filename} {Num} {Sequence[:N]} {Date[:fmt]} {Rating} {Make} {Model}
   {Folder}`; sequence = start + selection position, fixed at plan time (failures leave gaps);
   batch de-duplicated on a case-folded path under every policy; `write_output` claims the name with
   `create_new`, writes a unique temp, renames. Every component sanitized on every OS.
