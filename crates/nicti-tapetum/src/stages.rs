@@ -123,12 +123,39 @@ pub fn masks_stage() -> BasicStage {
         default_params: || json!({ "corrections": [] }),
     }
 }
-pub fn decode_stage() -> BasicStage {
-    BasicStage {
-        id: DECODE,
-        kind: StageKind::Baked,
-        default_params: || json!({}),
+/// Decode's stage version. Bumped to 1 by #552: decode now limits clipped samples to the
+/// clip-neutral ceiling ([`clip_neutral_ceiling`]), which changes pixels for any frame with blown
+/// highlights, so every cache key chained from it (baked frames, AI bakes) must change with it.
+const DECODE_IMPL_VERSION: u32 = 1;
+
+pub struct DecodeStage;
+
+impl Module for DecodeStage {
+    fn id(&self) -> &str {
+        DECODE
     }
+    fn schema_version(&self) -> u32 {
+        1
+    }
+    fn migrate_params(&self, _from_version: u32, params: Value) -> Option<Value> {
+        Some(params)
+    }
+}
+
+impl RenderStage for DecodeStage {
+    fn kind(&self) -> StageKind {
+        StageKind::Baked
+    }
+    fn default_params(&self) -> Value {
+        json!({})
+    }
+    fn impl_version(&self) -> u32 {
+        DECODE_IMPL_VERSION
+    }
+}
+
+pub fn decode_stage() -> DecodeStage {
+    DecodeStage
 }
 pub fn demosaic_stage() -> BasicStage {
     BasicStage {
@@ -290,6 +317,44 @@ struct NormalizeParams {
     dims: [u32; 4],
     /// maximum, cblack.r, cblack.g, cblack.b
     limits: [u32; 4],
+    /// Per-channel clip-neutral ceiling on the normalized value (r, g, b, unused); `f32::MAX`
+    /// means "no limit".
+    ceiling: [f32; 4],
+}
+
+/// Clip-neutral (#552, ADR-0438 slice 1): the highest normalized (post black/`cblack`/range)
+/// value each camera channel may keep so that, after the as-shot white balance, a clipped pixel
+/// comes out neutral instead of magenta/cyan.
+///
+/// A sample sitting at `frame.maximum` normalizes to `clip_c = (range - cblack_c) / range` (exactly
+/// 1.0 when `cblack_c` is 0). The channels clip at different levels once multiplied by the WB
+/// gains, so the white-balanced clip level is the smallest `clip_c * gain_c`; each channel is
+/// limited to that level divided back by its gain. Pixels that never reach a ceiling are
+/// untouched. Returns `f32::MAX` for every channel (no limit) when the frame's metadata can't
+/// support the maths: a non-positive range, a `cblack` at or above the range, or non-finite or
+/// non-positive as-shot gains.
+///
+/// **Unverified on real frames**: `maximum` is LibRaw's white level; if a body clips below it,
+/// nothing reaches the ceiling and this is a no-op rather than a wrong correction. Validation on
+/// real Z8 frames with blown skies is the gate for the reconstruction slice (#552 follow-up).
+/// The ceiling follows the *as-shot* gains: a manual WB edit later changes the multipliers, and a
+/// clipped area then carries the tint of the difference.
+pub fn clip_neutral_ceiling(frame: &LinearFrame) -> [f32; 3] {
+    const NONE: [f32; 3] = [f32::MAX; 3];
+    let range = frame.maximum as f32 - frame.black as f32;
+    if range <= 0.0 {
+        return NONE; // the u32 inputs can't make this NaN
+    }
+    let clip: [f32; 3] = std::array::from_fn(|c| (range - frame.cblack[c] as f32) / range);
+    let gains = crate::color::wb_gains(frame.cam_mul);
+    let usable = |v: &f32| v.is_finite() && *v > 0.0;
+    if !clip.iter().all(usable) || !gains.iter().all(usable) {
+        return NONE;
+    }
+    let white = (0..3)
+        .map(|c| clip[c] * gains[c])
+        .fold(f32::INFINITY, f32::min);
+    std::array::from_fn(|c| white / gains[c])
 }
 
 pub struct DecodeKernel {
@@ -379,6 +444,7 @@ impl BakedExec for DecodeExec<'_> {
             gpu.limits.max_storage_buffer_binding_size,
         );
 
+        let ceiling = clip_neutral_ceiling(frame);
         let bind_group_layout = self.kernel.pipeline.get_bind_group_layout(0);
         let mut row_offset = 0u32;
         while row_offset < frame.height {
@@ -404,6 +470,7 @@ impl BakedExec for DecodeExec<'_> {
                     frame.cblack[1],
                     frame.cblack[2],
                 ],
+                ceiling: [ceiling[0], ceiling[1], ceiling[2], 0.0],
             };
             let params_buf = gpu
                 .device
@@ -452,8 +519,10 @@ impl BakedExec for DecodeExec<'_> {
 /// by `decode_gpu_matches_cpu_reference`, which checks the GPU decode against this function.
 pub fn normalize_pixels(frame: &LinearFrame) -> Vec<[f32; 4]> {
     let range = frame.maximum as f32 - frame.black as f32;
+    let ceiling = clip_neutral_ceiling(frame);
     let sample = |i: usize, c: usize| {
-        (frame.pixels[i * 3 + c] as f32 - frame.black as f32 - frame.cblack[c] as f32) / range
+        ((frame.pixels[i * 3 + c] as f32 - frame.black as f32 - frame.cblack[c] as f32) / range)
+            .min(ceiling[c])
     };
     (0..(frame.width * frame.height) as usize)
         .map(|i| [sample(i, 0), sample(i, 1), sample(i, 2), 1.0])
@@ -1879,6 +1948,154 @@ mod tests {
     /// removal path relies on.
     fn normalize_cpu_reference(frame: &LinearFrame) -> Vec<[f32; 4]> {
         normalize_pixels(frame)
+    }
+
+    fn clip_frame(cam_mul: [f32; 4], cblack: [u32; 4], pixels: Vec<u16>) -> LinearFrame {
+        LinearFrame {
+            width: pixels.len() as u32 / 3,
+            height: 1,
+            cam_mul,
+            pre_mul: cam_mul,
+            cblack,
+            pixels,
+            ..synthetic_linear_frame()
+        }
+    }
+
+    #[test]
+    fn a_clipped_pixel_is_neutral_at_exactly_one_after_the_as_shot_white_balance() {
+        // No cblack: a sample at `maximum` normalizes to exactly 1.0 per channel. Gains are
+        // R 2.0, G 1.0, B 1.5, so the white-balanced clip level is min(2, 1, 1.5) = 1.0.
+        let f = clip_frame(
+            [2.0, 1.0, 1.5, 1.0],
+            [0; 4],
+            vec![1100, 1100, 1100, 600, 500, 400],
+        );
+        let ceiling = clip_neutral_ceiling(&f);
+        assert!((ceiling[0] - 0.5).abs() < 1e-6);
+        assert!((ceiling[1] - 1.0).abs() < 1e-6);
+        assert!((ceiling[2] - 2.0 / 3.0).abs() < 1e-6);
+        let px = normalize_pixels(&f);
+        let g = crate::color::wb_gains(f.cam_mul);
+        let wb = [px[0][0] * g[0], px[0][1] * g[1], px[0][2] * g[2]];
+        for c in wb {
+            assert!(
+                (c - 1.0).abs() < 1e-6,
+                "clipped pixel must be neutral 1.0, got {wb:?}"
+            );
+        }
+        // A pixel below every ceiling is untouched.
+        let plain = [
+            (600.0 - 100.0) / 1000.0,
+            (500.0 - 100.0) / 1000.0,
+            (400.0 - 100.0) / 1000.0,
+        ];
+        for c in 0..3 {
+            assert!((px[1][c] - plain[c]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn channels_that_clip_at_different_levels_still_end_up_neutral() {
+        // cblack makes R's clip level 0.99 (not 1.0): white-balanced R = 1.98, G = 1.0, B = 1.5.
+        let f = clip_frame([2.0, 1.0, 1.5, 1.0], [10, 0, 0, 0], vec![1100, 1100, 1100]);
+        let px = normalize_pixels(&f)[0];
+        let g = crate::color::wb_gains(f.cam_mul);
+        let wb = [px[0] * g[0], px[1] * g[1], px[2] * g[2]];
+        assert!(
+            (wb[0] - wb[1]).abs() < 1e-6 && (wb[1] - wb[2]).abs() < 1e-6,
+            "{wb:?}"
+        );
+    }
+
+    #[test]
+    fn broken_metadata_means_no_limit_rather_than_a_wrong_one() {
+        let ok = clip_frame([2.0, 1.0, 1.5, 1.0], [0; 4], vec![1, 2, 3]);
+        for bad in [
+            LinearFrame {
+                maximum: ok.black,
+                ..ok.clone()
+            },
+            LinearFrame {
+                cblack: [2000, 0, 0, 0],
+                ..ok.clone()
+            },
+            LinearFrame {
+                cam_mul: [f32::NAN, 1.0, 1.0, 1.0],
+                ..ok.clone()
+            },
+            LinearFrame {
+                cam_mul: [-1.0, 1.0, 1.0, 1.0],
+                ..ok.clone()
+            },
+            LinearFrame {
+                cam_mul: [0.0, 1.0, 1.0, 1.0],
+                ..ok.clone()
+            },
+        ] {
+            assert_eq!(clip_neutral_ceiling(&bad), [f32::MAX; 3]);
+        }
+    }
+
+    #[test]
+    fn a_frame_nothing_clips_in_is_unchanged_by_the_limit() {
+        let f = clip_frame([1.0, 1.0, 1.0, 1.0], [0; 4], vec![100, 600, 1099]);
+        let px = normalize_pixels(&f)[0];
+        assert!(
+            (px[0] - 0.0).abs() < 1e-6
+                && (px[1] - 0.5).abs() < 1e-6
+                && (px[2] - 0.999).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn decode_changes_its_cache_key_because_its_pixels_changed() {
+        assert_eq!(decode_stage().impl_version(), 1);
+        assert_ne!(
+            decode_stage().impl_version(),
+            demosaic_stage().impl_version(),
+            "decode's versioned key must differ from an unversioned stage's"
+        );
+    }
+
+    #[test]
+    fn decode_gpu_matches_cpu_reference_on_a_clipped_frame_with_a_cblack() {
+        let Some(gpu) = test_gpu() else { return };
+        let frame = clip_frame(
+            [2.0, 1.0, 1.5, 1.0],
+            [10, 0, 5, 0],
+            vec![1100, 1100, 1100, 1200, 900, 1100, 600, 500, 400],
+        );
+        let kernel = DecodeKernel::new(&gpu);
+        let exec = DecodeExec {
+            kernel: &kernel,
+            frame: &frame,
+        };
+        let extent = crate::frame::Extent {
+            width: frame.width,
+            height: frame.height,
+        };
+        let output = FrameTexture::new(&gpu, extent);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        exec.encode(&gpu, &mut encoder, None, &output);
+        gpu.queue.submit(Some(encoder.finish()));
+        let actual = crate::test_util::read_frame(&gpu, &output);
+        for (i, (a, e)) in actual
+            .iter()
+            .zip(normalize_pixels(&frame).iter())
+            .enumerate()
+        {
+            for c in 0..4 {
+                assert!(
+                    (a[c] - e[c]).abs() < 0.01,
+                    "pixel {i} c{c}: gpu={} cpu={}",
+                    a[c],
+                    e[c]
+                );
+            }
+        }
     }
 
     #[test]

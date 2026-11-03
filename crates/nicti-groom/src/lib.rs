@@ -72,8 +72,11 @@ impl PixelSource for FramePixels {
         let f = &*self.0;
         let range = f.maximum as f32 - f.black as f32;
         let base = (y as usize * f.width as usize + x as usize) * 3;
-        let sample =
-            |c: usize| (f.pixels[base + c] as f32 - f.black as f32 - f.cblack[c] as f32) / range;
+        let ceiling = nicti_tapetum::stages::clip_neutral_ceiling(f);
+        let sample = |c: usize| {
+            ((f.pixels[base + c] as f32 - f.black as f32 - f.cblack[c] as f32) / range)
+                .min(ceiling[c])
+        };
         [sample(0), sample(1), sample(2)]
     }
 }
@@ -131,5 +134,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn frame_pixels_apply_the_same_clip_neutral_ceiling() {
+        let frame = LinearFrame {
+            make: "T".into(),
+            model: "S".into(),
+            width: 2,
+            height: 1,
+            black: 100,
+            maximum: 1100,
+            cam_mul: [2.0, 1.0, 1.5, 1.0],
+            pre_mul: [2.0, 1.0, 1.5, 1.0],
+            cam_xyz: [0.0; 12],
+            cblack: [0; 4],
+            pixels: vec![1100, 1100, 1100, 500, 400, 300],
+            dng_opcode_list3: None,
+            nikon_lens_info: None,
+            orientation: 0,
+        };
+        let expected = normalize_pixels(&frame);
+        let src = FramePixels(Arc::new(frame));
+        for x in 0..2u32 {
+            let a = src.pixel(x, 0);
+            for c in 0..3 {
+                assert!((a[c] - expected[x as usize][c]).abs() < 1e-6, "x{x} c{c}");
+            }
+        }
+        // The clipped pixel really is limited (not left at 1.0 in R).
+        assert!(src.pixel(0, 0)[0] < 0.51);
     }
 }
