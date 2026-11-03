@@ -109,7 +109,7 @@ fn nef(orientation: Option<u16>, jpeg: &[u8]) -> Vec<u8> {
 struct Fx {
     _tmp: tempfile::TempDir,
     dir: PathBuf,
-    store: SqliteCatalog,
+    store: std::sync::Arc<SqliteCatalog>,
     root_id: i64,
 }
 
@@ -118,7 +118,7 @@ impl Fx {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("shoot");
         std::fs::create_dir_all(&dir).unwrap();
-        let store = SqliteCatalog::open_in_memory().unwrap();
+        let store = std::sync::Arc::new(SqliteCatalog::open_in_memory().unwrap());
         let vol = store.upsert_volume("vol", None, None, 0).unwrap();
         let root_id = store.ensure_root(vol, &dir.to_string_lossy()).unwrap();
         Fx {
@@ -164,7 +164,7 @@ impl Fx {
             .find(|a| a.id == id)
             .unwrap();
         let mut r = RightingReport::default();
-        righting_asset(&self.store, &self.dir, &asset, &mut r).unwrap();
+        righting_asset(&*self.store, &self.dir, &asset, &mut r).unwrap();
         r
     }
 
@@ -337,14 +337,14 @@ fn backfill_root_walks_every_asset_and_reports_the_totals() {
     fx.asset("a.NEF", Some(6), Some(&pv(jpeg.clone())));
     fx.asset("b.NEF", Some(1), Some(&pv(jpeg.clone())));
     fx.asset("c.NEF", Some(8), Some(&pv(jpeg)));
-    let r = backfill_root(&fx.store, fx.root_id).unwrap();
+    let r = backfill_root(&*fx.store, fx.root_id).unwrap();
     assert_eq!(
         (r.examined, r.fixed_blobs, r.no_rotation),
         (3, 2, 1),
         "{r:?}"
     );
     assert_eq!(
-        backfill_root(&fx.store, 9999).unwrap(),
+        backfill_root(&*fx.store, 9999).unwrap(),
         RightingReport::default()
     );
 }
@@ -363,7 +363,7 @@ fn settle_refreshes_a_stale_sidecar_from_a_retagged_blob_instead_of_keeping_the_
     thumb_sidecar::export(&fx.raw("a.NEF"), &pv(jpeg), SidecarCodec::Jpeg).unwrap();
     fx.store.set_root_archived(fx.root_id, true).unwrap();
 
-    let rep = tier::settle_root(&fx.store, fx.root_id).unwrap();
+    let rep = tier::settle_root(&*fx.store, fx.root_id).unwrap();
     assert_eq!(
         (rep.sidecars_refreshed, rep.blobs_dropped, rep.kept),
         (1, 1, 0),
@@ -380,7 +380,7 @@ fn settle_refreshes_a_stale_sidecar_from_a_retagged_blob_instead_of_keeping_the_
     // An unrelated byte difference is still kept, never refreshed.
     let id2 = fx.asset("b.NEF", Some(6), Some(&pv(tagged.clone())));
     thumb_sidecar::export(&fx.raw("b.NEF"), &pv(real_jpeg(9)), SidecarCodec::Jpeg).unwrap();
-    let rep = tier::settle_root(&fx.store, fx.root_id).unwrap();
+    let rep = tier::settle_root(&*fx.store, fx.root_id).unwrap();
     assert_eq!((rep.sidecars_refreshed, rep.kept), (0, 1), "{rep:?}");
     assert!(fx.blob(id2).is_some());
 }
@@ -474,7 +474,7 @@ fn an_offline_root_is_not_a_pile_of_deleted_files() {
     fx.asset("b.NEF", Some(6), Some(&pv(real_jpeg(1))));
     std::fs::remove_dir_all(&fx.dir).unwrap(); // the drive is unmounted
 
-    let r = backfill_root(&fx.store, fx.root_id).unwrap();
+    let r = backfill_root(&*fx.store, fx.root_id).unwrap();
     assert!(r.root_offline);
     assert_eq!(
         (r.examined, r.missing_file),
@@ -496,7 +496,7 @@ fn a_clean_run_may_be_marked_done_even_with_deleted_files_and_unrotated_raws() {
     let gone = fx.asset("gone.NEF", Some(6), Some(&pv(jpeg)));
     std::fs::remove_file(fx.raw("gone.NEF")).unwrap();
     let _ = gone;
-    let r = backfill_root(&fx.store, fx.root_id).unwrap();
+    let r = backfill_root(&*fx.store, fx.root_id).unwrap();
     assert_eq!(
         (r.fixed_blobs, r.no_rotation, r.missing_file),
         (1, 1, 1),
@@ -525,7 +525,7 @@ fn settle_keeps_the_pair_when_the_sidecar_is_not_the_blobs_untagged_original() {
     thumb_sidecar::export(&fx.raw("a.NEF"), &pv(tagged8.clone()), SidecarCodec::Jpeg).unwrap();
     fx.store.set_root_archived(fx.root_id, true).unwrap();
 
-    let rep = tier::settle_root(&fx.store, fx.root_id).unwrap();
+    let rep = tier::settle_root(&*fx.store, fx.root_id).unwrap();
     let _ = id;
     assert_eq!(rep.sidecars_refreshed, 0, "{rep:?}");
     let (_, side) = thumb_sidecar::read_with_codec(&fx.raw("a.NEF"), SidecarCodec::Jpeg).unwrap();
@@ -545,7 +545,7 @@ fn settle_does_not_abort_the_root_when_one_sidecar_cannot_be_refreshed() {
     block_sidecar_writes(&fx.raw("a.NEF"));
     fx.store.set_root_archived(fx.root_id, true).unwrap();
 
-    let rep = tier::settle_root(&fx.store, fx.root_id).expect("settle carries on");
+    let rep = tier::settle_root(&*fx.store, fx.root_id).expect("settle carries on");
     assert_eq!((rep.sidecars_refreshed, rep.kept), (0, 1), "{rep:?}");
     assert!(
         fx.blob(id).is_some(),
@@ -572,12 +572,12 @@ fn backfill_fills_a_null_orientation_from_the_raws_ifd0_and_a_rerun_finds_nothin
     let plain = fx.asset("b.NEF", None, None);
     assert_eq!(orientation_col(&fx, rotated), None);
 
-    let r = nicti_lair::orient::backfill_root(&fx.store, fx.root_id, 1).unwrap();
+    let r = nicti_lair::orient::backfill_root(&*fx.store, fx.root_id, 1).unwrap();
     assert_eq!((r.examined, r.filled, r.unreadable), (2, 2, 0), "{r:?}");
     assert_eq!(orientation_col(&fx, rotated), Some(6));
     assert_eq!(orientation_col(&fx, plain), Some(1));
 
-    let again = nicti_lair::orient::backfill_root(&fx.store, fx.root_id, 10).unwrap();
+    let again = nicti_lair::orient::backfill_root(&*fx.store, fx.root_id, 10).unwrap();
     assert_eq!(again.examined, 0);
 }
 
@@ -586,7 +586,7 @@ fn a_missing_file_stays_null_and_the_backfill_terminates() {
     let fx = Fx::new();
     let id = fx.asset("gone.NEF", Some(8), None);
     std::fs::remove_file(fx.raw("gone.NEF")).unwrap();
-    let r = nicti_lair::orient::backfill_root(&fx.store, fx.root_id, 5).unwrap();
+    let r = nicti_lair::orient::backfill_root(&*fx.store, fx.root_id, 5).unwrap();
     assert_eq!((r.examined, r.filled, r.unreadable), (1, 0, 1), "{r:?}");
     assert_eq!(orientation_col(&fx, id), None);
 }
@@ -595,7 +595,7 @@ fn a_missing_file_stays_null_and_the_backfill_terminates() {
 fn ingest_records_the_orientation_and_a_changed_file_resets_it_until_reingested() {
     let fx = Fx::new();
     std::fs::write(fx.raw("c.NEF"), nef(Some(3), &real_jpeg(2))).unwrap();
-    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    nicti_lair::scruff::ingest_root(&*fx.store, fx.root_id, &fx.dir).unwrap();
     let id = fx
         .store
         .find_asset_by_path(fx.root_id, "c.NEF")
@@ -632,7 +632,7 @@ fn ingest_records_the_orientation_and_a_changed_file_resets_it_until_reingested(
 fn a_changed_raw_is_re_read_by_ingest() {
     let fx = Fx::new();
     std::fs::write(fx.raw("d.NEF"), nef(Some(6), &real_jpeg(3))).unwrap();
-    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    nicti_lair::scruff::ingest_root(&*fx.store, fx.root_id, &fx.dir).unwrap();
     let id = |n: &str| {
         fx.store
             .find_asset_by_path(fx.root_id, n)
@@ -648,6 +648,149 @@ fn a_changed_raw_is_re_read_by_ingest() {
     let mut longer = std::fs::read(fx.raw("d.NEF")).unwrap();
     longer.extend_from_slice(&[0; 1000]);
     std::fs::write(fx.raw("d.NEF"), longer).unwrap();
-    nicti_lair::scruff::ingest_root(&fx.store, fx.root_id, &fx.dir).unwrap();
+    nicti_lair::scruff::ingest_root(&*fx.store, fx.root_id, &fx.dir).unwrap();
     assert_eq!(orientation_col(&fx, id("d.NEF")), Some(3));
+}
+
+// ---- #606: the steppable run + job ----
+
+fn drive(job: &mut nicti_lair::pounce_jobs::RightingJob) {
+    use nicti_pounce::{ChunkedJob, Step};
+    for _ in 0..100 {
+        if matches!(job.step().unwrap(), Step::Done) {
+            return;
+        }
+    }
+    panic!("RightingJob did not finish");
+}
+
+#[test]
+fn a_run_rights_thumbnails_fills_orientation_and_lists_the_finished_roots() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    let a = fx.asset("a.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    let b = fx.asset("b.NEF", None, Some(&pv(real_jpeg(2))));
+    let store: std::sync::Arc<dyn CatalogStore + Send + Sync> = fx.store.clone();
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(store, &HashSet::new()).unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert!(!run.cancelled);
+    assert_eq!(run.done_roots, vec![fx.root_id]);
+    assert_eq!(run.total.fixed_blobs, 1, "{:?}", run.total);
+    assert_eq!(run.total.orientation_filled, 2);
+    assert_eq!(orientation_of(&fx.blob(a).unwrap().bytes), Some(6));
+    assert_eq!(orientation_col(&fx, a), Some(6));
+    assert_eq!(orientation_col(&fx, b), Some(1));
+}
+
+#[test]
+fn finished_roots_are_skipped_and_an_offline_root_is_retried_not_marked() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    fx.asset("a.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    let store: std::sync::Arc<dyn CatalogStore + Send + Sync> = fx.store.clone();
+    // Skipping the only root: nothing to do, and an immediate Done.
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(store.clone(), &HashSet::from([fx.root_id]))
+            .unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert_eq!(run.total.examined, 0);
+
+    // The folder disappears (unmounted drive): reported offline, not listed as done.
+    std::fs::remove_dir_all(&fx.dir).unwrap();
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(store, &HashSet::new()).unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert!(run.total.root_offline);
+    assert!(run.done_roots.is_empty());
+}
+
+#[test]
+fn a_cancelled_job_hands_over_a_partial_run_marked_cancelled() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    fx.asset("a.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    let store: std::sync::Arc<dyn CatalogStore + Send + Sync> = fx.store.clone();
+    let (job, slot) = nicti_lair::pounce_jobs::RightingJob::new(store, &HashSet::new()).unwrap();
+    drop(job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert!(run.cancelled);
+    assert!(run.done_roots.is_empty());
+}
+
+#[test]
+fn a_mixed_run_marks_only_the_clean_root_and_counts_the_other_as_visited() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    fx.asset("ok.NEF", Some(6), Some(&pv(real_jpeg(1))));
+    // A second root whose only RAW changed on disk since cataloguing (stale).
+    let dir2 = fx._tmp.path().join("other");
+    std::fs::create_dir_all(&dir2).unwrap();
+    let vol = fx.store.upsert_volume("vol2", None, None, 0).unwrap();
+    let root2 = fx.store.ensure_root(vol, &dir2.to_string_lossy()).unwrap();
+    std::fs::write(dir2.join("s.NEF"), nef(Some(6), &real_jpeg(4))).unwrap();
+    let new = NewAsset {
+        rel_path: "s.NEF".into(),
+        rel_path_fold: "s.nef".into(),
+        size_bytes: 1, // not the real size: stale
+        mtime_unix: 1,
+        fingerprint: None,
+        natural_key: None,
+        make: None,
+        model: None,
+        captured_at: None,
+        width: None,
+        height: None,
+        imported_at: 0,
+    };
+    fx.store
+        .insert_asset(root2, &new, Some(&pv(real_jpeg(4))))
+        .unwrap();
+
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(fx.store.clone(), &HashSet::new()).unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert_eq!(run.done_roots, vec![fx.root_id]);
+    let mut visited = run.visited_roots.clone();
+    visited.sort();
+    assert_eq!(visited, vec![fx.root_id, root2]);
+    assert_eq!(run.total.stale_file, 1);
+}
+
+#[test]
+fn an_unreadable_file_keeps_its_root_from_being_marked_done() {
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    fx.asset("gone.NEF", Some(8), None);
+    std::fs::remove_file(fx.raw("gone.NEF")).unwrap();
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(fx.store.clone(), &HashSet::new()).unwrap();
+    drive(&mut job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert_eq!(run.total.orientation_unread, 1);
+    assert!(run.done_roots.is_empty());
+    assert_eq!(run.visited_roots, vec![fx.root_id]);
+}
+
+#[test]
+fn a_job_dropped_mid_root_reports_partial_totals_and_no_finished_root() {
+    use nicti_pounce::ChunkedJob;
+    use std::collections::HashSet;
+    let fx = Fx::new();
+    for i in 0..20 {
+        fx.asset(&format!("{i}.NEF"), Some(6), Some(&pv(real_jpeg(i as u8))));
+    }
+    let (mut job, slot) =
+        nicti_lair::pounce_jobs::RightingJob::new(fx.store.clone(), &HashSet::new()).unwrap();
+    let _ = job.step().unwrap(); // 16 of 20 assets
+    drop(job);
+    let run = slot.lock().unwrap().take().unwrap();
+    assert!(run.cancelled);
+    assert!(run.done_roots.is_empty());
+    assert!(run.visited_roots.is_empty());
+    assert_eq!(run.total.examined, 16);
 }

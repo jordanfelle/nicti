@@ -145,6 +145,8 @@ pub struct PeltApp {
     /// #367: why the last Import/Sync/Open in Loupe click did nothing (blank, missing or
     /// non-directory path, registration failure). Cleared on the next valid submit.
     import_status: Option<String>,
+    /// Thumbnail-rotation repair / orientation backfill (#606).
+    righting: crate::righting_ui::RightingUi,
     update: UpdateChecker,
     /// Nine Lives' (#25) own scheduler. See `poll_backup`'s own doc comment for how this gets checked and acted on.
     nine_lives: NineLives,
@@ -393,6 +395,19 @@ impl PeltApp {
                 None => (None, None),
             }
         };
+        // #606: once per catalog root, repair thumbnails ingested before the rotation tag existed and
+        // read the orientation of rows older than schema v11. Skipped while a move is being
+        // recovered (it holds the `Move` guards); the Library's "Repair thumbnails" runs it later.
+        let mut righting = crate::righting_ui::RightingUi::default();
+        if pending_recovery_result.is_none() {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = catalog.clone();
+            righting.start(
+                dyn_store,
+                &pounce,
+                &crate::righting_ui::righted_roots(&catalog_path),
+                true,
+            );
+        }
         let telemetry_ctx = egui_ctx.clone();
         let telemetry = TelemetrySampler::spawn_on_change(
             default_vram_source(),
@@ -455,6 +470,7 @@ impl PeltApp {
             import_picker: FolderPicker::default(),
             move_picker: FolderPicker::default(),
             import_status: None,
+            righting,
             update,
             nine_lives,
             last_backup_poll: None,
@@ -1290,6 +1306,8 @@ impl eframe::App for PeltApp {
         self.poll_backup();
         self.poll_move();
         self.poll_recovery();
+        // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
+        self.righting.poll(&self.catalog_path);
         self.poll_cull();
         self.poll_eyeshine(ui.ctx());
         self.poll_prebake(ui.ctx());
@@ -2188,6 +2206,34 @@ impl PeltApp {
                     if ui.button("Sync").clicked() {
                         self.submit_root_job(&store, RootAction::Sync);
                     }
+                    if ui
+                        .add_enabled(
+                            !self.righting.is_running()
+                                && !self.job_active(&[
+                                    JobKind::Import,
+                                    JobKind::Sync,
+                                    JobKind::Move,
+                                    JobKind::Delete,
+                                    JobKind::Export,
+                                    JobKind::Verify,
+                                    JobKind::Baseline,
+                                ]),
+                            egui::Button::new("Repair thumbnails"),
+                        )
+                        .on_hover_text(
+                            "Re-checks every photo's rotation and fixes thumbnails that show \
+                             sideways. Safe to repeat; the files are not modified.",
+                        )
+                        .clicked()
+                    {
+                        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                        self.righting.start(
+                            dyn_store,
+                            &self.pounce,
+                            &std::collections::HashSet::new(),
+                            false,
+                        );
+                    }
                     // #31: a folder-ordered asset list, not real grid/filter-driven selection
                     // (#30/#242's job, confirmed not a hard blocker for the loupe) -- reuses the
                     // same path field and root-registration path Import/Sync already use.
@@ -2197,6 +2243,9 @@ impl PeltApp {
                 });
                 if let Some(msg) = &self.import_status {
                     ui.colored_label(egui::Color32::RED, msg);
+                }
+                if let Some(msg) = &self.righting.status {
+                    ui.label(msg.clone());
                 }
 
                 // #26: verified folder move. Copies and hash-verifies every file, re-points the
@@ -2323,6 +2372,11 @@ impl PeltApp {
         let Some(path) = self.checked_import_path(true) else {
             return;
         };
+        if self.righting.is_running() {
+            self.import_status =
+                Some("Thumbnail repair is running; import/sync waits until it finishes.".into());
+            return;
+        }
         if self.job_active(&[
             JobKind::Move,
             JobKind::Delete,

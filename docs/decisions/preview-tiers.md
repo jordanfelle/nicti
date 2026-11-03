@@ -115,3 +115,21 @@ Covers the T0-T3 preview tier strategy, the JPEG-vs-AVIF format decision, and th
   `preview_color::decode` applies a JPEG's EXIF orientation, so grid/cull/loupe stand-ins show a
   portrait NEF upright before T2 lands. A rotated T0 stays JPEG in AVIF sidecar mode (the tag would
   be lost). T0s already in a catalog are not rewritten (ingest skips unchanged files), so they stay sideways until a backfill (follow-up). A re-extracted T0 no longer byte-equals an old `.thumb.jpg`, so settle keeps the blob rather than dropping it.
+
+## Righting trigger (#606)
+
+`nicti_lair::righting::Righting` (steppable, 16 assets per step) runs `righting_asset` over every root not yet recorded,
+and fills `asset.orientation` (#604) in the same pass (`RightingReport::orientation_filled`). `RightingJob` wraps it for
+Pounce (CPU lane, Background) and reports under `JobKind::Sync`: that reuses the "a sync is running" guards so ingest,
+sync and move cannot race the thumbnail rewrite, and the grid's existing busy -> idle refresh re-reads ids and thumbnails,
+which is the cache invalidation (a re-tagged blob replaces what is on screen).
+
+- **Trigger:** at launch (silent when there is nothing to do) for roots not in `<catalog>.migrations.json`
+  (`righted_roots`), skipped while a move recovery holds the `Move` guards; and the Library's "Repair thumbnails" button,
+  which ignores the marker. A root is recorded only when `RightingReport::can_mark_done()` (reachable, nothing failed,
+  stale or raced, no orientation left unread), so an unmounted drive or a changed file is retried next start, per root. A
+  reachable root that keeps ending unclean counts an attempt in the marker and is treated as done after 3, so one permanent
+  failure cannot re-read every file at every launch (the button still retries it). Import/Sync are refused while the pass runs.
+- **Cancel:** a dropped job hands over a partial `RightingRun { cancelled: true }`; only roots that finished are recorded.
+- **Not verified here:** a real library (RAW with Orientation 6/8, an archived folder with legacy AVIF sidecars) and the
+  per-start cost on a NAS for roots that keep failing; both need the operator's library.

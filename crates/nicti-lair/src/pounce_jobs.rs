@@ -15,6 +15,7 @@ use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progr
 use crate::carry::{Carry, CarryOptions, CarryOutcome, ResumeMoves, Resumed};
 use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
 use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
+use crate::righting::{Righting, RightingRun};
 use crate::scruff::{Ingest, IngestReport};
 use crate::shred::{Shred, ShredOutcome};
 use crate::verify::{Baseline, BaselineReport, Verify, VerifyReport};
@@ -745,6 +746,100 @@ impl Drop for ResumeMovesJob {
                 self.resume
                     .take()
                     .map(|r| r.into_report())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+}
+
+/// Thumbnail-rotation repair and orientation backfill over the catalog's roots (#606): steps
+/// [`Righting`] one chunk of assets per call. Reports under [`JobKind::Sync`] so the existing
+/// "a sync is running" guards keep ingest/sync/move from racing it, and so the grid's busy -> idle
+/// refresh (which also drops cached decoded thumbnails) fires when it ends. Never returns `Err`: a
+/// catalog failure ends the run and is recorded in the report. A cancelled job is dropped; `Drop`
+/// hands over what it settled (`cancelled = true`).
+pub struct RightingJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    righting: Option<Righting>,
+    progress: Progress,
+    result: ReportSlot<RightingRun>,
+}
+
+impl RightingJob {
+    /// `skip` is the set of roots already righted (the caller's marker).
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        skip: &std::collections::HashSet<i64>,
+    ) -> Result<(Self, ReportSlot<RightingRun>), crate::CatalogError> {
+        let righting = Righting::new(store.as_ref(), skip)?;
+        let result = Arc::new(Mutex::new(None));
+        let job = RightingJob {
+            store,
+            righting: Some(righting),
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        Ok((job, result))
+    }
+}
+
+impl ChunkedJob for RightingJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Sync,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        "Repairing thumbnail rotation".into()
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        let righting = self
+            .righting
+            .as_mut()
+            .expect("RightingJob::step called again after it already reported Done");
+        let more = match righting.step(self.store.as_ref()) {
+            Ok(more) => more,
+            Err(e) => {
+                let mut run = self.righting.take().unwrap().into_run();
+                run.total
+                    .failed
+                    .push((PathBuf::new(), format!("catalog error: {e}")));
+                *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
+                return Ok(Step::Done);
+            }
+        };
+        self.progress = Progress {
+            done: righting.progress(),
+            total: None,
+        };
+        if more {
+            Ok(Step::Yield)
+        } else {
+            let run = self.righting.take().unwrap().into_run();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
+            Ok(Step::Done)
+        }
+    }
+}
+
+impl Drop for RightingJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(
+                self.righting
+                    .take()
+                    .map(|r| r.into_run())
                     .unwrap_or_default(),
             );
         }
