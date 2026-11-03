@@ -341,3 +341,9 @@ Wires #548's engine (`offering`, `cards`) into the app. Slice shipped: everythin
   alias), verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename
   path), a second card read / cache-bypassing read-back, reusing the returned blake3 in ingest instead of re-hashing, and a
   cancel button (a job can be cancelled from the activity panel; the stepper polls per file).
+
+## #547: `{Num}`, `{Lens}`, `{ISO}` (ADR-0436 slices 1 and 2)
+
+`{Num}` is the trailing ASCII digits of the file stem (`DSC_0042` -> `0042`, leading zeros kept, empty when the stem ends in a non-digit). `{Lens}`/`{ISO}` read `asset.lens`/`asset.iso` (schema v13; `exif_extra_read` = 0 until the EXIF was read, reset when size/mtime change, so NULL lens/ISO means "read, the file has none"). Ingest fills them for new and changed files; ingest skips unchanged files, so older rows need `nicti_lair::lens_iso::backfill_root` (retries unreadable files, leaves an offline root untouched). Lens is the standard EXIF `LensModel` only (control characters dropped, 128 characters max); ISO is `PhotographicSensitivity`, with 65535 meaning "see `ISOSpeed`" for high-ISO bodies. The Nikon MakerNote lens fallback for pre-EXIF-2.3 bodies is not wired and unverified (no real NEF fixture here). The backfill trigger and that check are #670.
+
+Found on the way: `render_subfolder` substituted token values and *then* split the rendered text at `/`, so any EXIF-derived value containing a separator (a lens `24-70mm f/4`, a camera model `X/Y`) became extra folders. Token values now have `/` and `\` replaced by `_` before substitution (`naming::push_value`); template literals still separate components. `..` could not traverse before (sanitize trims it) and still cannot.

@@ -133,6 +133,52 @@ struct ExifFields {
     model: Option<String>,
     captured_at: Option<String>,
     natural_key: Option<String>,
+    /// Lens model and ISO (#547); `None` when the EXIF itself could not be read (so nothing is
+    /// recorded and the backfill retries), `Some((None, None))` for a readable EXIF without them.
+    extra: Option<(Option<String>, Option<u32>)>,
+}
+
+/// Longest lens name kept: real ones are < 60 characters, this only bounds a hostile EXIF.
+const MAX_LENS_CHARS: usize = 128;
+
+/// An ASCII EXIF string, trimmed, control characters dropped, bounded; `None` when empty.
+fn ascii_field(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
+    let f = exif.get_field(tag, exif::In::PRIMARY)?;
+    let exif::Value::Ascii(parts) = &f.value else {
+        return None;
+    };
+    let text = String::from_utf8_lossy(parts.first()?);
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_LENS_CHARS)
+        .collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_owned())
+}
+
+/// The lens model and ISO of an EXIF block. ISO is `PhotographicSensitivity`; 65535 there means
+/// "too large for a SHORT, see `ISOSpeed`" (high-ISO bodies), so that case reads the LONG tag.
+fn lens_and_iso(exif: &exif::Exif) -> (Option<String>, Option<u32>) {
+    let lens = ascii_field(exif, exif::Tag::LensModel);
+    let uint = |tag: exif::Tag| {
+        exif.get_field(tag, exif::In::PRIMARY)
+            .and_then(|f| f.value.get_uint(0))
+    };
+    let iso = uint(exif::Tag::PhotographicSensitivity)
+        .filter(|&i| i != 65535)
+        .or_else(|| uint(exif::Tag(exif::Context::Exif, 0x8833)))
+        .filter(|&i| i >= 1);
+    (lens, iso)
+}
+
+/// Lens model and ISO of the file at `path`, or `None` when its EXIF can't be read at all (#547).
+pub(crate) fn read_exif_extra(path: &Path) -> Option<(Option<String>, Option<u32>)> {
+    let file = File::open(path).ok()?;
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::BufReader::new(file))
+        .ok()?;
+    Some(lens_and_iso(&exif))
 }
 
 /// Reads the EXIF fields ingest cares about. A file with no readable EXIF (or no EXIF at all)
@@ -169,6 +215,7 @@ fn read_exif_fields(path: &Path) -> ExifFields {
         model,
         captured_at,
         natural_key,
+        extra: Some(lens_and_iso(&exif)),
     }
 }
 
@@ -576,6 +623,7 @@ fn ingest_one(
     }
 
     let exif = read_exif_fields(path);
+    let extra = exif.extra.clone();
     // A JPEG asset's dimensions are the file's own, not its (downscaled) T0's.
     let (preview, source_dims) = if is_jpeg(path) {
         match jpeg_preview(path) {
@@ -613,6 +661,10 @@ fn ingest_one(
     // Best effort: a file whose orientation can't be read stays NULL and the backfill retries.
     if let Some(o) = crate::orient::file_orientation(path) {
         let _ = store.set_orientation(asset_id, o);
+    }
+    // Same best-effort rule: unreadable EXIF leaves lens/ISO unread for the backfill.
+    if let Some((lens, iso)) = &extra {
+        let _ = store.set_exif_extra(asset_id, lens.as_deref(), *iso);
     }
     sync_sidecar(store, asset_id, path, report);
 

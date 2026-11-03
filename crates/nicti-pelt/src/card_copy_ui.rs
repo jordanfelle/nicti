@@ -30,8 +30,15 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_FILENAME_TEMPLATE: &str = "{Filename}";
 pub const DEFAULT_SUBFOLDER_TEMPLATE: &str = "{Date:YYYY-MM-DD}";
 
-/// What naming needs from a card file: capture time, mtime (unix seconds), make, model.
-type Capture = (Option<DateParts>, i64, Option<String>, Option<String>);
+/// What naming needs from a card file: capture time, mtime (unix seconds), make, model, lens, ISO.
+type Capture = (
+    Option<DateParts>,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+);
 
 /// Renders every file's destination (relative to the destination root) from the two templates.
 /// `capture` reads the capture time and camera of a file (the UI passes the card's EXIF; tests pass
@@ -55,7 +62,7 @@ pub fn build_plan(
     let mut plan = Vec::with_capacity(files.len());
     for (index, file) in files.into_iter().enumerate() {
         let sequence = index as u32 + 1;
-        let (captured, mtime_unix, make, model) = capture(&file.path);
+        let (captured, mtime_unix, make, model, lens, iso) = capture(&file.path);
         let facts = AssetFacts {
             asset_id: 0,
             stem: file
@@ -74,6 +81,8 @@ pub fn build_plan(
             rating: None,
             make,
             model,
+            lens,
+            iso,
         };
         let mut dest_rel = PathBuf::new();
         if let Some(sub) = &sub {
@@ -104,7 +113,14 @@ fn read_capture(path: &Path) -> Capture {
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs() as i64);
-    (captured, mtime, exif.make, exif.model)
+    (
+        captured,
+        mtime,
+        exif.make,
+        exif.model,
+        exif.lens_model,
+        exif.iso,
+    )
 }
 
 /// One line for a finished run.
@@ -344,7 +360,9 @@ impl CardCopyUi {
             self.subfolder_template.clone(),
         );
         // Fail on a bad template or a destination on the card here, before touching the card.
-        if let Err(e) = build_plan(Vec::new(), &name_tpl, &sub_tpl, &|_| (None, 0, None, None)) {
+        if let Err(e) = build_plan(Vec::new(), &name_tpl, &sub_tpl, &|_| {
+            (None, 0, None, None, None, None)
+        }) {
             self.status = Some(e);
             return;
         }
@@ -503,6 +521,8 @@ mod tests {
             0,
             Some("NIKON".into()),
             Some("Z8".into()),
+            Some("NIKKOR Z 50mm f/1.8 S".into()),
+            Some(640),
         )
     }
 
@@ -517,6 +537,15 @@ mod tests {
         .unwrap();
         assert_eq!(plan[0].dest_rel, PathBuf::from("2026-11-03/DSC_0001.NEF"));
         assert_eq!(plan[1].dest_rel, PathBuf::from("2026-11-03/DSC_0002.JPG"));
+    }
+
+    #[test]
+    fn lens_iso_and_num_tokens_name_card_files() {
+        let plan = build_plan(files(&["DSC_0001.NEF"]), "{Num}_{ISO}", "{Lens}", &stub).unwrap();
+        assert_eq!(
+            plan[0].dest_rel,
+            PathBuf::from("NIKKOR Z 50mm f_1.8 S").join("0001_640.NEF")
+        );
     }
 
     #[test]

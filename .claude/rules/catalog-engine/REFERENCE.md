@@ -68,6 +68,8 @@ Full reasoning/history: `docs/decisions/catalog-engine.md`.
 
 - Research outcome, nothing lifted. Build: #558 catalog-open failure window (Try Again / Choose Another / Quit; no "Continue Without Saving", Nicti has no in-memory catalog) and #557 crop constrained to the rotated image (max inscribed rect; sampling currently edge-clamps). Declined: container walkers (`nicti-scent` already walks JPEG APP1; IPTC is read from the LRC catalog, file IPTC waits on JPEG ingestion #371), smart-album rule editor (Nicti smart collections are a typed `hunt::Filter`; OR/NOT nesting waits on real data in #155), availability cache (#332 stepped probe, #327 a Pounce job; both closed, neither needed it), XMP merge (`packet.rs` patches in place; #375 closed), maker-note locator (Nikon MakerNote walk is `nicti-cornea`, AF in `spikes/squint`; `nicti-iris/nikon.rs` is the lens blob). Detail: `docs/decisions/catalog-engine.md`.
 
+- `asset.lens`/`asset.iso`/`exif_extra_read` (#547, schema v13): ingest fills them (EXIF `LensModel`, `PhotographicSensitivity`, 65535 -> `ISOSpeed`); `lens_iso::backfill_root` fills older rows; a size/mtime change resets the flag. Trigger + MakerNote fallback: #670. Detail: `docs/decisions/catalog-engine.md`.
+
 ## Package contents
 
 - **`crates/nicti-lair`** (#22, landed; #23 ...
