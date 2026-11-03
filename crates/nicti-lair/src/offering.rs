@@ -76,13 +76,23 @@ pub fn list_card_files(source: &Path) -> (Vec<CardFile>, Vec<String>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Offered {
     /// Copied and checked; `dest` is the final path (possibly with a `-N` suffix).
+    ///
+    /// `mtime_unix` is the file's modification time (whole seconds) read **before** the verify read,
+    /// so a baseline built from `blake3` + `size` + `mtime_unix` can only be attached to a file that
+    /// has not been modified since that read (within the clock's one-second resolution).
     Copied {
         dest: PathBuf,
         blake3: String,
         size: u64,
+        mtime_unix: i64,
     },
     /// A regular file with identical content was already at `dest`; nothing was written.
-    AlreadyThere { dest: PathBuf, blake3: String },
+    /// `mtime_unix` as for `Copied`.
+    AlreadyThere {
+        dest: PathBuf,
+        blake3: String,
+        mtime_unix: i64,
+    },
     /// Stopped by `cancelled`; no temp file is left behind.
     Cancelled,
 }
@@ -255,6 +265,16 @@ fn publish(temp: &Path, final_path: &Path, try_link: bool) -> io::Result<()> {
     })
 }
 
+/// A file's modification time as whole unix seconds, computed exactly as ingest stores it
+/// (`scruff::ingest_one`), so a recorded baseline's mtime equals the catalog row's.
+pub(crate) fn mtime_unix(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Best-effort durability of the new directory entry (a crash right after `Copied` must not lose
 /// it: the user is about to format the card). Not available everywhere.
 fn sync_dir(dir: &Path) {
@@ -370,6 +390,9 @@ fn offer_file_with(
         }
     };
 
+    // Stat before the verify read: a rename or hard link keeps the mtime, and anything that changes
+    // the file after this point is then visible as a different size or mtime later.
+    let temp_mtime = mtime_unix(&fs::metadata(&temp).map_err(io_err)?);
     match read_back(&temp, cancelled) {
         Ok(Some((h, n))) if h == hash && n == size => {}
         Ok(Some(_)) => {
@@ -401,20 +424,26 @@ fn offer_file_with(
                     dest: final_path,
                     blake3: hash,
                     size,
+                    mtime_unix: temp_mtime,
                 });
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 // Same content already here (a re-run, or this card imported before): done. Only a
                 // regular file of the right size is read (not a FIFO or a link, and no hashing of
                 // every same-named file of a different size).
-                let same = fs::symlink_metadata(&final_path)
-                    .is_ok_and(|m| m.is_file() && m.len() == size)
+                let existing = fs::symlink_metadata(&final_path)
+                    .ok()
+                    .filter(|m| m.is_file() && m.len() == size);
+                // Stat first, then read: see `Offered::AlreadyThere`.
+                let existing_mtime = existing.as_ref().map(mtime_unix);
+                let same = existing.is_some()
                     && matches!(read_back(&final_path, cancelled), Ok(Some((h, _))) if h == hash);
                 if same {
                     cleanup(&temp);
                     return Ok(Offered::AlreadyThere {
                         dest: final_path,
                         blake3: hash,
+                        mtime_unix: existing_mtime.unwrap_or(0),
                     });
                 }
             }
@@ -465,6 +494,7 @@ mod tests {
             dest: d,
             blake3,
             size,
+            ..
         } = r
         else {
             panic!("{r:?}")
@@ -628,6 +658,67 @@ mod tests {
         let r = offer_file_with(&src, &dest, Path::new("a.NEF"), &never, &short, true);
         assert!(matches!(r, Err(OfferError::VerifyFailed(_))), "{r:?}");
         assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_reported_mtime_is_read_before_the_verify_read_not_after() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let tmp = tempfile::tempdir().unwrap();
+        let (cardd, dest) = (tmp.path().join("card"), tmp.path().join("lib"));
+        fs::create_dir_all(&dest).unwrap();
+        let src = card(&cardd, "a.NEF", b"what the card held");
+        // Something rewrites the file (here: just moves its mtime) while it is being verified.
+        let later = UNIX_EPOCH + Duration::from_secs(4_000_000_000);
+        let touching = |p: &Path, c: &dyn Fn() -> bool| {
+            let f = OpenOptions::new().write(true).open(p)?;
+            f.set_modified(later)?;
+            read_back(p, c)
+        };
+        let r = offer_file_with(&src, &dest, Path::new("a.NEF"), &never, &touching, true).unwrap();
+        let Offered::Copied {
+            dest: d,
+            mtime_unix: reported,
+            ..
+        } = r
+        else {
+            panic!("{r:?}")
+        };
+        let now = mtime_unix(&fs::metadata(&d).unwrap());
+        assert_eq!(
+            now, 4_000_000_000,
+            "the file did change during the verify read"
+        );
+        assert_ne!(
+            reported, now,
+            "so the pre-read mtime must not match the new one"
+        );
+        // The same holds for a file that was already there.
+        let again = offer_file_with(
+            &src,
+            &dest,
+            Path::new("a.NEF"),
+            &never,
+            &|p: &Path, c: &dyn Fn() -> bool| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(p)?
+                    .set_modified(UNIX_EPOCH + Duration::from_secs(4_100_000_000))?;
+                read_back(p, c)
+            },
+            true,
+        )
+        .unwrap();
+        let Offered::AlreadyThere {
+            mtime_unix: reported,
+            ..
+        } = again
+        else {
+            panic!("{again:?}")
+        };
+        assert_eq!(
+            reported, 4_000_000_000,
+            "the mtime before the second file's verify read"
+        );
     }
 
     #[test]

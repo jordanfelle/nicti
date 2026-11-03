@@ -340,15 +340,25 @@ Wires #548's engine (`offering`, `cards`) into the app. Slice shipped: everythin
 - **Follow-ups done (#659):** (1) *Hash reuse.* The full-file BLAKE3 `offer_file` computes to verify a copy is exactly the
   `content_hash` baseline (#386) the bit-rot check (#304) needs, so after ingest a `Phase::Baseline` step looks each copy's
   asset up by path and calls `record_baseline_hashes` with the size and mtime the destination file had right after it landed;
-  the store writes it only if the catalog row still has that exact size/mtime and no hash yet (a changed file never gets a stale
-  baseline, an existing baseline is never overwritten: a second run records 0). It never fails the run
+  the store writes it only if the catalog row still has that exact size/mtime and no hash yet (an existing baseline is never
+  overwritten: a second run records 0). The size and mtime are read *before* the verify read (`Offered::{Copied,AlreadyThere}::mtime_unix`,
+  test-pinned), so a file rewritten after that read mismatches; the one case this cannot see is a same-size rewrite within the
+  same second as the recorded mtime (whole-second resolution, inherent to the baseline design). The destination path is
+  brought to the same spelling as the root (`relative_to_root`, verbatim `\\?\` prefixes stripped) before the lookup, since
+  `offer_file` canonicalizes and `check_destination` simplifies: without that no baseline would record on Windows (the unit test
+  for it is `cfg(windows)`, so it runs only on the Windows CI job). A failed ingest records no baselines. It never fails the run
   (`CardCopyReport::baseline_recorded` / `baseline_error`; neither blocks `is_clean`). Ingest's own `partial_hash` (the
   relink fingerprint) is a different, cheap head+tail hash and is unchanged. (2) *Cancel button.* The panel shows Cancel while
-  the job runs (`CardCopyUi::cancel` -> `Pounce::cancel`); honoured between files, so the file being copied is finished and
-  verified first and the report counts the rest as not attempted. (3) *Same-device check.* `check_destination` also refuses a
+  the job runs (`CardCopyUi::cancel` -> `Pounce::cancel`); Pounce stops stepping the job and drops it, so the file being
+  copied is finished and verified first (the stepper's own cancel poll is `|| false`) and the report counts the rest as not
+  attempted. A cancelled run's copies stay on the destination but are not registered or baselined (the verified list dies with
+  the job); running it again reports them already there and registers and baselines them. The button needs the panel open and a
+  started job (not the planning window). (3) *Same-device check.* `check_destination` also refuses a
   destination that reaches the card's volume through a link/junction/mount alias (`on_card_volume`: Unix compares `st_dev` and
   requires the card to be a mount root, Windows compares `volume::identify` keys; either side unknown means "not the same", so
-  a failed lookup never blocks a copy the path test allowed). The Windows half is type-checked by reading only.
+  a failed lookup never blocks a copy the path test allowed). The Windows half is type-checked by reading only, and
+  `identify` only knows NTFS+GPT or MBR volumes (`identity_key`), so on an exFAT card it is a quiet no-op there: the path-prefix
+  check remains the guard. Unix test: `/proc/self` vs `/proc` (same device) and `/` vs `/proc` (different).
 - **Still not done:** verification on a real Windows FAT/exFAT card and reader (`default_mount_roots`, claim/rename path),
   a second card read / cache-bypassing read-back (both need hardware), and offering to copy the non-photo files the survey
   reports (videos, other RAW formats) or revealing them: they are listed in the result line but not copied.

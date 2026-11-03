@@ -516,7 +516,7 @@ impl CardCopyUi {
                 if self.job.is_some()
                     && ui
                         .button("Cancel")
-                        .on_hover_text("Stops after the file being copied; copies already made stay.")
+                        .on_hover_text("Stops after the file being copied. Copies already made stay on the destination; run it again to register them.")
                         .clicked()
                 {
                     self.cancel(pounce);
@@ -691,15 +691,45 @@ mod tests {
         assert!(s.contains("db busy") && s.contains("safe to format"), "{s}");
     }
 
+    /// Occupies the only worker until released, so a job submitted after it cannot have started.
+    struct Blocker(Arc<std::sync::atomic::AtomicBool>);
+
+    impl nicti_pounce::ChunkedJob for Blocker {
+        fn spec(&self) -> nicti_pounce::JobSpec {
+            nicti_pounce::JobSpec {
+                priority: nicti_pounce::Priority::Foreground,
+                kind: nicti_pounce::JobKind::Import,
+                lane: nicti_pounce::Lane::Cpu,
+                vram_bytes: 0,
+                image_index: None,
+            }
+        }
+        fn label(&self) -> String {
+            "blocker".into()
+        }
+        fn progress(&self) -> nicti_pounce::Progress {
+            nicti_pounce::Progress::default()
+        }
+        fn step(&mut self) -> Result<nicti_pounce::Step, nicti_pounce::JobError> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(nicti_pounce::Step::Done)
+            } else {
+                std::thread::sleep(Duration::from_millis(2));
+                Ok(nicti_pounce::Step::Yield)
+            }
+        }
+    }
+
     #[test]
-    fn cancel_stops_the_running_job_and_the_report_still_arrives() {
+    fn cancel_stops_a_queued_copy_before_it_copies_anything_and_the_report_says_so() {
         use nicti_lair::pounce_jobs::CardCopyJob;
         use nicti_lair::{CatalogStore, SqliteCatalog};
+        use std::sync::atomic::{AtomicBool, Ordering};
         let tmp = tempfile::tempdir().unwrap();
         let (card, dest) = (tmp.path().join("card"), tmp.path().join("dest"));
         std::fs::create_dir_all(&card).unwrap();
         std::fs::create_dir_all(&dest).unwrap();
-        let plan: Vec<PlannedCopy> = (0..50)
+        let plan: Vec<PlannedCopy> = (0..5)
             .map(|i| {
                 let p = card.join(format!("{i}.NEF"));
                 std::fs::write(&p, vec![7u8; 4096]).unwrap();
@@ -716,7 +746,10 @@ mod tests {
         let vol = catalog.upsert_volume("v", None, None, 0).unwrap();
         let root = catalog.ensure_root(vol, &dest.to_string_lossy()).unwrap();
         let store: Arc<dyn CatalogStore + Send + Sync> = catalog;
+        // One CPU worker, held by the blocker: the copy job is queued and cannot have started.
         let pounce = Pounce::new(0, 1, 1, || {});
+        let release = Arc::new(AtomicBool::new(false));
+        pounce.submit(Box::new(Blocker(release.clone())));
         let (job, slot) = CardCopyJob::new(
             store,
             CardCopy::new(plan, Vec::new(), &dest, root),
@@ -732,6 +765,7 @@ mod tests {
             .status
             .as_deref()
             .is_some_and(|s| s.starts_with("Stopping")));
+        release.store(true, Ordering::SeqCst);
         let deadline = Instant::now() + Duration::from_secs(10);
         while ui.is_busy() {
             assert!(
@@ -742,6 +776,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(ui.job.is_none());
-        assert!(ui.status.is_some(), "the summary of what was done");
+        let status = ui.status.unwrap();
+        assert!(status.contains("5 not attempted"), "{status}");
+        assert!(!status.contains("safe to format"), "{status}");
+        assert_eq!(
+            std::fs::read_dir(&dest).unwrap().count(),
+            0,
+            "nothing was copied"
+        );
     }
 }

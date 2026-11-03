@@ -85,14 +85,6 @@ struct VerifiedCopy {
     blake3: String,
 }
 
-fn mtime_unix(meta: &std::fs::Metadata) -> i64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 pub struct CardCopy {
     plan: std::vec::IntoIter<PlannedCopy>,
     total_files: u64,
@@ -171,15 +163,36 @@ impl CardCopy {
                     return Ok(true);
                 }
                 match offer_file(&item.file.path, &self.dest_root, &item.dest_rel, cancelled) {
-                    Ok(Offered::Copied { dest, size, blake3 }) => {
+                    Ok(Offered::Copied {
+                        dest,
+                        size,
+                        blake3,
+                        mtime_unix,
+                    }) => {
                         self.report.copied += 1;
                         self.report.bytes_copied += size;
-                        self.note_verified(&dest, blake3);
+                        self.verified.push(VerifiedCopy {
+                            dest: dest.clone(),
+                            size,
+                            mtime_unix,
+                            blake3,
+                        });
                         self.report.destinations.push(dest);
                     }
-                    Ok(Offered::AlreadyThere { dest, blake3 }) => {
+                    Ok(Offered::AlreadyThere {
+                        dest,
+                        blake3,
+                        mtime_unix,
+                    }) => {
                         self.report.already_there += 1;
-                        self.note_verified(&dest, blake3);
+                        // Same size as the source (checked before the read-back), same content.
+                        let size = std::fs::metadata(&dest).map_or(0, |m| m.len());
+                        self.verified.push(VerifiedCopy {
+                            dest: dest.clone(),
+                            size,
+                            mtime_unix,
+                            blake3,
+                        });
                         self.report.destinations.push(dest);
                     }
                     Ok(Offered::Cancelled) => {
@@ -225,34 +238,19 @@ impl CardCopy {
         }
     }
 
-    /// Remembers what the verified read of `dest` saw, for [`Self::record_baselines`]. A file that
-    /// can't be stat'ed now simply gets no baseline.
-    fn note_verified(&mut self, dest: &Path, blake3: String) {
-        if let Ok(meta) = std::fs::metadata(dest) {
-            self.verified.push(VerifiedCopy {
-                dest: dest.to_path_buf(),
-                size: meta.len(),
-                mtime_unix: mtime_unix(&meta),
-                blake3,
-            });
-        }
-    }
-
     /// Records each verified copy's BLAKE3 as its asset's content-hash baseline (#659): the hash was
     /// computed to prove the copy and is exactly the full-file hash the baseline needs, so the
     /// first bit-rot check does not have to read these files again. Never fails the run.
     fn record_baselines(&mut self, store: &dyn CatalogStore) {
         let mut entries = Vec::with_capacity(self.verified.len());
         for v in std::mem::take(&mut self.verified) {
-            let rel = v.dest.strip_prefix(&self.dest_root).unwrap_or(&v.dest);
-            let rel = crate::scruff::normalize_rel_path(rel);
+            let Some(rel) = relative_to_root(&v.dest, &self.dest_root) else {
+                continue; // not under the root as spelled: no baseline rather than a wrong path
+            };
             match store.find_asset_by_path(self.root_id, &rel) {
                 Ok(Some(asset)) => entries.push((asset.id, v.size, v.mtime_unix, v.blake3)),
                 Ok(None) => {} // not registered (ingest skipped or failed it): nothing to attach to
-                Err(e) => {
-                    self.report.baseline_error = Some(e.to_string());
-                    return;
-                }
+                Err(e) => self.report.baseline_error = Some(e.to_string()),
             }
         }
         match store.record_baseline_hashes(self.root_id, &entries) {
@@ -266,6 +264,17 @@ impl CardCopy {
         self.report.not_attempted += self.plan.len() as u64;
         self.report
     }
+}
+
+/// `dest`'s path under `root` in the catalog's spelling, or `None` if it is not under it. `dest` comes
+/// from `offer_file`, which canonicalizes (verbatim `\\?\C:\...` on Windows), while `root` is the
+/// simplified spelling `check_destination` returned: both are brought to the same form first, or
+/// `strip_prefix` would fail on Windows and no baseline would ever be recorded.
+fn relative_to_root(dest: &Path, root: &Path) -> Option<String> {
+    let dest = simplify_verbatim(dest.to_path_buf());
+    let root = simplify_verbatim(root.to_path_buf());
+    let rel = dest.strip_prefix(&root).ok()?;
+    Some(crate::scruff::normalize_rel_path(rel))
 }
 
 /// Names that every card or OS puts on a volume and nobody wants copied.
@@ -559,5 +568,49 @@ mod tests {
         assert!(on_card_volume(Path::new("/"), Path::new("/")));
         // A missing path can't be established, so it never blocks.
         assert!(!on_card_volume(&tmp.path().join("missing"), Path::new("/")));
+    }
+
+    #[test]
+    fn a_destination_is_found_under_its_root_in_the_catalog_spelling() {
+        let root = Path::new("/photos");
+        assert_eq!(
+            relative_to_root(Path::new("/photos/2026-11-03/DSC_1.NEF"), root).as_deref(),
+            Some("2026-11-03/DSC_1.NEF")
+        );
+        assert_eq!(relative_to_root(Path::new("/elsewhere/a.NEF"), root), None);
+    }
+
+    /// The Windows case the review found: a verbatim destination against a plain root.
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_destination_matches_a_plain_root_on_windows() {
+        assert_eq!(
+            relative_to_root(
+                Path::new(r"\\?\C:\photos\2026-11-03\DSC_1.NEF"),
+                Path::new(r"C:\photos")
+            )
+            .as_deref(),
+            Some("2026-11-03/DSC_1.NEF")
+        );
+        assert_eq!(
+            relative_to_root(
+                Path::new(r"\\?\UNC\srv\share\a.NEF"),
+                Path::new(r"\\srv\share")
+            )
+            .as_deref(),
+            Some("a.NEF")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_card_volume_compares_real_devices() {
+        let (proc_root, proc_self) = (Path::new("/proc"), Path::new("/proc/self"));
+        if !proc_root.exists() {
+            return;
+        }
+        // Inside /proc is the same device; the filesystem root is another (and /proc is a mount root).
+        assert!(on_card_volume(proc_self, proc_root));
+        assert!(!on_card_volume(Path::new("/"), proc_root));
     }
 }
