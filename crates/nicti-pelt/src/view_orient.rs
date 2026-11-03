@@ -28,7 +28,7 @@ impl ViewOrient {
         Self(Orientation::from_exif(u32::from(value)))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
+    #[cfg_attr(not(test), allow(dead_code))] // a test/helper predicate; the paint path calls `index`
     pub fn is_normal(self) -> bool {
         self.0 == Orientation::Normal
     }
@@ -58,7 +58,6 @@ impl ViewOrient {
     }
 
     /// A display-space point (normalised) -> the sensor-space point it shows.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn to_sensor(self, (u, v): (f32, f32)) -> (f32, f32) {
         match self.0 {
             Orientation::Normal => (u, v),
@@ -73,7 +72,6 @@ impl ViewOrient {
     }
 
     /// A sensor-space point (normalised) -> where it appears in the displayed image.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn to_display(self, (su, sv): (f32, f32)) -> (f32, f32) {
         match self.0 {
             Orientation::Normal => (su, sv),
@@ -87,10 +85,30 @@ impl ViewOrient {
         }
     }
 
+    /// How many screen points the *frame's own width* spans on a `rect` the displayed image fills:
+    /// the rect's width normally, its height when a quarter turn runs the frame's width down the
+    /// screen. What the grain's canvas-minification scale needs (#421/#634).
+    pub fn frame_width_on_screen(self, rect: egui::Rect) -> f32 {
+        if self.0.swaps_dimensions() {
+            rect.height()
+        } else {
+            rect.width()
+        }
+    }
+
+    /// Screen pixels per displayed pixel along the screen's horizontal and vertical axes, for a
+    /// `rect` the displayed image fills. A circle of radius `r` in the sensor frame is still a
+    /// circle of radius `r` once displayed (turns and flips preserve circles), so on screen it is an
+    /// ellipse with half-axes `r * scale.0` (horizontal) and `r * scale.1` (vertical); this is
+    /// also how many source pixels one screen pixel covers, inverted, along the screen axes.
+    pub fn display_scale(self, rect: egui::Rect, source: (f32, f32)) -> (f32, f32) {
+        let (dw, dh) = self.display_size(source);
+        (rect.width() / dw.max(1.0), rect.height() / dh.max(1.0))
+    }
+
     /// Screen point inside `rect` (the rect the *displayed* image fills) -> source-image pixels.
     /// `source` is the sensor-orientation frame size. For [`Self::normal`] this is exactly the
     /// plain stretch `screen_to_image` always did.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn screen_to_image(
         self,
         rect: egui::Rect,
@@ -104,7 +122,6 @@ impl ViewOrient {
     }
 
     /// The inverse of [`Self::screen_to_image`].
-    #[cfg_attr(not(test), allow(dead_code))] // used by the Develop tools' follow-up
     pub fn image_to_screen(
         self,
         rect: egui::Rect,
@@ -249,5 +266,108 @@ mod tests {
             (one[0] - 0.2).abs() < 1e-6 && (one[1] - 0.1).abs() < 1e-6,
             "{one:?}"
         );
+    }
+
+    /// A minimal TIFF whose IFD0 holds only an Orientation entry of `field_type` (3 SHORT, 4 LONG).
+    fn tiff(big_endian: bool, field_type: u16, value: u32) -> Vec<u8> {
+        let u16b = |v: u16| {
+            if big_endian {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let u32b = |v: u32| {
+            if big_endian {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let mut t = if big_endian {
+            vec![b'M', b'M']
+        } else {
+            vec![b'I', b'I']
+        };
+        t.extend_from_slice(&u16b(42));
+        t.extend_from_slice(&u32b(8));
+        t.extend_from_slice(&u16b(1)); // one entry
+        t.extend_from_slice(&u16b(0x0112));
+        t.extend_from_slice(&u16b(field_type));
+        t.extend_from_slice(&u32b(1));
+        if field_type == 3 {
+            t.extend_from_slice(&u16b(value as u16));
+            t.extend_from_slice(&[0, 0]);
+        } else {
+            t.extend_from_slice(&u32b(value));
+        }
+        t.extend_from_slice(&u32b(0)); // no next IFD
+        t
+    }
+
+    /// #634: the screen reads the orientation with the embedded-JPEG walker, export with kamadak
+    /// (`SourceExif`). Whatever the byte order, SHORT or LONG, in range or not, they must land on
+    /// the same turn, or the Develop canvas and the exported file would disagree.
+    #[test]
+    fn the_screens_orientation_reader_agrees_with_exports_on_every_value() {
+        use nicti_cornea::embedded::{SliceSource, Walker};
+        for big_endian in [false, true] {
+            for field_type in [3u16, 4] {
+                for value in 0..=9u32 {
+                    let data = tiff(big_endian, field_type, value);
+                    let walked = Walker::new(SliceSource::new(&data))
+                        .unwrap()
+                        .ifd0_orientation()
+                        .unwrap()
+                        .unwrap_or(0);
+                    let screen = ViewOrient::from_exif(walked).0;
+                    let export = nicti_preen::metadata::SourceExif::from_reader(
+                        &mut std::io::Cursor::new(data.clone()),
+                    )
+                    .orientation;
+                    assert_eq!(
+                        screen, export,
+                        "big_endian={big_endian} type={field_type} value={value}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_scale_is_screen_px_per_displayed_px_and_swaps_axes_under_a_quarter_turn() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
+        let source = (600.0f32, 400.0);
+        // Normal: displayed size is the source's.
+        assert_eq!(
+            ViewOrient::normal().display_scale(rect, source),
+            (200.0 / 600.0, 600.0 / 400.0)
+        );
+        // A quarter turn displays 400 x 600.
+        assert_eq!(
+            ViewOrient(Orientation::Rotate90Cw).display_scale(rect, source),
+            (200.0 / 400.0, 600.0 / 600.0)
+        );
+        // Flips keep the size.
+        assert_eq!(
+            ViewOrient(Orientation::FlipH).display_scale(rect, source),
+            ViewOrient::normal().display_scale(rect, source)
+        );
+    }
+
+    #[test]
+    fn the_frames_width_runs_down_the_screen_under_a_quarter_turn() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
+        for (o, want) in [
+            (Orientation::Normal, 200.0),
+            (Orientation::FlipH, 200.0),
+            (Orientation::Rotate180, 200.0),
+            (Orientation::Rotate90Cw, 600.0),
+            (Orientation::Rotate270Cw, 600.0),
+            (Orientation::Transpose, 600.0),
+            (Orientation::Transverse, 600.0),
+        ] {
+            assert_eq!(ViewOrient(o).frame_width_on_screen(rect), want, "{o:?}");
+        }
     }
 }

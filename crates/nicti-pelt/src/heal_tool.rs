@@ -5,7 +5,7 @@
 //! **Geometry.** While the tool is active the view shows the *uncropped* image
 //! (`DevelopView::uncropped_preview`), which `app.rs` paints stretched into the viewport rect, so a
 //! screen point maps to source pixels by the same plain stretch the crop tool already uses
-//! (`develop_panel::screen_to_image`) and spots live directly in the `HealParams` coordinate space.
+//! (`ViewOrient::screen_to_image`) and spots live directly in the `HealParams` coordinate space.
 //! A spot's circle is drawn as an ellipse because that stretch can be anisotropic.
 //!
 //! **Undo.** Spot edits go through `DevelopDoc::set_stage_params`, so they are undoable with the
@@ -31,9 +31,9 @@ use nicti_tapetum::coat::{HealParams, MaskRecipe, Spot, SpotKind};
 use nicti_tapetum::heal::{spot_key, RemovalPatch, MAX_RADIUS, MAX_SPOTS};
 use nicti_tapetum::stages::HEAL;
 
-use crate::develop_panel::{image_to_screen, screen_to_image};
 use crate::fur::{self, SliderSpec};
 use crate::render::DevelopDoc;
+use crate::view_orient::ViewOrient;
 
 /// Which on-image tool owns the Develop viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -708,9 +708,13 @@ pub fn handle_viewport(
         heal.selected = None;
     }
     let mut changed = false;
-    let img = |p: egui::Pos2| screen_to_image(rect, source, p);
-    // One screen handle radius, in source pixels (x-axis; the stretch may be anisotropic).
-    let handle_tol = HANDLE_RADIUS_PX * source.0 / rect.width().max(1.0);
+    let orient = develop.view_orient();
+    let img = |p: egui::Pos2| orient.screen_to_image(rect, source, p);
+    // One screen handle radius, in source pixels. The displayed image is turned by the EXIF
+    // orientation (#634), so the screen's horizontal axis is the sensor's *vertical* one under a
+    // 90-degree turn; the displayed size gives the screen px per source px either way (the stretch
+    // may be anisotropic, so this uses the horizontal axis as before).
+    let handle_tol = HANDLE_RADIUS_PX / orient.display_scale(rect, source).0.max(1e-6);
 
     // Keys act only while the pointer is over the photo, so typing in a panel text field never
     // deletes a spot.
@@ -832,6 +836,7 @@ pub fn handle_viewport(
     }
     draw_overlay(
         ui,
+        orient,
         rect,
         source,
         &params,
@@ -911,23 +916,27 @@ fn place_spot(
     *changed = true;
 }
 
+/// A source-space circle on screen: its centre and ellipse half-axes. A turn or flip keeps a
+/// circle a circle, so the half-axes are the radius times the screen px per *displayed* px on each
+/// screen axis (#634; for a 90-degree turn these are not the source's own x/y ratios).
 fn ellipse(
+    orient: ViewOrient,
     rect: egui::Rect,
     source: (f32, f32),
     center: (f32, f32),
     radius: f32,
 ) -> (egui::Pos2, egui::Vec2) {
+    let (kx, ky) = orient.display_scale(rect, source);
     (
-        image_to_screen(rect, source, center),
-        egui::vec2(
-            radius * rect.width() / source.0.max(1.0),
-            radius * rect.height() / source.1.max(1.0),
-        ),
+        orient.image_to_screen(rect, source, center),
+        egui::vec2(radius * kx, radius * ky),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_overlay(
     ui: &egui::Ui,
+    orient: ViewOrient,
     rect: egui::Rect,
     source: (f32, f32),
     params: &HealParams,
@@ -950,10 +959,16 @@ fn draw_overlay(
         } else {
             white
         };
-        let (c, r) = ellipse(rect, source, s.center, s.radius);
+        let (c, r) = ellipse(orient, rect, source, s.center, s.radius);
         painter.add(egui::Shape::ellipse_stroke(c, r, stroke));
         if let Some((ox, oy)) = s.source_offset {
-            let (sc, sr) = ellipse(rect, source, (s.center.0 + ox, s.center.1 + oy), s.radius);
+            let (sc, sr) = ellipse(
+                orient,
+                rect,
+                source,
+                (s.center.0 + ox, s.center.1 + oy),
+                s.radius,
+            );
             painter.add(egui::Shape::ellipse_stroke(sc, sr, source_stroke));
             painter.line_segment([c, sc], egui::Stroke::new(1.0, source_stroke.color));
             if is_selected {
@@ -974,7 +989,7 @@ fn draw_overlay(
     // Brush preview under the pointer, sized to whatever a click would place.
     if response.hovered() && heal.drag.is_none() {
         if let Some(hover) = response.hover_pos() {
-            let (_, r) = ellipse(rect, source, (0.0, 0.0), clamp_radius(heal.radius));
+            let (_, r) = ellipse(orient, rect, source, (0.0, 0.0), clamp_radius(heal.radius));
             painter.add(egui::Shape::ellipse_stroke(
                 hover,
                 r,
@@ -1696,6 +1711,52 @@ mod tests {
             "a heal spot always has a source"
         );
         assert_eq!(s[0].radius, heal.radius);
+    }
+
+    /// #634: with the photo turned by its EXIF orientation, a click at a point of the *displayed*
+    /// image places the spot at the sensor-space pixel that point shows, for all eight orientations.
+    #[test]
+    fn a_click_on_a_turned_photo_lands_on_the_sensor_pixel_it_shows() {
+        for exif in 1..=8u8 {
+            let Some((mut develop, mut heal, p, mut h)) = rig() else {
+                return;
+            };
+            develop.set_orientation_for_test(exif);
+            let source = develop.source_extent();
+            let (fx, fy) = (0.25f32, 0.75f32);
+            h.click(h.at(fx, fy), &mut develop, &mut heal, &p);
+            let c = spots(&develop)[0].center;
+            let (su, sv) = ViewOrient::from_exif(exif).to_sensor((fx, fy));
+            assert!(
+                (c.0 - su * source.0).abs() < 2.0 && (c.1 - sv * source.1).abs() < 2.0,
+                "exif {exif}: spot {c:?}, want ({}, {})",
+                su * source.0,
+                sv * source.1
+            );
+        }
+    }
+
+    /// #634: a spot's circle is an ellipse on an anisotropically stretched rect; under a 90-degree
+    /// turn its screen half-axes swap relative to the source's own x/y ratios.
+    #[test]
+    fn a_spot_circle_keeps_its_size_on_screen_under_every_orientation() {
+        let source = (600.0f32, 400.0);
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(200.0, 600.0)); // anisotropic
+        for exif in 1..=8u8 {
+            let o = ViewOrient::from_exif(exif);
+            let (c, r) = ellipse(o, rect, source, (300.0, 200.0), 10.0);
+            let (dw, dh) = o.display_size(source);
+            // The displayed image is stretched to fill the rect: one displayed px is
+            // rect/display px on each screen axis.
+            assert!((r.x - 10.0 * 200.0 / dw).abs() < 1e-4, "exif {exif}: {r:?}");
+            assert!((r.y - 10.0 * 600.0 / dh).abs() < 1e-4, "exif {exif}: {r:?}");
+            // The centre of the image is the centre of the screen under any turn or flip.
+            assert!((c - rect.center()).length() < 1e-3, "exif {exif}: {c:?}");
+        }
+        // Normal is exactly the old ratio.
+        let (_, r) = ellipse(ViewOrient::normal(), rect, source, (0.0, 0.0), 10.0);
+        assert!((r.x - 10.0 * 200.0 / 600.0).abs() < 1e-4);
+        assert!((r.y - 10.0 * 600.0 / 400.0).abs() < 1e-4);
     }
 
     #[test]

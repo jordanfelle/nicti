@@ -17,7 +17,6 @@ use nicti_tapetum::mask::compose::ai_bake_key;
 use nicti_tapetum::mask::params::{LocalAdjust, MaskParams, MaskSource, Op, MAX_CORRECTIONS};
 use nicti_tapetum::stages::MASKS;
 
-use crate::develop_panel::{image_to_screen, screen_to_image};
 use crate::fur::{self, SliderSpec};
 use crate::mask_edit::{
     add_color_sample, add_component_from, add_correction, begin_stroke_pressure, delete, duplicate,
@@ -27,6 +26,7 @@ use crate::mask_edit::{
 };
 use crate::mask_tool::MaskBakeService;
 use crate::render::DevelopDoc;
+use crate::view_orient::ViewOrient;
 use nicti_siamese::providers::{stale_model, updated_recipe};
 
 /// Screen pixels within which a press grabs a gradient handle.
@@ -830,15 +830,26 @@ fn effective_arm(c: &nicti_tapetum::mask::params::LocalCorrection, arm: Arm) -> 
     }
 }
 
-/// Screen point -> normalized frame coordinates.
-pub(crate) fn to_norm(rect: egui::Rect, source: (f32, f32), p: egui::Pos2) -> [f32; 2] {
-    let (x, y) = screen_to_image(rect, source, p);
+/// Screen point -> normalized frame coordinates (of the frame in its own, sensor, orientation: the
+/// displayed image is turned by the EXIF orientation, #634).
+pub(crate) fn to_norm(
+    orient: ViewOrient,
+    rect: egui::Rect,
+    source: (f32, f32),
+    p: egui::Pos2,
+) -> [f32; 2] {
+    let (x, y) = orient.screen_to_image(rect, source, p);
     [x / source.0.max(1.0), y / source.1.max(1.0)]
 }
 
 /// Normalized frame coordinates -> screen point.
-pub(crate) fn to_screen(rect: egui::Rect, source: (f32, f32), n: [f32; 2]) -> egui::Pos2 {
-    image_to_screen(rect, source, (n[0] * source.0, n[1] * source.1))
+pub(crate) fn to_screen(
+    orient: ViewOrient,
+    rect: egui::Rect,
+    source: (f32, f32),
+    n: [f32; 2],
+) -> egui::Pos2 {
+    orient.image_to_screen(rect, source, (n[0] * source.0, n[1] * source.1))
 }
 
 fn near(a: egui::Pos2, b: egui::Pos2) -> bool {
@@ -849,19 +860,22 @@ fn near(a: egui::Pos2, b: egui::Pos2) -> bool {
 /// radius) handles. Radii are fractions of the long edge, so `radius * long / width` is the
 /// normalized x extent and `radius * long / height` the normalized y extent.
 pub(crate) fn radial_handles(
+    orient: ViewOrient,
     rect: egui::Rect,
     source: (f32, f32),
     center: [f32; 2],
     radii: [f32; 2],
     angle_deg: f32,
 ) -> (egui::Pos2, egui::Pos2, egui::Pos2) {
-    let c = to_screen(rect, source, center);
+    let c = to_screen(orient, rect, source, center);
     let ex = to_screen(
+        orient,
         rect,
         source,
         local_to_norm(center, radii[0], 0.0, angle_deg, source),
     );
     let ey = to_screen(
+        orient,
         rect,
         source,
         local_to_norm(center, 0.0, radii[1], angle_deg, source),
@@ -914,6 +928,7 @@ pub fn handle_viewport(
     mask: &mut MaskUi,
 ) {
     let source = develop.source_extent();
+    let orient = develop.view_orient();
     let mut params: MaskParams = develop.stage_params(MASKS);
     if mask.selected.is_some_and(|i| i >= params.corrections.len()) {
         mask.selected = None;
@@ -965,7 +980,7 @@ pub fn handle_viewport(
                             &mut params.corrections[sel],
                             &mask.brush,
                             erase,
-                            to_norm(rect, source, p),
+                            to_norm(orient, rect, source, p),
                             stylus_pressure(ui),
                         ) {
                             mask.drag = Some(MaskDrag::Stroke { comp, stroke });
@@ -986,7 +1001,7 @@ pub fn handle_viewport(
                             &mut params.corrections[sel],
                             comp,
                             stroke,
-                            to_norm(rect, source, p),
+                            to_norm(orient, rect, source, p),
                             step,
                             stylus_pressure(ui),
                         );
@@ -998,9 +1013,9 @@ pub fn handle_viewport(
                     if let Some(press) = press {
                         let c = &mut params.corrections[sel];
                         let grab = linear_ends(c).and_then(|(p0, p1)| {
-                            if near(press, to_screen(rect, source, p0)) {
+                            if near(press, to_screen(orient, rect, source, p0)) {
                                 Some(0u8)
-                            } else if near(press, to_screen(rect, source, p1)) {
+                            } else if near(press, to_screen(orient, rect, source, p1)) {
                                 Some(1u8)
                             } else {
                                 None
@@ -1009,7 +1024,7 @@ pub fn handle_viewport(
                         let handle = match grab {
                             Some(h) => h,
                             None => {
-                                let n = to_norm(rect, source, press);
+                                let n = to_norm(orient, rect, source, press);
                                 changed |= set_linear(c, n, n);
                                 1
                             }
@@ -1020,7 +1035,7 @@ pub fn handle_viewport(
                     if let (Some(MaskDrag::Linear(h)), Some(p)) = (mask.drag, pointer) {
                         let c = &mut params.corrections[sel];
                         if let Some((mut p0, mut p1)) = linear_ends(c) {
-                            let n = to_norm(rect, source, p);
+                            let n = to_norm(orient, rect, source, p);
                             if h == 0 {
                                 p0 = n;
                             } else {
@@ -1038,7 +1053,7 @@ pub fn handle_viewport(
                         let handle = match radial_shape(c) {
                             Some((center, radii, angle, _)) => {
                                 let (hc, hx, hy) =
-                                    radial_handles(rect, source, center, radii, angle);
+                                    radial_handles(orient, rect, source, center, radii, angle);
                                 if near(press, hc) {
                                     RadialHandle::Center
                                 } else if near(press, hx) {
@@ -1052,7 +1067,7 @@ pub fn handle_viewport(
                             None => RadialHandle::New,
                         };
                         if handle == RadialHandle::New {
-                            let n = to_norm(rect, source, press);
+                            let n = to_norm(orient, rect, source, press);
                             changed |= set_radial(c, n, [0.002, 0.002]);
                         }
                         mask.drag = Some(MaskDrag::Radial(handle));
@@ -1061,7 +1076,7 @@ pub fn handle_viewport(
                     if let (Some(MaskDrag::Radial(h)), Some(p)) = (mask.drag, pointer) {
                         let c = &mut params.corrections[sel];
                         if let Some((center, radii, angle, _)) = radial_shape(c) {
-                            let n = to_norm(rect, source, p);
+                            let n = to_norm(orient, rect, source, p);
                             let to = radii_to(center, n, source, angle);
                             let (new_center, new_radii) = match h {
                                 RadialHandle::Center => (n, radii),
@@ -1077,7 +1092,7 @@ pub fn handle_viewport(
             Arm::Pick => {
                 if response.clicked() {
                     if let Some(p) = response.interact_pointer_pos() {
-                        let n = to_norm(rect, source, p);
+                        let n = to_norm(orient, rect, source, p);
                         let lab = mask.thumb_for(develop).sample_lab(n[0], n[1]);
                         changed |= add_color_sample(&mut params.corrections[sel], lab);
                     }
@@ -1109,6 +1124,7 @@ fn draw_overlay(
         return;
     };
     let source = develop.source_extent();
+    let orient = develop.view_orient();
     let painter = ui.painter_at(rect);
 
     if mask.show_overlay {
@@ -1155,7 +1171,10 @@ fn draw_overlay(
     match effective_arm(c, mask.arm) {
         Arm::Linear => {
             if let Some((p0, p1)) = linear_ends(c) {
-                let (a, b) = (to_screen(rect, source, p0), to_screen(rect, source, p1));
+                let (a, b) = (
+                    to_screen(orient, rect, source, p0),
+                    to_screen(orient, rect, source, p1),
+                );
                 painter.line_segment([a, b], white);
                 painter.circle_filled(a, HANDLE_DRAW_PX, accent);
                 painter.circle_filled(b, HANDLE_DRAW_PX, egui::Color32::WHITE);
@@ -1163,12 +1182,13 @@ fn draw_overlay(
         }
         Arm::Radial => {
             if let Some((center, radii, angle, _)) = radial_shape(c) {
-                let (hc, hx, hy) = radial_handles(rect, source, center, radii, angle);
+                let (hc, hx, hy) = radial_handles(orient, rect, source, center, radii, angle);
                 // A polyline, not `ellipse_stroke`: the ellipse can be rotated.
                 let outline: Vec<egui::Pos2> = (0..64)
                     .map(|i| {
                         let t = i as f32 / 64.0 * std::f32::consts::TAU;
                         to_screen(
+                            orient,
                             rect,
                             source,
                             local_to_norm(
@@ -1190,7 +1210,7 @@ fn draw_overlay(
         Arm::Brush => {
             if let Some(p) = response.hover_pos() {
                 let long = source.0.max(source.1).max(1.0);
-                let scale = long * rect.width() / source.0.max(1.0);
+                let scale = long * orient.display_scale(rect, source).0;
                 painter.circle_stroke(p, mask.brush.radius * scale, white);
                 painter.circle_stroke(
                     p,
@@ -1716,7 +1736,7 @@ mod tests {
         let source = (600.0f32, 400.0);
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0));
         let (center, radii, angle) = ([0.5f32, 0.5], [0.2f32, 0.1], 30.0f32);
-        let (hc, hx, hy) = radial_handles(rect, source, center, radii, angle);
+        let (hc, hx, hy) = radial_handles(ViewOrient::normal(), rect, source, center, radii, angle);
         // The X handle is where the rasterizer's own math puts the ellipse edge along its x axis.
         let long = 600.0f32;
         let (s, c) = angle.to_radians().sin_cos();
@@ -1753,5 +1773,38 @@ mod tests {
             ..LocalAdjust::default()
         };
         assert!(a.is_noop(), "an amount-0 tint still changes nothing");
+    }
+
+    /// #634: `to_norm`/`to_screen` are inverses for every orientation, a displayed-image corner
+    /// lands on the sensor corner the turn says, and Normal is the plain stretch.
+    #[test]
+    fn mask_coordinates_follow_the_orientation_and_round_trip() {
+        let source = (600.0f32, 400.0);
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(300.0, 500.0));
+        for exif in 1..=8u8 {
+            let o = ViewOrient::from_exif(exif);
+            for p in [
+                pos2(10.0, 20.0),
+                pos2(310.0, 20.0),
+                pos2(160.0, 270.0),
+                pos2(250.0, 480.0),
+            ] {
+                let n = to_norm(o, rect, source, p);
+                let back = to_screen(o, rect, source, n);
+                assert!(
+                    (back - p).length() < 1e-2,
+                    "exif {exif}: {p:?} -> {n:?} -> {back:?}"
+                );
+            }
+            // Display top-left shows the sensor point to_sensor((0,0)) says.
+            let n = to_norm(o, rect, source, pos2(10.0, 20.0));
+            let want = o.to_sensor((0.0, 0.0));
+            assert!(
+                (n[0] - want.0).abs() < 1e-5 && (n[1] - want.1).abs() < 1e-5,
+                "exif {exif}: {n:?} vs {want:?}"
+            );
+        }
+        let n = to_norm(ViewOrient::normal(), rect, source, pos2(160.0, 270.0));
+        assert!((n[0] - 0.5).abs() < 1e-5 && (n[1] - 0.5).abs() < 1e-5);
     }
 }

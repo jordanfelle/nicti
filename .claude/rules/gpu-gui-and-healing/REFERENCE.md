@@ -41,7 +41,7 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #341: display orientation
 
-- `LinearFrame.orientation` (IFD0, EXIF 1-8) turns only the on-screen image (`view_orient::ViewOrient`, `display.wgsl` `orient` uniform), pinned to export's `preen::orient`; Loupe done, Develop crop/heal/mask overlays still sensor-oriented (follow-up). Detail: `docs/decisions/gpu-gui-and-healing.md`.
+- `LinearFrame.orientation` (IFD0, EXIF 1-8) turns only the on-screen image (`view_orient::ViewOrient`, `display.wgsl` `orient` uniform), pinned to export's `preen::orient`; Loupe done (#633), Develop paints and maps through it too (#634: fit by the turned size, crop/heal/mask/colour-pick overlays via `ViewOrient::{screen_to_image, image_to_screen, display_scale}`). Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
 ## #472: sidebar folder browsing
 

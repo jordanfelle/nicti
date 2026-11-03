@@ -719,23 +719,10 @@ const DRAG_STATE_ID: &str = "nicti_pelt::develop_panel::crop_drag_state";
 const HANDLE_RADIUS_PX: f32 = 6.0;
 const ROTATE_HANDLE_OFFSET_PX: f32 = 28.0;
 
-/// Maps a screen-space point (inside `rect`) to source-image pixel space -- the whole,
-/// uncropped-canvas render is painted stretched to fill `rect` (see `app.rs`'s
-/// `ui.allocate_exact_size`), so this can be anisotropic when `rect`'s aspect ratio doesn't match
-/// the source's.
-pub(crate) fn screen_to_image(rect: egui::Rect, source: (f32, f32), p: egui::Pos2) -> (f32, f32) {
-    (
-        (p.x - rect.left()) / rect.width().max(1.0) * source.0,
-        (p.y - rect.top()) / rect.height().max(1.0) * source.1,
-    )
-}
-
-pub(crate) fn image_to_screen(rect: egui::Rect, source: (f32, f32), p: (f32, f32)) -> egui::Pos2 {
-    egui::pos2(
-        rect.left() + p.0 / source.0.max(1.0) * rect.width(),
-        rect.top() + p.1 / source.1.max(1.0) * rect.height(),
-    )
-}
+// Screen <-> source-image mapping goes through `ViewOrient::{screen_to_image, image_to_screen}`
+// (#634): the displayed image is turned by the photo's EXIF orientation, `rect` is the rect the
+// *displayed* image fills (it can be anisotropic against the source, and swaps axes under a
+// 90-degree turn), and the crop/rotate/straighten gestures below work in sensor-image space.
 
 /// The forward (clockwise-positive, y-down) content-rotation matrix's action on a vector relative
 /// to `center` -- matches `geometry::Affine2D::crop_and_rotate`'s own documented sign convention
@@ -764,6 +751,7 @@ pub fn handle_viewport_gesture(
     develop: &mut DevelopDoc,
 ) {
     let source = develop.source_extent();
+    let orient = develop.view_orient();
     if develop.upright_guide_mode {
         handle_guide_gesture(ui, response, rect, develop, source);
         return;
@@ -786,12 +774,17 @@ pub fn handle_viewport_gesture(
                 (center.0, crop_rect.y - ROTATE_HANDLE_OFFSET_PX),
                 crop.rotation_degrees,
             );
-            let screen_rotate_handle = image_to_screen(rect, source, rotated_top);
+            let screen_rotate_handle = orient.image_to_screen(rect, source, rotated_top);
             if pointer.distance(screen_rotate_handle) <= HANDLE_RADIUS_PX * 2.0 {
                 DragTarget::Rotate
-            } else if let Some(corner) =
-                corner_hit(rect, source, &crop_rect, crop.rotation_degrees, pointer)
-            {
+            } else if let Some(corner) = corner_hit(
+                orient,
+                rect,
+                source,
+                &crop_rect,
+                crop.rotation_degrees,
+                pointer,
+            ) {
                 DragTarget::Corner(corner)
             } else {
                 DragTarget::Pan
@@ -816,8 +809,8 @@ pub fn handle_viewport_gesture(
         let Some(pointer) = response.interact_pointer_pos() else {
             return;
         };
-        let start_img = screen_to_image(rect, source, state.start_pointer);
-        let cur_img = screen_to_image(rect, source, pointer);
+        let start_img = orient.screen_to_image(rect, source, state.start_pointer);
+        let cur_img = orient.screen_to_image(rect, source, pointer);
         let delta = (cur_img.0 - start_img.0, cur_img.1 - start_img.1);
 
         match state.target {
@@ -830,8 +823,8 @@ pub fn handle_viewport_gesture(
                 // `rect` can be anisotropically stretched relative to the source image (see
                 // `screen_to_image`'s own doc comment), so a screen-space angle is not generally
                 // the same as the image-space content rotation it's meant to drive.
-                let start_img = screen_to_image(rect, source, state.start_pointer);
-                let cur_img = screen_to_image(rect, source, pointer);
+                let start_img = orient.screen_to_image(rect, source, state.start_pointer);
+                let cur_img = orient.screen_to_image(rect, source, pointer);
                 // Pivot on the rect as it was when the drag began: the live rect is re-fitted
                 // (and so may slide) every frame, which would feed back into the angle.
                 let center = state.start_crop.effective_rect(source).center_absolute();
@@ -922,8 +915,8 @@ pub fn handle_viewport_gesture(
         if let Some(state) = ui.data(|d| d.get_temp::<DragState>(state_id)) {
             if state.target == DragTarget::Straighten {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    let start_img = screen_to_image(rect, source, state.start_pointer);
-                    let cur_img = screen_to_image(rect, source, pointer);
+                    let start_img = orient.screen_to_image(rect, source, state.start_pointer);
+                    let cur_img = orient.screen_to_image(rect, source, pointer);
                     develop.straighten_from_drag(cur_img.0 - start_img.0, cur_img.1 - start_img.1);
                 }
             }
@@ -931,12 +924,13 @@ pub fn handle_viewport_gesture(
         ui.data_mut(|d| d.remove::<DragState>(state_id));
     }
 
-    draw_crop_overlay(ui, rect, source, &crop);
+    draw_crop_overlay(ui, orient, rect, source, &crop);
 }
 
 /// Hit-tests the 4 corner handles (0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left, in the
 /// rect's own rotated frame) against a screen-space pointer position.
 fn corner_hit(
+    orient: crate::view_orient::ViewOrient,
     rect: egui::Rect,
     source: (f32, f32),
     crop_rect: &nicti_tapetum::geometry::CropRect,
@@ -955,7 +949,7 @@ fn corner_hit(
     ];
     corners.iter().enumerate().find_map(|(i, &c)| {
         let rotated = rotate_forward(center, c, rotation_degrees);
-        let screen = image_to_screen(rect, source, rotated);
+        let screen = orient.image_to_screen(rect, source, rotated);
         if pointer.distance(screen) <= HANDLE_RADIUS_PX * 2.0 {
             Some(i)
         } else {
@@ -979,6 +973,7 @@ fn handle_guide_gesture(
     source: (f32, f32),
 ) {
     use nicti_tapetum::upright::{Guide, GuideKind, Segment};
+    let orient = develop.view_orient();
     let start_id = egui::Id::unique("nicti_pelt::develop_panel::guide_start");
     if response.drag_started() {
         if let Some(p) = response.interact_pointer_pos() {
@@ -994,8 +989,8 @@ fn handle_guide_gesture(
     }
     if response.drag_stopped() {
         if let (Some(a), Some(b)) = (start, response.interact_pointer_pos()) {
-            let a_img = screen_to_image(rect, source, a);
-            let b_img = screen_to_image(rect, source, b);
+            let a_img = orient.screen_to_image(rect, source, a);
+            let b_img = orient.screen_to_image(rect, source, b);
             let (dx, dy) = (b_img.0 - a_img.0, b_img.1 - a_img.1);
             if dx.hypot(dy) >= MIN_GUIDE_LENGTH_PX {
                 if develop.upright_guides.len() >= MAX_GUIDES {
@@ -1021,7 +1016,7 @@ fn handle_guide_gesture(
             GuideKind::Vertical => egui::Color32::from_rgb(0, 200, 255),
             GuideKind::Horizontal => egui::Color32::from_rgb(255, 160, 0),
         };
-        let p = |q: (f64, f64)| image_to_screen(rect, source, (q.0 as f32, q.1 as f32));
+        let p = |q: (f64, f64)| orient.image_to_screen(rect, source, (q.0 as f32, q.1 as f32));
         painter.line_segment(
             [p(g.segment.a), p(g.segment.b)],
             egui::Stroke::new(2.0, color),
@@ -1031,7 +1026,13 @@ fn handle_guide_gesture(
 
 /// Draws the crop rect outline (rotated per `crop.rotation_degrees`), its 4 corner handles, and
 /// the rotate handle above its top edge.
-fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), crop: &CropParams) {
+fn draw_crop_overlay(
+    ui: &mut egui::Ui,
+    orient: crate::view_orient::ViewOrient,
+    rect: egui::Rect,
+    source: (f32, f32),
+    crop: &CropParams,
+) {
     let crop_rect = crop.effective_rect(source);
     let center = crop_rect.center_absolute();
     let corners_img = [
@@ -1047,7 +1048,7 @@ fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), cr
     let screen_points: Vec<egui::Pos2> = corners_img
         .iter()
         .map(|&c| {
-            image_to_screen(
+            orient.image_to_screen(
                 rect,
                 source,
                 rotate_forward(center, c, crop.rotation_degrees),
@@ -1066,10 +1067,10 @@ fn draw_crop_overlay(ui: &mut egui::Ui, rect: egui::Rect, source: (f32, f32), cr
         (center.0, crop_rect.y - ROTATE_HANDLE_OFFSET_PX),
         crop.rotation_degrees,
     );
-    let handle_screen = image_to_screen(rect, source, rotated_top);
+    let handle_screen = orient.image_to_screen(rect, source, rotated_top);
     painter.line_segment(
         [
-            image_to_screen(
+            orient.image_to_screen(
                 rect,
                 source,
                 rotate_forward(center, (center.0, crop_rect.y), crop.rotation_degrees),
@@ -1634,5 +1635,78 @@ mod crop_regrow_tests {
             down.width >= up.width,
             "never smaller than at the larger angle"
         );
+    }
+}
+
+/// #634: the crop overlay's hit-testing follows the displayed image's turn.
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+    use crate::view_orient::ViewOrient;
+    use nicti_tapetum::geometry::CropRect;
+
+    /// Each corner handle is hit exactly where the overlay draws it, for all eight orientations,
+    /// with a straightened rect on a stretched, anisotropic canvas rect.
+    #[test]
+    fn a_corner_handle_is_hit_where_the_overlay_draws_it_for_every_orientation() {
+        let source = (600.0f32, 400.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(300.0, 500.0));
+        let crop = CropRect {
+            x: 100.0,
+            y: 80.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let rotation = 7.0f32;
+        let center = crop.center_absolute();
+        let corners = [
+            (crop.x, crop.y),
+            (crop.x + crop.width, crop.y),
+            (crop.x + crop.width, crop.y + crop.height),
+            (crop.x, crop.y + crop.height),
+        ];
+        for exif in 1..=8u8 {
+            let o = ViewOrient::from_exif(exif);
+            for (i, &c) in corners.iter().enumerate() {
+                let screen = o.image_to_screen(rect, source, rotate_forward(center, c, rotation));
+                assert_eq!(
+                    corner_hit(o, rect, source, &crop, rotation, screen),
+                    Some(i),
+                    "exif {exif} corner {i} at {screen:?}"
+                );
+            }
+            // Far from every handle: no hit.
+            assert_eq!(
+                corner_hit(o, rect, source, &crop, rotation, rect.center()),
+                None,
+                "exif {exif}"
+            );
+        }
+    }
+
+    /// The pointer delta a drag produces is the displayed delta mapped into sensor space: dragging
+    /// right on screen moves along the sensor's own axis for that turn.
+    #[test]
+    fn a_screen_drag_maps_to_the_sensor_delta_the_turn_implies() {
+        let source = (600.0f32, 400.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        // Quarter turn clockwise (EXIF 6): sensor x runs down the screen, sensor y runs left.
+        let o = ViewOrient::from_exif(6);
+        let a = o.screen_to_image(rect, source, egui::pos2(200.0, 300.0));
+        let down = o.screen_to_image(rect, source, egui::pos2(200.0, 360.0));
+        let right = o.screen_to_image(rect, source, egui::pos2(260.0, 300.0));
+        assert!(
+            down.0 > a.0 && (down.1 - a.1).abs() < 1e-3,
+            "down: {a:?} -> {down:?}"
+        );
+        assert!(
+            right.1 < a.1 && (right.0 - a.0).abs() < 1e-3,
+            "right: {a:?} -> {right:?}"
+        );
+        // Normal keeps the plain axes.
+        let n = ViewOrient::normal();
+        let a = n.screen_to_image(rect, source, egui::pos2(200.0, 300.0));
+        let right = n.screen_to_image(rect, source, egui::pos2(260.0, 300.0));
+        assert!(right.0 > a.0 && (right.1 - a.1).abs() < 1e-3);
     }
 }

@@ -226,7 +226,10 @@ impl<S: ByteSource> Walker<S> {
         self.ifds_visited = counted;
         let (entries, _) = read?;
         Ok(Self::find_entry(&entries, TAG_ORIENTATION)
-            .filter(|e| e.field_type == 3 && e.count == 1)
+            // SHORT per the TIFF spec; a LONG is accepted too, as export's EXIF reader does
+            // (kamadak `get_uint`), so the screen and the exported file cannot read one photo two
+            // ways (#634).
+            .filter(|e| matches!(e.field_type, 3 | 4) && e.count == 1)
             .map(|e| e.as_u32(self.bo))
             .and_then(|v| u8::try_from(v).ok())
             .filter(|v| (1..=8).contains(v)))
@@ -551,8 +554,12 @@ mod tests {
         t.extend_from_slice(&TAG_ORIENTATION.to_be_bytes());
         t.extend_from_slice(&field_type.to_be_bytes());
         t.extend_from_slice(&count.to_be_bytes());
-        t.extend_from_slice(&value.to_be_bytes());
-        t.extend_from_slice(&[0, 0]);
+        if field_type == 4 {
+            t.extend_from_slice(&u32::from(value).to_be_bytes()); // a LONG fills the 4 inline bytes
+        } else {
+            t.extend_from_slice(&value.to_be_bytes());
+            t.extend_from_slice(&[0, 0]);
+        }
         t.extend_from_slice(&0u32.to_be_bytes());
         t
     }
@@ -572,8 +579,27 @@ mod tests {
     }
 
     #[test]
+    fn ifd0_orientation_accepts_a_long_like_exports_reader_does() {
+        for v in 1..=8u32 {
+            let data = tiff_with_orientation(4, 1, v as u16);
+            assert_eq!(
+                walk(&data).ifd0_orientation().unwrap(),
+                Some(v as u8),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
     fn ifd0_orientation_rejects_out_of_range_and_malformed_entries() {
-        for (ty, count, v) in [(3, 1, 0), (3, 1, 9), (4, 1, 6), (3, 2, 6)] {
+        for (ty, count, v) in [
+            (3, 1, 0),
+            (3, 1, 9),
+            (4, 1, 0),
+            (4, 1, 9),
+            (3, 2, 6),
+            (4, 2, 6),
+        ] {
             let data = tiff_with_orientation(ty, count, v);
             assert_eq!(
                 walk(&data).ifd0_orientation().unwrap(),

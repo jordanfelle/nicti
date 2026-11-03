@@ -347,10 +347,12 @@ mod tests {
                 exif as u8
             );
         }
-        // Out of range, wrong type/count, not a TIFF, too short: all "no orientation".
+        // A LONG-typed value is read like a SHORT (as export's reader does, #634).
+        assert_eq!(container_orientation(&tiff_with_orientation(4, 1, 6)), 6);
+        // Out of range, wrong count, not a TIFF, too short: all "no orientation".
         assert_eq!(container_orientation(&tiff_with_orientation(3, 1, 9)), 0);
         assert_eq!(container_orientation(&tiff_with_orientation(3, 1, 0)), 0);
-        assert_eq!(container_orientation(&tiff_with_orientation(4, 1, 6)), 0);
+        assert_eq!(container_orientation(&tiff_with_orientation(4, 1, 9)), 0);
         assert_eq!(container_orientation(&tiff_with_orientation(3, 2, 6)), 0);
         assert_eq!(container_orientation(b"JUNKJUNKJUNKJUNK"), 0);
         assert_eq!(container_orientation(&[]), 0);
