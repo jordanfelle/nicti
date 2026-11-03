@@ -77,10 +77,27 @@ fn ca_key(frame: &LinearFrame, center: Option<[f64; 2]>) -> u64 {
     u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
 }
 
+/// Serialises estimator runs so several workers hitting a cold memo for the same frame (AI mask
+/// bakes, a removal, the thumbnail, #358) compute it once: the others wait and then hit the memo.
+static CA_COMPUTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn memo_lookup(key: u64) -> Option<[f64; 2]> {
+    CA_MEMO
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| *v)
+}
+
 fn estimate_ca_memoised(frame: &LinearFrame, center: Option<[f64; 2]>) -> [f64; 2] {
     let key = ca_key(frame, center);
-    if let Some((_, v)) = CA_MEMO.lock().unwrap().iter().find(|(k, _)| *k == key) {
-        return *v;
+    if let Some(v) = memo_lookup(key) {
+        return v;
+    }
+    let _single_flight = CA_COMPUTE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(v) = memo_lookup(key) {
+        return v; // another thread computed it while this one waited
     }
     #[cfg(test)]
     CA_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
