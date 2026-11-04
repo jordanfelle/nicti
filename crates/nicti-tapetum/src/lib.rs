@@ -31,6 +31,9 @@ pub mod tile;
 pub mod upright;
 
 #[cfg(test)]
+mod equivalence;
+
+#[cfg(test)]
 pub(crate) mod test_util;
 
 use nicti_claw::{Module, Registry};
