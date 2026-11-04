@@ -475,6 +475,28 @@ pub fn import_sidecar(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
+    import_sidecar_inner(store, asset_id, raw_path, now_ms, false)
+}
+
+/// [`import_sidecar`] for a file ingest just found changed (size or mtime moved): skips the
+/// mtime-only precheck, since a tool that preserves mtime (`exiftool -P`) can add an XMP packet
+/// without moving it.
+pub fn import_sidecar_changed(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+    raw_path: &Path,
+    now_ms: i64,
+) -> Result<SyncOutcome, ScentSyncError> {
+    import_sidecar_inner(store, asset_id, raw_path, now_ms, true)
+}
+
+fn import_sidecar_inner(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+    raw_path: &Path,
+    now_ms: i64,
+    file_changed: bool,
+) -> Result<SyncOutcome, ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = xmp_target(raw_path);
     let prior = store.sidecar_state(asset_id)?;
@@ -484,7 +506,7 @@ pub fn import_sidecar(
     // the newer-wins comparison below is what pushes its markers to the sidecar.
     if let Some(p) = prior
         .as_ref()
-        .filter(|p| p.catalog_dirty_since_ms.is_none())
+        .filter(|p| p.catalog_dirty_since_ms.is_none() && !file_changed)
     {
         if !p.needs_review {
             let on_disk = mtime_ms_of(&path).and_then(|ms| i64::try_from(ms).ok());
@@ -779,8 +801,22 @@ fn write_locked(
         // them, or the next scan re-decodes T0 for a pixel-identical file and a rename before
         // that scan no longer matches by fingerprint. Best effort: a failure only costs that
         // rescan.
-        if let Ok((size, mtime_unix, fp)) = crate::scruff::file_identity(&path) {
-            let _ = store.refresh_file_identity(asset_id, size, mtime_unix, &fp);
+        // Only when the row still described the file as it was just before our splice: if another
+        // program had re-saved it since the last scan, the row's T0/dimensions/orientation are
+        // stale, and refreshing would hide that -- leave the change for the next scan to see.
+        let row_matches_pre_splice = match (store.get_asset(asset_id), stamp) {
+            (Ok(Some(a)), Some((len, mtime))) => {
+                a.size_bytes == len
+                    && mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .is_ok_and(|d| i64::try_from(d.as_secs()).is_ok_and(|s| s == a.mtime_unix))
+            }
+            _ => false,
+        };
+        if row_matches_pre_splice {
+            if let Ok((size, mtime_unix, fp)) = crate::scruff::file_identity(&path) {
+                let _ = store.refresh_file_identity(asset_id, size, mtime_unix, &fp);
+            }
         }
     } else {
         atomic_write(&path, patched.as_bytes()).map_err(io_err)?;

@@ -646,9 +646,15 @@ fn sync_sidecar(
     store: &dyn CatalogStore,
     asset_id: i64,
     raw_path: &Path,
+    file_changed: bool,
     report: &mut IngestReport,
 ) {
-    match crate::scent_sync::import_sidecar(store, asset_id, raw_path, now_unix() * 1000) {
+    let import = if file_changed {
+        crate::scent_sync::import_sidecar_changed
+    } else {
+        crate::scent_sync::import_sidecar
+    };
+    match import(store, asset_id, raw_path, now_unix() * 1000) {
         Ok(crate::scent_sync::SyncOutcome::NeedsReview) => report.sidecar_review += 1,
         Ok(_) => {}
         Err(e) => report
@@ -682,7 +688,7 @@ fn ingest_one(
         if existing.size_bytes == size_bytes && existing.mtime_unix == mtime_unix {
             report.skipped_unchanged += 1;
             // The RAW is unchanged, but LRC may have rewritten its sidecar since the last scan.
-            sync_sidecar(store, existing.id, path, report);
+            sync_sidecar(store, existing.id, path, false, report);
             return Ok(());
         }
     }
@@ -719,7 +725,7 @@ fn ingest_one(
                 mtime_unix,
             )?;
             report.moved += 1;
-            sync_sidecar(store, matched.id, path, report);
+            sync_sidecar(store, matched.id, path, false, report);
             return Ok(());
         }
     }
@@ -768,7 +774,7 @@ fn ingest_one(
     if let Some((lens, iso)) = &extra {
         let _ = store.set_exif_extra(asset_id, lens.as_deref(), *iso);
     }
-    sync_sidecar(store, asset_id, path, report);
+    sync_sidecar(store, asset_id, path, true, report);
 
     if existing.is_some() {
         report.updated += 1;

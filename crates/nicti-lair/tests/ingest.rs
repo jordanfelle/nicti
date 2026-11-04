@@ -844,8 +844,70 @@ fn a_jpeg_without_an_xmp_packet_is_skipped_by_stat_on_later_rescans() {
         nicti_scent::embedded::write_xmp(&bytes, packet).unwrap(),
     )
     .unwrap();
+    // Pin the mtime change rather than trusting the filesystem's timestamp granularity.
+    set_mtime(
+        &jpg,
+        std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+    );
     assert_eq!(
         import_sidecar(&store, id, &jpg, later).unwrap(),
         SyncOutcome::NeedsReview
     );
+}
+
+fn set_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+const RATING_5_PACKET: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"5\"/></rdf:RDF></x:xmpmeta>";
+
+#[test]
+fn a_packet_added_without_moving_the_mtime_is_seen_when_ingest_found_the_file_changed() {
+    use nicti_lair::scent_sync::{import_sidecar, import_sidecar_changed, SyncOutcome};
+    let (store, _dir, jpg, id, _original) = rated_jpeg_fixture();
+    let later = 4_000_000_000_000;
+    let mtime = std::fs::metadata(&jpg).unwrap().modified().unwrap();
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::NoSidecar
+    );
+    // `exiftool -P` style: the packet arrives, the mtime is put back.
+    let bytes = std::fs::read(&jpg).unwrap();
+    std::fs::write(
+        &jpg,
+        nicti_scent::embedded::write_xmp(&bytes, RATING_5_PACKET).unwrap(),
+    )
+    .unwrap();
+    set_mtime(&jpg, mtime);
+    // The plain call is fooled by the stat; the changed-file call (ingest's) is not.
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::InSync
+    );
+    assert_eq!(
+        import_sidecar_changed(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::NeedsReview
+    );
+}
+
+#[test]
+fn our_xmp_write_does_not_bless_a_jpeg_another_program_re_saved_since_the_last_scan() {
+    use nicti_lair::scent_sync::write_sidecar;
+    let (store, dir, jpg, id, _original) = rated_jpeg_fixture();
+    let root_id = store.get_asset(id).unwrap().unwrap().root_id;
+    // Another program re-saves the pixels; no rescan yet.
+    std::fs::write(&jpg, encode_jpeg(80, 60)).unwrap();
+    set_mtime(
+        &jpg,
+        std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+    );
+    write_sidecar(&store, id, &jpg, 1).unwrap();
+    // The row was not refreshed, so the next scan still re-ingests the changed file.
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.updated, 1, "{report:?}");
 }
