@@ -538,8 +538,9 @@ fn every_render_stage_is_classified() {
                 // a comment or string mentioning it, and (with nothing between the two lines) not
                 // an `#[ignore]`d one.
                 let needle = format!("#[test]\n    fn {test}(");
+                // Windows checkouts may have CRLF line endings.
                 assert!(
-                    source_of(source).contains(&needle),
+                    source_of(source).replace("\r\n", "\n").contains(&needle),
                     "{id}: parity test `{test}` is gone from {source}, renamed, or no longer a \
                      plain #[test]"
                 );
