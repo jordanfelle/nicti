@@ -63,7 +63,7 @@ every crate listed in the tracking issue as done carries
 exempt), so clippy fails on a new `unwrap()`/`expect()`/`panic!`. A genuine invariant gets one
 `#[allow(clippy::expect_used)]` with the reason beside it. Crates not yet converted are tracked in
 #705; when you convert one, add the attribute to its root in the same PR. Jobs run under Pounce are
-isolated from panics regardless: a panicking job is reported `Failed` and the worker keeps going.
+isolated from panics regardless (a panicking job is reported `Failed` and the worker keeps going), but a job whose result the UI waits on through a `ReportSlot` needs a `Drop` that fills the slot, and threads that are not Pounce jobs get no such protection (#706).
 
 `pre-commit`'s hooks (fmt, clippy, secret detection, YAML lint on every commit; `cargo test` on
 push) mirror the same exclude list, so a clean local commit should mean clean CI for these jobs.

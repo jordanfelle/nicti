@@ -503,11 +503,10 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
         inner.update_state(taken.id, JobState::Running, before);
         notify(&inner);
 
-        let step_result = match guarded(|| taken.job.step()) {
-            Ok(result) => result,
-            Err(message) => Err(JobError(format!("job panicked: {message}"))),
+        let (step_result, panicked) = match guarded(|| taken.job.step()) {
+            Ok(result) => (result, false),
+            Err(message) => (Err(JobError(format!("job panicked: {message}"))), true),
         };
-        let panicked = matches!(&step_result, Err(e) if e.0.starts_with("job panicked: "));
         // After a panic the job's state is unknown, so ask it for progress only if it did not.
         let progress = if panicked {
             before
@@ -760,6 +759,106 @@ mod tests {
             );
             pounce.shutdown();
         }
+    }
+
+    /// Panics while the lane's scheduler lock is held (reading progress of a job cancelled while
+    /// queued; dropping a finished job) used to poison the lock and kill the worker.
+    struct LockedPanicJob {
+        spec: JobSpec,
+        panic_in_progress: bool,
+        panic_in_drop: bool,
+        step_forever: bool,
+    }
+
+    impl Drop for LockedPanicJob {
+        fn drop(&mut self) {
+            if self.panic_in_drop && !std::thread::panicking() {
+                panic!("drop exploded");
+            }
+        }
+    }
+
+    impl ChunkedJob for LockedPanicJob {
+        fn spec(&self) -> JobSpec {
+            self.spec
+        }
+        fn label(&self) -> String {
+            "locked panicky".to_string()
+        }
+        fn progress(&self) -> Progress {
+            if self.panic_in_progress {
+                panic!("progress exploded under the lock");
+            }
+            Progress::default()
+        }
+        fn step(&mut self) -> Result<Step, crate::job::JobError> {
+            if self.step_forever {
+                std::thread::sleep(Duration::from_millis(5));
+                Ok(Step::Yield)
+            } else {
+                Ok(Step::Done)
+            }
+        }
+    }
+
+    #[test]
+    fn a_panic_under_the_scheduler_lock_does_not_kill_the_lane() {
+        let spec = gpu_spec(crate::job::Priority::Background);
+        let pounce = Pounce::new(u64::MAX, 2, 1, || {});
+
+        // A job whose Drop panics, dropped by `finish` after Done.
+        let dropper = pounce.submit(Box::new(LockedPanicJob {
+            spec,
+            panic_in_progress: false,
+            panic_in_drop: true,
+            step_forever: false,
+        }));
+        assert!(wait_until(
+            || state_of(&pounce, dropper) == Some(JobState::Done),
+            Duration::from_secs(2)
+        ));
+
+        // A queued job cancelled behind a running one, whose progress() panics: the sweep reads
+        // it under the lock.
+        let blocker = pounce.submit(Box::new(LockedPanicJob {
+            spec,
+            panic_in_progress: false,
+            panic_in_drop: false,
+            step_forever: true,
+        }));
+        assert!(wait_until(
+            || state_of(&pounce, blocker) == Some(JobState::Running)
+                || state_of(&pounce, blocker) == Some(JobState::Queued),
+            Duration::from_secs(2)
+        ));
+        let victim = pounce.submit(Box::new(LockedPanicJob {
+            spec,
+            panic_in_progress: true,
+            panic_in_drop: true,
+            step_forever: false,
+        }));
+        pounce.cancel(victim);
+        pounce.cancel(blocker);
+        assert!(wait_until(
+            || state_of(&pounce, victim) == Some(JobState::Cancelled),
+            Duration::from_secs(2)
+        ));
+
+        // The lane still works, and submit() on this thread did not hit a poisoned lock.
+        let next = pounce.submit(Box::new(StepJob {
+            spec,
+            label: "after".into(),
+            remaining: 1,
+            on_step: None,
+        }));
+        assert!(
+            wait_until(
+                || state_of(&pounce, next) == Some(JobState::Done),
+                Duration::from_secs(2)
+            ),
+            "the worker died on a panic under the scheduler lock"
+        );
+        pounce.shutdown();
     }
 
     #[test]
