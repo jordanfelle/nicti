@@ -21,13 +21,17 @@ use ::lensfun::{Camera, Database, Lens, Modifier};
 
 use crate::{farthest_corner, LensCorrection, LensModel, LensSource, Vignette, Warp};
 
-/// Worst accepted warp fit error, as a fraction of the centre-to-farthest-corner distance (about
-/// 0.5 px on a 24 MP frame). A distortion fit worse than this is not applied.
+/// Worst accepted warp fit error, as a fraction of the centre-to-farthest-corner distance (0.7 px
+/// at 6000x4000, 1 px at 8256x5504). A distortion fit worse than this is not applied. Real fits are
+/// far tighter: the worst off-ray error over the whole bundled database is 1.5e-6.
 pub const WARP_TOLERANCE: f64 = 2.0e-4;
 
 /// Worst accepted vignette gain error, relative to the gain itself (1%). Wide-open wide-angle
 /// profiles brighten the corners several times over, so an absolute bound would be meaningless.
 pub const VIGNETTE_TOLERANCE: f64 = 0.01;
+
+/// Longest EXIF lens name looked up (bytes); see `find`.
+pub const MAX_LENS_NAME_BYTES: usize = 160;
 
 /// Sample count along the centre-to-corner ray.
 const SAMPLES: usize = 96;
@@ -79,7 +83,9 @@ impl LensCorrection for LensfunProvider {
 
 /// Look up the body and lens named by `source` in `db`.
 fn find<'d>(db: &'d Database, source: &LensSource<'_>) -> Option<(&'d Camera, &'d Lens)> {
-    if source.lens_model.trim().is_empty() {
+    // A real lens name is a few dozen bytes. The fuzzy matcher is superlinear in the query length
+    // (1 MB takes ~7 s) and the string comes from an untrusted file's EXIF, so refuse long ones.
+    if source.lens_model.trim().is_empty() || source.lens_model.len() > MAX_LENS_NAME_BYTES {
         return None;
     }
     let camera = pick_camera(db.find_cameras(Some(source.make), source.model), source)?;
@@ -90,12 +96,15 @@ fn find<'d>(db: &'d Database, source: &LensSource<'_>) -> Option<(&'d Camera, &'
     Some((camera, lens))
 }
 
-/// The body among fuzzy matches: an exact `"{make} {model}"` name wins; otherwise the first match
+/// The body among fuzzy matches: an exact `"{make} {model}"` or bare `"{model}"` name wins; otherwise the first match
 /// only if every match has the same crop factor (a "Z f" query also returns DX bodies, and a wrong
 /// crop factor would mis-scale the whole correction).
 fn pick_camera<'d>(found: Vec<&'d Camera>, source: &LensSource<'_>) -> Option<&'d Camera> {
-    let want = format!("{} {}", source.make, source.model);
-    if let Some(c) = found.iter().find(|c| c.model.eq_ignore_ascii_case(&want)) {
+    // The database names bodies both ways: "Nikon Z 8" (maker prefixed) and bare "DC-S5".
+    let prefixed = format!("{} {}", source.make, source.model);
+    if let Some(c) = found.iter().find(|c| {
+        c.model.eq_ignore_ascii_case(&prefixed) || c.model.eq_ignore_ascii_case(source.model)
+    }) {
         return Some(c);
     }
     let first = *found.first()?;
@@ -105,10 +114,45 @@ fn pick_camera<'d>(found: Vec<&'d Camera>, source: &LensSource<'_>) -> Option<&'
         .then_some(first)
 }
 
-/// Whether the bundled database knows this body and lens (for the UI switch; the database is
-/// parsed on the first call).
+/// Whether [`LensfunProvider`] can produce a correction for this body, lens, focal length and frame
+/// size (what the UI switch is offered on, like `has_nikon_profile`). The UI asks every frame the
+/// Lens Corrections section is open, so the last answer is remembered by its inputs; the database
+/// is parsed on the first call (tens of ms in a release build).
 pub fn has_profile(source: &LensSource<'_>) -> bool {
-    database().is_some_and(|db| find(db, source).is_some())
+    use std::sync::Mutex;
+    type Key = (
+        String,
+        String,
+        String,
+        Option<u32>,
+        u32,
+        u32,
+        Option<u32>,
+        Option<u32>,
+    );
+    static LAST: Mutex<Option<(Key, bool)>> = Mutex::new(None);
+    let key: Key = (
+        source.make.to_string(),
+        source.model.to_string(),
+        source.lens_model.to_string(),
+        source.focal_length_mm.map(f32::to_bits),
+        source.image_width,
+        source.image_height,
+        source.aperture.map(f32::to_bits),
+        source.focus_distance_m.map(f32::to_bits),
+    );
+    if let Ok(last) = LAST.lock() {
+        if let Some((k, v)) = last.as_ref() {
+            if *k == key {
+                return *v;
+            }
+        }
+    }
+    let has = database().is_some_and(|db| model_from(db, source).is_some());
+    if let Ok(mut last) = LAST.lock() {
+        *last = Some((key, has));
+    }
+    has
 }
 
 /// The fitted [`LensModel`] for `source` against `db`; `None` when the body, lens or focal length
@@ -378,6 +422,13 @@ mod tests {
   <camera><maker>Acme</maker><model>Acme Body</model><mount>Acme X</mount><cropfactor>1</cropfactor></camera>
   <camera><maker>Acme</maker><model>Acme Body DX</model><mount>Acme X</mount><cropfactor>1.5</cropfactor></camera>
   <lens>
+    <maker>Acme</maker><model>Off-centre 24mm</model><mount>Acme X</mount><cropfactor>1</cropfactor>
+    <center x="0.12" y="-0.08"/>
+    <calibration>
+      <distortion model="ptlens" focal="24" a="0.03963" b="-0.12592" c="0.08209"/>
+    </calibration>
+  </lens>
+  <lens>
     <maker>Acme</maker><model>Test 24mm f/2</model><mount>Acme X</mount><cropfactor>1</cropfactor>
     <calibration>
       <distortion model="ptlens" focal="24" a="0.03963" b="-0.12592" c="0.08209"/>
@@ -598,6 +649,83 @@ mod tests {
             }
         }
         println!("census: warp {dist_ok}/{dist} fitted, vignette {vig_ok}/{vig} fitted");
+    }
+
+    /// The real database names some bodies without the maker ("DC-S5") and a query for one also
+    /// returns neighbours with other crop factors (DC-GH5S, crop 2): the exact bare name must win.
+    #[test]
+    fn a_bare_exact_body_name_beats_its_fuzzy_neighbours() {
+        let db = Database::load_bundled().unwrap();
+        let src = LensSource {
+            make: "Panasonic",
+            model: "DC-S5",
+            ..LensSource::default()
+        };
+        let found = db.find_cameras(Some("Panasonic"), "DC-S5");
+        assert!(
+            found.len() > 1,
+            "the query is ambiguous in the real database"
+        );
+        let picked = pick_camera(found, &src).expect("exact bare name");
+        assert_eq!(picked.model, "DC-S5");
+    }
+
+    #[test]
+    fn an_offcentre_lens_fits_and_matches_lensfun_off_the_ray() {
+        let db = db();
+        let src = LensSource {
+            lens_model: "Off-centre 24mm",
+            aperture: None,
+            ..source()
+        };
+        let warp = model_from(&db, &src).expect("profile").warp.expect("warp");
+        assert!((warp.center[0] - 0.5).abs() > 0.01, "{:?}", warp.center);
+        let (camera, lens) = find(&db, &src).unwrap();
+        let (w, h) = (6000_u32, 4000_u32);
+        let mut modifier = Modifier::new(lens, 24.0, camera.crop_factor, w, h, REVERSE);
+        assert!(modifier.enable_distortion_correction(lens));
+        let (cx, cy) = (f64::from(w) * warp.center[0], f64::from(h) * warp.center[1]);
+        let m = farthest_corner(f64::from(w), f64::from(h), cx, cy);
+        let mut worst = 0.0_f64;
+        for &(x, y) in &[
+            (10.0_f32, 3990.0_f32),
+            (5990.0, 20.0),
+            (3000.0, 30.0),
+            (4500.0, 3000.0),
+        ] {
+            let t = source_points(&modifier, false, x, y)[1];
+            let (dx, dy) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
+            let (sx, sy) = warp.source_offset(1, dx, dy, m);
+            worst = worst.max((cx + sx - 0.5 - t[0]).hypot(cy + sy - 0.5 - t[1]));
+        }
+        assert!(worst < 0.75, "worst source error {worst} px");
+    }
+
+    #[test]
+    fn the_switch_needs_a_usable_profile_and_hostile_names_are_refused() {
+        let real = LensSource {
+            make: "Nikon",
+            model: "Z 8",
+            lens_model: "NIKKOR Z 24-70mm f/2.8 S",
+            focal_length_mm: Some(24.0),
+            aperture: Some(4.0),
+            image_width: 8256,
+            image_height: 5504,
+            ..LensSource::default()
+        };
+        assert!(has_profile(&real));
+        // Known body and lens but no focal length: nothing can be applied, so no switch.
+        assert!(!has_profile(&LensSource {
+            focal_length_mm: None,
+            ..real
+        }));
+        let long = "NIKKOR Z 24-70mm f/2.8 S".repeat(10_000);
+        let t = std::time::Instant::now();
+        assert!(!has_profile(&LensSource {
+            lens_model: &long,
+            ..real
+        }));
+        assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
     }
 
     #[test]

@@ -132,6 +132,10 @@ pub struct LensExif {
     pub focus_distance_m: Option<f32>,
 }
 
+/// Longest EXIF `LensModel` kept, in bytes. Real names are a few dozen; the string comes from an
+/// untrusted file and feeds a fuzzy database matcher, so an absurd one is treated as absent.
+pub const MAX_LENS_MODEL_BYTES: usize = 160;
+
 /// Reads [`LensExif`] from a TIFF-based container (NEF, DNG). Anything unreadable is the default:
 /// a missing lens is a normal outcome, never a decode failure.
 pub fn read_lens_exif(data: &[u8]) -> LensExif {
@@ -153,6 +157,7 @@ pub fn read_lens_exif(data: &[u8]) -> LensExif {
     {
         Some(Value::Ascii(v)) => v
             .first()
+            .filter(|b| b.len() <= MAX_LENS_MODEL_BYTES)
             .map(|b| {
                 String::from_utf8_lossy(b)
                     .trim_matches(['\0', ' '])
@@ -383,6 +388,20 @@ mod tests {
                 focus_distance_m: Some(3.5),
             }
         );
+    }
+
+    #[test]
+    fn an_absurdly_long_lens_name_is_treated_as_absent() {
+        let data = tiff_with(vec![field(
+            exif::Tag::LensModel,
+            exif::Value::Ascii(vec![vec![b'x'; MAX_LENS_MODEL_BYTES + 1]]),
+        )]);
+        assert_eq!(read_lens_exif(&data).lens_model, "");
+        let ok = tiff_with(vec![field(
+            exif::Tag::LensModel,
+            exif::Value::Ascii(vec![vec![b'x'; MAX_LENS_MODEL_BYTES]]),
+        )]);
+        assert_eq!(read_lens_exif(&ok).lens_model.len(), MAX_LENS_MODEL_BYTES);
     }
 
     #[test]

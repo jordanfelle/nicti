@@ -88,8 +88,9 @@ allow = [
 # (verified: r-efi passes today via its MIT/Apache-2.0 arms with no LGPL entry in `allow` at all),
 # so adding an LGPL SPDX string here would have no upside and a real downside: cargo-deny can't
 # express "only as an OR-arm" -- it would also pass a future crate whose *sole* license is that
-# exact LGPL string. For `lensfun-rs` specifically, its confirmed or-later dual license needed no
-# special sign-off once Nicti's own license was already copyleft (ADR-0018's amendment). `rawler`
+# exact LGPL string. `lensfun-rs`'s or-later grant needed no special sign-off once Nicti's own
+# license was already copyleft (ADR-0018's amendment); its sole `LGPL-3.0-or-later` licence is the per-crate
+# exception below (#462). `rawler`
 # (and LibRaw, vendored outside Cargo's graph entirely) turned out to need no "or-later" grant
 # either, once #37 checked LGPL-2.1's actual §§5-6 text (docs/licensing.md's Flags §2) -- but the
 # general principle (don't widen an allowlist just because cargo-deny's OR-arm matching makes it
