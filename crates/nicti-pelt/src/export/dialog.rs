@@ -165,6 +165,78 @@ impl ExportUi {
         });
     }
 
+    /// The settings the dialog would open with (the last ones used), location stripped.
+    pub fn last_spec(&self) -> ExportSpec {
+        self.presets.last.clone().without_location()
+    }
+
+    /// A saved preset's settings by name (built-in or the user's), location stripped.
+    pub fn preset_spec(&self, name: &str) -> Option<ExportSpec> {
+        self.presets
+            .all()
+            .into_iter()
+            .find(|p| p.name == name)
+            .map(|p| p.spec.without_location())
+    }
+
+    /// Names of every preset, for an error message that helps.
+    pub fn preset_names(&self) -> Vec<String> {
+        self.presets.all().into_iter().map(|p| p.name).collect()
+    }
+
+    /// Starts an export for `ids` with `spec` without the dialog (the control channel's
+    /// `export.run`, #647). Same validation and run as the dialog's Start button; the remembered
+    /// "last settings" are left alone, since a script's one-off should not become the user's
+    /// next default. Fails while another run is active.
+    pub fn start_headless(
+        &mut self,
+        env: ExportEnv,
+        ids: &[i64],
+        spec: ExportSpec,
+    ) -> Result<(), String> {
+        if self.is_running() {
+            return Err("an export is already running".into());
+        }
+        let run = ExportRun::start(env, ids, spec).map_err(|e| e.to_string())?;
+        self.dialog = None;
+        self.report = None;
+        self.start_error = None;
+        self.run = Some(run);
+        Ok(())
+    }
+
+    /// Progress of the running export and the last finished report, for `export.status`.
+    pub fn status_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let running = self.run.as_ref().map(|run| {
+            let (done, total) = run.progress();
+            json!({
+                "done": done,
+                "total": total,
+                "preparing": run.preparing().map(|(prepared, ids)| json!({"prepared": prepared, "of": ids})),
+            })
+        });
+        let last = self.report.as_ref().map(|r| {
+            json!({
+                "total": r.total,
+                "exported": r.exported.len(),
+                "skipped": r.skipped.len(),
+                "failed": r.failed.len(),
+                "cancelled": r.cancelled,
+                // Names only: this is a Read command, and where the user exports to is theirs.
+                "files": r.exported.iter().take(50).filter_map(|(_, p)| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>(),
+                "failures": r.failed.iter().take(20).map(|(id, why)| json!({"asset": id, "error": why})).collect::<Vec<_>>(),
+                "warnings": r.warnings.iter().take(20).collect::<Vec<_>>(),
+            })
+        });
+        json!({
+            "running": running.is_some(),
+            "progress": running,
+            "last": last,
+            "dialog_open": self.dialog.is_some(),
+        })
+    }
+
     /// Collects a finished run's report. Call once per frame.
     pub fn poll(&mut self) {
         if let Some(run) = &self.run {
@@ -1062,5 +1134,27 @@ mod tests {
         assert!(ui_state.dialog.is_none());
         ui_state.request(vec![7], "one photo".into(), vec![facts("a")]);
         assert!(ui_state.dialog.is_some());
+    }
+
+    #[test]
+    fn the_control_channel_reads_presets_and_status_without_the_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let ui = ExportUi::new(&dir.path().join("cat.db"));
+        let names = ui.preset_names();
+        assert!(!names.is_empty());
+        let spec = ui
+            .preset_spec(&names[0])
+            .expect("a built-in preset resolves by name");
+        assert!(
+            !spec.metadata.include_location,
+            "location is never carried over"
+        );
+        assert!(ui.preset_spec("no such preset").is_none());
+        assert!(!ui.last_spec().metadata.include_location);
+
+        let idle = ui.status_json();
+        assert_eq!(idle["running"], false);
+        assert!(idle["progress"].is_null() && idle["last"].is_null());
+        assert_eq!(idle["dialog_open"], false);
     }
 }

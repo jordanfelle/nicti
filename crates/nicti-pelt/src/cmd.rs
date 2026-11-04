@@ -78,6 +78,35 @@ pub trait CommandHost {
     /// Opens the Export dialog for the current photos. (A headless run needs the dialog's
     /// settings flow to become callable; see ADR-0434.)
     fn export_open(&mut self) -> Result<(), String>;
+    /// The photo Develop has loaded, if any. Edits go to this photo, which is not necessarily the
+    /// one the grid cursor or the loupe shows.
+    fn develop_asset(&self) -> Option<i64>;
+    /// The folder `export.run` may write into without `--control-allow-destructive`: the
+    /// operator's `--control-export-dir`.
+    fn export_dir(&self) -> Option<std::path::PathBuf>;
+    /// Starts an export without the dialog (see [`ExportRequest`]); returns at once, the run goes
+    /// on in the background (`export.status`).
+    fn export_run(&mut self, req: &ExportRequest) -> Result<Value, String>;
+    /// Whether an export is running, how far it is, and the last finished run's report.
+    fn export_status(&self) -> Value;
+}
+
+/// A validated `export.run` request. Every path in it is either the operator's export folder or,
+/// only under `--control-allow-destructive`, one the caller named.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRequest {
+    /// Photos to export; `None` = what the Export dialog would offer (the selection or the cursor).
+    pub assets: Option<Vec<i64>>,
+    /// A saved preset (built-in or the user's) to start from; `None` = the dialog's last settings.
+    pub preset: Option<String>,
+    /// `Some`: a folder the caller named (needs `--control-allow-destructive`). `None`: the
+    /// operator's `--control-export-dir`.
+    pub destination: Option<std::path::PathBuf>,
+    /// A subfolder below the destination, already validated as plain relative components.
+    pub subfolder: Option<String>,
+    /// `true`: files that already exist are replaced (needs `--control-allow-destructive`).
+    /// Otherwise a clash gets a `-2` suffix and nothing is overwritten.
+    pub overwrite: bool,
 }
 
 /// One entry of the table.
@@ -87,7 +116,12 @@ pub struct Command {
     pub label: &'static str,
     /// Human/agent-readable parameter doc; rendered into MCP tool schemas later.
     pub params: &'static str,
+    /// The risk with the fewest privileges this command ever needs.
     pub risk: Risk,
+    /// Raises the risk for particular parameters (`export.run` writing to a caller-chosen folder
+    /// is `Destructive`; into the operator's `--control-export-dir` it is `Mutate`). `None`: the
+    /// risk is always `risk`.
+    pub risk_for: Option<fn(&Value) -> Risk>,
     /// `Ok` when the command can run now, else the reason it can't ("why is Export greyed out").
     pub enabled: fn(&dyn CommandHost) -> Result<(), String>,
     pub run: fn(&mut dyn CommandHost, &Value) -> Result<Value, String>,
@@ -179,29 +213,248 @@ fn develop_enabled(host: &dyn CommandHost) -> Result<(), String> {
     host.develop_ready()
 }
 
+/// Checks the caller's `asset` against the photo Develop actually has loaded. Develop edits that
+/// photo, which can differ from the one on screen in the grid or loupe, so a write names its
+/// target and is refused when it does not match (`required`), and a read that names one is held to
+/// the same check.
+fn check_develop_asset(
+    host: &dyn CommandHost,
+    params: &Value,
+    required: bool,
+) -> Result<(), String> {
+    let loaded = host.develop_asset();
+    match params.get("asset") {
+        None if required => Err(match loaded {
+            Some(id) => format!(
+                "`asset` is required: Develop has photo {id} loaded, which is not necessarily the \
+                 photo on screen; name it to confirm the edit is meant for it"
+            ),
+            None => "`asset` is required (no photo is loaded in Develop)".into(),
+        }),
+        None => Ok(()),
+        Some(v) => {
+            let wanted = v.as_i64().ok_or("`asset` must be an integer")?;
+            match loaded {
+                Some(id) if id == wanted => Ok(()),
+                Some(id) => Err(format!(
+                    "Develop has photo {id} loaded, not {wanted}; open {wanted} in the loupe first"
+                )),
+                None => Err("no photo is loaded in Develop".into()),
+            }
+        }
+    }
+}
+
+fn with_asset(host: &dyn CommandHost, mut result: Value) -> Value {
+    if let (Some(obj), Some(id)) = (result.as_object_mut(), host.develop_asset()) {
+        obj.insert("asset".into(), json!(id));
+    }
+    result
+}
+
 fn run_develop_get(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
-    only_keys(params, &["stage"])?;
+    only_keys(params, &["stage", "asset"])?;
+    check_develop_asset(host, params, false)?;
     let stage = params
         .get("stage")
         .and_then(Value::as_str)
         .ok_or("`stage` must be a string")?;
-    host.develop_get(stage)
+    let got = host.develop_get(stage)?;
+    Ok(with_asset(host, got))
 }
 
 fn run_develop_set(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
-    only_keys(params, &["stage", "set"])?;
+    only_keys(params, &["stage", "set", "asset"])?;
+    check_develop_asset(host, params, true)?;
     let stage = params
         .get("stage")
         .and_then(Value::as_str)
         .ok_or("`stage` must be a string")?;
     let patch = params.get("set").ok_or("`set` is required")?;
-    host.develop_set(stage, patch)
+    let set = host.develop_set(stage, patch)?;
+    Ok(with_asset(host, set))
 }
 
 fn run_export_open(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
     only_keys(params, &[])?;
     host.export_open()?;
     Ok(json!({ "opened": true }))
+}
+
+/// Most photos one `export.run` may name.
+pub const MAX_EXPORT_BATCH: usize = 1000;
+/// Longest `subfolder` accepted.
+const MAX_SUBFOLDER_LEN: usize = 120;
+
+/// `export.run` is `Destructive` when it names a folder or asks to overwrite; otherwise it only
+/// writes new files into the operator's `--control-export-dir`.
+fn export_run_risk(params: &Value) -> Risk {
+    let names_folder = params.get("destination").is_some_and(|v| !v.is_null());
+    let overwrites = params.get("overwrite").and_then(Value::as_bool) == Some(true);
+    if names_folder || overwrites {
+        Risk::Destructive
+    } else {
+        Risk::Mutate
+    }
+}
+
+/// A `subfolder` is relative plain components joined by `/`: no `..`, no empty or hidden parts, no
+/// separators of the other kind, no drive or stream syntax, no control characters. Token templates
+/// (`{Date}`) are not accepted from the channel.
+pub fn validate_subfolder(s: &str) -> Result<String, String> {
+    if s.is_empty() || s.len() > MAX_SUBFOLDER_LEN {
+        return Err(format!(
+            "`subfolder` must be 1-{MAX_SUBFOLDER_LEN} characters"
+        ));
+    }
+    for part in s.split('/') {
+        let bad = part.is_empty()
+            || part.starts_with('.')
+            || part.ends_with(' ')
+            || part.chars().any(|c| {
+                c.is_control()
+                    || matches!(
+                        c,
+                        '\\' | ':' | '{' | '}' | '*' | '?' | '"' | '<' | '>' | '|'
+                    )
+            });
+        // The export renders every part through preen's sanitiser (it trims leading spaces and
+        // trailing dots/spaces, drops parts that come out empty, prefixes reserved device names
+        // and maps bidi controls). A part that it would change is a part that lands somewhere
+        // other than where it was checked: `link.` or ` link` name the folder `link`, and ` .`
+        // vanishes. Accept only parts it leaves exactly as they are.
+        let changed = nicti_preen::naming::sanitize_component(part) != part;
+        if bad || changed {
+            return Err(format!(
+                "`subfolder` part {part:?} is not a plain folder name (no empty or hidden parts, \
+                 `..`, backslashes, drive letters, wildcards, templates, leading spaces, trailing \
+                 dots or spaces, or reserved device names)"
+            ));
+        }
+    }
+    Ok(s.to_owned())
+}
+
+/// The spec an `export.run` really exports with, from the starting settings (a preset or the
+/// dialog's last): the destination is replaced by `base` + the validated subfolder (whatever the
+/// preset said is discarded), the clash policy is decided here and never taken from the preset,
+/// and GPS is never included.
+pub fn channel_export_spec(
+    mut spec: nicti_preen::spec::ExportSpec,
+    base: std::path::PathBuf,
+    subfolder: Option<String>,
+    overwrite: bool,
+) -> nicti_preen::spec::ExportSpec {
+    use nicti_preen::spec::{CollisionPolicy, DestinationBase, DestinationSpec};
+    spec.destination = DestinationSpec {
+        base: DestinationBase::Folder(base),
+        subfolder,
+    };
+    spec.collision = if overwrite {
+        CollisionPolicy::Overwrite
+    } else {
+        CollisionPolicy::UniqueSuffix
+    };
+    spec.metadata.include_location = false;
+    spec
+}
+
+/// Refuses a `subfolder` whose existing parts under `base` are links (or not folders): the
+/// destination would then resolve somewhere other than below the operator's export folder.
+/// Parts that do not exist yet are fine (the export creates them as plain folders).
+pub fn check_subfolder_unlinked(base: &std::path::Path, subfolder: &str) -> Result<(), String> {
+    let mut walk = base.to_path_buf();
+    for part in subfolder.split('/') {
+        walk.push(part);
+        match std::fs::symlink_metadata(&walk) {
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{} is a link or not a folder; exports only go into real folders",
+                    walk.display()
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(format!("{}: {e}", walk.display())),
+        }
+    }
+    Ok(())
+}
+
+fn run_export_run(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(
+        params,
+        &["assets", "preset", "destination", "subfolder", "overwrite"],
+    )?;
+    let assets = match params.get("assets") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let arr = v
+                .as_array()
+                .ok_or("`assets` must be an array of photo ids")?;
+            if arr.is_empty() || arr.len() > MAX_EXPORT_BATCH {
+                return Err(format!("`assets` must hold 1-{MAX_EXPORT_BATCH} photo ids"));
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut ids = Vec::with_capacity(arr.len());
+            for item in arr {
+                let id = item
+                    .as_i64()
+                    .ok_or("`assets` must be an array of photo ids")?;
+                if seen.insert(id) {
+                    if !host.known_asset(id) {
+                        return Err(format!("photo {id} is not in the catalog"));
+                    }
+                    ids.push(id);
+                }
+            }
+            Some(ids)
+        }
+    };
+    let preset = match params.get("preset") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().ok_or("`preset` must be a string")?.to_owned()),
+    };
+    let destination = match params.get("destination") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let path =
+                std::path::PathBuf::from(v.as_str().ok_or("`destination` must be a string")?);
+            if !path.is_absolute() {
+                return Err("`destination` must be an absolute folder path".into());
+            }
+            Some(path)
+        }
+    };
+    let subfolder = match params.get("subfolder") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(validate_subfolder(
+            v.as_str().ok_or("`subfolder` must be a string")?,
+        )?),
+    };
+    let overwrite = match params.get("overwrite") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or("`overwrite` must be true or false")?,
+    };
+    if destination.is_none() && host.export_dir().is_none() {
+        return Err(
+            "no export folder: start Nicti with --control-export-dir DIR, or (with \
+             --control-allow-destructive) pass `destination`"
+                .into(),
+        );
+    }
+    host.export_run(&ExportRequest {
+        assets,
+        preset,
+        destination,
+        subfolder,
+        overwrite,
+    })
+}
+
+fn run_export_status(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(params, &[])?;
+    Ok(host.export_status())
 }
 
 /// The table. Grows only when a verification ticket needs a command.
@@ -211,6 +464,7 @@ pub const COMMANDS: &[Command] = &[
         label: "Inspect the app",
         params: "{}",
         risk: Risk::Read,
+        risk_for: None,
         enabled: always,
         run: run_inspect,
     },
@@ -219,6 +473,7 @@ pub const COMMANDS: &[Command] = &[
         label: "Switch view",
         params: r#"{"view": "library" | "loupe"}  (loupe opens on the grid's selected photo)"#,
         risk: Risk::Mutate,
+        risk_for: None,
         enabled: always,
         run: run_view_set,
     },
@@ -227,6 +482,7 @@ pub const COMMANDS: &[Command] = &[
         label: "Select a photo in the grid",
         params: r#"{"asset": <catalog asset id>}"#,
         risk: Risk::Mutate,
+        risk_for: None,
         enabled: always,
         run: run_grid_select,
     },
@@ -235,30 +491,52 @@ pub const COMMANDS: &[Command] = &[
         label: "Rate photos",
         params: r#"{"rating": null | -1 | 1..5, "assets"?: [ids]}  (default: the selection)"#,
         risk: Risk::Mutate,
+        risk_for: None,
         enabled: always,
         run: run_photo_rate,
     },
     Command {
         id: "develop.get",
         label: "Read a Develop stage's params",
-        params: r#"{"stage": "nicti.wb" | "nicti.exposure" | "nicti.tone" | "nicti.vibrance" | "nicti.presence"}"#,
+        params: r#"{"stage": "nicti.wb" | "nicti.exposure" | "nicti.tone" | "nicti.vibrance" | "nicti.presence", "asset"?: <id>}  (the result names the photo Develop has loaded; `asset`, if given, must be it)"#,
         risk: Risk::Read,
+        risk_for: None,
         enabled: develop_enabled,
         run: run_develop_get,
     },
     Command {
         id: "develop.set",
         label: "Set fields of a Develop stage",
-        params: r#"{"stage": <as develop.get>, "set": {<field>: <number>, ...}}  (unknown fields are refused; undoable)"#,
+        params: r#"{"stage": <as develop.get>, "asset": <id of the photo Develop has loaded -- required>, "set": {<field>: <number>, ...}}  (unknown fields are refused; undoable)"#,
         risk: Risk::Mutate,
+        risk_for: None,
         enabled: develop_enabled,
         run: run_develop_set,
+    },
+    Command {
+        id: "export.run",
+        label: "Export photos without the dialog",
+        params: r#"{"assets"?: [ids] (default: the selection or cursor), "preset"?: "<name>" (default: the dialog's last settings), "subfolder"?: "a/b" (plain relative folders under the export folder), "destination"?: "<absolute folder>" and "overwrite"?: true -- both need --control-allow-destructive}  Writes into --control-export-dir; never overwrites unless allowed; GPS is never included. Returns at once; poll export.status"#,
+        risk: Risk::Mutate,
+        risk_for: Some(export_run_risk),
+        enabled: always,
+        run: run_export_run,
+    },
+    Command {
+        id: "export.status",
+        label: "Export progress and last result",
+        params: "{}",
+        risk: Risk::Read,
+        risk_for: None,
+        enabled: always,
+        run: run_export_status,
     },
     Command {
         id: "export.open",
         label: "Open the Export dialog",
         params: "{}",
         risk: Risk::Mutate,
+        risk_for: None,
         enabled: always,
         run: run_export_open,
     },
@@ -286,15 +564,16 @@ fn dispatch_in(
         .iter()
         .find(|c| c.id == id)
         .ok_or_else(|| format!("unknown command `{id}`"))?;
-    if !policy.permits(cmd.risk) {
-        return Err(format!(
-            "`{id}` is {} and this channel is not allowed to run it",
-            cmd.risk.as_str()
-        ));
-    }
     // A missing params object means "no params".
     let empty = json!({});
     let params = if params.is_null() { &empty } else { params };
+    let risk = cmd.risk_for.map_or(cmd.risk, |f| f(params)).max(cmd.risk);
+    if !policy.permits(risk) {
+        return Err(format!(
+            "`{id}` is {} with these parameters and this channel is not allowed to run it",
+            risk.as_str()
+        ));
+    }
     (cmd.enabled)(host).map_err(|why| format!("`{id}` is not available: {why}"))?;
     (cmd.run)(host, params)
 }
@@ -531,6 +810,8 @@ mod tests {
         rated: Vec<(Vec<i64>, Option<i64>)>,
         develop: bool,
         opened_export: bool,
+        export_dir: Option<std::path::PathBuf>,
+        export_requests: Vec<ExportRequest>,
     }
 
     impl CommandHost for Mock {
@@ -578,6 +859,19 @@ mod tests {
         fn export_open(&mut self) -> Result<(), String> {
             self.opened_export = true;
             Ok(())
+        }
+        fn develop_asset(&self) -> Option<i64> {
+            self.develop.then_some(7)
+        }
+        fn export_dir(&self) -> Option<std::path::PathBuf> {
+            self.export_dir.clone()
+        }
+        fn export_run(&mut self, req: &ExportRequest) -> Result<Value, String> {
+            self.export_requests.push(req.clone());
+            Ok(json!({ "started": true }))
+        }
+        fn export_status(&self) -> Value {
+            json!({ "running": false })
         }
     }
 
@@ -715,6 +1009,7 @@ mod tests {
             label: "Boom",
             params: "{}",
             risk: Risk::Destructive,
+            risk_for: None,
             enabled: always,
             run: boom,
         }];
@@ -917,5 +1212,292 @@ mod tests {
         }
         assert_eq!(develop_stage_get(&dev, EXPOSURE).unwrap(), stops);
         assert!(develop_stage_get(&dev, "nicti.heal").is_err());
+    }
+
+    const ALLOW: Policy = Policy {
+        allow_destructive: true,
+    };
+
+    /// An absolute folder path on any platform (`/tmp/x` is not absolute on Windows).
+    fn abs_path(name: &str) -> String {
+        std::env::temp_dir().join(name).display().to_string()
+    }
+
+    fn export_host() -> Mock {
+        Mock {
+            export_dir: Some("/srv/exports".into()),
+            ..Mock::default()
+        }
+    }
+
+    #[test]
+    fn export_run_into_the_operators_folder_is_mutate_and_anything_else_is_destructive() {
+        // Into --control-export-dir: allowed on a default channel.
+        let mut m = export_host();
+        let r = dispatch(
+            &mut m,
+            OPEN,
+            "export.run",
+            &json!({"assets": [3, 3, 4], "preset": "Web", "subfolder": "shoot/a"}),
+        )
+        .unwrap();
+        assert_eq!(r["started"], true);
+        let req = m.export_requests.pop().unwrap();
+        assert_eq!(req.assets, Some(vec![3, 4]), "duplicates dropped");
+        assert_eq!(req.preset.as_deref(), Some("Web"));
+        assert_eq!(req.subfolder.as_deref(), Some("shoot/a"));
+        assert!(req.destination.is_none() && !req.overwrite);
+
+        // A caller-named folder, or overwrite, needs --control-allow-destructive.
+        for params in [
+            json!({"destination": abs_path("anywhere")}),
+            json!({"overwrite": true}),
+            json!({"destination": abs_path("x"), "overwrite": true}),
+        ] {
+            let mut m = export_host();
+            let e = dispatch(&mut m, OPEN, "export.run", &params).unwrap_err();
+            assert!(e.contains("not allowed"), "{params}: {e}");
+            assert!(
+                m.export_requests.is_empty(),
+                "a refused export must not start"
+            );
+            dispatch(&mut m, ALLOW, "export.run", &params).unwrap();
+            assert_eq!(m.export_requests.len(), 1, "{params}");
+        }
+        // overwrite:false is not an overwrite.
+        let mut m = export_host();
+        dispatch(&mut m, OPEN, "export.run", &json!({"overwrite": false})).unwrap();
+    }
+
+    #[test]
+    fn export_run_needs_a_folder_and_checks_its_parameters() {
+        // No operator folder and no destination: nothing to write to.
+        let mut m = Mock::default();
+        let e = dispatch(&mut m, OPEN, "export.run", &json!({})).unwrap_err();
+        assert!(e.contains("--control-export-dir"), "{e}");
+        // ...but a named destination works where destructive is allowed.
+        dispatch(
+            &mut m,
+            ALLOW,
+            "export.run",
+            &json!({"destination": abs_path("out")}),
+        )
+        .unwrap();
+        assert!(dispatch(
+            &mut m,
+            ALLOW,
+            "export.run",
+            &json!({"destination": "relative/dir"})
+        )
+        .is_err());
+
+        let mut m = export_host();
+        for bad in [
+            json!({"assets": []}),
+            json!({"assets": "all"}),
+            json!({"assets": [1, "x"]}),
+            json!({"assets": [999]}),
+            json!({"assets": (1..=1001).collect::<Vec<i64>>()}),
+            json!({"preset": 5}),
+            json!({"subfolder": ".."}),
+            json!({"subfolder": 7}),
+            json!({"overwrite": "yes"}),
+            json!({"format": "png"}),
+        ] {
+            assert!(dispatch(&mut m, OPEN, "export.run", &bad).is_err(), "{bad}");
+        }
+        assert!(m.export_requests.is_empty());
+        // The status command is read-only and takes no parameters.
+        assert!(dispatch(&mut m, OPEN, "export.status", &json!({})).unwrap()["running"] == false);
+        assert!(dispatch(&mut m, OPEN, "export.status", &json!({"x": 1})).is_err());
+    }
+
+    #[test]
+    fn a_subfolder_is_plain_relative_folders_only() {
+        for ok in ["shoot", "2026/10/anthrocon", "a b/c-d_e"] {
+            assert_eq!(validate_subfolder(ok).as_deref(), Ok(ok));
+        }
+        let long = "a".repeat(MAX_SUBFOLDER_LEN + 1);
+        for bad in [
+            "",
+            "..",
+            "../x",
+            "a/../b",
+            "/abs",
+            "a//b",
+            "a/",
+            ".hidden",
+            "a/.git",
+            "a\\b",
+            "C:x",
+            "a:b",
+            "{Date}",
+            "x/{Folder}",
+            "a*",
+            "q?",
+            "a|b",
+            "tab\there",
+            "trail ",
+            // What preen's sanitiser would change: a symlink named `link` inside the export folder
+            // is reached through these, past the link check.
+            "link.",
+            " link",
+            " ./link",
+            "x/ .",
+            "a/b.",
+            "a /b",
+            "CON",
+            "con.txt",
+            "a/NUL",
+            "\u{202E}gpj",
+            long.as_str(),
+        ] {
+            assert!(validate_subfolder(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_subfolder_that_runs_through_a_link_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let (base, elsewhere) = (t.path().join("exports"), t.path().join("elsewhere"));
+        std::fs::create_dir_all(base.join("real/inner")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join("link")).unwrap();
+        std::fs::write(base.join("file"), b"x").unwrap();
+        assert!(check_subfolder_unlinked(&base, "real/inner").is_ok());
+        assert!(
+            check_subfolder_unlinked(&base, "real/new/deeper").is_ok(),
+            "not yet created"
+        );
+        assert!(check_subfolder_unlinked(&base, "link").is_err());
+        assert!(check_subfolder_unlinked(&base, "link/inside").is_err());
+        assert!(
+            check_subfolder_unlinked(&base, "file/x").is_err(),
+            "a file is not a folder"
+        );
+    }
+
+    #[test]
+    fn develop_edits_name_their_photo_and_are_refused_for_any_other() {
+        let mut m = Mock {
+            develop: true,
+            ..Mock::default()
+        };
+        // develop.set must say which photo (Develop's loaded one is 7 in the mock).
+        let e = dispatch(
+            &mut m,
+            OPEN,
+            "develop.set",
+            &json!({"stage": "nicti.wb", "set": {}}),
+        )
+        .unwrap_err();
+        assert!(e.contains("`asset` is required") && e.contains('7'), "{e}");
+        let e = dispatch(
+            &mut m,
+            OPEN,
+            "develop.set",
+            &json!({"stage": "nicti.wb", "set": {}, "asset": 8}),
+        )
+        .unwrap_err();
+        assert!(e.contains("not 8"), "{e}");
+        assert!(dispatch(
+            &mut m,
+            OPEN,
+            "develop.set",
+            &json!({"stage": "nicti.wb", "set": {}, "asset": "7"})
+        )
+        .is_err());
+        let ok = dispatch(
+            &mut m,
+            OPEN,
+            "develop.set",
+            &json!({"stage": "nicti.wb", "set": {}, "asset": 7}),
+        )
+        .unwrap();
+        assert_eq!(ok["asset"], 7, "the result names the edited photo");
+
+        // develop.get: asset optional, held to the same check when given, and always reported.
+        let got = dispatch(&mut m, OPEN, "develop.get", &json!({"stage": "nicti.wb"})).unwrap();
+        assert_eq!(got["asset"], 7);
+        assert!(dispatch(
+            &mut m,
+            OPEN,
+            "develop.get",
+            &json!({"stage": "nicti.wb", "asset": 9})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_command_list_shows_export_run_at_its_base_risk() {
+        let host = export_host();
+        let list = list(&host, OPEN);
+        let run = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "export.run")
+            .unwrap();
+        assert_eq!(run["risk"], "mutate");
+        assert_eq!(run["enabled"], true);
+        assert!(run["params"]
+            .as_str()
+            .unwrap()
+            .contains("--control-allow-destructive"));
+    }
+
+    #[test]
+    fn the_channels_export_settings_override_whatever_the_preset_says() {
+        use nicti_preen::spec::{CollisionPolicy, DestinationBase, DestinationSpec, ExportSpec};
+        let mut preset = ExportSpec {
+            collision: CollisionPolicy::Overwrite,
+            destination: DestinationSpec {
+                base: DestinationBase::Folder("/somewhere/else".into()),
+                subfolder: Some("../../escape".into()),
+            },
+            ..ExportSpec::default()
+        };
+        preset.metadata.include_location = true;
+        let base = std::path::PathBuf::from("/srv/exports");
+
+        let spec = channel_export_spec(preset.clone(), base.clone(), Some("shoot/a".into()), false);
+        assert_eq!(spec.destination.base, DestinationBase::Folder(base.clone()));
+        assert_eq!(spec.destination.subfolder.as_deref(), Some("shoot/a"));
+        assert_eq!(
+            spec.collision,
+            CollisionPolicy::UniqueSuffix,
+            "never the preset's overwrite"
+        );
+        assert!(
+            !spec.metadata.include_location,
+            "GPS is never published from the channel"
+        );
+        assert_eq!(spec.format, preset.format, "the rest of the preset is kept");
+
+        let spec = channel_export_spec(preset.clone(), base.clone(), None, true);
+        assert_eq!(
+            spec.collision,
+            CollisionPolicy::Overwrite,
+            "only an explicit overwrite"
+        );
+        assert!(spec.destination.subfolder.is_none());
+    }
+
+    #[test]
+    fn nothing_that_passes_validation_changes_under_the_export_sanitiser() {
+        // The property the link check relies on: a validated part is exactly the folder name preen
+        // will create, so what was inspected is what gets written to.
+        for ok in [
+            "shoot",
+            "2026/10/anthrocon",
+            "a b/c-d_e",
+            "caf\u{e9}/\u{65e5}\u{672c}",
+        ] {
+            let v = validate_subfolder(ok).unwrap();
+            for part in v.split('/') {
+                assert_eq!(nicti_preen::naming::sanitize_component(part), part);
+            }
+        }
     }
 }

@@ -45,12 +45,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROTOCOL: u32 = 2;
 
 /// What `--control...` asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlOptions {
     /// 0 = let the OS pick (the default); the bound port goes into the token file.
     pub port: u16,
     /// `--control-allow-destructive`.
     pub allow_destructive: bool,
+    /// `--control-export-dir DIR`: the one folder `export.run` may write into without
+    /// `--control-allow-destructive` (canonicalised, an existing directory). ADR-0434 section 3.
+    pub export_dir: Option<std::path::PathBuf>,
 }
 
 impl ControlOptions {
@@ -65,11 +68,13 @@ impl ControlOptions {
         let mut on = false;
         let mut port = 0u16;
         let mut allow_destructive = false;
+        let mut export_dir: Option<std::path::PathBuf> = None;
         if let Some(p) = env_port.filter(|p| !p.is_empty()) {
             on = true;
             port = parse_port(p)?;
         }
-        for arg in args {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
             if arg == "--control" {
                 on = true;
             } else if let Some(p) = arg.strip_prefix("--control=") {
@@ -77,6 +82,11 @@ impl ControlOptions {
                 port = parse_port(p)?;
             } else if arg == "--control-allow-destructive" {
                 allow_destructive = true;
+            } else if arg == "--control-export-dir" {
+                let dir = args.next().ok_or("--control-export-dir needs a folder")?;
+                export_dir = Some(parse_export_dir(&dir)?);
+            } else if let Some(dir) = arg.strip_prefix("--control-export-dir=") {
+                export_dir = Some(parse_export_dir(dir)?);
             } else if arg.starts_with("--control") {
                 return Err(format!("unknown option `{arg}`"));
             }
@@ -84,20 +94,39 @@ impl ControlOptions {
         if allow_destructive && !on {
             return Err("--control-allow-destructive needs --control".into());
         }
+        if export_dir.is_some() && !on {
+            return Err("--control-export-dir needs --control".into());
+        }
         Ok(on.then_some(Self {
             port,
             allow_destructive,
+            export_dir,
         }))
     }
 }
 
 impl ControlOptions {
     /// What a client of this channel may run.
-    pub fn policy(self) -> crate::cmd::Policy {
+    pub fn policy(&self) -> crate::cmd::Policy {
         crate::cmd::Policy {
             allow_destructive: self.allow_destructive,
         }
     }
+}
+
+/// The operator's export folder: must exist and be a directory; stored canonical so a later
+/// `export.run` can only ever resolve beneath the real location, not a link planted since.
+fn parse_export_dir(s: &str) -> Result<std::path::PathBuf, String> {
+    if s.is_empty() {
+        return Err("--control-export-dir needs a folder".into());
+    }
+    let dir = std::path::Path::new(s)
+        .canonicalize()
+        .map_err(|e| format!("--control-export-dir {s}: {e}"))?;
+    if !dir.is_dir() {
+        return Err(format!("--control-export-dir {s}: not a folder"));
+    }
+    Ok(dir)
 }
 
 fn parse_port(s: &str) -> Result<u16, String> {
@@ -654,6 +683,7 @@ mod tests {
         assert_eq!(
             p(&["--control"], None),
             Ok(Some(ControlOptions {
+                export_dir: None,
                 port: 0,
                 allow_destructive: false
             }))
@@ -864,6 +894,18 @@ mod tests {
         fn export_open(&mut self) -> Result<(), String> {
             Ok(())
         }
+        fn develop_asset(&self) -> Option<i64> {
+            None
+        }
+        fn export_dir(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn export_run(&mut self, _: &crate::cmd::ExportRequest) -> Result<Value, String> {
+            Err("none".into())
+        }
+        fn export_status(&self) -> Value {
+            json!({"running": false})
+        }
     }
 
     /// A running channel plus a thread standing in for the UI thread that drains its queue.
@@ -886,6 +928,7 @@ mod tests {
             let queue = Arc::new(CommandQueue::default());
             let control = start(
                 ControlOptions {
+                    export_dir: None,
                     port: 0,
                     allow_destructive: false,
                 },
@@ -1147,6 +1190,7 @@ mod tests {
         let queue = CommandQueue::default();
         let control = start_with(
             ControlOptions {
+                export_dir: None,
                 port: 0,
                 allow_destructive: false,
             },
@@ -1199,6 +1243,7 @@ mod tests {
         let queue = CommandQueue::default();
         let control = start_with(
             ControlOptions {
+                export_dir: None,
                 port: 0,
                 allow_destructive: false,
             },
@@ -1241,12 +1286,13 @@ mod tests {
     #[test]
     fn the_policy_flag_reaches_the_command_gate_and_a_bad_line_does_not_end_the_session() {
         let on = ControlOptions {
+            export_dir: None,
             port: 0,
             allow_destructive: true,
         };
         let off = ControlOptions {
             allow_destructive: false,
-            ..on
+            ..on.clone()
         };
         assert!(on.policy().allow_destructive && !off.policy().allow_destructive);
         let rig = Rig::new();
@@ -1291,6 +1337,7 @@ mod tests {
         let queue = CommandQueue::default();
         let control = start(
             ControlOptions {
+                export_dir: None,
                 port: 0,
                 allow_destructive: false,
             },
@@ -1309,5 +1356,45 @@ mod tests {
             "still listening"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_export_folder_option_needs_an_existing_folder_and_the_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let d = dir.path().display().to_string();
+        let p = |a: &[&str]| ControlOptions::parse(args(a), None);
+
+        let both = p(&["--control", "--control-export-dir", &d])
+            .unwrap()
+            .unwrap();
+        assert_eq!(both.export_dir.as_deref(), Some(canonical.as_path()));
+        let eq = p(&["--control", &format!("--control-export-dir={d}")])
+            .unwrap()
+            .unwrap();
+        assert_eq!(eq.export_dir, both.export_dir);
+        assert!(
+            !eq.allow_destructive,
+            "naming a folder does not lift the gate"
+        );
+
+        // Without the channel it is an error (like --control-allow-destructive).
+        assert!(p(&["--control-export-dir", &d]).is_err());
+        // Missing value, missing folder, a file.
+        assert!(p(&["--control", "--control-export-dir"]).is_err());
+        assert!(p(&["--control", "--control-export-dir", "/no/such/folder/xyz"]).is_err());
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(p(&[
+            "--control",
+            &format!("--control-export-dir={}", file.display())
+        ])
+        .is_err());
+        assert!(p(&["--control", "--control-export-dir="]).is_err());
+        // The flag order does not matter and the value is not mistaken for another flag.
+        let late = p(&["--control-export-dir", &d, "--control=0"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(late.export_dir, both.export_dir);
     }
 }
