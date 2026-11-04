@@ -101,7 +101,7 @@ pub fn fold(rel_path: &str) -> String {
 /// file, if smaller), with the size folded into the hash input. Cheap enough to run on every file
 /// at import time, and the tier `spikes/homing` and this pipeline both use as the default identity
 /// proxy for move detection.
-fn partial_hash(path: &Path) -> std::io::Result<String> {
+pub(crate) fn partial_hash(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let mut hasher = blake3::Hasher::new();
@@ -120,6 +120,19 @@ fn partial_hash(path: &Path) -> std::io::Result<String> {
         hasher.update(&tail);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// The `(size, mtime_unix, partial fingerprint)` ingest would record for `path` right now.
+/// `mtime_unix` is computed exactly as `ingest_one` does, so the next scan sees "unchanged".
+pub(crate) fn file_identity(path: &Path) -> std::io::Result<(u64, i64, String)> {
+    let metadata = std::fs::metadata(path)?;
+    let mtime_unix = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok((metadata.len(), mtime_unix, partial_hash(path)?))
 }
 
 fn field_string(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {

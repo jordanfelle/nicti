@@ -270,6 +270,19 @@ pub trait CatalogStore: Module {
         mtime_unix: i64,
     ) -> Result<(), CatalogError>;
 
+    /// Records the file's own stat + partial fingerprint after nicti itself rewrote it in place
+    /// (an embedded-XMP splice, #666). The pixels and EXIF are untouched, so the T0 preview,
+    /// orientation and lens/ISO stay; only `content_hash` (a hash of the whole file) is cleared.
+    /// Without this the next scan sees a size/mtime change, re-decodes T0, and a rename before
+    /// that scan no longer matches by fingerprint.
+    fn refresh_file_identity(
+        &self,
+        asset_id: i64,
+        size_bytes: u64,
+        mtime_unix: i64,
+        fingerprint: &str,
+    ) -> Result<(), CatalogError>;
+
     fn put_preview(
         &self,
         asset_id: i64,

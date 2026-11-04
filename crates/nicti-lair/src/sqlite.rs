@@ -1767,6 +1767,23 @@ impl CatalogStore for SqliteCatalog {
         Ok(())
     }
 
+    fn refresh_file_identity(
+        &self,
+        asset_id: i64,
+        size_bytes: u64,
+        mtime_unix: i64,
+        fingerprint: &str,
+    ) -> Result<(), CatalogError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE asset SET content_hash = CASE WHEN size_bytes IS ?1 AND mtime_unix IS ?2 \
+                    THEN content_hash ELSE NULL END, \
+                size_bytes = ?1, mtime_unix = ?2, fingerprint = ?3 WHERE id = ?4",
+            params![size_bytes as i64, mtime_unix, fingerprint, asset_id],
+        )?;
+        Ok(())
+    }
+
     fn put_preview(
         &self,
         asset_id: i64,
