@@ -89,6 +89,7 @@ pub fn process_cpu_time() -> Option<Duration> {
 /// `utime + stime` out of a `/proc/<pid>/stat` line, in `USER_HZ` ticks (100/s on every Linux
 /// that matters). The command name (field 2) may contain spaces and parentheses, so the fields are
 /// counted from the *last* `)`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_proc_stat_cpu(stat: &str) -> Option<Duration> {
     let rest = &stat[stat.rfind(')')? + 1..];
     // After the ")" the fields restart at 3 (state); utime and stime are fields 14 and 15.
