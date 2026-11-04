@@ -160,42 +160,53 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
         })
         .sum();
     let steps = cap.saturating_sub(1).max(1) as f32;
-    // A hair finer than the exact fit when widening, so float error over thousands of segments
-    // can't push the last dab just past the end of the path.
-    let widen = {
-        let w = wanted / steps;
-        if w > 1.0 {
-            w * (1.0 - 1e-4)
-        } else {
-            1.0
+    // One walk of the path at a widening factor, stopping after `limit` dabs. Each step is taken
+    // from the pressure of the dab just placed, so this (not the closed-form `wanted`) is what
+    // the budget has to be fitted against: a rising pressure grows the steps as it goes.
+    let run = |widen: f32, limit: usize| {
+        let step_at = |pr: f32| nominal_at(pr) * widen;
+        let mut dabs = vec![make(pts[0], pressure_at(0))];
+        let mut walk = vec![(step_at(pressure_at(0)), nominal_at(pressure_at(0)))];
+        // Distance from the current segment's start to the next dab.
+        let mut next = step_at(pressure_at(0));
+        for (k, w) in pts.windows(2).enumerate() {
+            let (x0, y0) = w[0];
+            let (x1, y1) = w[1];
+            let (p0, p1) = (pressure_at(k), pressure_at(k + 1));
+            let seg = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+            if seg <= f32::EPSILON {
+                continue;
+            }
+            let mut at = next;
+            // A hair of tolerance: with a widened step the float walk can land the last dab a
+            // rounding error past the end of the path and lose it.
+            while at <= seg + step_at(p1) * 1e-3 && dabs.len() < limit {
+                let t = (at / seg).min(1.0);
+                let pr = p0 + (p1 - p0) * t;
+                dabs.push(make((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t), pr));
+                walk.push((step_at(pr), nominal_at(pr)));
+                at += step_at(pr);
+            }
+            next = at - seg;
         }
+        (dabs, walk)
     };
-    let step_at = |pr: f32| nominal_at(pr) * widen;
-
-    let mut dabs = vec![make(pts[0], pressure_at(0))];
-    let mut walk = vec![(step_at(pressure_at(0)), nominal_at(pressure_at(0)))];
-    // Distance from the current segment's start to the next dab.
-    let mut next = step_at(pressure_at(0));
-    for (k, w) in pts.windows(2).enumerate() {
-        let (x0, y0) = w[0];
-        let (x1, y1) = w[1];
-        let (p0, p1) = (pressure_at(k), pressure_at(k + 1));
-        let seg = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-        if seg <= f32::EPSILON {
-            continue;
+    // Start from the closed-form estimate, then refine by counting what the walk really places:
+    // the count is roughly proportional to 1/widen, so rescale by it (up when over budget, down
+    // when well under it) until the walk fits and uses most of the budget. For a constant
+    // pressure the estimate is already exact and this loop exits at once.
+    let mut widen = (wanted / steps).max(1.0);
+    let (mut dabs, mut walk) = run(widen, cap.saturating_mul(8).saturating_add(1));
+    for _ in 0..8 {
+        let n = dabs.len();
+        let fits = n <= cap && (widen <= 1.0 || n as f32 >= 0.98 * cap as f32);
+        if fits {
+            break;
         }
-        let mut at = next;
-        // A hair of tolerance: with a widened step the float walk can land the last dab a
-        // rounding error past the end of the path and lose it.
-        while at <= seg + step_at(p1) * 1e-3 && dabs.len() < cap {
-            let t = (at / seg).min(1.0);
-            let pr = p0 + (p1 - p0) * t;
-            dabs.push(make((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t), pr));
-            walk.push((step_at(pr), nominal_at(pr)));
-            at += step_at(pr);
-        }
-        next = at - seg;
+        widen = (widen * (n.saturating_sub(1).max(1)) as f32 / steps).max(1.0);
+        (dabs, walk) = run(widen, cap.saturating_mul(8).saturating_add(1));
     }
+    // Backstop for a budget the refinement did not settle (never silently longer than `cap`).
     dabs.truncate(cap);
     walk.truncate(dabs.len());
     buildup(dabs, &walk)
@@ -705,6 +716,38 @@ mod tests {
         assert_eq!(dabs_for_stroke(&s, 200, 100, 1000), full);
         s.pressure = Vec::new();
         assert_eq!(dabs_for_stroke(&s, 200, 100, 1000), full);
+    }
+
+    #[test]
+    fn a_budgeted_stroke_with_changing_pressure_still_covers_its_whole_path() {
+        // The budget is fitted by walking the path, not by a closed-form estimate: with rising
+        // pressure the steps grow along the way, and a fit that ignored that ran out of dabs
+        // hundreds of pixels short of the end.
+        for (pressure, cap) in [
+            (vec![0.0, 1.0], 300),
+            (vec![0.0, 1.0], 50),
+            (vec![0.5, 1.0], 10),
+            (vec![1.0, 0.0], 10),
+            (vec![0.0, 1.0, 0.0], 40),
+        ] {
+            let mut s = stroke(&[[0.05, 0.5], [0.5, 0.5], [0.95, 0.5]], 0.002, 0.001, false);
+            s.pressure = pressure.clone();
+            let dabs = dabs_for_stroke(&s, 4000, 3000, cap);
+            assert!(
+                dabs.len() <= cap,
+                "{pressure:?} cap {cap}: {} dabs",
+                dabs.len()
+            );
+            let end = 0.95 * 4000.0;
+            let last = dabs.last().unwrap();
+            // The tail may fall short of the end by less than the step actually taken there.
+            let step = dabs[dabs.len() - 1].cx - dabs[dabs.len() - 2].cx;
+            assert!(
+                end - last.cx <= step * 1.5 + 1.0,
+                "{pressure:?} cap {cap}: stops at {} of {end}",
+                last.cx
+            );
+        }
     }
 
     #[test]
