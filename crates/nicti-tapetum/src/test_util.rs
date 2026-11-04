@@ -38,6 +38,28 @@ pub fn shared_test_gpu() -> Option<Arc<GpuContext>> {
         .clone()
 }
 
+/// Like [`shared_test_gpu`], but for tests whose whole point is the GPU: with `NICTI_REQUIRE_GPU`
+/// set (to anything but `0`/empty -- CI's required runner sets it, #538) a missing adapter is a
+/// hard failure instead of a quiet skip, so a runner that silently lost its adapter can't turn
+/// the CPU-vs-GPU equivalence table into a green no-op.
+pub fn required_test_gpu() -> Option<Arc<GpuContext>> {
+    let gpu = shared_test_gpu();
+    let env = std::env::var("NICTI_REQUIRE_GPU").ok();
+    if missing_adapter_is_fatal(env.as_deref(), gpu.is_some()) {
+        panic!(
+            "NICTI_REQUIRE_GPU is set but no wgpu adapter is available: the GPU equivalence \
+             tests refuse to skip on this runner"
+        );
+    }
+    gpu
+}
+
+/// The policy behind [`required_test_gpu`]: no adapter is fatal exactly when `NICTI_REQUIRE_GPU`
+/// (`env`) is set to something other than empty or `0`.
+pub fn missing_adapter_is_fatal(env: Option<&str>, have_gpu: bool) -> bool {
+    !have_gpu && env.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// WebGPU requires a buffer<->texture copy's row stride to be a multiple of
 /// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256) -- real textures are almost always wide enough for
 /// `width * BYTES_PER_PIXEL` to already satisfy that, but this crate's own tiny test fixtures

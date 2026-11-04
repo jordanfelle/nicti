@@ -214,7 +214,13 @@ jobs:
       # covers nicti-claw's/dewclaw's dylib-loading tests (previously the only Windows test
       # coverage, via build-windows's own narrow `-p nicti-claw -p dewclaw` step, now redundant
       # and removed there).
+      #
+      # NICTI_REQUIRE_GPU (#538): the CPU-vs-GPU equivalence table in nicti-tapetum fails loudly
+      # instead of skipping when this runner has no wgpu adapter (it normally gets WARP via Dx12),
+      # so a runner that silently lost its adapter can't turn the table into a green no-op.
       - run: cargo test --workspace --all-targets --all-features --exclude retina --exclude nicti-cornea --exclude knead
+        env:
+          NICTI_REQUIRE_GPU: "1"
 
   decode-linux:
     name: decode (linux)

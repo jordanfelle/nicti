@@ -77,6 +77,7 @@ Full reasoning/history: `docs/decisions/render-graph.md`.
   `max_storage_buffer_binding_size` (128MiB exactly, measured in this sandbox) well before real
   hardware's own limit -- `stages::rows_per_strip` splits the upload into per-strip buffers/
   dispatches, each writing to the correct absolute row range of the one shared output texture.
+- **CPU-vs-GPU equivalence table (#538)**: `nicti-tapetum/src/equivalence.rs` -- 145 `LiveParams` edit cases (every tone/tone-curve/HSL/exposure/vibrance/WB slider, both signs, two magnitudes) through the real live suffix vs the `color::` twins, bounds mean < 0.5 / max <= 3 LSB (8-bit, display-clamped); `COVERAGE` classifies every spine stage (Table / named Parity test that must exist / Exempt / Gap, gap count capped), so a new stage fails until classified. `test_util::required_test_gpu` fails instead of skipping when `NICTI_REQUIRE_GPU` is set (the windows test job sets it); lavapipe is enough locally. Known divergence #701; unclassified stages #702.
 - **Open follow-ups**: #189 (screen-res-first denoise scheduling), #190 (real-photo compression
   ratio, blocked on #45).
 - **#46 slice 1/5 (typed params + Basic + WB, ...
