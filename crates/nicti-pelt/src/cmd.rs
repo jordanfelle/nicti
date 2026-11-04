@@ -89,6 +89,22 @@ pub trait CommandHost {
     fn export_run(&mut self, req: &ExportRequest) -> Result<Value, String>;
     /// Whether an export is running, how far it is, and the last finished run's report.
     fn export_status(&self) -> Value;
+    /// The widgets registered on screen (name and rect), or why there are none.
+    fn widgets_list(&self) -> Result<Value, String>;
+    /// Queues a click on a registered widget (real egui pointer events; see `widgets.rs`).
+    fn ui_click(
+        &mut self,
+        widget: &str,
+        button: &str,
+        modifiers: &[String],
+    ) -> Result<Value, String>;
+    /// Queues a key press and release.
+    fn ui_key(&mut self, key: &str, modifiers: &[String]) -> Result<Value, String>;
+    /// Queues a drag from a registered widget by `(dx, dy)` points.
+    fn ui_drag(&mut self, widget: &str, dx: f32, dy: f32) -> Result<Value, String>;
+    /// Whether queued input has been delivered and drawn (and, with `jobs`, no background job is
+    /// queued or running).
+    fn ui_settled(&self, jobs: bool) -> bool;
 }
 
 /// A validated `export.run` request. Every path in it is either the operator's export folder or,
@@ -452,6 +468,90 @@ fn run_export_run(host: &mut dyn CommandHost, params: &Value) -> Result<Value, S
     })
 }
 
+fn run_ui_widgets(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(params, &[])?;
+    host.widgets_list()
+}
+
+fn str_list(params: &Value, key: &str) -> Result<Vec<String>, String> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(v) => v
+            .as_array()
+            .filter(|a| a.len() <= 4)
+            .ok_or_else(|| format!("`{key}` must be an array of at most 4 names"))?
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("`{key}` must be an array of names"))
+            })
+            .collect(),
+    }
+}
+
+fn widget_param(params: &Value) -> Result<&str, String> {
+    params
+        .get("widget")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "`widget` must be a registered widget name (ui.widgets)".to_owned())
+}
+
+fn run_ui_click(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(params, &["widget", "button", "modifiers"])?;
+    let widget = widget_param(params)?;
+    let button = match params.get("button") {
+        None | Some(Value::Null) => "primary",
+        Some(v) => v.as_str().ok_or("`button` must be a string")?,
+    };
+    host.ui_click(widget, button, &str_list(params, "modifiers")?)
+}
+
+fn run_ui_key(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(params, &["key", "modifiers"])?;
+    let key = params
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or("`key` must be a key name (\"Delete\", \"A\", \"ArrowRight\", ...)")?;
+    host.ui_key(key, &str_list(params, "modifiers")?)
+}
+
+fn run_ui_drag(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(params, &["widget", "dx", "dy"])?;
+    let widget = widget_param(params)?;
+    let num = |k: &str| {
+        params
+            .get(k)
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .ok_or_else(|| format!("`{k}` must be a number of points"))
+    };
+    host.ui_drag(widget, num("dx")?, num("dy")?)
+}
+
+/// What `ui.settle` waits for; parsed here so the queue (which defers the reply) and the plain
+/// dispatch agree.
+pub fn settle_params(params: &Value) -> Result<(std::time::Duration, bool), String> {
+    only_keys(params, &["timeout_ms", "jobs"])?;
+    let ms = match params.get("timeout_ms") {
+        None | Some(Value::Null) => 5000,
+        Some(v) => v
+            .as_u64()
+            .filter(|ms| (50..=30_000).contains(ms))
+            .ok_or("`timeout_ms` must be 50-30000")?,
+    };
+    let jobs = match params.get("jobs") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or("`jobs` must be true or false")?,
+    };
+    Ok((std::time::Duration::from_millis(ms), jobs))
+}
+
+fn run_ui_settle(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    let (_, jobs) = settle_params(params)?;
+    Ok(json!({ "settled": host.ui_settled(jobs) }))
+}
+
 fn run_export_status(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
     only_keys(params, &[])?;
     Ok(host.export_status())
@@ -512,6 +612,51 @@ pub const COMMANDS: &[Command] = &[
         risk_for: None,
         enabled: develop_enabled,
         run: run_develop_set,
+    },
+    Command {
+        id: "ui.widgets",
+        label: "List the widgets that can be clicked",
+        params: "{}",
+        risk: Risk::Read,
+        risk_for: None,
+        enabled: always,
+        run: run_ui_widgets,
+    },
+    Command {
+        id: "ui.click",
+        label: "Click a widget by name",
+        params: r#"{"widget": "<name from ui.widgets>", "button"?: "primary" | "secondary" | "middle", "modifiers"?: ["ctrl", "shift", "alt"]}  (real pointer events; returns when queued, then ui.settle)"#,
+        risk: Risk::Mutate,
+        risk_for: None,
+        enabled: always,
+        run: run_ui_click,
+    },
+    Command {
+        id: "ui.key",
+        label: "Press a key",
+        params: r#"{"key": "<egui key name>", "modifiers"?: ["ctrl", "shift", "alt"]}  (no text entry)"#,
+        risk: Risk::Mutate,
+        risk_for: None,
+        enabled: always,
+        run: run_ui_key,
+    },
+    Command {
+        id: "ui.drag",
+        label: "Drag from a widget",
+        params: r#"{"widget": "<name>", "dx": <points>, "dy": <points>}"#,
+        risk: Risk::Mutate,
+        risk_for: None,
+        enabled: always,
+        run: run_ui_drag,
+    },
+    Command {
+        id: "ui.settle",
+        label: "Wait until queued input has played out",
+        params: r#"{"timeout_ms"?: 50-30000 (default 5000), "jobs"?: true (also wait for background jobs)}  -> {"settled": bool}"#,
+        risk: Risk::Read,
+        risk_for: None,
+        enabled: always,
+        run: run_ui_settle,
     },
     Command {
         id: "export.run",
@@ -617,6 +762,17 @@ pub struct Request {
 pub struct CommandQueue {
     tx: Sender<Request>,
     rx: std::sync::Mutex<Receiver<Request>>,
+    /// `ui.settle` requests waiting for the app to go quiet.
+    deferred: std::sync::Mutex<Vec<Deferred>>,
+}
+
+/// A `ui.settle` whose reply is sent once the UI has settled or its deadline passes. Polled each
+/// drain (a deadline loop, never a fixed sleep).
+struct Deferred {
+    reply: Sender<Result<Value, String>>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    deadline: std::time::Instant,
+    jobs: bool,
 }
 
 impl Default for CommandQueue {
@@ -625,6 +781,7 @@ impl Default for CommandQueue {
         Self {
             tx,
             rx: std::sync::Mutex::new(rx),
+            deferred: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -657,11 +814,62 @@ impl CommandQueue {
             } else {
                 dispatch(host, policy, &req.id, &req.params)
             };
+            // `ui.settle` that is not settled yet keeps its reply until it is (or times out).
+            if req.id == "ui.settle" {
+                if let Ok(v) = &result {
+                    if v["settled"] == false {
+                        if let Ok((timeout, jobs)) = settle_params(&req.params) {
+                            if let Ok(mut d) = self.deferred.lock() {
+                                d.push(Deferred {
+                                    reply: req.reply,
+                                    cancelled: req.cancelled,
+                                    deadline: std::time::Instant::now() + timeout,
+                                    jobs,
+                                });
+                            }
+                            ran += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
             // The client may have gone; that is its problem, not the app's.
             let _ = req.reply.send(result);
             ran += 1;
         }
+        self.poll_deferred(host);
         ran
+    }
+
+    /// Answers the waiting `ui.settle` requests that have settled or run out of time.
+    fn poll_deferred(&self, host: &mut dyn CommandHost) {
+        let Ok(mut waiting) = self.deferred.lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        waiting.retain(|d| {
+            if d.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return false; // the client gave up
+            }
+            if host.ui_settled(d.jobs) {
+                let _ = d.reply.send(Ok(json!({ "settled": true })));
+                return false;
+            }
+            if now >= d.deadline {
+                let _ = d.reply.send(Ok(json!({
+                    "settled": false,
+                    "reason": "timed out before the UI went quiet (input still queued, or the \
+                               window is not being painted)"
+                })));
+                return false;
+            }
+            true
+        });
+    }
+
+    /// Whether a `ui.settle` is still waiting (the app should keep painting to answer it).
+    pub fn has_deferred(&self) -> bool {
+        self.deferred.lock().is_ok_and(|d| !d.is_empty())
     }
 }
 
@@ -812,6 +1020,8 @@ mod tests {
         opened_export: bool,
         export_dir: Option<std::path::PathBuf>,
         export_requests: Vec<ExportRequest>,
+        ui_calls: Vec<String>,
+        settled: bool,
     }
 
     impl CommandHost for Mock {
@@ -872,6 +1082,24 @@ mod tests {
         }
         fn export_status(&self) -> Value {
             json!({ "running": false })
+        }
+        fn widgets_list(&self) -> Result<Value, String> {
+            Ok(json!([{"name": "button:go"}]))
+        }
+        fn ui_click(&mut self, w: &str, b: &str, m: &[String]) -> Result<Value, String> {
+            self.ui_calls.push(format!("click {w} {b} {m:?}"));
+            Ok(json!({ "queued": true }))
+        }
+        fn ui_key(&mut self, k: &str, m: &[String]) -> Result<Value, String> {
+            self.ui_calls.push(format!("key {k} {m:?}"));
+            Ok(json!({ "queued": true }))
+        }
+        fn ui_drag(&mut self, w: &str, dx: f32, dy: f32) -> Result<Value, String> {
+            self.ui_calls.push(format!("drag {w} {dx} {dy}"));
+            Ok(json!({ "queued": true }))
+        }
+        fn ui_settled(&self, _: bool) -> bool {
+            self.settled
         }
     }
 
@@ -1499,5 +1727,154 @@ mod tests {
                 assert_eq!(nicti_preen::naming::sanitize_component(part), part);
             }
         }
+    }
+
+    #[test]
+    fn ui_input_commands_validate_their_parameters_and_reach_the_host() {
+        let mut m = Mock::default();
+        // They are Mutate: a default channel may run them.
+        let r = dispatch(
+            &mut m,
+            OPEN,
+            "ui.click",
+            &json!({"widget": "button:export", "button": "secondary", "modifiers": ["ctrl"]}),
+        )
+        .unwrap();
+        assert_eq!(r["queued"], true);
+        dispatch(&mut m, OPEN, "ui.key", &json!({"key": "Delete"})).unwrap();
+        dispatch(
+            &mut m,
+            OPEN,
+            "ui.drag",
+            &json!({"widget": "cell:7", "dx": 30, "dy": -4.5}),
+        )
+        .unwrap();
+        assert_eq!(
+            m.ui_calls,
+            vec![
+                "click button:export secondary [\"ctrl\"]".to_string(),
+                "key Delete []".to_string(),
+                "drag cell:7 30 -4.5".to_string(),
+            ]
+        );
+        for (id, bad) in [
+            ("ui.click", json!({})),
+            ("ui.click", json!({"widget": 3})),
+            ("ui.click", json!({"widget": "button:x", "button": 1})),
+            (
+                "ui.click",
+                json!({"widget": "button:x", "modifiers": "ctrl"}),
+            ),
+            (
+                "ui.click",
+                json!({"widget": "button:x", "modifiers": ["a", "b", "c", "d", "e"]}),
+            ),
+            ("ui.click", json!({"widget": "button:x", "x": 10, "y": 10})),
+            ("ui.key", json!({})),
+            ("ui.key", json!({"key": "A", "text": "hello"})),
+            ("ui.drag", json!({"widget": "cell:7", "dx": "far", "dy": 0})),
+            ("ui.drag", json!({"widget": "cell:7", "dx": 1})),
+            ("ui.widgets", json!({"x": 1})),
+        ] {
+            let before = m.ui_calls.len();
+            assert!(dispatch(&mut m, OPEN, id, &bad).is_err(), "{id} {bad}");
+            assert_eq!(
+                m.ui_calls.len(),
+                before,
+                "a refused call must not reach the host"
+            );
+        }
+        assert!(dispatch(&mut m, OPEN, "ui.widgets", &json!({}))
+            .unwrap()
+            .is_array());
+    }
+
+    fn settle_request(params: Value) -> (Request, mpsc::Receiver<Result<Value, String>>) {
+        let (rtx, rrx) = mpsc::channel();
+        (
+            Request {
+                id: "ui.settle".into(),
+                params,
+                reply: rtx,
+                cancelled: Default::default(),
+            },
+            rrx,
+        )
+    }
+
+    #[test]
+    fn ui_settle_replies_when_settled_or_out_of_time_and_never_sleeps() {
+        let q = CommandQueue::default();
+        let tx = q.sender();
+        let mut m = Mock::default(); // not settled
+
+        // Already settled: an immediate reply.
+        let mut quiet = Mock {
+            settled: true,
+            ..Mock::default()
+        };
+        let (req, rx) = settle_request(json!({}));
+        tx.send(req).unwrap();
+        q.drain(&mut quiet, OPEN);
+        assert_eq!(rx.try_recv().unwrap().unwrap()["settled"], true);
+        assert!(!q.has_deferred());
+
+        // Not settled yet: no reply, the request is kept...
+        let (req, rx) = settle_request(json!({"timeout_ms": 30_000}));
+        tx.send(req).unwrap();
+        q.drain(&mut m, OPEN);
+        assert!(rx.try_recv().is_err());
+        assert!(q.has_deferred());
+        q.drain(&mut m, OPEN);
+        assert!(rx.try_recv().is_err(), "still waiting, not busy-replying");
+        // ...and answered by a later drain once the host settles.
+        m.settled = true;
+        q.drain(&mut m, OPEN);
+        assert_eq!(rx.try_recv().unwrap().unwrap()["settled"], true);
+        assert!(!q.has_deferred());
+
+        // A deadline: answered `settled:false` with a reason, not left to the transport's timeout.
+        m.settled = false;
+        let (req, rx) = settle_request(json!({"timeout_ms": 50}));
+        tx.send(req).unwrap();
+        q.drain(&mut m, OPEN);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let reply = loop {
+            q.drain(&mut m, OPEN);
+            if let Ok(r) = rx.try_recv() {
+                break r.unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the deadline never fired"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(reply["settled"], false);
+        assert!(reply["reason"].as_str().unwrap().contains("timed out"));
+
+        // A client that gave up is dropped without a reply.
+        let (req, rx) = settle_request(json!({"timeout_ms": 30_000}));
+        let cancelled = req.cancelled.clone();
+        tx.send(req).unwrap();
+        q.drain(&mut m, OPEN);
+        assert!(q.has_deferred());
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        q.drain(&mut m, OPEN);
+        assert!(!q.has_deferred() && rx.try_recv().is_err());
+
+        // Bad parameters are refused at once.
+        for bad in [
+            json!({"timeout_ms": 5}),
+            json!({"timeout_ms": 99_999}),
+            json!({"jobs": 1}),
+            json!({"x": 1}),
+        ] {
+            let (req, rx) = settle_request(bad.clone());
+            tx.send(req).unwrap();
+            q.drain(&mut m, OPEN);
+            assert!(rx.try_recv().unwrap().is_err(), "{bad}");
+        }
+        assert!(!q.has_deferred());
     }
 }

@@ -139,6 +139,12 @@ impl ExportUi {
         self.run.is_some()
     }
 
+    /// Whether the Export dialog is open (the control channel's gate treats it as destructive: its
+    /// Start writes to wherever the dialog points).
+    pub fn dialog_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
     /// Whether there is a progress line or result summary to draw.
     pub fn has_status(&self) -> bool {
         self.run.is_some() || self.report.is_some()
@@ -411,10 +417,16 @@ impl ExportUi {
                 validity.is_ok() && !d.folder_picker.is_open(),
                 egui::Button::new("Export"),
             );
+            // Start writes files to wherever the dialog points: nameable by the control channel
+            // only under --control-allow-destructive (and the channel is refused outright while
+            // this dialog is open without it; `export.run` is the headless route).
+            crate::widgets::reg_destructive(ui.ctx(), "button:export-start", &start);
             if start.clicked() {
                 action = Action::Start;
             }
-            if ui.button("Cancel").clicked() {
+            let cancel = ui.button("Cancel");
+            crate::widgets::reg_destructive(ui.ctx(), "button:export-cancel", &cancel);
+            if cancel.clicked() {
                 action = Action::Close;
             }
         });

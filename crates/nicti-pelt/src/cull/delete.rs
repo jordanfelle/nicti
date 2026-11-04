@@ -103,13 +103,22 @@ impl DeleteFlow {
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Move to Recycle Bin").clicked() {
+                // Registered for the control channel only when the operator allowed destructive
+                // commands (ADR-0434 section 3): otherwise an agent cannot name these buttons, and
+                // while this dialog is open injected input is refused outright.
+                let r = ui.button("Move to Recycle Bin");
+                crate::widgets::reg_destructive(ui.ctx(), "button:delete-recycle", &r);
+                if r.clicked() {
                     chosen = Some(DeleteMode::RecycleBin);
                 }
-                if ui.button("Remove from catalog only").clicked() {
+                let r = ui.button("Remove from catalog only");
+                crate::widgets::reg_destructive(ui.ctx(), "button:delete-catalog-only", &r);
+                if r.clicked() {
                     chosen = Some(DeleteMode::CatalogOnly);
                 }
-                if ui.button("Cancel").clicked() {
+                let r = ui.button("Cancel");
+                crate::widgets::reg_destructive(ui.ctx(), "button:delete-cancel", &r);
+                if r.clicked() {
                     close = true;
                 }
             });

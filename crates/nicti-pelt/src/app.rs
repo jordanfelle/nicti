@@ -152,6 +152,10 @@ pub struct PeltApp {
     backup_copy: crate::backup_copy_ui::BackupCopyUi,
     /// `--control-export-dir`: where the control channel's `export.run` may write (#647).
     control_export_dir: Option<PathBuf>,
+    /// The control channel's widget registry and input queue (#649); `None` while it is off.
+    widgets: Option<crate::widgets::Widgets>,
+    /// The egui context, kept for the screen rectangle injected clicks are checked against.
+    control_ctx: Option<egui::Context>,
     /// Copy from a camera card (#602).
     card_copy: crate::card_copy_ui::CardCopyUi,
     update: UpdateChecker,
@@ -491,6 +495,8 @@ impl PeltApp {
             geotag_ui: crate::geotag_ui::GeotagUi::default(),
             backup_copy,
             control_export_dir: None,
+            widgets: None,
+            control_ctx: None,
             card_copy: crate::card_copy_ui::CardCopyUi::default(),
             update,
             nine_lives,
@@ -1359,9 +1365,20 @@ impl eframe::App for PeltApp {
         self.drain_commands(ctx);
     }
 
+    /// Feeds the control channel's queued clicks and keys to egui as real input events (#649).
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::widgets::deliver(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         crate::repaint_trace::frame(ui.ctx());
+        crate::widgets::begin_frame(ui.ctx());
         self.drain_commands(ui.ctx());
+        // A command may just have opened the delete or export dialog: take back any injected input
+        // delivered before it did (the hook runs ahead of the commands), then tell the gate.
+        let destructive_ui_open = self.destructive_ui_open();
+        crate::widgets::scrub_injected(ui.ctx(), destructive_ui_open);
+        crate::widgets::set_destructive_ui_open(ui.ctx(), destructive_ui_open);
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
@@ -1871,51 +1888,51 @@ impl PeltApp {
             (false, false, false, false, false);
         let mut knead_action: Option<PanelAction> = None;
         ui.horizontal(|ui| {
-            if ui
+            let r = ui
                 .add_enabled(total > 0, egui::Button::new("Select all"))
-                .on_hover_text("Ctrl+A. Every photo matching the current filter.")
-                .clicked()
-            {
+                .on_hover_text("Ctrl+A. Every photo matching the current filter.");
+            crate::widgets::reg(ui.ctx(), "button:select-all", &r);
+            if r.clicked() {
                 select_all = true;
             }
             if has_selection {
                 ui.label(format!("{targets} selected"));
             }
-            if ui
+            let r = ui
                 .add_enabled(
                     targets > 0 && !busy && !self.delete.is_running(),
                     egui::Button::new(format!("Delete {targets}\u{2026}")),
                 )
-                .on_hover_text("Delete / Backspace. Asks whether to use the Recycle Bin.")
-                .clicked()
-            {
+                .on_hover_text("Delete / Backspace. Asks whether to use the Recycle Bin.");
+            // Only opens the confirmation, but it is the road to deleting files: nameable only
+            // when the operator allowed destructive commands.
+            crate::widgets::reg_destructive(ui.ctx(), "button:delete", &r);
+            if r.clicked() {
                 delete = true;
             }
-            if ui
-                .add_enabled(
-                    targets >= 2 && has_selection,
-                    egui::Button::new("Survey (N)"),
-                )
-                .clicked()
-            {
+            let r = ui.add_enabled(
+                targets >= 2 && has_selection,
+                egui::Button::new("Survey (N)"),
+            );
+            crate::widgets::reg(ui.ctx(), "button:survey", &r);
+            if r.clicked() {
                 survey = true;
             }
-            if ui
-                .add_enabled(total >= 2, egui::Button::new("Compare (C)"))
-                .clicked()
-            {
+            let r = ui.add_enabled(total >= 2, egui::Button::new("Compare (C)"));
+            crate::widgets::reg(ui.ctx(), "button:compare", &r);
+            if r.clicked() {
                 compare = true;
             }
-            if ui
+            let r = ui
                 .add_enabled(
                     targets > 0 && !busy && !self.export.is_running(),
                     egui::Button::new(format!("Export {targets}\u{2026}")),
                 )
                 .on_hover_text(
                     "Ctrl+Shift+E. Render these photos with their edits to JPEG, PNG or TIFF.",
-                )
-                .clicked()
-            {
+                );
+            crate::widgets::reg(ui.ctx(), "button:export", &r);
+            if r.clicked() {
                 export = true;
             }
             let can_edit = targets > 0 && !busy && !self.knead.is_asking();
@@ -2292,10 +2309,14 @@ impl PeltApp {
                             &self.import_path_input,
                         );
                     }
-                    if ui.button("Import").clicked() {
+                    let r = ui.button("Import");
+                    crate::widgets::reg(ui.ctx(), "button:import", &r);
+                    if r.clicked() {
                         self.submit_root_job(&store, RootAction::Import);
                     }
-                    if ui.button("Sync").clicked() {
+                    let r = ui.button("Sync");
+                    crate::widgets::reg(ui.ctx(), "button:sync", &r);
+                    if r.clicked() {
                         self.submit_root_job(&store, RootAction::Sync);
                     }
                     if ui
@@ -2329,7 +2350,9 @@ impl PeltApp {
                     // #31: a folder-ordered asset list, not real grid/filter-driven selection
                     // (#30/#242's job, confirmed not a hard blocker for the loupe) -- reuses the
                     // same path field and root-registration path Import/Sync already use.
-                    if ui.button("Open in Loupe").clicked() {
+                    let r = ui.button("Open in Loupe");
+                    crate::widgets::reg(ui.ctx(), "button:open-in-loupe", &r);
+                    if r.clicked() {
                         self.open_in_loupe(&store);
                     }
                 });
@@ -3829,6 +3852,8 @@ impl PeltApp {
                 );
                 self.command_policy = opts.policy();
                 self.control_export_dir = opts.export_dir.clone();
+                self.widgets = Some(crate::widgets::install(ctx, opts.allow_destructive));
+                self.control_ctx = Some(ctx.clone());
                 // A hidden window runs `logic` but no `ui`; frame-dependent work still needs a
                 // paint (ADR-0434 section 2).
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -3846,14 +3871,33 @@ impl PeltApp {
 const MAX_INSPECT_IDS: usize = 1000;
 
 impl PeltApp {
-    /// Runs the waiting command-table requests; asks for another frame if the cap left some.
+    /// Runs the waiting command-table requests; asks for another frame if the cap left some, or
+    /// while a `ui.settle` is still waiting for frames to play out.
     fn drain_commands(&mut self, ctx: &egui::Context) {
         let queue = Arc::clone(&self.commands);
         let policy = self.command_policy;
         let ran = queue.drain(self, policy);
-        if ran >= crate::cmd::MAX_PER_DRAIN {
+        if ran >= crate::cmd::MAX_PER_DRAIN || queue.has_deferred() {
             ctx.request_repaint();
         }
+        // Injected input is delivered one step per frame: keep frames coming until it is all in.
+        if self.widgets.as_ref().is_some_and(|w| w.pending() > 0) {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The window's content rectangle, which injected clicks must land in.
+    fn screen_rect(&self) -> Result<egui::Rect, String> {
+        self.control_ctx
+            .as_ref()
+            .map(egui::Context::content_rect)
+            .ok_or_else(|| "the control channel is off".to_owned())
+    }
+
+    /// Whether a dialog the control channel must not operate without
+    /// `--control-allow-destructive` is open: the delete confirmation or the Export dialog.
+    fn destructive_ui_open(&self) -> bool {
+        self.delete.is_confirming() || self.export.dialog_open()
     }
 }
 
@@ -3867,6 +3911,8 @@ impl crate::cmd::CommandHost for PeltApp {
             "grid_len": self.grid.as_ref().map(GridSession::len),
             "develop_asset": self.loupe_loaded_asset.map(|(id, _)| id),
             "export_running": self.export.is_running(),
+            // Injected input discarded because a delete or export dialog was open (#649).
+            "input_blocked": self.widgets.as_ref().map_or(0, crate::widgets::Widgets::discarded),
         })
     }
 
@@ -3965,6 +4011,66 @@ impl crate::cmd::CommandHost for PeltApp {
         self.develop_ready()?;
         let dev = self.develop.as_mut().ok_or("Develop is not available")?;
         crate::cmd::develop_stage_set(dev, stage, patch)
+    }
+
+    fn widgets_list(&self) -> Result<serde_json::Value, String> {
+        let w = self.widgets.as_ref().ok_or("the control channel is off")?;
+        Ok(serde_json::Value::Array(
+            w.list()
+                .into_iter()
+                .map(|(name, r)| {
+                    serde_json::json!({
+                        "name": name,
+                        "rect": [r.min.x, r.min.y, r.width(), r.height()],
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    fn ui_click(
+        &mut self,
+        widget: &str,
+        button: &str,
+        modifiers: &[String],
+    ) -> Result<serde_json::Value, String> {
+        let w = self.widgets.as_ref().ok_or("the control channel is off")?;
+        let screen = self.screen_rect()?;
+        let mods = crate::widgets::parse_modifiers(
+            &modifiers.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
+        w.click(widget, crate::widgets::parse_button(button)?, mods, screen)?;
+        Ok(serde_json::json!({ "queued": true, "widget": widget }))
+    }
+
+    fn ui_key(&mut self, key: &str, modifiers: &[String]) -> Result<serde_json::Value, String> {
+        let w = self.widgets.as_ref().ok_or("the control channel is off")?;
+        let mods = crate::widgets::parse_modifiers(
+            &modifiers.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
+        w.key(crate::widgets::parse_key(key)?, mods)?;
+        Ok(serde_json::json!({ "queued": true, "key": key }))
+    }
+
+    fn ui_drag(&mut self, widget: &str, dx: f32, dy: f32) -> Result<serde_json::Value, String> {
+        let w = self.widgets.as_ref().ok_or("the control channel is off")?;
+        let screen = self.screen_rect()?;
+        w.drag(widget, dx, dy, screen)?;
+        Ok(serde_json::json!({ "queued": true, "widget": widget }))
+    }
+
+    fn ui_settled(&self, jobs: bool) -> bool {
+        let Some(w) = self.widgets.as_ref() else {
+            return true;
+        };
+        w.is_settled()
+            && (!jobs
+                || !self.pounce.snapshot().iter().any(|s| {
+                    matches!(
+                        s.state,
+                        nicti_pounce::JobState::Queued | nicti_pounce::JobState::Running
+                    )
+                }))
     }
 
     fn develop_asset(&self) -> Option<i64> {
