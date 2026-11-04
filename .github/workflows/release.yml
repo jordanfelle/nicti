@@ -201,7 +201,7 @@ jobs:
         env:
           NICTI_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          & makensis "/DVERSION=$env:NICTI_VERSION" "/DSRCDIR=${{ github.workspace }}\target\release" packaging\windows\nicti.nsi
+          & makensis "/DVERSION=$env:NICTI_VERSION" "/DSRCDIR=${{ github.workspace }}\target\release" "/DNOTICES_DIR=${{ github.workspace }}\assets\notices" packaging\windows\nicti.nsi
 
       # SignPath also has to sign the installer itself, not just nicti.exe -- both binaries ship
       # to the user. Same gate as above (edge builds excluded, #267).
