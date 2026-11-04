@@ -2,6 +2,13 @@
 //! `nicti_claw::dylib::DylibModule` — see `tests/abi_handshake.rs` and
 //! `tests/dylib_on_demand.rs`.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 use nicti_claw::VTable;
 
 /// `#[repr(C)]` with `abi_version` first, per `VTable`'s safety contract.

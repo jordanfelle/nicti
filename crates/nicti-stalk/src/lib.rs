@@ -15,6 +15,13 @@
 //! hosted API; weight fetches are explicit, user-initiated, and checksum-verified, never a silent
 //! auto-fetch; cloud AI is a separate opt-in feature, not a buried toggle.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 pub mod models;
 
 use std::path::Path;

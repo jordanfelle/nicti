@@ -212,20 +212,25 @@ pub fn materialize(manifest: &Manifest, opts: &Options<'_>) -> anyhow::Result<Re
             Err(err) => Err(err),
         })
         .collect();
-    let mut states = states.into_iter();
-    wanted.retain(|e| match states.next().expect("one state per entry") {
-        Ok(true) => {
-            report.already_present.push(e.id.clone());
-            false
-        }
-        Ok(false) => true,
-        Err(err) => {
-            report
-                .failed
-                .push((e.id.clone(), format!("unreadable file in dest: {err}")));
-            false
-        }
-    });
+    // One state per entry, in order: decide per pair, then drop the entries that are done.
+    let mut keep = Vec::with_capacity(wanted.len());
+    for (e, state) in wanted.iter().zip(states) {
+        keep.push(match state {
+            Ok(true) => {
+                report.already_present.push(e.id.clone());
+                false
+            }
+            Ok(false) => true,
+            Err(err) => {
+                report
+                    .failed
+                    .push((e.id.clone(), format!("unreadable file in dest: {err}")));
+                false
+            }
+        });
+    }
+    let mut keep = keep.into_iter();
+    wanted.retain(|_| keep.next().unwrap_or(true));
 
     // (size, sha256) -> entries; only files of a wanted size are worth hashing.
     let mut index: HashMap<(u64, String), Vec<&Entry>> = HashMap::new();

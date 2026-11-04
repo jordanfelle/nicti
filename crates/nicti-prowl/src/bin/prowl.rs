@@ -3,6 +3,11 @@
 //! re-implementing SHA-256 checking themselves (see `bench/run-hero.ps1`, which points at
 //! `prowl verify --ids` in place of its own inline `Get-FileHash` loop).
 
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};

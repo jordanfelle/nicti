@@ -55,7 +55,9 @@ fn canonicalize(value: &mut serde_json::Value) {
             if n.is_f64() {
                 if let Some(f) = n.as_f64() {
                     if f == 0.0 {
-                        *n = serde_json::Number::from_f64(0.0).expect("0.0 is finite");
+                        if let Some(zero) = serde_json::Number::from_f64(0.0) {
+                            *n = zero;
+                        }
                     }
                 }
             }
@@ -94,7 +96,7 @@ fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CanonicalError> {
     if contains_null(&v) {
         return Err(CanonicalError::NonFinite);
     }
-    Ok(serde_json::to_vec(&v).expect("canonicalized JSON value always serializes"))
+    serde_json::to_vec(&v).map_err(|e| CanonicalError::Serialization(e.to_string()))
 }
 
 /// Canonical hash of any serializable value -- the "this stage's own params" half of a cache key.
@@ -113,7 +115,7 @@ pub fn hash_value<T: Serialize>(value: &T) -> Result<blake3::Hash, CanonicalErro
 /// Same refusal rule as `hash_value` (`Err(CanonicalError::NonFinite)` on any JSON `null`).
 pub fn to_canonical_json<T: Serialize>(value: &T) -> Result<String, CanonicalError> {
     let bytes = canonical_bytes(value)?;
-    Ok(String::from_utf8(bytes).expect("serde_json output is always valid UTF-8"))
+    String::from_utf8(bytes).map_err(|e| CanonicalError::Serialization(e.to_string()))
 }
 
 /// Chains `own_hash` with every `upstream_hashes` entry, in the order given. This is Tapetum's

@@ -15,6 +15,13 @@
 //! This crate is policy and mechanism only: nothing hosts a plugin yet (no WASI linking, no
 //! consent screen, no menu item). Those are follow-ups once v2 hosting is being built.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 pub mod authorize;
 pub mod consent;
 pub mod hiss;

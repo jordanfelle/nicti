@@ -14,6 +14,13 @@
 //! - `conflict`: the ADR-0021 newer-wins conflict rule wired to real file
 //!   mtimes/hashes, plus the layer-(c) `crs:` write gate #59 was left to pick.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 pub mod conflict;
 pub mod embedded;
 pub mod gpx;

@@ -4,6 +4,13 @@
 //! `nicti-iris`, `nicti-tapetum`, `nicti-stalk`, `nicti-preen`, `nicti-lair`) builds on this
 //! crate's traits — see ADR-0019 §8.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 pub mod dylib;
 pub mod module;
 pub mod registry;

@@ -576,7 +576,8 @@ pub fn apply(xmp: &str, patch: &Patch) -> Result<String, PatchError> {
         writer.write_event(replaced.get(&i).unwrap_or(ev).clone())?;
     }
 
-    Ok(String::from_utf8(writer.into_inner()).expect("xmp is always valid utf-8"))
+    // quick-xml only ever writes UTF-8 here; lossy is a no-op for valid output and can never panic.
+    Ok(String::from_utf8_lossy(&writer.into_inner()).into_owned())
 }
 
 fn write_bag<W: std::io::Write>(

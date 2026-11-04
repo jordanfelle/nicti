@@ -31,7 +31,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::cancel::{CancelToken, EditingGate};
-use crate::job::{ChunkedJob, JobId, JobKind, JobSpec, Lane, Progress, Step};
+use crate::job::{ChunkedJob, JobError, JobId, JobKind, JobSpec, Lane, Progress, Step};
 use crate::queue::{Outcome, Scheduler};
 use crate::throttle::Throttle;
 
@@ -116,7 +116,7 @@ impl Inner {
             kind: spec.kind,
             lane: spec.lane,
             state: JobState::Queued,
-            progress: job.progress(),
+            progress: guarded(|| job.progress()).unwrap_or_default(),
         };
         self.set_status(status);
 
@@ -184,7 +184,7 @@ impl Inner {
         for (id, progress) in cancelled {
             self.finish_status(id, JobState::Cancelled, progress);
         }
-        (self.on_change)();
+        notify(self);
     }
 
     fn lane(&self, lane: Lane) -> &LaneState {
@@ -495,12 +495,25 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
             }
         };
 
-        inner.update_state(taken.id, JobState::Running, taken.job.progress());
-        (inner.on_change)();
-
         let mut taken = taken;
-        let step_result = taken.job.step();
-        let progress = taken.job.progress();
+        // A job is arbitrary code (decode, ORT, wgpu): a panic in `progress`/`step` must fail that
+        // job, not unwind the worker thread -- the GPU lane has exactly one, and losing it would
+        // strand every later GPU job in `Queued` forever (#538).
+        let before = guarded(|| taken.job.progress()).unwrap_or_default();
+        inner.update_state(taken.id, JobState::Running, before);
+        notify(&inner);
+
+        let step_result = match guarded(|| taken.job.step()) {
+            Ok(result) => result,
+            Err(message) => Err(JobError(format!("job panicked: {message}"))),
+        };
+        let panicked = matches!(&step_result, Err(e) if e.0.starts_with("job panicked: "));
+        // After a panic the job's state is unknown, so ask it for progress only if it did not.
+        let progress = if panicked {
+            before
+        } else {
+            guarded(|| taken.job.progress()).unwrap_or(before)
+        };
         let cancelled = taken.cancel.is_cancelled();
 
         let (outcome, terminal) = match (&step_result, cancelled) {
@@ -547,8 +560,26 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
         if let Some(state) = terminal {
             inner.finish_status(id, state, progress);
         }
-        (inner.on_change)();
+        notify(&inner);
     }
+}
+
+/// Runs `f`, turning a panic into its message. Jobs are `Send` but not `UnwindSafe`; a job that
+/// panicked is dropped by the caller (reported `Failed`, never stepped again), so nothing observes
+/// its half-updated state.
+fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string())
+    })
+}
+
+/// The `on_change` callback is the UI's repaint hook: a panic in it must not kill a worker either.
+fn notify(inner: &Inner) {
+    let _ = guarded(|| (inner.on_change)());
 }
 
 #[cfg(test)]
@@ -638,6 +669,155 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         cond()
+    }
+
+    struct PanicJob {
+        spec: JobSpec,
+        panic_in_step: bool,
+        panic_in_progress: bool,
+        payload_string: bool,
+    }
+
+    impl ChunkedJob for PanicJob {
+        fn spec(&self) -> JobSpec {
+            self.spec
+        }
+        fn label(&self) -> String {
+            "panicky".to_string()
+        }
+        fn progress(&self) -> Progress {
+            if self.panic_in_progress {
+                panic!("progress exploded");
+            }
+            Progress::default()
+        }
+        fn step(&mut self) -> Result<Step, crate::job::JobError> {
+            if self.panic_in_step {
+                if self.payload_string {
+                    panic!("{}", String::from("formatted boom"));
+                }
+                panic!("boom");
+            }
+            Ok(Step::Done)
+        }
+    }
+
+    fn state_of(pounce: &Pounce, id: JobId) -> Option<JobState> {
+        pounce
+            .snapshot()
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|s| s.state)
+    }
+
+    /// The one GPU worker must survive a panicking job, or every later GPU job is stranded.
+    #[test]
+    fn a_panicking_job_fails_without_killing_the_worker_that_ran_it() {
+        for lane in [Lane::Gpu, Lane::Cpu] {
+            let spec = JobSpec { lane, ..cpu_spec() };
+            let pounce = Pounce::new(u64::MAX, 2, 1, || {});
+            let id = pounce.submit(Box::new(PanicJob {
+                spec,
+                panic_in_step: true,
+                panic_in_progress: false,
+                payload_string: lane == Lane::Cpu,
+            }));
+            assert!(
+                wait_until(
+                    || matches!(state_of(&pounce, id), Some(JobState::Failed(_))),
+                    Duration::from_secs(2)
+                ),
+                "{lane:?}: {:?}",
+                state_of(&pounce, id)
+            );
+            let Some(JobState::Failed(message)) = state_of(&pounce, id) else {
+                unreachable!()
+            };
+            assert!(message.starts_with("job panicked: "), "{message}");
+            assert!(
+                message.contains(if lane == Lane::Cpu {
+                    "formatted boom"
+                } else {
+                    "boom"
+                }),
+                "{message}"
+            );
+
+            // The same lane still runs the next job (with a one-thread CPU lane or the single GPU
+            // worker, a dead worker means this never finishes).
+            let next = pounce.submit(Box::new(StepJob {
+                spec,
+                label: "after".into(),
+                remaining: 1,
+                on_step: None,
+            }));
+            assert!(
+                wait_until(
+                    || state_of(&pounce, next) == Some(JobState::Done),
+                    Duration::from_secs(2)
+                ),
+                "{lane:?}: the worker died with the panicking job"
+            );
+            pounce.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_job_whose_progress_panics_is_failed_or_finished_not_a_dead_worker() {
+        let spec = gpu_spec(crate::job::Priority::Foreground);
+        let pounce = Pounce::new(u64::MAX, 2, 1, || {});
+        let id = pounce.submit(Box::new(PanicJob {
+            spec,
+            panic_in_step: false,
+            panic_in_progress: true,
+            payload_string: false,
+        }));
+        // progress() is read for the status only; the step itself succeeded.
+        assert!(wait_until(
+            || state_of(&pounce, id) == Some(JobState::Done),
+            Duration::from_secs(2)
+        ));
+        let next = pounce.submit(Box::new(StepJob {
+            spec,
+            label: "after".into(),
+            remaining: 1,
+            on_step: None,
+        }));
+        assert!(wait_until(
+            || state_of(&pounce, next) == Some(JobState::Done),
+            Duration::from_secs(2)
+        ));
+        pounce.shutdown();
+    }
+
+    #[test]
+    fn a_panicking_on_change_callback_does_not_kill_the_worker() {
+        // Only the worker threads panic in the callback; submit() on this thread must not.
+        let pounce = Pounce::new(u64::MAX, 2, 1, || {
+            if std::thread::current()
+                .name()
+                .is_some_and(|n| n.contains("pounce") || n.contains("Pounce"))
+            {
+                panic!("the UI repaint hook blew up");
+            }
+        });
+        let spec = gpu_spec(crate::job::Priority::Foreground);
+        for i in 0..2 {
+            let id = pounce.submit(Box::new(StepJob {
+                spec,
+                label: format!("job {i}"),
+                remaining: 1,
+                on_step: None,
+            }));
+            assert!(
+                wait_until(
+                    || state_of(&pounce, id) == Some(JobState::Done),
+                    Duration::from_secs(2)
+                ),
+                "job {i} never finished: the worker died in on_change"
+            );
+        }
+        pounce.shutdown();
     }
 
     #[test]

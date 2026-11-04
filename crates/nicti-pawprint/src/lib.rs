@@ -3,6 +3,13 @@
 //! Promoted from `spikes/pawprint`; `canonical` additionally absorbs `spikes/loaf/src/hash.rs`'s
 //! DAG-generalized `chain`, since both are the same canonical-hashing scheme.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

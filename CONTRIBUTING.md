@@ -57,6 +57,14 @@ change does touch `spikes/retina/**`, also run that crate's own commands — see
 `decode-linux` job for the exact feature-flag combinations (some engines can't be enabled together
 in the same binary; the workflow file's comments explain why).
 
+**Never-crash policy (#538).** Production code returns errors instead of panicking: the crate root of
+every crate listed in the tracking issue as done carries
+`#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` (tests are
+exempt), so clippy fails on a new `unwrap()`/`expect()`/`panic!`. A genuine invariant gets one
+`#[allow(clippy::expect_used)]` with the reason beside it. Crates not yet converted are tracked in
+#705; when you convert one, add the attribute to its root in the same PR. Jobs run under Pounce are
+isolated from panics regardless: a panicking job is reported `Failed` and the worker keeps going.
+
 `pre-commit`'s hooks (fmt, clippy, secret detection, YAML lint on every commit; `cargo test` on
 push) mirror the same exclude list, so a clean local commit should mean clean CI for these jobs.
 
