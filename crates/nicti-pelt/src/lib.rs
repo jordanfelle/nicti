@@ -30,6 +30,7 @@ mod folder_browse;
 mod folder_dialog;
 mod folder_panel;
 mod fur;
+mod geotag_ui;
 mod grid;
 mod heal_tool;
 mod keyword_tag;

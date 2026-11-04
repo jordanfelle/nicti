@@ -148,6 +148,7 @@ pub struct PeltApp {
     import_status: Option<String>,
     /// Thumbnail-rotation repair / orientation backfill (#606).
     righting: crate::righting_ui::RightingUi,
+    geotag_ui: crate::geotag_ui::GeotagUi,
     /// Copy from a camera card (#602).
     card_copy: crate::card_copy_ui::CardCopyUi,
     update: UpdateChecker,
@@ -483,6 +484,7 @@ impl PeltApp {
             move_picker: FolderPicker::default(),
             import_status: None,
             righting,
+            geotag_ui: crate::geotag_ui::GeotagUi::default(),
             card_copy: crate::card_copy_ui::CardCopyUi::default(),
             update,
             nine_lives,
@@ -715,6 +717,23 @@ impl PeltApp {
     }
 
     fn job_active(&self, kinds: &[JobKind]) -> bool {
+        // A geotag/clear run writes catalog rows and sidecars for a captured list of assets
+        // (#668); anything that moves, deletes, re-scans or re-hashes those files must wait for it.
+        if self.geotag_ui.is_running()
+            && kinds.iter().any(|k| {
+                matches!(
+                    k,
+                    JobKind::Import
+                        | JobKind::Sync
+                        | JobKind::Move
+                        | JobKind::Delete
+                        | JobKind::Verify
+                        | JobKind::Baseline
+                )
+            })
+        {
+            return true;
+        }
         // A card copy being planned has no job yet, but must still hold the same guards.
         if self.card_copy.is_busy()
             && kinds.iter().any(|k| {
@@ -1341,6 +1360,7 @@ impl eframe::App for PeltApp {
         self.poll_recovery();
         // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
         self.righting.poll(&self.catalog_path);
+        self.geotag_ui.poll();
         self.poll_cull();
         self.poll_eyeshine(ui.ctx());
         self.poll_prebake(ui.ctx());
@@ -2315,6 +2335,26 @@ impl PeltApp {
                         JobKind::Baseline,
                     ]);
                 self.card_copy.show(ui, &self.pounce, &store, other_running);
+
+                // #668: apply a GPX log to the selection; the Info section shows (and clears) the
+                // cursor photo's position.
+                {
+                    let target_count = self.grid.as_ref().map_or(0, GridSession::target_count);
+                    let grid = self.grid.as_ref();
+                    let cursor = self.grid.as_ref().and_then(GridSession::cursor_id);
+                    let busy = other_running || self.card_copy.is_busy();
+                    let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                    self.geotag_ui.show(
+                        ui,
+                        &dyn_store,
+                        &self.pounce,
+                        target_count,
+                        &|| grid.map(GridSession::target_ids).unwrap_or_default(),
+                        cursor,
+                        self.xmp.autowrite(),
+                        busy,
+                    );
+                }
 
                 // #26: verified folder move. Copies and hash-verifies every file, re-points the
                 // catalog, then removes the original -- edits/ratings/keywords follow the folder.

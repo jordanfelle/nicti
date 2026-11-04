@@ -49,6 +49,9 @@ pub use model::{
     Asset, AssetMeta, DeleteItem, DeleteState, Keyword, LayoutItem, LrcChunkOutcome, LrcItem,
     LrcProvenance, MoveState, NewAsset, Preview, PreviewTier, Root, RootMove, SidecarState,
 };
+/// The position and geotag-option types the catalog API and `trail` speak, re-exported so UI
+/// code needn't depend on `nicti-scent` just to name them (#668).
+pub use nicti_scent::gpx::{GeotagOptions, Gps};
 pub use sqlite::SqliteCatalog;
 
 #[derive(Debug, thiserror::Error)]

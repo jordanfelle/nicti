@@ -582,7 +582,7 @@ fn import_sidecar_inner(
                 store.record_sidecar(asset_id, &state)?;
                 return Ok(SyncOutcome::NeedsReview);
             }
-            return write_locked(store, asset_id, raw_path, now_ms, true);
+            return write_locked(store, asset_id, raw_path, now_ms, true, false);
         }
         if let Some(g) = file_gps {
             // Catalog has none, or is not newer and the file's differs: adopt the file's. (A file
@@ -644,7 +644,7 @@ fn import_sidecar_inner(
         }
         Resolution::PreferCatalog => {
             // The catalog side is newer; already under SYNC_LOCK, so call the unlocked writer.
-            write_locked(store, asset_id, raw_path, now_ms, true)
+            write_locked(store, asset_id, raw_path, now_ms, true, false)
         }
         Resolution::FlagForManualReview => {
             state.needs_review = true;
@@ -673,7 +673,7 @@ pub fn write_sidecar(
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    write_locked(store, asset_id, raw_path, now_ms, false)
+    write_locked(store, asset_id, raw_path, now_ms, false, false)
 }
 
 /// Records that the catalog changed while auto-write is off, so a later import knows the
@@ -720,7 +720,7 @@ pub fn resolve_review(
 ) -> Result<SyncOutcome, ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if use_catalog {
-        return write_locked(store, asset_id, raw_path, now_ms, true);
+        return write_locked(store, asset_id, raw_path, now_ms, true, false);
     }
     let path = xmp_target(raw_path);
     let Some(loaded) = load(&path)? else {
@@ -735,12 +735,67 @@ pub fn resolve_review(
     Ok(SyncOutcome::AppliedSidecar)
 }
 
+/// What [`clear_position`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearOutcome {
+    /// The position is gone from the catalog and from the file.
+    Cleared,
+    /// There was no position anywhere.
+    NothingToClear,
+    /// The file carries a position and XMP auto-write is off: clearing only the catalog would let
+    /// the next import adopt the file's position straight back, so nothing was changed.
+    NeedsAutoWrite,
+    /// The sidecar changed under us and the write is held for review (see `resolve_review`);
+    /// nothing was changed.
+    HeldForReview,
+    /// The asset's file is not reachable (offline volume, moved file). Nothing was changed:
+    /// clearing only the catalog would let the file's position come back when it reappears.
+    Unreachable,
+}
+
+/// Removes an asset's GPS position (#668), from the catalog and -- through the usual write-back --
+/// from its XMP. A file position the catalog doesn't mirror is never cleared by an ordinary write
+/// (a file-only position is adopted, not removed), so this writes an explicit clear. The catalog
+/// is cleared only after the file write succeeded, so a failed or held write loses nothing.
+pub fn clear_position(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+    raw_path: &Path,
+    auto_write: bool,
+    now_ms: i64,
+) -> Result<ClearOutcome, ScentSyncError> {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // The file itself (the RAW, or the JPEG that carries its own packet), not just its sidecar:
+    // an unreachable one may still hold a position we cannot see or remove.
+    if !raw_path.is_file() {
+        return Ok(ClearOutcome::Unreachable);
+    }
+    let path = xmp_target(raw_path);
+    let file_has_gps = load(&path)?.is_some_and(|l| l.markers.gps.is_some());
+    let in_catalog = store.get_gps(&[asset_id])?.contains_key(&asset_id);
+    if !file_has_gps && !in_catalog {
+        return Ok(ClearOutcome::NothingToClear);
+    }
+    if file_has_gps {
+        if !auto_write {
+            return Ok(ClearOutcome::NeedsAutoWrite);
+        }
+        if write_locked(store, asset_id, raw_path, now_ms, false, true)? == SyncOutcome::NeedsReview
+        {
+            return Ok(ClearOutcome::HeldForReview);
+        }
+    }
+    store.set_gps(asset_id, None)?;
+    Ok(ClearOutcome::Cleared)
+}
+
 fn write_locked(
     store: &dyn CatalogStore,
     asset_id: i64,
     raw_path: &Path,
     now_ms: i64,
     force: bool,
+    clear_gps: bool,
 ) -> Result<SyncOutcome, ScentSyncError> {
     let path = xmp_target(raw_path);
     let prior = store.sidecar_state(asset_id)?;
@@ -749,7 +804,10 @@ fn write_locked(
     let loaded = load(&path)?;
 
     if let Some(l) = &loaded {
-        if l.markers.exactly_eq(&catalog) {
+        // `exactly_eq` ignores a position only the file has, which is exactly what a clear must
+        // still remove.
+        let must_clear = clear_gps && l.markers.gps.is_some();
+        if l.markers.exactly_eq(&catalog) && !must_clear {
             seen(&mut state, l, now_ms);
             state.catalog_dirty_since_ms = None;
             state.needs_review = false;
@@ -772,7 +830,13 @@ fn write_locked(
     }
 
     let base = loaded.as_ref().map(|l| l.text.as_str()).unwrap_or(TEMPLATE);
-    let patched = packet::apply(base, &catalog.to_patch()).map_err(|e| ScentSyncError::Xmp {
+    let mut patch = catalog.to_patch();
+    if clear_gps {
+        // `Some(None)` removes the `exif:GPS*` properties; the plain patch leaves a file-only
+        // position alone.
+        patch.gps = Some(None);
+    }
+    let patched = packet::apply(base, &patch).map_err(|e| ScentSyncError::Xmp {
         path: path.clone(),
         message: e.to_string(),
     })?;

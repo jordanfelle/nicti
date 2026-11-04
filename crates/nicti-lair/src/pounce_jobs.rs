@@ -19,6 +19,7 @@ use crate::patrol::{Sync as PatrolSync, SyncOptions, SyncReport};
 use crate::righting::{Righting, RightingRun};
 use crate::scruff::{Ingest, IngestReport};
 use crate::shred::{Shred, ShredOutcome};
+use crate::trail::{self, GeotagReport};
 use crate::verify::{Baseline, BaselineReport, Verify, VerifyReport};
 use crate::{CatalogStore, SqliteCatalog};
 
@@ -955,6 +956,302 @@ impl Drop for CardCopyJob {
                     .map(|c| c.into_report())
                     .unwrap_or_default(),
             );
+        }
+    }
+}
+
+/// Assets handled per `step` by [`GeotagJob`] / [`ClearPositionJob`]: each costs a catalog read, a
+/// write and a sidecar write, so a chunk this size keeps cancellation and progress responsive.
+const GEOTAG_CHUNK: usize = 16;
+
+/// The largest GPX file a [`GeotagJob`] will read (a day of 1 Hz logging is a few MB).
+pub const MAX_GPX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Where a [`GeotagJob`] gets its track log.
+pub enum GpxSource {
+    /// Already parsed.
+    Parsed(nicti_scent::gpx::Tracklog),
+    /// Read and parsed by the job's first step (size-capped), so a large log never blocks the UI.
+    File(PathBuf),
+}
+
+/// An asset's file as the catalog resolves it (`root path` + `rel_path`), reachable or not.
+fn asset_file(store: &dyn CatalogStore, id: i64) -> Result<PathBuf, String> {
+    let asset = store
+        .get_asset(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("asset {id} not found"))?;
+    let root = store
+        .get_root_path(asset.root_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("asset {id}: its folder is not registered"))?;
+    Ok(Path::new(&root).join(&asset.rel_path))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// Applies a GPX log to a selection (#668): reads the log on its first step, then runs
+/// [`trail::geotag_assets`] over `GEOTAG_CHUNK` assets per call and merges the reports. Never
+/// returns `Err` (a bad asset is counted in [`GeotagReport::failed`], a bad log in
+/// [`GeotagReport::gpx_error`]); a cancelled or dropped job still resolves its slot, marked
+/// `stopped`, so the UI never waits on it.
+pub struct GeotagJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    ids: Vec<i64>,
+    next: usize,
+    source: Option<GpxSource>,
+    log: Option<nicti_scent::gpx::Tracklog>,
+    opts: nicti_scent::gpx::GeotagOptions,
+    overwrite: bool,
+    auto_write: bool,
+    report: GeotagReport,
+    progress: Progress,
+    result: ReportSlot<GeotagReport>,
+}
+
+impl GeotagJob {
+    /// `ids` are the assets to tag; `auto_write` is whether to write the XMP now (else the asset
+    /// is only marked dirty for a later flush).
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        ids: Vec<i64>,
+        source: GpxSource,
+        opts: nicti_scent::gpx::GeotagOptions,
+        overwrite: bool,
+        auto_write: bool,
+    ) -> (Self, ReportSlot<GeotagReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let total = ids.len() as u64;
+        let job = GeotagJob {
+            store,
+            ids,
+            next: 0,
+            source: Some(source),
+            log: None,
+            opts,
+            overwrite,
+            auto_write,
+            report: GeotagReport::default(),
+            progress: Progress {
+                done: 0,
+                total: Some(total),
+            },
+            result: result.clone(),
+        };
+        (job, result)
+    }
+
+    fn load_log(&mut self) -> Result<(), String> {
+        match self.source.take() {
+            Some(GpxSource::Parsed(log)) => self.log = Some(log),
+            Some(GpxSource::File(path)) => {
+                let meta = std::fs::metadata(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                if meta.len() > MAX_GPX_BYTES {
+                    return Err(format!(
+                        "{} is {} MiB; GPX files over {} MiB are refused",
+                        path.display(),
+                        meta.len() >> 20,
+                        MAX_GPX_BYTES >> 20
+                    ));
+                }
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                self.log = Some(
+                    nicti_scent::gpx::parse_gpx(&text)
+                        .map_err(|e| format!("{}: {e}", path.display()))?,
+                );
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Step {
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.report.clone());
+        Step::Done
+    }
+}
+
+impl ChunkedJob for GeotagJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Geotag,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("Geotag {} photo(s) from GPX", self.ids.len())
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        if self.log.is_none() {
+            if let Err(e) = self.load_log() {
+                self.report.gpx_error = Some(e);
+                return Ok(self.finish());
+            }
+        }
+        let Some(log) = self.log.as_ref() else {
+            return Ok(self.finish());
+        };
+        let end = (self.next + GEOTAG_CHUNK).min(self.ids.len());
+        let mut items = Vec::with_capacity(end - self.next);
+        for &id in &self.ids[self.next..end] {
+            match asset_file(self.store.as_ref(), id) {
+                Ok(path) => items.push((id, path)),
+                Err(e) => self.report.failed.push((id, e)),
+            }
+        }
+        let part = trail::geotag_assets(
+            self.store.as_ref(),
+            &items,
+            log,
+            &self.opts,
+            self.overwrite,
+            self.auto_write,
+            now_ms(),
+        );
+        self.report.merge(part);
+        self.next = end;
+        self.progress.done = end as u64;
+        if end < self.ids.len() {
+            return Ok(Step::Yield);
+        }
+        Ok(self.finish())
+    }
+}
+
+impl Drop for GeotagJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            let mut report = self.report.clone();
+            report.stopped = true;
+            *slot = Some(report);
+        }
+    }
+}
+
+/// How a batch of [`ClearPositionJob`] went.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClearReport {
+    pub cleared: usize,
+    pub nothing_to_clear: usize,
+    /// The file carries a position and XMP auto-write is off, so nothing was changed.
+    pub needs_auto_write: usize,
+    /// The sidecar changed under us; the clear is held for review and nothing was changed.
+    pub held_for_review: usize,
+    pub failed: Vec<(i64, String)>,
+    /// Cancelled (or dropped) before every asset was handled.
+    pub stopped: bool,
+}
+
+/// Removes the stored GPS position from a selection (#668), from the catalog and the XMP, through
+/// [`crate::scent_sync::clear_position`]. Never returns `Err`.
+pub struct ClearPositionJob {
+    store: Arc<dyn CatalogStore + Send + Sync>,
+    ids: Vec<i64>,
+    next: usize,
+    auto_write: bool,
+    report: ClearReport,
+    progress: Progress,
+    result: ReportSlot<ClearReport>,
+}
+
+impl ClearPositionJob {
+    pub fn new(
+        store: Arc<dyn CatalogStore + Send + Sync>,
+        ids: Vec<i64>,
+        auto_write: bool,
+    ) -> (Self, ReportSlot<ClearReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let total = ids.len() as u64;
+        let job = ClearPositionJob {
+            store,
+            ids,
+            next: 0,
+            auto_write,
+            report: ClearReport::default(),
+            progress: Progress {
+                done: 0,
+                total: Some(total),
+            },
+            result: result.clone(),
+        };
+        (job, result)
+    }
+}
+
+impl ChunkedJob for ClearPositionJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::Geotag,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("Clear position of {} photo(s)", self.ids.len())
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        use crate::scent_sync::{clear_position, ClearOutcome};
+        let end = (self.next + GEOTAG_CHUNK).min(self.ids.len());
+        for &id in &self.ids[self.next..end] {
+            let outcome = asset_file(self.store.as_ref(), id).and_then(|path| {
+                clear_position(self.store.as_ref(), id, &path, self.auto_write, now_ms())
+                    .map_err(|e| e.to_string())
+            });
+            match outcome {
+                Ok(ClearOutcome::Cleared) => self.report.cleared += 1,
+                Ok(ClearOutcome::NothingToClear) => self.report.nothing_to_clear += 1,
+                Ok(ClearOutcome::NeedsAutoWrite) => self.report.needs_auto_write += 1,
+                Ok(ClearOutcome::HeldForReview) => self.report.held_for_review += 1,
+                Ok(ClearOutcome::Unreachable) => self.report.failed.push((
+                    id,
+                    "its file is not reachable (offline volume?); nothing was changed".into(),
+                )),
+                Err(e) => self.report.failed.push((id, e)),
+            }
+        }
+        self.next = end;
+        self.progress.done = end as u64;
+        if end < self.ids.len() {
+            return Ok(Step::Yield);
+        }
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.report.clone());
+        Ok(Step::Done)
+    }
+}
+
+impl Drop for ClearPositionJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            let mut report = self.report.clone();
+            report.stopped = true;
+            *slot = Some(report);
         }
     }
 }

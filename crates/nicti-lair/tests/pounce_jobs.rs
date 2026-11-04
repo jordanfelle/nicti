@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy};
 use nicti_lair::patrol::SyncOptions;
-use nicti_lair::pounce_jobs::{BackupJob, BaselineJob, IngestJob, SyncJob, VerifyJob};
+use nicti_lair::pounce_jobs::{
+    BackupJob, BaselineJob, ClearPositionJob, GeotagJob, GpxSource, IngestJob, SyncJob, VerifyJob,
+};
 use nicti_lair::{CatalogStore, SqliteCatalog};
 use nicti_pounce::{JobState, Pounce};
 
@@ -291,4 +293,222 @@ fn a_backup_job_dropped_without_reporting_resolves_its_slot_as_failed() {
         "{:?}",
         report.outcome
     );
+}
+
+const GPX: &str = r#"<?xml version="1.0"?><gpx version="1.1" creator="t" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
+<trkpt lat="46.0" lon="7.0"><ele>1600</ele><time>2026-05-01T10:00:00Z</time></trkpt>
+<trkpt lat="46.001" lon="7.002"><ele>1610</ele><time>2026-05-01T10:01:00Z</time></trkpt>
+</trkseg></trk></gpx>"#;
+
+fn geotag_fixture(n: usize) -> (Arc<SqliteCatalog>, tempfile::TempDir, Vec<i64>) {
+    let store = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let vol = store.upsert_volume("v", None, None, 0).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = store
+        .ensure_root(vol, dir.path().to_str().unwrap())
+        .unwrap();
+    let mut items = Vec::new();
+    for i in 0..n {
+        let name = format!("p{i}.NEF");
+        let path = dir.path().join(&name);
+        std::fs::write(&path, b"raw").unwrap();
+        // Even ones are inside the log, odd ones a day away.
+        let captured = if i % 2 == 0 {
+            "2026:05:01 10:00:30"
+        } else {
+            "2026:05:02 10:00:30"
+        };
+        let id = store
+            .insert_asset(
+                root,
+                &nicti_lair::NewAsset {
+                    rel_path: name.clone(),
+                    rel_path_fold: name.to_lowercase(),
+                    size_bytes: 3,
+                    mtime_unix: 0,
+                    fingerprint: None,
+                    natural_key: None,
+                    make: None,
+                    model: None,
+                    captured_at: Some(captured.into()),
+                    width: None,
+                    height: None,
+                    imported_at: 0,
+                },
+                None,
+            )
+            .unwrap();
+        let _ = path;
+        items.push(id);
+    }
+    (store, dir, items)
+}
+
+#[test]
+fn a_geotag_job_driven_through_pounce_runs_in_chunks_and_reports_every_asset() {
+    // 40 assets is more than two 16-asset chunks.
+    let (store, _dir, items) = geotag_fixture(40);
+    let log = nicti_scent::gpx::parse_gpx(GPX).unwrap();
+    let ids = items.clone();
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let (job, slot) = GeotagJob::new(
+        store.clone(),
+        items,
+        GpxSource::Parsed(log),
+        nicti_scent::gpx::GeotagOptions::default(),
+        false,
+        true,
+    );
+    let job_id = pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    assert!(wait_until(
+        || pounce
+            .snapshot()
+            .into_iter()
+            .any(|s| s.id == job_id && s.state == JobState::Done),
+        Duration::from_secs(5)
+    ));
+    let report = slot.lock().unwrap().clone().unwrap();
+    assert_eq!((report.tagged, report.no_position), (20, 20), "{report:?}");
+    assert_eq!(report.total(), 40);
+    assert!(!report.stopped && report.failed.is_empty());
+    assert_eq!(store.get_gps(&ids).unwrap().len(), 20);
+    pounce.shutdown();
+}
+
+#[test]
+fn a_geotag_job_dropped_before_it_finishes_resolves_its_slot_as_stopped() {
+    let (store, _dir, items) = geotag_fixture(3);
+    let log = nicti_scent::gpx::parse_gpx(GPX).unwrap();
+    let (job, slot) = GeotagJob::new(
+        store,
+        items,
+        GpxSource::Parsed(log),
+        nicti_scent::gpx::GeotagOptions::default(),
+        false,
+        true,
+    );
+    assert!(slot.lock().unwrap().is_none());
+    drop(job);
+    let report = slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("Drop resolves the slot");
+    assert!(report.stopped);
+    assert_eq!(report.total(), 0, "nothing was processed");
+}
+
+#[test]
+fn a_geotag_job_reads_its_gpx_file_itself_and_reports_a_bad_file_without_tagging() {
+    let (store, dir, ids) = geotag_fixture(4);
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let run = |source: GpxSource| {
+        let (job, slot) = GeotagJob::new(
+            store.clone(),
+            ids.clone(),
+            source,
+            nicti_scent::gpx::GeotagOptions::default(),
+            false,
+            true,
+        );
+        pounce.submit(Box::new(job));
+        assert!(wait_until(
+            || slot.lock().unwrap().is_some(),
+            Duration::from_secs(5)
+        ));
+        let report = slot.lock().unwrap().clone().unwrap();
+        report
+    };
+
+    let good = dir.path().join("track.gpx");
+    std::fs::write(&good, GPX).unwrap();
+    let r = run(GpxSource::File(good));
+    assert_eq!((r.tagged, r.no_position), (2, 2), "{r:?}");
+    assert!(r.gpx_error.is_none());
+
+    let bad = dir.path().join("bad.gpx");
+    std::fs::write(&bad, b"this is not xml at all <<<").unwrap();
+    let r = run(GpxSource::File(bad));
+    assert!(r.gpx_error.is_some(), "{r:?}");
+    assert_eq!(r.total(), 0, "nothing is tagged from an unreadable log");
+    let r = run(GpxSource::File(dir.path().join("missing.gpx")));
+    assert!(
+        r.gpx_error.as_deref().unwrap().contains("missing.gpx"),
+        "{r:?}"
+    );
+    pounce.shutdown();
+}
+
+#[test]
+fn a_clear_position_job_removes_what_a_geotag_job_wrote() {
+    let (store, _dir, ids) = geotag_fixture(20);
+    let log = nicti_scent::gpx::parse_gpx(GPX).unwrap();
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let (job, slot) = GeotagJob::new(
+        store.clone(),
+        ids.clone(),
+        GpxSource::Parsed(log),
+        nicti_scent::gpx::GeotagOptions::default(),
+        false,
+        true,
+    );
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    assert_eq!(store.get_gps(&ids).unwrap().len(), 10);
+
+    let (job, slot) = ClearPositionJob::new(store.clone(), ids.clone(), true);
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    let r = slot.lock().unwrap().clone().unwrap();
+    assert_eq!((r.cleared, r.nothing_to_clear), (10, 10), "{r:?}");
+    assert!(!r.stopped && r.failed.is_empty());
+    assert!(store.get_gps(&ids).unwrap().is_empty());
+    pounce.shutdown();
+}
+
+#[test]
+fn jobs_report_an_asset_they_cannot_resolve_or_reach_as_failed_not_as_done() {
+    let (store, dir, ids) = geotag_fixture(2);
+    let log = nicti_scent::gpx::parse_gpx(GPX).unwrap();
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    // One real asset, one id that is not in the catalog.
+    let (job, slot) = GeotagJob::new(
+        store.clone(),
+        vec![ids[0], 9_999],
+        GpxSource::Parsed(log),
+        nicti_scent::gpx::GeotagOptions::default(),
+        false,
+        true,
+    );
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    let r = slot.lock().unwrap().clone().unwrap();
+    assert_eq!((r.tagged, r.failed.len(), r.total()), (1, 1, 2), "{r:?}");
+    assert_eq!(r.failed[0].0, 9_999);
+
+    // Clearing a photo whose file went offline is a failure, not a quiet success.
+    std::fs::remove_file(dir.path().join("p0.NEF")).unwrap();
+    let (job, slot) = ClearPositionJob::new(store, vec![ids[0]], true);
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    let r = slot.lock().unwrap().clone().unwrap();
+    assert_eq!((r.cleared, r.failed.len()), (0, 1), "{r:?}");
+    assert!(r.failed[0].1.contains("not reachable"), "{r:?}");
+    pounce.shutdown();
 }
