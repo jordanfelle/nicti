@@ -59,6 +59,8 @@ pub enum JobKind {
     /// Recording a trusted baseline content hash for assets that have none (#386) -- disk-bound,
     /// CPU lane.
     Baseline,
+    /// Applying a GPX log to a selection of assets (#668) -- catalog + sidecar I/O, CPU lane.
+    Geotag,
     /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
     /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
     Decode,

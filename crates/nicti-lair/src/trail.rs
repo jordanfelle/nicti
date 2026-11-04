@@ -34,6 +34,36 @@ pub struct GeotagReport {
     pub held_for_review: usize,
     /// Assets that errored (catalog/sidecar I/O), with the reason.
     pub failed: Vec<(i64, String)>,
+    /// The run was cancelled (or its job dropped) before every asset was handled; the counts
+    /// cover only what it got through.
+    pub stopped: bool,
+    /// The GPX file could not be read or parsed (nothing was tagged), with the reason.
+    pub gpx_error: Option<String>,
+}
+
+impl GeotagReport {
+    /// Adds `other`'s counts to this report (a job runs the batch in chunks).
+    pub fn merge(&mut self, other: GeotagReport) {
+        self.tagged += other.tagged;
+        self.kept_existing += other.kept_existing;
+        self.no_position += other.no_position;
+        self.no_capture_time += other.no_capture_time;
+        self.held_for_review += other.held_for_review;
+        self.failed.extend(other.failed);
+        self.stopped |= other.stopped;
+        if self.gpx_error.is_none() {
+            self.gpx_error = other.gpx_error;
+        }
+    }
+
+    /// Assets accounted for so far.
+    pub fn total(&self) -> usize {
+        self.tagged
+            + self.kept_existing
+            + self.no_position
+            + self.no_capture_time
+            + self.failed.len()
+    }
 }
 
 /// Geotags `items` (`(asset_id, path to the asset's file)`) from `log`. `overwrite` replaces an

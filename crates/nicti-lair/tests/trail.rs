@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nicti_lair::scent_sync::{import_sidecar, SyncOutcome};
+use nicti_lair::scent_sync::{clear_position, import_sidecar, ClearOutcome, SyncOutcome};
 use nicti_lair::trail::geotag_assets;
 use nicti_lair::{CatalogStore, NewAsset, SqliteCatalog};
 use nicti_scent::gpx::{parse_gpx, read_gps, GeotagOptions, Gps};
@@ -316,4 +316,127 @@ fn an_unreachable_file_is_a_failure_and_stores_no_position() {
     assert_eq!((r.tagged, r.failed.len()), (0, 1), "{r:?}");
     assert!(f.store.get_gps(&[a.0]).unwrap().is_empty());
     assert!(!a.1.with_extension("xmp").exists(), "no orphan sidecar");
+}
+
+#[test]
+fn clearing_a_position_removes_it_from_the_catalog_and_the_file_and_it_stays_gone() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    for name in ["a.NEF", "a.jpg"] {
+        let a = f.add(name, Some("2026:05:01 10:00:30"));
+        geotag_assets(
+            &f.store,
+            std::slice::from_ref(&a),
+            &log,
+            &GeotagOptions::default(),
+            false,
+            true,
+            1,
+        );
+        assert!(
+            f.store.get_gps(&[a.0]).unwrap().contains_key(&a.0),
+            "{name}"
+        );
+
+        let out = clear_position(&f.store, a.0, &a.1, true, 2).unwrap();
+        assert_eq!(out, ClearOutcome::Cleared, "{name}");
+        assert!(
+            f.store.get_gps(&[a.0]).unwrap().is_empty(),
+            "{name}: catalog"
+        );
+        let text = if name.ends_with(".jpg") {
+            nicti_scent::embedded::read_xmp(&std::fs::read(&a.1).unwrap())
+                .unwrap()
+                .unwrap_or_default()
+        } else {
+            sidecar(&a.1)
+        };
+        assert!(
+            read_gps(&text).is_none(),
+            "{name}: file still has a position"
+        );
+
+        // A rescan must not adopt a position back from the file.
+        import_sidecar(&f.store, a.0, &a.1, 10_000_000).unwrap();
+        assert!(
+            f.store.get_gps(&[a.0]).unwrap().is_empty(),
+            "{name}: re-adopted"
+        );
+        // And clearing again is a no-op.
+        assert_eq!(
+            clear_position(&f.store, a.0, &a.1, true, 3).unwrap(),
+            ClearOutcome::NothingToClear
+        );
+    }
+}
+
+#[test]
+fn clearing_a_position_the_file_carries_needs_auto_write_and_changes_nothing_without_it() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let a = f.add("a.NEF", Some("2026:05:01 10:00:30"));
+    geotag_assets(
+        &f.store,
+        std::slice::from_ref(&a),
+        &log,
+        &GeotagOptions::default(),
+        false,
+        true,
+        1,
+    );
+
+    let out = clear_position(&f.store, a.0, &a.1, false, 2).unwrap();
+    assert_eq!(out, ClearOutcome::NeedsAutoWrite);
+    assert!(
+        f.store.get_gps(&[a.0]).unwrap().contains_key(&a.0),
+        "catalog untouched"
+    );
+    assert!(read_gps(&sidecar(&a.1)).is_some(), "file untouched");
+}
+
+#[test]
+fn a_position_only_the_catalog_has_can_be_cleared_without_auto_write() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let a = f.add("a.NEF", Some("2026:05:01 10:00:30"));
+    // Auto-write off when tagging: stored and marked dirty, no sidecar yet.
+    geotag_assets(
+        &f.store,
+        std::slice::from_ref(&a),
+        &log,
+        &GeotagOptions::default(),
+        false,
+        false,
+        1,
+    );
+    assert!(!a.1.with_extension("xmp").exists());
+    let out = clear_position(&f.store, a.0, &a.1, false, 2).unwrap();
+    assert_eq!(out, ClearOutcome::Cleared);
+    assert!(f.store.get_gps(&[a.0]).unwrap().is_empty());
+}
+
+#[test]
+fn a_sidecar_changed_under_us_holds_the_clear_for_review_and_loses_nothing() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let a = f.add("a.NEF", Some("2026:05:01 10:00:30"));
+    geotag_assets(
+        &f.store,
+        std::slice::from_ref(&a),
+        &log,
+        &GeotagOptions::default(),
+        false,
+        true,
+        1,
+    );
+    // Another program edits the sidecar's rating after nicti last wrote it.
+    let edited = sidecar(&a.1).replacen("<rdf:Description", "<rdf:Description xmp:Rating=\"4\"", 1);
+    std::fs::write(a.1.with_extension("xmp"), edited).unwrap();
+
+    let out = clear_position(&f.store, a.0, &a.1, true, 2).unwrap();
+    assert_eq!(out, ClearOutcome::HeldForReview);
+    assert!(
+        f.store.get_gps(&[a.0]).unwrap().contains_key(&a.0),
+        "catalog position kept"
+    );
 }
