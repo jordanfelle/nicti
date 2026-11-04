@@ -27,6 +27,10 @@ pub const MAX_COMPONENTS: usize = 16;
 pub const MAX_BRUSH_POINTS: usize = 200_000;
 /// Most strokes one brush component renders.
 pub const MAX_STROKES: usize = 4096;
+/// Most Auto Mask strokes a document keeps (#644): each is a full-extent guided refine (five
+/// stat textures and several fields at the mask extent), unlike a plain stroke's one cheap pass.
+/// Further ones are sanitised into plain strokes.
+pub const MAX_AUTO_MASK_STROKES: usize = 64;
 /// Most colour-range samples one component keeps.
 pub const MAX_COLOR_SAMPLES: usize = 16;
 /// Normalized coordinates are clamped to `-COORD_LIMIT..=COORD_LIMIT` -- a little past the frame so
@@ -301,7 +305,7 @@ fn clean_point(p: [f32; 2]) -> [f32; 2] {
 }
 
 impl MaskSource {
-    fn sanitize(&mut self, brush_budget: &mut usize) {
+    fn sanitize(&mut self, brush_budget: &mut usize, auto_budget: &mut usize) {
         match self {
             MaskSource::Ai(_) => {}
             MaskSource::LinearGradient { p0, p1 } => {
@@ -332,6 +336,15 @@ impl MaskSource {
                         *v = clean(*v, 0.0, 1.0);
                     }
                     *brush_budget -= room;
+                    // Each Auto Mask stroke is a full-extent guided refine, so a document can't buy
+                    // thousands of them: past the budget a stroke paints as a plain one.
+                    if stroke.auto_mask {
+                        if *auto_budget == 0 {
+                            stroke.auto_mask = false;
+                        } else {
+                            *auto_budget -= 1;
+                        }
+                    }
                     for p in &mut stroke.points {
                         *p = clean_point(*p);
                     }
@@ -401,13 +414,14 @@ impl MaskParams {
         let mut out = self.clone();
         out.corrections.truncate(MAX_CORRECTIONS);
         let mut brush_budget = MAX_BRUSH_POINTS;
+        let mut auto_budget = MAX_AUTO_MASK_STROKES;
         for c in &mut out.corrections {
             c.amount = clean(c.amount, 0.0, 1.0);
             c.adjust.sanitize();
             c.mask.components.truncate(MAX_COMPONENTS);
             for comp in &mut c.mask.components {
                 comp.opacity = clean(comp.opacity, 0.0, 1.0);
-                comp.source.sanitize(&mut brush_budget);
+                comp.source.sanitize(&mut brush_budget, &mut auto_budget);
             }
         }
         out
@@ -494,6 +508,37 @@ mod tests {
                 && v.get("buildup").is_none()
                 && v.get("auto_mask").is_none()
         );
+    }
+
+    #[test]
+    fn auto_mask_strokes_past_the_document_budget_paint_as_plain_strokes() {
+        let strokes = (0..MAX_AUTO_MASK_STROKES + 5)
+            .map(|_| Stroke {
+                points: vec![[0.5, 0.5]],
+                auto_mask: true,
+                ..Stroke::default()
+            })
+            .collect();
+        let p = MaskParams {
+            corrections: vec![LocalCorrection {
+                mask: MaskGroup {
+                    components: vec![MaskComponent {
+                        source: MaskSource::Brush { strokes },
+                        ..MaskComponent::default()
+                    }],
+                },
+                ..LocalCorrection::default()
+            }],
+        }
+        .sanitized();
+        let MaskSource::Brush { strokes } = &p.corrections[0].mask.components[0].source else {
+            panic!()
+        };
+        assert_eq!(
+            strokes.iter().filter(|s| s.auto_mask).count(),
+            MAX_AUTO_MASK_STROKES
+        );
+        assert!(strokes[..MAX_AUTO_MASK_STROKES].iter().all(|s| s.auto_mask));
     }
 
     fn brush(n: usize) -> MaskSource {

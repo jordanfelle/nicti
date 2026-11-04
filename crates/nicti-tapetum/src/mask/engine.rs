@@ -609,6 +609,12 @@ impl MaskEngine {
             dabs_used: 0,
         });
         let mut scratch: Option<FieldTexture> = None;
+        // Built once for the whole walk (the export engine caches nothing, so asking per stroke
+        // would resample the guide for every Auto Mask stroke).
+        let guide = strokes[start..]
+            .iter()
+            .any(|s| s.auto_mask)
+            .then(|| self.guide_luma(gpu, cx));
 
         for i in start..n {
             let stroke = &strokes[i];
@@ -620,7 +626,14 @@ impl MaskEngine {
                 Some(_) if stroke.auto_mask => {
                     self.stats.brush_passes += 1;
                     self.stats.auto_mask_refines += 1;
-                    Arc::new(self.auto_mask_stroke(gpu, &state.tex, stroke, budget, cx))
+                    Arc::new(self.auto_mask_stroke(
+                        gpu,
+                        &state.tex,
+                        stroke,
+                        budget,
+                        guide.as_ref().expect("built when a stroke needs it"),
+                        cx.mask,
+                    ))
                 }
                 Some(binned) => {
                     self.stats.brush_passes += 1;
@@ -816,21 +829,24 @@ impl MaskEngine {
     /// snaps to nearby image edges, then folds it into `prev`: `max` to add, `acc * (1 - w)` to
     /// erase. The guided filter only carries structure the input already has, so a soft feather
     /// would pass through nearly unchanged; the filter's own window supplies the softness.
+    ///
+    /// Erase differs slightly from a plain erase stroke: the fold is `acc * (1 - w)`, not
+    /// `max(acc - w, 0)`, so over a partly selected area (a feathered earlier stroke) it removes
+    /// proportionally rather than by a fixed amount; the two agree where the field is 0 or 1.
     fn auto_mask_stroke(
         &mut self,
         gpu: &GpuContext,
         prev: &FieldTexture,
         stroke: &super::params::Stroke,
         budget: usize,
-        cx: &Cx,
+        guide: &FieldTexture,
+        (mw, mh): (u32, u32),
     ) -> FieldTexture {
-        let (mw, mh) = cx.mask;
         let hard = super::params::Stroke {
             feather: 0.0,
             ..stroke.clone()
         };
         let dabs = raster::dabs_for_stroke(&hard, mw as usize, mh as usize, budget);
-        let guide = self.guide_luma(gpu, cx);
         let empty = FieldTexture::new(gpu, mw, mh);
         let painted = FieldTexture::new(gpu, mw, mh);
         let refined = FieldTexture::new(gpu, mw, mh);
@@ -855,7 +871,7 @@ impl MaskEngine {
                 gpu,
                 enc,
                 &painted,
-                &guide,
+                guide,
                 &refined,
                 guided::radius_for(mw as usize, mh as usize),
                 guided::EPS,
@@ -1417,6 +1433,58 @@ mod tests {
         let at = |x: f32| got[(0.5 * H as f32) as usize * W + (x * W as f32) as usize];
         assert!(at(0.4) < 0.1, "erased inside: {}", at(0.4));
         assert!(at(0.6) > 0.9, "kept beyond the edge: {}", at(0.6));
+    }
+
+    #[test]
+    fn many_auto_mask_strokes_build_the_guide_once_even_on_the_export_engine() {
+        let Some(mut rig) = Rig::new() else { return };
+        // The export engine caches nothing, so a per-stroke guide lookup would rebuild it each time.
+        rig.engine = MaskEngine::for_export(&rig.gpu, 4096);
+        let strokes: Vec<Stroke> = (0..3)
+            .map(|i| {
+                let mut s = stroke(
+                    &[[0.2 + 0.1 * i as f32, 0.4], [0.25 + 0.1 * i as f32, 0.6]],
+                    false,
+                );
+                s.auto_mask = true;
+                s
+            })
+            .collect();
+        let before = rig.engine.stats();
+        rig.prepare(vec![correction("a", brush(strokes), 1.0)])
+            .unwrap();
+        let after = rig.engine.stats();
+        assert_eq!(after.auto_mask_refines - before.auto_mask_refines, 3);
+        assert_eq!(after.guide_builds - before.guide_builds, 1);
+    }
+
+    #[test]
+    fn plain_then_auto_then_plain_strokes_resume_and_match_a_cold_build() {
+        let Some(mut rig) = Rig::new() else { return };
+        let mut auto = stroke(&[[0.3, 0.5], [0.4, 0.5]], false);
+        auto.auto_mask = true;
+        let mut strokes = vec![
+            stroke(&[[0.2, 0.2], [0.3, 0.25]], false),
+            auto,
+            stroke(&[[0.7, 0.7], [0.8, 0.75]], false),
+        ];
+        rig.prepare(vec![correction("a", brush(strokes.clone()), 1.0)])
+            .unwrap();
+        // Another plain stroke resumes from the cached prefix (one pass, no new refine).
+        strokes.push(stroke(&[[0.6, 0.3]], false));
+        let before = rig.engine.stats();
+        let c = correction("a", brush(strokes), 1.0);
+        let frame = rig.prepare(vec![c.clone()]).unwrap();
+        let after = rig.engine.stats();
+        assert_eq!(after.brush_passes - before.brush_passes, 1);
+        assert_eq!(after.auto_mask_refines - before.auto_mask_refines, 0);
+        let mut cold = Rig::new().unwrap();
+        let cold_frame = cold.prepare(vec![c]).unwrap();
+        close(
+            &rig.atlas_channel(&frame, 0),
+            &cold.atlas_channel(&cold_frame, 0),
+            1e-6,
+        );
     }
 
     #[test]

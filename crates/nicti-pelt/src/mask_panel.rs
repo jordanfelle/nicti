@@ -788,6 +788,11 @@ fn show_selected(
         feather.max = mask.brush.radius;
         feather.default = feather.default.min(feather.max);
         fur_slider(ui, &feather, &mut mask.brush.feather);
+        if mask.brush.auto_mask {
+            ui.weak(
+                "Feather is ignored while Auto Mask is on: the photo's edges set the softness.",
+            );
+        }
         fraction_slider(ui, "Flow", &mut mask.brush.flow, 1.0);
         ui.checkbox(&mut mask.brush.buildup, "Build-up")
             .on_hover_text("Repeated passes over the same spot darken the mask, like an airbrush.");
